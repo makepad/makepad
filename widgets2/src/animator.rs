@@ -25,7 +25,6 @@ pub fn script_mod(vm:&mut ScriptVm){
     
     script_mod!{
         use mod.animator;
-        
         animator.Animator = mod.std.set_type_default() do #(Animator::script_ext(vm)){}
         animator.AnimatorStates = #(AnimatorState::script_ext(vm)){}
         animator.AnimatorState =  #(AnimatorState::script_api(vm)){}
@@ -155,8 +154,6 @@ impl ScriptApplyDefault for Animator{
         
         // Return the apply value from that state
         let apply = state.apply?.into();
-        _vm.heap.println(apply);
-        println!("{}", apply);
         Some(apply)
     }
 }

@@ -2,13 +2,16 @@ use {
     std::{
         ops::{Index, IndexMut},
         collections::BTreeSet,
+        collections::HashMap,
     },
     crate::{
+        
         makepad_live_id::*,
+        makepad_script::ScriptObjectRef,
         makepad_script::shader::*,
         makepad_script::heap::ScriptHeap,
         makepad_script::value::ScriptObject,
-        //draw_vars::DrawVars,
+        draw_vars::DrawVars,
         os::CxOsDrawShader,
         cx::Cx
     }
@@ -53,18 +56,22 @@ impl CxDrawShaderOptions {
     }
 }
 
+/*
 #[derive(Default)]
-pub struct _CxDrawShaderItem {
+pub struct CxDrawShaderItem {
     pub draw_shader_id: usize,
     pub options: CxDrawShaderOptions
-}
+}*/
 
 #[derive(Default)]
 pub struct CxDrawShaders {
     pub shaders: Vec<CxDrawShader>,
     pub os_shaders: Vec<CxOsDrawShader>,
-    pub generation: u64,
     pub compile_set: BTreeSet<usize>,
+    
+    pub cache_object_id_to_shader: HashMap<ScriptObject, DrawShaderId>,
+    pub cache_functions_to_shader: LiveIdMap<LiveId, DrawShaderId>,
+    pub cache_code_to_shader: HashMap<CxDrawShaderCode, DrawShaderId>,
     //pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
     //pub fingerprints: Vec<DrawShaderFingerprint>,
     //pub error_set: HashSet<DrawShaderPtr>,
@@ -83,7 +90,6 @@ impl CxDrawShaders{
 
 impl Cx {
     pub fn flush_draw_shaders(&mut self) {
-        self.draw_shaders.generation += 1;
         /*        
         self.shader_registry.flush_registry();
         self.draw_shaders.shaders.clear();
@@ -109,7 +115,6 @@ impl IndexMut<usize> for CxDrawShaders {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct DrawShaderId {
-    pub generation: u64,
     pub index: usize,
     //pub draw_shader_ptr: DrawShaderPtr
 }
@@ -124,37 +129,6 @@ pub struct CxDrawShader {
     pub debug_id: LiveId,
     pub os_shader_id: Option<usize>,
     pub mapping: CxDrawShaderMapping
-}
-
-#[derive(Debug, PartialEq)]
-pub struct _DrawShaderFingerprint {
-    //pub fingerprint: Vec<LiveNode>,
-    pub draw_shader_id: usize
-}
-
-impl _DrawShaderFingerprint {
-    /*pub fn from_ptr(cx: &Cx, draw_shader_ptr: DrawShaderPtr) -> Vec<LiveNode> {
-        let live_registry_cp = cx.live_registry.clone();
-        let live_registry = live_registry_cp.borrow();
-        let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
-        let mut node_iter = doc.nodes.first_child(draw_shader_ptr.node_index());
-        let mut fingerprint = Vec::new();
-        while let Some(node_index) = node_iter {
-            let node = &doc.nodes[node_index];
-            match node.value {
-                LiveValue::DSL {token_start, token_count, ..} => {
-                    fingerprint.push(LiveNode {
-                        id: node.id,
-                        origin: node.origin,
-                        value: LiveValue::DSL {token_start, token_count, expand_index: None}
-                    });
-                }
-                _ => ()
-            }
-            node_iter = doc.nodes.next_child(node_index);
-        }
-        fingerprint
-    }*/
 }
 
 #[derive(Clone, Debug)]
@@ -295,45 +269,34 @@ pub struct DrawShaderFlags {
     pub draw_call_always: bool,
 }
 
-#[derive(Clone)]
-pub enum CxDrawShaderSource {
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub enum CxDrawShaderCode {
     Separate{vertex:String, fragment:String},
-    Combined{source:String}
+    Combined{code:String}
 }    
 
 #[derive(Clone)]
 pub struct CxDrawShaderMapping {
-    pub source: CxDrawShaderSource,
+    pub source: ScriptObjectRef,
+    pub code: CxDrawShaderCode,
     pub flags: DrawShaderFlags,
     pub instances: DrawShaderInputs,
     pub dyn_instances: DrawShaderInputs,
     pub dyn_uniforms: DrawShaderInputs,
     pub geometries: DrawShaderInputs,
-    // pub const_table: DrawShaderConstTable,
-    // pub live_instances: DrawShaderInputs,
-    // pub live_uniforms: DrawShaderInputs,
-    // pub draw_call_uniforms: DrawShaderInputs,
-    // pub draw_list_uniforms: DrawShaderInputs,
-    // pub pass_uniforms: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
     pub uses_time: bool,
-    // pub instance_enums: Vec<usize>,
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
     pub draw_clip: Option<usize>,
-    //pub live_uniforms_buf: Vec<f32>,
-    /// Mapping from uniform buffer type names to Metal buffer indices
     pub uniform_buffer_bindings: UniformBufferBindings,
-    /// Layout for scope uniforms (uses slots, 4-byte alignment)
     pub scope_uniforms: DrawShaderInputs,
-    /// Source objects and keys for scope uniforms (parallel to scope_uniforms.inputs)
     pub scope_uniform_sources: Vec<(ScriptObject, LiveId)>,
-    /// Buffer for scope uniform data (filled before draw calls, in f32 slots)
     pub scope_uniforms_buf: Vec<f32>,
 }
 
 impl CxDrawShaderMapping {
-    pub fn from_shader_output(source:CxDrawShaderSource, heap: &ScriptHeap, output: &ShaderOutput) -> CxDrawShaderMapping {
+    pub fn from_shader_output(source:ScriptObjectRef, code:CxDrawShaderCode, heap: &ScriptHeap, output: &ShaderOutput) -> CxDrawShaderMapping {
         // Use attribute packing for instances (they're vertex attributes)
         // instances contains ALL instance fields (dyn first, then rust)
         let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
@@ -443,6 +406,7 @@ impl CxDrawShaderMapping {
         
         CxDrawShaderMapping {
             source,
+            code,
             flags: DrawShaderFlags::default(),
             instances,
             dyn_instances,
@@ -479,93 +443,7 @@ impl CxDrawShaderMapping {
             let value = heap.scope_value(source_obj, key, trap);
             
             // Write value to buffer at the input's offset
-            let offset = input.offset;
-            let slots = input.slots;
-            
-            // Handle different value types and write as f32 slots
-            Self::write_value_to_slots(value, &mut self.scope_uniforms_buf[offset..offset + slots], heap);
-        }
-    }
-    
-    /// Write a script value to f32 slots.
-    fn write_value_to_slots(
-        value: crate::makepad_script::value::ScriptValue,
-        dst: &mut [f32],
-        heap: &ScriptHeap,
-    ) {
-        use crate::makepad_math::Vec4f;
-        
-        // Handle f64/f32 (abstract float) -> single f32 slot
-        if let Some(v) = value.as_f64() {
-            if !dst.is_empty() {
-                dst[0] = v as f32;
-            }
-            return;
-        }
-        if let Some(v) = value.as_f32() {
-            if !dst.is_empty() {
-                dst[0] = v;
-            }
-            return;
-        }
-        
-        // Handle u32
-        if let Some(v) = value.as_u32() {
-            if !dst.is_empty() {
-                dst[0] = f32::from_bits(v);
-            }
-            return;
-        }
-        if let Some(v) = value.as_u40() {
-            if !dst.is_empty() {
-                dst[0] = f32::from_bits(v as u32);
-            }
-            return;
-        }
-        
-        // Handle i32
-        if let Some(v) = value.as_i32() {
-            if !dst.is_empty() {
-                dst[0] = f32::from_bits(v as u32);
-            }
-            return;
-        }
-        
-        // Handle bool
-        if let Some(v) = value.as_bool() {
-            if !dst.is_empty() {
-                dst[0] = f32::from_bits(v as u32);
-            }
-            return;
-        }
-        
-        // Handle colors -> vec4f (4 slots)
-        if let Some(c) = value.as_color() {
-            let v = Vec4f::from_u32(c);
-            if dst.len() >= 4 {
-                dst[0] = v.x;
-                dst[1] = v.y;
-                dst[2] = v.z;
-                dst[3] = v.w;
-            }
-            return;
-        }
-        
-        // Handle pod types (vec2f, vec3f, vec4f, structs, etc.)
-        if let Some(pod) = value.as_pod() {
-            let (_pod_type, data) = heap.pod_data(pod);
-            // Copy pod data as f32 slots
-            for (i, &u) in data.iter().enumerate() {
-                if i < dst.len() {
-                    dst[i] = f32::from_bits(u);
-                }
-            }
-            return;
-        }
-        
-        // Default: zero the slots
-        for slot in dst.iter_mut() {
-            *slot = 0.0;
+            DrawVars::write_value_to_f32_slots(heap, value, &mut self.scope_uniforms_buf, input.offset, input.slots);
         }
     }
     

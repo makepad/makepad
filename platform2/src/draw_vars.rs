@@ -10,6 +10,7 @@ use {
         //makepad_live_id::*,
         makepad_math::*,
         cx::Cx,
+        script::vm::*,
         texture::{Texture},
         geometry::GeometryId,
         area::Area,
@@ -18,9 +19,9 @@ use {
     },
 };
 
-pub const DRAW_CALL_USER_UNIFORMS: usize = 256;
+pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
-pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
+pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
 
 #[derive(Clone, Script, Debug)]
 #[repr(C)]
@@ -31,14 +32,25 @@ pub struct DrawVars {
     #[rust] pub options: CxDrawShaderOptions,
     #[rust] pub draw_shader_id: Option<DrawShaderId>,
     #[rust] pub geometry_id: Option<GeometryId>,
-    #[rust([0f32; DRAW_CALL_USER_UNIFORMS])] pub dyn_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
+    #[rust([0f32; DRAW_CALL_DYN_UNIFORMS])] pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS],
     #[rust] pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
-    #[rust([0f32; DRAW_CALL_VAR_INSTANCES])] pub dyn_instances: [f32; DRAW_CALL_VAR_INSTANCES]
+    #[rust([0f32; DRAW_CALL_DYN_INSTANCES])] pub dyn_instances: [f32; DRAW_CALL_DYN_INSTANCES]
 }
 
 impl ScriptHook for DrawVars{
-    fn on_before_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, _scope:&mut Scope, value:ScriptValue){
-        self.compile_shader(vm, apply, value)
+    fn on_after_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, _scope:&mut Scope, value:ScriptValue){
+        if !apply.is_default(){
+            self.compile_shader(vm, apply, value);
+        }
+        // lets fill our values
+        if let Some(id) = self.draw_shader_id{
+            if let Some(io_self) = value.as_object(){
+                let cx = vm.host.cx();
+                let sh = &cx.draw_shaders.shaders[id.index];
+                self.fill_dyn_instances(&vm.heap, &sh.mapping, io_self);
+                self.fill_dyn_uniforms(&vm.heap, &sh.mapping, io_self);
+            }
+        }
     }
 }
 
@@ -330,9 +342,6 @@ impl DrawVars {
     pub fn update_rect(&mut self, cx: &mut Cx, rect: Rect) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader_id.generation != cx.draw_shaders.generation {
-                    return;
-                }
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
@@ -365,9 +374,6 @@ impl DrawVars {
     pub fn update_instance_area_value(&mut self, cx: &mut Cx,  id: &[LiveId]) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader_id.generation != cx.draw_shaders.generation {
-                    return;
-                }
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
@@ -507,68 +513,48 @@ impl DrawVars {
         }
     }
     
-    /// Read default values for dyn_instance slots from a shader script object.
-    /// 
-    /// When a shader defines `dynvalue: shader.instance(1.0)`, the value (1.0) becomes
-    /// the prototype of the shader IO object. This method iterates through all dyn_instance
-    /// inputs from the shader mapping and reads their default values from the shader object.
-    pub fn read_dyn_instance_defaults(&mut self, heap: &ScriptHeap, mapping: &CxDrawShaderMapping, io_self: ScriptObject) {
-        let trap = ScriptTrap::default();
+    pub fn fill_dyn_instances(&mut self, heap: &ScriptHeap, mapping: &CxDrawShaderMapping, io_self: ScriptObject) {
         let base_offset = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
         
         for input in &mapping.dyn_instances.inputs {
-            let offset = base_offset + input.offset;
-            let slots = input.slots;
-            
-            // Look up the value on the shader object and extract default from shader IO
-            let default_value = Self::extract_shader_io_default(heap, io_self, input.id, SHADER_IO_DYN_INSTANCE, &trap);
-            
-            // Extract float values from the default value and write to dyn_instances
-            Self::write_value_to_f32_slots(heap, default_value, &mut self.dyn_instances, offset, slots);
+            let value = Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_INSTANCE);
+            if !value.is_nil() && !value.is_err() {
+                Self::write_value_to_f32_slots(heap, value, &mut self.dyn_instances, base_offset + input.offset, input.slots);
+            }
         }
     }
     
-    /// Read default values for dyn_uniform slots from a shader script object.
-    /// 
-    /// When a shader defines `myuniform: shader.uniform(1.0)`, the value (1.0) becomes
-    /// the prototype of the shader IO object. This method iterates through all dyn_uniform
-    /// inputs from the shader mapping and reads their default values from the shader object.
-    pub fn read_dyn_uniforms_defaults(&mut self, heap: &ScriptHeap, mapping: &CxDrawShaderMapping, io_self: ScriptObject) {
+    pub fn fill_dyn_uniforms(&mut self, heap: &ScriptHeap, mapping: &CxDrawShaderMapping, io_self: ScriptObject) {
         use crate::makepad_script::mod_shader::SHADER_IO_DYN_UNIFORM;
-        let trap = ScriptTrap::default();
         
         for input in &mapping.dyn_uniforms.inputs {
-            let offset = input.offset;
-            let slots = input.slots;
-            
-            // Look up the value on the shader object and extract default from shader IO
-            let default_value = Self::extract_shader_io_default(heap, io_self, input.id, SHADER_IO_DYN_UNIFORM, &trap);
-            
-            // Extract float values from the default value and write to dyn_uniforms
-            Self::write_value_to_f32_slots(heap, default_value, &mut self.dyn_uniforms, offset, slots);
+            let value = Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_UNIFORM);
+            if !value.is_nil() && !value.is_err() {
+                Self::write_value_to_f32_slots(heap, value, &mut self.dyn_uniforms, input.offset, input.slots);
+            }
         }
     }
     
-    /// Extract the default value from a shader IO object.
-    /// 
-    /// For shader IO objects (e.g., shader.instance(value) or shader.uniform(value)),
-    /// the default value is stored as the prototype.
-    fn extract_shader_io_default(heap: &ScriptHeap, io_self: ScriptObject, id: LiveId, expected_io_type: ShaderIoType, trap: &ScriptTrap) -> ScriptValue {
-        let value = heap.value(io_self, id.into(), trap);
+    fn extract_shader_io_value(heap: &ScriptHeap, io_self: ScriptObject, id: LiveId, expected_io_type: ShaderIoType) -> ScriptValue {
+        let trap = ScriptTrap::default();
+        let value = heap.value(io_self, id.into(), &trap);
         
+        // Check if it's a shader IO object with the expected type
         if let Some(value_obj) = value.as_object() {
             if let Some(io_type) = heap.as_shader_io(value_obj) {
                 if io_type == expected_io_type {
-                    // The default value is stored as the prototype
+                    // The value is stored as the prototype
                     return heap.proto(value_obj);
                 }
             }
         }
+        
+        // Return the value directly
         value
     }
     
-    /// Write a ScriptValue to f32 slots in an output array.
-    fn write_value_to_f32_slots(heap: &ScriptHeap, value: ScriptValue, output: &mut [f32], offset: usize, slots: usize) {
+    /// Write a ScriptValue to f32 slots in an output array at the given offset.
+    pub fn write_value_to_f32_slots(heap: &ScriptHeap, value: ScriptValue, output: &mut [f32], offset: usize, slots: usize) {
         // Try f64 first (most common for abstract numbers)
         if let Some(v) = value.as_f64() {
             let v = v as f32;
@@ -613,6 +599,15 @@ impl DrawVars {
         }
         if let Some(v) = value.as_i32() {
             let v = v as f32;
+            for i in 0..slots {
+                output[offset + i] = v;
+            }
+            return;
+        }
+        
+        // Try bool
+        if let Some(v) = value.as_bool() {
+            let v = if v { 1.0 } else { 0.0 };
             for i in 0..slots {
                 output[offset + i] = v;
             }
