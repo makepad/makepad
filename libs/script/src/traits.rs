@@ -79,9 +79,10 @@ pub struct ScriptTypeProp {
 #[derive(Default, Debug)]
 pub struct ScriptTypeProps{
     pub props: LiveIdMap<LiveId, ScriptTypeProp>,
-    /// Reserved for future use. Currently always 0 since config fields before #[deref]
-    /// are simply not added to props during script_proto_props generation.
-    /// The ordering is: parent fields first (via recursive call), then child's fields after deref.
+    /// Index marking where Rust instance fields begin in the props list.
+    /// Fields with order < rust_instance_start are config fields (live fields before #[deref]).
+    /// Fields with order >= rust_instance_start are instance fields (deref parent fields + child's fields after deref).
+    /// The shader compiler uses iter_rust_instance_ordered() to process only instance fields.
     pub rust_instance_start: u32,
 }
 
@@ -92,8 +93,9 @@ impl ScriptTypeProps {
     }
     
     /// Mark the current position as where Rust instance fields begin.
-    /// Note: This is no longer called in the derive macro since parent fields ARE instance data.
-    /// Config fields before #[deref] are excluded by not adding them to props at all.
+    /// Called by the derive macro just before processing the #[deref] field.
+    /// Config fields (live fields before #[deref]) are added to props before this call,
+    /// then parent fields and child's own fields are added after.
     pub fn mark_rust_instance_start(&mut self) {
         self.rust_instance_start = self.props.len() as u32;
     }
@@ -105,8 +107,9 @@ impl ScriptTypeProps {
     }
     
     /// Iterate over props that are part of the Rust instance data.
-    /// Returns all props in order: deref parent fields first, then child's own fields.
-    /// Note: rust_instance_start is currently always 0, so this returns all props.
+    /// Skips config fields (live fields before #[deref]) and returns instance fields in order:
+    /// deref parent fields first, then child's own fields after deref.
+    /// Used by the shader compiler to build the RustInstance struct layout.
     pub fn iter_rust_instance_ordered(&self) -> impl Iterator<Item = (LiveId, ScriptTypeId)> + '_ {
         let rust_instance_start = self.rust_instance_start;
         let mut ordered: Vec<_> = self.props.iter()
@@ -151,7 +154,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     /// Builds a pod struct type from the macro-generated type reflection.
     /// This iterates through the ScriptTypeProps in order and generates
     /// a ScriptPodTy::Struct with fields matching the struct's layout.
-    /// Uses iter_rust_instance_ordered() to skip fields before #[deref].
+    /// Uses iter_rust_instance_ordered() to skip config fields before #[deref].
     fn script_pod(vm: &mut ScriptVm) -> Option<ScriptPodType> where Self: Sized {
         use crate::pod::*;
         
@@ -162,7 +165,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         let type_check = vm.heap.registered_type(type_id)?;
         
         // Build pod fields from the type props
-        // Use iter_rust_instance_ordered to skip config fields before #[deref]
+        // Use iter_rust_instance_ordered to skip config fields (live fields before #[deref])
         let mut fields = Vec::new();
         
         for (field_name, field_type_id) in type_check.props.iter_rust_instance_ordered() {
@@ -198,8 +201,8 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         Some(pt)
     }
     
-    fn script_from_dirty(vm:&mut ScriptVm, object:ScriptValue, id:LiveId)->Option<Self> where Self:Sized{
-        if let Some(value) = vm.heap.value_apply_if_dirty(object, id.into()){
+    fn script_from_apply_value(vm:&mut ScriptVm, object:ScriptValue, id:LiveId)->Option<Self> where Self:Sized{
+        if let Some(value) = vm.heap.value_for_apply(object, id.into()){
             Some(ScriptNew::script_from_value(vm, value))
         }
         else{
@@ -308,6 +311,10 @@ pub trait ScriptApply{
     fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue){}
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{NIL}
     fn script_to_value_props(&self, _vm:&mut ScriptVm, _obj:ScriptObject){}
+}
+
+pub trait ScriptApplyDefault{
+    fn script_apply_default(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue)->Option<ScriptValue>{None}
 }
 
 pub trait ScriptReset{

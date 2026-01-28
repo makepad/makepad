@@ -118,22 +118,22 @@ impl ScriptNew for WindowHandle {
 
 impl ScriptApply for WindowHandle {
     fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue) {
-        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(inner_size)){
+        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(inner_size)){
             vm.host.cx_mut().windows[self.window_id()].create_inner_size = Some(v);
         }
-        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(title)){
+        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(title)){
             vm.host.cx_mut().windows[self.window_id()].create_title = v;
         }
-        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(kind_id)){
+        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(kind_id)){
             vm.host.cx_mut().windows[self.window_id()].kind_id = v;
         }
-        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(position)){
+        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(position)){
             vm.host.cx_mut().windows[self.window_id()].create_position = Some(v);
         }
-        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(dpi_override)){
+        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(dpi_override)){
             vm.host.cx_mut().windows[self.window_id()].dpi_override = Some(v);
         }
-        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(topmost)){
+        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(topmost)){
             self.set_topmost(vm.host.cx_mut(), v);
         }
     }

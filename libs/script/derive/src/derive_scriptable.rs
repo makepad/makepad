@@ -41,7 +41,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         for field in &mut fields {
             if field.attrs.is_empty() { // need field def
-                return error_result("Please annotate the field type with #[rust] for rust-only fields, and #[live] for scriptable mapped fields and #[deref] for a base class and #[script] to call script_new");
+                return error_result("Please annotate the field type with #[rust] for rust-only fields, #[live] for scriptable mapped fields, #[apply_default] for scriptable fields with default application, #[deref] for a base class, #[script] to call script_new, or #[self] for a ScriptObjectRef to the object being applied");
             }
         }
         
@@ -93,14 +93,16 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    fn script_type_id(&self)->ScriptTypeId{ ScriptTypeId::of::<Self>()}");
         
         tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue) {");
-        tb.add("       if <Self as ScriptHook>::on_custom_apply(self, vm, apply, scope, value) || value.is_nil(){return};");
-        
-        tb.add("        <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, scope, value);");
-        
-        
+        tb.add("       if !apply.is_default(){");
+        tb.add("           if <Self as ScriptHook>::on_custom_apply(self, vm, apply, scope, value) || value.is_nil(){return};");
+        tb.add("           <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, scope, value);");
+        tb.add("       }");
+
+        // Declare variables for apply_default fields to store their dirty values
+
         for field in &fields {
-            if field.attrs.iter().any( | a | a.name == "live" ){
-                tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, id!(")
+            if field.attrs.iter().any( | a | a.name == "live" || a.name == "source" || a.name == "apply_default"){
+                tb.add("if let Some(v) = vm.heap.value_for_apply(value, id!(")
                     .ident(&field.name).add(").into()){");
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(",vm, apply, scope, v);");
                 tb.add("}");
@@ -109,8 +111,17 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(", vm, apply, scope, value);");
             }
         }
-        tb.add("        if let Some(o) = value.as_object(){vm.heap.set_first_applied_and_clean(o);}");
-        tb.add("        <Self as ScriptHookDeref>::on_deref_after_apply(self, vm, apply, scope, value);");
+        
+        tb.add("        if !apply.is_default() {");
+        for field in &fields {
+            if field.attrs.iter().any( | a | a.name == "apply_default"){
+                tb.add("    if let Some(default_value) = <").stream(Some(field.ty.clone())).add(" as ScriptApplyDefault>::script_apply_default(&mut self.").ident(&field.name).add(",vm, apply, scope, value){");
+                tb.add("        self.script_apply(vm, &Apply::Default, scope, default_value);");
+                tb.add("    }");
+            }
+        }
+        tb.add("            <Self as ScriptHookDeref>::on_deref_after_apply(self, vm, apply, scope, value);");
+        tb.add("        }");
         tb.add("    }");
         
         
@@ -128,7 +139,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
                 tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj);");
             }
-            if let Some(_) = field.attrs.iter().find(|a| a.name == "live"){
+            if let Some(_) = field.attrs.iter().find(|a| a.name == "live" || a.name == "apply_default"){
                 tb.add("let value:ScriptValue = <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_to_value( &self.").ident(&field.name).add(", vm); ");
                 tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
                 .ident(&field.name).add(")), value, &vm.thread.trap);");
@@ -154,12 +165,12 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         for field in &fields {
             tb.ident(&field.name).add(":");
             
-            if let Some(attr) = field.attrs.iter().find(|a| a.name == "new" || a.name == "live" ||a.name == "deref" || a.name == "rust"){
+            if let Some(attr) = field.attrs.iter().find(|a| a.name == "new" || a.name == "live" || a.name == "apply_default" ||a.name == "deref" || a.name == "rust" || a.name == "source"){
                 if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                    if attr.name == "live" || attr.name =="new" || attr.name == "deref" {
+                    if attr.name == "live" || attr.name == "apply_default" || attr.name =="new" || attr.name == "deref" {
                         tb.add("ScriptNew::script_new_with_default(vm)");
                     }
-                    else {
+                    else{
                         tb.add("Default::default()");
                     }
                 }
@@ -178,32 +189,17 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
          
         tb.add("    fn script_proto_props(vm: &mut ScriptVm, obj:ScriptObject, props:&mut ScriptTypeProps) {");
         
-        // Find the index of the deref field (if any)
-        let deref_index = fields.iter().position(|f| f.attrs.iter().any(|a| a.name == "deref"));
-        
-        for (idx, field) in fields.iter().enumerate() {
-            // Process deref field - recursively adds props from the base type
-            // Note: We do NOT call mark_rust_instance_start() here because parent's fields
-            // ARE part of the Rust instance data. Config fields before deref are excluded
-            // by the continue statement below, not by rust_instance_start filtering.
+        for (_, field) in fields.iter().enumerate() {
+
+            // Process deref field - mark rust_instance_start before adding parent fields
+            // This marks where the actual Rust instance data begins (excluding config fields above)
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
+                tb.add("props.mark_rust_instance_start();");
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto_props(vm, obj, props);");
             }
             
-            // Process live fields
-            if let Some(_attr) = field.attrs.iter().find(|a| a.name == "live"){
-                // Skip live fields that come BEFORE the deref field - they are not instance data
-                if let Some(deref_idx) = deref_index {
-                    if idx < deref_idx {
-                        // Still register prototype for scripting, but don't add to props
-                        // (props is used for shader instance field collection)
-                        tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto(vm);");
-                        // Note: NOT adding to props - these are config fields, not instance data
-                        continue;
-                    }
-                }
-                
-                // This is either a field after deref, or there's no deref field
+            // Process live and apply_default fields after deref (or when no deref exists)
+            if let Some(_attr) = field.attrs.iter().find(|a| a.name == "live" || a.name == "apply_default"){
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto(vm);");
                 tb.add("props.insert(id_lut!(").ident(&field.name).add("),<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
             }
@@ -455,7 +451,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     }
                     tb.add("} = self{");
                     for (i, field) in fields.iter().enumerate(){
-                        tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, ScriptValue::from_id(id!(").ident(&field.name).add("))){");
+                        tb.add("if let Some(v) = vm.heap.value_for_apply(value, ScriptValue::from_id(id!(").ident(&field.name).add("))){");
                         tb.add("    <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, scope, v);");
                         tb.add("}");
                     }
