@@ -704,4 +704,16 @@ impl ScriptHeap{
     pub fn objects_len(&self)->usize{
         self.objects.len()
     }
+    
+    /// Checks if a value has an apply transform without calling it.
+    /// Used by type_check to be permissive when a transform exists.
+    pub fn has_apply_transform(&self, value: ScriptValue) -> bool {
+        if let Some(obj) = value.as_object() {
+            return self.objects[obj.index as usize].tag.as_apply_transform().is_some();
+        }
+        if let Some(arr) = value.as_array() {
+            return self.arrays[arr.index as usize].tag.as_apply_transform().is_some();
+        }
+        false
+    }
 }

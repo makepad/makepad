@@ -43,7 +43,7 @@ impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static + Scrip
                 ScriptArrayStorage::U8(_)=> return true
             }
         }
-        value.is_nil() || T::script_type_check(heap, value)
+        value.is_nil() || T::script_type_check(heap, value) || heap.has_apply_transform(value)
     }
     fn script_default(_vm:&mut ScriptVm)->ScriptValue{NIL}
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
@@ -52,6 +52,10 @@ impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static + Scrip
 impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + ScriptDeriveMarker{
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
     fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){
+        // Check for apply transform
+        if let Some(transformed) = vm.call_apply_transform(value) {
+            return self.script_apply(vm, apply, scope, transformed);
+        }
         if let Some(obj) = value.as_object(){
             let len = vm.heap.vec_len(obj);
             self.resize_with(len, || ScriptNew::script_new(vm));
@@ -133,7 +137,7 @@ impl ScriptNew for Vec<u8> {
                 ScriptArrayStorage::U8(_)=> return true
             }
         }
-        value.is_string_like() || value.is_nil()
+        value.is_string_like() || value.is_nil() || heap.has_apply_transform(value)
     }
     fn script_default(vm:&mut ScriptVm)->ScriptValue{
         vm.heap.new_object().into()
@@ -146,7 +150,11 @@ impl ScriptNew for Vec<u8> {
 
 impl ScriptApply for Vec<u8> {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){
+        // Check for apply transform
+        if let Some(transformed) = vm.call_apply_transform(value) {
+            return self.script_apply(vm, apply, scope, transformed);
+        }
         if let Some(obj) = value.as_object(){
             self.clear();
             for kv in vm.heap.vec_ref(obj){
@@ -205,7 +213,11 @@ impl ScriptNew for Vec<ScriptValue> {
 }
 impl ScriptApply for Vec<ScriptValue> {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){
+        // Check for apply transform
+        if let Some(transformed) = vm.call_apply_transform(value) {
+            return self.script_apply(vm, apply, scope, transformed);
+        }
         if let Some(obj) = value.as_object(){
             self.clear();
             for kv in vm.heap.vec_ref(obj){
@@ -263,7 +275,7 @@ impl<K,V> ScriptNew for HashMap<K,V>
             }
             return true
         }
-        value.is_nil()
+        value.is_nil() || heap.has_apply_transform(value)
     }
     fn script_default(_vm:&mut ScriptVm)->ScriptValue{NIL}
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
@@ -273,7 +285,11 @@ impl<K,V> ScriptApply for HashMap<K,V>
     where K: ScriptApply + ScriptNew  + 'static  + Eq + Hash,
           V: ScriptApply + ScriptNew  + 'static  {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){
+        // Check for apply transform
+        if let Some(transformed) = vm.call_apply_transform(value) {
+            return self.script_apply(vm, apply, scope, transformed);
+        }
         if let Some(obj) = value.as_object(){
             // hashmaps and btreemaps are cleared and copied fresh we can optimise later
             self.clear();
@@ -330,7 +346,7 @@ impl<K,V> ScriptNew for BTreeMap<K,V>
             }
             return true
         }
-        value.is_nil()
+        value.is_nil() || heap.has_apply_transform(value)
     }
     fn script_default(_vm:&mut ScriptVm)->ScriptValue{NIL}
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
@@ -340,7 +356,11 @@ impl<K,V> ScriptApply for BTreeMap<K,V>
     where K: ScriptApply + ScriptNew  + 'static + Ord,
           V: ScriptApply + ScriptNew  + 'static {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){
+        // Check for apply transform
+        if let Some(transformed) = vm.call_apply_transform(value) {
+            return self.script_apply(vm, apply, scope, transformed);
+        }
         if let Some(obj) = value.as_object(){
             // hashmaps and btreemaps are cleared and copied fresh we can optimise later
             self.clear();

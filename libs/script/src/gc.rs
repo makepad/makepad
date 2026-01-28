@@ -45,14 +45,14 @@ impl ScriptHeap{
             Entry::Occupied(mut occ) => {
                 *occ.get_mut() += 1;
                 ScriptObjectRef{
-                    roots: self.root_objects.clone(),
+                    roots: Some(self.root_objects.clone()),
                     obj: obj
                 }
             }
             Entry::Vacant(vac) => {
                 vac.insert(1);
                 ScriptObjectRef{
-                    roots: self.root_objects.clone(),
+                    roots: Some(self.root_objects.clone()),
                     obj: obj
                 }
             }

@@ -28,6 +28,14 @@ pub fn derive_animator_impl(input: TokenStream) ->  TokenStream {
         let animator_field = fields.iter().find( | field | field.name == "animator");
         
         if let Some(animator_field) = animator_field {
+            // Check that we have a #[source] attribute to hold the reference to the object
+            let has_source = fields.iter().any(|field| {
+                field.attrs.iter().any(|attr| attr.name == "source")
+            });
+            
+            if !has_source {
+                tb.add("compile_error!(\"Animator derive requires a field with #[source] attribute to hold the ScriptObjectRef\");");
+            }
                         
             tb.add("impl").stream(generic.clone());
             tb.add("AnimatorImpl for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");

@@ -180,6 +180,7 @@ pub enum Apply {
     Reload,
     Update,
     Animate,
+    Default,
     #[default]
     Over,
 }
@@ -233,6 +234,13 @@ impl Apply {
     pub fn is_over(&self) -> bool {
         match self {
             Self::Over => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::Default => true,
             _ => false
         }
     }

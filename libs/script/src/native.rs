@@ -169,6 +169,15 @@ impl ScriptNative{
         fn_obj
     }
     
+    /// Registers a native function to be used as an apply_transform and returns its NativeId.
+    /// This is used for creating objects that transform to a computed value when applied.
+    pub fn add_apply_transform_fn<F>(&mut self, f: F) -> NativeId
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
+        let fn_index = self.functions.len();
+        self.functions.push(Box::new(f));
+        NativeId{index: fn_index as u32}
+    }
+    
     pub fn add_method<F>(&mut self, heap:&mut ScriptHeap, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         // lets get the 

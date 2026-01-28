@@ -3,6 +3,8 @@ use crate::heap::*;
 use crate::native::*;
 use crate::makepad_live_id::*;
 use crate::object::*;
+use crate::function::*;
+
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -77,8 +79,31 @@ impl ScriptArrayTag{
     pub const DIRTY: u64 = 0x40<<40;
     pub const FROZEN: u64 = 0x100<<40;
     
+    pub const REF_DATA_MASK: u64 = 0xFF_FFFF_FFFF;
+    pub const REF_KIND_MASK:  u64 = 0xF<<58;
+    pub const REF_KIND_APPLY_TRANSFORM: u64 = 0x6<<58;
+    
     pub fn is_alloced(&self)->bool{
         return self.0 & Self::ALLOCED != 0
+    }
+    
+    pub fn set_apply_transform(&mut self, ni:NativeId){
+        self.0 &= !(Self::REF_DATA_MASK);
+        self.0 &= !(Self::REF_KIND_MASK);
+        self.0 |= ((ni.index as u64)) | Self::REF_KIND_APPLY_TRANSFORM; 
+    }
+    
+    pub fn as_apply_transform(&self)->Option<NativeId>{
+        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_APPLY_TRANSFORM{
+            Some(NativeId{index:self.0 as u32})
+        }
+        else{
+            None
+        }
+    }
+            
+    pub fn is_apply_transform(&self)->bool{
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_APPLY_TRANSFORM
     }
     
     pub fn set_alloced(&mut self){
