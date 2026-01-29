@@ -38,7 +38,7 @@ impl ScriptHeap{
         }
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
-            script_err_frozen!(trap, "array is frozen");
+            script_err_immutable!(trap, "array is frozen");
             return 
         }
         array.tag.set_dirty();
@@ -57,7 +57,7 @@ impl ScriptHeap{
     pub fn array_push_vec(&mut self, array:ScriptArray, object:ScriptObject, trap:ScriptTrap){
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
-            script_err_frozen!(trap, "array is frozen");
+            script_err_immutable!(trap, "array is frozen");
             return 
         }
         array.tag.set_dirty();
@@ -82,7 +82,7 @@ impl ScriptHeap{
         
         let target_arr = &mut self.arrays[target.index as usize];
         if target_arr.tag.is_frozen(){
-            script_err_frozen!(trap, "array is frozen");
+            script_err_immutable!(trap, "array is frozen");
             return 
         }
         target_arr.tag.set_dirty();
@@ -116,7 +116,7 @@ impl ScriptHeap{
     pub fn array_mut(&mut self, array:ScriptArray,trap:ScriptTrap)->Option<&mut ScriptArrayStorage>{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
-            script_err_frozen!(trap, "array is frozen");
+            script_err_immutable!(trap, "array is frozen");
             return None
         }
         array.tag.set_dirty();
@@ -142,11 +142,11 @@ impl ScriptHeap{
     pub fn array_remove(&mut self, array:ScriptArray, index: usize,trap:ScriptTrap)->ScriptValue{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
-            return script_err_frozen!(trap, "array is frozen");
+            return script_err_immutable!(trap, "array is frozen");
         }
         array.tag.set_dirty();
         if index >= array.storage.len(){
-            return script_err_array_bound!(trap, "array remove index {} out of bounds (len={})", index, array.storage.len())
+            return script_err_out_of_bounds!(trap, "array remove index {} out of bounds (len={})", index, array.storage.len())
         }
         array.storage.remove(index)
     }
@@ -154,21 +154,21 @@ impl ScriptHeap{
     pub fn array_pop(&mut self, array:ScriptArray, trap:ScriptTrap)->ScriptValue{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
-            return script_err_frozen!(trap, "array is frozen")
+            return script_err_immutable!(trap, "array is frozen")
         }
         if let Some(value) = array.storage.pop(){
             array.tag.set_dirty();
             value
         }
         else{
-            script_err_array_bound!(trap, "array pop on empty array")
+            script_err_out_of_bounds!(trap, "array pop on empty array")
         }
     }
         
     pub fn array_clear(&mut self, array:ScriptArray, trap:ScriptTrap){
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
-            script_err_frozen!(trap, "array is frozen");
+            script_err_immutable!(trap, "array is frozen");
             return
         }
         if array.storage.len() != 0{
@@ -183,7 +183,7 @@ impl ScriptHeap{
             return value
         }
         else{
-            script_err_array_bound!(trap, "array index {} out of bounds (len={})", index, storage.len())
+            script_err_out_of_bounds!(trap, "array index {} out of bounds (len={})", index, storage.len())
         }
     }
         
@@ -199,7 +199,7 @@ impl ScriptHeap{
     pub fn set_array_index(&mut self, array:ScriptArray, index:usize, value:ScriptValue, trap:ScriptTrap)->ScriptValue{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
-            return script_err_frozen!(trap, "array is frozen");
+            return script_err_immutable!(trap, "array is frozen");
         }
         array.tag.set_dirty();
         array.storage.set_index(index, value);

@@ -186,7 +186,7 @@ impl ScriptApply for Vec<u8> {
             self.clear();
         }
         else{
-            script_err_wrong_type_in_apply!(vm.thread.trap, "wrong vec type in apply");
+            script_err_type_mismatch!(vm.thread.trap, "wrong vec type in apply");
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
@@ -306,7 +306,7 @@ impl<K,V> ScriptApply for HashMap<K,V>
             self.clear()
         }
         else{
-            script_err_wrong_type_in_apply!(vm.thread.trap, "wrong vec type in apply");
+            script_err_type_mismatch!(vm.thread.trap, "wrong vec type in apply");
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
@@ -377,7 +377,7 @@ impl<K,V> ScriptApply for BTreeMap<K,V>
             self.clear()
         }
         else{
-            script_err_wrong_type_in_apply!(vm.thread.trap, "wrong vec type in apply");
+            script_err_type_mismatch!(vm.thread.trap, "wrong vec type in apply");
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{

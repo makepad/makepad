@@ -354,7 +354,7 @@ impl<K, V> ScriptApply for LiveIdMap<K, V>
             self.clear()
         }
         else {
-            script_err_wrong_type_in_apply!(vm.thread.trap, "wrong type in apply");
+            script_err_type_mismatch!(vm.thread.trap, "wrong type in apply");
         }
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {

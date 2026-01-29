@@ -303,63 +303,27 @@ impl ScriptValueType{
     pub const INLINE_STRING_END: Self = Self(23);
     
     pub const ERR_FIRST: Self = Self(23);
-    pub const ERR_NOT_FOUND: Self = Self(Self::ERR_FIRST.0 + 0);
-    pub const ERR_NOT_FN: Self = Self(Self::ERR_FIRST.0 + 1);
-    pub const ERR_NOT_INDEX: Self = Self(Self::ERR_FIRST.0 + 2);
-    pub const ERR_NOT_OBJECT: Self = Self(Self::ERR_FIRST.0 + 3);
-    pub const ERR_STACK_UNDERFLOW: Self = Self(Self::ERR_FIRST.0 + 4);
-    pub const ERR_STACK_OVERFLOW: Self = Self(Self::ERR_FIRST.0 + 5);
-    pub const ERR_INVALID_ARGS: Self = Self(Self::ERR_FIRST.0 + 6);
-    pub const ERR_NOT_ASSIGNABLE: Self = Self(Self::ERR_FIRST.0 + 7);
-    pub const ERR_UNEXPECTED: Self = Self(Self::ERR_FIRST.0 + 8);
-    pub const ERR_ASSERT_FAIL: Self = Self(Self::ERR_FIRST.0 + 9);
-    pub const ERR_NOT_IMPL: Self = Self(Self::ERR_FIRST.0 + 10);
-    pub const ERR_FROZEN: Self = Self(Self::ERR_FIRST.0 + 11);
-    pub const ERR_VEC_FROZEN: Self = Self(Self::ERR_FIRST.0 + 12);
-    pub const ERR_INVALID_PROP_TYPE: Self = Self(Self::ERR_FIRST.0 + 13);
-    pub const ERR_INVALID_PROP_NAME: Self = Self(Self::ERR_FIRST.0 + 14);
-    pub const ERR_KEY_ALREADY_EXISTS: Self = Self(Self::ERR_FIRST.0 + 15);
-    pub const ERR_INVALID_KEY_TYPE: Self = Self(Self::ERR_FIRST.0 + 16);
-    pub const ERR_INVALID_VAR_NAME: Self = Self(Self::ERR_FIRST.0 + 17);
-    pub const ERR_USER: Self = Self(Self::ERR_FIRST.0 + 18);
-    pub const ERR_VEC_BOUND: Self = Self(Self::ERR_FIRST.0 + 19);
-    pub const ERR_INVALID_ARG_TYPE: Self = Self(Self::ERR_FIRST.0 + 20);
-    pub const ERR_INVALID_ARG_NAME: Self = Self(Self::ERR_FIRST.0 + 21);
-    pub const ERR_INVALID_ARG_COUNT: Self = Self(Self::ERR_FIRST.0 + 22);
-    pub const ERR_NOT_PROTO: Self = Self(Self::ERR_FIRST.0 + 23);
-    pub const ERR_TYPE_NOT_REGISTERED: Self = Self(Self::ERR_FIRST.0 + 24);
-    pub const ERR_ENUM_UNKNOWN_VARIANT: Self = Self(Self::ERR_FIRST.0 + 25);
-    pub const ERR_NOT_ALLOWED_IN_ARRAY: Self = Self(Self::ERR_FIRST.0 + 26);
-    pub const ERR_NOT_ALLOWED_IN_ARGUMENTS: Self = Self(Self::ERR_FIRST.0 + 27);
-    pub const ERR_ARRAY_BOUND: Self = Self(Self::ERR_FIRST.0 + 28);
-    pub const ERR_WRONG_TYPE_IN_APPLY: Self = Self(Self::ERR_FIRST.0 + 29);
-    pub const ERR_FILE_SYSTEM: Self = Self(Self::ERR_FIRST.0 + 30);
-    pub const ERR_CHILD_PROCESS: Self= Self(Self::ERR_FIRST.0 + 31);
-    pub const ERR_TOO_MANY_PAUSED_CALLS: Self = Self(Self::ERR_FIRST.0 + 32);
-    pub const ERR_POD_TYPE_NOT_EXTENDABLE: Self = Self(Self::ERR_FIRST.0 + 33);
-    pub const ERR_POD_TYPE_NOT_MATCHING: Self = Self(Self::ERR_FIRST.0 + 34);
-    pub const ERR_POD_FIELD_NOT_POD: Self = Self(Self::ERR_FIRST.0 + 35);
-    pub const ERR_POD_ARRAY_DEF_INCORRECT: Self = Self(Self::ERR_FIRST.0 + 36);
-    pub const ERR_POD_TOO_MUCH_DATA: Self = Self(Self::ERR_FIRST.0 + 37);
-    pub const ERR_POD_NOT_ENOUGH_DATA: Self = Self(Self::ERR_FIRST.0 + 38);
-    pub const ERR_POD_INVALID_FIELD_NAME: Self = Self(Self::ERR_FIRST.0 + 39);
-    pub const ERR_NO_MATCHING_SHADER_TYPE: Self = Self(Self::ERR_FIRST.0 + 40);
-    pub const ERR_OPCODE_NOT_SUPPORTED_IN_SHADER: Self = Self(Self::ERR_FIRST.0 + 41);
-    pub const ERR_NO_WGSL_CONVERSION_AVAILABLE: Self = Self(Self::ERR_FIRST.0 + 42);
-    pub const ERR_RETURN_TYPE_CHANGED: Self = Self(Self::ERR_FIRST.0 + 43);
-    pub const ERR_INVALID_CONSTRUCTOR_ARG: Self = Self(Self::ERR_FIRST.0 + 44);
-    pub const ERR_HAVE_TO_INITIALISE_VARIABLE: Self = Self(Self::ERR_FIRST.0 + 45);
-    pub const ERR_STRUCT_NAME_NOT_CONSISTENT: Self = Self(Self::ERR_FIRST.0 + 46);
-    pub const ERR_RECURSION_NOT_ALLOWED: Self  = Self(Self::ERR_FIRST.0 + 47);
-    pub const ERR_IF_ELSE_TYPE_DIFFERENT: Self = Self(Self::ERR_FIRST.0 + 48);
-    pub const ERR_LET_IS_IMMUTABLE: Self = Self(Self::ERR_FIRST.0 + 49);
-    pub const ERR_OPCODE_NOT_DEFINED_FOR_SHADER_TYPE: Self = Self(Self::ERR_FIRST.0 + 50);
-    pub const ERR_NOT_AN_ARRAY: Self = Self(Self::ERR_FIRST.0 + 51);
-    pub const ERR_INDEX_OUT_OF_BOUNDS: Self = Self(Self::ERR_FIRST.0 + 52);
-    pub const ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS: Self = Self(Self::ERR_FIRST.0 + 53);
-    pub const ERR_ASSIGN_NOT_ALLOWED: Self = Self(Self::ERR_FIRST.0 + 54);
-    pub const ERR_RANGE_REQUIRES_NUMBERS: Self = Self(Self::ERR_FIRST.0 + 55);
-    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 56);
+    // Consolidated error types (19 total, down from 56)
+    pub const ERR_NOT_FOUND: Self = Self(Self::ERR_FIRST.0 + 0);      // lookup failures (property, field, variable, name, index)
+    pub const ERR_TYPE_MISMATCH: Self = Self(Self::ERR_FIRST.0 + 1);  // wrong type for operation
+    pub const ERR_WRONG_VALUE: Self = Self(Self::ERR_FIRST.0 + 2);    // expected different kind (not object/fn/array/proto)
+    pub const ERR_OUT_OF_BOUNDS: Self = Self(Self::ERR_FIRST.0 + 3);  // index/bounds errors
+    pub const ERR_IMMUTABLE: Self = Self(Self::ERR_FIRST.0 + 4);      // cannot modify (frozen, not assignable, let)
+    pub const ERR_STACK: Self = Self(Self::ERR_FIRST.0 + 5);          // stack underflow/overflow
+    pub const ERR_INVALID_ARGS: Self = Self(Self::ERR_FIRST.0 + 6);   // argument count/format errors
+    pub const ERR_NOT_ALLOWED: Self = Self(Self::ERR_FIRST.0 + 7);    // operation not allowed in context
+    pub const ERR_INCONSISTENT: Self = Self(Self::ERR_FIRST.0 + 8);   // types/names don't match across branches
+    pub const ERR_NOT_IMPL: Self = Self(Self::ERR_FIRST.0 + 9);       // not implemented
+    pub const ERR_UNEXPECTED: Self = Self(Self::ERR_FIRST.0 + 10);    // catch-all
+    pub const ERR_ASSERT_FAIL: Self = Self(Self::ERR_FIRST.0 + 11);   // assertions
+    pub const ERR_USER: Self = Self(Self::ERR_FIRST.0 + 12);          // user-generated
+    pub const ERR_POD: Self = Self(Self::ERR_FIRST.0 + 13);           // all pod errors
+    pub const ERR_SHADER: Self = Self(Self::ERR_FIRST.0 + 14);        // all shader errors
+    pub const ERR_UNKNOWN_TYPE: Self = Self(Self::ERR_FIRST.0 + 15);  // type not registered, unknown variant
+    pub const ERR_DUPLICATE: Self = Self(Self::ERR_FIRST.0 + 16);     // key already exists
+    pub const ERR_IO: Self = Self(Self::ERR_FIRST.0 + 17);            // file system, child process
+    pub const ERR_LIMIT: Self = Self(Self::ERR_FIRST.0 + 18);         // resource limits
+    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 19);
     
     pub const HANDLE_FIRST: Self = Self(0x50);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -443,66 +407,29 @@ impl fmt::Display for ScriptValueType {
             // Inline strings all display as "string"
             Self::INLINE_STRING_0 | Self::INLINE_STRING_1 | Self::INLINE_STRING_2 |
             Self::INLINE_STRING_3 | Self::INLINE_STRING_4 | Self::INLINE_STRING_5 => write!(f,"string"),
-            // Error types
+            // Consolidated error types (19 total)
             Self::ERR_NOT_FOUND=>write!(f,"NotFound"),
-            Self::ERR_NOT_FN=>write!(f,"NotAFunction"),
-            Self::ERR_NOT_INDEX=>write!(f,"IndexNotFound"),
-            Self::ERR_NOT_OBJECT=>write!(f,"NotAnObject"),
-            Self::ERR_STACK_UNDERFLOW=>write!(f,"StackUnderflow"),
-            Self::ERR_STACK_OVERFLOW=>write!(f,"StackOverflow"),
+            Self::ERR_TYPE_MISMATCH=>write!(f,"TypeMismatch"),
+            Self::ERR_WRONG_VALUE=>write!(f,"WrongValue"),
+            Self::ERR_OUT_OF_BOUNDS=>write!(f,"OutOfBounds"),
+            Self::ERR_IMMUTABLE=>write!(f,"Immutable"),
+            Self::ERR_STACK=>write!(f,"StackError"),
             Self::ERR_INVALID_ARGS=>write!(f,"InvalidArgs"),
-            Self::ERR_NOT_ASSIGNABLE=>write!(f,"NotAssignable"),
+            Self::ERR_NOT_ALLOWED=>write!(f,"NotAllowed"),
+            Self::ERR_INCONSISTENT=>write!(f,"Inconsistent"),
+            Self::ERR_NOT_IMPL=>write!(f,"NotImplemented"),
             Self::ERR_UNEXPECTED=>write!(f,"Unexpected"),
             Self::ERR_ASSERT_FAIL=>write!(f,"AssertFailure"),
-            Self::ERR_NOT_IMPL=>write!(f,"NotImplemented"),
-            Self::ERR_FROZEN=>write!(f,"ObjectFrozen"),
-            Self::ERR_VEC_FROZEN=>write!(f,"VecFrozen"),
-            Self::ERR_INVALID_PROP_TYPE=>write!(f,"InvalidPropertyType"),
-            Self::ERR_INVALID_PROP_NAME=>write!(f,"InvalidPropertyName"),
-            Self::ERR_KEY_ALREADY_EXISTS=>write!(f,"KeyAlreadyExists"),
-            Self::ERR_INVALID_KEY_TYPE=>write!(f,"UnsupportedKeyType"),
-            Self::ERR_VEC_BOUND=>write!(f,"VecIndexOutOfBounds"),
-            Self::ERR_INVALID_ARG_TYPE=>write!(f,"InvalidArgumentType"),
-            Self::ERR_INVALID_ARG_NAME=>write!(f,"InvalidArgumentName"),
-            Self::ERR_INVALID_ARG_COUNT=>write!(f,"InvalidArgumentCount"),
-            Self::ERR_INVALID_VAR_NAME=>write!(f,"InvalidVariableName"),
-            Self::ERR_NOT_PROTO=>write!(f,"NotAllowedAsPrototype"),
-            Self::ERR_TYPE_NOT_REGISTERED=>write!(f,"TypeNotRegistered"),
-            Self::ERR_ENUM_UNKNOWN_VARIANT=>write!(f,"EnumUnknownVariant"),
-            Self::ERR_NOT_ALLOWED_IN_ARRAY=>write!(f,"NotAllowedInArray"),
-            Self::ERR_NOT_ALLOWED_IN_ARGUMENTS=>write!(f,"NotAllowedInArguments"),
-            Self::ERR_ARRAY_BOUND=>write!(f,"ArrayIndexOutOfBounds"),
-            Self::ERR_WRONG_TYPE_IN_APPLY=>write!(f,"WrongTypeInApply"),
             Self::ERR_USER=>write!(f,"UserGenerated"),
-            Self::ERR_FILE_SYSTEM=>write!(f,"FileSystemError"),
-            Self::ERR_CHILD_PROCESS=>write!(f,"ChildProcessError"),
-            Self::ERR_TOO_MANY_PAUSED_CALLS=>write!(f,"TooManyPausedCalls"),
-            Self::ERR_POD_TYPE_NOT_EXTENDABLE=>write!(f,"PodTypeNotExtendable"),
-            Self::ERR_POD_TYPE_NOT_MATCHING=>write!(f,"PodTypeNotMatching"),
-            Self::ERR_POD_FIELD_NOT_POD=>write!(f,"PodFieldNotPod"),
-            Self::ERR_POD_ARRAY_DEF_INCORRECT=>write!(f,"PodArrayDefIncorrect"),
-            Self::ERR_POD_TOO_MUCH_DATA=>write!(f,"PodTooMuchData"),
-            Self::ERR_POD_NOT_ENOUGH_DATA=>write!(f,"PodNotEnoughData"),
-            Self::ERR_POD_INVALID_FIELD_NAME=>write!(f,"PodInvalidFieldName"),
-            Self::ERR_NO_MATCHING_SHADER_TYPE=>write!(f,"NoMatchingShaderType"),
-            Self::ERR_OPCODE_NOT_SUPPORTED_IN_SHADER=>write!(f,"NotSupportedInShader"),
-            Self::ERR_NO_WGSL_CONVERSION_AVAILABLE=>write!(f,"NoWgslConversionAvailable"),
-            Self::ERR_RETURN_TYPE_CHANGED=>write!(f,"ReturnTypeChanged"),
-            Self::ERR_INVALID_CONSTRUCTOR_ARG=>write!(f,"InvalidConstructorArg"),
-            Self::ERR_HAVE_TO_INITIALISE_VARIABLE=>write!(f,"HaveToInitialiseVariable"),
-            Self::ERR_STRUCT_NAME_NOT_CONSISTENT=>write!(f,"StructNameNotConsistent"),
-            Self::ERR_RECURSION_NOT_ALLOWED=>write!(f,"RecursionNotAllowed"),
-            Self::ERR_IF_ELSE_TYPE_DIFFERENT=>write!(f,"IfElseTypeDifferent"),
-            Self::ERR_LET_IS_IMMUTABLE=>write!(f,"LetIsImmutable"),
-            Self::ERR_OPCODE_NOT_DEFINED_FOR_SHADER_TYPE=>write!(f,"OpcodeNotDefinedForShaderType"),
-            Self::ERR_NOT_AN_ARRAY=>write!(f,"NotAnArray"),
-            Self::ERR_INDEX_OUT_OF_BOUNDS=>write!(f,"IndexOutOfBounds"),
-            Self::ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS=>write!(f,"UseOnlyNamedOrOrderedPodFields"),
-            Self::ERR_ASSIGN_NOT_ALLOWED=>write!(f,"AssignNotAllowed"),
-            Self::ERR_RANGE_REQUIRES_NUMBERS=>write!(f,"RangeRequiresNumbers"),
+            Self::ERR_POD=>write!(f,"PodError"),
+            Self::ERR_SHADER=>write!(f,"ShaderError"),
+            Self::ERR_UNKNOWN_TYPE=>write!(f,"UnknownType"),
+            Self::ERR_DUPLICATE=>write!(f,"Duplicate"),
+            Self::ERR_IO=>write!(f,"IoError"),
+            Self::ERR_LIMIT=>write!(f,"LimitExceeded"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
-            x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle"),
-            _=>write!(f,"unknown")
+            x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
+            _=>write!(f,"ScriptValueType?")
         }
     }
 }
@@ -583,65 +510,26 @@ impl ScriptValue{
     
     
     
-    err_fn!(script_err_not_found, ERR_NOT_FOUND);
-    err_fn!(script_err_not_fn, ERR_NOT_FN);
-    err_fn!(script_err_not_index, ERR_NOT_INDEX);
-    err_fn!(script_err_not_object, ERR_NOT_OBJECT);
-    err_fn!(script_err_stack_underflow, ERR_STACK_UNDERFLOW);
-    err_fn!(script_err_stack_overflow, ERR_STACK_OVERFLOW);
-    err_fn!(script_err_invalid_args, ERR_INVALID_ARGS);
-    err_fn!(script_err_not_assignable, ERR_NOT_ASSIGNABLE);
-    err_fn!(script_err_unexpected, ERR_UNEXPECTED); 
-    err_fn!(script_err_assert_fail, ERR_ASSERT_FAIL);
-    err_fn!(script_err_not_impl, ERR_NOT_IMPL);
-    err_fn!(script_err_frozen, ERR_FROZEN);
-    err_fn!(script_err_vec_frozen, ERR_VEC_FROZEN);
-    err_fn!(script_err_invalid_prop_type, ERR_INVALID_PROP_TYPE);
-    err_fn!(script_err_invalid_prop_name, ERR_INVALID_PROP_NAME);
-    err_fn!(script_err_key_already_exists, ERR_KEY_ALREADY_EXISTS);
-    err_fn!(script_err_invalid_key_type, ERR_INVALID_KEY_TYPE);
-    err_fn!(script_err_vec_bound, ERR_VEC_BOUND);
-    err_fn!(script_err_invalid_arg_type, ERR_INVALID_ARG_TYPE);       
-    err_fn!(script_err_invalid_arg_name, ERR_INVALID_ARG_NAME);
-    err_fn!(script_err_invalid_arg_count, ERR_INVALID_ARG_COUNT);
-    err_fn!(script_err_invalid_var_name, ERR_INVALID_VAR_NAME);
-        
-    err_fn!(script_err_user, ERR_USER);
-    err_fn!(script_err_not_proto, ERR_NOT_PROTO);
-    err_fn!(script_err_type_not_registered, ERR_TYPE_NOT_REGISTERED);
-    
-    err_fn!(script_err_enum_unknown_variant, ERR_ENUM_UNKNOWN_VARIANT);
-    err_fn!(script_err_not_allowed_in_array, ERR_NOT_ALLOWED_IN_ARRAY);
-    err_fn!(script_err_not_allowed_in_arguments, ERR_NOT_ALLOWED_IN_ARGUMENTS);
-    err_fn!(script_err_array_bound, ERR_ARRAY_BOUND);
-    err_fn!(script_err_wrong_type_in_apply, ERR_WRONG_TYPE_IN_APPLY);
-    err_fn!(script_err_file_system, ERR_FILE_SYSTEM);
-    err_fn!(script_err_child_process, ERR_CHILD_PROCESS);
-    err_fn!(script_err_too_many_paused_calls, ERR_TOO_MANY_PAUSED_CALLS);
-    
-    err_fn!(script_err_pod_type_not_extendable, ERR_POD_TYPE_NOT_EXTENDABLE);
-    err_fn!(script_err_pod_type_not_matching, ERR_POD_TYPE_NOT_MATCHING);
-    err_fn!(script_err_pod_field_not_pod, ERR_POD_FIELD_NOT_POD);
-    err_fn!(script_err_pod_array_def_incorrect, ERR_POD_ARRAY_DEF_INCORRECT);
-    err_fn!(script_err_pod_too_much_data, ERR_POD_TOO_MUCH_DATA);
-    err_fn!(script_err_pod_not_enough_data, ERR_POD_NOT_ENOUGH_DATA);
-    err_fn!(script_err_pod_invalid_field_name, ERR_POD_INVALID_FIELD_NAME);
-    err_fn!(script_err_no_matching_shader_type, ERR_NO_MATCHING_SHADER_TYPE);
-    err_fn!(script_err_opcode_not_supported_in_shader, ERR_OPCODE_NOT_SUPPORTED_IN_SHADER);
-    err_fn!(script_err_no_wgsl_conversion_available, ERR_NO_WGSL_CONVERSION_AVAILABLE);
-    err_fn!(script_err_return_type_changed, ERR_RETURN_TYPE_CHANGED);
-    err_fn!(script_err_invalid_constructor_arg, ERR_INVALID_CONSTRUCTOR_ARG);
-    err_fn!(script_err_have_to_initialise_variable, ERR_HAVE_TO_INITIALISE_VARIABLE);
-    err_fn!(script_err_struct_name_not_consistent, ERR_STRUCT_NAME_NOT_CONSISTENT);
-    err_fn!(script_err_recursion_not_allowed, ERR_RECURSION_NOT_ALLOWED);
-    err_fn!(script_err_if_else_type_different, ERR_IF_ELSE_TYPE_DIFFERENT);
-    err_fn!(script_err_let_is_immutable, ERR_LET_IS_IMMUTABLE);
-    err_fn!(script_err_opcode_not_defined_for_shader_type, ERR_OPCODE_NOT_DEFINED_FOR_SHADER_TYPE);
-    err_fn!(script_err_not_an_array, ERR_NOT_AN_ARRAY);
-    err_fn!(script_err_index_out_of_bounds, ERR_INDEX_OUT_OF_BOUNDS);
-    err_fn!(script_err_use_only_named_or_ordered_pod_fields, ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS);
-    err_fn!(script_err_assign_not_allowed, ERR_ASSIGN_NOT_ALLOWED);
-    err_fn!(script_err_range_requires_numbers, ERR_RANGE_REQUIRES_NUMBERS);
+    // Consolidated error functions (19 total, down from 56)
+    err_fn!(script_err_not_found, ERR_NOT_FOUND);           // lookup failures
+    err_fn!(script_err_type_mismatch, ERR_TYPE_MISMATCH);   // wrong type for operation
+    err_fn!(script_err_wrong_value, ERR_WRONG_VALUE);       // expected different kind
+    err_fn!(script_err_out_of_bounds, ERR_OUT_OF_BOUNDS);   // index/bounds errors
+    err_fn!(script_err_immutable, ERR_IMMUTABLE);           // cannot modify
+    err_fn!(script_err_stack, ERR_STACK);                   // stack errors
+    err_fn!(script_err_invalid_args, ERR_INVALID_ARGS);     // argument errors
+    err_fn!(script_err_not_allowed, ERR_NOT_ALLOWED);       // operation not allowed
+    err_fn!(script_err_inconsistent, ERR_INCONSISTENT);     // types don't match across branches
+    err_fn!(script_err_not_impl, ERR_NOT_IMPL);             // not implemented
+    err_fn!(script_err_unexpected, ERR_UNEXPECTED);         // catch-all
+    err_fn!(script_err_assert_fail, ERR_ASSERT_FAIL);       // assertions
+    err_fn!(script_err_user, ERR_USER);                     // user-generated
+    err_fn!(script_err_pod, ERR_POD);                       // all pod errors
+    err_fn!(script_err_shader, ERR_SHADER);                 // all shader errors
+    err_fn!(script_err_unknown_type, ERR_UNKNOWN_TYPE);     // type not registered
+    err_fn!(script_err_duplicate, ERR_DUPLICATE);           // key already exists
+    err_fn!(script_err_io, ERR_IO);                         // file system, child process
+    err_fn!(script_err_limit, ERR_LIMIT);                   // resource limits
 
     pub const fn raw(&self)->u64{self.0}
     

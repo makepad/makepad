@@ -321,7 +321,7 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let value = match self.mes.last().unwrap(){
             ScriptMe::Array(_) => {
-                script_err_not_allowed_in_array!(self.trap, "field access {:?} not allowed in array literal context", field)
+                script_err_not_allowed!(self.trap, "field access {:?} not allowed in array literal context", field)
             }
             ScriptMe::Call{args, ..} => {
                 heap.value(*args, field, self.trap.pass())
@@ -359,7 +359,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = script_err_not_object!(self.trap, "proto_field {:?} target is not an object (got {:?})", field, object.value_type());
+            let value = script_err_wrong_value!(self.trap, "proto_field {:?} target is not an object (got {:?})", field, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -452,7 +452,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value)
         }
         else{
-            let value = script_err_not_object!(self.trap, "cannot index {:?} on {:?} (not an object/array/pod)", index, object.value_type());
+            let value = script_err_wrong_value!(self.trap, "cannot index {:?} on {:?} (not an object/array/pod)", index, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();

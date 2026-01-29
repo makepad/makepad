@@ -273,7 +273,7 @@ impl ScriptHeap{
                             }
                         }
                     }
-                    script_err_pod_array_def_incorrect!(trap, "pod array definition requires [element_type] or [length, element_type], got {} elements", kvs.len());
+                    script_err_pod!(trap, "pod array definition requires [element_type] or [length, element_type], got {} elements", kvs.len());
                     return
                 }
                 id!(pod_struct)=>{
@@ -299,7 +299,7 @@ impl ScriptHeap{
                             }
                         }
                         
-                        script_err_pod_field_not_pod!(trap, "pod struct field {:?} is not a pod type", kv.key);
+                        script_err_pod!(trap, "pod struct field {:?} is not a pod type", kv.key);
                     }
                     
                     // Use centralized layout calculation
@@ -309,7 +309,7 @@ impl ScriptHeap{
                     self.freeze(ptr);
                 }
                 _x=>{
-                    script_err_pod_type_not_extendable!(trap, "pod type {:?} cannot be extended (only pod_array and pod_struct are extendable)", pod_type);
+                    script_err_pod!(trap, "pod type {:?} cannot be extended (only pod_array and pod_struct are extendable)", pod_type);
                     return
                 }
             }
@@ -398,12 +398,12 @@ impl ScriptHeap{
                  ty
              }
              else{
-                 script_err_pod_type_not_matching!(trap, "pod type mismatch: value {:?} is not a valid pod element", value.value_type());
+                 script_err_pod!(trap, "pod type mismatch: value {:?} is not a valid pod element", value.value_type());
                  return
              };
              if let Some(last_ty) = self.pods[pod_ptr.index as usize].tag.as_array_builder(){
                  if last_ty != ty.self_ref{
-                     script_err_pod_type_not_matching!(trap, "pod array element type mismatch: array expects element type index {}, got {}", last_ty.index, ty.self_ref.index);
+                     script_err_pod!(trap, "pod array element type mismatch: array expects element type index {}, got {}", last_ty.index, ty.self_ref.index);
                      return
                  }
              }
@@ -436,7 +436,7 @@ impl ScriptHeap{
                     offset.offset_of += field.ty.data.ty.size_of();
                 }
                 else{
-                    script_err_pod_too_much_data!(trap, "pod struct has too many fields: field index {} >= field count {}", offset.field_index, fields.len());
+                    script_err_pod!(trap, "pod struct has too many fields: field index {} >= field count {}", offset.field_index, fields.len());
                 }
             },
             ScriptPodTy::ArrayBuilder=>{
@@ -473,7 +473,7 @@ impl ScriptHeap{
             ScriptPodTy::Mat(mt)=>{
                 if let Some(value) = value.as_number(){
                     if offset.offset_of >= mt.elem_size() * mt.dim(){
-                        script_err_pod_too_much_data!(trap, "pod matrix has too many elements: offset {} >= size {}", offset.offset_of, mt.elem_size() * mt.dim());
+                        script_err_pod!(trap, "pod matrix has too many elements: offset {} >= size {}", offset.offset_of, mt.elem_size() * mt.dim());
                     }
                     else{
                         out_data[offset.offset_of>>2] = (value as f32).to_bits();
@@ -481,10 +481,10 @@ impl ScriptHeap{
                     }
                 }
                 else if let Some(_in_pod) = value.as_pod(){
-                    script_err_pod_type_not_matching!(trap, "pod matrix expects scalar values, got pod");
+                    script_err_pod!(trap, "pod matrix expects scalar values, got pod");
                 }
                 else{
-                    script_err_pod_type_not_matching!(trap, "pod matrix expects number, got {:?}", value.value_type());
+                    script_err_pod!(trap, "pod matrix expects number, got {:?}", value.value_type());
                 }
             }
             _=>{
@@ -550,14 +550,14 @@ impl ScriptHeap{
         else{
             return
         }
-        script_err_pod_not_enough_data!(trap, "pod constructor incomplete: provided {} bytes, expected {}", offset.offset_of, size_of);
+        script_err_pod!(trap, "pod constructor incomplete: provided {} bytes, expected {}", offset.offset_of, size_of);
     }
         
     
     fn pod_write_vec(&self, ot:&ScriptPodVec, offset_of:usize, out_data:&mut[u32], value:ScriptValue, trap:ScriptTrap)->usize{
         if let Some(value) = value.as_number(){
             if offset_of >= ot.elem_size() * ot.dims(){
-                script_err_pod_too_much_data!(trap, "pod {} has too many components: offset {} >= size {}", ot.name(), offset_of, ot.elem_size() * ot.dims());
+                script_err_pod!(trap, "pod {} has too many components: offset {} >= size {}", ot.name(), offset_of, ot.elem_size() * ot.dims());
                 return 0
             }
             else{
@@ -591,7 +591,7 @@ impl ScriptHeap{
         }
         else if let Some(value) = value.as_bool(){
             if offset_of >= ot.elem_size() * ot.dims(){
-                script_err_pod_too_much_data!(trap, "pod {} has too many components: offset {} >= size {}", ot.name(), offset_of, ot.elem_size() * ot.dims());
+                script_err_pod!(trap, "pod {} has too many components: offset {} >= size {}", ot.name(), offset_of, ot.elem_size() * ot.dims());
                 return 0
             }
             else{
@@ -602,7 +602,7 @@ impl ScriptHeap{
                         out_data[o2] = if value{1} else {0}
                     }
                     _=>{
-                        script_err_pod_type_not_matching!(trap, "pod {} does not accept bool values", ot.name());
+                        script_err_pod!(trap, "pod {} does not accept bool values", ot.name());
                     }
                 }
                 return ot.elem_size()
@@ -613,7 +613,7 @@ impl ScriptHeap{
             let in_pod_ty = &self.pod_types[in_pod.ty.index as usize];
             if let ScriptPodTy::Vec(it) = &in_pod_ty.ty{
                 if offset_of + it.dims() * ot.elem_size() > ot.elem_size() * ot.dims(){
-                    script_err_pod_too_much_data!(trap, "pod {} + {} exceeds {} capacity: {} + {} > {}", ot.name(), it.name(), ot.name(), offset_of, it.dims() * ot.elem_size(), ot.elem_size() * ot.dims());
+                    script_err_pod!(trap, "pod {} + {} exceeds {} capacity: {} + {} > {}", ot.name(), it.name(), ot.name(), offset_of, it.dims() * ot.elem_size(), ot.elem_size() * ot.dims());
                     return 0
                 }
                 else{
@@ -754,11 +754,11 @@ impl ScriptHeap{
                 }                            
             }
             else{
-                script_err_pod_type_not_matching!(trap, "pod {} expects vector input, got {:?}", ot.name(), in_pod_ty.ty);
+                script_err_pod!(trap, "pod {} expects vector input, got {:?}", ot.name(), in_pod_ty.ty);
             }
         }
         else{
-            script_err_pod_type_not_matching!(trap, "pod {} expects number, bool or vector, got {:?}", ot.name(), value.value_type());
+            script_err_pod!(trap, "pod {} expects number, bool or vector, got {:?}", ot.name(), value.value_type());
         }
         0
     }        
@@ -775,7 +775,7 @@ impl ScriptHeap{
                     out_data[offset_of>>2] = if value{1} else {0}
                 }
                 else {
-                    script_err_pod_type_not_matching!(trap, "pod bool field expects bool, got {:?}", value.value_type());
+                    script_err_pod!(trap, "pod bool field expects bool, got {:?}", value.value_type());
                 }
             }
             ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
@@ -783,7 +783,7 @@ impl ScriptHeap{
                     out_data[offset_of>>2] = value as u32;
                 }
                 else {
-                    script_err_pod_type_not_matching!(trap, "pod u32 field expects number, got {:?}", value.value_type());
+                    script_err_pod!(trap, "pod u32 field expects number, got {:?}", value.value_type());
                 }
             }
             ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
@@ -791,7 +791,7 @@ impl ScriptHeap{
                     out_data[offset_of>>2] = (value as i32) as u32;
                 }
                 else {
-                    script_err_pod_type_not_matching!(trap, "pod i32 field expects number, got {:?}", value.value_type());
+                    script_err_pod!(trap, "pod i32 field expects number, got {:?}", value.value_type());
                 }
             }
             ScriptPodTy::F32=>{
@@ -805,7 +805,7 @@ impl ScriptHeap{
                     // how do we figure out we are a vec
                 }
                 else{
-                    script_err_pod_type_not_matching!(trap, "pod f32 field expects number, got {:?}", value.value_type());
+                    script_err_pod!(trap, "pod f32 field expects number, got {:?}", value.value_type());
                 }
             }
             ScriptPodTy::Vec(_vt)=>{ 
@@ -819,7 +819,7 @@ impl ScriptHeap{
                         return
                     }
                 }
-                script_err_pod_type_not_matching!(trap, "pod vec field expects matching vec type (type index {}), got {:?}", field_ty.self_ref.index, value.value_type());
+                script_err_pod!(trap, "pod vec field expects matching vec type (type index {}), got {:?}", field_ty.self_ref.index, value.value_type());
             }
             ScriptPodTy::Mat(_mt)=>{
                 if let Some(other_pod) = value.as_pod(){
@@ -832,7 +832,7 @@ impl ScriptHeap{
                         return
                     }
                 }
-                script_err_pod_type_not_matching!(trap, "pod mat field expects matching mat type (type index {}), got {:?}", field_ty.self_ref.index, value.value_type());
+                script_err_pod!(trap, "pod mat field expects matching mat type (type index {}), got {:?}", field_ty.self_ref.index, value.value_type());
             }
             ScriptPodTy::F16=>{
                 if let Some(value) = value.as_number(){
@@ -845,7 +845,7 @@ impl ScriptHeap{
                     }
                 }
                 else {
-                    script_err_pod_type_not_matching!(trap, "pod f16 field expects number, got {:?}", value.value_type());
+                    script_err_pod!(trap, "pod f16 field expects number, got {:?}", value.value_type());
                 }
             }
             ScriptPodTy::Struct{..}=>{
@@ -858,11 +858,11 @@ impl ScriptHeap{
                         }
                     }
                     else{
-                        script_err_pod_type_not_matching!(trap, "pod struct field expects type index {}, got type index {}", field_ty.self_ref.index, other_pod.ty.index);
+                        script_err_pod!(trap, "pod struct field expects type index {}, got type index {}", field_ty.self_ref.index, other_pod.ty.index);
                     }
                 }
                 else{
-                    script_err_pod_type_not_matching!(trap, "pod struct field expects struct, got {:?}", value.value_type());
+                    script_err_pod!(trap, "pod struct field expects struct, got {:?}", value.value_type());
                 }
             }
             ScriptPodTy::Enum{..}=>{
@@ -880,24 +880,24 @@ impl ScriptHeap{
                         // Check element type
                         if let Some(elem_ty) = other_pod.tag.as_array_builder() {
                             if elem_ty != ty.self_ref {
-                                script_err_pod_type_not_matching!(trap, "pod fixed array element type mismatch: expected type index {}, got {}", ty.self_ref.index, elem_ty.index);
+                                script_err_pod!(trap, "pod fixed array element type mismatch: expected type index {}, got {}", ty.self_ref.index, elem_ty.index);
                                 return;
                             }
                         }
                         else if *len > 0 {
-                             script_err_pod_type_not_matching!(trap, "pod fixed array expects ArrayBuilder with {} elements", len);
+                             script_err_pod!(trap, "pod fixed array expects ArrayBuilder with {} elements", len);
                              return;
                         }
                         
                         // Check size match
                         // heuristic check based on ArrayBuilder implementation
                         if other_pod.data.len() * 4 < *size_of {
-                            script_err_pod_not_enough_data!(trap, "pod fixed array has not enough data: got {} bytes, need {}", other_pod.data.len() * 4, size_of);
+                            script_err_pod!(trap, "pod fixed array has not enough data: got {} bytes, need {}", other_pod.data.len() * 4, size_of);
                              return;
                         }
                         let elem_align = ty.data.ty.align_of();
                         if other_pod.data.len() > *size_of + elem_align {
-                             script_err_pod_too_much_data!(trap, "pod fixed array has too much data: got {} u32s, max {}", other_pod.data.len(), *size_of + elem_align);
+                             script_err_pod!(trap, "pod fixed array has too much data: got {} u32s, max {}", other_pod.data.len(), *size_of + elem_align);
                              return;
                         }
                         
@@ -905,7 +905,7 @@ impl ScriptHeap{
                         let u32_count = *size_of >> 2;
                         let start = offset_of >> 2;
                         if start + u32_count > out_data.len() {
-                             script_err_pod_too_much_data!(trap, "pod fixed array write would exceed buffer: {} + {} > {}", start, u32_count, out_data.len()); 
+                             script_err_pod!(trap, "pod fixed array write would exceed buffer: {} + {} > {}", start, u32_count, out_data.len()); 
                              return;
                         }
                         for i in 0..u32_count {
@@ -914,7 +914,7 @@ impl ScriptHeap{
                         return;
                     }
                 }
-                script_err_pod_type_not_matching!(trap, "pod fixed array field expects ArrayBuilder, got {:?}", value.value_type());
+                script_err_pod!(trap, "pod fixed array field expects ArrayBuilder, got {:?}", value.value_type());
             }
             ScriptPodTy::VariableArray{ty, ..}=>{
                 if let Some(other_pod_ptr) = value.as_pod() {
@@ -924,12 +924,12 @@ impl ScriptHeap{
                     if let ScriptPodTy::ArrayBuilder = &other_pod_ty.ty {
                         if let Some(elem_ty) = other_pod.tag.as_array_builder() {
                              if elem_ty != ty.self_ref {
-                                 script_err_pod_type_not_matching!(trap, "pod variable array element type mismatch: expected type index {}, got {}", ty.self_ref.index, elem_ty.index);
+                                 script_err_pod!(trap, "pod variable array element type mismatch: expected type index {}, got {}", ty.self_ref.index, elem_ty.index);
                                  return;
                              }
                         }
                         else if other_pod.data.len() > 0 {
-                             script_err_pod_type_not_matching!(trap, "pod variable array expects ArrayBuilder with matching element type");
+                             script_err_pod!(trap, "pod variable array expects ArrayBuilder with matching element type");
                              return;
                         }
                         
@@ -944,7 +944,7 @@ impl ScriptHeap{
                         return
                     }
                 }
-                script_err_pod_type_not_matching!(trap, "pod variable array field expects ArrayBuilder, got {:?}", value.value_type());
+                script_err_pod!(trap, "pod variable array field expects ArrayBuilder, got {:?}", value.value_type());
             }
         }
     }
@@ -974,7 +974,7 @@ impl ScriptHeap{
                 (Some(ty.self_ref), *align_of)
             }
             _=>{
-                script_err_not_an_array!(trap, "cannot index into pod type {:?} (not an array)", pod_type.ty);
+                script_err_wrong_value!(trap, "cannot index into pod type {:?} (not an array)", pod_type.ty);
                 return NIL;
             }
         };
@@ -984,7 +984,7 @@ impl ScriptHeap{
             // bounds check
             let pod = &self.pods[pod_ptr.index as usize];
             if offset_of + align_of > pod.data.len() * 4{
-                 script_err_index_out_of_bounds!(trap, "pod array index {} out of bounds (max index={})", index, (pod.data.len() * 4 / align_of).saturating_sub(1));
+                 script_err_out_of_bounds!(trap, "pod array index {} out of bounds (max index={})", index, (pod.data.len() * 4 / align_of).saturating_sub(1));
                  return NIL;
             }
             
@@ -1072,7 +1072,7 @@ impl ScriptHeap{
         // alright lets get a field
         let field_name = if let Some(id) = field.as_id(){id}
         else{
-            return script_err_pod_invalid_field_name!(trap, "pod field name must be identifier, got {:?}", field.value_type())
+            return script_err_pod!(trap, "pod field name must be identifier, got {:?}", field.value_type())
         };
         let pod = &mut self.pods[pod_ptr.index as usize];
         let pod_ty = pod.ty;
@@ -1163,7 +1163,7 @@ impl ScriptHeap{
                     }
                     offset_of += field.ty.data.ty.size_of();
                 }
-                return script_err_pod_invalid_field_name!(trap, "pod struct has no field {:?}", field_name)
+                return script_err_pod!(trap, "pod struct has no field {:?}", field_name)
             },
             ScriptPodTy::Vec(vt)=>{
                 // we support reading fields and swizzles
@@ -1192,7 +1192,7 @@ impl ScriptHeap{
         
     pub fn pod_swizzle_vec1(&self, vec:ScriptPodVec, data:[u32;4], x:usize, trap:ScriptTrap)->ScriptValue{
         if x >= vec.dims(){
-            return script_err_pod_invalid_field_name!(trap, "pod {} swizzle component {} out of range (max={})", vec.name(), x, vec.dims() - 1)
+            return script_err_pod!(trap, "pod {} swizzle component {} out of range (max={})", vec.name(), x, vec.dims() - 1)
         }
         match vec{
             ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>{
@@ -1275,7 +1275,7 @@ impl ScriptHeap{
             // cross casting numbers
             ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32=>{ 
                 if offset.field_index > 0{
-                    script_err_pod_too_much_data!(trap, "scalar pod constructor takes exactly 1 arg, got more");
+                    script_err_pod!(trap, "scalar pod constructor takes exactly 1 arg, got more");
                     return
                 }
                 offset.field_index += 1;
@@ -1284,7 +1284,7 @@ impl ScriptHeap{
             ScriptPodTy::Vec(v1)=>{ // what do we 
                 // check field counter
                 if offset.field_index + 1 > v1.dims(){
-                    script_err_pod_too_much_data!(trap, "pod {} constructor: arg {} exceeds {} components", v1.name(), offset.field_index + 1, v1.dims());
+                    script_err_pod!(trap, "pod {} constructor: arg {} exceeds {} components", v1.name(), offset.field_index + 1, v1.dims());
                 }
                 offset.field_index += 1;
                 return
@@ -1292,42 +1292,42 @@ impl ScriptHeap{
             ScriptPodTy::Mat(m)=>{ // what do we 
                 // check field counter
                 if offset.field_index + 1 > m.dim(){
-                    script_err_pod_too_much_data!(trap, "pod {} constructor: arg {} exceeds {} elements", m.name(), offset.field_index + 1, m.dim());
+                    script_err_pod!(trap, "pod {} constructor: arg {} exceeds {} elements", m.name(), offset.field_index + 1, m.dim());
                 }
                 offset.field_index += 1;
                 return
             }
             ScriptPodTy::Struct{fields,..}=>{
                 if offset.field_index >= fields.len(){
-                    script_err_pod_too_much_data!(trap, "pod struct constructor: arg {} exceeds {} fields", offset.field_index, fields.len());
+                    script_err_pod!(trap, "pod struct constructor: arg {} exceeds {} fields", offset.field_index, fields.len());
                     return
                 }
                 if !fields[offset.field_index].ty.data.ty.is_number(){
-                    script_err_invalid_constructor_arg!(trap, "pod struct field {:?} at index {} is not a number type", fields[offset.field_index].name, offset.field_index);
+                    script_err_type_mismatch!(trap, "pod struct field {:?} at index {} is not a number type", fields[offset.field_index].name, offset.field_index);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::FixedArray{ty, len,..}=>{
                 if offset.field_index >= *len{
-                    script_err_pod_too_much_data!(trap, "pod fixed array constructor: arg {} exceeds length {}", offset.field_index, len);
+                    script_err_pod!(trap, "pod fixed array constructor: arg {} exceeds length {}", offset.field_index, len);
                     return
                 }
                 if ty.data.ty.is_number(){
-                    script_err_invalid_constructor_arg!(trap, "pod fixed array element is number type, use scalar constructor");
+                    script_err_type_mismatch!(trap, "pod fixed array element is number type, use scalar constructor");
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::VariableArray{ty,..}=>{
                 if ty.data.ty.is_number(){
-                    script_err_invalid_constructor_arg!(trap, "pod variable array element is number type, use scalar constructor");
+                    script_err_type_mismatch!(trap, "pod variable array element is number type, use scalar constructor");
                     return
                 }
                 offset.field_index += 1;
             }
             _=>{
-                script_err_invalid_constructor_arg!(trap, "pod type {:?} does not support abstract constructor args", pod_ty_data.ty);
+                script_err_type_mismatch!(trap, "pod type {:?} does not support abstract constructor args", pod_ty_data.ty);
             }
         }
     }
@@ -1338,27 +1338,27 @@ impl ScriptHeap{
         match &pod_ty_data.ty{
             ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::Bool=>{
                 if offset.field_index != 1{
-                    script_err_pod_not_enough_data!(trap, "scalar pod constructor requires exactly 1 arg, got {}", offset.field_index);
+                    script_err_pod!(trap, "scalar pod constructor requires exactly 1 arg, got {}", offset.field_index);
                 }
             }
             ScriptPodTy::Vec(v1)=>{
                 if offset.field_index != 1 && offset.field_index <v1.dims(){
-                    script_err_pod_not_enough_data!(trap, "pod {} constructor requires 1 or {} args, got {}", v1.name(), v1.dims(), offset.field_index);
+                    script_err_pod!(trap, "pod {} constructor requires 1 or {} args, got {}", v1.name(), v1.dims(), offset.field_index);
                 }
             }
             ScriptPodTy::Struct{fields,..}=>{
                 if offset.field_index < fields.len(){
-                    script_err_pod_not_enough_data!(trap, "pod struct constructor requires {} args, got {}", fields.len(), offset.field_index);
+                    script_err_pod!(trap, "pod struct constructor requires {} args, got {}", fields.len(), offset.field_index);
                 }
             }
             ScriptPodTy::FixedArray{len,..}=>{
                 if offset.field_index < *len{
-                    script_err_pod_not_enough_data!(trap, "pod fixed array constructor requires {} args, got {}", len, offset.field_index);
+                    script_err_pod!(trap, "pod fixed array constructor requires {} args, got {}", len, offset.field_index);
                 }
             }
             ScriptPodTy::Mat(m)=>{
                 if offset.field_index != 1 && offset.field_index <m.dim(){
-                    script_err_pod_not_enough_data!(trap, "pod {} constructor requires 1 or {} args, got {}", m.name(), m.dim(), offset.field_index);
+                    script_err_pod!(trap, "pod {} constructor requires 1 or {} args, got {}", m.name(), m.dim(), offset.field_index);
                 }
             }
             _=>()
@@ -1372,38 +1372,38 @@ impl ScriptHeap{
             // cross casting numbers
             ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32=>{ // were casting to f32
                 if offset.field_index > 0{
-                    script_err_pod_too_much_data!(trap, "scalar pod constructor takes exactly 1 arg, already have {}", offset.field_index);
+                    script_err_pod!(trap, "scalar pod constructor takes exactly 1 arg, already have {}", offset.field_index);
                     return
                 }
                 offset.field_index += 1;
                 match &pod_ty_arg_data.ty{
                     ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32 =>{return;} 
-                    _=>{script_err_invalid_constructor_arg!(trap, "scalar pod constructor expects number type, got {:?}", pod_ty_arg_data.ty);}
+                    _=>{script_err_type_mismatch!(trap, "scalar pod constructor expects number type, got {:?}", pod_ty_arg_data.ty);}
                 }
             }
             ScriptPodTy::Bool=>{ // were casting to f32
                 if offset.field_index > 0{
-                    script_err_pod_too_much_data!(trap, "bool pod constructor takes exactly 1 arg, already have {}", offset.field_index);
+                    script_err_pod!(trap, "bool pod constructor takes exactly 1 arg, already have {}", offset.field_index);
                     return
                 }
                 offset.field_index += 1;
                 match &pod_ty_arg_data.ty{
                     ScriptPodTy::Bool=>{return;} 
-                    _=>{script_err_invalid_constructor_arg!(trap, "bool pod constructor expects bool, got {:?}", pod_ty_arg_data.ty);}
+                    _=>{script_err_type_mismatch!(trap, "bool pod constructor expects bool, got {:?}", pod_ty_arg_data.ty);}
                 }
             }
-            ScriptPodTy::AtomicU32=>{script_err_invalid_constructor_arg!(trap, "AtomicU32 cannot be constructed directly");}
-            ScriptPodTy::AtomicI32=>{script_err_invalid_constructor_arg!(trap, "AtomicI32 cannot be constructed directly");}
+            ScriptPodTy::AtomicU32=>{script_err_type_mismatch!(trap, "AtomicU32 cannot be constructed directly");}
+            ScriptPodTy::AtomicI32=>{script_err_type_mismatch!(trap, "AtomicI32 cannot be constructed directly");}
             ScriptPodTy::Vec(v1)=>{ // what do we 
                 match pod_ty_arg_data.ty{
                     // single component
                     ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::Bool =>{
                         if v1.elem_ty() != pod_ty_arg_data.ty{
-                            script_err_invalid_constructor_arg!(trap, "pod {} constructor expects {:?} component, got {:?}", v1.name(), v1.elem_ty(), pod_ty_arg_data.ty);
+                            script_err_type_mismatch!(trap, "pod {} constructor expects {:?} component, got {:?}", v1.name(), v1.elem_ty(), pod_ty_arg_data.ty);
                         }
                         // check field counter
                         if offset.field_index + 1 > v1.dims(){
-                            script_err_pod_too_much_data!(trap, "pod {} constructor: component {} exceeds {} dimensions", v1.name(), offset.field_index + 1, v1.dims());
+                            script_err_pod!(trap, "pod {} constructor: component {} exceeds {} dimensions", v1.name(), offset.field_index + 1, v1.dims());
                         }
                         offset.field_index += 1;
                         return
@@ -1411,17 +1411,17 @@ impl ScriptHeap{
                     // multi component
                     ScriptPodTy::Vec(v2)=>{
                         if v1.elem_ty() != v2.elem_ty() {
-                            script_err_invalid_constructor_arg!(trap, "pod {} constructor element type {:?} doesn't match {} element type {:?}", v1.name(), v1.elem_ty(), v2.name(), v2.elem_ty());
+                            script_err_type_mismatch!(trap, "pod {} constructor element type {:?} doesn't match {} element type {:?}", v1.name(), v1.elem_ty(), v2.name(), v2.elem_ty());
                         }
                         // check field counter
                         if offset.field_index + v2.dims() > v1.dims(){
-                            script_err_pod_too_much_data!(trap, "pod {} + {} would exceed {} components: {} + {} > {}", v1.name(), v2.name(), v1.name(), offset.field_index, v2.dims(), v1.dims());
+                            script_err_pod!(trap, "pod {} + {} would exceed {} components: {} + {} > {}", v1.name(), v2.name(), v1.name(), offset.field_index, v2.dims(), v1.dims());
                             return
                         }
                         offset.field_index += v2.dims();
                     }
                     _=>{
-                        script_err_invalid_constructor_arg!(trap, "pod {} constructor expects scalar or vector, got {:?}", v1.name(), pod_ty_arg_data.ty);
+                        script_err_type_mismatch!(trap, "pod {} constructor expects scalar or vector, got {:?}", v1.name(), pod_ty_arg_data.ty);
                         offset.field_index += 1;
                         return
                     }
@@ -1432,49 +1432,49 @@ impl ScriptHeap{
                     ScriptPodTy::F32 =>{
                         if offset.field_index >= m.dim(){
                         // check field counter
-                            script_err_pod_too_much_data!(trap, "pod {} constructor: element {} exceeds {} elements", m.name(), offset.field_index, m.dim());
+                            script_err_pod!(trap, "pod {} constructor: element {} exceeds {} elements", m.name(), offset.field_index, m.dim());
                             return
                         }
                         offset.field_index += 1;
                     } 
                     _=>{
-                        script_err_invalid_constructor_arg!(trap, "pod {} constructor expects f32 elements, got {:?}", m.name(), pod_ty_arg_data.ty);
+                        script_err_type_mismatch!(trap, "pod {} constructor expects f32 elements, got {:?}", m.name(), pod_ty_arg_data.ty);
                         return
                     }
                 }
             }
             ScriptPodTy::Struct{fields,..}=>{
                 if offset.field_index >= fields.len(){
-                    script_err_pod_too_much_data!(trap, "pod struct constructor: arg {} exceeds {} fields", offset.field_index, fields.len());
+                    script_err_pod!(trap, "pod struct constructor: arg {} exceeds {} fields", offset.field_index, fields.len());
                     return
                 }
                 if fields[offset.field_index].ty.data.ty  != pod_ty_arg_data.ty{
-                    script_err_invalid_constructor_arg!(trap, "pod struct field {:?} expects {:?}, got {:?}", fields[offset.field_index].name, fields[offset.field_index].ty.data.ty, pod_ty_arg_data.ty);
+                    script_err_type_mismatch!(trap, "pod struct field {:?} expects {:?}, got {:?}", fields[offset.field_index].name, fields[offset.field_index].ty.data.ty, pod_ty_arg_data.ty);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::FixedArray{ty, len,..}=>{
                 if offset.field_index >= *len{
-                    script_err_pod_too_much_data!(trap, "pod fixed array constructor: arg {} exceeds length {}", offset.field_index, len);
+                    script_err_pod!(trap, "pod fixed array constructor: arg {} exceeds length {}", offset.field_index, len);
                     return
                 }
                 if ty.data.ty != pod_ty_arg_data.ty{
-                    script_err_invalid_constructor_arg!(trap, "pod fixed array expects element type {:?}, got {:?}", ty.data.ty, pod_ty_arg_data.ty);
+                    script_err_type_mismatch!(trap, "pod fixed array expects element type {:?}, got {:?}", ty.data.ty, pod_ty_arg_data.ty);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::VariableArray{ty,..}=>{
                 if ty.data.ty != pod_ty_arg_data.ty{
-                    script_err_invalid_constructor_arg!(trap, "pod variable array expects element type {:?}, got {:?}", ty.data.ty, pod_ty_arg_data.ty);
+                    script_err_type_mismatch!(trap, "pod variable array expects element type {:?}, got {:?}", ty.data.ty, pod_ty_arg_data.ty);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::Enum{..}=>todo!(),
             _=>{
-                script_err_invalid_constructor_arg!(trap, "pod type {:?} does not support typed constructor args", pod_ty_data.ty);
+                script_err_type_mismatch!(trap, "pod type {:?} does not support typed constructor args", pod_ty_data.ty);
             }
         }
     }  

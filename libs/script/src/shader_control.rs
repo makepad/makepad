@@ -313,7 +313,7 @@ impl ShaderFnCompiler {
             if let ShaderMe::FnBody { ret, escaped } = me {
                 if let Some(ret) = ret {
                     if ty != *ret {
-                        script_err_return_type_changed!(self.trap, "return type changed");
+                        script_err_inconsistent!(self.trap, "return type changed");
                     }
                 }
                 *ret = Some(ty);
@@ -394,7 +394,7 @@ impl ShaderFnCompiler {
             if !start_is_number || !end_is_number {
                 self.stack.free_string(start_s);
                 self.stack.free_string(end_s);
-                script_err_range_requires_numbers!(self.trap, "range requires numbers");
+                script_err_type_mismatch!(self.trap, "range requires numbers");
                 return;
             }
             self.stack.push(
@@ -409,7 +409,7 @@ impl ShaderFnCompiler {
         } else {
             self.stack.free_string(start_s);
             self.stack.free_string(end_s);
-            script_err_range_requires_numbers!(self.trap, "range requires numbers");
+            script_err_type_mismatch!(self.trap, "range requires numbers");
         }
     }
 }

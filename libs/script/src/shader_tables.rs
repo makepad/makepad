@@ -24,7 +24,7 @@ pub fn type_table_neg(val: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuil
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        script_err_opcode_not_defined_for_shader_type!(trap, "opcode not defined for type");
+        script_err_shader!(trap, "opcode not defined for type");
     }
     r
 }
@@ -298,7 +298,7 @@ pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:Scri
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        script_err_no_wgsl_conversion_available!(trap, "no wgsl conversion");
+        script_err_shader!(trap, "no wgsl conversion");
     }
     r
 }
@@ -353,7 +353,7 @@ pub fn type_table_int_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:Script
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        script_err_no_wgsl_conversion_available!(trap, "no wgsl conversion");
+        script_err_shader!(trap, "no wgsl conversion");
     }
     r
 }
@@ -368,7 +368,7 @@ pub fn type_table_logic(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, bui
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        script_err_no_wgsl_conversion_available!(trap, "no wgsl conversion");
+        script_err_shader!(trap, "no wgsl conversion");
     }
     r
 }
@@ -463,7 +463,7 @@ pub fn type_table_eq(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, builti
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        script_err_no_wgsl_conversion_available!(trap, "no wgsl conversion");
+        script_err_shader!(trap, "no wgsl conversion");
     }
     r
 }
@@ -491,7 +491,7 @@ pub fn type_table_if_else(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, b
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        script_err_if_else_type_different!(trap, "if-else type mismatch");
+        script_err_inconsistent!(trap, "if-else type mismatch");
     }
     r
 }
