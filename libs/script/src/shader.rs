@@ -266,7 +266,7 @@ impl ShaderStack{
             return (s,self.strings.pop().unwrap())
         }
         else{
-            script_err_stack_underflow!(trap, "shader stack underflow");
+            script_err_stack!(trap, "shader stack underflow");
             (ShaderType::Error(NIL), String::new())
         }
     }
@@ -276,7 +276,7 @@ impl ShaderStack{
             return (ty, self.strings.last().unwrap())
         }
         else{
-            script_err_stack_underflow!(trap, "shader stack underflow");
+            script_err_stack!(trap, "shader stack underflow");
             static EMPTY: (ShaderType, String) = (ShaderType::None, String::new());
             (&EMPTY.0, &EMPTY.1)
         }
@@ -284,7 +284,7 @@ impl ShaderStack{
     
     pub fn push(&mut self, trap:ScriptTrap, ty:ShaderType, s:String){
         if self.types.len() > self.stack_limit{
-            script_err_stack_overflow!(trap, "shader stack overflow");
+            script_err_stack!(trap, "shader stack overflow");
         }
         else{
             self.types.push(ty);
@@ -507,7 +507,7 @@ impl ShaderFnCompiler{
                                 return (ShaderType::ScopeTexture { obj: value_obj, tex_type, shader_name }, s2)
                             }
                             // Other shader_io types are not supported in scope
-                            script_err_opcode_not_supported_in_shader!(self.trap, "opcode not supported");
+                            script_err_shader!(self.trap, "opcode not supported");
                             self.stack.free_string(s);
                             return (ShaderType::Error(NIL), self.stack.new_string())
                         }
@@ -768,7 +768,7 @@ impl ShaderFnCompiler{
             s.push(')');
             return self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_vec4f), s);
         }
-        script_err_no_matching_shader_type!(self.trap, "no matching shader type");
+        script_err_shader!(self.trap, "no matching shader type");
     }
 
     pub(crate) fn ensure_struct_name(&self, vm: &mut ScriptVm, output: &mut ShaderOutput, pod_ty: ScriptPodType, used_name: LiveId) -> LiveId {
@@ -779,7 +779,7 @@ impl ShaderFnCompiler{
         
         if let Some(name) = vm.heap.pod_type_name(pod_ty) {
             if name != used_name && used_name != id!(self) && used_name != id!(vec2) && used_name != id!(vec3) && used_name != id!(vec4) {
-                script_err_struct_name_not_consistent!(self.trap, "struct name not consistent");
+                script_err_inconsistent!(self.trap, "struct name not consistent");
             }
             return name;
         }
@@ -845,12 +845,12 @@ impl ShaderFnCompiler{
 // ASSIGN ME            
             Opcode::ASSIGN_ME=>self.handle_assign_me(vm),
                                     
-            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{script_err_opcode_not_supported_in_shader!(self.trap, "ASSIGN_ME_BEFORE/AFTER: `++x` / `x++` not supported in shaders, use `x += 1`");},
+            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{script_err_shader!(self.trap, "ASSIGN_ME_BEFORE/AFTER: `++x` / `x++` not supported in shaders, use `x += 1`");},
                                     
-            Opcode::ASSIGN_ME_BEGIN=>{script_err_opcode_not_supported_in_shader!(self.trap, "ASSIGN_ME_BEGIN: compound assignment not supported in shaders");},
+            Opcode::ASSIGN_ME_BEGIN=>{script_err_shader!(self.trap, "ASSIGN_ME_BEGIN: compound assignment not supported in shaders");},
             
 // CONCAT  
-            Opcode::CONCAT=>{script_err_opcode_not_supported_in_shader!(self.trap, "CONCAT: string concatenation `a + b` not supported in shaders");},
+            Opcode::CONCAT=>{script_err_shader!(self.trap, "CONCAT: string concatenation `a + b` not supported in shaders");},
 // EQUALITY
             Opcode::EQ=>{self.handle_eq(vm, output, opargs, "==");},
             Opcode::NEQ=>{self.handle_eq(vm, output, opargs, "!=");},
@@ -862,24 +862,24 @@ impl ShaderFnCompiler{
                         
             Opcode::LOGIC_AND =>{self.handle_logic(vm, output, opargs, "&&");},
             Opcode::LOGIC_OR =>{self.handle_logic(vm, output, opargs, "||");},
-            Opcode::NIL_OR =>{script_err_opcode_not_supported_in_shader!(self.trap, "NIL_OR: null-coalescing `a ?? b` not supported in shaders");},
-            Opcode::SHALLOW_EQ =>{script_err_opcode_not_supported_in_shader!(self.trap, "SHALLOW_EQ: shallow equality `===` not supported in shaders");},
-            Opcode::SHALLOW_NEQ=>{script_err_opcode_not_supported_in_shader!(self.trap, "SHALLOW_NEQ: shallow inequality `!==` not supported in shaders");},
+            Opcode::NIL_OR =>{script_err_shader!(self.trap, "NIL_OR: null-coalescing `a ?? b` not supported in shaders");},
+            Opcode::SHALLOW_EQ =>{script_err_shader!(self.trap, "SHALLOW_EQ: shallow equality `===` not supported in shaders");},
+            Opcode::SHALLOW_NEQ=>{script_err_shader!(self.trap, "SHALLOW_NEQ: shallow inequality `!==` not supported in shaders");},
             // Object/Array begin
-            Opcode::BEGIN_PROTO=>{script_err_opcode_not_supported_in_shader!(self.trap, "BEGIN_PROTO: object literal `{{...}}` not supported in shaders");},
-            Opcode::PROTO_INHERIT_READ=>{script_err_opcode_not_supported_in_shader!(self.trap, "PROTO_INHERIT: prototype inheritance not supported in shaders");},
-            Opcode::PROTO_INHERIT_WRITE=>{script_err_opcode_not_supported_in_shader!(self.trap, "PROTO_INHERIT: prototype inheritance not supported in shaders");},
-            Opcode::SCOPE_INHERIT_READ=>{script_err_opcode_not_supported_in_shader!(self.trap, "SCOPE_INHERIT: scope inheritance not supported in shaders");},
-            Opcode::SCOPE_INHERIT_WRITE=>{script_err_opcode_not_supported_in_shader!(self.trap, "SCOPE_INHERIT: scope inheritance not supported in shaders");},
-            Opcode::FIELD_INHERIT_READ=>{script_err_opcode_not_supported_in_shader!(self.trap, "FIELD_INHERIT: field inheritance not supported in shaders");},
-            Opcode::FIELD_INHERIT_WRITE=>{script_err_opcode_not_supported_in_shader!(self.trap, "FIELD_INHERIT: field inheritance not supported in shaders");},
-            Opcode::INDEX_INHERIT_READ=>{script_err_opcode_not_supported_in_shader!(self.trap, "INDEX_INHERIT: index inheritance not supported in shaders");},
-            Opcode::INDEX_INHERIT_WRITE=>{script_err_opcode_not_supported_in_shader!(self.trap, "INDEX_INHERIT: index inheritance not supported in shaders");},
-            Opcode::END_PROTO=>{script_err_opcode_not_supported_in_shader!(self.trap, "END_PROTO: object literal `{{...}}` not supported in shaders");},
-            Opcode::BEGIN_BARE=>{script_err_opcode_not_supported_in_shader!(self.trap, "BEGIN_BARE: bare object `{{..}}` not supported in shaders");},
-            Opcode::END_BARE=>{script_err_opcode_not_supported_in_shader!(self.trap, "END_BARE: bare object not supported in shaders");},
-            Opcode::BEGIN_ARRAY=>{script_err_opcode_not_supported_in_shader!(self.trap, "BEGIN_ARRAY: dynamic array `[...]` not supported in shaders, use fixed-size arrays");},
-            Opcode::END_ARRAY=>{script_err_opcode_not_supported_in_shader!(self.trap, "END_ARRAY: dynamic array not supported in shaders");},
+            Opcode::BEGIN_PROTO=>{script_err_shader!(self.trap, "BEGIN_PROTO: object literal `{{...}}` not supported in shaders");},
+            Opcode::PROTO_INHERIT_READ=>{script_err_shader!(self.trap, "PROTO_INHERIT: prototype inheritance not supported in shaders");},
+            Opcode::PROTO_INHERIT_WRITE=>{script_err_shader!(self.trap, "PROTO_INHERIT: prototype inheritance not supported in shaders");},
+            Opcode::SCOPE_INHERIT_READ=>{script_err_shader!(self.trap, "SCOPE_INHERIT: scope inheritance not supported in shaders");},
+            Opcode::SCOPE_INHERIT_WRITE=>{script_err_shader!(self.trap, "SCOPE_INHERIT: scope inheritance not supported in shaders");},
+            Opcode::FIELD_INHERIT_READ=>{script_err_shader!(self.trap, "FIELD_INHERIT: field inheritance not supported in shaders");},
+            Opcode::FIELD_INHERIT_WRITE=>{script_err_shader!(self.trap, "FIELD_INHERIT: field inheritance not supported in shaders");},
+            Opcode::INDEX_INHERIT_READ=>{script_err_shader!(self.trap, "INDEX_INHERIT: index inheritance not supported in shaders");},
+            Opcode::INDEX_INHERIT_WRITE=>{script_err_shader!(self.trap, "INDEX_INHERIT: index inheritance not supported in shaders");},
+            Opcode::END_PROTO=>{script_err_shader!(self.trap, "END_PROTO: object literal `{{...}}` not supported in shaders");},
+            Opcode::BEGIN_BARE=>{script_err_shader!(self.trap, "BEGIN_BARE: bare object `{{..}}` not supported in shaders");},
+            Opcode::END_BARE=>{script_err_shader!(self.trap, "END_BARE: bare object not supported in shaders");},
+            Opcode::BEGIN_ARRAY=>{script_err_shader!(self.trap, "BEGIN_ARRAY: dynamic array `[...]` not supported in shaders, use fixed-size arrays");},
+            Opcode::END_ARRAY=>{script_err_shader!(self.trap, "END_ARRAY: dynamic array not supported in shaders");},
 // Calling
             Opcode::CALL_ARGS=>{
                 self.handle_call_args(vm, output, opargs);
@@ -898,16 +898,16 @@ impl ShaderFnCompiler{
             Opcode::FN_BODY_DYN=>{script_err_not_impl!(self.trap, "FN_BODY_DYN: function body definition not supported in shaders");},
             Opcode::FN_BODY_TYPED=>{script_err_not_impl!(self.trap, "FN_BODY_TYPED: typed function body not supported in shaders");},
             Opcode::RETURN=>self.handle_return(vm, output, opargs),
-            Opcode::RETURN_IF_ERR=>{script_err_opcode_not_supported_in_shader!(self.trap, "RETURN_IF_ERR: error propagation `?` not supported in shaders");},
+            Opcode::RETURN_IF_ERR=>{script_err_shader!(self.trap, "RETURN_IF_ERR: error propagation `?` not supported in shaders");},
 // IF            
             Opcode::IF_TEST=>self.handle_if_test(opargs),
                         
             Opcode::IF_ELSE=>self.handle_if_else(vm, opargs),
 // Use            
-            Opcode::USE=>{script_err_opcode_not_supported_in_shader!(self.trap, "USE: `use` imports not supported in shaders");},
+            Opcode::USE=>{script_err_shader!(self.trap, "USE: `use` imports not supported in shaders");},
 // Field            
             Opcode::FIELD=>self.handle_field(vm, output),
-            Opcode::FIELD_NIL=>{script_err_opcode_not_supported_in_shader!(self.trap, "FIELD_NIL: optional chaining `obj?.field` not supported in shaders");},
+            Opcode::FIELD_NIL=>{script_err_shader!(self.trap, "FIELD_NIL: optional chaining `obj?.field` not supported in shaders");},
             Opcode::ME_FIELD=>{script_err_not_impl!(self.trap, "ME_FIELD: `me.field` access not supported in shaders");},
             Opcode::PROTO_FIELD=>self.handle_field(vm, output),
                         
@@ -922,17 +922,17 @@ impl ShaderFnCompiler{
             Opcode::VAR_DYN=>self.handle_var_dyn(vm, output, opargs),
             Opcode::VAR_TYPED=>{script_err_not_impl!(self.trap, "VAR_TYPED: typed var `var x: Type = ...` not yet supported in shaders, use `var x = Type(...)`");},
 // Tree search            
-            Opcode::SEARCH_TREE=>{script_err_opcode_not_supported_in_shader!(self.trap, "SEARCH_TREE: tree search `#identifier` not supported in shaders");},
+            Opcode::SEARCH_TREE=>{script_err_shader!(self.trap, "SEARCH_TREE: tree search `#identifier` not supported in shaders");},
 // Log            
             Opcode::LOG=>{self.handle_log(vm);},
 // Me/Scope
-            Opcode::ME=>{script_err_opcode_not_supported_in_shader!(self.trap, "ME: `me` keyword not supported in shaders");},
+            Opcode::ME=>{script_err_shader!(self.trap, "ME: `me` keyword not supported in shaders");},
                         
-            Opcode::SCOPE=>{script_err_opcode_not_supported_in_shader!(self.trap, "SCOPE: `scope` keyword not supported in shaders");},
+            Opcode::SCOPE=>{script_err_shader!(self.trap, "SCOPE: `scope` keyword not supported in shaders");},
 // For            
             Opcode::FOR_1 =>self.handle_for_1(),
-            Opcode::FOR_2 =>{script_err_opcode_not_supported_in_shader!(self.trap, "FOR_2: `for k, v in obj` iteration not supported in shaders, use `for i in 0..n`");},
-            Opcode::FOR_3=>{script_err_opcode_not_supported_in_shader!(self.trap, "FOR_3: `for i, k, v in obj` iteration not supported in shaders, use `for i in 0..n`");},
+            Opcode::FOR_2 =>{script_err_shader!(self.trap, "FOR_2: `for k, v in obj` iteration not supported in shaders, use `for i in 0..n`");},
+            Opcode::FOR_3=>{script_err_shader!(self.trap, "FOR_3: `for i, k, v in obj` iteration not supported in shaders, use `for i in 0..n`");},
             Opcode::LOOP=>{script_err_not_impl!(self.trap, "LOOP: infinite `loop {{}}` not supported in shaders, use `for i in 0..n`");},
             Opcode::FOR_END=>self.handle_for_end(),
             Opcode::BREAK=>{script_err_not_impl!(self.trap, "BREAK: `break` not yet supported in shaders");},
@@ -941,15 +941,15 @@ impl ShaderFnCompiler{
 // Range            
             Opcode::RANGE=>self.handle_range(vm),
 // Is            
-            Opcode::IS=>{script_err_opcode_not_supported_in_shader!(self.trap, "IS: type check `x is Type` not supported in shaders");},
+            Opcode::IS=>{script_err_shader!(self.trap, "IS: type check `x is Type` not supported in shaders");},
 // Try / OK            
-            Opcode::OK_TEST=>{script_err_opcode_not_supported_in_shader!(self.trap, "OK_TEST: `ok {{}}` block not supported in shaders");},
-            Opcode::OK_END=>{script_err_opcode_not_supported_in_shader!(self.trap, "OK_END: `ok {{}}` block not supported in shaders");},
-            Opcode::TRY_TEST=>{script_err_opcode_not_supported_in_shader!(self.trap, "TRY_TEST: `try {{}}` block not supported in shaders");},
-            Opcode::TRY_ERR=>{script_err_opcode_not_supported_in_shader!(self.trap, "TRY_ERR: `try {{}} catch {{}}` not supported in shaders");},
-            Opcode::TRY_OK=>{script_err_opcode_not_supported_in_shader!(self.trap, "TRY_OK: `try {{}}` block not supported in shaders");},
+            Opcode::OK_TEST=>{script_err_shader!(self.trap, "OK_TEST: `ok {{}}` block not supported in shaders");},
+            Opcode::OK_END=>{script_err_shader!(self.trap, "OK_END: `ok {{}}` block not supported in shaders");},
+            Opcode::TRY_TEST=>{script_err_shader!(self.trap, "TRY_TEST: `try {{}}` block not supported in shaders");},
+            Opcode::TRY_ERR=>{script_err_shader!(self.trap, "TRY_ERR: `try {{}} catch {{}}` not supported in shaders");},
+            Opcode::TRY_OK=>{script_err_shader!(self.trap, "TRY_OK: `try {{}}` block not supported in shaders");},
             opcode=>{
-                script_err_opcode_not_supported_in_shader!(self.trap, "unknown opcode {:?} not supported in shaders", opcode);
+                script_err_shader!(self.trap, "unknown opcode {:?} not supported in shaders", opcode);
                 self.trap.goto_next();
                 // unknown instruction
             }
@@ -972,7 +972,7 @@ impl ShaderFnCompiler{
                     if let Some(last) = args.last(){
                          let last_was_named = last.name.is_some();
                          if last_was_named {
-                             script_err_use_only_named_or_ordered_pod_fields!(self.trap, "mixing named and ordered fields");
+                             script_err_pod!(self.trap, "mixing named and ordered fields");
                          }
                     }
                     
@@ -997,13 +997,13 @@ impl ShaderFnCompiler{
                         ty
                     }
                     else{
-                        script_err_no_matching_shader_type!(self.trap, "no matching shader type");
+                        script_err_shader!(self.trap, "no matching shader type");
                         vm.code.builtins.pod.pod_void
                     };
                     
                     if let Some(elem_ty) = elem_ty {
                         if *elem_ty != arg_ty {
-                             script_err_pod_type_not_matching!(self.trap, "array element type mismatch: expected {}, got {}", format_pod_type_name(&vm.heap, *elem_ty), format_pod_type_name(&vm.heap, arg_ty));
+                             script_err_pod!(self.trap, "array element type mismatch: expected {}, got {}", format_pod_type_name(&vm.heap, *elem_ty), format_pod_type_name(&vm.heap, arg_ty));
                         }
                     }
                     else {

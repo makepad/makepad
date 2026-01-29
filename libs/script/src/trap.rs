@@ -66,59 +66,23 @@ impl ScriptTrapInner{
     }
 }
 
-script_err_gen!(script_err_not_found);
-script_err_gen!(script_err_not_fn);
-script_err_gen!(script_err_not_index);
-script_err_gen!(script_err_not_object);
-script_err_gen!(script_err_stack_underflow);
-script_err_gen!(script_err_stack_overflow);
-script_err_gen!(script_err_invalid_args);
-script_err_gen!(script_err_not_assignable);
-script_err_gen!(script_err_unexpected); 
-script_err_gen!(script_err_assert_fail);
-script_err_gen!(script_err_not_impl);
-script_err_gen!(script_err_frozen);
-script_err_gen!(script_err_vec_frozen);
-script_err_gen!(script_err_invalid_prop_type);
-script_err_gen!(script_err_invalid_prop_name);
-script_err_gen!(script_err_key_already_exists);
-script_err_gen!(script_err_invalid_key_type);
-script_err_gen!(script_err_vec_bound);
-script_err_gen!(script_err_invalid_arg_type);
-script_err_gen!(script_err_invalid_arg_name);
-script_err_gen!(script_err_invalid_arg_count);
-script_err_gen!(script_err_invalid_var_name);
-script_err_gen!(script_err_not_proto);
-script_err_gen!(script_err_type_not_registered);
-script_err_gen!(script_err_enum_unknown_variant);
-script_err_gen!(script_err_not_allowed_in_array);
-script_err_gen!(script_err_user);
-script_err_gen!(script_err_not_allowed_in_arguments);
-script_err_gen!(script_err_array_bound);
-script_err_gen!(script_err_wrong_type_in_apply);
-script_err_gen!(script_err_file_system);
-script_err_gen!(script_err_child_process);
-script_err_gen!(script_err_too_many_paused_calls);
-script_err_gen!(script_err_pod_type_not_extendable);
-script_err_gen!(script_err_pod_type_not_matching);
-script_err_gen!(script_err_pod_field_not_pod);
-script_err_gen!(script_err_pod_array_def_incorrect);
-script_err_gen!(script_err_pod_too_much_data);
-script_err_gen!(script_err_pod_not_enough_data);
-script_err_gen!(script_err_pod_invalid_field_name);
-script_err_gen!(script_err_no_matching_shader_type);
-script_err_gen!(script_err_opcode_not_supported_in_shader);
-script_err_gen!(script_err_no_wgsl_conversion_available);
-script_err_gen!(script_err_return_type_changed);
-script_err_gen!(script_err_invalid_constructor_arg);
-script_err_gen!(script_err_have_to_initialise_variable);
-script_err_gen!(script_err_struct_name_not_consistent);
-script_err_gen!(script_err_recursion_not_allowed);
-script_err_gen!(script_err_if_else_type_different);
-script_err_gen!(script_err_let_is_immutable);
-script_err_gen!(script_err_opcode_not_defined_for_shader_type);
-script_err_gen!(script_err_not_an_array);
-script_err_gen!(script_err_index_out_of_bounds);
-script_err_gen!(script_err_use_only_named_or_ordered_pod_fields);
-script_err_gen!(script_err_assign_not_allowed);
-script_err_gen!(script_err_range_requires_numbers);
+// Consolidated error macros (19 total, down from 56)
+script_err_gen!(script_err_not_found);      // lookup failures
+script_err_gen!(script_err_type_mismatch);  // wrong type for operation
+script_err_gen!(script_err_wrong_value);    // expected different kind
+script_err_gen!(script_err_out_of_bounds);  // index/bounds errors
+script_err_gen!(script_err_immutable);      // cannot modify
+script_err_gen!(script_err_stack);          // stack errors
+script_err_gen!(script_err_invalid_args);   // argument errors
+script_err_gen!(script_err_not_allowed);    // operation not allowed
+script_err_gen!(script_err_inconsistent);   // types don't match across branches
+script_err_gen!(script_err_not_impl);       // not implemented
+script_err_gen!(script_err_unexpected);     // catch-all
+script_err_gen!(script_err_assert_fail);    // assertions
+script_err_gen!(script_err_user);           // user-generated
+script_err_gen!(script_err_pod);            // all pod errors
+script_err_gen!(script_err_shader);         // all shader errors
+script_err_gen!(script_err_unknown_type);   // type not registered
+script_err_gen!(script_err_duplicate);      // key already exists
+script_err_gen!(script_err_io);             // file system, child process
+script_err_gen!(script_err_limit);          // resource limits

@@ -658,19 +658,19 @@ pub fn type_table_builtin(
         id!(round) | id!(sin) | id!(sinh) | id!(sqrt) | id!(tan) | id!(tanh) | id!(trunc) |
         id!(dFdx) | id!(dFdy) => {
              if args.len() != 1 {
-                 script_err_invalid_arg_count!(trap, "shader builtin {:?} requires 1 arg, got {}", name, args.len());
+                 script_err_invalid_args!(trap, "shader builtin {:?} requires 1 arg, got {}", name, args.len());
                  return builtins.pod_void;
              }
              let t = args[0];
              if is_any_float(t) {
                  return t;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires float/vec-float arg, got {}", name, fmt_ty(t));
+             script_err_type_mismatch!(trap, "shader builtin {:?} requires float/vec-float arg, got {}", name, fmt_ty(t));
              return builtins.pod_void;
         }
         id!(length) => {
             if args.len() != 1 {
-                script_err_invalid_arg_count!(trap, "shader builtin 'length' requires 1 arg, got {}", args.len());
+                script_err_invalid_args!(trap, "shader builtin 'length' requires 1 arg, got {}", args.len());
                 return builtins.pod_void;
             }
             let t = args[0];
@@ -679,38 +679,38 @@ pub fn type_table_builtin(
                 if t == vec2h_t || t == vec3h_t || t == vec4h_t { return f16_t; }
                 return t; 
             }
-            script_err_invalid_arg_type!(trap, "shader builtin 'length' requires float/vec-float arg, got {}", fmt_ty(t));
+            script_err_type_mismatch!(trap, "shader builtin 'length' requires float/vec-float arg, got {}", fmt_ty(t));
             return builtins.pod_void;
        }
         // Float or Int 1 argument
         id!(abs) | id!(sign) => {
             if args.len() != 1 {
-                 script_err_invalid_arg_count!(trap, "shader builtin {:?} requires 1 arg, got {}", name, args.len());
+                 script_err_invalid_args!(trap, "shader builtin {:?} requires 1 arg, got {}", name, args.len());
                  return builtins.pod_void;
              }
              let t = args[0];
              if is_any_float(t) || is_any_int(t) {
                  return t;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires float/int arg, got {}", name, fmt_ty(t));
+             script_err_type_mismatch!(trap, "shader builtin {:?} requires float/int arg, got {}", name, fmt_ty(t));
              return builtins.pod_void;
         }
         // Float 2 arguments
         id!(atan2) | id!(pow) => {
              if args.len() != 2 {
-                 script_err_invalid_arg_count!(trap, "shader builtin {:?} requires 2 args, got {}", name, args.len());
+                 script_err_invalid_args!(trap, "shader builtin {:?} requires 2 args, got {}", name, args.len());
                  return builtins.pod_void;
              }
              let (t1, t2) = (args[0], args[1]);
              if t1 == t2 && is_any_float(t1) {
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires matching float types, got {} and {}", name, fmt_ty(t1), fmt_ty(t2));
+             script_err_type_mismatch!(trap, "shader builtin {:?} requires matching float types, got {} and {}", name, fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         id!(step) => {
              if args.len() != 2 {
-                 script_err_invalid_arg_count!(trap, "shader builtin 'step' requires 2 args, got {}", args.len());
+                 script_err_invalid_args!(trap, "shader builtin 'step' requires 2 args, got {}", args.len());
                  return builtins.pod_void;
              }
              let (t1, t2) = (args[0], args[1]);
@@ -722,12 +722,12 @@ pub fn type_table_builtin(
                 t1 == f16_t && (t2 == vec2h_t || t2 == vec3h_t || t2 == vec4h_t)) {
                  return t2;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin 'step' requires (float,float) or (scalar,vec-float), got {} and {}", fmt_ty(t1), fmt_ty(t2));
+             script_err_type_mismatch!(trap, "shader builtin 'step' requires (float,float) or (scalar,vec-float), got {} and {}", fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         id!(distance) => {
              if args.len() != 2 {
-                 script_err_invalid_arg_count!(trap, "shader builtin 'distance' requires 2 args, got {}", args.len());
+                 script_err_invalid_args!(trap, "shader builtin 'distance' requires 2 args, got {}", args.len());
                  return builtins.pod_void;
              }
              let (t1, t2) = (args[0], args[1]);
@@ -736,26 +736,26 @@ pub fn type_table_builtin(
                  if t1 == vec2h_t || t1 == vec3h_t || t1 == vec4h_t { return f16_t; }
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin 'distance' requires matching float types, got {} and {}", fmt_ty(t1), fmt_ty(t2));
+             script_err_type_mismatch!(trap, "shader builtin 'distance' requires matching float types, got {} and {}", fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         // Float or Int 2 arguments
         id!(max) | id!(min) => {
              if args.len() != 2 {
-                 script_err_invalid_arg_count!(trap, "shader builtin {:?} requires 2 args, got {}", name, args.len());
+                 script_err_invalid_args!(trap, "shader builtin {:?} requires 2 args, got {}", name, args.len());
                  return builtins.pod_void;
              }
              let (t1, t2) = (args[0], args[1]);
              if t1 == t2 && (is_any_float(t1) || is_any_int(t1)) {
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires matching float/int types, got {} and {}", name, fmt_ty(t1), fmt_ty(t2));
+             script_err_type_mismatch!(trap, "shader builtin {:?} requires matching float/int types, got {} and {}", name, fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         // Float 3 arguments
         id!(mix) => {
              if args.len() != 3 {
-                 script_err_invalid_arg_count!(trap, "shader builtin 'mix' requires 3 args (x, y, alpha), got {}", args.len());
+                 script_err_invalid_args!(trap, "shader builtin 'mix' requires 3 args (x, y, alpha), got {}", args.len());
                  return builtins.pod_void;
              }
              let (t1, t2, t3) = (args[0], args[1], args[2]);
@@ -765,36 +765,36 @@ pub fn type_table_builtin(
                  // vector with scalar alpha
                  if (t1 == vec2f_t || t1 == vec3f_t || t1 == vec4f_t) && (is_float(t3) || is_int(t3)){ return t1; }
              }
-             script_err_invalid_arg_type!(trap, "shader builtin 'mix' requires matching float types for x,y and compatible alpha, got {}, {}, {}", fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
+             script_err_type_mismatch!(trap, "shader builtin 'mix' requires matching float types for x,y and compatible alpha, got {}, {}, {}", fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
              return builtins.pod_void;
         }
         id!(smoothstep) | id!(fma) => {
              if args.len() != 3 {
-                 script_err_invalid_arg_count!(trap, "shader builtin {:?} requires 3 args, got {}", name, args.len());
+                 script_err_invalid_args!(trap, "shader builtin {:?} requires 3 args, got {}", name, args.len());
                  return builtins.pod_void;
              }
              let (t1, t2, t3) = (args[0], args[1], args[2]);
              if t1 == t2 && t2 == t3 && is_any_float(t1) {
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires 3 matching float args, got {}, {}, {}", name, fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
+             script_err_type_mismatch!(trap, "shader builtin {:?} requires 3 matching float args, got {}, {}, {}", name, fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
              return builtins.pod_void;
         }
         // Clamp: Float or Int 3 arguments
         id!(clamp) => {
              if args.len() != 3 {
-                 script_err_invalid_arg_count!(trap, "shader builtin 'clamp' requires 3 args (value, min, max), got {}", args.len());
+                 script_err_invalid_args!(trap, "shader builtin 'clamp' requires 3 args (value, min, max), got {}", args.len());
                  return builtins.pod_void;
              }
              let (t1, t2, t3) = (args[0], args[1], args[2]);
              if t1 == t2 && t2 == t3 && (is_any_float(t1) || is_any_int(t1)) {
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin 'clamp' requires 3 matching float/int args, got {}, {}, {}", fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
+             script_err_type_mismatch!(trap, "shader builtin 'clamp' requires 3 matching float/int args, got {}, {}, {}", fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
              return builtins.pod_void;
         }
         _ => {
-             script_err_not_fn!(trap, "unknown shader builtin function {:?}", name);
+             script_err_wrong_value!(trap, "unknown shader builtin function {:?}", name);
              builtins.pod_void
         }
     }

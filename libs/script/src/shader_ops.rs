@@ -81,7 +81,7 @@ impl ShaderFnCompiler {
         if let ShaderType::Id(id) = id_ty {
             if let Some((var, shadow)) = self.shader_scope.find_var(id) {
                 if !matches!(var, ShaderScopeItem::Var { .. }) {
-                    script_err_let_is_immutable!(self.trap, "shader: cannot assign to let-bound variable {:?}", id);
+                    script_err_immutable!(self.trap, "shader: cannot assign to let-bound variable {:?}", id);
                 }
                 let t1 = ShaderType::Pod(var.ty());
                 let _ty = if is_int {
@@ -103,7 +103,7 @@ impl ShaderFnCompiler {
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
             }
         } else {
-            script_err_not_assignable!(self.trap, "shader: compound assign target must be identifier, got {:?}", id_ty);
+            script_err_immutable!(self.trap, "shader: compound assign target must be identifier, got {:?}", id_ty);
             self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         }
         self.stack.free_string(s2);
@@ -134,7 +134,7 @@ impl ShaderFnCompiler {
 
                     let val_ty = op_res_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty {
-                        script_err_pod_type_not_matching!(self.trap, "shader: field {:?} compound assign type mismatch: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
+                        script_err_pod!(self.trap, "shader: field {:?} compound assign type mismatch: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                     }
 
                     let mut s = self.stack.new_string();
@@ -156,7 +156,7 @@ impl ShaderFnCompiler {
 
                     let val_ty = op_res_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty {
-                        script_err_pod_type_not_matching!(self.trap, "shader: ptr field {:?} compound assign type mismatch: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
+                        script_err_pod!(self.trap, "shader: ptr field {:?} compound assign type mismatch: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                     }
 
                     let mut s = self.stack.new_string();
@@ -167,7 +167,7 @@ impl ShaderFnCompiler {
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 }
             } else {
-                script_err_no_matching_shader_type!(self.trap, "shader: cannot do field compound assign on type {:?}", instance_ty);
+                script_err_shader!(self.trap, "shader: cannot do field compound assign on type {:?}", instance_ty);
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
             }
         } else {
@@ -204,7 +204,7 @@ impl ShaderFnCompiler {
                             ShaderType::Pod(t) => format_pod_type_name(&vm.heap, t),
                             _ => format!("{:?}", index_ty),
                         };
-                        script_err_pod_type_not_matching!(self.trap, "shader: index must be integer, got {}", got_type);
+                        script_err_pod!(self.trap, "shader: index must be integer, got {}", got_type);
                     }
                 }
 
@@ -217,18 +217,18 @@ impl ShaderFnCompiler {
 
                 let val_ty = op_res_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
                 if val_ty != ret_ty {
-                    script_err_pod_type_not_matching!(self.trap, "shader: index compound assign type mismatch: expected {}, got {}", format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
+                    script_err_pod!(self.trap, "shader: index compound assign type mismatch: expected {}, got {}", format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                 }
 
                 let mut s = self.stack.new_string();
                 write!(s, "{}[{}] {} {}", instance_s, index_s, op, s2).ok();
                 self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), s);
             } else {
-                script_err_not_assignable!(self.trap, "shader: type is not indexable for compound assign");
+                script_err_immutable!(self.trap, "shader: type is not indexable for compound assign");
                 self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), String::new());
             }
         } else {
-            script_err_no_matching_shader_type!(self.trap, "shader: cannot do index compound assign on type {:?}", instance_ty);
+            script_err_shader!(self.trap, "shader: cannot do index compound assign on type {:?}", instance_ty);
             self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         }
         self.stack.free_string(s2);

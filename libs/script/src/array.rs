@@ -313,7 +313,7 @@ impl ScriptArrayData{
                             vm.thread.json_parser.read_json(v.as_ref(), heap)
                         }
                         _=>{
-                            script_err_invalid_arg_type!(vm.thread.trap, "parse_json requires U8 byte array, got different array storage type")
+                            script_err_type_mismatch!(vm.thread.trap, "parse_json requires U8 byte array, got different array storage type")
                         }
                     }
                 }).into()

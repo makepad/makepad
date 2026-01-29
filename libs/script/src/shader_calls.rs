@@ -88,7 +88,7 @@ impl ShaderFnCompiler {
                 }
             }
         }
-        script_err_not_fn!(self.trap, "shader call target is not a function");
+        script_err_wrong_value!(self.trap, "shader call target is not a function");
     }
 
     pub(crate) fn handle_array_construct(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, args: Vec<String>, elem_ty: Option<ScriptPodType>) {
@@ -138,7 +138,7 @@ impl ShaderFnCompiler {
                 }
             }
         } else {
-            script_err_no_matching_shader_type!(self.trap, "no shader type for array element");
+            script_err_shader!(self.trap, "no shader type for array element");
             match output.backend {
                 ShaderBackend::Wgsl => {
                     write!(out, "(").ok();
@@ -198,7 +198,7 @@ impl ShaderFnCompiler {
                 }
             }
         } else {
-            script_err_no_matching_shader_type!(self.trap, "no shader type for pod construct");
+            script_err_shader!(self.trap, "no shader type for pod construct");
         }
 
         if let Some(first) = args.first() {
@@ -216,13 +216,13 @@ impl ShaderFnCompiler {
                             match &arg.ty {
                                 ShaderType::Pod(arg_pod_ty) => {
                                     if *arg_pod_ty != field.ty.self_ref {
-                                        script_err_pod_type_not_matching!(self.trap, "named arg {:?} type mismatch: expected {}, got {}", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref), format_pod_type_name(&vm.heap, *arg_pod_ty));
+                                        script_err_pod!(self.trap, "named arg {:?} type mismatch: expected {}, got {}", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref), format_pod_type_name(&vm.heap, *arg_pod_ty));
                                     }
                                 }
                                 ShaderType::Id(id) => {
                                     if let Some((v, _name)) = self.shader_scope.find_var(*id) {
                                         if v.ty() != field.ty.self_ref {
-                                            script_err_pod_type_not_matching!(self.trap, "var {:?} type mismatch for field {:?}: expected {}, got {}", id, field.name, format_pod_type_name(&vm.heap, field.ty.self_ref), format_pod_type_name(&vm.heap, v.ty()));
+                                            script_err_pod!(self.trap, "var {:?} type mismatch for field {:?}: expected {}, got {}", id, field.name, format_pod_type_name(&vm.heap, field.ty.self_ref), format_pod_type_name(&vm.heap, v.ty()));
                                         }
                                     } else {
                                         script_err_not_found!(self.trap, "var {:?} not found{}", id, suggest_from_live_ids(*id, &self.shader_scope.all_var_names()));
@@ -234,25 +234,25 @@ impl ShaderFnCompiler {
                                         && field.ty.self_ref != builtins.pod_u32
                                         && field.ty.self_ref != builtins.pod_f32
                                     {
-                                        script_err_pod_type_not_matching!(self.trap, "abstract int not compatible with field {:?} (expects {})", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref));
+                                        script_err_pod!(self.trap, "abstract int not compatible with field {:?} (expects {})", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref));
                                     }
                                 }
                                 ShaderType::AbstractFloat => {
                                     let builtins = &vm.code.builtins.pod;
                                     if field.ty.self_ref != builtins.pod_f32 {
-                                        script_err_pod_type_not_matching!(self.trap, "abstract float not compatible with field {:?} (expects {})", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref));
+                                        script_err_pod!(self.trap, "abstract float not compatible with field {:?} (expects {})", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref));
                                     }
                                 }
                                 _ => {}
                             }
                             out.push_str(&arg.s);
                         } else {
-                            script_err_invalid_constructor_arg!(self.trap, "missing arg for field {:?}", field.name);
+                            script_err_type_mismatch!(self.trap, "missing arg for field {:?}", field.name);
                         }
                     }
 
                     if args.len() != fields.len() {
-                        script_err_invalid_arg_count!(self.trap, "expected {} args, got {}", fields.len(), args.len());
+                        script_err_invalid_args!(self.trap, "expected {} args, got {}", fields.len(), args.len());
                     }
                 } else {
                     script_err_unexpected!(self.trap, "named args require struct type");
@@ -467,7 +467,7 @@ impl ShaderFnCompiler {
 
             if kv.key == id!(self).into() {
                 if !has_self || argi != 0 {
-                    script_err_invalid_arg_name!(vm.thread.trap, "self arg must be first with has_self");
+                    script_err_not_found!(vm.thread.trap, "self arg must be first with has_self");
                 }
                 continue;
             }
@@ -477,7 +477,7 @@ impl ShaderFnCompiler {
                     write!(fn_args, ", ").ok();
                 }
                 if argi >= resolved_args.len() {
-                    script_err_invalid_arg_count!(vm.thread.trap, "more formal params than resolved args");
+                    script_err_invalid_args!(vm.thread.trap, "more formal params than resolved args");
                     break;
                 }
                 let arg_ty = resolved_args[argi];
@@ -506,13 +506,13 @@ impl ShaderFnCompiler {
             argi += 1;
         }
         if argi < resolved_args.len() {
-            script_err_invalid_arg_count!(vm.thread.trap, "fewer formal params than resolved args");
+            script_err_invalid_args!(vm.thread.trap, "fewer formal params than resolved args");
         }
 
         if let Some(fnptr) = vm.heap.as_fn(fnobj) {
             if let ScriptFnPtr::Script(fnip) = fnptr {
                 if output.recur_block.iter().any(|v| *v == fnobj) {
-                    script_err_recursion_not_allowed!(vm.thread.trap, "shader functions cannot recurse");
+                    script_err_not_allowed!(vm.thread.trap, "shader functions cannot recurse");
                     (vm.code.builtins.pod.pod_void, fn_name)
                 } else {
                     output.recur_block.push(fnobj);
@@ -714,7 +714,7 @@ impl ShaderFnCompiler {
                 // sample(coord) samples the texture at normalized coordinates
                 // Returns vec4f
                 if args.len() != 1 {
-                    script_err_invalid_arg_count!(self.trap, "texture.sample requires 1 arg");
+                    script_err_invalid_args!(self.trap, "texture.sample requires 1 arg");
                     let empty = self.stack.new_string();
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_vec4f), empty);
                 } else {
@@ -913,7 +913,7 @@ impl ShaderFnCompiler {
                     }
                     ScriptFnPtr::Native(_) => {
                         // Native methods on scope objects not supported
-                        script_err_opcode_not_supported_in_shader!(self.trap, "native methods not supported on scope objects");
+                        script_err_shader!(self.trap, "native methods not supported on scope objects");
                         return false;
                     }
                 }
