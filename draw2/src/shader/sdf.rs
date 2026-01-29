@@ -82,7 +82,7 @@ script_mod!{
             }
             
             random_2d: fn(v: vec2)->float {
-            return fract(sin(dot(v.xy, vec2(12.9898,78.233))) * 43758.5453);
+                return fract(sin(dot(v.xy, vec2(12.9898,78.233))) * 43758.5453);
             }
         }
         

@@ -426,6 +426,22 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
         };
         ScriptValue::from_f64(result)
     });
+    native.add_method(heap, math, id!(dot), script_args!(x=0.0, y=0.0), |vm, args|{ 
+        let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
+        let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
+        let x_nv = NumericValue::from_script_value(vm, x_val);
+        let y_nv = NumericValue::from_script_value(vm, y_val);
+        // dot returns a scalar (sum of component-wise products)
+        let result = match (x_nv, y_nv) {
+            (NumericValue::F64(a), NumericValue::F64(b)) => (a * b),
+            (NumericValue::Vec2(a), NumericValue::Vec2(b)) => (a.x * b.x + a.y * b.y) as f64,
+            (NumericValue::Vec3(a), NumericValue::Vec3(b)) => (a.x * b.x + a.y * b.y + a.z * b.z) as f64,
+            (NumericValue::Vec4(a), NumericValue::Vec4(b)) => (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) as f64,
+            (NumericValue::Color(a), NumericValue::Color(b)) => (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) as f64,
+            _ => 0.0, // Mismatched types
+        };
+        ScriptValue::from_f64(result)
+    });
     native.add_method(heap, math, id!(max), script_args!(x=0.0, y=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
@@ -725,9 +741,9 @@ pub fn type_table_builtin(
              script_err_type_mismatch!(trap, "shader builtin 'step' requires (float,float) or (scalar,vec-float), got {} and {}", fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
-        id!(distance) => {
+        id!(distance) | id!(dot) => {
              if args.len() != 2 {
-                 script_err_invalid_args!(trap, "shader builtin 'distance' requires 2 args, got {}", args.len());
+                 script_err_invalid_args!(trap, "shader builtin {:?} requires 2 args, got {}", name, args.len());
                  return builtins.pod_void;
              }
              let (t1, t2) = (args[0], args[1]);
@@ -736,7 +752,7 @@ pub fn type_table_builtin(
                  if t1 == vec2h_t || t1 == vec3h_t || t1 == vec4h_t { return f16_t; }
                  return t1;
              }
-             script_err_type_mismatch!(trap, "shader builtin 'distance' requires matching float types, got {} and {}", fmt_ty(t1), fmt_ty(t2));
+             script_err_type_mismatch!(trap, "shader builtin {:?} requires matching float types, got {} and {}", name, fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         // Float or Int 2 arguments
