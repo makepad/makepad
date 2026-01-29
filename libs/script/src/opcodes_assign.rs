@@ -20,7 +20,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value);
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "assign target is not an identifier, got {:?}", id.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -50,7 +50,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "+= target is not an identifier, got {:?}", id.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -70,7 +70,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "?= target is not an identifier, got {:?}", id.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -87,7 +87,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value);
         }
         else{
-            let value = err_not_object!(self.trap);
+            let value = script_err_not_object!(self.trap, "cannot assign field {:?} on {:?} (not an object)", field, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -115,7 +115,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "cannot += field {:?} on {:?} (not an object)", field, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -136,7 +136,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_object!(self.trap);
+            let value = script_err_not_object!(self.trap, "cannot ?= field {:?} on {:?} (not an object)", field, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -157,7 +157,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value);
         }
         else{
-            let value = err_not_object!(self.trap);
+            let value = script_err_not_object!(self.trap, "cannot assign index {:?} on {:?} (not an object/array)", index, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -203,7 +203,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "cannot += index {:?} on {:?} (not an object/array)", index, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -235,7 +235,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_object!(self.trap);
+            let value = script_err_not_object!(self.trap, "cannot ?= index {:?} on {:?} (not an object/array)", index, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -262,7 +262,7 @@ impl ScriptThread {
                     heap.set_pod_field(*pod, field, value, self.trap.pass());
                 }
                 ScriptMe::Array(_arr)=>{
-                    err_not_allowed_in_array!(self.trap);
+                    script_err_not_allowed_in_array!(self.trap, "named assign {:?} not allowed in array literal context", field);
                 }
             }
         }
@@ -274,13 +274,13 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let value = match self.mes.last().unwrap(){
             ScriptMe::Call{..} | ScriptMe::Pod{..}=>{
-                err_not_allowed_in_arguments!(self.trap)
+                script_err_not_allowed_in_arguments!(self.trap, "before/after {:?} not allowed in function call arguments", field)
             }
             ScriptMe::Object(obj)=>{
                 heap.vec_insert_value_at(*obj, field, value, opcode == Opcode::ASSIGN_ME_BEFORE, self.trap.pass())
             }
             ScriptMe::Array(_arr)=>{
-                err_not_allowed_in_array!(self.trap)
+                script_err_not_allowed_in_array!(self.trap, "before/after {:?} not allowed in array literal context", field)
             }
         };
         self.push_stack_unchecked(value);
@@ -292,13 +292,13 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let value = match self.mes.last().unwrap(){
             ScriptMe::Call{..} | ScriptMe::Pod{..}=>{
-                err_not_allowed_in_arguments!(self.trap)
+                script_err_not_allowed_in_arguments!(self.trap, "begin {:?} not allowed in function call arguments", field)
             }
             ScriptMe::Object(obj)=>{
                 heap.vec_insert_value_begin(*obj, field, value, self.trap.pass())
             }
             ScriptMe::Array(_arr)=>{
-                err_not_allowed_in_array!(self.trap)
+                script_err_not_allowed_in_array!(self.trap, "begin {:?} not allowed in array literal context", field)
             }
         };
         self.push_stack_unchecked(value);
@@ -325,7 +325,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "compound assignment target is not an identifier, got {:?}", id.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -349,7 +349,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "bitwise compound assignment target is not an identifier, got {:?}", id.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -369,7 +369,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value);
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "field compound assignment on {:?} (not an object)", object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -390,7 +390,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value);
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "field bitwise compound assignment on {:?} (not an object)", object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -418,7 +418,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value);
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "index compound assignment on {:?} (not an object/array)", object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -446,7 +446,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value);
         }
         else{
-            let value = err_not_assignable!(self.trap);
+            let value = script_err_not_assignable!(self.trap, "index bitwise compound assignment on {:?} (not an object/array)", object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();

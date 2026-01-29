@@ -136,11 +136,11 @@ impl ScriptThread {
         let start = self.pop_stack_resolved(heap);
         // Validate that both operands are numbers
         if !start.is_number() {
-            self.push_stack_unchecked(err_range_requires_numbers!(self.trap));
+            self.push_stack_unchecked(script_err_range_requires_numbers!(self.trap, "range start must be a number"));
             return;
         }
         if !end.is_number() {
-            self.push_stack_unchecked(err_range_requires_numbers!(self.trap));
+            self.push_stack_unchecked(script_err_range_requires_numbers!(self.trap, "range end must be a number"));
             return;
         }
         let range = heap.new_with_proto(code.builtins.range.into());

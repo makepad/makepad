@@ -81,7 +81,7 @@ impl ScriptHeap{
                 let key = kv.key;
                 if let Some(def) = object.vec.get(index){
                     if !def.value.is_nil() && def.value.value_type().to_redux() != value.value_type().to_redux(){
-                        return err_invalid_arg_type!(trap)
+                        return script_err_invalid_arg_type!(trap, "arg {} type mismatch: expected {:?}, got {:?}", index, def.value.value_type().to_redux(), value.value_type().to_redux())
                     }
                 }
                 self.objects[top_ptr.index as usize].map_insert(key, value);
@@ -105,15 +105,15 @@ impl ScriptHeap{
             for kv in object.vec.iter(){
                 if kv.key == key{
                     if !kv.value.is_nil() && kv.value.value_type().to_redux() != value.value_type().to_redux(){
-                        return err_invalid_arg_type!(trap)
+                        return script_err_invalid_arg_type!(trap, "named arg {:?} type mismatch: expected {:?}, got {:?}", key, kv.value.value_type().to_redux(), value.value_type().to_redux())
                     }
                     self.objects[top_ptr.index as usize].map_insert(key, value);
                     return NIL    
                 }
             }
-            return err_invalid_arg_name!(trap) 
+            return script_err_invalid_arg_name!(trap, "unknown named arg {:?}", key) 
         }
-        err_unexpected!(trap)
+        script_err_unexpected!(trap, "named_fn_arg called without prototype object")
     }
         
     pub fn push_all_fn_args(&mut self, top_ptr:ScriptObject, args:&[ScriptValue], trap:ScriptTrap)->ScriptValue{
@@ -126,7 +126,7 @@ impl ScriptHeap{
                     // typecheck against default arg
                     if let Some(def) = object.vec.get(index){
                         if !def.value.is_nil() && def.value.value_type().to_redux() != value.value_type().to_redux(){
-                            return err_invalid_arg_type!(trap)
+                            return script_err_invalid_arg_type!(trap, "arg {} ({:?}) type mismatch: expected {:?}, got {:?}", index, key, def.value.value_type().to_redux(), value.value_type().to_redux())
                         }
                     }
                     self.objects[top_ptr.index as usize].map_insert(key, *value);
@@ -141,6 +141,6 @@ impl ScriptHeap{
             }
             return NIL
         }
-        err_unexpected!(trap)
+        script_err_unexpected!(trap, "push_all_fn_args called without prototype object")
     }
 }
