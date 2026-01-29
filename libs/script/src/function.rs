@@ -69,7 +69,7 @@ impl ScriptHeap{
         }
     }   
     
-    pub fn unnamed_fn_arg(&mut self, top_ptr:ScriptObject, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
+    pub fn unnamed_fn_arg(&mut self, top_ptr:ScriptObject, value:ScriptValue, trap:ScriptTrap)->ScriptValue{
         let object = &self.objects[top_ptr.index as usize];
                 
         // which arg number?
@@ -97,7 +97,7 @@ impl ScriptHeap{
         return NIL
     }
         
-    pub fn named_fn_arg(&mut self, top_ptr:ScriptObject, key:ScriptValue, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
+    pub fn named_fn_arg(&mut self, top_ptr:ScriptObject, key:ScriptValue, value:ScriptValue, trap:ScriptTrap)->ScriptValue{
         let object = &self.objects[top_ptr.index as usize];
                     
         if let Some(ptr) = object.proto.as_object(){
@@ -116,7 +116,7 @@ impl ScriptHeap{
         trap.err_unexpected()
     }
         
-    pub fn push_all_fn_args(&mut self, top_ptr:ScriptObject, args:&[ScriptValue], trap:&ScriptTrap)->ScriptValue{
+    pub fn push_all_fn_args(&mut self, top_ptr:ScriptObject, args:&[ScriptValue], trap:ScriptTrap)->ScriptValue{
         let object = &self.objects[top_ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             for (index, value) in args.iter().enumerate(){
