@@ -95,14 +95,14 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
                     if chan.max_depth == 0 || array_len < chan.max_depth{
                         let vec_len = vm.heap.vec_len(args.into());
                         if vec_len == 0{
-                            vm.heap.array_push(chan.queue.as_array(), NIL, &vm.thread.trap);
+                            vm.heap.array_push(chan.queue.as_array(), NIL, vm.thread.trap.pass());
                         }
                         else if vec_len== 1{
-                            let value = vm.heap.vec_value(args, 0, &vm.thread.trap);
-                            vm.heap.array_push(chan.queue.as_array(), value, &vm.thread.trap);
+                            let value = vm.heap.vec_value(args, 0, vm.thread.trap.pass());
+                            vm.heap.array_push(chan.queue.as_array(), value, vm.thread.trap.pass());
                         }
                         else{
-                            vm.heap.array_push(chan.queue.as_array(), args.into(), &vm.thread.trap);
+                            vm.heap.array_push(chan.queue.as_array(), args.into(), vm.thread.trap.pass());
                         }
                         if fn_id == id!(end){
                             chan.ended = true;
@@ -111,7 +111,7 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
                     }
                     else {
                         if chan.send_pause.len() > 100{
-                            return vm.thread.trap.err_too_many_paused_calls()
+                            return err_too_many_paused_calls!(vm.thread.trap.pass())
                         }
                         chan.send_pause.push_front(vm.thread.pause());
                         return NIL
@@ -136,13 +136,13 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
                         return NIL
                     }
                     if task.recv_pause.len() > 100{
-                        return vm.thread.trap.err_too_many_paused_calls()
+                        return err_too_many_paused_calls!(vm.thread.trap.pass())
                     }
                     task.recv_pause.push_front(vm.thread.pause());
                     return NIL
                 }
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap.pass())
         });
     }
     
@@ -156,7 +156,7 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
                 }
             }
         }
-        vm.thread.trap.err_invalid_prop_name()
+        err_invalid_prop_name!(vm.thread.trap.pass())
     });
     
     vm.add_method(std, id_lut!(task), script_args_def!(start_fn_or_depth = NIL), move |vm, args|{

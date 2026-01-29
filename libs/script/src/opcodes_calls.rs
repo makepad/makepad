@@ -11,7 +11,9 @@ use crate::function::*;
 use crate::vm::*;
 use crate::thread::*;
 use crate::pod::*;
+use crate::trap::*;
 use std::any::Any;
+use crate::*;
 
 impl ScriptThread {
     // Calling handlers
@@ -37,7 +39,7 @@ impl ScriptThread {
         let (args, sself) = match me{
             ScriptMe::Call{args, sself} => (args, sself),
             ScriptMe::Pod{pod, offset} => {
-                heap.pod_check_arg_total(pod, offset, &self.trap);
+                heap.pod_check_arg_total(pod, offset, self.trap.pass());
                 self.push_stack_unchecked(pod.into());
                 self.trap.goto_next();
                 return true // Pod: caller should handle pop_to_me
@@ -89,7 +91,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = self.trap.err_not_fn();
+            let value = err_not_fn!(self.trap);
             self.push_stack_unchecked(value);
             self.trap.goto_next();
             return true // Error: caller should handle pop_to_me
@@ -100,10 +102,10 @@ impl ScriptThread {
         let method = self.pop_stack_value();
         let sself = self.pop_stack_resolved(heap);
         let fnobj = if let Some(obj) = sself.as_object(){
-            heap.object_method(obj, method, &mut Default::default())
+            heap.object_method(obj, method, NoTrap)
         }
         else if let Some(pod) = sself.as_pod(){
-            heap.pod_method(pod, method, &mut Default::default())
+            heap.pod_method(pod, method, NoTrap)
         }
         else{
             NIL
@@ -117,7 +119,7 @@ impl ScriptThread {
                 heap.new_with_proto((*method_ptr).into())
             }
             else{ 
-                self.trap.err_not_found();
+                err_not_found!(self.trap);
                 heap.new_with_proto(id!(undefined_function).into())
             }
         }
@@ -170,14 +172,14 @@ impl ScriptThread {
         
         match self.mes.last().unwrap(){
             ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..} => {
-                self.trap.err_unexpected();
+                err_unexpected!(self.trap);
             }
             ScriptMe::Object(obj) => {
                 if id == id!(self) && heap.vec_len(*obj) == 0 {
                     // ignore self as first argument
                 }
                 else {
-                    heap.set_value(*obj, id.into(), value, &mut self.trap);
+                    heap.set_value(*obj, id.into(), value, NoTrap);
                 }
             }
         };
@@ -195,10 +197,10 @@ impl ScriptThread {
         let id = self.pop_stack_value().as_id().unwrap_or(id!());
         match self.mes.last().unwrap(){
             ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..} => {
-                self.trap.err_unexpected();
+                err_unexpected!(self.trap);
             }
             ScriptMe::Object(obj) => {
-                heap.set_value(*obj, id.into(), ty, &mut self.trap);
+                heap.set_value(*obj, id.into(), ty, NoTrap);
             }
         };
         self.trap.goto_next();
@@ -209,7 +211,7 @@ impl ScriptThread {
         if let Some(me) = self.mes.pop(){
             match me{
                 ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..} => {
-                    self.trap.err_unexpected();
+                    err_unexpected!(self.trap);
                     self.push_stack_unchecked(NIL);
                 }
                 ScriptMe::Object(obj) => {
@@ -222,7 +224,7 @@ impl ScriptThread {
             self.trap.goto_rel(jump_over_fn);
         }
         else{
-            self.trap.err_unexpected();
+            err_unexpected!(self.trap);
             self.push_stack_unchecked(NIL);
             self.trap.goto_next();
         }
@@ -234,7 +236,7 @@ impl ScriptThread {
         if let Some(me) = self.mes.pop(){
             match me{
                 ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..} => {
-                    self.trap.err_unexpected();
+                    err_unexpected!(self.trap);
                     self.push_stack_unchecked(NIL);
                 }
                 ScriptMe::Object(obj) => {
@@ -247,7 +249,7 @@ impl ScriptThread {
             self.trap.goto_rel(jump_over_fn);
         }
         else{
-            self.trap.err_unexpected();
+            err_unexpected!(self.trap);
             self.push_stack_unchecked(NIL);
             self.trap.goto_next();
         }

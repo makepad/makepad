@@ -585,7 +585,7 @@ impl ScriptHook for FontFamily {
             
             let len = vm.heap.vec_len(obj);
             for i in 0..len {
-                let kv = vm.heap.vec_key_value(obj, i, &vm.thread.trap);
+                let kv = vm.heap.vec_key_value(obj, i, NoTrap);
                 let member = FontMember::script_from_value(vm, kv.value);
                 
                 if let Some(ref handle_ref) = member.res {

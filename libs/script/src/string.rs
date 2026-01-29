@@ -87,7 +87,7 @@ impl ScriptStringData{
                 r
             }
             else{
-                vm.thread.trap.err_unexpected()
+                err_unexpected!(vm.thread.trap)
             }
         });
         
@@ -98,7 +98,7 @@ impl ScriptStringData{
             }){
                 return s.into()
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(strip_prefix), script_args_def!(pat = NIL), |vm, args|{
@@ -111,7 +111,7 @@ impl ScriptStringData{
             }){
                 return s.into()
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(strip_suffix), script_args_def!(pat = NIL), |vm, args|{
@@ -124,7 +124,7 @@ impl ScriptStringData{
             }){
                 return s.into()
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(split), script_args_def!(pat = NIL), |vm, args|{
@@ -149,7 +149,7 @@ impl ScriptStringData{
                 return s.into()
             }
             
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
     }
 }

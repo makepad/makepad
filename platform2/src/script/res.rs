@@ -133,7 +133,7 @@ pub fn extend_std_module_with_res(vm: &mut ScriptVm) {
                 }
             }
         }
-        vm.thread.trap.err_invalid_prop_name()
+        err_invalid_prop_name!(vm.thread.trap.pass())
     });
     
     // res.load_all() - loads all pending resources from disk
@@ -148,7 +148,7 @@ pub fn extend_std_module_with_res(vm: &mut ScriptVm) {
     vm.add_method(res, id_lut!(file), script_args_def!(path = NIL), move |vm, args| {
         let path = script_value!(vm, args.path);
         if !path.is_string_like() {
-            return vm.thread.trap.err_invalid_arg_type()
+            return err_invalid_arg_type!(vm.thread.trap.pass())
         }
         
         if let Some(abs_path) = vm.heap.string_with(path, |_heap, s| s.to_string()) {
@@ -170,7 +170,7 @@ pub fn extend_std_module_with_res(vm: &mut ScriptVm) {
             return handle.into()
         }
         
-        vm.thread.trap.err_invalid_arg_type()
+        err_invalid_arg_type!(vm.thread.trap.pass())
     });
     
     // res.crate("self:path/to/file") or res.crate("crate_name:path/to/file")
@@ -178,7 +178,7 @@ pub fn extend_std_module_with_res(vm: &mut ScriptVm) {
     vm.add_method(res, id_lut!(crate), script_args_def!(path = NIL), move |vm, args| {
         let path = script_value!(vm, args.path);
         if !path.is_string_like() {
-            return vm.thread.trap.err_invalid_arg_type()
+            return err_invalid_arg_type!(vm.thread.trap.pass())
         }
         
         let path_string = vm.heap.string_with(path, |_heap, s| s.to_string());
@@ -236,6 +236,6 @@ pub fn extend_std_module_with_res(vm: &mut ScriptVm) {
             }
         }
         
-        vm.thread.trap.err_invalid_arg_type()
+        err_invalid_arg_type!(vm.thread.trap.pass())
     });
 }

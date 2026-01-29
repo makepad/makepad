@@ -5,6 +5,7 @@ use crate::trap::*;
 use crate::mod_pod::*;
 use crate::pod::*;
 use std::fmt::Write;
+use crate::*;
 
 impl ScriptHeap{
     
@@ -272,7 +273,7 @@ impl ScriptHeap{
                             }
                         }
                     }
-                    trap.err_pod_array_def_incorrect();
+                    err_pod_array_def_incorrect!(trap);
                     return
                 }
                 id!(pod_struct)=>{
@@ -298,7 +299,7 @@ impl ScriptHeap{
                             }
                         }
                         
-                        trap.err_pod_field_not_pod();
+                        err_pod_field_not_pod!(trap);
                     }
                     
                     // Use centralized layout calculation
@@ -308,7 +309,7 @@ impl ScriptHeap{
                     self.freeze(ptr);
                 }
                 _x=>{
-                    trap.err_pod_type_not_extendable();
+                    err_pod_type_not_extendable!(trap);
                     return
                 }
             }
@@ -397,12 +398,12 @@ impl ScriptHeap{
                  ty
              }
              else{
-                 trap.err_pod_type_not_matching();
+                 err_pod_type_not_matching!(trap);
                  return
              };
              if let Some(last_ty) = self.pods[pod_ptr.index as usize].tag.as_array_builder(){
                  if last_ty != ty.self_ref{
-                     trap.err_pod_type_not_matching();
+                     err_pod_type_not_matching!(trap);
                      return
                  }
              }
@@ -435,7 +436,7 @@ impl ScriptHeap{
                     offset.offset_of += field.ty.data.ty.size_of();
                 }
                 else{
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                 }
             },
             ScriptPodTy::ArrayBuilder=>{
@@ -472,7 +473,7 @@ impl ScriptHeap{
             ScriptPodTy::Mat(mt)=>{
                 if let Some(value) = value.as_number(){
                     if offset.offset_of >= mt.elem_size() * mt.dim(){
-                        trap.err_pod_too_much_data();
+                        err_pod_too_much_data!(trap);
                     }
                     else{
                         out_data[offset.offset_of>>2] = (value as f32).to_bits();
@@ -480,14 +481,14 @@ impl ScriptHeap{
                     }
                 }
                 else if let Some(_in_pod) = value.as_pod(){
-                    trap.err_pod_type_not_matching();
+                    err_pod_type_not_matching!(trap);
                 }
                 else{
-                    trap.err_pod_type_not_matching();
+                    err_pod_type_not_matching!(trap);
                 }
             }
             _=>{
-                trap.err_unexpected();
+                err_unexpected!(trap);
             }
         }
         std::mem::swap(&mut out_data, &mut self.pods[pod_ptr.index as usize].data);
@@ -549,14 +550,14 @@ impl ScriptHeap{
         else{
             return
         }
-        trap.err_pod_not_enough_data();
+        err_pod_not_enough_data!(trap);
     }
         
     
     fn pod_write_vec(&self, ot:&ScriptPodVec, offset_of:usize, out_data:&mut[u32], value:ScriptValue, trap:ScriptTrap)->usize{
         if let Some(value) = value.as_number(){
             if offset_of >= ot.elem_size() * ot.dims(){
-                trap.err_pod_too_much_data();
+                err_pod_too_much_data!(trap);
                 return 0
             }
             else{
@@ -590,7 +591,7 @@ impl ScriptHeap{
         }
         else if let Some(value) = value.as_bool(){
             if offset_of >= ot.elem_size() * ot.dims(){
-                trap.err_pod_too_much_data();
+                err_pod_too_much_data!(trap);
                 return 0
             }
             else{
@@ -601,7 +602,7 @@ impl ScriptHeap{
                         out_data[o2] = if value{1} else {0}
                     }
                     _=>{
-                        trap.err_pod_type_not_matching();
+                        err_pod_type_not_matching!(trap);
                     }
                 }
                 return ot.elem_size()
@@ -612,7 +613,7 @@ impl ScriptHeap{
             let in_pod_ty = &self.pod_types[in_pod.ty.index as usize];
             if let ScriptPodTy::Vec(it) = &in_pod_ty.ty{
                 if offset_of + it.dims() * ot.elem_size() > ot.elem_size() * ot.dims(){
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                     return 0
                 }
                 else{
@@ -753,11 +754,11 @@ impl ScriptHeap{
                 }                            
             }
             else{
-                trap.err_pod_type_not_matching();
+                err_pod_type_not_matching!(trap);
             }
         }
         else{
-            trap.err_pod_type_not_matching();
+            err_pod_type_not_matching!(trap);
         }
         0
     }        
@@ -766,7 +767,7 @@ impl ScriptHeap{
         
         match &field_ty.data.ty{
             ScriptPodTy::Void | ScriptPodTy::ArrayBuilder | ScriptPodTy::UndefinedStruct  =>{
-                trap.err_unexpected();
+                err_unexpected!(trap);
                 return 
             }
             ScriptPodTy::Bool=>{
@@ -774,7 +775,7 @@ impl ScriptHeap{
                     out_data[offset_of>>2] = if value{1} else {0}
                 }
                 else { // error?
-                    trap.err_pod_type_not_matching();
+                    err_pod_type_not_matching!(trap);
                 }
             }
             ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
@@ -782,7 +783,7 @@ impl ScriptHeap{
                     out_data[offset_of>>2] = value as u32;
                 }
                 else { // error?
-                    trap.err_pod_type_not_matching();
+                    err_pod_type_not_matching!(trap);
                 }
             }
             ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
@@ -790,7 +791,7 @@ impl ScriptHeap{
                     out_data[offset_of>>2] = (value as i32) as u32;
                 }
                 else { // error?
-                    trap.err_pod_type_not_matching();
+                    err_pod_type_not_matching!(trap);
                 }
             }
             ScriptPodTy::F32=>{
@@ -804,7 +805,7 @@ impl ScriptHeap{
                     // how do we figure out we are a vec
                 }
                 else{
-                    trap.err_pod_type_not_matching();
+                    err_pod_type_not_matching!(trap);
                 }
             }
             ScriptPodTy::Vec(_vt)=>{ 
@@ -818,7 +819,7 @@ impl ScriptHeap{
                         return
                     }
                 }
-                trap.err_pod_type_not_matching();
+                err_pod_type_not_matching!(trap);
             }
             ScriptPodTy::Mat(_mt)=>{
                 if let Some(other_pod) = value.as_pod(){
@@ -831,7 +832,7 @@ impl ScriptHeap{
                         return
                     }
                 }
-                trap.err_pod_type_not_matching();
+                err_pod_type_not_matching!(trap);
             }
             ScriptPodTy::F16=>{
                 if let Some(value) = value.as_number(){
@@ -844,7 +845,7 @@ impl ScriptHeap{
                     }
                 }
                 else { // error?
-                    trap.err_pod_type_not_matching();
+                    err_pod_type_not_matching!(trap);
                 }
             }
             ScriptPodTy::Struct{..}=>{
@@ -857,11 +858,11 @@ impl ScriptHeap{
                         }
                     }
                     else{
-                        trap.err_pod_type_not_matching();
+                        err_pod_type_not_matching!(trap);
                     }
                 }
                 else{
-                    trap.err_pod_type_not_matching();
+                    err_pod_type_not_matching!(trap);
                 }
             }
             ScriptPodTy::Enum{..}=>{
@@ -879,24 +880,24 @@ impl ScriptHeap{
                         // Check element type
                         if let Some(elem_ty) = other_pod.tag.as_array_builder() {
                             if elem_ty != ty.self_ref {
-                                trap.err_pod_type_not_matching();
+                                err_pod_type_not_matching!(trap);
                                 return;
                             }
                         }
                         else if *len > 0 {
-                             trap.err_pod_type_not_matching();
+                             err_pod_type_not_matching!(trap);
                              return;
                         }
                         
                         // Check size match
                         // heuristic check based on ArrayBuilder implementation
                         if other_pod.data.len() * 4 < *size_of {
-                            trap.err_pod_not_enough_data();
+                            err_pod_not_enough_data!(trap);
                              return;
                         }
                         let elem_align = ty.data.ty.align_of();
                         if other_pod.data.len() > *size_of + elem_align {
-                             trap.err_pod_too_much_data();
+                             err_pod_too_much_data!(trap);
                              return;
                         }
                         
@@ -904,7 +905,7 @@ impl ScriptHeap{
                         let u32_count = *size_of >> 2;
                         let start = offset_of >> 2;
                         if start + u32_count > out_data.len() {
-                             trap.err_pod_too_much_data(); 
+                             err_pod_too_much_data!(trap); 
                              return;
                         }
                         for i in 0..u32_count {
@@ -913,7 +914,7 @@ impl ScriptHeap{
                         return;
                     }
                 }
-                trap.err_pod_type_not_matching();
+                err_pod_type_not_matching!(trap);
             }
             ScriptPodTy::VariableArray{ty, ..}=>{
                 if let Some(other_pod_ptr) = value.as_pod() {
@@ -923,12 +924,12 @@ impl ScriptHeap{
                     if let ScriptPodTy::ArrayBuilder = &other_pod_ty.ty {
                         if let Some(elem_ty) = other_pod.tag.as_array_builder() {
                              if elem_ty != ty.self_ref {
-                                 trap.err_pod_type_not_matching();
+                                 err_pod_type_not_matching!(trap);
                                  return;
                              }
                         }
                         else if other_pod.data.len() > 0 {
-                             trap.err_pod_type_not_matching();
+                             err_pod_type_not_matching!(trap);
                              return;
                         }
                         
@@ -943,7 +944,7 @@ impl ScriptHeap{
                         return
                     }
                 }
-                trap.err_pod_type_not_matching();
+                err_pod_type_not_matching!(trap);
             }
         }
     }
@@ -973,7 +974,7 @@ impl ScriptHeap{
                 (Some(ty.self_ref), *align_of)
             }
             _=>{
-                trap.err_not_an_array();
+                err_not_an_array!(trap);
                 return NIL;
             }
         };
@@ -983,7 +984,7 @@ impl ScriptHeap{
             // bounds check
             let pod = &self.pods[pod_ptr.index as usize];
             if offset_of + align_of > pod.data.len() * 4{
-                 trap.err_index_out_of_bounds();
+                 err_index_out_of_bounds!(trap);
                  return NIL;
             }
             
@@ -1071,7 +1072,7 @@ impl ScriptHeap{
         // alright lets get a field
         let field_name = if let Some(id) = field.as_id(){id}
         else{
-            return trap.err_pod_invalid_field_name()
+            return err_pod_invalid_field_name!(trap)
         };
         let pod = &mut self.pods[pod_ptr.index as usize];
         let pod_ty = pod.ty;
@@ -1095,7 +1096,7 @@ impl ScriptHeap{
                                                 
                         match &field.ty.data.ty{
                             ScriptPodTy::Void | ScriptPodTy::ArrayBuilder | ScriptPodTy::UndefinedStruct => {
-                                trap.err_unexpected();
+                                err_unexpected!(trap);
                                 return NIL
                             }
                             ScriptPodTy::Bool=>{
@@ -1162,7 +1163,7 @@ impl ScriptHeap{
                     }
                     offset_of += field.ty.data.ty.size_of();
                 }
-                return trap.err_pod_invalid_field_name()
+                return err_pod_invalid_field_name!(trap)
             },
             ScriptPodTy::Vec(vt)=>{
                 // we support reading fields and swizzles
@@ -1191,7 +1192,7 @@ impl ScriptHeap{
         
     pub fn pod_swizzle_vec1(&self, vec:ScriptPodVec, data:[u32;4], x:usize, trap:ScriptTrap)->ScriptValue{
         if x >= vec.dims(){
-            return trap.err_pod_invalid_field_name()
+            return err_pod_invalid_field_name!(trap)
         }
         match vec{
             ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>{
@@ -1274,7 +1275,7 @@ impl ScriptHeap{
             // cross casting numbers
             ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32=>{ 
                 if offset.field_index > 0{
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                     return
                 }
                 offset.field_index += 1;
@@ -1283,7 +1284,7 @@ impl ScriptHeap{
             ScriptPodTy::Vec(v1)=>{ // what do we 
                 // check field counter
                 if offset.field_index + 1 > v1.dims(){
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                 }
                 offset.field_index += 1;
                 return
@@ -1291,42 +1292,42 @@ impl ScriptHeap{
             ScriptPodTy::Mat(m)=>{ // what do we 
                 // check field counter
                 if offset.field_index + 1 > m.dim(){
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                 }
                 offset.field_index += 1;
                 return
             }
             ScriptPodTy::Struct{fields,..}=>{
                 if offset.field_index >= fields.len(){
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                     return
                 }
                 if !fields[offset.field_index].ty.data.ty.is_number(){
-                    trap.err_invalid_constructor_arg();
+                    err_invalid_constructor_arg!(trap);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::FixedArray{ty, len,..}=>{
                 if offset.field_index >= *len{
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                     return
                 }
                 if ty.data.ty.is_number(){
-                    trap.err_invalid_constructor_arg();
+                    err_invalid_constructor_arg!(trap);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::VariableArray{ty,..}=>{
                 if ty.data.ty.is_number(){
-                    trap.err_invalid_constructor_arg();
+                    err_invalid_constructor_arg!(trap);
                     return
                 }
                 offset.field_index += 1;
             }
             _=>{
-                trap.err_invalid_constructor_arg();
+                err_invalid_constructor_arg!(trap);
             }
         }
     }
@@ -1337,27 +1338,27 @@ impl ScriptHeap{
         match &pod_ty.ty{
             ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::Bool=>{
                 if offset.field_index != 1{
-                    trap.err_pod_not_enough_data();
+                    err_pod_not_enough_data!(trap);
                 }
             }
             ScriptPodTy::Vec(v1)=>{
                 if offset.field_index != 1 && offset.field_index <v1.dims(){
-                    trap.err_pod_not_enough_data();
+                    err_pod_not_enough_data!(trap);
                 }
             }
             ScriptPodTy::Struct{fields,..}=>{
                 if offset.field_index < fields.len(){
-                    trap.err_pod_not_enough_data();
+                    err_pod_not_enough_data!(trap);
                 }
             }
             ScriptPodTy::FixedArray{len,..}=>{
                 if offset.field_index < *len{
-                    trap.err_pod_not_enough_data();
+                    err_pod_not_enough_data!(trap);
                 }
             }
             ScriptPodTy::Mat(m)=>{
                 if offset.field_index != 1 && offset.field_index <m.dim(){
-                    trap.err_pod_not_enough_data();
+                    err_pod_not_enough_data!(trap);
                 }
             }
             _=>()
@@ -1371,38 +1372,38 @@ impl ScriptHeap{
             // cross casting numbers
             ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32=>{ // were casting to f32
                 if offset.field_index > 0{
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                     return
                 }
                 offset.field_index += 1;
                 match &pod_ty_arg.ty{
                     ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32 =>{return;} 
-                    _=>{trap.err_invalid_constructor_arg();}
+                    _=>{err_invalid_constructor_arg!(trap);}
                 }
             }
             ScriptPodTy::Bool=>{ // were casting to f32
                 if offset.field_index > 0{
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                     return
                 }
                 offset.field_index += 1;
                 match &pod_ty_arg.ty{
                     ScriptPodTy::Bool=>{return;} 
-                    _=>{trap.err_invalid_constructor_arg();}
+                    _=>{err_invalid_constructor_arg!(trap);}
                 }
             }
-            ScriptPodTy::AtomicU32=>{trap.err_invalid_constructor_arg();}
-            ScriptPodTy::AtomicI32=>{trap.err_invalid_constructor_arg();}
+            ScriptPodTy::AtomicU32=>{err_invalid_constructor_arg!(trap);}
+            ScriptPodTy::AtomicI32=>{err_invalid_constructor_arg!(trap);}
             ScriptPodTy::Vec(v1)=>{ // what do we 
                 match pod_ty_arg.ty{
                     // single component
                     ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::Bool =>{
                         if v1.elem_ty() != pod_ty_arg.ty{
-                            trap.err_invalid_constructor_arg();
+                            err_invalid_constructor_arg!(trap);
                         }
                         // check field counter
                         if offset.field_index + 1 > v1.dims(){
-                            trap.err_pod_too_much_data();
+                            err_pod_too_much_data!(trap);
                         }
                         offset.field_index += 1;
                         return
@@ -1410,17 +1411,17 @@ impl ScriptHeap{
                     // multi component
                     ScriptPodTy::Vec(v2)=>{
                         if v1.elem_ty() != v2.elem_ty() {
-                            trap.err_invalid_constructor_arg();
+                            err_invalid_constructor_arg!(trap);
                         }
                         // check field counter
                         if offset.field_index + v2.dims() > v1.dims(){
-                            trap.err_pod_too_much_data();
+                            err_pod_too_much_data!(trap);
                             return
                         }
                         offset.field_index += v2.dims();
                     }
                     _=>{
-                        trap.err_invalid_constructor_arg();
+                        err_invalid_constructor_arg!(trap);
                         offset.field_index += 1;
                         return
                     }
@@ -1431,49 +1432,49 @@ impl ScriptHeap{
                     ScriptPodTy::F32 =>{
                         if offset.field_index >= m.dim(){
                         // check field counter
-                            trap.err_pod_too_much_data();
+                            err_pod_too_much_data!(trap);
                             return
                         }
                         offset.field_index += 1;
                     } 
                     _=>{
-                        trap.err_invalid_constructor_arg();
+                        err_invalid_constructor_arg!(trap);
                         return
                     }
                 }
             }
             ScriptPodTy::Struct{fields,..}=>{
                 if offset.field_index >= fields.len(){
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                     return
                 }
                 if fields[offset.field_index].ty.data.ty  != pod_ty_arg.ty{
-                    trap.err_invalid_constructor_arg();
+                    err_invalid_constructor_arg!(trap);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::FixedArray{ty, len,..}=>{
                 if offset.field_index >= *len{
-                    trap.err_pod_too_much_data();
+                    err_pod_too_much_data!(trap);
                     return
                 }
                 if ty.data.ty != pod_ty_arg.ty{
-                    trap.err_invalid_constructor_arg();
+                    err_invalid_constructor_arg!(trap);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::VariableArray{ty,..}=>{
                 if ty.data.ty != pod_ty_arg.ty{
-                    trap.err_invalid_constructor_arg();
+                    err_invalid_constructor_arg!(trap);
                     return
                 }
                 offset.field_index += 1;
             }
             ScriptPodTy::Enum{..}=>todo!(),
             _=>{
-                trap.err_invalid_constructor_arg();
+                err_invalid_constructor_arg!(trap);
             }
         }
     }  

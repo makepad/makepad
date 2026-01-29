@@ -1121,7 +1121,7 @@ impl DrawVars {
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_fragment_outputs(vm, io_self);
             
-            if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), &vm.thread.trap).as_object() {
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), vm.thread.trap.pass()).as_object() {
                 output.mode = ShaderMode::Vertex;
                 ShaderFnCompiler::compile_shader_def(
                     vm,
@@ -1132,7 +1132,7 @@ impl DrawVars {
                     vec![],
                 );
             }
-            if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), &vm.thread.trap).as_object() {
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), vm.thread.trap.pass()).as_object() {
                 output.mode = ShaderMode::Fragment;
                 ShaderFnCompiler::compile_shader_def(
                     vm,
@@ -1197,7 +1197,7 @@ impl DrawVars {
             
             // See if we have a script-set vertex buffer with geometry
             if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
-                let buffer_value = vm.heap.value(vb_obj, id!(buffer).into(), &vm.thread.trap);
+                let buffer_value = vm.heap.value(vb_obj, id!(buffer).into(), vm.thread.trap.pass());
                 if let Some(handle) = buffer_value.as_handle() {
                     if let Some(geometry) = vm.heap.handle_ref::<Geometry>(handle) {
                         self.geometry_id = Some(geometry.geometry_id());

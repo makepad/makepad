@@ -11,13 +11,14 @@ use crate::opcode::*;
 use crate::vm::*;
 use crate::thread::*;
 use std::any::Any;
+use crate::*;
 
 impl ScriptThread {
     // Object/Array begin handlers
     
     pub(crate) fn handle_begin_proto(&mut self, heap: &mut ScriptHeap) {
         let proto = self.pop_stack_resolved(heap);
-        let me = heap.new_with_proto_checked(proto, &self.trap);
+        let me = heap.new_with_proto_checked(proto, self.trap.pass());
         self.mes.push(ScriptMe::Object(me));
         self.trap.goto_next();
     }
@@ -30,13 +31,13 @@ impl ScriptThread {
         let me = self.mes.last().unwrap();
         let proto = if let ScriptMe::Object(object) = me {
             // First try to get value from prototype chain (handles inheritance)
-            let value = heap.proto_field_from_value(*object, field, &self.trap);
+            let value = heap.proto_field_from_value(*object, field, self.trap.pass());
             
             // If value not found, try to create from type-check structure
             if value.is_nil() || value.is_err() {
                 self.trap.err.take(); // Clear any error from value lookup
                 if let Some(field_id) = field.as_id() {
-                    heap.proto_field_from_type_check(*object, field_id, &self.trap)
+                    heap.proto_field_from_type_check(*object, field_id, self.trap.pass())
                 } else {
                     NIL
                 }
@@ -61,7 +62,7 @@ impl ScriptThread {
                 if field.is_string_like() {
                     heap.set_string_keys(*me_obj);
                 }
-                heap.set_value(*me_obj, field, object, &self.trap);
+                heap.set_value(*me_obj, field, object, self.trap.pass());
             }
         }
         // Push NIL as result so POP_TO_ME has something to pop
@@ -119,7 +120,7 @@ impl ScriptThread {
             object
         };
         let proto = if let Some(obj) = object.as_object() {
-            let value = heap.value(obj, field, &self.trap);
+            let value = heap.value(obj, field, self.trap.pass());
             if value.is_nil() || value.is_err() {
                 self.trap.err.take();
                 NIL
@@ -144,7 +145,7 @@ impl ScriptThread {
             if field.is_string_like() {
                 heap.set_string_keys(obj);
             }
-            heap.set_value(obj, field, built_object, &self.trap);
+            heap.set_value(obj, field, built_object, self.trap.pass());
         }
         // Push NIL as result so POP_TO_ME has something to pop
         self.push_stack_unchecked(NIL);
@@ -167,7 +168,7 @@ impl ScriptThread {
             object
         };
         let proto = if let Some(obj) = object.as_object() {
-            let value = heap.value(obj, index, &self.trap);
+            let value = heap.value(obj, index, self.trap.pass());
             if value.is_nil() || value.is_err() {
                 self.trap.err.take();
                 NIL
@@ -176,7 +177,7 @@ impl ScriptThread {
             }
         } else if let Some(arr) = object.as_array() {
             let idx = index.as_index();
-            let value = heap.array_index(arr, idx, &self.trap);
+            let value = heap.array_index(arr, idx, self.trap.pass());
             if value.is_nil() || value.is_err() {
                 self.trap.err.take();
                 NIL
@@ -198,10 +199,10 @@ impl ScriptThread {
         let index = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object() {
-            heap.set_value(obj, index, built_object, &self.trap);
+            heap.set_value(obj, index, built_object, self.trap.pass());
         } else if let Some(arr) = object.as_array() {
             let idx = index.as_index();
-            heap.set_array_index(arr, idx, built_object, &self.trap);
+            heap.set_array_index(arr, idx, built_object, self.trap.pass());
         }
         // Push NIL as result so POP_TO_ME has something to pop
         self.push_stack_unchecked(NIL);
@@ -211,7 +212,7 @@ impl ScriptThread {
     pub(crate) fn handle_end_proto(&mut self, heap: &mut ScriptHeap, code: &ScriptCode) {
         let me = self.mes.pop().unwrap();
         if let ScriptMe::Object(me) = me{
-            heap.finalize_maybe_pod_type(me, &code.builtins.pod, &self.trap);
+            heap.finalize_maybe_pod_type(me, &code.builtins.pod, self.trap.pass());
         }
         self.push_stack_unchecked(me.into());
         self.trap.goto_next();
@@ -264,7 +265,7 @@ impl ScriptThread {
                 }
             }
             else{
-                let value = heap.value(obj, field, &self.trap);
+                let value = heap.value(obj, field, self.trap.pass());
                 if !value.is_nil(){
                     if let Some(field) = field.as_id(){
                         self.def_scope_value(heap, field, value);
@@ -281,11 +282,11 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let value = heap.value(obj, field, &self.trap);
+            let value = heap.value(obj, field, self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else if let Some(pod) = object.as_pod(){
-            let value = heap.pod_read_field(pod, field, &code.builtins.pod, &self.trap);
+            let value = heap.pod_read_field(pod, field, &code.builtins.pod, self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else {
@@ -307,7 +308,7 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let value = heap.value(obj, field, &self.trap);
+            let value = heap.value(obj, field, self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else{
@@ -320,16 +321,16 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let value = match self.mes.last().unwrap(){
             ScriptMe::Array(_) => {
-                self.trap.err_not_allowed_in_array()
+                err_not_allowed_in_array!(self.trap)
             }
             ScriptMe::Call{args, ..} => {
-                heap.value(*args, field, &self.trap)
+                heap.value(*args, field, self.trap.pass())
             }
             ScriptMe::Pod{pod, ..} => {
-                heap.pod_read_field(*pod, field, &code.builtins.pod, &self.trap)
+                heap.pod_read_field(*pod, field, &code.builtins.pod, self.trap.pass())
             }
             ScriptMe::Object(obj) => {
-                heap.value(*obj, field, &self.trap)
+                heap.value(*obj, field, self.trap.pass())
             }
         };
         self.push_stack_value(value);
@@ -341,16 +342,16 @@ impl ScriptThread {
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
             // First try to get value from prototype chain (handles inheritance)
-            let value = heap.proto_field_from_value(obj, field, &self.trap);
+            let value = heap.proto_field_from_value(obj, field, self.trap.pass());
             
             // If value not found, try to create from type-check structure
             if value.is_nil() || value.is_err() {
                 self.trap.err.take(); // Clear any error from value lookup
                 if let Some(field_id) = field.as_id() {
-                    let value = heap.proto_field_from_type_check(obj, field_id, &self.trap);
+                    let value = heap.proto_field_from_type_check(obj, field_id, self.trap.pass());
                     self.push_stack_unchecked(value);
                 } else {
-                    let value = self.trap.err_not_found();
+                    let value = err_not_found!(self.trap);
                     self.push_stack_unchecked(value);
                 }
             } else {
@@ -358,7 +359,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = self.trap.err_not_object();
+            let value = err_not_object!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -384,25 +385,25 @@ impl ScriptThread {
             ScriptMe::Object(obj) => {
                 // Splat into an object: merge vec and map
                 if let Some(source_obj) = source.as_object(){
-                    heap.merge_object(*obj, source_obj, &self.trap);
+                    heap.merge_object(*obj, source_obj, self.trap.pass());
                 }
                 else if let Some(source_arr) = source.as_array(){
                     // Splat array into object: push array elements to vec
                     let len = heap.array_len(source_arr);
                     for i in 0..len {
-                        let v = heap.array_index(source_arr, i, &self.trap);
-                        heap.vec_push(*obj, NIL, v, &self.trap);
+                        let v = heap.array_index(source_arr, i, self.trap.pass());
+                        heap.vec_push(*obj, NIL, v, self.trap.pass());
                     }
                 }
             }
             ScriptMe::Array(arr) => {
                 // Splat into an array: merge all elements
                 if let Some(source_arr) = source.as_array(){
-                    heap.merge_array(*arr, source_arr, &self.trap);
+                    heap.merge_array(*arr, source_arr, self.trap.pass());
                 }
                 else if let Some(source_obj) = source.as_object(){
                     // Splat object vec into array (array_push_vec takes array, object)
-                    heap.array_push_vec(*arr, source_obj, &self.trap);
+                    heap.array_push_vec(*arr, source_obj, self.trap.pass());
                 }
             }
             ScriptMe::Call{args, ..} => {
@@ -410,21 +411,21 @@ impl ScriptThread {
                 if let Some(source_obj) = source.as_object(){
                     let len = heap.vec_len(source_obj);
                     for i in 0..len {
-                        let kv = heap.vec_key_value(source_obj, i, &self.trap);
-                        heap.unnamed_fn_arg(*args, kv.value, &self.trap);
+                        let kv = heap.vec_key_value(source_obj, i, self.trap.pass());
+                        heap.unnamed_fn_arg(*args, kv.value, self.trap.pass());
                     }
                 }
                 else if let Some(source_arr) = source.as_array(){
                     let len = heap.array_len(source_arr);
                     for i in 0..len {
-                        let v = heap.array_index(source_arr, i, &self.trap);
-                        heap.unnamed_fn_arg(*args, v, &self.trap);
+                        let v = heap.array_index(source_arr, i, self.trap.pass());
+                        heap.unnamed_fn_arg(*args, v, self.trap.pass());
                     }
                 }
             }
             ScriptMe::Pod{..} => {
                 // Splat not supported for pods
-                self.trap.err_not_impl();
+                err_not_impl!(self.trap);
             }
         }
         self.trap.goto_next();
@@ -437,21 +438,21 @@ impl ScriptThread {
         let object = self.pop_stack_resolved(heap);
         
         if let Some(obj) = object.as_object(){
-            let value = heap.value(obj, index, &self.trap);
+            let value = heap.value(obj, index, self.trap.pass());
             self.push_stack_unchecked(value)
         }
         else if let Some(arr) = object.as_array(){
             let index = index.as_index();
-            let value = heap.array_index(arr, index, &self.trap);
+            let value = heap.array_index(arr, index, self.trap.pass());
             self.push_stack_unchecked(value)
         }
         else if let Some(pod) = object.as_pod(){
             let index = index.as_index();
-            let value = heap.pod_array_index(pod, index, &code.builtins.pod, &self.trap);
+            let value = heap.pod_array_index(pod, index, &code.builtins.pod, self.trap.pass());
             self.push_stack_unchecked(value)
         }
         else{
-            let value = self.trap.err_not_object();
+            let value = err_not_object!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();

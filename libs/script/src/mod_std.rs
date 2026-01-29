@@ -15,12 +15,12 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             }
         }
         vm.thread.trap.in_rust = false;
-        vm.thread.trap.err_assert_fail()
+        err_assert_fail!(vm.thread.trap)
     });
     
-    native.add_method(heap, std, id!(err), script_args!(), |vm, _args|{
-        return vm.thread.last_err
-    });
+    //native.add_method(heap, std, id!(err), script_args!(), |vm, _args|{
+     //   return vm.thread.last_err
+    //});
             
     let range = heap.new_with_proto(id!(range).into());
     heap.set_value_def(std, id!(Range).into(), range.into());
@@ -67,10 +67,10 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         NIL
     });
     
-    native.add_method(heap, std, id!(to_metal_shader), script_args!(entry=NIL), |vm, _args|{
+    //native.add_method(heap, std, id!(to_metal_shader), script_args!(entry=NIL), |vm, _args|{
         
-        return vm.thread.last_err
-    });
+     //   return vm.thread.last_err
+    //});
     
     native.add_method(heap, std, id!(set_type_default), script_args!(obj=NIL), |vm, args|{
         if let Some(obj) = script_value!(vm, args.obj).as_object(){

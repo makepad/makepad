@@ -33,7 +33,7 @@ impl ScriptHeap{
         if let Some(ptr) = proto.as_object(){
             let object = &mut self.objects[ptr.index as usize];
             if object.tag.is_notproto(){
-                trap.err_not_proto();
+                err_not_proto!(trap);
                 return ScriptObject::ZERO;
             }
         }
@@ -181,7 +181,7 @@ impl ScriptHeap{
         // alright so. now what.
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.is_vec_frozen(){ // has rw flags
-            return trap.err_vec_frozen()
+            return err_vec_frozen!(trap)
         }
                 
         let index = index.as_index();
@@ -195,7 +195,7 @@ impl ScriptHeap{
     fn set_value_prefixed(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue, trap:ScriptTrap)->ScriptValue{
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.is_vec_frozen(){
-            return trap.err_vec_frozen()
+            return err_vec_frozen!(trap)
         }
         for kv in object.vec.iter_mut().rev(){
             if kv.key == key{
@@ -213,7 +213,7 @@ impl ScriptHeap{
         loop{
             let object = &mut self.objects[ptr.index as usize];
             if object.tag.is_frozen(){
-                return trap.err_frozen()
+                return err_frozen!(trap)
             }
             for kv in object.vec.iter_mut().rev(){
                 if kv.key == key{
@@ -250,7 +250,7 @@ impl ScriptHeap{
         
         let object = &self.objects[top_ptr.index as usize];
         if object.tag.is_frozen(){
-            return trap.err_frozen()
+            return err_frozen!(trap)
         }
 
         if let Some(ty) = object.tag.as_type_index(){
@@ -261,17 +261,17 @@ impl ScriptHeap{
                     if let Some(object) = &check_prop.object{
                         //println!("SET VALUE {:?} {:?}", key, value);
                         if !(*object.check)(self, value){
-                            return trap.err_invalid_prop_type()
+                            return err_invalid_prop_type!(trap)
                         }
                     }
                 }
                 else{
                     println!("Trying to check a type that hasnt been registered yet for {} {}", key, value);
-                    return trap.err_type_not_registered()
+                    return err_type_not_registered!(trap)
                 }
             }
             else if !object.tag.is_map_add(){
-                return trap.err_invalid_prop_name()
+                return err_invalid_prop_name!(trap)
             }
             let object = &mut self.objects[top_ptr.index as usize];
             object.map_insert(key, value);
@@ -286,7 +286,7 @@ impl ScriptHeap{
                     for kv in object.vec.iter().rev(){
                         if kv.key == key{
                             if !self.validate_type(kv.value, value){
-                                return trap.err_invalid_prop_type()
+                                return err_invalid_prop_type!(trap)
                             }
                             return self.set_value_shallow(top_ptr, key, value, trap);
                         }
@@ -294,7 +294,7 @@ impl ScriptHeap{
                 }
                 if let Some(set_value) = object.map_get(&key){
                     if !self.validate_type(set_value, value){
-                        return trap.err_invalid_prop_type()
+                        return err_invalid_prop_type!(trap)
                     }
                     return self.set_value_shallow(top_ptr, key, value, trap);
                 }
@@ -302,7 +302,7 @@ impl ScriptHeap{
                     ptr = next_ptr
                 }
                 else if !object.tag.is_map_add(){ // not found
-                    return trap.err_invalid_prop_name()
+                    return err_invalid_prop_name!(trap)
                 } 
             }
         }
@@ -311,21 +311,21 @@ impl ScriptHeap{
             if object.tag.is_vec2(){
                 for kv in object.vec.iter_mut().rev(){
                     if kv.key == key{
-                        return trap.err_key_already_exists()
+                        return err_key_already_exists!(trap)
                     }
                 }
                 object.vec.push(ScriptVecValue{key, value});
                 return NIL
             }
             if let Some(_) = object.map_get(&key){
-                return trap.err_key_already_exists()
+                return err_key_already_exists!(trap)
             }
             else{
                 object.map_insert(key, value);
                 return NIL    
             }
         }
-        trap.err_unexpected()
+        err_unexpected!(trap)
     }
         
     fn set_value_shallow(&mut self, ptr:ScriptObject, key:ScriptValue, value:ScriptValue, _trap:ScriptTrap)->ScriptValue{
@@ -346,7 +346,7 @@ impl ScriptHeap{
                 
         
     pub fn set_value_def(&mut self, ptr:ScriptObject, key:ScriptValue, value:ScriptValue){
-        self.set_value(ptr, key, value, &mut ScriptTrap::default());
+        self.set_value(ptr, key, value, NoTrap);
     }
         
     pub fn set_value(&mut self, ptr:ScriptObject, key:ScriptValue, value:ScriptValue, trap:ScriptTrap)->ScriptValue{
@@ -396,7 +396,7 @@ impl ScriptHeap{
             let object = &mut self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
                 if object.tag.needs_checking(){
-                    return trap.err_invalid_key_type()
+                    return err_invalid_key_type!(trap)
                 }
                 return self.set_value_shallow(ptr, key, value, trap);
             }
@@ -404,7 +404,7 @@ impl ScriptHeap{
                 return self.set_value_deep(ptr, key, value, trap)
             }
         }
-        trap.err_invalid_key_type()
+        err_invalid_key_type!(trap)
     }
         
         
@@ -427,7 +427,7 @@ impl ScriptHeap{
             } 
         }
         // alright nothing found
-        trap.err_not_found()
+        err_not_found!(trap)
     }
         
     pub fn scope_value(&self, ptr:ScriptObject, key: LiveId, trap:ScriptTrap)->ScriptValue{
@@ -453,7 +453,7 @@ impl ScriptHeap{
             } 
         }
         // alright nothing found
-        trap.err_not_found()
+        err_not_found!(trap)
     }
         
     pub fn def_scope_value(&mut self, ptr:ScriptObject, key:LiveId, value:ScriptValue)->Option<ScriptObject>{
@@ -490,7 +490,7 @@ impl ScriptHeap{
         if let Some(kv) = object.vec.get(index){
             return kv.value
         }
-        trap.err_not_found()
+        err_not_found!(trap)
     }
         
     fn value_prefixed(&self, ptr: ScriptObject, key: ScriptValue, trap:ScriptTrap)->ScriptValue{
@@ -500,7 +500,7 @@ impl ScriptHeap{
                 return kv.value;
             }
         }
-        trap.err_not_found()
+        err_not_found!(trap)
     }
         
     fn value_deep_map(&self, obj_ptr:ScriptObject, key: ScriptValue, trap:ScriptTrap)->ScriptValue{
@@ -517,7 +517,7 @@ impl ScriptHeap{
                 break;
             }
         }
-        trap.err_not_found()
+        err_not_found!(trap)
     }
         
     fn value_deep(&self, obj_ptr:ScriptObject, key: ScriptValue, trap:ScriptTrap)->ScriptValue{
@@ -570,7 +570,7 @@ impl ScriptHeap{
                 break;
             }
         }
-        trap.err_not_found()
+        err_not_found!(trap)
     }
     
     pub fn object_method(&self, ptr:ScriptObject, key:ScriptValue, trap:ScriptTrap)->ScriptValue{
@@ -584,7 +584,7 @@ impl ScriptHeap{
                 value = self.value(obj, key.into(), trap);
             }
             else{
-                return trap.err_not_found();
+                return err_not_found!(trap);
             }
         }
         value
@@ -604,7 +604,7 @@ impl ScriptHeap{
             return self.value_deep(ptr, key, trap)
         }
         // TODO implement string lookup
-        trap.err_not_found()
+        err_not_found!(trap)
     }
     
     /// Create a default instance for a type-checked field that doesn't exist on the prototype.
@@ -622,7 +622,7 @@ impl ScriptHeap{
                 return new_obj.into();
             }
         }
-        trap.err_not_found()
+        err_not_found!(trap)
     }
     
     /// Handle proto_field access for a value that exists on the prototype chain.
@@ -725,7 +725,7 @@ impl ScriptHeap{
         if let Some(value) = object.vec.get(index){
             return *value
         }
-        ScriptVecValue{key:NIL, value:trap.err_vec_bound()}
+        ScriptVecValue{key:NIL, value:err_vec_bound!(trap)}
     }
             
     pub fn vec_value(&self, ptr:ScriptObject, index:usize, trap:ScriptTrap)->ScriptValue{
@@ -733,7 +733,7 @@ impl ScriptHeap{
         if let Some(kv) = object.vec.get(index){
             return kv.value
         }
-        trap.err_vec_bound()
+        err_vec_bound!(trap)
     }
         
     pub fn vec_value_if_exist(&self, ptr:ScriptObject, index:usize)->Option<ScriptValue>{
@@ -771,7 +771,7 @@ impl ScriptHeap{
             
     pub fn vec_push_vec(&mut self, target:ScriptObject, source:ScriptObject, trap:ScriptTrap)->ScriptValue{
         if target == source{
-            return trap.err_invalid_args()
+            return err_invalid_args!(trap)
         }
         let (target, source) = if target.index > source.index{
             let (o1, o2) = self.objects.split_at_mut(target.index as _);
@@ -781,7 +781,7 @@ impl ScriptHeap{
             (&mut o1[target.index as usize], &mut o2[0])                    
         };
         if target.tag.is_vec_frozen(){
-            return trap.err_vec_frozen()
+            return err_vec_frozen!(trap)
         }
         target.push_vec_from_other(source);
         NIL
@@ -792,7 +792,7 @@ impl ScriptHeap{
         for i in 0..len{
             if let Some(source) = self.objects[source.index as usize].vec[i].value.as_object(){
                 if target == source{
-                    return trap.err_invalid_args()
+                    return err_invalid_args!(trap)
                 }
                 let (target, source) = if target.index > source.index{
                     let (o1, o2) = self.objects.split_at_mut(target.index as _);
@@ -802,7 +802,7 @@ impl ScriptHeap{
                     (&mut o1[target.index as usize], &mut o2[0])
                 };
                 if target.tag.is_vec_frozen(){
-                    return trap.err_vec_frozen()
+                    return err_vec_frozen!(trap)
                 }
                 target.push_vec_from_other(source);
                 if map{
@@ -818,7 +818,7 @@ impl ScriptHeap{
     /// Map entries from source are only added if they don't already exist in target.
     pub fn merge_object(&mut self, target:ScriptObject, source:ScriptObject, trap:ScriptTrap)->ScriptValue{
         if target == source{
-            return trap.err_invalid_args()
+            return err_invalid_args!(trap)
         }
         let (target, source) = if target.index > source.index{
             let (o1, o2) = self.objects.split_at_mut(target.index as _);
@@ -838,7 +838,7 @@ impl ScriptHeap{
     pub fn vec_push(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue, trap:ScriptTrap)->ScriptValue{
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.is_vec_frozen(){
-            return trap.err_vec_frozen()
+            return err_vec_frozen!(trap)
         }
         object.vec.push(ScriptVecValue{key,value});
         if let Some(obj) = value.as_object(){
@@ -860,10 +860,10 @@ impl ScriptHeap{
     pub fn vec_remove(&mut self, ptr:ScriptObject, index:usize, trap:ScriptTrap)->ScriptVecValue{
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.is_vec_frozen(){
-            return ScriptVecValue{key:NIL, value:trap.err_vec_frozen()}
+            return ScriptVecValue{key:NIL, value:err_vec_frozen!(trap)}
         }
         if index >= object.vec.len(){
-            return ScriptVecValue{key:NIL, value:trap.err_vec_bound()}
+            return ScriptVecValue{key:NIL, value:err_vec_bound!(trap)}
         }
         object.vec.remove(index)
     }
@@ -871,8 +871,8 @@ impl ScriptHeap{
     pub fn vec_pop(&mut self, ptr:ScriptObject, trap:ScriptTrap)->ScriptVecValue{
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.is_vec_frozen(){
-            return ScriptVecValue{key:NIL, value:trap.err_vec_frozen()}
+            return ScriptVecValue{key:NIL, value:err_vec_frozen!(trap)}
         }
-        object.vec.pop().unwrap_or_else(||  ScriptVecValue{key:NIL, value:trap.err_vec_bound()})
+        object.vec.pop().unwrap_or_else(||  ScriptVecValue{key:NIL, value:err_vec_bound!(trap)})
     }
 }

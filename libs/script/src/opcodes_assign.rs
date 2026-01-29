@@ -7,6 +7,7 @@ use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
 use crate::thread::*;
+use crate::*;
 
 impl ScriptThread {
     // ASSIGN handlers
@@ -19,7 +20,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value);
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -49,7 +50,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -69,7 +70,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -82,11 +83,11 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let value = heap.set_value(obj, field, value, &self.trap);
+            let value = heap.set_value(obj, field, value, self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else{
-            let value = self.trap.err_not_object();
+            let value = err_not_object!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -97,24 +98,24 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let old_value = heap.value(obj, field, &self.trap);
+            let old_value = heap.value(obj, field, self.trap.pass());
             if old_value.is_string_like() || value.is_string_like(){
                 let str = heap.new_string_with(|heap, out|{
                     heap.cast_to_string(old_value, out);
                     heap.cast_to_string(value, out);
                 });
-                let value = heap.set_value(obj, field, str.into(), &self.trap);
+                let value = heap.set_value(obj, field, str.into(), self.trap.pass());
                 self.push_stack_unchecked(value);
             }
             else{
                 let fa = heap.cast_to_f64(old_value, self.trap.ip);
                 let fb = heap.cast_to_f64(value, self.trap.ip);
-                let value = heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip), &mut self.trap);
+                let value = heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip), self.trap.pass());
                 self.push_stack_unchecked(value);
             }
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -125,9 +126,9 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let old_value = heap.value(obj, field, &self.trap);
+            let old_value = heap.value(obj, field, self.trap.pass());
             if old_value.is_err() || old_value.is_nil(){
-                let value = heap.set_value(obj, field, value, &self.trap);
+                let value = heap.set_value(obj, field, value, self.trap.pass());
                 self.push_stack_unchecked(value);
             }
             else{
@@ -135,7 +136,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = self.trap.err_not_object();
+            let value = err_not_object!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -148,15 +149,15 @@ impl ScriptThread {
         let index = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let value = heap.set_value(obj, index, value, &self.trap);
+            let value = heap.set_value(obj, index, value, self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else if let Some(arr) = object.as_array(){
-            let value = heap.array_index(arr, index.as_index(), &self.trap);
+            let value = heap.array_index(arr, index.as_index(), self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else{
-            let value = self.trap.err_not_object();
+            let value = err_not_object!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -167,42 +168,42 @@ impl ScriptThread {
         let index = self.pop_stack_resolved(heap);
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let old_value = heap.value(obj, index, &self.trap);
+            let old_value = heap.value(obj, index, self.trap.pass());
             if old_value.is_string_like() || value.is_string_like(){
                 let str = heap.new_string_with(|heap, out|{
                     heap.cast_to_string(old_value, out);
                     heap.cast_to_string(value, out);
                 });
-                let value = heap.set_value(obj, index, str.into(), &self.trap);
+                let value = heap.set_value(obj, index, str.into(), self.trap.pass());
                 self.push_stack_unchecked(value);
             }
             else{
                 let fa = heap.cast_to_f64(old_value, self.trap.ip);
                 let fb = heap.cast_to_f64(value, self.trap.ip);
-                let value = heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip), &self.trap);
+                let value = heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip), self.trap.pass());
                 self.push_stack_unchecked(value);
             }
         }
         else if let Some(arr) = object.as_array(){
             let index = index.as_index();
-            let old_value = heap.array_index(arr, index, &self.trap);
+            let old_value = heap.array_index(arr, index, self.trap.pass());
             if old_value.is_string_like() || value.is_string_like(){
                 let str = heap.new_string_with(|heap, out|{
                     heap.cast_to_string(old_value, out);
                     heap.cast_to_string(value, out);
                 });
-                let value = heap.set_array_index(arr, index, str.into(), &self.trap);
+                let value = heap.set_array_index(arr, index, str.into(), self.trap.pass());
                 self.push_stack_unchecked(value);
             }
             else{
                 let fa = heap.cast_to_f64(old_value, self.trap.ip);
                 let fb = heap.cast_to_f64(value, self.trap.ip);
-                let value = heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip), &self.trap);
+                let value = heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip), self.trap.pass());
                 self.push_stack_unchecked(value);
             }
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -213,9 +214,9 @@ impl ScriptThread {
         let index = self.pop_stack_resolved(heap);
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let old_value = heap.value(obj, index, &self.trap);
+            let old_value = heap.value(obj, index, self.trap.pass());
             if old_value.is_err() || old_value.is_nil(){
-                let value = heap.set_value(obj, index, value, &self.trap);
+                let value = heap.set_value(obj, index, value, self.trap.pass());
                 self.push_stack_unchecked(value);
             }
             else{
@@ -224,9 +225,9 @@ impl ScriptThread {
         }
         else if let Some(arr) = object.as_array(){
             let index = index.as_index();
-            let old_value = heap.array_index(arr, index, &self.trap);
+            let old_value = heap.array_index(arr, index, self.trap.pass());
             if old_value.is_err() || old_value.is_nil(){
-                let value = heap.set_array_index(arr, index, value, &self.trap);
+                let value = heap.set_array_index(arr, index, value, self.trap.pass());
                 self.push_stack_unchecked(value);
             }
             else{
@@ -234,7 +235,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = self.trap.err_not_object();
+            let value = err_not_object!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -249,19 +250,19 @@ impl ScriptThread {
             let me = self.mes.last().unwrap();
             match me{
                 ScriptMe::Call{args,..}=>{
-                    heap.named_fn_arg(*args, field, value, &self.trap);
+                    heap.named_fn_arg(*args, field, value, self.trap.pass());
                 }
                 ScriptMe::Object(obj)=>{
                     if field.is_string_like(){
                         heap.set_string_keys(*obj);
                     }
-                    heap.set_value(*obj, field, value, &self.trap);
+                    heap.set_value(*obj, field, value, self.trap.pass());
                 }
                 ScriptMe::Pod{pod,..}=>{
-                    heap.set_pod_field(*pod, field, value, &self.trap);
+                    heap.set_pod_field(*pod, field, value, self.trap.pass());
                 }
                 ScriptMe::Array(_arr)=>{
-                    self.trap.err_not_allowed_in_array();
+                    err_not_allowed_in_array!(self.trap);
                 }
             }
         }
@@ -273,13 +274,13 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let value = match self.mes.last().unwrap(){
             ScriptMe::Call{..} | ScriptMe::Pod{..}=>{
-                self.trap.err_not_allowed_in_arguments()
+                err_not_allowed_in_arguments!(self.trap)
             }
             ScriptMe::Object(obj)=>{
-                heap.vec_insert_value_at(*obj, field, value, opcode == Opcode::ASSIGN_ME_BEFORE, &self.trap)
+                heap.vec_insert_value_at(*obj, field, value, opcode == Opcode::ASSIGN_ME_BEFORE, self.trap.pass())
             }
             ScriptMe::Array(_arr)=>{
-                self.trap.err_not_allowed_in_array()
+                err_not_allowed_in_array!(self.trap)
             }
         };
         self.push_stack_unchecked(value);
@@ -291,13 +292,13 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let value = match self.mes.last().unwrap(){
             ScriptMe::Call{..} | ScriptMe::Pod{..}=>{
-                self.trap.err_not_allowed_in_arguments()
+                err_not_allowed_in_arguments!(self.trap)
             }
             ScriptMe::Object(obj)=>{
-                heap.vec_insert_value_begin(*obj, field, value, &self.trap)
+                heap.vec_insert_value_begin(*obj, field, value, self.trap.pass())
             }
             ScriptMe::Array(_arr)=>{
-                self.trap.err_not_allowed_in_array()
+                err_not_allowed_in_array!(self.trap)
             }
         };
         self.push_stack_unchecked(value);
@@ -324,7 +325,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -348,7 +349,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -361,14 +362,14 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let old_value = heap.value(obj, field, &self.trap);
+            let old_value = heap.value(obj, field, self.trap.pass());
             let fa = heap.cast_to_f64(old_value, self.trap.ip);
             let fb = heap.cast_to_f64(value, self.trap.ip);
-            let value = heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), &mut self.trap);
+            let value = heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -381,15 +382,15 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let old_value = heap.value(obj, field, &self.trap);
+            let old_value = heap.value(obj, field, self.trap.pass());
             let fa = heap.cast_to_f64(old_value, self.trap.ip) as u64;
             let fb = heap.cast_to_f64(value, self.trap.ip) as u64;
             
-            let value = heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), &mut self.trap);
+            let value = heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -402,22 +403,22 @@ impl ScriptThread {
         let index = self.pop_stack_resolved(heap);
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let old_value = heap.value(obj, index, &self.trap);
+            let old_value = heap.value(obj, index, self.trap.pass());
             let fa = heap.cast_to_f64(old_value, self.trap.ip);
             let fb = heap.cast_to_f64(value, self.trap.ip);
-            let value = heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), &self.trap);
+            let value = heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else if let Some(arr) = object.as_array(){
             let index = index.as_index();
-            let old_value = heap.array_index(arr, index, &self.trap);
+            let old_value = heap.array_index(arr, index, self.trap.pass());
             let fa = heap.cast_to_f64(old_value, self.trap.ip);
             let fb = heap.cast_to_f64(value, self.trap.ip);
-            let value = heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), &self.trap);
+            let value = heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -430,22 +431,22 @@ impl ScriptThread {
         let index = self.pop_stack_resolved(heap);
         let object = self.pop_stack_resolved(heap);
         if let Some(obj) = object.as_object(){
-            let old_value = heap.value(obj, index, &self.trap);
+            let old_value = heap.value(obj, index, self.trap.pass());
             let fa = heap.cast_to_f64(old_value, self.trap.ip) as u64;
             let fb = heap.cast_to_f64(value, self.trap.ip) as u64;
-            let value = heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), &mut self.trap);
+            let value = heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else if let Some(arr) = object.as_array(){
             let index = index.as_index();
-            let old_value = heap.array_index(arr, index, &self.trap);
+            let old_value = heap.array_index(arr, index, self.trap.pass());
             let fa = heap.cast_to_f64(old_value, self.trap.ip) as u64;
             let fb = heap.cast_to_f64(value, self.trap.ip) as u64;
-            let value = heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), &self.trap);
+            let value = heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), self.trap.pass());
             self.push_stack_unchecked(value);
         }
         else{
-            let value = self.trap.err_not_assignable();
+            let value = err_not_assignable!(self.trap);
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();

@@ -16,18 +16,16 @@ pub fn script_err_gen_impl(input: TokenStream) -> TokenStream {
     fn parse(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
         let ident = parser.expect_any_ident()?;
         tb.add("#[macro_export] macro_rules!").ident(&ident).add("{");
-        tb.add("    ($trap:expr) => {").ident(&ident).add("!($trap,").string(&ident).add(")};");
+        tb.add("    ($trap:expr) => {");
+        tb.add("        if let $crate::trap::ScriptTrap::Inner(trap) = $trap.pass(){");
+        tb.add("            trap.push_err(ScriptValue::").ident(&ident).add("(trap.ip), stringify!($trap).into(), file!().into(), line!())");
+        tb.add("        }else{");
+        tb.add("            ScriptValue::").ident(&ident).add("(ScriptIp::default())");
+        tb.add("        }");
+        tb.add("    };");
         tb.add("    ($trap:expr, $($arg:tt)*) => {");
-        tb.add("        if let crate::trap::ScriptTrap::Inner(trap) = $trap.pass(){");
-        tb.add("            let value = ScriptValue::").ident(&ident).add("(trap.ip);");
-        tb.add("            trap.push_err(crate::trap::ScriptError{");
-        tb.add("                in_rust: trap.in_rust,");
-        tb.add("                value,");
-        tb.add("                message: format!($($arg)*),");
-        tb.add("                origin_file: file!().into(),");
-        tb.add("                origin_line: line!(),");
-        tb.add("            });");
-        tb.add("            value");
+        tb.add("        if let $crate::trap::ScriptTrap::Inner(trap) = $trap.pass(){");
+        tb.add("            trap.push_err(ScriptValue::").ident(&ident).add("(trap.ip), format!($($arg)*), file!().into(), line!())");
         tb.add("        }else{");
         tb.add("            ScriptValue::").ident(&ident).add("(ScriptIp::default())");
         tb.add("        }");
