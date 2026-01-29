@@ -4,7 +4,7 @@ use crate::pod::*;
 use crate::shader::ShaderType;
 use crate::trap::ScriptTrap;
 
-pub fn type_table_neg(val: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
+pub fn type_table_neg(val: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let r = match val{
         ShaderType::AbstractInt => ShaderType::AbstractInt,
         ShaderType::AbstractFloat => ShaderType::AbstractFloat,
@@ -28,7 +28,7 @@ pub fn type_table_neg(val: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBui
     r
 }
 
-pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
+pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let r = match lhs{
         ShaderType::AbstractFloat => match rhs{
             ShaderType::AbstractFloat=>ShaderType::AbstractFloat,
@@ -302,7 +302,7 @@ pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&Scr
     r
 }
     
-pub fn type_table_int_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
+pub fn type_table_int_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let r = match lhs{
         ShaderType::AbstractFloat => match rhs{
             _=>ShaderType::Error(NIL),
@@ -357,7 +357,7 @@ pub fn type_table_int_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&Scrip
     r
 }
 
-pub fn type_table_logic(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
+pub fn type_table_logic(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let bool_ty = ShaderType::Pod(builtins.pod_bool);
     let r = match lhs{
         ShaderType::Pod(x) if *x == builtins.pod_bool => match rhs{
@@ -372,7 +372,7 @@ pub fn type_table_logic(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, bu
     r
 }
 
-pub fn type_table_eq(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
+pub fn type_table_eq(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let bool_ty = ShaderType::Pod(builtins.pod_bool);
     let vec2b_ty = ShaderType::Pod(builtins.pod_vec2b);
     let vec3b_ty = ShaderType::Pod(builtins.pod_vec3b);
@@ -467,7 +467,7 @@ pub fn type_table_eq(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, built
     r
 }
 
-pub fn type_table_if_else(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
+pub fn type_table_if_else(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let r = match lhs{
         ShaderType::AbstractFloat => match rhs{
              ShaderType::AbstractFloat => ShaderType::AbstractFloat,
@@ -495,7 +495,7 @@ pub fn type_table_if_else(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, 
     r
 }
 
-pub fn type_table_elem_type(ty: &ScriptPodTy, _trap: &ScriptTrap, builtins: &ScriptPodBuiltins) -> Option<ScriptPodType> {
+pub fn type_table_elem_type(ty: &ScriptPodTy, _trap: ScriptTrap, builtins: &ScriptPodBuiltins) -> Option<ScriptPodType> {
     match ty {
         ScriptPodTy::FixedArray{ty, ..} => Some(ty.self_ref),
         ScriptPodTy::VariableArray{ty, ..} => Some(ty.self_ref),

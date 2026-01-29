@@ -3,9 +3,11 @@ use proc_macro::{TokenStream};
 mod script;
 mod derive_scriptable;
 mod swizzle;
+mod error;
 use script::*;
 use derive_scriptable::*;
 use swizzle::*;
+use error::*;
 
 #[proc_macro]
 pub fn script(input: TokenStream) -> TokenStream {
@@ -15,6 +17,11 @@ pub fn script(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn script_mod(input: TokenStream) -> TokenStream {
     script_mod_impl(input)
+}
+
+#[proc_macro]
+pub fn script_err_gen(input: TokenStream) -> TokenStream {
+    script_err_gen_impl(input)
 }
 
 

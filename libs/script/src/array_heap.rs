@@ -32,7 +32,7 @@ impl ScriptHeap{
         self.arrays[array.index as usize].storage.len()
     }
         
-    pub fn array_push(&mut self, array:ScriptArray, value:ScriptValue, trap:&ScriptTrap){
+    pub fn array_push(&mut self, array:ScriptArray, value:ScriptValue, trap:ScriptTrap){
         if let Some(obj) = value.as_object(){
             self.set_reffed(obj);
         }
@@ -54,7 +54,7 @@ impl ScriptHeap{
         array.storage.pop_front()
     }
         
-    pub fn array_push_vec(&mut self, array:ScriptArray, object:ScriptObject, trap:&ScriptTrap){
+    pub fn array_push_vec(&mut self, array:ScriptArray, object:ScriptObject, trap:ScriptTrap){
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
             trap.err_frozen();
@@ -69,7 +69,7 @@ impl ScriptHeap{
     
     /// Merges all elements from source array into target array.
     /// Used by the splat operator (..) to spread one array into another.
-    pub fn merge_array(&mut self, target:ScriptArray, source:ScriptArray, trap:&ScriptTrap){
+    pub fn merge_array(&mut self, target:ScriptArray, source:ScriptArray, trap:ScriptTrap){
         // Get the storage from source first
         let source_storage = &self.arrays[source.index as usize].storage;
         let values: Vec<ScriptValue> = match source_storage {
@@ -113,7 +113,7 @@ impl ScriptHeap{
         ptr
     }
         
-    pub fn array_mut(&mut self, array:ScriptArray,trap:&ScriptTrap)->Option<&mut ScriptArrayStorage>{
+    pub fn array_mut(&mut self, array:ScriptArray,trap:ScriptTrap)->Option<&mut ScriptArrayStorage>{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
             trap.err_frozen();
@@ -139,7 +139,7 @@ impl ScriptHeap{
         r
     }
             
-    pub fn array_remove(&mut self, array:ScriptArray, index: usize,trap:&ScriptTrap)->ScriptValue{
+    pub fn array_remove(&mut self, array:ScriptArray, index: usize,trap:ScriptTrap)->ScriptValue{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
             return trap.err_frozen();
@@ -151,7 +151,7 @@ impl ScriptHeap{
         array.storage.remove(index)
     }
         
-    pub fn array_pop(&mut self, array:ScriptArray, trap:&ScriptTrap)->ScriptValue{
+    pub fn array_pop(&mut self, array:ScriptArray, trap:ScriptTrap)->ScriptValue{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
             return trap.err_frozen()
@@ -165,7 +165,7 @@ impl ScriptHeap{
         }
     }
         
-    pub fn array_clear(&mut self, array:ScriptArray, trap:&ScriptTrap){
+    pub fn array_clear(&mut self, array:ScriptArray, trap:ScriptTrap){
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
             trap.err_frozen();
@@ -177,7 +177,7 @@ impl ScriptHeap{
         }
     }
         
-    pub fn array_index(&self, array:ScriptArray, index:usize, trap:&ScriptTrap)->ScriptValue{
+    pub fn array_index(&self, array:ScriptArray, index:usize, trap:ScriptTrap)->ScriptValue{
         if let Some(value) = self.arrays[array.index as usize].storage.index(index){
             return value
         }
@@ -195,7 +195,7 @@ impl ScriptHeap{
         }
     }
         
-    pub fn set_array_index(&mut self, array:ScriptArray, index:usize, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
+    pub fn set_array_index(&mut self, array:ScriptArray, index:usize, value:ScriptValue, trap:ScriptTrap)->ScriptValue{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
             return trap.err_frozen();

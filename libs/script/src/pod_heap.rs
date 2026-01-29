@@ -10,7 +10,7 @@ impl ScriptHeap{
     
     // POD TYPES
     
-    pub fn pod_method(&self, ptr:ScriptPod, key:ScriptValue, trap:&ScriptTrap)->ScriptValue{
+    pub fn pod_method(&self, ptr:ScriptPod, key:ScriptValue, trap:ScriptTrap)->ScriptValue{
         let pod = &self.pods[ptr.index as usize];
         let pod_ty = &self.pod_types[pod.ty.index as usize];
         self.value(pod_ty.object, key, trap)
@@ -213,7 +213,7 @@ impl ScriptHeap{
         }
         None
     }
-    pub fn finalize_maybe_pod_type(&mut self, ptr:ScriptObject, builtins:&ScriptPodBuiltins, trap:&ScriptTrap){
+    pub fn finalize_maybe_pod_type(&mut self, ptr:ScriptObject, builtins:&ScriptPodBuiltins, trap:ScriptTrap){
         let object = &self.objects[ptr.index as usize];
         if object.tag.is_pod_type(){
             let mut kvs = Vec::new();
@@ -383,12 +383,12 @@ impl ScriptHeap{
     // POD writing
     
                 
-    pub fn set_pod_field(&self, pod:ScriptPod, field:ScriptValue, _value:ScriptValue, _trap:&ScriptTrap)->ScriptValue{
+    pub fn set_pod_field(&self, pod:ScriptPod, field:ScriptValue, _value:ScriptValue, _trap:ScriptTrap)->ScriptValue{
         let _pod = &self.pods[pod.index as usize];
         todo!("WANT TO SET FIELD {}", field);
     }
         
-    pub fn pod_pop_to_me(&mut self,  pod_ptr:ScriptPod, offset:&mut ScriptPodOffset, _field:ScriptValue, value:ScriptValue, builtins:&ScriptPodBuiltins, trap:&ScriptTrap){
+    pub fn pod_pop_to_me(&mut self,  pod_ptr:ScriptPod, offset:&mut ScriptPodOffset, _field:ScriptValue, value:ScriptValue, builtins:&ScriptPodBuiltins, trap:ScriptTrap){
         let pod_ty_index = self.pods[pod_ptr.index as usize].ty.index as usize;
         
         // if we are constructing an array, set the type here
@@ -494,7 +494,7 @@ impl ScriptHeap{
     }
     
           
-    pub fn pod_check_arg_total(&mut self,  pod:ScriptPod, offset:ScriptPodOffset, trap:&ScriptTrap){
+    pub fn pod_check_arg_total(&mut self,  pod:ScriptPod, offset:ScriptPodOffset, trap:ScriptTrap){
         let pod = &mut self.pods[pod.index as usize];
         let pod_type = &self.pod_types[pod.ty.index as usize];
         let size_of = pod_type.ty.size_of();
@@ -553,7 +553,7 @@ impl ScriptHeap{
     }
         
     
-    fn pod_write_vec(&self, ot:&ScriptPodVec, offset_of:usize, out_data:&mut[u32], value:ScriptValue, trap:&ScriptTrap)->usize{
+    fn pod_write_vec(&self, ot:&ScriptPodVec, offset_of:usize, out_data:&mut[u32], value:ScriptValue, trap:ScriptTrap)->usize{
         if let Some(value) = value.as_number(){
             if offset_of >= ot.elem_size() * ot.dims(){
                 trap.err_pod_too_much_data();
@@ -762,7 +762,7 @@ impl ScriptHeap{
         0
     }        
         
-    fn pod_write_field(&self, field_ty:&ScriptPodTypeInline, offset_of:usize, out_data:&mut Vec<u32>, value:ScriptValue, trap:&ScriptTrap){    
+    fn pod_write_field(&self, field_ty:&ScriptPodTypeInline, offset_of:usize, out_data:&mut Vec<u32>, value:ScriptValue, trap:ScriptTrap){    
         
         match &field_ty.data.ty{
             ScriptPodTy::Void | ScriptPodTy::ArrayBuilder | ScriptPodTy::UndefinedStruct  =>{
@@ -954,7 +954,7 @@ impl ScriptHeap{
     
     
     
-    pub fn pod_array_index(&mut self, pod_ptr:ScriptPod, index:usize, builtins:&ScriptPodBuiltins, trap:&ScriptTrap)->ScriptValue{
+    pub fn pod_array_index(&mut self, pod_ptr:ScriptPod, index:usize, builtins:&ScriptPodBuiltins, trap:ScriptTrap)->ScriptValue{
         let pod = &mut self.pods[pod_ptr.index as usize];
         let pod_ty = pod.ty;
         let pod_type = &self.pod_types[pod_ty.index as usize];
@@ -1067,7 +1067,7 @@ impl ScriptHeap{
         }
     }
     
-    pub fn pod_read_field(&mut self, pod_ptr:ScriptPod, field:ScriptValue, builtins:&ScriptPodBuiltins, trap:&ScriptTrap)->ScriptValue{
+    pub fn pod_read_field(&mut self, pod_ptr:ScriptPod, field:ScriptValue, builtins:&ScriptPodBuiltins, trap:ScriptTrap)->ScriptValue{
         // alright lets get a field
         let field_name = if let Some(id) = field.as_id(){id}
         else{
@@ -1189,7 +1189,7 @@ impl ScriptHeap{
         
         
         
-    pub fn pod_swizzle_vec1(&self, vec:ScriptPodVec, data:[u32;4], x:usize, trap:&ScriptTrap)->ScriptValue{
+    pub fn pod_swizzle_vec1(&self, vec:ScriptPodVec, data:[u32;4], x:usize, trap:ScriptTrap)->ScriptValue{
         if x >= vec.dims(){
             return trap.err_pod_invalid_field_name()
         }
@@ -1217,7 +1217,7 @@ impl ScriptHeap{
         }
     }
         
-    pub fn pod_swizzle_vec<const N:usize>(&mut self, vec:ScriptPodVec, data:[u32;4], swiz:[usize;N], builtins:&ScriptPodBuiltins, _trap:&ScriptTrap)->ScriptValue{
+    pub fn pod_swizzle_vec<const N:usize>(&mut self, vec:ScriptPodVec, data:[u32;4], swiz:[usize;N], builtins:&ScriptPodBuiltins, _trap:ScriptTrap)->ScriptValue{
         let pod_type = match N{
             2=> match vec{
                 ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>builtins.pod_vec2f,
@@ -1268,7 +1268,7 @@ impl ScriptHeap{
     // Shader compiler use
     
     
-    pub fn pod_check_abstract_constructor_arg(&self, pod_ty:ScriptPodType, offset: &mut ScriptPodOffset, trap:&ScriptTrap){
+    pub fn pod_check_abstract_constructor_arg(&self, pod_ty:ScriptPodType, offset: &mut ScriptPodOffset, trap:ScriptTrap){
         let pod_ty = &self.pod_types[pod_ty.index as usize];
         match &pod_ty.ty{
             // cross casting numbers
@@ -1332,7 +1332,7 @@ impl ScriptHeap{
     }
     
     
-    pub fn pod_check_constructor_arg_count(&self, pod_ty:ScriptPodType, offset: &ScriptPodOffset, trap:&ScriptTrap){
+    pub fn pod_check_constructor_arg_count(&self, pod_ty:ScriptPodType, offset: &ScriptPodOffset, trap:ScriptTrap){
         let pod_ty = &self.pod_types[pod_ty.index as usize];
         match &pod_ty.ty{
             ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::Bool=>{
@@ -1364,7 +1364,7 @@ impl ScriptHeap{
         }
     }
     
-    pub fn pod_check_constructor_arg(&self, pod_ty:ScriptPodType, pod_ty_arg:ScriptPodType, offset: &mut ScriptPodOffset, trap:&ScriptTrap){
+    pub fn pod_check_constructor_arg(&self, pod_ty:ScriptPodType, pod_ty_arg:ScriptPodType, offset: &mut ScriptPodOffset, trap:ScriptTrap){
         let pod_ty = &self.pod_types[pod_ty.index as usize];
         let pod_ty_arg = &self.pod_types[pod_ty_arg.index as usize];
         match &pod_ty.ty{

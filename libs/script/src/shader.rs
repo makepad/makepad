@@ -155,7 +155,7 @@ pub struct ShaderFnCompiler{
     pub script_scope: ScriptObject,
     pub shader_scope: ShaderScope,
     pub mes: Vec<ShaderMe>,
-    pub trap: ScriptTrap,
+    pub trap: ScriptTrapInner,
 }
 
 #[derive(Default)]
@@ -246,7 +246,7 @@ impl ShaderScope{
 }
 
 impl ShaderStack{    
-    pub fn pop(&mut self, trap:&ScriptTrap)->(ShaderType,String){
+    pub fn pop(&mut self, trap:ScriptTrap)->(ShaderType,String){
         if let Some(s) = self.types.pop(){
             return (s,self.strings.pop().unwrap())
         }
@@ -256,7 +256,7 @@ impl ShaderStack{
         }
     }
     
-    pub fn peek(&self, trap:&ScriptTrap)->(&ShaderType, &String){
+    pub fn peek(&self, trap:ScriptTrap)->(&ShaderType, &String){
         if let Some(ty) = self.types.last(){
             return (ty, self.strings.last().unwrap())
         }
@@ -267,7 +267,7 @@ impl ShaderStack{
         }
     }
     
-    pub fn push(&mut self, trap:&ScriptTrap, ty:ShaderType, s:String){
+    pub fn push(&mut self, trap:ScriptTrap, ty:ShaderType, s:String){
         if self.types.len() > self.stack_limit{
             trap.err_stack_overflow();
         }

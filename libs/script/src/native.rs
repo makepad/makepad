@@ -32,7 +32,7 @@ macro_rules! script_value_bool{
 #[macro_export]
 macro_rules! script_value{
     ($vm:ident, $obj:ident.$id: ident)=>{
-        $vm.heap.value(($obj).into(), id!($id).into(),&$vm.thread.trap)
+        $vm.heap.value(($obj).into(), id!($id).into(),$vm.thread.trap.pass())
     };
     ($vm:ident, $obj:ident.$id:ident.$id2:ident)=>{
         $vm.heap.value($vm.heap.value(($obj).into(), id!($id).into(),&$vm.thread.trap).into(), id!($id2).into(),&$vm.thread.trap)
