@@ -422,6 +422,7 @@ impl fmt::Debug for ScriptValueType {
 impl fmt::Display for ScriptValueType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self{
+            // Numeric types
             Self::F64=>write!(f,"f64"),
             Self::F32=>write!(f,"f32"),
             Self::U40=>write!(f,"u40"),
@@ -429,6 +430,7 @@ impl fmt::Display for ScriptValueType {
             Self::I32=>write!(f,"i32"),
             Self::F16=>write!(f,"f16"),
             Self::NAN=>write!(f,"nan"),
+            // Basic types
             Self::BOOL=>write!(f,"bool"),
             Self::NIL=>write!(f,"nil"),
             Self::COLOR=>write!(f,"color"),
@@ -436,14 +438,12 @@ impl fmt::Display for ScriptValueType {
             Self::OBJECT=>write!(f,"object"),
             Self::ARRAY=>write!(f,"array"),
             Self::POD=>write!(f,"pod"),
-            Self::POD_TYPE=>write!(f,"pod_type"),
+            Self::POD_TYPE=>write!(f,"type"),
             Self::OPCODE=>write!(f,"opcode"),
-            Self::INLINE_STRING_0=>write!(f,"string0"),
-            Self::INLINE_STRING_1=>write!(f,"string1"),
-            Self::INLINE_STRING_2=>write!(f,"string2"),
-            Self::INLINE_STRING_3=>write!(f,"string3"),
-            Self::INLINE_STRING_4=>write!(f,"string4"),
-            Self::INLINE_STRING_5=>write!(f,"string5"),
+            // Inline strings all display as "string"
+            Self::INLINE_STRING_0 | Self::INLINE_STRING_1 | Self::INLINE_STRING_2 |
+            Self::INLINE_STRING_3 | Self::INLINE_STRING_4 | Self::INLINE_STRING_5 => write!(f,"string"),
+            // Error types
             Self::ERR_NOT_FOUND=>write!(f,"NotFound"),
             Self::ERR_NOT_FN=>write!(f,"NotAFunction"),
             Self::ERR_NOT_INDEX=>write!(f,"IndexNotFound"),
@@ -501,8 +501,8 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_ASSIGN_NOT_ALLOWED=>write!(f,"AssignNotAllowed"),
             Self::ERR_RANGE_REQUIRES_NUMBERS=>write!(f,"RangeRequiresNumbers"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
-            x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
-            _=>write!(f,"ScriptValueType?")
+            x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle"),
+            _=>write!(f,"unknown")
         }
     }
 }
