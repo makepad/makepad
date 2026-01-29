@@ -321,6 +321,7 @@ impl ShaderFnCompiler {
     pub fn compile_shader_def(
         vm: &mut ScriptVm,
         output: &mut ShaderOutput,
+        trap: ScriptTrap,
         name: LiveId,
         fnobj: ScriptObject,
         sself: ShaderType,
@@ -343,17 +344,20 @@ impl ShaderFnCompiler {
         }
 
         // First pass: resolve AbstractInt/AbstractFloat against declared parameter types
+        // Also count expected parameters to validate argument count
         let builtins = &vm.code.builtins.pod;
         let argc = vm.heap.vec_len(fnobj);
         let mut resolved_args: Vec<ScriptPodType> = Vec::new();
         let mut argi = 0;
+        let mut expected_param_count = 0;
         for i in 0..argc {
-            let kv = vm.heap.vec_key_value(fnobj, i, vm.thread.trap.pass());
+            let kv = vm.heap.vec_key_value(fnobj, i, trap);
             if kv.key == id!(self).into() {
                 continue;
             }
+            expected_param_count += 1;
             if argi >= args.len() {
-                break;
+                continue; // Keep counting expected params but skip arg processing
             }
             let arg = &args[argi];
             // Get declared parameter type from kv.value
@@ -373,6 +377,19 @@ impl ShaderFnCompiler {
             };
             resolved_args.push(resolved);
             argi += 1;
+        }
+
+        // Validate argument count
+        if args.len() != expected_param_count {
+            output.has_errors = true;
+            script_err_invalid_args!(trap, 
+                "function {:?} expects {} argument{}, but {} {} provided",
+                name,
+                expected_param_count,
+                if expected_param_count == 1 { "" } else { "s" },
+                args.len(),
+                if args.len() == 1 { "was" } else { "were" }
+            );
         }
 
         // lets see if we already have fnobj with our argstypes
@@ -463,11 +480,12 @@ impl ShaderFnCompiler {
         let argc = vm.heap.vec_len(fnobj);
         let mut argi = 0;
         for i in 0..argc {
-            let kv = vm.heap.vec_key_value(fnobj, i, vm.thread.trap.pass());
+            let kv = vm.heap.vec_key_value(fnobj, i, trap);
 
             if kv.key == id!(self).into() {
                 if !has_self || argi != 0 {
-                    script_err_not_found!(vm.thread.trap, "self arg must be first with has_self");
+                    output.has_errors = true;
+                    script_err_not_found!(trap, "self arg must be first with has_self");
                 }
                 continue;
             }
@@ -477,7 +495,8 @@ impl ShaderFnCompiler {
                     write!(fn_args, ", ").ok();
                 }
                 if argi >= resolved_args.len() {
-                    script_err_invalid_args!(vm.thread.trap, "more formal params than resolved args");
+                    output.has_errors = true;
+                    script_err_invalid_args!(trap, "more formal params than resolved args");
                     break;
                 }
                 let arg_ty = resolved_args[argi];
@@ -506,13 +525,15 @@ impl ShaderFnCompiler {
             argi += 1;
         }
         if argi < resolved_args.len() {
-            script_err_invalid_args!(vm.thread.trap, "fewer formal params than resolved args");
+            output.has_errors = true;
+            script_err_invalid_args!(trap, "fewer formal params than resolved args");
         }
 
         if let Some(fnptr) = vm.heap.as_fn(fnobj) {
             if let ScriptFnPtr::Script(fnip) = fnptr {
                 if output.recur_block.iter().any(|v| *v == fnobj) {
-                    script_err_not_allowed!(vm.thread.trap, "shader functions cannot recurse");
+                    output.has_errors = true;
+                    script_err_not_allowed!(trap, "shader functions cannot recurse");
                     (vm.code.builtins.pod.pod_void, fn_name)
                 } else {
                     output.recur_block.push(fnobj);
@@ -576,7 +597,7 @@ impl ShaderFnCompiler {
     ) {
         // we should compare number of arguments (needs to be exact)
         // Note: fn_name already includes "(" at the end from compile_shader_def
-        let (ret, fn_name) = Self::compile_shader_def(vm, output, name, fnobj, sself, args);
+        let (ret, fn_name) = Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
         out.insert_str(0, &fn_name);
         out.push_str(")");
         self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);

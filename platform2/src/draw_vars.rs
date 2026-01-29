@@ -6,7 +6,6 @@ use {
         makepad_script::mod_shader::ShaderIoType,
         makepad_script::pod_heap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
-        makepad_script::trap::*,
         makepad_script::ScriptFnPtr,
         makepad_math::*,
         cx::Cx,
