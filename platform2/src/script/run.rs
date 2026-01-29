@@ -111,7 +111,7 @@ pub fn define_run_module(vm:&mut ScriptVm){
                 
         if !script_has_proto!(vm, cmd, run.ChildCmd) || 
             !script_has_proto!(vm, events, run.ChildEvents){
-            return vm.thread.trap.err_invalid_arg_type()
+            return err_invalid_arg_type!(vm.thread.trap.pass())
         }
         
         let cmd = ChildCmd::script_from_value(vm, cmd);
@@ -150,7 +150,7 @@ pub fn define_run_module(vm:&mut ScriptVm){
             }
             Err(_e)=>{
                
-                vm.thread.trap.err_child_process()
+                err_child_process!(vm.thread.trap.pass())
             }
         }
     });

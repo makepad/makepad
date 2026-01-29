@@ -57,8 +57,8 @@ pub fn script_mod(vm:&mut ScriptVm){
         
         // Copy keyframes from args
         for i in 0..len {
-            let value = vm.heap.vec_value(args, i, &vm.thread.trap);
-            vm.heap.vec_push(keyframes, ScriptValue::NIL, value, &vm.thread.trap);
+            let value = vm.heap.vec_value(args, i, NoTrap);
+            vm.heap.vec_push(keyframes, ScriptValue::NIL, value, NoTrap);
         }
         
         // Store keyframes on timeline object
@@ -173,8 +173,6 @@ struct AnimatorTrack {
     group_id: LiveId,
     /// The current state id (e.g., "off", "on", "drag")
     state_id: LiveId,
-    /// The previous state id we're animating from
-    from_state_id: LiveId,
     /// When the animation started
     start_time: f64,
     /// The Play mode for this animation
@@ -327,7 +325,6 @@ impl Animator{
         let track = AnimatorTrack {
             group_id,
             state_id: target_state_id,
-            from_state_id,
             start_time: f64::NEG_INFINITY,
             play,
             ease: Ease::Linear, // Could be made configurable
@@ -475,10 +472,10 @@ impl Animator{
                 let to_val = to_value.value;
                 
                 // Try to get corresponding value from 'from'
-                let from_val = vm.heap.value(from, *key, &Default::default());
+                let from_val = vm.heap.value(from, *key, NoTrap);
                 
                 // Get existing value at this key in result (for reusing nested objects)
-                let existing = vm.heap.value(result, *key, &Default::default());
+                let existing = vm.heap.value(result, *key, NoTrap);
                 
                 // Interpolate based on type, reusing existing nested objects from result
                 let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
@@ -496,12 +493,12 @@ impl Animator{
         if let Some(to_obj) = to.as_object() {
             if vm.heap.has_apply_transform(to) {
                 // Check if it's a timeline object (has keyframes property)
-                let keyframes = vm.heap.value(to_obj, id!(keyframes).into(), &Default::default());
+                let keyframes = vm.heap.value(to_obj, id!(keyframes).into(), NoTrap);
                 if let Some(kf_obj) = keyframes.as_object() {
                     return Self::interpolate_timeline(vm, from, kf_obj, mix, existing);
                 }
                 // Otherwise it's a snap object - return the stored value
-                return vm.heap.value(to_obj, id!(value).into(), &Default::default());
+                return vm.heap.value(to_obj, id!(value).into(), NoTrap);
             }
             
             // If it's an object, recursively interpolate
@@ -577,8 +574,8 @@ impl Animator{
         }
         
         // Get first keyframe
-        let first_time = vm.heap.vec_value(keyframes, 0, &Default::default()).as_f64().unwrap_or(0.0);
-        let first_value = vm.heap.vec_value(keyframes, 1, &Default::default());
+        let first_time = vm.heap.vec_value(keyframes, 0, NoTrap).as_f64().unwrap_or(0.0);
+        let first_value = vm.heap.vec_value(keyframes, 1, NoTrap);
         
         // If mix is before first keyframe, interpolate from `from` to first keyframe value
         if mix <= first_time {
@@ -590,8 +587,8 @@ impl Animator{
         }
         
         // Get last keyframe
-        let last_time = vm.heap.vec_value(keyframes, (num_pairs - 1) * 2, &Default::default()).as_f64().unwrap_or(1.0);
-        let last_value = vm.heap.vec_value(keyframes, (num_pairs - 1) * 2 + 1, &Default::default());
+        let last_time = vm.heap.vec_value(keyframes, (num_pairs - 1) * 2, NoTrap).as_f64().unwrap_or(1.0);
+        let last_value = vm.heap.vec_value(keyframes, (num_pairs - 1) * 2 + 1, NoTrap);
         
         // If mix is at or after last keyframe, return last value
         if mix >= last_time {
@@ -603,8 +600,8 @@ impl Animator{
         let mut v0 = first_value;
         
         for i in 1..num_pairs {
-            let t1 = vm.heap.vec_value(keyframes, i * 2, &Default::default()).as_f64().unwrap_or(1.0);
-            let v1 = vm.heap.vec_value(keyframes, i * 2 + 1, &Default::default());
+            let t1 = vm.heap.vec_value(keyframes, i * 2, NoTrap).as_f64().unwrap_or(1.0);
+            let v1 = vm.heap.vec_value(keyframes, i * 2 + 1, NoTrap);
             
             if mix <= t1 {
                 // Interpolate between t0,v0 and t1,v1

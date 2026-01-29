@@ -174,7 +174,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
             
-            if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), &vm.thread.trap).as_object(){
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), vm.thread.trap.pass()).as_object(){
                 output.mode = ShaderMode::Vertex;
                 ShaderFnCompiler::compile_shader_def(
                     vm, 
@@ -185,7 +185,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                     vec![],
                 );
             }
-            if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), &vm.thread.trap).as_object(){
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), vm.thread.trap.pass()).as_object(){
                 output.mode = ShaderMode::Fragment;
                 ShaderFnCompiler::compile_shader_def(
                     vm, 

@@ -9,6 +9,7 @@ use crate::trap::*;
 use crate::json::*;
 use crate::pod::*;
 use std::any::Any;
+use crate::*;
 
 #[derive(Debug, Default)]
 pub struct StackBases{
@@ -87,7 +88,7 @@ pub struct ScriptThread{
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
     pub trap: ScriptTrapInner,
-    pub(crate) last_err: ScriptValue,
+    //pub(crate) last_err: ScriptValue,
     pub(crate) json_parser: JsonParserThread,
     pub(crate) thread_id: ScriptThreadId,
 }
@@ -98,7 +99,7 @@ impl ScriptThread{
         Self{
             thread_id,
             is_paused: false,
-            last_err: NIL,
+            //last_err: NIL,
             scopes: vec![],
             tries: vec![],
             stack_limit: 1_000_000,
@@ -106,7 +107,7 @@ impl ScriptThread{
             stack: vec![],
             calls: vec![],
             mes: vec![],
-            trap: ScriptTrap::default(),
+            trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
         }
     }
@@ -152,7 +153,7 @@ impl ScriptThread{
             return val    
         }
         else{
-            self.trap.err_stack_underflow()
+            err_stack_underflow!(self.trap)
         }
     }
     
@@ -167,7 +168,7 @@ impl ScriptThread{
             return *val    
         }
         else{
-            self.trap.err_stack_underflow()
+            err_stack_underflow!(self.trap)
         }
     }
     
@@ -176,7 +177,7 @@ impl ScriptThread{
             return *value
         }
         else{
-            self.trap.err_stack_underflow()
+            err_stack_underflow!(self.trap)
         }
     }
     
@@ -186,7 +187,7 @@ impl ScriptThread{
             return self.stack[len - 1 - offset]
         }
         else{
-            self.trap.err_stack_underflow()
+            err_stack_underflow!(self.trap)
         }
     }
     
@@ -195,13 +196,13 @@ impl ScriptThread{
             return value
         }
         else{
-            self.trap.err_stack_underflow()
+            err_stack_underflow!(self.trap)
         }
     }
     
     pub fn push_stack_value(&mut self, value:ScriptValue){
         if self.stack.len() > self.stack_limit{
-            self.trap.err_stack_overflow();
+            err_stack_overflow!(self.trap);
         }
         else{
             self.stack.push(value);
@@ -222,11 +223,11 @@ impl ScriptThread{
     
     // lets resolve an id to a ScriptValue
     pub fn scope_value(&mut  self, heap:&ScriptHeap, id: LiveId)->ScriptValue{
-        heap.scope_value(*self.scopes.last().unwrap(), id.into(),&self.trap)
+        heap.scope_value(*self.scopes.last().unwrap(), id.into(), self.trap.pass())
     }
     
     pub fn set_scope_value(&mut self, heap:&mut ScriptHeap, id: LiveId, value:ScriptValue)->ScriptValue{
-        heap.set_scope_value(*self.scopes.last().unwrap(), id.into(),value,&self.trap)
+        heap.set_scope_value(*self.scopes.last().unwrap(), id.into(),value,self.trap.pass())
     }
     
     pub fn def_scope_value(&mut self, heap:&mut ScriptHeap, id: LiveId, value:ScriptValue){
@@ -244,7 +245,7 @@ impl ScriptThread{
             return fnobj
         }
         
-        let err = heap.push_all_fn_args(scope, args, &self.trap);
+        let err = heap.push_all_fn_args(scope, args, self.trap.pass());
         if err.is_err(){
             return err
         }
@@ -279,7 +280,7 @@ impl ScriptThread{
             }
         }
         else{
-            return self.trap.err_not_fn()
+            return err_not_fn!(self.trap)
         }
     }
     
@@ -292,24 +293,24 @@ impl ScriptThread{
             if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(opcode, args, heap, code, host);
                 // if exception tracing
-                if let Some(err) = self.trap.err.take(){
+                if self.trap.err.borrow_mut().len()>0{
                     if self.call_has_try(){
+                        // pop all errors
+                        self.trap.err.borrow_mut().clear();
                         let try_frame = self.tries.pop().unwrap();
                         self.truncate_bases(try_frame.bases, heap);
                         if try_frame.push_nil{
                             self.push_stack_unchecked(NIL)
                         }
                         self.trap.goto(try_frame.start_ip + try_frame.jump);
-                        self.last_err = err.value;
+                        //self.last_err = err.value;
                     }
                     else{
-                        if let Some(ptr) = err.value.as_err(){
-                            if let Some(loc2) = code.ip_to_loc(ptr.ip){
-                                if err.in_rust{
-                                    log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}(in rust)", err.value), LogLevel::Error);
-                                }
-                                else{
-                                    log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}", err.value), LogLevel::Error);
+                        while let Some(err) = self.trap.err.borrow_mut().pop(){
+                            if let Some(ptr) = err.value.as_err(){
+                                if let Some(loc2) = code.ip_to_loc(ptr.ip){
+                                    let in_rust = if err.in_rust{"(in rust)"}else{""};
+                                    log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}{in_rust} {} ({}:{})", err.value, err.message, err.origin_file, err.origin_line), LogLevel::Error);
                                 }
                             }
                         }

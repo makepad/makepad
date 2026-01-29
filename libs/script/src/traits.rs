@@ -302,7 +302,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     fn script_enum_lookup_variant(vm:&mut ScriptVm, variant:LiveId)->ScriptValue{
         let rt = vm.heap.registered_type(Self::script_type_id_static()).unwrap();
         let obj = rt.object.as_ref().unwrap().proto.into();
-        vm.heap.value(obj, variant.into(), &vm.thread.trap)
+        vm.heap.value(obj, variant.into(), vm.thread.trap.pass())
     }
 }
 

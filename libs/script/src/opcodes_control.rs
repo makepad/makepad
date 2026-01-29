@@ -10,6 +10,7 @@ use crate::opcode::*;
 use crate::vm::ScriptCode;
 use crate::thread::*;
 use crate::trap::*;
+use crate::*;
 
 impl ScriptThread {
     // IF handlers
@@ -135,11 +136,11 @@ impl ScriptThread {
         let start = self.pop_stack_resolved(heap);
         // Validate that both operands are numbers
         if !start.is_number() {
-            self.push_stack_unchecked(self.trap.err_range_requires_numbers());
+            self.push_stack_unchecked(err_range_requires_numbers!(self.trap));
             return;
         }
         if !end.is_number() {
-            self.push_stack_unchecked(self.trap.err_range_requires_numbers());
+            self.push_stack_unchecked(err_range_requires_numbers!(self.trap));
             return;
         }
         let range = heap.new_with_proto(code.builtins.range.into());
@@ -194,7 +195,7 @@ impl ScriptThread {
     // Try / OK handlers
     
     pub(crate) fn handle_ok_test(&mut self, opargs: OpcodeArgs) {
-        self.last_err = NIL;
+        //self.last_err = NIL;
         self.tries.push(TryFrame{
             push_nil: true,
             start_ip: self.trap.ip(),
@@ -210,7 +211,7 @@ impl ScriptThread {
     }
     
     pub(crate) fn handle_try_test(&mut self, opargs: OpcodeArgs) {
-        self.last_err = NIL;
+        //self.last_err = NIL;
         self.tries.push(TryFrame{
             push_nil: false,
             start_ip: self.trap.ip(),

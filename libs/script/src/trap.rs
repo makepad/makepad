@@ -25,6 +25,7 @@ pub struct ScriptTrapInner{
     pub ip: ScriptIp,
 }
 
+#[derive(Clone, Copy)]
 pub enum ScriptTrap<'a>{
     NoTrap,
     Inner(&'a ScriptTrapInner)
@@ -37,12 +38,19 @@ impl<'a> ScriptTrap<'a>{
 }
 
 impl ScriptTrapInner{
-    pub fn pass<'a>(&'a self)->ScriptTrap{ScriptTrap::Inner(self)}
+    pub fn pass<'a>(&'a self)->ScriptTrap<'a>{ScriptTrap::Inner(self)}
 }
 
 impl ScriptTrapInner{
-    pub fn push_err(&self, err:ScriptError){
-        self.err.borrow_mut().push(err)
+    pub fn push_err(&self, value:ScriptValue,  message:String, origin_file:String, origin_line:u32)->ScriptValue{
+        self.err.borrow_mut().push(ScriptError{
+            in_rust: self.in_rust,
+            value,
+            message,
+            origin_file,
+            origin_line
+        });
+        value
     }
     pub fn ip(&self)->u32{
         self.ip.index

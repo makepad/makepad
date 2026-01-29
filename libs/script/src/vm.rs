@@ -11,6 +11,7 @@ use crate::mod_pod::*;
 use crate::mod_shader::*;
 use crate::object::*;
 use crate::function::*;
+use crate::trap::*;
 use std::cell::RefCell;
 use std::any::Any;
 use std::collections::HashMap;
@@ -49,7 +50,7 @@ pub struct ScriptBuiltins{
 impl ScriptBuiltins{
     pub fn new(heap:&mut ScriptHeap, pod: ScriptPodBuiltins)->Self{
         Self{
-            range: heap.value_path(heap.modules, ids!(std.Range),&mut Default::default()).as_object().unwrap(),
+            range: heap.value_path(heap.modules, ids!(std.Range),NoTrap).as_object().unwrap(),
             pod,
         }
     }

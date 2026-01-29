@@ -1,4 +1,5 @@
 pub use makepad_draw::makepad_platform;
+pub use makepad_platform::makepad_script;
 pub use makepad_draw2 as makepad_draw;
 pub use makepad_html;
 pub use makepad_derive_widget2 as makepad_derive_widget;

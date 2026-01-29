@@ -11,6 +11,7 @@ use crate::shader_backend::*;
 use crate::pod::ScriptPodTy;
 use std::fmt::Write;
 use crate::makepad_error_log::*;
+use crate::*;
 
 // Re-export types from shader_output
 pub use crate::shader_output::*;
@@ -169,7 +170,7 @@ pub struct ShaderStack{
 macro_rules! push_fmt {
     ($self:ident, $ty:expr, $fmt_str:literal, $($args:expr),*) => {{
         let s = free_fmt!($self, $fmt_str, $($args),*);
-        $self.stack.push(&$self.trap, $ty, s);
+        $self.stack.push($self.trap.pass(), $ty, s);
     }};
 }
 
@@ -251,7 +252,7 @@ impl ShaderStack{
             return (s,self.strings.pop().unwrap())
         }
         else{
-            trap.err_stack_underflow();
+            err_stack_underflow!(trap);
             (ShaderType::Error(NIL), String::new())
         }
     }
@@ -261,7 +262,7 @@ impl ShaderStack{
             return (ty, self.strings.last().unwrap())
         }
         else{
-            trap.err_stack_underflow();
+            err_stack_underflow!(trap);
             static EMPTY: (ShaderType, String) = (ShaderType::None, String::new());
             (&EMPTY.0, &EMPTY.1)
         }
@@ -269,7 +270,7 @@ impl ShaderStack{
     
     pub fn push(&mut self, trap:ScriptTrap, ty:ShaderType, s:String){
         if self.types.len() > self.stack_limit{
-            trap.err_stack_overflow();
+            err_stack_overflow!(trap);
         }
         else{
             self.types.push(ty);
@@ -369,7 +370,7 @@ impl ShaderFnCompiler{
                 self.handle_if_else_phi(vm, output);
             }
             // alright lets see if we have a trap, ifso we can log it
-            if let Some(err) = self.trap.err.take(){
+            if let Some(err) = self.trap.err.borrow_mut().pop(){
                 if let Some(ptr) = err.value.as_err(){
                     if let Some(loc2) = vm.code.ip_to_loc(ptr.ip){
                         log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}", err.value), LogLevel::Error);
@@ -389,7 +390,7 @@ impl ShaderFnCompiler{
     }
 
     pub(crate) fn pop_resolved(&mut self, vm:&mut ScriptVm, output:&mut ShaderOutput)->(ShaderType,String){
-        let (ty, s) = self.stack.pop(&self.trap);
+        let (ty, s) = self.stack.pop(self.trap.pass());
         // if ty is an id, look it up
         match ty{
             ShaderType::Id(id)=>{
@@ -417,8 +418,8 @@ impl ShaderFnCompiler{
                 }
                 
                 // Not found in shader scope - try script scope for scope uniforms
-                let value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
-                if !value.is_nil() && self.trap.err.get().is_none() {
+                let value = vm.heap.scope_value(self.script_scope, id.into(), self.trap.pass());
+                if !value.is_nil() && self.trap.err.borrow().is_empty() {
                     // Check if this is a shader_io type
                     if let Some(value_obj) = value.as_object() {
                         if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
@@ -491,7 +492,7 @@ impl ShaderFnCompiler{
                                 return (ShaderType::ScopeTexture { obj: value_obj, tex_type, shader_name }, s2)
                             }
                             // Other shader_io types are not supported in scope
-                            self.trap.err_opcode_not_supported_in_shader();
+                            err_opcode_not_supported_in_shader!(self.trap);
                             self.stack.free_string(s);
                             return (ShaderType::Error(NIL), self.stack.new_string())
                         }
@@ -546,7 +547,7 @@ impl ShaderFnCompiler{
                 
                 // Clear any error from scope_value lookup failure
                 self.trap.err.take();
-                self.trap.err_not_found();
+                err_not_found!(self.trap);
                 self.stack.free_string(s);
                 return (ShaderType::Error(NIL), self.stack.new_string())
             },
@@ -708,7 +709,7 @@ impl ShaderFnCompiler{
         if let Some(v) = value.as_f64(){ // abstract int or float
             let mut s = self.stack.new_string();
             write_shader_float(&mut s, v);
-            return self.stack.push(&self.trap, ShaderType::AbstractFloat, s);
+            return self.stack.push(self.trap.pass(), ShaderType::AbstractFloat, s);
         }
         if let Some(v) = value.as_u40(){
             return push_fmt!(self, ShaderType::AbstractInt, "{}", v);
@@ -720,13 +721,13 @@ impl ShaderFnCompiler{
             let mut s = self.stack.new_string();
             write_shader_float(&mut s, v as f64);
             s.push('f');
-            return self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_f32), s);
+            return self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_f32), s);
         }
         if let Some(v) = value.as_f16(){
             let mut s = self.stack.new_string();
             write_shader_float(&mut s, v as f64);
             s.push('h');
-            return self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_f16), s);
+            return self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_f16), s);
         }
         if let Some(v) = value.as_u32(){
             return push_fmt!(self, ShaderType::Pod(builtins.pod_u32), "{}u", v);
@@ -750,9 +751,9 @@ impl ShaderFnCompiler{
             s.push(',');
             write_shader_float(&mut s, v.w as f64);
             s.push(')');
-            return self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_vec4f), s);
+            return self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_vec4f), s);
         }
-        self.trap.err_no_matching_shader_type();
+        err_no_matching_shader_type!(self.trap);
     }
 
     pub(crate) fn ensure_struct_name(&self, vm: &mut ScriptVm, output: &mut ShaderOutput, pod_ty: ScriptPodType, used_name: LiveId) -> LiveId {
@@ -763,7 +764,7 @@ impl ShaderFnCompiler{
         
         if let Some(name) = vm.heap.pod_type_name(pod_ty) {
             if name != used_name && used_name != id!(self) && used_name != id!(vec2) && used_name != id!(vec3) && used_name != id!(vec4) {
-                self.trap.err_struct_name_not_consistent();
+                err_struct_name_not_consistent!(self.trap);
             }
             return name;
         }
@@ -799,7 +800,7 @@ impl ShaderFnCompiler{
             Opcode::ASSIGN_XOR=>{self.handle_arithmetic_assign(vm, output, opargs, "^=", true);},
             Opcode::ASSIGN_SHL=>{self.handle_arithmetic_assign(vm, output, opargs, ">>=", true);},
             Opcode::ASSIGN_SHR=>{self.handle_arithmetic_assign(vm, output, opargs, "<<=", true);},
-            Opcode::ASSIGN_IFNIL=>{self.trap.err_not_impl();},
+            Opcode::ASSIGN_IFNIL=>{err_not_impl!(self.trap);},
 // ASSIGN FIELD                       
             Opcode::ASSIGN_FIELD=>self.handle_assign_field(vm, output),
             Opcode::ASSIGN_FIELD_ADD=>{self.handle_arithmetic_field_assign(vm, output, opargs, "+=", false);},
@@ -812,7 +813,7 @@ impl ShaderFnCompiler{
             Opcode::ASSIGN_FIELD_XOR=>{self.handle_arithmetic_field_assign(vm, output, opargs, "^=", true);},
             Opcode::ASSIGN_FIELD_SHL=>{self.handle_arithmetic_field_assign(vm, output, opargs, ">>=", true);},
             Opcode::ASSIGN_FIELD_SHR=>{self.handle_arithmetic_field_assign(vm, output, opargs, "<<=", true);},
-            Opcode::ASSIGN_FIELD_IFNIL=>{self.trap.err_not_impl();},
+            Opcode::ASSIGN_FIELD_IFNIL=>{err_not_impl!(self.trap);},
                                     
             Opcode::ASSIGN_INDEX=>self.handle_assign_index(vm, output),
             Opcode::ASSIGN_INDEX_ADD=>{self.handle_arithmetic_index_assign(vm, output, opargs, "+=", false);},
@@ -825,16 +826,16 @@ impl ShaderFnCompiler{
             Opcode::ASSIGN_INDEX_XOR=>{self.handle_arithmetic_index_assign(vm, output, opargs, "^=", true);},
             Opcode::ASSIGN_INDEX_SHL=>{self.handle_arithmetic_index_assign(vm, output, opargs, ">>=", true);},
             Opcode::ASSIGN_INDEX_SHR=>{self.handle_arithmetic_index_assign(vm, output, opargs, "<<=", true);},
-            Opcode::ASSIGN_INDEX_IFNIL=>{self.trap.err_not_impl();},
+            Opcode::ASSIGN_INDEX_IFNIL=>{err_not_impl!(self.trap);},
 // ASSIGN ME            
             Opcode::ASSIGN_ME=>self.handle_assign_me(vm),
                                     
-            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{err_opcode_not_supported_in_shader!(self.trap);},
                                     
-            Opcode::ASSIGN_ME_BEGIN=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::ASSIGN_ME_BEGIN=>{err_opcode_not_supported_in_shader!(self.trap);},
             
 // CONCAT  
-            Opcode::CONCAT=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::CONCAT=>{err_opcode_not_supported_in_shader!(self.trap);},
 // EQUALITY
             Opcode::EQ=>{self.handle_eq(vm, output, opargs, "==");},
             Opcode::NEQ=>{self.handle_eq(vm, output, opargs, "!=");},
@@ -846,24 +847,24 @@ impl ShaderFnCompiler{
                         
             Opcode::LOGIC_AND =>{self.handle_logic(vm, output, opargs, "&&");},
             Opcode::LOGIC_OR =>{self.handle_logic(vm, output, opargs, "||");},
-            Opcode::NIL_OR =>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::SHALLOW_EQ =>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::SHALLOW_NEQ=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::NIL_OR =>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::SHALLOW_EQ =>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::SHALLOW_NEQ=>{err_opcode_not_supported_in_shader!(self.trap);},
             // Object/Array begin
-            Opcode::BEGIN_PROTO=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::PROTO_INHERIT_READ=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::PROTO_INHERIT_WRITE=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::SCOPE_INHERIT_READ=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::SCOPE_INHERIT_WRITE=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::FIELD_INHERIT_READ=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::FIELD_INHERIT_WRITE=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::INDEX_INHERIT_READ=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::INDEX_INHERIT_WRITE=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::END_PROTO=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::BEGIN_BARE=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::END_BARE=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::BEGIN_ARRAY=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::END_ARRAY=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::BEGIN_PROTO=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::PROTO_INHERIT_READ=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::PROTO_INHERIT_WRITE=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::SCOPE_INHERIT_READ=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::SCOPE_INHERIT_WRITE=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::FIELD_INHERIT_READ=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::FIELD_INHERIT_WRITE=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::INDEX_INHERIT_READ=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::INDEX_INHERIT_WRITE=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::END_PROTO=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::BEGIN_BARE=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::END_BARE=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::BEGIN_ARRAY=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::END_ARRAY=>{err_opcode_not_supported_in_shader!(self.trap);},
 // Calling
             Opcode::CALL_ARGS=>{
                 self.handle_call_args(vm, output, opargs);
@@ -875,65 +876,65 @@ impl ShaderFnCompiler{
                 self.handle_method_call_args(vm, output, opargs);
             },
 // Fn def
-            Opcode::FN_ARGS=>{self.trap.err_not_impl();},
-            Opcode::FN_LET_ARGS=>{self.trap.err_not_impl();},
-            Opcode::FN_ARG_DYN=>{self.trap.err_not_impl();},
-            Opcode::FN_ARG_TYPED=>{self.trap.err_not_impl();},
-            Opcode::FN_BODY_DYN=>{self.trap.err_not_impl();},
-            Opcode::FN_BODY_TYPED=>{self.trap.err_not_impl();},
+            Opcode::FN_ARGS=>{err_not_impl!(self.trap);},
+            Opcode::FN_LET_ARGS=>{err_not_impl!(self.trap);},
+            Opcode::FN_ARG_DYN=>{err_not_impl!(self.trap);},
+            Opcode::FN_ARG_TYPED=>{err_not_impl!(self.trap);},
+            Opcode::FN_BODY_DYN=>{err_not_impl!(self.trap);},
+            Opcode::FN_BODY_TYPED=>{err_not_impl!(self.trap);},
             Opcode::RETURN=>self.handle_return(vm, output, opargs),
-            Opcode::RETURN_IF_ERR=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::RETURN_IF_ERR=>{err_opcode_not_supported_in_shader!(self.trap);},
 // IF            
             Opcode::IF_TEST=>self.handle_if_test(opargs),
                         
             Opcode::IF_ELSE=>self.handle_if_else(vm, opargs),
 // Use            
-            Opcode::USE=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::USE=>{err_opcode_not_supported_in_shader!(self.trap);},
 // Field            
             Opcode::FIELD=>self.handle_field(vm, output),
-            Opcode::FIELD_NIL=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::ME_FIELD=>{self.trap.err_not_impl();},
+            Opcode::FIELD_NIL=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::ME_FIELD=>{err_not_impl!(self.trap);},
             Opcode::PROTO_FIELD=>self.handle_field(vm, output),
                         
             Opcode::POP_TO_ME=>{
                 self.pop_to_me(vm);    
             },
 // Array index            
-            Opcode::ARRAY_INDEX=>{self.trap.err_not_impl();},
+            Opcode::ARRAY_INDEX=>{err_not_impl!(self.trap);},
 // Let                   
             Opcode::LET_DYN=>self.handle_let_dyn(vm, output, opargs),
-            Opcode::LET_TYPED=>{self.trap.err_not_impl();},
+            Opcode::LET_TYPED=>{err_not_impl!(self.trap);},
             Opcode::VAR_DYN=>self.handle_var_dyn(vm, output, opargs),
-            Opcode::VAR_TYPED=>{self.trap.err_not_impl();},
+            Opcode::VAR_TYPED=>{err_not_impl!(self.trap);},
 // Tree search            
-            Opcode::SEARCH_TREE=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::SEARCH_TREE=>{err_opcode_not_supported_in_shader!(self.trap);},
 // Log            
             Opcode::LOG=>{self.handle_log(vm);},
 // Me/Scope
-            Opcode::ME=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::ME=>{err_opcode_not_supported_in_shader!(self.trap);},
                         
-            Opcode::SCOPE=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::SCOPE=>{err_opcode_not_supported_in_shader!(self.trap);},
 // For            
             Opcode::FOR_1 =>self.handle_for_1(),
-            Opcode::FOR_2 =>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::FOR_3=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::LOOP=>{self.trap.err_not_impl();},
+            Opcode::FOR_2 =>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::FOR_3=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::LOOP=>{err_not_impl!(self.trap);},
             Opcode::FOR_END=>self.handle_for_end(),
-            Opcode::BREAK=>{self.trap.err_not_impl();},
-            Opcode::BREAKIFNOT=>{self.trap.err_not_impl();},
-            Opcode::CONTINUE=>{self.trap.err_not_impl();},
+            Opcode::BREAK=>{err_not_impl!(self.trap);},
+            Opcode::BREAKIFNOT=>{err_not_impl!(self.trap);},
+            Opcode::CONTINUE=>{err_not_impl!(self.trap);},
 // Range            
             Opcode::RANGE=>self.handle_range(vm),
 // Is            
-            Opcode::IS=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::IS=>{err_opcode_not_supported_in_shader!(self.trap);},
 // Try / OK            
-            Opcode::OK_TEST=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::OK_END=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::TRY_TEST=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::TRY_ERR=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::TRY_OK=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::OK_TEST=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::OK_END=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::TRY_TEST=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::TRY_ERR=>{err_opcode_not_supported_in_shader!(self.trap);},
+            Opcode::TRY_OK=>{err_opcode_not_supported_in_shader!(self.trap);},
             opcode=>{
-                self.trap.err_opcode_not_supported_in_shader();
+                err_opcode_not_supported_in_shader!(self.trap);
                 println!("UNDEFINED OPCODE {}", opcode);
                 self.trap.goto_next();
                 // unknown instruction
@@ -946,18 +947,18 @@ impl ShaderFnCompiler{
         if let Some(me) = self.mes.last_mut(){
             match me{
                 ShaderMe::FnBody{ .. } | ShaderMe::ForLoop{..} | ShaderMe::IfBody{..}=>{
-                    let (_ty,s) = self.stack.pop(&self.trap);
+                    let (_ty,s) = self.stack.pop(self.trap.pass());
                     self.out.push_str(&s);
                     self.out.push_str(";\n");
                     self.stack.free_string(s);
                 }
                 ShaderMe::Pod{pod_ty:_, args}=>{
-                    let (ty, s) = self.stack.pop(&self.trap);
+                    let (ty, s) = self.stack.pop(self.trap.pass());
                     
                     if let Some(last) = args.last(){
                          let last_was_named = last.name.is_some();
                          if last_was_named {
-                             self.trap.err_use_only_named_or_ordered_pod_fields();
+                             err_use_only_named_or_ordered_pod_fields!(self.trap);
                          }
                     }
                     
@@ -968,13 +969,13 @@ impl ShaderFnCompiler{
                     });
                 }
                 ShaderMe::ArrayConstruct{args, elem_ty}=>{
-                    let (ty, s) = self.stack.pop(&self.trap);
+                    let (ty, s) = self.stack.pop(self.trap.pass());
                     let arg_ty = if let ShaderType::Id(id) = ty {
                          if let Some((v, _name)) = self.shader_scope.find_var(id){
                              v.ty()
                          }
                          else{
-                             self.trap.err_not_found();
+                             err_not_found!(self.trap);
                              vm.code.builtins.pod.pod_void
                          }
                     }
@@ -982,13 +983,13 @@ impl ShaderFnCompiler{
                         ty
                     }
                     else{
-                        self.trap.err_no_matching_shader_type();
+                        err_no_matching_shader_type!(self.trap);
                         vm.code.builtins.pod.pod_void
                     };
                     
                     if let Some(elem_ty) = elem_ty {
                         if *elem_ty != arg_ty {
-                             self.trap.err_pod_type_not_matching();
+                             err_pod_type_not_matching!(self.trap);
                         }
                     }
                     else {
@@ -997,11 +998,11 @@ impl ShaderFnCompiler{
                     args.push(s);
                 }
                 ShaderMe::TextureBuiltin{args, ..}=>{
-                    let (_ty, s) = self.stack.pop(&self.trap);
+                    let (_ty, s) = self.stack.pop(self.trap.pass());
                     args.push(s);
                 }
                 ShaderMe::ScriptCall{out, args, ..}=>{
-                    let (ty, s) = self.stack.pop(&self.trap);
+                    let (ty, s) = self.stack.pop(self.trap.pass());
                     //let has_self = if let ShaderType::Pod(_) = sself{true} else {false};
                     if out.len() > 0{
                         out.push_str(", ");
@@ -1013,7 +1014,7 @@ impl ShaderFnCompiler{
                              args.push(ShaderType::Pod(v.ty()));
                          }
                          else{
-                             self.trap.err_not_found();
+                             err_not_found!(self.trap);
                              args.push(ty);
                          }
                     }
@@ -1024,13 +1025,13 @@ impl ShaderFnCompiler{
                     self.stack.free_string(s);
                 }
                 ShaderMe::BuiltinCall{args, ..}=>{
-                    let (ty, s) = self.stack.pop(&self.trap);
+                    let (ty, s) = self.stack.pop(self.trap.pass());
                     // Resolve Id to Pod type, but keep AbstractInt/AbstractFloat as-is
                     let resolved_ty = if let ShaderType::Id(id) = &ty {
                         if let Some((v, _name)) = self.shader_scope.find_var(*id) {
                             ShaderType::Pod(v.ty())
                         } else {
-                            self.trap.err_not_found();
+                            err_not_found!(self.trap);
                             ty
                         }
                     } else {

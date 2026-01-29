@@ -82,7 +82,7 @@ pub fn pod_swizzle_vec_match_impl(_input: TokenStream) -> TokenStream {
             }
         }
     }
-    tb.add("    _=>trap.err_pod_invalid_field_name()");
+    tb.add("    _=>err_pod_invalid_field_name!(trap)");
     tb.add("}");
     tb.end()
 }

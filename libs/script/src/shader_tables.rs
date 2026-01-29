@@ -3,6 +3,7 @@ use crate::value::*;
 use crate::pod::*;
 use crate::shader::ShaderType;
 use crate::trap::ScriptTrap;
+use crate::*;
 
 pub fn type_table_neg(val: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let r = match val{
@@ -23,7 +24,7 @@ pub fn type_table_neg(val: &ShaderType, trap:ScriptTrap, builtins:&ScriptPodBuil
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        trap.err_opcode_not_defined_for_shader_type();
+        err_opcode_not_defined_for_shader_type!(trap);
     }
     r
 }
@@ -297,7 +298,7 @@ pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:Scri
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        trap.err_no_wgsl_conversion_available();
+        err_no_wgsl_conversion_available!(trap);
     }
     r
 }
@@ -352,7 +353,7 @@ pub fn type_table_int_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:Script
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        trap.err_no_wgsl_conversion_available();
+        err_no_wgsl_conversion_available!(trap);
     }
     r
 }
@@ -367,7 +368,7 @@ pub fn type_table_logic(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, bui
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        trap.err_no_wgsl_conversion_available();
+        err_no_wgsl_conversion_available!(trap);
     }
     r
 }
@@ -462,7 +463,7 @@ pub fn type_table_eq(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, builti
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        trap.err_no_wgsl_conversion_available();
+        err_no_wgsl_conversion_available!(trap);
     }
     r
 }
@@ -490,7 +491,7 @@ pub fn type_table_if_else(lhs: &ShaderType, rhs: &ShaderType, trap:ScriptTrap, b
         _=>ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r{
-        trap.err_if_else_type_different();
+        err_if_else_type_different!(trap);
     }
     r
 }

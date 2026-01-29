@@ -443,7 +443,7 @@ impl CxDrawShaderMapping {
             let (source_obj, key) = self.scope_uniform_sources[i];
             
             // Read the value from the heap
-            let value = heap.scope_value(source_obj, key, trap);
+            let value = heap.scope_value(source_obj, key, *trap);
             
             // Write value to buffer at the input's offset
             DrawVars::write_value_to_f32_slots(heap, value, &mut self.scope_uniforms_buf, input.offset, input.slots);

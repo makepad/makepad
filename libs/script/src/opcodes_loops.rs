@@ -63,8 +63,8 @@ impl ScriptThread {
         }
         else if let Some(obj) = source.as_object(){
             if heap.has_proto(obj, code.builtins.range.into()){ // range object
-                let start = heap.value(obj, id!(start).into(), &self.trap).as_f64().unwrap_or(0.0);
-                let end = heap.value(obj, id!(end).into(), &self.trap).as_f64().unwrap_or(0.0);
+                let start = heap.value(obj, id!(start).into(), self.trap.pass()).as_f64().unwrap_or(0.0);
+                let end = heap.value(obj, id!(end).into(), self.trap.pass()).as_f64().unwrap_or(0.0);
                 let v = start.into();
                 if (start - end).abs() >= 1.0{
                     self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, v, start, v);
@@ -73,7 +73,7 @@ impl ScriptThread {
             }
             else{
                 if heap.vec_len(obj) > 0{
-                    let kv = heap.vec_key_value(obj, 0, &self.trap);
+                    let kv = heap.vec_key_value(obj, 0, self.trap.pass());
                     self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, kv.value, 0.0, kv.key);
                     return
                 }
@@ -81,7 +81,7 @@ impl ScriptThread {
         }
         else if let Some(arr) = source.as_array(){
             if heap.array_len(arr) > 0{
-                let value = heap.array_index(arr, 0, &self.trap);
+                let value = heap.array_index(arr, 0, self.trap.pass());
                 self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, value, 0.0, NIL);
                 return
             }
@@ -111,8 +111,8 @@ impl ScriptThread {
             }
             else if let Some(obj) = values.source.as_object(){
                 if heap.has_proto(obj, code.builtins.range.into()){ // range object
-                    let end = heap.value(obj, id!(end).into(), &self.trap).as_f64().unwrap_or(0.0);
-                    let step = heap.value(obj, id!(step).into(), &self.trap).as_f64().unwrap_or(1.0);
+                    let end = heap.value(obj, id!(end).into(), self.trap.pass()).as_f64().unwrap_or(0.0);
+                    let step = heap.value(obj, id!(step).into(), self.trap.pass()).as_f64().unwrap_or(1.0);
                     values.index += step;
                     if values.index >= end{
                         self.break_for_loop(heap);
@@ -133,7 +133,7 @@ impl ScriptThread {
                         self.break_for_loop(heap);
                         return
                     }
-                    let kv = heap.vec_key_value(obj, values.index as usize, &self.trap);
+                    let kv = heap.vec_key_value(obj, values.index as usize, self.trap.pass());
                     
                     while self.scopes.len() > lf.bases.scope{
                         heap.free_object_if_unreffed(self.scopes.pop().unwrap());
@@ -158,7 +158,7 @@ impl ScriptThread {
                     self.break_for_loop(heap);
                     return
                 }
-                let value = heap.array_index(arr, values.index as usize, &self.trap);
+                let value = heap.array_index(arr, values.index as usize, self.trap.pass());
                                     
                 while self.scopes.len() > lf.bases.scope{
                     heap.free_object_if_unreffed(self.scopes.pop().unwrap());
@@ -199,18 +199,18 @@ impl ScriptThread {
                         
             match self.mes.last_mut().unwrap(){
                 ScriptMe::Call{args, ..} => {
-                    heap.unnamed_fn_arg(*args, value, &self.trap);
+                    heap.unnamed_fn_arg(*args, value, self.trap.pass());
                 }
                 ScriptMe::Object(obj) => {
                     if !value.is_nil() && !value.is_err(){
-                        heap.vec_push(*obj, key, value, &self.trap);
+                        heap.vec_push(*obj, key, value, self.trap.pass());
                     }
                 }
                 ScriptMe::Pod{pod, offset} => {
-                    heap.pod_pop_to_me(*pod, offset, key, value, &code.builtins.pod, &self.trap);
+                    heap.pod_pop_to_me(*pod, offset, key, value, &code.builtins.pod, self.trap.pass());
                 }
                 ScriptMe::Array(arr) => {
-                    heap.array_push(*arr, value, &self.trap)
+                    heap.array_push(*arr, value, self.trap.pass())
                 }
             }
         }

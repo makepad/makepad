@@ -7,6 +7,7 @@ use crate::object::*;
 use crate::array::*;
 use crate::string::*;
 use crate::function::*;
+use crate::*;
 
 
 #[macro_export]
@@ -35,13 +36,13 @@ macro_rules! script_value{
         $vm.heap.value(($obj).into(), id!($id).into(),$vm.thread.trap.pass())
     };
     ($vm:ident, $obj:ident.$id:ident.$id2:ident)=>{
-        $vm.heap.value($vm.heap.value(($obj).into(), id!($id).into(),&$vm.thread.trap).into(), id!($id2).into(),&$vm.thread.trap)
+        $vm.heap.value($vm.heap.value(($obj).into(), id!($id).into(), $vm.thread.trap.pass()).into(), id!($id2).into(),$vm.thread.trap.pass())
     };
     ($vm:ident, $obj:ident[$index: expr])=>{
-        $vm.heap.vec_value(($obj).into(), ($index) as usize,&$vm.thread.trap)
+        $vm.heap.vec_value(($obj).into(), ($index) as usize, $vm.thread.trap.pass())
     };
     ($vm:ident, $obj:ident as array[$index: expr])=>{
-        $vm.heap.array_index(($obj).into(), ($index) as usize,&$vm.thread.trap)
+        $vm.heap.array_index(($obj).into(), ($index) as usize, $vm.thread.trap.pass())
     }
 }
 
@@ -49,7 +50,7 @@ macro_rules! script_value{
 macro_rules! script_has_proto{
     ($vm:ident, $what:ident, $obj:ident.$id: ident)=>{
         {
-           let proto = $vm.heap.value(($obj).into(), id!($id).into(),&$vm.thread.trap);
+           let proto = $vm.heap.value(($obj).into(), id!($id).into(),$vm.thread.trap.pass());
            $vm.heap.has_proto(($what).into(), proto)
         }
     };
@@ -67,17 +68,17 @@ macro_rules! script_is_fn{
 #[macro_export]
 macro_rules! script_array_index{
     ($vm:ident, $obj:ident[$index: expr])=>{
-        $vm.heap.array_index(($obj).into(), ($index) as usize,&$vm.thread.trap)
+        $vm.heap.array_index(($obj).into(), ($index) as usize,$vm.thread.trap.pass())
     }
 }
 
 #[macro_export]
 macro_rules! set_script_value{
     ($vm:ident, $obj:ident.$id: ident=$value:expr)=>{
-        $vm.heap.set_value($obj, id!($id).into(), ($value).into(), &$vm.thread.trap)
+        $vm.heap.set_value($obj, id!($id).into(), ($value).into(), $vm.thread.trap.pass())
     };
     ($vm:ident, $obj:ident[$index: expr]=$value:expr)=>{
-        $vm.heap.set_vec_value($obj, ($index) as usize, ($value).into(), &$vm.thread.trap)
+        $vm.heap.set_vec_value($obj, ($index) as usize, ($value).into(), $vm.thread.trap.pass())
     }
 }
 
@@ -86,13 +87,13 @@ macro_rules! set_script_value_to_api{
     ($vm:ident, $obj:ident.$id: ident=$val:expr)=>{
         {
             let v = $val::script_api($vm);
-            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, &$vm.thread.trap);
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, $vm.thread.trap.pass());
         }
     };
     ($vm:ident, $obj:ident.$id: ident)=>{
         {
             let v = $id::script_api($vm);
-            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, &$vm.thread.trap);
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, $vm.thread.trap.pass());
         }
     };
 }
@@ -103,14 +104,14 @@ macro_rules! set_script_value_to_pod{
         {
             let v = $val::script_pod($vm).expect("Cant make a pod type");
             $vm.heap.pod_type_name_set(v, id_lut!($id));
-            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), &$vm.thread.trap);
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), $vm.thread.trap.pass());
         }
     };
     ($vm:ident, $obj:ident.$id: ident)=>{
         {
             let v = $id::script_pod($vm).expect("Cant make a pod type");
             $vm.heap.pod_type_name_set(v, id_lut!($id));
-            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), &$vm.thread.trap);
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), $vm.thread.trap.pass());
         }
     };
 }
@@ -211,8 +212,8 @@ impl ScriptNative{
         let fn_obj = self.add_fn(heap, args, f);
         if ty_redux.to_index() as usize >= self.type_table.len(){
             self.type_table.resize_with( ty_redux.to_index() + 1, || Default::default());
-            self.getters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, _, _|{vm.thread.trap.err_invalid_prop_name()}));
-            self.setters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, _, _, _|{vm.thread.trap.err_invalid_prop_name()}));
+            self.getters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, _, _|{err_invalid_prop_name!(vm.thread.trap)}));
+            self.setters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, _, _, _|{err_invalid_prop_name!(vm.thread.trap)}));
         }
         self.type_table[ ty_redux.to_index()].insert(method,fn_obj);
     }
