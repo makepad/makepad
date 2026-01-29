@@ -3,19 +3,27 @@ use {
         makepad_derive_widget::*, 
         makepad_draw::*, 
         scroll_bars::ScrollBars, 
-        widget::*
+        widget::*,
+        animator::*
     }, 
     crate::makepad_draw::event::FingerLongPressEvent, std::cell::RefCell
 };
 
-live_design! {
-    pub ViewBase = {{View}} {debug:None}
+script_mod! {
+    use mod.pod.*
+    use mod.math.*
+    use mod.theme
+    use mod.draw
+    use mod.shader
+    use mod.animator.*
+    use mod.widgets.*
+    
+    mod.widgets.ViewBase = mod.std.set_type_default() do #(View::register_widget(vm))
 }
 
 // maybe we should put an enum on the bools like
 
-#[derive(Live, LiveHook, Clone, Copy)]
-#[live_ignore]
+#[derive(Script, ScriptHook, Clone, Copy)]
 pub enum ViewOptimize {
     #[pick]
     None,
@@ -29,91 +37,7 @@ impl Default for ViewOptimize {
     }
 }
 
-#[derive(Live)]
-#[live_ignore]
-pub enum ViewDebug {
-    #[pick]
-    None,
-    R,
-    G,
-    B,
-    M,
-    Margin,
-    P,
-    Padding,
-    A,
-    All,
-    #[live(Vec4f::default())]
-    Color(Vec4f),
-}
-
-impl LiveHook for ViewDebug {
-    /*
-    fn before_apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, _nodes: &[LiveNode]){
-        match apply.from{
-            ApplyFrom::NewFromDoc{file_id} | ApplyFrom::UpdateFromDoc{file_id}=>{
-                // store this here
-                
-                let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                
-                let registry = cx.live_registry.clone();
-                let registry = registry.borrow();
-                let  (nodes,index) = registry.ptr_to_nodes_index(live_ptr);
-                // then apply it
-                
-            }
-            _=>{}
-        }
-    }
-    */
-    
-    fn skip_apply(
-        &mut self,
-        _cx: &mut Cx,
-        _apply: &Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> Option<usize> {
-        match &nodes[index].value {
-            LiveValue::Vec4f(v) => {
-                *self = Self::Color(*v);
-                Some(index + 1)
-            }
-            LiveValue::Color(v) => {
-                *self = Self::Color(Vec4f::from_u32(*v));
-                Some(index + 1)
-            }
-            LiveValue::Bool(v) => {
-                if *v {
-                    *self = Self::R;
-                } else {
-                    *self = Self::None;
-                }
-                Some(index + 1)
-            }
-            LiveValue::Float64(v) => {
-                if *v != 0.0 {
-                    *self = Self::R;
-                } else {
-                    *self = Self::None;
-                }
-                Some(index + 1)
-            }
-            LiveValue::Int64(v) => {
-                if *v != 0 {
-                    *self = Self::R;
-                } else {
-                    *self = Self::None;
-                }
-                Some(index + 1)
-            }
-            _ => None,
-        }
-    }
-}
-
-#[derive(Live, LiveHook)]
-#[live_ignore]
+#[derive(Script, ScriptHook)]
 pub enum EventOrder {
     Down,
     #[pick]
@@ -142,10 +66,11 @@ impl ViewOptimize {
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Script, Animator, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct View {
+    #[source] source: ScriptObjectRef,
     // draw info per UI element
-    #[live] pub draw_bg: DrawColor,
+    #[live] pub draw_bg: DrawQuad,
 
     #[live(false)] pub show_bg: bool,
 
@@ -157,7 +82,6 @@ pub struct View {
     #[live] dpi_factor: Option<f64>,
 
     #[live] optimize: ViewOptimize,
-    #[live] debug: ViewDebug,
     #[live] event_order: EventOrder,
 
     #[live(true)] pub visible: bool,
@@ -166,7 +90,8 @@ pub struct View {
     #[live(false)] block_signal_event: bool,
     #[live] cursor: Option<MouseCursor>,
     #[live(false)] capture_overload: bool,
-    #[live] scroll_bars: Option<LivePtr>,
+    #[live] scroll_bars: ScriptObjectRef,
+    
     #[live(false)] design_mode: bool,
 
     #[rust] find_cache: RefCell<SmallVec<[(u64, WidgetSet);3]>>,
@@ -182,106 +107,75 @@ pub struct View {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] children: SmallVec<[(LiveId, WidgetRef);2]>,
     #[rust] live_update_order: SmallVec<[LiveId;1]>,
-    //#[rust]
-    //draw_order: Vec<LiveId>,
 
-    #[animator] animator: Animator,
+    #[apply_default] animator: Animator,
 }
 
 struct ViewTextureCache {
-    pass: Pass,
+    pass: DrawPass,
     _depth_texture: Texture,
     color_texture: Texture,
 }
 
-impl LiveHook for View {
-    fn before_apply(
-        &mut self,
-        _cx: &mut Cx,
-        apply: &Apply,
-        _index: usize,
-        _nodes: &[LiveNode],
-    ) {
-        if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
-            //self.draw_order.clear();
+impl ScriptHook for View {
+    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        if apply.is_update() {
             self.live_update_order.clear();
             self.find_cache.get_mut().clear();
         }
     }
 
-    fn after_apply(
-        &mut self,
-        cx: &mut Cx,
-        apply: &Apply,
-        _index: usize,
-        _nodes: &[LiveNode],
-    ) {
-        if apply.from.is_update_from_doc(){//livecoding
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        
+        // Handle $prop children from the object's vec
+        if let Some(obj) = value.as_object() {
+            // Copy vec data first to allow mutable vm access in the loop
+            let vec_data: SmallVec<[ScriptVecValue; 8]> = vm.heap.vec_ref(obj).iter().copied().collect();
+            for kv in vec_data {
+                if kv.key.is_prefixed_id() {  // $prop children
+                    if let Some(id) = kv.key.as_id() {
+                        if apply.is_update() {
+                            self.live_update_order.push(id);
+                        }
+                        
+                        if let Some((_, node)) = self.children.iter_mut().find(|(id2, _)| *id2 == id) {
+                            node.script_apply(vm, apply, scope, kv.value);
+                        } else {
+                            let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                            self.children.push((id, widget));
+                        }
+                    }
+                }
+            }
+        }
+        
+        if apply.is_reload() {
             // update/delete children list
-            for (idx, id) in self.live_update_order.iter().enumerate(){
-                // lets remove this id from the childlist
-                if let Some(pos) = self.children.iter().position(|(i,_v)| *i == *id){
-                    // alright so we have the position its in now, and the position it should be in
+            for (idx, id) in self.live_update_order.iter().enumerate() {
+                if let Some(pos) = self.children.iter().position(|(i, _v)| *i == *id) {
                     self.children.swap(idx, pos);
                 }
             }
-            // if we had more truncate
             self.children.truncate(self.live_update_order.len());
         }
+        
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
-            self.draw_list = Some(DrawList2d::new(cx));
+            self.draw_list = Some(DrawList2d::script_new(vm));
         }
-        if self.scroll_bars.is_some() {
+        if !self.scroll_bars.is_zero() {
             if self.scroll_bars_obj.is_none() {
                 self.scroll_bars_obj =
-                    Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
+                    Some(Box::new(
+                        ScrollBars::script_from_value(vm, self.scroll_bars.as_object().into())
+                    ));
             }
-        }
-    }
-
-    fn apply_value_instance(
-        &mut self,
-        cx: &mut Cx,
-        apply: &Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> usize { 
-
-        let id = nodes[index].id;
-        match apply.from {
-            ApplyFrom::Animate | ApplyFrom::Over => {
-                let node_id = nodes[index].id;
-                if let Some((_,component)) = self.children.iter_mut().find(|(id,_)| *id == node_id) {
-                    component.apply(cx, apply, index, nodes)
-                } else {
-                    nodes.skip_node(index)
-                }
-            }
-            ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
-                if nodes[index].is_instance_prop() {
-                    if apply.from.is_update_from_doc(){//livecoding
-                        self.live_update_order.push(id);
-                    }
-                    //self.draw_order.push(id);
-                    if let Some((_,node)) = self.children.iter_mut().find(|(id2,_)| *id2 == id){
-                        node.apply(cx, apply, index, nodes)
-                    }
-                    else{
-                        self.children.push((id,WidgetRef::new(cx)));
-                        self.children.last_mut().unwrap().1.apply(cx, apply, index, nodes)
-                    }
-                } else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                    nodes.skip_node(index)
-                }
-            }
-            _ => nodes.skip_node(index),
         }
     }
 }
 
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum ViewAction {
+    #[default]
     None,
     FingerDown(FingerDownEvent),
     FingerUp(FingerUpEvent),
@@ -697,14 +591,14 @@ impl Widget for View {
             _=>()
         }
         
-        if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
+        if self.visible && self.cursor.is_some() || self.animator.is_defined {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
                 Hit::FingerDown(e) => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
                     cx.widget_action(uid, &scope.path, ViewAction::FingerDown(e));
-                    if self.animator.live_ptr.is_some() {
+                    if self.animator.is_defined {
                         self.animator_play(cx, ids!(down.on));
                     }
                 }
@@ -712,7 +606,7 @@ impl Widget for View {
                 Hit::FingerLongPress(e) => cx.widget_action(uid, &scope.path, ViewAction::FingerLongPress(e)), 
                 Hit::FingerUp(e) => {
                     cx.widget_action(uid, &scope.path, ViewAction::FingerUp(e));
-                    if self.animator.live_ptr.is_some() {
+                    if self.animator.is_defined {
                         self.animator_play(cx, ids!(down.off));
                     }
                 }
@@ -721,13 +615,13 @@ impl Widget for View {
                     if let Some(cursor) = &self.cursor {
                         cx.set_cursor(*cursor);
                     }
-                    if self.animator.live_ptr.is_some() {
+                    if self.animator.is_defined {
                         self.animator_play(cx, ids!(hover.on));
                     }
                 }
                 Hit::FingerHoverOut(e) => {
                     cx.widget_action(uid, &scope.path, ViewAction::FingerHoverOut(e));
-                    if self.animator.live_ptr.is_some() {
+                    if self.animator.is_defined {
                         self.animator_play(cx, ids!(hover.off));
                     }
                 }
@@ -791,7 +685,7 @@ impl Widget for View {
                     // lets start a pass
                     if self.texture_cache.is_none() {
                         self.texture_cache = Some(ViewTextureCache {
-                            pass: Pass::new(cx),
+                            pass: DrawPass::new(cx),
                             _depth_texture: Texture::new(cx),
                             color_texture: Texture::new(cx),
                         });
@@ -807,7 +701,7 @@ impl Widget for View {
                         texture_cache.pass.set_color_texture(
                             cx,
                             &texture_cache.color_texture,
-                            PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+                            DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
                         );
                     }
                     let texture_cache = self.texture_cache.as_mut().unwrap();
@@ -939,42 +833,6 @@ impl Widget for View {
                     }
                 }
                 self.draw_state.end();
-            }
-        }
-        match &self.debug {
-            ViewDebug::None => {}
-            ViewDebug::Color(c) => {
-                cx.debug.area(self.area, *c);
-            }
-            ViewDebug::R => {
-                cx.debug.area(self.area, Vec4f::R);
-            }
-            ViewDebug::G => {
-                cx.debug.area(self.area, Vec4f::G);
-            }
-            ViewDebug::B => {
-                cx.debug.area(self.area, Vec4f::B);
-            }
-            ViewDebug::M | ViewDebug::Margin => {
-                let tl = dvec2(self.walk.margin.left, self.walk.margin.top);
-                let br = dvec2(self.walk.margin.right, self.walk.margin.bottom);
-                cx.debug.area_offset(self.area, tl, br, Vec4f::B);
-                cx.debug.area(self.area, Vec4f::R);
-            }
-            ViewDebug::P | ViewDebug::Padding => {
-                let tl = dvec2(-self.layout.padding.left, -self.walk.margin.top);
-                let br = dvec2(-self.layout.padding.right, -self.layout.padding.bottom);
-                cx.debug.area_offset(self.area, tl, br, Vec4f::G);
-                cx.debug.area(self.area, Vec4f::R);
-            }
-            ViewDebug::All | ViewDebug::A => {
-                let tl = dvec2(self.walk.margin.left, self.walk.margin.top);
-                let br = dvec2(self.walk.margin.right, self.walk.margin.bottom);
-                cx.debug.area_offset(self.area, tl, br, Vec4f::B);
-                let tl = dvec2(-self.layout.padding.left, -self.walk.margin.top);
-                let br = dvec2(-self.layout.padding.right, -self.layout.padding.bottom);
-                cx.debug.area_offset(self.area, tl, br, Vec4f::G);
-                cx.debug.area(self.area, Vec4f::R);
             }
         }
         DrawStep::done()

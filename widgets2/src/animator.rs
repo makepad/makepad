@@ -189,6 +189,7 @@ struct AnimatorTrack {
 
 #[derive(Default, Script)]
 pub struct Animator {
+    #[rust] pub is_defined: bool,
     #[rust] pub next_frame: NextFrame,
     #[rust] pub state_groups: LiveIdMap<LiveId, AnimatorStates>,
     /// Runtime: Current state for each state group
@@ -215,7 +216,7 @@ impl ScriptHook for Animator {
                 }
             }
         });
-        
+        self.is_defined = true;
         true
     }
 }
@@ -240,6 +241,15 @@ impl ScriptApplyDefault for Animator{
 pub enum AnimatorAction {
     Animating {redraw: bool},
     None
+}
+
+impl AnimatorAction{
+    pub fn must_redraw(&self)->bool{
+        match self{
+            Self::Animating{redraw}=>*redraw,
+            Self::None=>false
+        }
+    }
 }
 
 impl Animator{

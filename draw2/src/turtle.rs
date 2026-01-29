@@ -5,6 +5,32 @@ use {
     }
 };
 
+pub fn script_mod(vm: &mut ScriptVm) {
+    let turtle = vm.new_module(id_lut!(turtle));
+    
+    // Register in dependency order:
+    // Base has no dependencies
+    set_script_value_to_api!(vm, turtle.Base);
+    // FitBound depends on Base
+    set_script_value_to_api!(vm, turtle.FitBound);
+    // Size depends on FitBound
+    set_script_value_to_api!(vm, turtle.Size);
+    // Metrics has no dependencies among our types
+    set_script_value_to_api!(vm, turtle.Metrics);
+    // RowAlign has no dependencies
+    set_script_value_to_api!(vm, turtle.RowAlign);
+    // Flow depends on RowAlign
+    set_script_value_to_api!(vm, turtle.Flow);
+    // Align has no dependencies among our types
+    set_script_value_to_api!(vm, turtle.Align);
+    // Padding has no dependencies among our types
+    set_script_value_to_api!(vm, turtle.Padding);
+    // Layout depends on Flow, Padding, Align
+    set_script_value_to_api!(vm, turtle.Layout);
+    // Walk depends on Size, Metrics (and Margin from platform)
+    set_script_value_to_api!(vm, turtle.Walk);
+}
+
 #[derive(Clone, Debug)]
 struct DeferredFill {
     weight: f64,

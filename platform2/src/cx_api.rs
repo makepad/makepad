@@ -831,7 +831,7 @@ impl Cx {
 
 #[macro_export]
 macro_rules! register_component_factory {
-    ( $ cx: ident, $ registry: ident, $ ty: ty, $ factory: ident) => {
+    ( $ cx: expr, $ registry: ident, $ ty: ty, $ factory: ident) => {
         let module_id = LiveModuleId::from_str(&module_path!()).unwrap();
         if let Some((reg, _)) = $cx
             .live_registry
