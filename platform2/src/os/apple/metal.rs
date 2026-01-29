@@ -884,9 +884,11 @@ impl DrawVars{
             
             if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), vm.thread.trap.pass()).as_object(){
                 output.mode = ShaderMode::Vertex;
+                // Entry point shaders don't have script-level arguments to validate, use NoTrap
                 ShaderFnCompiler::compile_shader_def(
                     vm, 
                     &mut output, 
+                    NoTrap,
                     id!(vertex), 
                     fnobj, 
                     ShaderType::IoSelf(io_self), 
@@ -895,14 +897,21 @@ impl DrawVars{
             }
             if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), vm.thread.trap.pass()).as_object(){
                 output.mode = ShaderMode::Fragment;
+                // Entry point shaders don't have script-level arguments to validate, use NoTrap
                 ShaderFnCompiler::compile_shader_def(
                     vm, 
                     &mut output, 
+                    NoTrap,
                     id!(fragment), 
                     fnobj, 
                     ShaderType::IoSelf(io_self), 
                     vec![],
                 );
+            }
+            
+            // Don't proceed if shader compilation had errors
+            if output.has_errors {
+                return;
             }
             
             // Assign buffer indices to uniform buffers before generating Metal code
