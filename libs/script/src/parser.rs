@@ -512,7 +512,12 @@ impl ScriptParser{
                 }
             }
             State::Let{index}=>{
-                if id.not_empty(){ // lets expect an assignment expression
+                if id == id!(mut) {
+                    // "let mut" is treated as "var"
+                    self.state.push(State::Var{index});
+                    return 1
+                }
+                else if id.not_empty(){ // lets expect an assignment expression
                     // push the id on to the stack
                     self.push_code(id.into(), self.index);
                     self.state.push(State::LetDynOrTyped{index});

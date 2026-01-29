@@ -189,7 +189,7 @@ script_mod! {
             shadow_color: uniform(#0007)
             shadow_offset: uniform(vec2(0))
             shadow_radius: uniform(10.0)
-                    
+            
             rect_size2: varying(vec2(0))
             rect_size3: varying(vec2(0))
             sdf_rect_pos: varying(vec2(0))
@@ -275,7 +275,7 @@ script_mod! {
             shadow_color: uniform(#0007)
             shadow_radius: uniform(20.0)
             shadow_offset: uniform(vec2(0))
-                                            
+            
             rect_size2: varying(vec2(0))
             rect_size3: varying(vec2(0))
             rect_pos2: varying(vec2(0))
@@ -358,28 +358,28 @@ script_mod! {
             color_2: uniform(vec4(-1))
             border_color: uniform(#0000)
             border_color_2: uniform(vec4(-1))
-            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_inset: uniform(vec4(0))
                                 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                var color_2 = self.color
+                let mut color_2 = self.color
                 if (self.color_2.x > -0.5) {
                     color_2 = self.color_2
                 }
 
-                var border_color_2 = self.border_color
+                let mut border_color_2 = self.border_color
                 if (self.border_color_2.x > -0.5) {
                     border_color_2 = self.border_color_2
                 }
 
-                var gradient_border_dir = self.pos.y + dither
+                let mut gradient_border_dir = self.pos.y + dither
                 if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither
                 }
 
-                var gradient_fill_dir = self.pos.y + dither
+                let mut gradient_fill_dir = self.pos.y + dither
                 if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither
                 }
@@ -418,7 +418,7 @@ script_mod! {
             border_size: uniform(0.0)
             border_color: uniform(#0000)
             border_color_2: uniform(vec4(-1))
-            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_inset: uniform(vec4(0))
             border_radius: uniform(vec2(2.5 2.5))
                             
             pixel: fn() {
@@ -480,7 +480,7 @@ script_mod! {
             border_size: uniform(0.0)
             border_color: uniform(#0000)
             border_color_2: uniform(vec4(-1))
-            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_inset: uniform(vec4(0))
             border_radius: uniform(vec2(2.5 2.5))
                                                         
             pixel: fn() {
@@ -544,8 +544,8 @@ script_mod! {
             border_size: uniform(0.0)
             border_color: uniform(#0000)
             border_color_2: uniform(vec4(-1))
-            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
-            border_radius: uniform(vec4(2.5 2.5 2.5 2.5))
+            border_inset: uniform(vec4(0))
+            border_radius: uniform(vec4(2.5))
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -609,7 +609,7 @@ script_mod! {
             border_size: uniform(0.0)
             border_color: uniform(#0000)
             border_color_2: uniform(vec4(-1))
-            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_inset: uniform(vec4(0.0))
             border_radius: uniform(5.0)
                             
             pixel: fn() {
@@ -683,7 +683,7 @@ script_mod! {
 
             border_size: uniform(0.0)
             border_color: uniform(#0000)
-            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_inset: uniform(vec4(0.0))
             border_radius: uniform(vec2(0.0 1.0))
                             
             pixel: fn() {
@@ -808,7 +808,7 @@ script_mod! {
         draw_bg +: {
             border_size: uniform(0.0)
             border_color: uniform(#000F)
-            border_inset: uniform(vec4(0. 0. 0. 0.))
+            border_inset: uniform(vec4(0))
             border_radius: uniform(2.5)
                                 
             image: texture_2d(float)

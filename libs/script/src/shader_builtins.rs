@@ -433,7 +433,7 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
         let y_nv = NumericValue::from_script_value(vm, y_val);
         // dot returns a scalar (sum of component-wise products)
         let result = match (x_nv, y_nv) {
-            (NumericValue::F64(a), NumericValue::F64(b)) => (a * b),
+            (NumericValue::F64(a), NumericValue::F64(b)) => a * b,
             (NumericValue::Vec2(a), NumericValue::Vec2(b)) => (a.x * b.x + a.y * b.y) as f64,
             (NumericValue::Vec3(a), NumericValue::Vec3(b)) => (a.x * b.x + a.y * b.y + a.z * b.z) as f64,
             (NumericValue::Vec4(a), NumericValue::Vec4(b)) => (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) as f64,
