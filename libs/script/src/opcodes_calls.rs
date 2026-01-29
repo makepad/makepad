@@ -91,7 +91,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = script_err_not_fn!(self.trap, "call target is not a function (got {:?})", heap.proto(args).value_type());
+            let value = script_err_wrong_value!(self.trap, "call target is not a function (got {:?})", heap.proto(args).value_type());
             self.push_stack_unchecked(value);
             self.trap.goto_next();
             return true // Error: caller should handle pop_to_me
