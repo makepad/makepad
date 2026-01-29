@@ -238,9 +238,15 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_from_value(vm:&mut ScriptVm, value:ScriptValue)->Self where Self:Sized{
         let mut s = Self::script_new(vm);
-        s.script_apply(vm, &Apply::default(), &mut Scope::empty(), value);
+        s.script_apply(vm, &Apply::New, &mut Scope::empty(), value);
         s
-    }    
+    }
+    
+    fn script_from_value_scoped(vm:&mut ScriptVm, scope: &mut Scope, value:ScriptValue)->Self where Self:Sized{
+        let mut s = Self::script_new(vm);
+        s.script_apply(vm, &Apply::New, scope, value);
+        s
+    }
     
     fn script_proto(vm:&mut ScriptVm)->ScriptValue{  
         let type_id = Self::script_type_id_static();

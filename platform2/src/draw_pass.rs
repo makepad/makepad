@@ -68,9 +68,16 @@ impl ScriptHook for DrawPass {}
 impl ScriptNew for DrawPass {
     fn script_new(vm:&mut ScriptVm)->Self{
         let cx = vm.cx_mut();
+        Self::new(cx)
+    }
+}
+
+impl DrawPass{
+    pub fn new(cx:&mut Cx)->Self{
         cx.passes.alloc()
     }
 }
+
 
 impl ScriptApply for DrawPass {
     fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue) {

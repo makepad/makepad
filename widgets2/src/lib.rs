@@ -23,8 +23,8 @@ pub mod animator;
 // pub mod radio_button;
 // pub mod text_input;
 // pub mod slider;
- pub mod scroll_bar;
-// pub mod scroll_bars;
+pub mod scroll_bar;
+pub mod scroll_bars;
 // pub mod splitter;
 // pub mod vectorline;
 // pub mod fold_header;
@@ -69,10 +69,10 @@ pub mod animator;
 // pub mod performance_view;
 // pub mod nav_control;
 
-// pub mod view;
+pub mod view;
 
 // pub mod adaptive_view;
-// pub mod view_ui;
+pub mod view_ui;
 
 // pub mod toggle_panel;
 // pub mod command_text_input;
@@ -109,7 +109,7 @@ pub use crate::{
 //    data_binding::{DataBindingStore, DataBindingMap},
 //    button::*,
 //    cached_widget::*,
-//    view::*,
+    view::*,
 //    adaptive_view::*,
 //    image::*,
 //    image_blend::*,
@@ -142,9 +142,9 @@ pub use crate::{
 //    window::*,
 //    multi_window::*,
 //    web_view::*,
-//    scroll_bars::{ScrollBars},
+    scroll_bars::{ScrollBars},
 //    scroll_shadow::{DrawScrollShadow},
-//    scroll_bar::{ScrollBar},
+scroll_bar::{ScrollBar},
 //    slides_view::{SlidesView},
 //    widget_match_event::WidgetMatchEvent,
 //    toggle_panel::*,
@@ -184,6 +184,9 @@ pub fn script_mod(vm: &mut ScriptVm){
     
     vm.heap.new_module(id!(widgets));
     crate::scroll_bar::script_mod(vm);
+    crate::scroll_bars::script_mod(vm);
+    crate::view::script_mod(vm);
+    crate::view_ui::script_mod(vm);
     //crate::theme_desktop_dark::script_mod(vm);
     //makepad_fonts_emoji2::script_mod(vm);
     //makepad_fonts_chinese_regular2::script_mod(vm);

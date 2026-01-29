@@ -248,6 +248,7 @@ script_primitive!(
 );
 impl ScriptDeriveMarker for String{}
 
+
 script_primitive!(
     &'static str, 
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
@@ -278,6 +279,7 @@ script_primitive!(
     },
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{self.into()}
 );
+impl ScriptDeriveMarker for LiveId{}
 
 script_primitive!(
     ScriptObject, 
@@ -290,7 +292,7 @@ script_primitive!(
     },
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{(*self).into()}
 );
-
+//impl ScriptDeriveMarker for ScriptObject{}
 
 script_primitive!(
     ScriptValue, 
@@ -301,6 +303,7 @@ script_primitive!(
     },
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{*self}
 );
+//impl ScriptDeriveMarker for ScriptValue{}
 
 // LiveIdMap<K, V> implementation
 impl<K, V> ScriptHook for LiveIdMap<K, V> 

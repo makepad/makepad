@@ -246,8 +246,8 @@ impl dyn Widget {
     }
 }
 
-pub trait WidgetFactory {
-    fn new(&self, cx: &mut Cx) -> Box<dyn Widget>;
+pub trait WidgetFactory: 'static {
+    fn script_new(&self, vm: &mut ScriptVm) -> Box<dyn Widget>;
 }
 
 #[derive(Default)]
@@ -270,8 +270,8 @@ impl ComponentRegistry for WidgetRegistry {
 }
 
 impl WidgetRegistry {
-    pub fn new(&self, cx: &mut Cx, ty: TypeId) -> Option<Box<dyn Widget>> {
-        self.map.get(&ty).map(|(_, fac)| fac.new(cx))
+    pub fn script_new(&self, vm: &mut ScriptVm, ty: TypeId) -> Option<Box<dyn Widget>> {
+        self.map.get(&ty).map(|(_, fac)| fac.script_new(vm))
     }
 }
 
@@ -771,99 +771,76 @@ impl WidgetRef {
             None
         }
     }
-/*
-    pub fn apply_over(&self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply(cx, &mut ApplyFrom::Over.into(), 0, nodes);
-    }
-    
-    fn store_designer_backref(&self, cx:&mut Cx, apply:&Apply, index:usize){
-        if let Some(scope) = &mut apply.scope{
-            if let Some(file_id) = apply.from.file_id(){
-                if let Some(dd) = scope.data.get_mut::<DesignerDataToWidget>(){
-                    let ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                    dd.live_ptr_to_widget.insert(ptr, self.clone());
-                }
-            }                        
-        }
-    }
-    
-    fn apply(&self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
+
+    fn script_apply(&self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
         let mut inner = self.0.borrow_mut();
-        if let LiveValue::Class { live_type, .. } = nodes[index].value {
-            if let Some(component) = &mut *inner {
-                if component.widget.ref_cast_type_id() != live_type {
-                    *inner = None; // type changed, drop old component
-                    log!("TYPECHANGE {:?}", nodes[index]);
+        
+        // Get the TypeId from the value if it's an object with a registered type
+        let type_id = if let Some(obj) = value.as_object() {
+            vm.heap.object_type_id(obj)
+        } else {
+            None
+        };
+        
+        // Check if we already have a widget
+        if let Some(component) = &mut *inner {
+            if let Some(type_id) = type_id {
+                // We have a type_id from the value - check if it matches
+                if component.widget.ref_cast_type_id() != type_id {
+                    // Type changed, drop old component
+                    *inner = None;
                 } else {
-                    self.store_designer_backref(cx, apply, index);
-                    let idx = component.widget.apply(cx, apply, index, nodes);
+                    // Type matches, apply to existing widget and redraw
+                    component.widget.script_apply(vm, apply, scope, value);
+                    let cx = vm.cx_mut();
                     component.widget.redraw(cx);
-                    return idx;
-                }
-            }
-            if let Some(component) = cx
-                .live_registry
-                .clone()
-                .borrow()
-                .components
-                .get::<WidgetRegistry>()
-                .new(cx, live_type)
-            {
-                if cx.debug.marker() == 1 {
-                    panic!()
-                }
-                *inner = Some(WidgetRefInner { widget: component });
-                self.store_designer_backref(cx, apply, index);
-                if let Some(component) = &mut *inner {
-                    let idx = component.widget.apply(cx, apply, index, nodes);
-                    component.widget.redraw(cx);
-                    return idx;
+                    return;
                 }
             } else {
-                cx.apply_error_cant_find_target(
-                    live_error_origin!(),
-                    index,
-                    nodes,
-                    nodes[index].id,
-                );
+                // No type_id in value, apply to existing widget anyway
+                component.widget.script_apply(vm, apply, scope, value);
+                let cx = vm.cx_mut();
+                component.widget.redraw(cx);
+                return;
             }
-        } else if let Some(component) = &mut *inner {
-            self.store_designer_backref(cx, apply, index);
-            let idx = component.widget.apply(cx, apply, index, nodes);
-            component.widget.redraw(cx);
-            return idx;
         }
-        cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
         
-        nodes.skip_node(index)
-    }
-    */
-    
-}
-/*
-impl LiveHook for WidgetRef {}
-impl LiveApply for WidgetRef {
-    fn apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        <WidgetRef>::apply(self, cx, apply, index, nodes)
+        // If we have a type_id, create a new widget via the registry
+        if let Some(type_id) = type_id {
+            // Clone the components Rc to avoid borrow issues with vm
+            let components = vm.cx_mut().components.clone();
+            
+            // Get the WidgetRegistry and create a new widget
+            // Separate statement to ensure Ref is dropped before components
+            let new_widget = components.get::<WidgetRegistry>().script_new(vm, type_id);
+            
+            if let Some(new_widget) = new_widget {
+                *inner = Some(WidgetRefInner { widget: new_widget });
+                
+                // Apply value to the new widget and redraw
+                if let Some(component) = &mut *inner {
+                    component.widget.script_apply(vm, apply, scope, value);
+                    let cx = vm.cx_mut();
+                    component.widget.redraw(cx);
+                }
+            }
+        }
     }
 }
 
-impl LiveNew for WidgetRef {
-    fn new(_cx: &mut Cx) -> Self {
+impl ScriptHook for WidgetRef {}
+impl ScriptApply for WidgetRef {
+    fn script_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope:&mut Scope, value: ScriptValue){
+        <WidgetRef>::script_apply(self, vm, apply, scope, value)
+    }
+}
+
+impl ScriptNew for WidgetRef {
+    fn script_new(_vm: &mut ScriptVm) -> Self {
         Self(Rc::new(RefCell::new(None)))
     }
-
-    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: LiveType::of::<dyn Widget>(),
-            fields: Vec::new(),
-            live_ignore: true,
-            type_name: LiveId(0),
-        }
-    }
 }
-*/
+
 pub trait WidgetActionTrait: 'static + Send+ Sync {
     fn ref_cast_type_id(&self) -> TypeId;
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -1389,15 +1366,33 @@ impl<T: Clone> DrawStateWrap<T> {
     }
 }
 
+pub trait WidgetRegister{
+    fn register_widget(vm:&mut ScriptVm)->ScriptValue;
+}
+
 #[macro_export]
 macro_rules! register_widget {
-    ( $ cx: ident, $ ty: ty) => {{
+    ( $ cx: expr, $ ty: ty) => {{
         struct Factory();
         impl WidgetFactory for Factory {
-            fn new(&self, cx: &mut Cx) -> Box<dyn Widget> {
-                Box::new(<$ty>::new(cx))
+            fn script_new(&self, vm: &mut ScriptVm) -> Box<dyn Widget> {
+                Box::new(<$ty>::script_new(vm))
             }
         }
-        register_component_factory!($cx, WidgetRegistry, $ty, Factory);
+        
+        let cx = $cx;
+        let type_id = std::any::TypeId::of::<$ty>();
+        let name = $crate::LiveId::from_str_with_lut(stringify!($ty)).unwrap();
+        
+        cx.components
+            .get_or_create::<$crate::WidgetRegistry>()
+            .map
+            .insert(
+                type_id,
+                (
+                    $crate::ComponentInfo { name },
+                    Box::new(Factory()),
+                ),
+            );
     }};
 }
