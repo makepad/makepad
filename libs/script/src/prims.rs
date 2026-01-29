@@ -8,6 +8,7 @@ use crate::handle::*;
 use makepad_live_id::*;
 use crate::function::*;
 use crate::pod::*;
+use crate::*;
 
 #[macro_export]
 macro_rules!script_primitive {
@@ -353,7 +354,7 @@ impl<K, V> ScriptApply for LiveIdMap<K, V>
             self.clear()
         }
         else {
-            vm.thread.trap.err_wrong_type_in_apply();
+            err_wrong_type_in_apply!(vm.thread.trap);
         }
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {

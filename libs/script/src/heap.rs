@@ -109,7 +109,7 @@ impl ScriptHeap{
     }
     
     pub fn module(&mut self, id:LiveId)->ScriptObject{
-        self.value(self.modules, id.into(), ScriptTrap::default()).into()
+        self.value(self.modules, id.into(), NoTrap).into()
     }
       
      

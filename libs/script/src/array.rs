@@ -4,6 +4,7 @@ use crate::native::*;
 use crate::makepad_live_id::*;
 use crate::object::*;
 use crate::function::*;
+use crate::*;
 
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -300,7 +301,7 @@ impl ScriptArrayData{
                     heap.array_storage(arr).to_string(heap, s);
                 }).into();
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(parse_json), &[], |vm, args|{
@@ -312,12 +313,12 @@ impl ScriptArrayData{
                             vm.thread.json_parser.read_json(v.as_ref(), heap)
                         }
                         _=>{
-                            vm.thread.trap.err_invalid_arg_type()
+                            err_invalid_arg_type!(vm.thread.trap)
                         }
                     }
                 }).into()
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(parse_json), &[], |vm, args|{
@@ -328,37 +329,37 @@ impl ScriptArrayData{
                     vm.thread.json_parser.read_json(temp, heap)
                 })
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(push), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
-                vm.heap.array_push_vec(sself, args, &vm.thread.trap);
+                vm.heap.array_push_vec(sself, args, vm.thread.trap.pass());
                 return NIL
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(pop), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
-                return vm.heap.array_pop(sself, &vm.thread.trap)
+                return vm.heap.array_pop(sself, vm.thread.trap.pass())
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(clear), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
-                vm.heap.array_clear(sself, &vm.thread.trap);
+                vm.heap.array_clear(sself, vm.thread.trap.pass());
                 return NIL
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(len), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
                 return vm.heap.array_len(sself).into()
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(freeze), &[], |vm, args|{
@@ -366,7 +367,7 @@ impl ScriptArrayData{
                 vm.heap.freeze_array(sself);
                 return sself.into()
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(retain), script_args!(cb=NIL), |vm, args|{
@@ -380,7 +381,7 @@ impl ScriptArrayData{
                         return ret;
                     }
                     if !vm.heap.cast_to_bool(ret){
-                        vm.heap.array_remove(sself, i, &mut vm.thread.trap);
+                        vm.heap.array_remove(sself, i, vm.thread.trap.pass());
                     }
                     else{
                         i += 1
@@ -388,7 +389,7 @@ impl ScriptArrayData{
                 }
                 return NIL
             }
-            vm.thread.trap.err_not_impl()
+            err_not_impl!(vm.thread.trap)
         });
         
         

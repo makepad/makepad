@@ -66,6 +66,9 @@ pub use makepad_objc_sys;
 pub use ::windows as windows;
 
 pub use makepad_futures;
+
+// Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
+pub use makepad_script::trap;
  
 pub use {
     makepad_script,
@@ -78,6 +81,7 @@ pub use {
     makepad_math::*,
     makepad_math::makepad_micro_serde,
     makepad_script::{
+        trap::*,
         apply::*,
         heap::*,
         value::*,

@@ -5,7 +5,7 @@ use {
         makepad_script::mod_shader::ShaderIoType,
         makepad_script::pod_heap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
-        makepad_script::trap::ScriptTrap,
+        makepad_script::trap::*,
         makepad_script::ScriptFnPtr,
         //makepad_error_log::*,
         //makepad_live_id::*,
@@ -535,8 +535,7 @@ impl DrawVars {
     }
     
     fn extract_shader_io_value(heap: &ScriptHeap, io_self: ScriptObject, id: LiveId, expected_io_type: ShaderIoType) -> ScriptValue {
-        let trap = ScriptTrap::default();
-        let value = heap.value(io_self, id.into(), &trap);
+        let value = heap.value(io_self, id.into(), NoTrap);
         
         // Check if it's a shader IO object with the expected type
         if let Some(value_obj) = value.as_object() {

@@ -9,6 +9,7 @@ use crate::apply::*;
 use std::hash::Hash;
 use std::collections::HashMap;
 use std::collections::BTreeMap;
+use crate::*;
 
 
 
@@ -83,7 +84,7 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let arr = vm.heap.new_array();
-        let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
+        let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
         // we swap the vec off of the heap to be able to script_to_value the rest
         let mut vec_store = ScriptArrayStorage::ScriptValue(Default::default());
         std::mem::swap(&mut vec_store, astore);
@@ -92,7 +93,7 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
             for v in self{
                 vec.push_back(v.script_to_value(vm));
             }
-            let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
+            let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
             std::mem::swap(&mut vec_store, astore);
         }
         else{
@@ -101,7 +102,7 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
                 for v in self{
                     vec.push_back(v.script_to_value(vm));
                 }
-                let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
+                let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
                 std::mem::swap(&mut vec_store, astore);
             }
         }
@@ -185,12 +186,12 @@ impl ScriptApply for Vec<u8> {
             self.clear();
         }
         else{
-            vm.thread.trap.err_wrong_type_in_apply();
+            err_wrong_type_in_apply!(vm.thread.trap);
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let arr = vm.heap.new_array();
-        let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
+        let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
         if let ScriptArrayStorage::U8(v) = astore{v.clear();v.extend(self)}
         else{*astore = ScriptArrayStorage::U8(self.clone());}
         arr.into()
@@ -244,7 +245,7 @@ impl ScriptApply for Vec<ScriptValue> {
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let arr = vm.heap.new_array();
-        let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
+        let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
         if let ScriptArrayStorage::ScriptValue(v) = astore{v.clear();v.extend(self)}
         else{*astore = ScriptArrayStorage::ScriptValue(self.iter().cloned().collect());}
         arr.into()
@@ -305,7 +306,7 @@ impl<K,V> ScriptApply for HashMap<K,V>
             self.clear()
         }
         else{
-            vm.thread.trap.err_wrong_type_in_apply();
+            err_wrong_type_in_apply!(vm.thread.trap);
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
@@ -376,7 +377,7 @@ impl<K,V> ScriptApply for BTreeMap<K,V>
             self.clear()
         }
         else{
-            vm.thread.trap.err_wrong_type_in_apply();
+            err_wrong_type_in_apply!(vm.thread.trap);
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{

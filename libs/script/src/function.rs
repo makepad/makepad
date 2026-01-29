@@ -81,7 +81,7 @@ impl ScriptHeap{
                 let key = kv.key;
                 if let Some(def) = object.vec.get(index){
                     if !def.value.is_nil() && def.value.value_type().to_redux() != value.value_type().to_redux(){
-                        return trap.err_invalid_arg_type()
+                        return err_invalid_arg_type!(trap)
                     }
                 }
                 self.objects[top_ptr.index as usize].map_insert(key, value);
@@ -105,15 +105,15 @@ impl ScriptHeap{
             for kv in object.vec.iter(){
                 if kv.key == key{
                     if !kv.value.is_nil() && kv.value.value_type().to_redux() != value.value_type().to_redux(){
-                        return trap.err_invalid_arg_type()
+                        return err_invalid_arg_type!(trap)
                     }
                     self.objects[top_ptr.index as usize].map_insert(key, value);
                     return NIL    
                 }
             }
-            return trap.err_invalid_arg_name() 
+            return err_invalid_arg_name!(trap) 
         }
-        trap.err_unexpected()
+        err_unexpected!(trap)
     }
         
     pub fn push_all_fn_args(&mut self, top_ptr:ScriptObject, args:&[ScriptValue], trap:ScriptTrap)->ScriptValue{
@@ -126,7 +126,7 @@ impl ScriptHeap{
                     // typecheck against default arg
                     if let Some(def) = object.vec.get(index){
                         if !def.value.is_nil() && def.value.value_type().to_redux() != value.value_type().to_redux(){
-                            return trap.err_invalid_arg_type()
+                            return err_invalid_arg_type!(trap)
                         }
                     }
                     self.objects[top_ptr.index as usize].map_insert(key, *value);
@@ -141,6 +141,6 @@ impl ScriptHeap{
             }
             return NIL
         }
-        trap.err_unexpected()
+        err_unexpected!(trap)
     }
 }

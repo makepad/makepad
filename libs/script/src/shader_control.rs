@@ -9,6 +9,7 @@ use crate::vm::*;
 use crate::opcode::*;
 use crate::shader::*;
 use crate::shader_tables::*;
+use crate::*;
 
 impl ShaderFnCompiler {
     /// Check if we're currently in unreachable code (after a return in the current branch)
@@ -65,7 +66,7 @@ impl ShaderFnCompiler {
 
                 if self.stack.types.len() > *stack_depth {
                     // Else branch has a value on the stack
-                    let (ty, val) = self.stack.pop(&self.trap);
+                    let (ty, val) = self.stack.pop(self.trap.pass());
                     
                     // Check if the else value is void
                     let else_concrete = ty.make_concrete(&vm.code.builtins.pod);
@@ -80,7 +81,7 @@ impl ShaderFnCompiler {
                     } else if let Some(phi) = phi {
                         if let Some(phi_type) = phi_type {
                             // declare the phi at start
-                            let ty = type_table_if_else(phi_type, &ty, &self.trap, &vm.code.builtins.pod);
+                            let ty = type_table_if_else(phi_type, &ty, self.trap.pass(), &vm.code.builtins.pod);
                             let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                             
                             // Skip phi handling if type is void
@@ -98,7 +99,7 @@ impl ShaderFnCompiler {
                                 self.stack.free_string(s);
                                 let mut s = self.stack.new_string();
                                 write!(s, "{}", phi).ok();
-                                self.stack.push(&self.trap, ShaderType::Pod(ty), s);
+                                self.stack.push(self.trap.pass(), ShaderType::Pod(ty), s);
                             }
                         }
                     }
@@ -151,7 +152,7 @@ impl ShaderFnCompiler {
     }
 
     pub(crate) fn handle_if_test(&mut self, opargs: OpcodeArgs) {
-        let (_ty, val) = self.stack.pop(&self.trap);
+        let (_ty, val) = self.stack.pop(self.trap.pass());
         let start_pos = self.out.len();
         self.out.push_str("if(");
         self.out.push_str(&val);
@@ -198,7 +199,7 @@ impl ShaderFnCompiler {
         }) = self.mes.last_mut()
         {
             if self.stack.types.len() > *stack_depth {
-                let (ty, val) = self.stack.pop(&self.trap);
+                let (ty, val) = self.stack.pop(self.trap.pass());
                 // Check if the type is void - if so, don't create a phi, just emit as statement
                 let concrete_ty = ty.make_concrete(&vm.code.builtins.pod);
                 let is_void = concrete_ty.map(|t| t == vm.code.builtins.pod.pod_void).unwrap_or(false);
@@ -230,7 +231,7 @@ impl ShaderFnCompiler {
             *if_branch_returned = *has_return;
             *has_return = false;
         } else {
-            self.trap.err_unexpected();
+            err_unexpected!(self.trap);
         }
     }
 
@@ -288,7 +289,7 @@ impl ShaderFnCompiler {
         if already_escaped {
             // Still need to consume the stack value if present
             if !opargs.is_nil() {
-                let (_ty, s) = self.stack.pop(&self.trap);
+                let (_ty, s) = self.stack.pop(self.trap.pass());
                 self.stack.free_string(s);
             }
             return;
@@ -312,7 +313,7 @@ impl ShaderFnCompiler {
             if let ShaderMe::FnBody { ret, escaped } = me {
                 if let Some(ret) = ret {
                     if ty != *ret {
-                        self.trap.err_return_type_changed();
+                        err_return_type_changed!(self.trap);
                     }
                 }
                 *ret = Some(ty);
@@ -351,8 +352,8 @@ impl ShaderFnCompiler {
     }
 
     pub(crate) fn handle_for_1(&mut self) {
-        let (source, _) = self.stack.pop(&self.trap);
-        let (val_id, _) = self.stack.pop(&self.trap);
+        let (source, _) = self.stack.pop(self.trap.pass());
+        let (val_id, _) = self.stack.pop(self.trap.pass());
         if let ShaderType::Range { start, end, ty } = source {
             if let ShaderType::Id(id) = val_id {
                 self.shader_scope.enter_scope();
@@ -360,10 +361,10 @@ impl ShaderFnCompiler {
                 write!(self.out, "for(var {0} = {1}; {0} < {2}; {0}++){{\n", id, start, end).ok();
                 self.mes.push(ShaderMe::ForLoop { var_id: id });
             } else {
-                self.trap.err_unexpected();
+                err_unexpected!(self.trap);
             }
         } else {
-            self.trap.err_unexpected();
+            err_unexpected!(self.trap);
         }
     }
 
@@ -373,16 +374,16 @@ impl ShaderFnCompiler {
                 self.out.push_str("}\n");
                 self.shader_scope.exit_scope();
             } else {
-                self.trap.err_unexpected();
+                err_unexpected!(self.trap);
             }
         } else {
-            self.trap.err_unexpected();
+            err_unexpected!(self.trap);
         }
     }
 
     pub(crate) fn handle_range(&mut self, vm: &mut ScriptVm) {
-        let (end_ty, end_s) = self.stack.pop(&self.trap);
-        let (start_ty, start_s) = self.stack.pop(&self.trap);
+        let (end_ty, end_s) = self.stack.pop(self.trap.pass());
+        let (start_ty, start_s) = self.stack.pop(self.trap.pass());
         // Validate that both operands can be made into concrete numeric types
         let start_concrete = start_ty.make_concrete(&vm.code.builtins.pod);
         let end_concrete = end_ty.make_concrete(&vm.code.builtins.pod);
@@ -393,11 +394,11 @@ impl ShaderFnCompiler {
             if !start_is_number || !end_is_number {
                 self.stack.free_string(start_s);
                 self.stack.free_string(end_s);
-                self.trap.err_range_requires_numbers();
+                err_range_requires_numbers!(self.trap);
                 return;
             }
             self.stack.push(
-                &self.trap,
+                self.trap.pass(),
                 ShaderType::Range {
                     start: start_s,
                     end: end_s,
@@ -408,7 +409,7 @@ impl ShaderFnCompiler {
         } else {
             self.stack.free_string(start_s);
             self.stack.free_string(end_s);
-            self.trap.err_range_requires_numbers();
+            err_range_requires_numbers!(self.trap);
         }
     }
 }
