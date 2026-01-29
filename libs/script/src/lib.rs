@@ -70,3 +70,4 @@ pub use object::*;
 pub use array::*;
 pub use handle::*;
 pub use function::*;
+pub use trap::*;

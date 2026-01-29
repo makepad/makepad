@@ -6,6 +6,7 @@ use crate::native::*;
 use crate::value::*;
 use crate::shader::*;
 use crate::shader_backend::*;
+use crate::trap::NoTrap;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct ShaderIoType(pub(crate) u32);
@@ -176,9 +177,11 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             
             if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), vm.thread.trap.pass()).as_object(){
                 output.mode = ShaderMode::Vertex;
+                // Entry point shaders don't have script-level arguments to validate, use NoTrap
                 ShaderFnCompiler::compile_shader_def(
                     vm, 
                     &mut output, 
+                    NoTrap,
                     id!(vertex), 
                     fnobj, 
                     ShaderType::IoSelf(io_self), 
@@ -187,9 +190,11 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             }
             if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), vm.thread.trap.pass()).as_object(){
                 output.mode = ShaderMode::Fragment;
+                // Entry point shaders don't have script-level arguments to validate, use NoTrap
                 ShaderFnCompiler::compile_shader_def(
                     vm, 
                     &mut output, 
+                    NoTrap,
                     id!(fragment), 
                     fnobj, 
                     ShaderType::IoSelf(io_self), 

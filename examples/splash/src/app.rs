@@ -10,16 +10,15 @@ script_mod!{
     let theme = {
         test_color: #fff
     }
-    let x = #(App::script_component(vm)){
+    #(App::script_component(vm)){
         me.draw_quad.pixel = ||{
             let sdf = Sdf2d.viewport(self.pos*self.rect_size)
-            sdf.circle(40 40 35 1)
+            sdf.circle(40 40 35)
             sdf.fill(mix(theme.test_color #f00 self.pos.y))
             sdf.result
         }
         me.draw_text.color = #f00
     }
-    x
 }
 
 impl App{

@@ -180,6 +180,8 @@ pub struct ShaderOutput{
     pub scope_textures: Vec<ScopeTextureSource>,
     /// HLSL helper: needs _mpTexSize helper function for texture.size()
     pub hlsl_needs_tex_size: bool,
+    /// Set to true if any errors occurred during shader compilation
+    pub has_errors: bool,
 }
 
 /// Mapping of uniform buffer type names to their assigned buffer indices
