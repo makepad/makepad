@@ -202,7 +202,6 @@ enum ScrollState {
 
 #[derive(Live, LiveHook, LiveRegister)]
 pub struct ScrollBar {
-    #[self] script: ScriptObjectRef,
     #[live] draw_bg: DrawScrollBar,
     #[live] pub bar_size: f64,
     #[live] pub min_handle_size: f64, //minimum size of the handle in pixels
