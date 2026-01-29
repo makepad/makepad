@@ -328,6 +328,9 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    }");
         
         tb.add("    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{");
+        tb.add("        if <Self as ScriptHook>::on_type_check(heap, value){");
+        tb.add("            return true");
+        tb.add("        }");
         tb.add("        if let Some(o) = value.as_object(){");
         tb.add("            let root_proto = heap.root_proto(o);");
         tb.add("            if let Some(id) = root_proto.as_id(){");

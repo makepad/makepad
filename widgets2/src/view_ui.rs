@@ -11,13 +11,15 @@ script_mod! {
     use mod.shader.*
     use mod.widgets.*
     use mod.turtle.*
+    use mod.turtle.Flow.*
+    use mod.turtle.Size.*
     use mod.widgets.ViewOptimize
     mod.widgets.View =  mod.widgets.ViewBase {}
     
     mod.widgets.Hr = mod.widgets.View {
-        width: Size.Fill
+        width: Fill
         height: theme.space_2 * 7.5
-        flow: Flow.Down
+        flow: Down
         margin: 0.
 
         show_bg: true
@@ -54,8 +56,8 @@ script_mod! {
     
     mod.widgets.Vr = mod.widgets.View {
         width: theme.space_2 * 2.
-        height: Size.Fill
-        flow: Flow.Right
+        height: Fill
+        flow: Right
 
         show_bg: true
         draw_bg +: {
@@ -90,7 +92,7 @@ script_mod! {
         }
     }
     
-    mod.widgets.Filler = mod.widgets.View { width: Size.Fill height: Size.Fill }
+    mod.widgets.Filler = mod.widgets.View { width: Fill height: Fill }
     
     mod.widgets.SolidView = mod.widgets.ViewBase {
         show_bg: true
