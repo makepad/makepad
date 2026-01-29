@@ -134,7 +134,7 @@ impl ShaderFnCompiler {
 
                     let val_ty = op_res_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty {
-                        script_err_pod_type_not_matching!(self.trap, "shader: field {:?} compound assign type mismatch", field_id);
+                        script_err_pod_type_not_matching!(self.trap, "shader: field {:?} compound assign type mismatch: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                     }
 
                     let mut s = self.stack.new_string();
@@ -156,7 +156,7 @@ impl ShaderFnCompiler {
 
                     let val_ty = op_res_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty {
-                        script_err_pod_type_not_matching!(self.trap, "shader: ptr field {:?} compound assign type mismatch", field_id);
+                        script_err_pod_type_not_matching!(self.trap, "shader: ptr field {:?} compound assign type mismatch: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                     }
 
                     let mut s = self.stack.new_string();
@@ -200,7 +200,11 @@ impl ShaderFnCompiler {
                     ShaderType::AbstractInt => {}
                     ShaderType::Pod(t) if t == builtins.pod_i32 || t == builtins.pod_u32 => {}
                     _ => {
-                        script_err_pod_type_not_matching!(self.trap, "shader: index must be integer, got {:?}", index_ty);
+                        let got_type = match index_ty {
+                            ShaderType::Pod(t) => format_pod_type_name(&vm.heap, t),
+                            _ => format!("{:?}", index_ty),
+                        };
+                        script_err_pod_type_not_matching!(self.trap, "shader: index must be integer, got {}", got_type);
                     }
                 }
 
@@ -213,7 +217,7 @@ impl ShaderFnCompiler {
 
                 let val_ty = op_res_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
                 if val_ty != ret_ty {
-                    script_err_pod_type_not_matching!(self.trap, "shader: index compound assign type mismatch");
+                    script_err_pod_type_not_matching!(self.trap, "shader: index compound assign type mismatch: expected {}, got {}", format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                 }
 
                 let mut s = self.stack.new_string();
