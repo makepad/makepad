@@ -614,7 +614,7 @@ pub fn type_table_builtin(
     name: LiveId, 
     args: &[ScriptPodType], 
     builtins: &ScriptPodBuiltins,
-    trap: &ScriptTrap
+    trap: ScriptTrap
 ) -> ScriptPodType {
     let f32_t = builtins.pod_f32;
     let f16_t = builtins.pod_f16;

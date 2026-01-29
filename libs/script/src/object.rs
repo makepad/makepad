@@ -586,7 +586,7 @@ impl ScriptObjectData{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
                 return vm.heap.proto(sself)
             }
-            vm.thread.trap.err_unexpected()
+            err_unexpected!(vm.thread.trap)
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(push), &[], |vm, args|{

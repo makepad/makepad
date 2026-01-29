@@ -309,7 +309,7 @@ impl ShaderFnCompiler {
         vm: &ScriptVm,
         io_self: ScriptObject,
         field_id: LiveId,
-        _trap: &ScriptTrap,
+        _trap: ScriptTrap,
     ) -> Option<(ScriptObject, ShaderIoType)> {
         let mut result: Option<(ScriptObject, ShaderIoType)> = None;
         let mut current: Option<ScriptObject> = Some(io_self);
@@ -342,7 +342,7 @@ impl ShaderFnCompiler {
         vm: &ScriptVm,
         io_self: ScriptObject,
         field_id: LiveId,
-        trap: &ScriptTrap,
+        trap: ScriptTrap,
     ) -> (ScriptValue, Option<ShaderIoType>) {
         // First, try to find the highest shader IO definition
         if let Some((io_obj, io_type)) = Self::find_highest_shader_io(vm, io_self, field_id, trap) {

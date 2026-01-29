@@ -86,7 +86,7 @@ pub struct ScriptThread{
     pub(crate) stack: Vec<ScriptValue>,
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
-    pub trap: ScriptTrap,
+    pub trap: ScriptTrapInner,
     pub(crate) last_err: ScriptValue,
     pub(crate) json_parser: JsonParserThread,
     pub(crate) thread_id: ScriptThreadId,
