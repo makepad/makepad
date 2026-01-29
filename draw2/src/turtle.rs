@@ -207,7 +207,7 @@ impl Default for Metrics {
 /// 
 /// See `Turtle::next_walk_width` and `Turtle::next_walk_height` for details on how the actual
 /// width/height is computed based on the desired width/height.
-#[derive(Copy, Clone, Debug, Script, ScriptHook)]
+#[derive(Copy, Clone, Debug, Script)]
 pub enum Size {
     #[pick {
         weight: 100.0,
@@ -286,6 +286,26 @@ impl Size {
 impl Default for Size {
     fn default() -> Self {
         Size::fill()
+    }
+}
+
+impl ScriptHook for Size {
+    fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
+        value.as_f64().is_some() || value.as_number().is_some()
+    }
+    
+    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, value: ScriptValue) -> bool {
+        // Handle numeric values as Size::Fixed
+        if let Some(v) = value.as_f64() {
+            *self = Size::Fixed(v);
+            return true;
+        }
+        if let Some(v) = value.as_number() {
+            *self = Size::Fixed(v);
+            return true;
+        }
+        // Return false to let the generated code handle normal enum objects
+        false
     }
 }
 
@@ -535,7 +555,7 @@ pub enum RowAlign {
 }
 
 /// Specifies the padding around a walk's inner rectangle.
-#[derive(Clone, Copy, Default, Debug, Script, ScriptHook)]
+#[derive(Clone, Copy, Default, Debug, Script)]
 pub struct Padding {
     /// The left padding.
     #[live]
@@ -614,6 +634,27 @@ impl Padding {
     /// This is the sum of the top and bottom padding.
     pub fn height(self) -> f64 {
         self.top + self.bottom
+    }
+}
+
+impl ScriptHook for Padding {
+    fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
+        // Accept numeric values - they will set all four sides
+        value.as_f64().is_some() || value.as_number().is_some()
+    }
+    
+    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, value: ScriptValue) -> bool {
+        // Handle numeric values as uniform padding
+        if let Some(v) = value.as_f64() {
+            *self = Padding { left: v, top: v, right: v, bottom: v };
+            return true;
+        }
+        if let Some(v) = value.as_number() {
+            *self = Padding { left: v, top: v, right: v, bottom: v };
+            return true;
+        }
+        // Return false to let the generated code handle normal objects
+        false
     }
 }
 
