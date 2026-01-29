@@ -4,7 +4,6 @@ use std::cell::RefCell;
 
 #[derive(Debug, Clone)]
 pub struct ScriptError{
-    pub in_rust: bool,
     pub message: String,
     pub origin_file: String,
     pub origin_line: u32,
@@ -19,7 +18,6 @@ pub enum ScriptTrapOn{
 use std::cell::Cell;
 #[derive(Default, Debug)]
 pub struct ScriptTrapInner{
-    pub in_rust: bool,
     pub(crate) err: RefCell<Vec<ScriptError>>,
     pub(crate) on: Cell<Option<ScriptTrapOn>>,
     pub ip: ScriptIp,
@@ -44,7 +42,6 @@ impl ScriptTrapInner{
 impl ScriptTrapInner{
     pub fn push_err(&self, value:ScriptValue,  message:String, origin_file:String, origin_line:u32)->ScriptValue{
         self.err.borrow_mut().push(ScriptError{
-            in_rust: self.in_rust,
             value,
             message,
             origin_file,

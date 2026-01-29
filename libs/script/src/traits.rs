@@ -125,6 +125,7 @@ pub struct ScriptTypeObject{
     pub(crate) type_id: ScriptTypeId,
     pub(crate) check: Box<dyn Fn(&ScriptHeap, ScriptValue)->bool>,
     pub(crate) proto: ScriptValue,
+    pub(crate) name: Option<LiveId>,
 }
 
 pub struct ScriptTypeCheck{
@@ -138,6 +139,10 @@ pub struct ScriptTypeIndex(pub(crate) u32);
 
 // implementation is procmacro generated
 pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
+    
+    /// Returns the LiveId name of this type for error messages.
+    /// Override this in derive macro to provide meaningful type names.
+    fn script_type_name() -> Option<LiveId> { None }
     
     fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
         if  <Self as ScriptHook>::on_type_check(heap, value){
@@ -260,6 +265,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
                 type_id,
                 proto,
                 check: Box::new(Self::script_type_check),
+                name: Self::script_type_name(),
             }),
             props
         };

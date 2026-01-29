@@ -334,7 +334,6 @@ impl ShaderFnCompiler{
         });
         // alright lets go trace the opcodes
         self.trap.ip = fnip;
-        self.trap.in_rust = true;
         let bodies = vm.code.bodies.borrow();
         let body = &bodies[self.trap.ip.body as usize];
         
@@ -387,8 +386,7 @@ impl ShaderFnCompiler{
             if let Some(err) = self.trap.err.borrow_mut().pop(){
                 if let Some(ptr) = err.value.as_err(){
                     if let Some(loc2) = vm.code.ip_to_loc(ptr.ip){
-                        let in_rust = if err.in_rust{"(in rust)"}else{""};
-                        log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}{in_rust} {} ({}:{})", err.value, err.message, err.origin_file, err.origin_line), LogLevel::Error);
+                        log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} {} ({}:{})", err.value, err.message, err.origin_file, err.origin_line), LogLevel::Error);
                     }
                 }
             }

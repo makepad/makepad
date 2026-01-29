@@ -159,6 +159,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("ScriptNew for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
 
         tb.add("    fn script_type_id_static()->ScriptTypeId{ ScriptTypeId::of::<Self>()}");
+        tb.add("    fn script_type_name()->Option<LiveId>{ Some(id_lut!(").ident(&struct_name).add(")) }");
         
         tb.add("    fn script_new(vm: &mut ScriptVm) -> Self {");
         tb.add("        Self {");
@@ -314,6 +315,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("ScriptNew for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         tb.add("    fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}");
+        tb.add("    fn script_type_name()->Option<LiveId>{ Some(id_lut!(").ident(&enum_name).add(")) }");
         tb.add("    fn script_new(vm:&mut ScriptVm)->Self{");
         tb.add("       ");
         items[pick.unwrap()].gen_new(tb) ?;
