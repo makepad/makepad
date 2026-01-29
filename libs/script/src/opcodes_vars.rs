@@ -321,7 +321,7 @@ impl ScriptThread {
         let field = self.pop_stack_value();
         let value = match self.mes.last().unwrap(){
             ScriptMe::Array(_) => {
-                err_not_allowed_in_array!(self.trap)
+                script_err_not_allowed_in_array!(self.trap, "field access {:?} not allowed in array literal context", field)
             }
             ScriptMe::Call{args, ..} => {
                 heap.value(*args, field, self.trap.pass())
@@ -351,7 +351,7 @@ impl ScriptThread {
                     let value = heap.proto_field_from_type_check(obj, field_id, self.trap.pass());
                     self.push_stack_unchecked(value);
                 } else {
-                    let value = err_not_found!(self.trap);
+                    let value = script_err_not_found!(self.trap, "proto field lookup requires identifier, got {:?}", field.value_type());
                     self.push_stack_unchecked(value);
                 }
             } else {
@@ -359,7 +359,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_object!(self.trap);
+            let value = script_err_not_object!(self.trap, "proto_field {:?} target is not an object (got {:?})", field, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -425,7 +425,7 @@ impl ScriptThread {
             }
             ScriptMe::Pod{..} => {
                 // Splat not supported for pods
-                err_not_impl!(self.trap);
+                script_err_not_impl!(self.trap, "splat operator (..) not supported for pod types");
             }
         }
         self.trap.goto_next();
@@ -452,7 +452,7 @@ impl ScriptThread {
             self.push_stack_unchecked(value)
         }
         else{
-            let value = err_not_object!(self.trap);
+            let value = script_err_not_object!(self.trap, "cannot index {:?} on {:?} (not an object/array/pod)", index, object.value_type());
             self.push_stack_unchecked(value);
         }
         self.trap.goto_next();
@@ -562,12 +562,19 @@ impl ScriptThread {
     pub fn log(&self, heap: &ScriptHeap, code: &ScriptCode, value: ScriptValue){
         if let Some(loc) = code.ip_to_loc(self.trap.ip){
             if value != NIL{
-                if let Some(err) = value.as_err(){
-                    if let Some(loc2) = code.ip_to_loc(err.ip){
-                        log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} {}", value, loc2), LogLevel::Log);
+                if let Some(err_ptr) = value.as_err(){
+                    if let Some(loc2) = code.ip_to_loc(err_ptr.ip){
+                        // Check if there's a matching error in the trap queue with full details
+                        let err_queue = self.trap.err.borrow();
+                        if let Some(err) = err_queue.iter().find(|e| e.value == value) {
+                            let in_rust = if err.in_rust{"(in rust)"}else{""};
+                            log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{}{in_rust} {} ({}:{}) {}", value, err.message, err.origin_file, err.origin_line, loc2), LogLevel::Log);
+                        } else {
+                            log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} {}", value, loc2), LogLevel::Log);
+                        }
                     }
                 }
-                if let Some(nanip) = value.as_f64_traced_nan(){
+                else if let Some(nanip) = value.as_f64_traced_nan(){
                     if let Some(loc2) = code.ip_to_loc(nanip){
                         log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} NaN Traced to {}", value, loc2), LogLevel::Log);
                     }

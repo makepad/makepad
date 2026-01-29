@@ -231,7 +231,7 @@ impl ShaderFnCompiler {
             *if_branch_returned = *has_return;
             *has_return = false;
         } else {
-            err_unexpected!(self.trap);
+            script_err_unexpected!(self.trap, "unexpected in shader control");
         }
     }
 
@@ -313,7 +313,7 @@ impl ShaderFnCompiler {
             if let ShaderMe::FnBody { ret, escaped } = me {
                 if let Some(ret) = ret {
                     if ty != *ret {
-                        err_return_type_changed!(self.trap);
+                        script_err_return_type_changed!(self.trap, "return type changed");
                     }
                 }
                 *ret = Some(ty);
@@ -361,10 +361,10 @@ impl ShaderFnCompiler {
                 write!(self.out, "for(var {0} = {1}; {0} < {2}; {0}++){{\n", id, start, end).ok();
                 self.mes.push(ShaderMe::ForLoop { var_id: id });
             } else {
-                err_unexpected!(self.trap);
+                script_err_unexpected!(self.trap, "unexpected in shader control");
             }
         } else {
-            err_unexpected!(self.trap);
+            script_err_unexpected!(self.trap, "unexpected in shader control");
         }
     }
 
@@ -374,10 +374,10 @@ impl ShaderFnCompiler {
                 self.out.push_str("}\n");
                 self.shader_scope.exit_scope();
             } else {
-                err_unexpected!(self.trap);
+                script_err_unexpected!(self.trap, "unexpected in shader control");
             }
         } else {
-            err_unexpected!(self.trap);
+            script_err_unexpected!(self.trap, "unexpected in shader control");
         }
     }
 
@@ -394,7 +394,7 @@ impl ShaderFnCompiler {
             if !start_is_number || !end_is_number {
                 self.stack.free_string(start_s);
                 self.stack.free_string(end_s);
-                err_range_requires_numbers!(self.trap);
+                script_err_range_requires_numbers!(self.trap, "range requires numbers");
                 return;
             }
             self.stack.push(
@@ -409,7 +409,7 @@ impl ShaderFnCompiler {
         } else {
             self.stack.free_string(start_s);
             self.stack.free_string(end_s);
-            err_range_requires_numbers!(self.trap);
+            script_err_range_requires_numbers!(self.trap, "range requires numbers");
         }
     }
 }

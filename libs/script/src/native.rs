@@ -212,8 +212,8 @@ impl ScriptNative{
         let fn_obj = self.add_fn(heap, args, f);
         if ty_redux.to_index() as usize >= self.type_table.len(){
             self.type_table.resize_with( ty_redux.to_index() + 1, || Default::default());
-            self.getters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, _, _|{err_invalid_prop_name!(vm.thread.trap)}));
-            self.setters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, _, _, _|{err_invalid_prop_name!(vm.thread.trap)}));
+            self.getters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, value, field|{script_err_invalid_prop_name!(vm.thread.trap, "no getter for field {:?} on type {:?}", field, value.value_type())}));
+            self.setters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, value, field, _|{script_err_invalid_prop_name!(vm.thread.trap, "no setter for field {:?} on type {:?}", field, value.value_type())}));
         }
         self.type_table[ ty_redux.to_index()].insert(method,fn_obj);
     }

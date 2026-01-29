@@ -11,7 +11,6 @@ script_mod!{
     let theme = {
         test_color: #fff
     }
-    
     let x = #(App::script_component(vm)){
         me.draw_quad.pixel = ||{
             let sdf = Sdf2d.viewport(self.pos*self.rect_size)
@@ -20,6 +19,7 @@ script_mod!{
             sdf.result
         }
         me.draw_text.color = #fff
+        me.draw_text.col
     }
     x
 }

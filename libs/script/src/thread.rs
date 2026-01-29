@@ -153,7 +153,7 @@ impl ScriptThread{
             return val    
         }
         else{
-            err_stack_underflow!(self.trap)
+            script_err_stack_underflow!(self.trap, "pop_stack_resolved on empty stack")
         }
     }
     
@@ -168,7 +168,7 @@ impl ScriptThread{
             return *val    
         }
         else{
-            err_stack_underflow!(self.trap)
+            script_err_stack_underflow!(self.trap, "peek_stack_resolved on empty stack")
         }
     }
     
@@ -177,7 +177,7 @@ impl ScriptThread{
             return *value
         }
         else{
-            err_stack_underflow!(self.trap)
+            script_err_stack_underflow!(self.trap, "peek_stack_value on empty stack")
         }
     }
     
@@ -187,7 +187,7 @@ impl ScriptThread{
             return self.stack[len - 1 - offset]
         }
         else{
-            err_stack_underflow!(self.trap)
+            script_err_stack_underflow!(self.trap, "peek at offset {} exceeds stack len {}", offset, len)
         }
     }
     
@@ -196,13 +196,13 @@ impl ScriptThread{
             return value
         }
         else{
-            err_stack_underflow!(self.trap)
+            script_err_stack_underflow!(self.trap, "pop_stack_value on empty stack")
         }
     }
     
     pub fn push_stack_value(&mut self, value:ScriptValue){
         if self.stack.len() > self.stack_limit{
-            err_stack_overflow!(self.trap);
+            script_err_stack_overflow!(self.trap, "stack exceeded limit {}", self.stack_limit);
         }
         else{
             self.stack.push(value);
@@ -280,7 +280,7 @@ impl ScriptThread{
             }
         }
         else{
-            return err_not_fn!(self.trap)
+            return script_err_not_fn!(self.trap, "call target is not a function (got {:?})", heap.proto(scope).value_type())
         }
     }
     
