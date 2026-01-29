@@ -187,6 +187,23 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
     crate::view_ui::script_mod(vm);
+    
+    
+    script_mod!{
+        mod.ui = {
+            ..mod.pod,
+            ..mod.math,
+            ..mod.sdf,
+            mod.theme,
+            mod.draw,
+            ..mod.shader,
+            ..mod.widgets,
+            ..mod.turtle,
+            ..mod.turtle.Size,
+            ..mod.turtle.Flow,
+        }                
+    }
+    script_mod(vm);
     //crate::theme_desktop_dark::script_mod(vm);
     //makepad_fonts_emoji2::script_mod(vm);
     //makepad_fonts_chinese_regular2::script_mod(vm);

@@ -216,7 +216,7 @@ pub struct TouchUpdateEvent {
 // Finger API
 
 
-#[derive(Clone, Copy, Default, Debug, Script, ScriptHook)]
+#[derive(Clone, Copy, Default, Debug, Script)]
 pub struct Margin {
     /// The left margin.
     #[live] pub left: f64,
@@ -293,6 +293,27 @@ impl Margin {
         else {
             return rect.contains(pos);
         }
+    }
+}
+
+impl ScriptHook for Margin {
+    fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
+        // Accept numeric values - they will set all four sides
+        value.as_f64().is_some() || value.as_number().is_some()
+    }
+    
+    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, value: ScriptValue) -> bool {
+        // Handle numeric values as uniform margin
+        if let Some(v) = value.as_f64() {
+            *self = Margin { left: v, top: v, right: v, bottom: v };
+            return true;
+        }
+        if let Some(v) = value.as_number() {
+            *self = Margin { left: v, top: v, right: v, bottom: v };
+            return true;
+        }
+        // Return false to let the generated code handle normal objects
+        false
     }
 }
 

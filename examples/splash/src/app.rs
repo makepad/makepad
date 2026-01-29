@@ -3,9 +3,8 @@ use makepad_widgets2::scroll_bar::{ScrollBar, ScrollAxis, ScrollBarAction};
 
 app_main!(App); 
 script_mod!{
-    use mod.pod.*
-    use mod.math.*
-    use mod.sdf.*
+    use mod.ui.*
+    
     mod.res.load_all()
     
     let theme = {
@@ -14,7 +13,7 @@ script_mod!{
     let x = #(App::script_component(vm)){
         me.draw_quad.pixel = ||{
             let sdf = Sdf2d.viewport(self.pos*self.rect_size)
-            sdf.circle(40 40 35)
+            sdf.circle(40 40 35 1)
             sdf.fill(mix(theme.test_color #f00 self.pos.y))
             sdf.result
         }
