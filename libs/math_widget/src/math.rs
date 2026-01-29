@@ -2,7 +2,7 @@
 ///
 /// DSL Usage:
 /// ```
-/// <Math> {
+/// <MathView> {
 ///     width: Fit,
 ///     height: Fit,
 ///     color: #fff,
@@ -44,7 +44,7 @@ live_design!{
         }
     }
     
-    pub Math = {{Math}} {
+    pub MathView = {{Math}} {
         color: #fff,
         font_size: 11.0,
         baseline_offset: -2.0,
