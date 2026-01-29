@@ -137,6 +137,92 @@ pub fn format_value_brief(heap: &ScriptHeap, value: ScriptValue) -> String {
     format!("{:?}", value.value_type())
 }
 
+/// Format a ScriptPodType as a human-readable type name for error messages.
+/// Returns names like "f32", "vec2f", "vec4f", "MyStruct", etc.
+pub fn format_pod_type_name(heap: &ScriptHeap, pod_ty: ScriptPodType) -> String {
+    // First try to get the registered name
+    if let Some(name) = heap.pod_type_name(pod_ty) {
+        return name.as_string(|s| s.unwrap_or("?").to_string());
+    }
+    
+    // Fallback: try to describe based on the type structure
+    format_pod_type_from_ty(heap, pod_ty)
+}
+
+/// Format a ScriptPodType based on its type structure (without using registered name).
+pub fn format_pod_type_from_ty(heap: &ScriptHeap, pod_ty: ScriptPodType) -> String {
+    let pod_type = &heap.pod_types[pod_ty.index as usize];
+    match &pod_type.ty {
+        ScriptPodTy::F32 => "f32".to_string(),
+        ScriptPodTy::F16 => "f16".to_string(),
+        ScriptPodTy::U32 => "u32".to_string(),
+        ScriptPodTy::I32 => "i32".to_string(),
+        ScriptPodTy::Bool => "bool".to_string(),
+        ScriptPodTy::Vec(vt) => {
+            // Use the name() method which returns the correct LiveId
+            vt.name().as_string(|s| s.unwrap_or("vec").to_string())
+        }
+        ScriptPodTy::Mat(mt) => {
+            // Use the name() method which returns the correct LiveId
+            mt.name().as_string(|s| s.unwrap_or("mat").to_string())
+        }
+        ScriptPodTy::Struct { .. } => {
+            // Try to get name if available
+            if let Some(name) = heap.pod_type_name(pod_ty) {
+                return name.as_string(|s| s.unwrap_or("struct").to_string());
+            }
+            format!("struct#{}", pod_ty.index)
+        }
+        ScriptPodTy::Enum { .. } => {
+            if let Some(name) = heap.pod_type_name(pod_ty) {
+                return name.as_string(|s| s.unwrap_or("enum").to_string());
+            }
+            format!("enum#{}", pod_ty.index)
+        }
+        ScriptPodTy::FixedArray { .. } => format!("array#{}", pod_ty.index),
+        ScriptPodTy::VariableArray { .. } => format!("vararray#{}", pod_ty.index),
+        ScriptPodTy::Void => "void".to_string(),
+        ScriptPodTy::AtomicU32 => "atomic_u32".to_string(),
+        ScriptPodTy::AtomicI32 => "atomic_i32".to_string(),
+        _ => format!("type#{}", pod_ty.index),
+    }
+}
+
+/// Format a ScriptPodType using builtin constants (for use in shader builtins where we don't have heap access).
+/// This compares against known builtin type indices to get the name.
+pub fn format_pod_type_from_builtins(pod_ty: ScriptPodType, builtins: &crate::mod_pod::ScriptPodBuiltins) -> String {
+    // Check against known builtin types
+    if pod_ty == builtins.pod_void { return "void".to_string(); }
+    if pod_ty == builtins.pod_f32 { return "f32".to_string(); }
+    if pod_ty == builtins.pod_f16 { return "f16".to_string(); }
+    if pod_ty == builtins.pod_u32 { return "u32".to_string(); }
+    if pod_ty == builtins.pod_i32 { return "i32".to_string(); }
+    if pod_ty == builtins.pod_vec2f { return "vec2f".to_string(); }
+    if pod_ty == builtins.pod_vec3f { return "vec3f".to_string(); }
+    if pod_ty == builtins.pod_vec4f { return "vec4f".to_string(); }
+    if pod_ty == builtins.pod_vec2h { return "vec2h".to_string(); }
+    if pod_ty == builtins.pod_vec3h { return "vec3h".to_string(); }
+    if pod_ty == builtins.pod_vec4h { return "vec4h".to_string(); }
+    if pod_ty == builtins.pod_vec2u { return "vec2u".to_string(); }
+    if pod_ty == builtins.pod_vec3u { return "vec3u".to_string(); }
+    if pod_ty == builtins.pod_vec4u { return "vec4u".to_string(); }
+    if pod_ty == builtins.pod_vec2i { return "vec2i".to_string(); }
+    if pod_ty == builtins.pod_vec3i { return "vec3i".to_string(); }
+    if pod_ty == builtins.pod_vec4i { return "vec4i".to_string(); }
+    if pod_ty == builtins.pod_mat2x2f { return "mat2x2f".to_string(); }
+    if pod_ty == builtins.pod_mat3x3f { return "mat3x3f".to_string(); }
+    if pod_ty == builtins.pod_mat4x4f { return "mat4x4f".to_string(); }
+    if pod_ty == builtins.pod_mat2x3f { return "mat2x3f".to_string(); }
+    if pod_ty == builtins.pod_mat2x4f { return "mat2x4f".to_string(); }
+    if pod_ty == builtins.pod_mat3x2f { return "mat3x2f".to_string(); }
+    if pod_ty == builtins.pod_mat3x4f { return "mat3x4f".to_string(); }
+    if pod_ty == builtins.pod_mat4x2f { return "mat4x2f".to_string(); }
+    if pod_ty == builtins.pod_mat4x3f { return "mat4x3f".to_string(); }
+    
+    // Unknown type - just show index
+    format!("type#{}", pod_ty.index)
+}
+
 /// Format suggestions from a list of candidate names
 /// Returns a string like: `. Did you mean 'foo'? Available: bar, baz, foo`
 pub fn suggest_from_iter<'a>(key_str: &str, candidates: impl Iterator<Item = &'a str>) -> String {

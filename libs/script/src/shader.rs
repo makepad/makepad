@@ -1003,7 +1003,7 @@ impl ShaderFnCompiler{
                     
                     if let Some(elem_ty) = elem_ty {
                         if *elem_ty != arg_ty {
-                             script_err_pod_type_not_matching!(self.trap, "pod type mismatch in shader");
+                             script_err_pod_type_not_matching!(self.trap, "array element type mismatch: expected {}, got {}", format_pod_type_name(&vm.heap, *elem_ty), format_pod_type_name(&vm.heap, arg_ty));
                         }
                     }
                     else {

@@ -114,7 +114,7 @@ impl ShaderFnCompiler {
                 if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
                     let val_ty = value_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty {
-                        script_err_pod_type_not_matching!(self.trap, "field {:?} type mismatch", field_id);
+                        script_err_pod_type_not_matching!(self.trap, "field {:?} type mismatch: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                     }
 
                     let mut s = self.stack.new_string();
@@ -129,7 +129,7 @@ impl ShaderFnCompiler {
                 if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
                     let val_ty = value_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty {
-                        script_err_pod_type_not_matching!(self.trap, "field {:?} type mismatch on pod ptr", field_id);
+                        script_err_pod_type_not_matching!(self.trap, "field {:?} type mismatch on pod ptr: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                     }
 
                     let mut s = self.stack.new_string();
@@ -173,7 +173,7 @@ impl ShaderFnCompiler {
                         if let Some(pod_ty) = concrete_ty {
                             let val_ty = value_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                             if val_ty != pod_ty {
-                                script_err_pod_type_not_matching!(self.trap, "shader io field type mismatch");
+                                script_err_pod_type_not_matching!(self.trap, "shader io field {:?} type mismatch: expected {}, got {}", field_id, format_pod_type_name(&vm.heap, pod_ty), format_pod_type_name(&vm.heap, val_ty));
                             }
 
                             let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, io_type);
@@ -229,13 +229,17 @@ impl ShaderFnCompiler {
                     ShaderType::AbstractInt => {}
                     ShaderType::Pod(t) if t == builtins.pod_i32 || t == builtins.pod_u32 => {}
                     _ => {
-                        script_err_pod_type_not_matching!(self.trap, "index type must be int or uint");
+                        let got_type = match index_ty {
+                            ShaderType::Pod(t) => format_pod_type_name(&vm.heap, t),
+                            _ => format!("{:?}", index_ty),
+                        };
+                        script_err_pod_type_not_matching!(self.trap, "index type must be int or uint, got {}", got_type);
                     }
                 }
 
                 let val_ty = value_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
                 if val_ty != ret_ty {
-                    script_err_pod_type_not_matching!(self.trap, "value type mismatch in index assign");
+                    script_err_pod_type_not_matching!(self.trap, "index assign type mismatch: expected {}, got {}", format_pod_type_name(&vm.heap, ret_ty), format_pod_type_name(&vm.heap, val_ty));
                 }
 
                 let mut s = self.stack.new_string();
