@@ -7,6 +7,7 @@ use crate::value::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::pod::*;
+use crate::traits::ScriptTypeObject;
 use std::fmt::Write;
 
 /// Compute Levenshtein distance between two strings
@@ -135,6 +136,113 @@ pub fn format_value_brief(heap: &ScriptHeap, value: ScriptValue) -> String {
     
     // Fallback
     format!("{:?}", value.value_type())
+}
+
+/// Format the type of a ScriptValue as a human-readable string for error messages.
+/// Unlike format_value_brief which shows the value, this shows the type.
+/// Examples: "number", "string", "bool", "vec4f", "MyStruct", "object", "function", "array"
+pub fn format_value_type(heap: &ScriptHeap, value: ScriptValue) -> String {
+    // Handle nil
+    if value.is_nil() {
+        return "nil".to_string();
+    }
+    
+    // Handle bool
+    if value.is_bool() {
+        return "bool".to_string();
+    }
+    
+    // Handle numbers (f64, f32, u32, i32, u40)
+    if value.as_f64().is_some() || value.as_u40().is_some() {
+        return "number".to_string();
+    }
+    
+    // Handle color
+    if value.as_color().is_some() {
+        return "color".to_string();
+    }
+    
+    // Handle LiveId
+    if value.as_id().is_some() {
+        return "id".to_string();
+    }
+    
+    // Handle strings
+    if value.as_inline_string(|_| ()).is_some() || value.as_string().is_some() {
+        return "string".to_string();
+    }
+    
+    // Handle objects - check if it's a function
+    if let Some(obj) = value.as_object() {
+        if heap.is_fn(obj) {
+            return "function".to_string();
+        }
+        // Check if it has a proto that indicates its type
+        let proto = heap.proto(obj);
+        if let Some(id) = proto.as_id() {
+            return id.as_string(|s| s.unwrap_or("object").to_string());
+        }
+        return "object".to_string();
+    }
+    
+    // Handle arrays
+    if value.as_array().is_some() {
+        return "array".to_string();
+    }
+    
+    // Handle pod values - show the pod type name
+    if let Some(pod) = value.as_pod() {
+        let pod_data = &heap.pods[pod.index as usize];
+        return format_pod_type_name(heap, pod_data.ty);
+    }
+    
+    // Handle pod types
+    if let Some(pod_ty) = value.as_pod_type() {
+        return format!("type:{}", format_pod_type_name(heap, pod_ty));
+    }
+    
+    // Handle errors
+    if value.is_err() {
+        return "error".to_string();
+    }
+    
+    // Fallback
+    format!("{:?}", value.value_type())
+}
+
+/// Format the expected type name from a ScriptTypeObject for error messages.
+/// This is used when type checking fails and we need to show what type was expected.
+pub fn format_expected_type(heap: &ScriptHeap, type_object: &ScriptTypeObject) -> String {
+    // Check if proto is a pod value (e.g., Vec4f, Mat4f primitives)
+    if let Some(pod) = type_object.proto.as_pod() {
+        let pod_data = &heap.pods[pod.index as usize];
+        return format_pod_type_name(heap, pod_data.ty);
+    }
+    // Check if proto is an object
+    if let Some(proto_obj) = type_object.proto.as_object() {
+        let obj_data = &heap.objects[proto_obj.index as usize];
+        // Check if it's a pod type first - this handles Vec4f, etc.
+        if let Some(pod_type) = obj_data.tag.as_pod_type() {
+            return format_pod_type_name(heap, pod_type);
+        }
+        // Check if the object itself has a name via its proto
+        let proto_val = heap.proto(proto_obj);
+        if let Some(id) = proto_val.as_id() {
+            return id.as_string(|s| s.unwrap_or("object").to_string());
+        }
+        // Check if the object has entries that indicate it's a known type
+        if let Some(name_val) = obj_data.map_get(&id!(name).into()) {
+            if let Some(id) = name_val.as_id() {
+                return id.as_string(|s| s.unwrap_or("object").to_string());
+            }
+        }
+    }
+    // Proto is directly an id
+    if let Some(id) = type_object.proto.as_id() {
+        return id.as_string(|s| s.unwrap_or("object").to_string());
+    }
+    // Fallback
+    "object".to_string()
 }
 
 /// Format a ScriptPodType as a human-readable type name for error messages.

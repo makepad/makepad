@@ -259,10 +259,10 @@ impl ScriptHeap{
             if let Some(type_prop) = check.props.props.get(&key_id){
                 if let Some(ty_index) = self.type_index.get(&type_prop.ty){
                     let check_prop = &self.type_check[ty_index.0 as usize];
-                    if let Some(object) = &check_prop.object{
-                        //println!("SET VALUE {:?} {:?}", key, value);
-                        if !(*object.check)(self, value){
-                            return script_err_invalid_prop_type!(trap, "value type mismatch for property {:?}", key_id)
+                    if let Some(type_object) = &check_prop.object{
+                        if !(*type_object.check)(self, value){
+                            let expected = format_expected_type(self, type_object);
+                            return script_err_invalid_prop_type!(trap, "type mismatch for property {:?}: expected {}, got {}", key_id, expected, format_value_type(self, value))
                         }
                     }
                 }
@@ -287,7 +287,7 @@ impl ScriptHeap{
                     for kv in object.vec.iter().rev(){
                         if kv.key == key{
                             if !self.validate_type(kv.value, value){
-                                return script_err_invalid_prop_type!(trap, "type mismatch assigning to property {:?}: expected {:?}, got {:?}", key, kv.value.value_type(), value.value_type())
+                                return script_err_invalid_prop_type!(trap, "type mismatch assigning to property {:?}: expected {}, got {}", key, format_value_type(self, kv.value), format_value_type(self, value))
                             }
                             return self.set_value_shallow(top_ptr, key, value, trap);
                         }
@@ -295,7 +295,7 @@ impl ScriptHeap{
                 }
                 if let Some(set_value) = object.map_get(&key){
                     if !self.validate_type(set_value, value){
-                        return script_err_invalid_prop_type!(trap, "type mismatch assigning to property {:?}: expected {:?}, got {:?}", key, set_value.value_type(), value.value_type())
+                        return script_err_invalid_prop_type!(trap, "type mismatch assigning to property {:?}: expected {}, got {}", key, format_value_type(self, set_value), format_value_type(self, value))
                     }
                     return self.set_value_shallow(top_ptr, key, value, trap);
                 }

@@ -18,7 +18,7 @@ script_mod!{
             sdf.fill(mix(theme.test_color #f00 self.pos.y))
             sdf.result
         }
-        me.draw_text.color = #fff
+        me.draw_text.color = "hi"
     }
     x
 }
