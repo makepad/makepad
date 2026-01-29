@@ -179,10 +179,10 @@ pub fn derive_widget_register_impl(input: TokenStream) -> TokenStream {
             let _types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
             tb.add("impl").stream(generic.clone());
-            tb.add("LiveRegister for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            //tb.add("    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}");
-            tb.add("    fn live_register(cx: &mut Cx) {");
-            tb.add("        register_widget!(cx, ").ident(&struct_name).add(");");
+            tb.add("WidgetRegister for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn register_widget(vm: &mut ScriptVm)->ScriptValue{");
+            tb.add("        register_widget!(vm.cx_mut(), ").ident(&struct_name).add(");");
+            tb.add("        Self::script_component(vm)");
             tb.add("    }");
             tb.add("}");
             return tb.end();

@@ -331,6 +331,9 @@ pub fn format_pod_type_from_builtins(pod_ty: ScriptPodType, builtins: &crate::mo
     format!("type#{}", pod_ty.index)
 }
 
+/// Maximum number of items to show in "Available:" list
+const MAX_AVAILABLE_ITEMS: usize = 10;
+
 /// Format suggestions from a list of candidate names
 /// Returns a string like: `. Did you mean 'foo'? Available: bar, baz, foo`
 pub fn suggest_from_iter<'a>(key_str: &str, candidates: impl Iterator<Item = &'a str>) -> String {
@@ -356,15 +359,19 @@ pub fn suggest_from_iter<'a>(key_str: &str, candidates: impl Iterator<Item = &'a
     // Sort alphabetically for the available list
     scored.sort_by_key(|(name, _)| *name);
     
-    // Always list all available
+    // List available items (truncated to MAX_AVAILABLE_ITEMS)
+    let total_count = scored.len();
     if result.is_empty() {
         write!(result, ". Available: ").ok();
     } else {
         write!(result, " Available: ").ok();
     }
-    for (i, (name, _)) in scored.iter().enumerate() {
+    for (i, (name, _)) in scored.iter().take(MAX_AVAILABLE_ITEMS).enumerate() {
         if i > 0 { result.push_str(", "); }
         result.push_str(name);
+    }
+    if total_count > MAX_AVAILABLE_ITEMS {
+        write!(result, " (+{} more)", total_count - MAX_AVAILABLE_ITEMS).ok();
     }
     
     result
@@ -399,19 +406,23 @@ fn suggest_from_candidates(key_str: &str, candidates: Vec<FieldCandidate>) -> St
     // Sort alphabetically for the available list
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     
-    // Always list all available
+    // List available items (truncated to MAX_AVAILABLE_ITEMS)
+    let total_count = sorted.len();
     if result.is_empty() {
         write!(result, ". Available: ").ok();
     } else {
         write!(result, " Available: ").ok();
     }
-    for (i, candidate) in sorted.iter().enumerate() {
+    for (i, candidate) in sorted.iter().take(MAX_AVAILABLE_ITEMS).enumerate() {
         if i > 0 { result.push_str(", "); }
         if candidate.value_preview.is_empty() {
             result.push_str(&candidate.name);
         } else {
             write!(result, "{}({})", candidate.name, candidate.value_preview).ok();
         }
+    }
+    if total_count > MAX_AVAILABLE_ITEMS {
+        write!(result, " (+{} more)", total_count - MAX_AVAILABLE_ITEMS).ok();
     }
     
     result

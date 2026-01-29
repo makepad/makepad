@@ -100,7 +100,7 @@ script_mod!{
                     apply: {
                         draw_bg: {
                             drag: 0
-                            hover: 1
+                            hover: snap(1)
                         }
                     }
                 }

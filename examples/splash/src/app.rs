@@ -38,6 +38,7 @@ pub struct App {
     #[live] draw_quad: DrawQuad,
     #[live] draw_text: DrawText,
     #[live] scroll_bar: ScrollBar,
+    #[live] view: View,
     #[new] main_draw_list: DrawList2d,
 }
 

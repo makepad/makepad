@@ -102,6 +102,17 @@ impl ScriptHeap{
         false
     }
     
+    /// Returns the TypeId for an object if it has a registered type.
+    pub fn object_type_id(&self, ptr: ScriptObject) -> Option<ScriptTypeId> {
+        let obj = &self.objects[ptr.index as usize];
+        if let Some(ti) = obj.tag.as_type_index() {
+            if let Some(object) = &self.type_check[ti.0 as usize].object {
+                return Some(object.type_id)
+            }
+        }
+        None
+    }
+    
     pub fn new_module(&mut self, id:LiveId)->ScriptObject{
         let md = self.new_with_proto(id.into());
         self.set_value_def(self.modules, id.into(), md.into());

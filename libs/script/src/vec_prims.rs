@@ -212,6 +212,7 @@ impl ScriptNew for Vec<ScriptValue> {
         vm.heap.new_object().into()
     }
 }
+
 impl ScriptApply for Vec<ScriptValue> {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
     fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){

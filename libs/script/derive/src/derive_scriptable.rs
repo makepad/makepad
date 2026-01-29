@@ -135,6 +135,10 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
                 tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj);");
             }
+            // Also cascade walk/layout/splat fields' properties to the object
+            if field.attrs.iter().find(|a| a.name == "walk" || a.name == "layout" || a.name == "splat").is_some(){
+                tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj);");
+            }
             if let Some(_) = field.attrs.iter().find(|a| a.name == "live" || a.name == "apply_default"){
                 tb.add("let value:ScriptValue = <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_to_value( &self.").ident(&field.name).add(", vm); ");
                 tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
@@ -191,6 +195,11 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             // This marks where the actual Rust instance data begins (excluding config fields above)
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
                 tb.add("props.mark_rust_instance_start();");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto_props(vm, obj, props);");
+            }
+            
+            // Process walk and layout fields - cascade their props like deref but without marking rust_instance_start
+            if field.attrs.iter().find(|a| a.name == "walk" || a.name == "layout" || a.name == "splat").is_some(){
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto_props(vm, obj, props);");
             }
             
