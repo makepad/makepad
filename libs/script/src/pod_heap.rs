@@ -487,6 +487,76 @@ impl ScriptHeap{
                     script_err_pod!(trap, "pod matrix expects number, got {:?}", value.value_type());
                 }
             }
+            ScriptPodTy::F32 => {
+                if offset.field_index > 0 {
+                    script_err_pod!(trap, "f32 constructor takes exactly 1 arg, got more");
+                }
+                else if let Some(v) = value.as_number() {
+                    out_data.resize(1, 0);
+                    out_data[0] = (v as f32).to_bits();
+                    offset.field_index = 1;
+                    offset.offset_of = 4;
+                }
+                else {
+                    script_err_pod!(trap, "f32 constructor expects number, got {:?}", value.value_type());
+                }
+            }
+            ScriptPodTy::F16 => {
+                if offset.field_index > 0 {
+                    script_err_pod!(trap, "f16 constructor takes exactly 1 arg, got more");
+                }
+                else if let Some(v) = value.as_number() {
+                    out_data.resize(1, 0);
+                    out_data[0] = f32_to_f16(v as f32) as u32;
+                    offset.field_index = 1;
+                    offset.offset_of = 2;
+                }
+                else {
+                    script_err_pod!(trap, "f16 constructor expects number, got {:?}", value.value_type());
+                }
+            }
+            ScriptPodTy::U32 => {
+                if offset.field_index > 0 {
+                    script_err_pod!(trap, "u32 constructor takes exactly 1 arg, got more");
+                }
+                else if let Some(v) = value.as_number() {
+                    out_data.resize(1, 0);
+                    out_data[0] = v as u32;
+                    offset.field_index = 1;
+                    offset.offset_of = 4;
+                }
+                else {
+                    script_err_pod!(trap, "u32 constructor expects number, got {:?}", value.value_type());
+                }
+            }
+            ScriptPodTy::I32 => {
+                if offset.field_index > 0 {
+                    script_err_pod!(trap, "i32 constructor takes exactly 1 arg, got more");
+                }
+                else if let Some(v) = value.as_number() {
+                    out_data.resize(1, 0);
+                    out_data[0] = (v as i32) as u32;
+                    offset.field_index = 1;
+                    offset.offset_of = 4;
+                }
+                else {
+                    script_err_pod!(trap, "i32 constructor expects number, got {:?}", value.value_type());
+                }
+            }
+            ScriptPodTy::Bool => {
+                if offset.field_index > 0 {
+                    script_err_pod!(trap, "bool constructor takes exactly 1 arg, got more");
+                }
+                else if let Some(v) = value.as_bool() {
+                    out_data.resize(1, 0);
+                    out_data[0] = if v { 1 } else { 0 };
+                    offset.field_index = 1;
+                    offset.offset_of = 4;
+                }
+                else {
+                    script_err_pod!(trap, "bool constructor expects bool, got {:?}", value.value_type());
+                }
+            }
             _=>{
                 script_err_unexpected!(trap, "unexpected pod type {:?} in pop_to_me", pod_type.ty);
             }

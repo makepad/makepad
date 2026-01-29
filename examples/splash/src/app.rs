@@ -17,7 +17,14 @@ script_mod!{
             sdf.fill(mix(theme.test_color #f00 self.pos.y))
             sdf.result
         }
-        me.draw_text.color = #f00
+        me.draw_text.color = #0f0
+        me.view = RoundedView{
+            width: 250, 
+            height: 300
+            draw_bg +: {
+                color: #444
+            }
+        }
     }
 }
 
@@ -68,11 +75,13 @@ impl MatchEvent for App{
 
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
-        
+        // Draw the RoundedView with orange color
+        let _ = self.view.draw(cx, &mut Scope::empty());
+                
         self.draw_quad.draw_abs(cx, rect(10.,10.,200.,100.));
         self.draw_text.draw_abs(cx, dvec2(10., 100.), "Text output");
         
-        // Draw a vertical scrollbar on the right side
+// Draw a vertical scrollbar on the right side
         let view_rect = Rect { pos: dvec2(0., 0.), size:dvec2(200.,200.) };
         let view_total = dvec2(size.x, 1000.0); // Content is 1000px tall
         self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, view_rect, view_total);
