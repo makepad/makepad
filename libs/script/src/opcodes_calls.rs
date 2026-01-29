@@ -57,7 +57,6 @@ impl ScriptThread {
             match fnptr{
                 ScriptFnPtr::Native(ni) => {
                     let ip = self.trap.ip;
-                    self.trap.in_rust = true;
                     let ret = (*code.native.borrow().functions[ni.index as usize])(&mut ScriptVm{
                         host,
                         heap,
@@ -70,7 +69,6 @@ impl ScriptThread {
                         return false // Paused: skip pop_to_me, function not complete
                     }
                     
-                    self.trap.in_rust = false;
                     self.trap.ip = ip;
                     self.push_stack_value(ret);
                     heap.free_object_if_unreffed(args);

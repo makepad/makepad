@@ -567,8 +567,7 @@ impl ScriptThread {
                         // Check if there's a matching error in the trap queue with full details
                         let err_queue = self.trap.err.borrow();
                         if let Some(err) = err_queue.iter().find(|e| e.value == value) {
-                            let in_rust = if err.in_rust{"(in rust)"}else{""};
-                            log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{}{in_rust} {} ({}:{}) {}", value, err.message, err.origin_file, err.origin_line, loc2), LogLevel::Log);
+                            log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} ({}:{}) {}", err.message, err.origin_file, err.origin_line, loc2), LogLevel::Log);
                         } else {
                             log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} {}", value, loc2), LogLevel::Log);
                         }

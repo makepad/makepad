@@ -8,10 +8,10 @@ script_mod! {
     use mod.sdf.*
     use mod.theme
     use mod.draw
-    use mod.shader
+    use mod.shader.*
     use mod.widgets.*
     use mod.turtle.*
-    
+    use mod.widgets.ViewOptimize
     mod.widgets.View =  mod.widgets.ViewBase {}
     
     mod.widgets.Hr = mod.widgets.View {
@@ -22,9 +22,9 @@ script_mod! {
 
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(theme.color_bevel_outset_2)
-            color_2: shader.uniform(theme.color_bevel_outset_1)
-            border_size: shader.uniform(theme.beveling)
+            color: uniform(theme.color_bevel_outset_2)
+            color_2: uniform(theme.color_bevel_outset_1)
+            border_size: uniform(theme.beveling)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -59,9 +59,9 @@ script_mod! {
 
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(theme.color_bevel_outset_2)
-            color_2: shader.uniform(theme.color_bevel_outset_1)
-            border_size: shader.uniform(theme.beveling)
+            color: uniform(theme.color_bevel_outset_2)
+            color_2: uniform(theme.color_bevel_outset_1)
+            border_size: uniform(theme.beveling)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -95,7 +95,7 @@ script_mod! {
     mod.widgets.SolidView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#0000)
+            color: uniform(#0000)
 
             get_color: fn() {
                 return self.color
@@ -111,17 +111,17 @@ script_mod! {
         show_bg: true
 
         draw_bg +: {
-            color: shader.uniform(#0000)
-            color_dither: shader.uniform(1.0)
-            border_size: shader.uniform(0.0)
-            border_inset: shader.uniform(vec4(0.0 0.0 0.0 0.0))
-            gradient_fill_horizontal: shader.uniform(0.0)
-            gradient_border_horizontal: shader.uniform(0.0)
+            color: uniform(#0000)
+            color_dither: uniform(1.0)
+            border_size: uniform(0.0)
+            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            gradient_fill_horizontal: uniform(0.0)
+            gradient_border_horizontal: uniform(0.0)
 
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
 
-            border_color: shader.uniform(#0000)
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_color: uniform(#0000)
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
                         
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -174,26 +174,26 @@ script_mod! {
                 
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#0000)
-            color_dither: shader.uniform(1.0)
-            border_size: shader.uniform(0.0)
-            gradient_border_horizontal: shader.uniform(0.0)
-            gradient_fill_horizontal: shader.uniform(0.0)
+            color: uniform(#0000)
+            color_dither: uniform(1.0)
+            border_size: uniform(0.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color: shader.uniform(#f00)
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_color: uniform(#f00)
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
 
-            shadow_color: shader.uniform(#0007)
-            shadow_offset: shader.uniform(vec2(0.0 0.0))
-            shadow_radius: shader.uniform(10.0)
+            shadow_color: uniform(#0007)
+            shadow_offset: uniform(vec2(0.0 0.0))
+            shadow_radius: uniform(10.0)
                     
-            rect_size2: shader.varying(vec2(0.0 0.0))
-            rect_size3: shader.varying(vec2(0.0 0.0))
-            sdf_rect_pos: shader.varying(vec2(0.0 0.0))
-            sdf_rect_size: shader.varying(vec2(0.0 0.0))
-            rect_pos2: shader.varying(vec2(0.0 0.0))
-            rect_shift: shader.varying(vec2(0.0 0.0))
+            rect_size2: varying(vec2(0.0 0.0))
+            rect_size3: varying(vec2(0.0 0.0))
+            sdf_rect_pos: varying(vec2(0.0 0.0))
+            sdf_rect_size: varying(vec2(0.0 0.0))
+            rect_pos2: varying(vec2(0.0 0.0))
+            rect_shift: varying(vec2(0.0 0.0))
 
             vertex: fn() {
                 let min_offset = min(self.shadow_offset vec2(0))
@@ -259,27 +259,27 @@ script_mod! {
                             
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#8)
-            color_dither: shader.uniform(1.0)
-            gradient_border_horizontal: shader.uniform(0.0)
-            gradient_fill_horizontal: shader.uniform(0.0)
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            color: uniform(#8)
+            color_dither: uniform(1.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
 
-            border_radius: shader.uniform(2.5)
-            border_size: shader.uniform(0.0)
-            border_color: shader.uniform(#0000)
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_radius: uniform(2.5)
+            border_size: uniform(0.0)
+            border_color: uniform(#0000)
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
 
-            shadow_color: shader.uniform(#0007)
-            shadow_radius: shader.uniform(20.0)
-            shadow_offset: shader.uniform(vec2(0.0 0.0))
+            shadow_color: uniform(#0007)
+            shadow_radius: uniform(20.0)
+            shadow_offset: uniform(vec2(0.0 0.0))
                                             
-            rect_size2: shader.varying(vec2(0.0 0.0))
-            rect_size3: shader.varying(vec2(0.0 0.0))
-            rect_pos2: shader.varying(vec2(0.0 0.0))
-            rect_shift: shader.varying(vec2(0.0 0.0))
-            sdf_rect_pos: shader.varying(vec2(0.0 0.0))
-            sdf_rect_size: shader.varying(vec2(0.0 0.0))
+            rect_size2: varying(vec2(0.0 0.0))
+            rect_size3: varying(vec2(0.0 0.0))
+            rect_pos2: varying(vec2(0.0 0.0))
+            rect_shift: varying(vec2(0.0 0.0))
+            sdf_rect_pos: varying(vec2(0.0 0.0))
+            sdf_rect_size: varying(vec2(0.0 0.0))
                                               
             vertex: fn() {
                 let min_offset = min(self.shadow_offset vec2(0))
@@ -346,17 +346,17 @@ script_mod! {
     mod.widgets.RoundedView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#0000)
-            color_dither: shader.uniform(1.0)
-            gradient_border_horizontal: shader.uniform(0.0)
-            gradient_fill_horizontal: shader.uniform(0.0)
+            color: uniform(#0000)
+            color_dither: uniform(1.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            border_size: shader.uniform(0.0)
-            border_radius: shader.uniform(2.5)
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color: shader.uniform(#0000)
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_inset: shader.uniform(vec4(0.0 0.0 0.0 0.0))
+            border_size: uniform(0.0)
+            border_radius: uniform(2.5)
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_color: uniform(#0000)
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
                                 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -406,18 +406,18 @@ script_mod! {
     mod.widgets.RoundedXView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#0000)
-            color_dither: shader.uniform(1.0)
-            gradient_border_horizontal: shader.uniform(0.0)
-            gradient_fill_horizontal: shader.uniform(0.0)
+            color: uniform(#0000)
+            color_dither: uniform(1.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
 
-            border_size: shader.uniform(0.0)
-            border_color: shader.uniform(#0000)
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_inset: shader.uniform(vec4(0.0 0.0 0.0 0.0))
-            border_radius: shader.uniform(vec2(2.5 2.5))
+            border_size: uniform(0.0)
+            border_color: uniform(#0000)
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_radius: uniform(vec2(2.5 2.5))
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -468,18 +468,18 @@ script_mod! {
     mod.widgets.RoundedYView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#0000)
-            color_dither: shader.uniform(1.0)
-            gradient_border_horizontal: shader.uniform(0.0)
-            gradient_fill_horizontal: shader.uniform(0.0)
+            color: uniform(#0000)
+            color_dither: uniform(1.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
 
-            border_size: shader.uniform(0.0)
-            border_color: shader.uniform(#0000)
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_inset: shader.uniform(vec4(0.0 0.0 0.0 0.0))
-            border_radius: shader.uniform(vec2(2.5 2.5))
+            border_size: uniform(0.0)
+            border_color: uniform(#0000)
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_radius: uniform(vec2(2.5 2.5))
                                                         
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -533,17 +533,17 @@ script_mod! {
     mod.widgets.RoundedAllView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#0000)
-            color_dither: shader.uniform(1.0)
-            gradient_border_horizontal: shader.uniform(0.0)
-            gradient_fill_horizontal: shader.uniform(0.0)
+            color: uniform(#0000)
+            color_dither: uniform(1.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_size: shader.uniform(0.0)
-            border_color: shader.uniform(#0000)
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_inset: shader.uniform(vec4(0.0 0.0 0.0 0.0))
-            border_radius: shader.uniform(vec4(2.5 2.5 2.5 2.5))
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_size: uniform(0.0)
+            border_color: uniform(#0000)
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_radius: uniform(vec4(2.5 2.5 2.5 2.5))
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -599,16 +599,16 @@ script_mod! {
     mod.widgets.CircleView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#0000)
-            color_dither: shader.uniform(1.0)
-            gradient_border_horizontal: shader.uniform(0.0)
-            gradient_fill_horizontal: shader.uniform(0.0)
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_size: shader.uniform(0.0)
-            border_color: shader.uniform(#0000)
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_inset: shader.uniform(vec4(0.0 0.0 0.0 0.0))
-            border_radius: shader.uniform(5.0)
+            color: uniform(#0000)
+            color_dither: uniform(1.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_size: uniform(0.0)
+            border_color: uniform(#0000)
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_radius: uniform(5.0)
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -671,18 +671,18 @@ script_mod! {
     mod.widgets.HexagonView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#0000)
-            color_dither: shader.uniform(1.0)
-            gradient_border_horizontal: shader.uniform(0.0)
-            gradient_fill_horizontal: shader.uniform(0.0)
+            color: uniform(#0000)
+            color_dither: uniform(1.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
 
-            border_size: shader.uniform(0.0)
-            border_color: shader.uniform(#0000)
-            border_inset: shader.uniform(vec4(0.0 0.0 0.0 0.0))
-            border_radius: shader.uniform(vec2(0.0 1.0))
+            border_size: uniform(0.0)
+            border_color: uniform(#0000)
+            border_inset: uniform(vec4(0.0 0.0 0.0 0.0))
+            border_radius: uniform(vec2(0.0 1.0))
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -745,10 +745,10 @@ script_mod! {
     mod.widgets.GradientXView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#00f)
-            gradient_fill_horizontal: shader.uniform(1.0)
-            color_dither: shader.uniform(1.0)
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            color: uniform(#00f)
+            gradient_fill_horizontal: uniform(1.0)
+            color_dither: uniform(1.0)
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
 
             get_color: fn() {
                 let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
@@ -774,19 +774,19 @@ script_mod! {
     mod.widgets.GradientYView = mod.widgets.GradientXView {
         show_bg: true
         draw_bg +: {
-            color: shader.uniform(#00f)
-            gradient_fill_horizontal: shader.uniform(0.0)
-            color_2: shader.uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_dither: shader.uniform(1.0)
+            color: uniform(#00f)
+            gradient_fill_horizontal: uniform(0.0)
+            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
+            color_dither: uniform(1.0)
         }
     }
                 
     mod.widgets.CachedView = mod.widgets.ViewBase {
         optimize: ViewOptimize.Texture
         draw_bg +: {
-            image: shader.texture()
-            scale: shader.varying(vec2(0.0 0.0))
-            shift: shader.varying(vec2(0.0 0.0))
+            image: texture_2d(float)
+            scale: varying(vec2(0.0 0.0))
+            shift: varying(vec2(0.0 0.0))
             vertex: fn() {
                 let dpi = self.dpi_factor
                 let ceil_size = ceil(self.rect_size * dpi) / dpi
@@ -804,14 +804,14 @@ script_mod! {
     mod.widgets.CachedRoundedView = mod.widgets.ViewBase {
         optimize: ViewOptimize.Texture
         draw_bg +: {
-            border_size: shader.uniform(0.0)
-            border_color: shader.uniform(#000F)
-            border_inset: shader.uniform(vec4(0. 0. 0. 0.))
-            border_radius: shader.uniform(2.5)
+            border_size: uniform(0.0)
+            border_color: uniform(#000F)
+            border_inset: uniform(vec4(0. 0. 0. 0.))
+            border_radius: uniform(2.5)
                                 
-            image: shader.texture()
-            scale: shader.varying(vec2(0.0 0.0))
-            shift: shader.varying(vec2(0.0 0.0))
+            image: texture_2d(float)
+            scale: varying(vec2(0.0 0.0))
+            shift: varying(vec2(0.0 0.0))
                                             
             get_border_color: fn() {
                 return self.border_color

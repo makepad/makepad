@@ -256,7 +256,6 @@ impl ScriptThread{
         if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{
                 ScriptFnPtr::Native(ni)=>{
-                    self.trap.in_rust = true;
                     return (*code.native.borrow().functions[ni.index as usize])(&mut ScriptVm{
                         host,
                         heap,
@@ -265,7 +264,6 @@ impl ScriptThread{
                     }, scope);
                 }
                 ScriptFnPtr::Script(sip)=>{
-                    self.trap.in_rust = false;
                     let call = CallFrame{
                         bases: self.new_bases(),
                         args: OpcodeArgs::default(),
@@ -274,7 +272,6 @@ impl ScriptThread{
                     self.scopes.push(scope);
                     self.calls.push(call);
                     self.trap.ip = sip;
-                    self.trap.in_rust = true;
                     return self.run_core(heap, code, host);
                 }
             }
@@ -285,7 +282,6 @@ impl ScriptThread{
     }
     
     pub fn run_core(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any)->ScriptValue{
-        self.trap.in_rust = false;
         let bodies = code.bodies.borrow();
         let mut body = &bodies[self.trap.ip.body as usize];
         while (self.trap.ip.index as usize) < body.parser.opcodes.len(){
@@ -309,8 +305,7 @@ impl ScriptThread{
                         while let Some(err) = self.trap.err.borrow_mut().pop(){
                             if let Some(ptr) = err.value.as_err(){
                                 if let Some(loc2) = code.ip_to_loc(ptr.ip){
-                                    let in_rust = if err.in_rust{"(in rust)"}else{""};
-                                    log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}{in_rust} {} ({}:{})", err.value, err.message, err.origin_file, err.origin_line), LogLevel::Error);
+                                    log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} ({}:{})", err.message, err.origin_file, err.origin_line), LogLevel::Error);
                                 }
                             }
                         }

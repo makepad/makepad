@@ -213,6 +213,10 @@ pub fn format_value_type(heap: &ScriptHeap, value: ScriptValue) -> String {
 /// Format the expected type name from a ScriptTypeObject for error messages.
 /// This is used when type checking fails and we need to show what type was expected.
 pub fn format_expected_type(heap: &ScriptHeap, type_object: &ScriptTypeObject) -> String {
+    // First check if we have an explicit type name set (from derive macro)
+    if let Some(name) = type_object.name {
+        return name.as_string(|s| s.unwrap_or("object").to_string());
+    }
     // Check if proto is a pod value (e.g., Vec4f, Mat4f primitives)
     if let Some(pod) = type_object.proto.as_pod() {
         let pod_data = &heap.pods[pod.index as usize];
