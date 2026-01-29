@@ -216,13 +216,13 @@ impl ShaderFnCompiler {
                             match &arg.ty {
                                 ShaderType::Pod(arg_pod_ty) => {
                                     if *arg_pod_ty != field.ty.self_ref {
-                                        script_err_pod_type_not_matching!(self.trap, "named arg {:?} type mismatch", field.name);
+                                        script_err_pod_type_not_matching!(self.trap, "named arg {:?} type mismatch: expected {}, got {}", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref), format_pod_type_name(&vm.heap, *arg_pod_ty));
                                     }
                                 }
                                 ShaderType::Id(id) => {
                                     if let Some((v, _name)) = self.shader_scope.find_var(*id) {
                                         if v.ty() != field.ty.self_ref {
-                                            script_err_pod_type_not_matching!(self.trap, "var {:?} type mismatch for field {:?}", id, field.name);
+                                            script_err_pod_type_not_matching!(self.trap, "var {:?} type mismatch for field {:?}: expected {}, got {}", id, field.name, format_pod_type_name(&vm.heap, field.ty.self_ref), format_pod_type_name(&vm.heap, v.ty()));
                                         }
                                     } else {
                                         script_err_not_found!(self.trap, "var {:?} not found{}", id, suggest_from_live_ids(*id, &self.shader_scope.all_var_names()));
@@ -234,13 +234,13 @@ impl ShaderFnCompiler {
                                         && field.ty.self_ref != builtins.pod_u32
                                         && field.ty.self_ref != builtins.pod_f32
                                     {
-                                        script_err_pod_type_not_matching!(self.trap, "abstract int not compatible with field {:?}", field.name);
+                                        script_err_pod_type_not_matching!(self.trap, "abstract int not compatible with field {:?} (expects {})", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref));
                                     }
                                 }
                                 ShaderType::AbstractFloat => {
                                     let builtins = &vm.code.builtins.pod;
                                     if field.ty.self_ref != builtins.pod_f32 {
-                                        script_err_pod_type_not_matching!(self.trap, "abstract float not compatible with field {:?}", field.name);
+                                        script_err_pod_type_not_matching!(self.trap, "abstract float not compatible with field {:?} (expects {})", field.name, format_pod_type_name(&vm.heap, field.ty.self_ref));
                                     }
                                 }
                                 _ => {}

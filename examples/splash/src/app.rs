@@ -19,7 +19,6 @@ script_mod!{
             sdf.result
         }
         me.draw_text.color = #fff
-        me.draw_text.col
     }
     x
 }

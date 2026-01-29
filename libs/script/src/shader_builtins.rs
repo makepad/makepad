@@ -7,6 +7,7 @@ use crate::trap::*;
 use crate::pod::*;
 use crate::vm::*;
 use crate::value::*;
+use crate::suggest::format_pod_type_from_builtins;
 use crate::*;
 use makepad_math::{Vec2f, Vec3f, Vec4f};
 
@@ -616,6 +617,9 @@ pub fn type_table_builtin(
     builtins: &ScriptPodBuiltins,
     trap: ScriptTrap
 ) -> ScriptPodType {
+    // Helper to format type names for error messages
+    let fmt_ty = |t: ScriptPodType| format_pod_type_from_builtins(t, builtins);
+    
     let f32_t = builtins.pod_f32;
     let f16_t = builtins.pod_f16;
     let u32_t = builtins.pod_u32;
@@ -661,7 +665,7 @@ pub fn type_table_builtin(
              if is_any_float(t) {
                  return t;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires float/vec-float arg, got type index {}", name, t.index);
+             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires float/vec-float arg, got {}", name, fmt_ty(t));
              return builtins.pod_void;
         }
         id!(length) => {
@@ -675,7 +679,7 @@ pub fn type_table_builtin(
                 if t == vec2h_t || t == vec3h_t || t == vec4h_t { return f16_t; }
                 return t; 
             }
-            script_err_invalid_arg_type!(trap, "shader builtin 'length' requires float/vec-float arg, got type index {}", t.index);
+            script_err_invalid_arg_type!(trap, "shader builtin 'length' requires float/vec-float arg, got {}", fmt_ty(t));
             return builtins.pod_void;
        }
         // Float or Int 1 argument
@@ -688,7 +692,7 @@ pub fn type_table_builtin(
              if is_any_float(t) || is_any_int(t) {
                  return t;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires float/int arg, got type index {}", name, t.index);
+             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires float/int arg, got {}", name, fmt_ty(t));
              return builtins.pod_void;
         }
         // Float 2 arguments
@@ -701,7 +705,7 @@ pub fn type_table_builtin(
              if t1 == t2 && is_any_float(t1) {
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires matching float types, got type indices {} and {}", name, t1.index, t2.index);
+             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires matching float types, got {} and {}", name, fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         id!(step) => {
@@ -718,7 +722,7 @@ pub fn type_table_builtin(
                 t1 == f16_t && (t2 == vec2h_t || t2 == vec3h_t || t2 == vec4h_t)) {
                  return t2;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin 'step' requires (float,float) or (scalar,vec-float), got type indices {} and {}", t1.index, t2.index);
+             script_err_invalid_arg_type!(trap, "shader builtin 'step' requires (float,float) or (scalar,vec-float), got {} and {}", fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         id!(distance) => {
@@ -732,7 +736,7 @@ pub fn type_table_builtin(
                  if t1 == vec2h_t || t1 == vec3h_t || t1 == vec4h_t { return f16_t; }
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin 'distance' requires matching float types, got type indices {} and {}", t1.index, t2.index);
+             script_err_invalid_arg_type!(trap, "shader builtin 'distance' requires matching float types, got {} and {}", fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         // Float or Int 2 arguments
@@ -745,7 +749,7 @@ pub fn type_table_builtin(
              if t1 == t2 && (is_any_float(t1) || is_any_int(t1)) {
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires matching float/int types, got type indices {} and {}", name, t1.index, t2.index);
+             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires matching float/int types, got {} and {}", name, fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         // Float 3 arguments
@@ -761,7 +765,7 @@ pub fn type_table_builtin(
                  // vector with scalar alpha
                  if (t1 == vec2f_t || t1 == vec3f_t || t1 == vec4f_t) && (is_float(t3) || is_int(t3)){ return t1; }
              }
-             script_err_invalid_arg_type!(trap, "shader builtin 'mix' requires matching float types for x,y and compatible alpha, got type indices {}, {}, {}", t1.index, t2.index, t3.index);
+             script_err_invalid_arg_type!(trap, "shader builtin 'mix' requires matching float types for x,y and compatible alpha, got {}, {}, {}", fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
              return builtins.pod_void;
         }
         id!(smoothstep) | id!(fma) => {
@@ -773,7 +777,7 @@ pub fn type_table_builtin(
              if t1 == t2 && t2 == t3 && is_any_float(t1) {
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires 3 matching float args, got type indices {}, {}, {}", name, t1.index, t2.index, t3.index);
+             script_err_invalid_arg_type!(trap, "shader builtin {:?} requires 3 matching float args, got {}, {}, {}", name, fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
              return builtins.pod_void;
         }
         // Clamp: Float or Int 3 arguments
@@ -786,7 +790,7 @@ pub fn type_table_builtin(
              if t1 == t2 && t2 == t3 && (is_any_float(t1) || is_any_int(t1)) {
                  return t1;
              }
-             script_err_invalid_arg_type!(trap, "shader builtin 'clamp' requires 3 matching float/int args, got type indices {}, {}, {}", t1.index, t2.index, t3.index);
+             script_err_invalid_arg_type!(trap, "shader builtin 'clamp' requires 3 matching float/int args, got {}, {}, {}", fmt_ty(t1), fmt_ty(t2), fmt_ty(t3));
              return builtins.pod_void;
         }
         _ => {
