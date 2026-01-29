@@ -87,7 +87,7 @@ impl ScriptStringData{
                 r
             }
             else{
-                err_unexpected!(vm.thread.trap)
+                script_err_unexpected!(vm.thread.trap, "parse_json called on non-string value")
             }
         });
         
@@ -98,7 +98,7 @@ impl ScriptStringData{
             }){
                 return s.into()
             }
-            err_unexpected!(vm.thread.trap)
+            script_err_unexpected!(vm.thread.trap, "trim called on non-string value")
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(strip_prefix), script_args_def!(pat = NIL), |vm, args|{
@@ -111,7 +111,7 @@ impl ScriptStringData{
             }){
                 return s.into()
             }
-            err_unexpected!(vm.thread.trap)
+            script_err_unexpected!(vm.thread.trap, "strip_prefix requires string arguments")
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(strip_suffix), script_args_def!(pat = NIL), |vm, args|{
@@ -124,7 +124,7 @@ impl ScriptStringData{
             }){
                 return s.into()
             }
-            err_unexpected!(vm.thread.trap)
+            script_err_unexpected!(vm.thread.trap, "strip_suffix requires string arguments")
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(split), script_args_def!(pat = NIL), |vm, args|{
@@ -149,7 +149,7 @@ impl ScriptStringData{
                 return s.into()
             }
             
-            err_unexpected!(vm.thread.trap)
+            script_err_unexpected!(vm.thread.trap, "split requires string arguments for both self and pattern")
         });
     }
 }

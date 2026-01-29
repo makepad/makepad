@@ -55,6 +55,7 @@ pub mod shader_hlsl;
 pub mod shader_tables;
 pub mod shader_builtins;
 pub mod apply;
+pub mod suggest;
 
 pub use gc::*;
 pub use makepad_live_id::*;

@@ -13,6 +13,7 @@ use crate::shader::*;
 use crate::shader_tables::*;
 use crate::shader_backend::*;
 use crate::mod_shader::*;
+use crate::suggest::*;
 use crate::*;
 
 impl ShaderFnCompiler {
@@ -82,7 +83,7 @@ impl ShaderFnCompiler {
         if let ShaderType::Id(id) = id_ty {
             if let Some((var, shadow)) = self.shader_scope.find_var(id) {
                 if !matches!(var, ShaderScopeItem::Var { .. }) {
-                    err_let_is_immutable!(self.trap);
+                    script_err_let_is_immutable!(self.trap, "cannot assign to let binding {:?}", id);
                 }
                 let mut s = self.stack.new_string();
                 if shadow > 0 {
@@ -93,11 +94,11 @@ impl ShaderFnCompiler {
                 write!(s, " = {}", value).ok();
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
             } else {
-                err_not_found!(self.trap);
+                script_err_not_found!(self.trap, "variable {:?} not found in shader scope{}", id, suggest_from_live_ids(id, &self.shader_scope.all_var_names()));
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
             }
         } else {
-            err_not_assignable!(self.trap);
+            script_err_not_assignable!(self.trap, "shader assign target is not an id");
             self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         }
         self.stack.free_string(value);
@@ -113,14 +114,14 @@ impl ShaderFnCompiler {
                 if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
                     let val_ty = value_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty {
-                        err_pod_type_not_matching!(self.trap);
+                        script_err_pod_type_not_matching!(self.trap, "field {:?} type mismatch", field_id);
                     }
 
                     let mut s = self.stack.new_string();
                     write!(s, "{}.{} = {}", instance_s, field_id, value_s).ok();
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
                 } else {
-                    err_not_found!(self.trap);
+                    script_err_not_found!(self.trap, "field {:?} not found on pod{}", field_id, suggest_pod_field(&vm.heap, pod_ty, field_id));
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 }
             } else if let ShaderType::PodPtr(pod_ty) = instance_ty {
@@ -128,14 +129,14 @@ impl ShaderFnCompiler {
                 if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
                     let val_ty = value_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty {
-                        err_pod_type_not_matching!(self.trap);
+                        script_err_pod_type_not_matching!(self.trap, "field {:?} type mismatch on pod ptr", field_id);
                     }
 
                     let mut s = self.stack.new_string();
                     write!(s, "{}->{} = {}", instance_s, field_id, value_s).ok();
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
                 } else {
-                    err_not_found!(self.trap);
+                    script_err_not_found!(self.trap, "field {:?} not found on pod ptr{}", field_id, suggest_pod_field(&vm.heap, pod_ty, field_id));
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 }
             } else if let ShaderType::IoSelf(obj) = instance_ty {
@@ -152,7 +153,7 @@ impl ShaderFnCompiler {
                         };
 
                         if !allowed {
-                            err_assign_not_allowed!(self.trap);
+                            script_err_assign_not_allowed!(self.trap, "cannot assign to shader io in this mode");
                             self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                             self.stack.free_string(value_s);
                             self.stack.free_string(field_s);
@@ -172,7 +173,7 @@ impl ShaderFnCompiler {
                         if let Some(pod_ty) = concrete_ty {
                             let val_ty = value_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                             if val_ty != pod_ty {
-                                err_pod_type_not_matching!(self.trap);
+                                script_err_pod_type_not_matching!(self.trap, "shader io field type mismatch");
                             }
 
                             let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, io_type);
@@ -199,14 +200,14 @@ impl ShaderFnCompiler {
                         }
                     }
                 }
-                err_no_matching_shader_type!(self.trap);
+                script_err_no_matching_shader_type!(self.trap, "no matching shader type for IoSelf field");
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
             } else {
-                err_no_matching_shader_type!(self.trap);
+                script_err_no_matching_shader_type!(self.trap, "no matching shader type for instance");
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
             }
         } else {
-            err_unexpected!(self.trap);
+            script_err_unexpected!(self.trap, "field assign requires Id field type");
             self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         }
         self.stack.free_string(value_s);
@@ -228,24 +229,24 @@ impl ShaderFnCompiler {
                     ShaderType::AbstractInt => {}
                     ShaderType::Pod(t) if t == builtins.pod_i32 || t == builtins.pod_u32 => {}
                     _ => {
-                        err_pod_type_not_matching!(self.trap);
+                        script_err_pod_type_not_matching!(self.trap, "index type must be int or uint");
                     }
                 }
 
                 let val_ty = value_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
                 if val_ty != ret_ty {
-                    err_pod_type_not_matching!(self.trap);
+                    script_err_pod_type_not_matching!(self.trap, "value type mismatch in index assign");
                 }
 
                 let mut s = self.stack.new_string();
                 write!(s, "{}[{}] = {}", instance_s, index_s, value_s).ok();
                 self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), s);
             } else {
-                err_not_assignable!(self.trap);
+                script_err_not_assignable!(self.trap, "index assign not supported for this type");
                 self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), String::new());
             }
         } else {
-            err_no_matching_shader_type!(self.trap);
+            script_err_no_matching_shader_type!(self.trap, "index assign requires Pod type");
             self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         }
         self.stack.free_string(value_s);
@@ -260,7 +261,7 @@ impl ShaderFnCompiler {
             if let Some(ShaderMe::Pod { args, .. }) = self.mes.last_mut() {
                 if let Some(last) = args.last() {
                     if last.name.is_none() {
-                        err_use_only_named_or_ordered_pod_fields!(self.trap);
+                        script_err_use_only_named_or_ordered_pod_fields!(self.trap, "mixing named and ordered args");
                     }
                 }
                 args.push(ShaderPodArg {
@@ -269,12 +270,12 @@ impl ShaderFnCompiler {
                     s: val_s,
                 });
             } else {
-                err_unexpected!(self.trap);
+                script_err_unexpected!(self.trap, "assign_me requires Pod on me stack");
                 self.stack.free_string(val_s);
             }
             self.stack.free_string(id_s);
         } else {
-            err_unexpected!(self.trap);
+            script_err_unexpected!(self.trap, "assign_me requires Id type");
             self.stack.free_string(val_s);
             self.stack.free_string(id_s);
             self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
@@ -366,7 +367,7 @@ impl ShaderFnCompiler {
                     write!(s, "{}.{}", instance_s, field_id).ok();
                     self.stack.push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
                 } else {
-                    err_not_found!(self.trap);
+                    script_err_not_found!(self.trap, "field {:?} not found on Pod{}", field_id, suggest_pod_field(&vm.heap, pod_ty, field_id));
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 }
                 self.stack.free_string(field_s);
@@ -379,7 +380,7 @@ impl ShaderFnCompiler {
                     write!(s, "{}->{}", instance_s, field_id).ok();
                     self.stack.push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
                 } else {
-                    err_not_found!(self.trap);
+                    script_err_not_found!(self.trap, "field {:?} not found on PodPtr{}", field_id, suggest_pod_field(&vm.heap, pod_ty, field_id));
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 }
                 self.stack.free_string(field_s);
@@ -401,7 +402,7 @@ impl ShaderFnCompiler {
                     if let Some(value_obj) = value.as_object() {
                         // Check if this is a shader_io type - not supported for scope objects
                         if vm.heap.as_shader_io(value_obj).is_some() {
-                            err_opcode_not_supported_in_shader!(self.trap);
+                            script_err_opcode_not_supported_in_shader!(self.trap, "shader_io not supported on scope objects");
                             self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                             self.stack.free_string(field_s);
                             self.stack.free_string(instance_s);
@@ -518,7 +519,7 @@ impl ShaderFnCompiler {
                 }
                 
                 // Field not found in type-check structure either
-                err_not_found!(self.trap);
+                script_err_not_found!(self.trap, "field {:?} not found on ScopeObject{}", field_id, suggest_property(&vm.heap, obj, field_id.into()));
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 self.stack.free_string(field_s);
                 self.stack.free_string(instance_s);
@@ -569,7 +570,7 @@ impl ShaderFnCompiler {
                     }
                     self.stack.push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
                 } else {
-                    err_not_found!(self.trap);
+                    script_err_not_found!(self.trap, "field {:?} not found on ScopeUniformBuffer{}", field_id, suggest_pod_field(&vm.heap, pod_ty, field_id));
                     self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 }
                 self.stack.free_string(field_s);
@@ -727,7 +728,7 @@ impl ShaderFnCompiler {
                 }
             }
         }
-        err_not_found!(self.trap);
+        script_err_not_found!(self.trap, "field not found on shader type");
         self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         self.stack.free_string(field_s);
         self.stack.free_string(instance_s);
@@ -735,7 +736,7 @@ impl ShaderFnCompiler {
 
     pub(crate) fn handle_let_dyn(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs) {
         if opargs.is_nil() {
-            err_have_to_initialise_variable!(self.trap);
+            script_err_have_to_initialise_variable!(self.trap, "shader let requires initializer");
             self.stack.pop(self.trap.pass());
         } else {
             let (ty_value, value) = self.pop_resolved(vm, output);
@@ -766,17 +767,17 @@ impl ShaderFnCompiler {
                         }
                     }
                 } else {
-                    err_no_matching_shader_type!(self.trap);
+                    script_err_no_matching_shader_type!(self.trap, "cannot determine shader type for let");
                 }
             } else {
-                err_unexpected!(self.trap);
+                script_err_unexpected!(self.trap, "let requires Id");
             }
         }
     }
 
     pub(crate) fn handle_var_dyn(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs) {
         if opargs.is_nil() {
-            err_have_to_initialise_variable!(self.trap);
+            script_err_have_to_initialise_variable!(self.trap, "shader var requires initializer");
             self.stack.pop(self.trap.pass());
         } else {
             let (ty_value, value) = self.pop_resolved(vm, output);
@@ -807,10 +808,10 @@ impl ShaderFnCompiler {
                         }
                     }
                 } else {
-                    err_no_matching_shader_type!(self.trap);
+                    script_err_no_matching_shader_type!(self.trap, "cannot determine shader type for var");
                 }
             } else {
-                err_unexpected!(self.trap);
+                script_err_unexpected!(self.trap, "var requires Id");
             }
         }
     }

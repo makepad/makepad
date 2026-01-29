@@ -345,12 +345,12 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("vm.add_method(enum_object, id_lut!(").ident(&item.name).add("), &[], |vm, args|{");
                     tb.add("    let tuple = vm.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
                     tb.add("    if vm.heap.vec_len(args) != ").unsuf_usize(args.len()).add("{");
-                    tb.add("        makepad_script::err_invalid_arg_count!(vm.thread.trap);");
+                    tb.add("        makepad_script::script_err_invalid_arg_count!(vm.thread.trap);");
                     tb.add("    }");
                     for (i, arg) in args.iter().enumerate(){
                         tb.add("if let Some(a) = vm.heap.vec_value_if_exist(args, ").unsuf_usize(i).add("){");
                         tb.add("    if!<").stream(Some(arg.clone())).add(" as ScriptNew>::script_type_check(vm.heap, a){");
-                        tb.add("        makepad_script::err_invalid_arg_type!(vm.thread.trap);");
+                        tb.add("        makepad_script::script_err_invalid_arg_type!(vm.thread.trap);");
                         tb.add("    }");
                         tb.add("}");
                     }
@@ -461,7 +461,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("                }");
         tb.add("            }");
         tb.add("        }");
-        tb.add("        makepad_script::err_enum_unknown_variant!(vm.thread.trap);");
+        tb.add("        makepad_script::script_err_enum_unknown_variant!(vm.thread.trap);");
         tb.add("    }");
         
                 
@@ -596,11 +596,11 @@ impl ScriptNew for EnumTest{
         vm.add_method(enum_object, id!(Tuple), &[], |vm, args|{
             let tuple = vm.heap.new_with_proto(id!(Tuple).into());
             if vm.heap.vec_len(args) != 1 {
-                err_invalid_arg_count!(vm.thread.trap);
+                script_err_invalid_arg_count!(vm.thread.trap, "EnumTest::Tuple requires 1 arg");
             }
             if let Some(a) = vm.heap.vec_value_if_exist(args, 0){
                 if !f64::script_type_check(vm.heap, a){
-                    err_invalid_arg_type!(vm.thread.trap);
+                    script_err_invalid_arg_type!(vm.thread.trap, "EnumTest::Tuple arg must be f64");
                 }
             }
             vm.heap.vec_push_vec(tuple, args, vm.thread.trap.pass());
@@ -690,6 +690,6 @@ impl ScriptApply for EnumTest{
                 }
             }
         }
-        err_enum_unknown_variant!(vm.thread.trap);
+        script_err_enum_unknown_variant!(vm.thread.trap, "unknown EnumTest variant");
     }
 }*/

@@ -111,7 +111,7 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
                     }
                     else {
                         if chan.send_pause.len() > 100{
-                            return err_too_many_paused_calls!(vm.thread.trap.pass())
+                            return script_err_too_many_paused_calls!(vm.thread.trap.pass(), "too many paused calls")
                         }
                         chan.send_pause.push_front(vm.thread.pause());
                         return NIL
@@ -136,13 +136,13 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
                         return NIL
                     }
                     if task.recv_pause.len() > 100{
-                        return err_too_many_paused_calls!(vm.thread.trap.pass())
+                        return script_err_too_many_paused_calls!(vm.thread.trap.pass(), "too many paused calls")
                     }
                     task.recv_pause.push_front(vm.thread.pause());
                     return NIL
                 }
             }
-            err_unexpected!(vm.thread.trap.pass())
+            script_err_unexpected!(vm.thread.trap.pass(), "unexpected task state")
         });
     }
     
@@ -156,7 +156,7 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
                 }
             }
         }
-        err_invalid_prop_name!(vm.thread.trap.pass())
+        script_err_invalid_prop_name!(vm.thread.trap.pass(), "invalid task prop")
     });
     
     vm.add_method(std, id_lut!(task), script_args_def!(start_fn_or_depth = NIL), move |vm, args|{

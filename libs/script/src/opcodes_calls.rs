@@ -91,7 +91,7 @@ impl ScriptThread {
             }
         }
         else{
-            let value = err_not_fn!(self.trap);
+            let value = script_err_not_fn!(self.trap, "call target is not a function (got {:?})", heap.proto(args).value_type());
             self.push_stack_unchecked(value);
             self.trap.goto_next();
             return true // Error: caller should handle pop_to_me
@@ -119,7 +119,7 @@ impl ScriptThread {
                 heap.new_with_proto((*method_ptr).into())
             }
             else{ 
-                err_not_found!(self.trap);
+                script_err_not_found!(self.trap, "method {:?} not found on type {:?}", method, type_index);
                 heap.new_with_proto(id!(undefined_function).into())
             }
         }
@@ -172,7 +172,7 @@ impl ScriptThread {
         
         match self.mes.last().unwrap(){
             ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..} => {
-                err_unexpected!(self.trap);
+                script_err_unexpected!(self.trap, "FN_ARG_DYN for {:?}: expected Object context on stack", id);
             }
             ScriptMe::Object(obj) => {
                 if id == id!(self) && heap.vec_len(*obj) == 0 {
@@ -197,7 +197,7 @@ impl ScriptThread {
         let id = self.pop_stack_value().as_id().unwrap_or(id!());
         match self.mes.last().unwrap(){
             ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..} => {
-                err_unexpected!(self.trap);
+                script_err_unexpected!(self.trap, "FN_ARG_TYPED for {:?}: expected Object context on stack", id);
             }
             ScriptMe::Object(obj) => {
                 heap.set_value(*obj, id.into(), ty, NoTrap);
@@ -211,7 +211,7 @@ impl ScriptThread {
         if let Some(me) = self.mes.pop(){
             match me{
                 ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..} => {
-                    err_unexpected!(self.trap);
+                    script_err_unexpected!(self.trap, "FN_BODY_DYN: expected Object context for function body, got {:?}", me);
                     self.push_stack_unchecked(NIL);
                 }
                 ScriptMe::Object(obj) => {
@@ -224,7 +224,7 @@ impl ScriptThread {
             self.trap.goto_rel(jump_over_fn);
         }
         else{
-            err_unexpected!(self.trap);
+            script_err_unexpected!(self.trap, "FN_BODY_DYN: me stack is empty (function definition without arguments block)");
             self.push_stack_unchecked(NIL);
             self.trap.goto_next();
         }
@@ -236,7 +236,7 @@ impl ScriptThread {
         if let Some(me) = self.mes.pop(){
             match me{
                 ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..} => {
-                    err_unexpected!(self.trap);
+                    script_err_unexpected!(self.trap, "FN_BODY_TYPED: expected Object context for typed function body, got {:?}", me);
                     self.push_stack_unchecked(NIL);
                 }
                 ScriptMe::Object(obj) => {
@@ -249,7 +249,7 @@ impl ScriptThread {
             self.trap.goto_rel(jump_over_fn);
         }
         else{
-            err_unexpected!(self.trap);
+            script_err_unexpected!(self.trap, "FN_BODY_TYPED: me stack is empty (typed function definition without arguments block)");
             self.push_stack_unchecked(NIL);
             self.trap.goto_next();
         }

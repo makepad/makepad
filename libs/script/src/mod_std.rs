@@ -15,7 +15,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             }
         }
         vm.thread.trap.in_rust = false;
-        err_assert_fail!(vm.thread.trap)
+        script_err_assert_fail!(vm.thread.trap, "assertion failed")
     });
     
     //native.add_method(heap, std, id!(err), script_args!(), |vm, _args|{
