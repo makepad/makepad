@@ -178,7 +178,7 @@ impl State{
     
     fn operator_to_field_assign(op:LiveId)->ScriptValue{
         match op{
-            id!(=) => Opcode::ASSIGN_FIELD,
+            id!(=) | id!(:) => Opcode::ASSIGN_FIELD,
             id!(+=) => Opcode::ASSIGN_FIELD_ADD,
             id!(-=) => Opcode::ASSIGN_FIELD_SUB,
             id!(*=) => Opcode::ASSIGN_FIELD_MUL,
@@ -1518,8 +1518,41 @@ impl ScriptParser{
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp{what_op:id!(.)|id!(.?),..} = last{
                             if State::is_assign_operator(op){
+                                // For : operator with field chain like field.sub: value
+                                // transform to me.field.sub = value
+                                if op == id!(:) {
+                                    // Find the start of the field chain by walking backwards
+                                    // The chain structure is: [id, id, (FIELD, id)*]
+                                    // e.g. field.sub -> [id(field), id(sub)]
+                                    // e.g. field.sub.sub2 -> [id(field), id(sub), FIELD, id(sub2)]
+                                    let mut chain_start = self.opcodes.len();
+                                    
+                                    // Walk backwards through ids and FIELDs
+                                    while chain_start > 0 {
+                                        let prev = chain_start - 1;
+                                        if self.opcodes[prev].is_id() || self.opcodes[prev] == Opcode::FIELD.into() {
+                                            chain_start = prev;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    
+                                    // Now insert ME at chain_start
+                                    self.opcodes.insert(chain_start, Opcode::ME.into());
+                                    self.source_map.insert(chain_start, Some(self.index));
+                                    
+                                    // Insert PROTO_FIELD after the first id (which is now at chain_start + 1)
+                                    // The first id is at chain_start + 1, so PROTO_FIELD goes at chain_start + 2
+                                    self.opcodes.insert(chain_start + 2, Opcode::PROTO_FIELD.into());
+                                    self.source_map.insert(chain_start + 2, Some(self.index));
+                                }
+                                
+                                // Patch remaining FIELD to PROTO_FIELD
                                 for pair in self.opcodes.rchunks_mut(2){
-                                    if pair[0] == Opcode::FIELD.into() && pair[1].is_id(){
+                                    if pair[0].is_id() && pair[1] == Opcode::FIELD.into(){
+                                        pair[1] = Opcode::PROTO_FIELD.into()
+                                    }
+                                    else if pair[1].is_id() && pair[0] == Opcode::FIELD.into(){
                                         pair[0] = Opcode::PROTO_FIELD.into()
                                     }
                                     else{
