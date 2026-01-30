@@ -86,50 +86,11 @@ script_mod!{
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
-                
-                let mut color_2 = self.color
-                let mut color_2_hover = self.color_hover
-                let mut color_2_down = self.color_down
-                let mut color_2_focus = self.color_focus
-                let mut color_2_disabled = self.color_disabled
-
-                let mut border_color_2 = self.border_color
-                let mut border_color_2_hover = self.border_color_hover
-                let mut border_color_2_down = self.border_color_down
-                let mut border_color_2_focus = self.border_color_focus
-                let mut border_color_2_disabled = self.border_color_disabled
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
-                    color_2_hover = self.color_2_hover
-                    color_2_down = self.color_2_down
-                    color_2_focus = self.color_2_focus
-                    color_2_disabled = self.color_2_disabled
-                }
-
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                    border_color_2_hover = self.border_color_2_hover
-                    border_color_2_down = self.border_color_2_down
-                    border_color_2_focus = self.border_color_2_focus
-                    border_color_2_disabled = self.border_color_2_disabled
-                }
                 
                 let border_sz_uv = vec2(
                     self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
                 )
-
-                let gradient_border = vec2(
-                    self.pos.x + dither
-                    self.pos.y + dither
-                )
-
-                let mut gradient_border_dir = gradient_border.y
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = gradient_border.x
-                }
 
                 let sz_inner_px = vec2(
                     self.rect_size.x - self.border_size * 2.
@@ -141,16 +102,6 @@ script_mod!{
                     self.rect_size.y / sz_inner_px.y
                 )
 
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-
-                let mut gradient_fill_dir = gradient_fill.y
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = gradient_fill.x
-                }
-                
                 sdf.box(
                     self.border_size
                     self.border_size
@@ -159,17 +110,57 @@ script_mod!{
                     self.border_radius
                 )
                 
-                let fill = mix(self.color, color_2, gradient_fill_dir)
-                    .mix(mix(self.color_focus, color_2_focus, gradient_fill_dir), self.focus)
-                    .mix(mix(self.color_hover, color_2_hover, gradient_fill_dir), self.hover)
-                    .mix(mix(self.color_down, color_2_down, gradient_fill_dir), self.down)
-                    .mix(mix(self.color_disabled, color_2_disabled, gradient_fill_dir), self.disabled)
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_down = self.color_down
+                let mut color_fill_focus = self.color_focus
+                let mut color_fill_disabled = self.color_disabled
+
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_fill = vec2(
+                        self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
+                        self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                    )
+                    let dir = if self.gradient_fill_horizontal > 0.5 gradient_fill.x else gradient_fill.y
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
+                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                }
+
+                let mut color_stroke = self.border_color
+                let mut color_stroke_hover = self.border_color_hover
+                let mut color_stroke_down = self.border_color_down
+                let mut color_stroke_focus = self.border_color_focus
+                let mut color_stroke_disabled = self.border_color_disabled
+
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_border = vec2(
+                        self.pos.x + dither
+                        self.pos.y + dither
+                    )
+                    let dir = if self.gradient_border_horizontal > 0.5 gradient_border.x else gradient_border.y
+                    color_stroke = mix(self.border_color, self.border_color_2, dir)
+                    color_stroke_hover = mix(self.border_color_hover, self.border_color_2_hover, dir)
+                    color_stroke_down = mix(self.border_color_down, self.border_color_2_down, dir)
+                    color_stroke_focus = mix(self.border_color_focus, self.border_color_2_focus, dir)
+                    color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
+                }
                 
-                let stroke = mix(self.border_color, border_color_2, gradient_border_dir)
-                    .mix(mix(self.border_color_focus, border_color_2_focus, gradient_border_dir), self.focus)
-                    .mix(mix(self.border_color_hover, border_color_2_hover, gradient_border_dir), self.hover)
-                    .mix(mix(self.border_color_down, border_color_2_down, gradient_border_dir), self.down)
-                    .mix(mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir), self.disabled)
+                let fill = color_fill
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover, self.hover)
+                    .mix(color_fill_down, self.down)
+                    .mix(color_fill_disabled, self.disabled)
+                
+                let stroke = color_stroke
+                    .mix(color_stroke_focus, self.focus)
+                    .mix(color_stroke_hover, self.hover)
+                    .mix(color_stroke_down, self.down)
+                    .mix(color_stroke_disabled, self.disabled)
                 
                 sdf.fill_keep(fill)
                 sdf.stroke(stroke, self.border_size)

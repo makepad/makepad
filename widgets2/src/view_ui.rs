@@ -3,17 +3,9 @@ use {
 };
 
 script_mod! {
-    use mod.pod.*
-    use mod.math.*
-    use mod.sdf.*
-    use mod.theme
-    use mod.draw
-    use mod.shader.*
-    use mod.widgets.*
-    use mod.turtle.*
-    use mod.turtle.Flow.*
-    use mod.turtle.Size.*
+    use mod.prelude.widgets_internal.*
     use mod.widgets.ViewOptimize
+    
     mod.widgets.View =  mod.widgets.ViewBase {}
     
     mod.widgets.Hr = mod.widgets.View {
@@ -127,27 +119,19 @@ script_mod! {
                         
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                let mut color_2 = self.color
-                let mut border_color_2 = self.border_color_2
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
 
                 sdf.rect(
@@ -157,13 +141,10 @@ script_mod! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                 )
 
-                sdf.fill_keep(mix(self.color color_2 gradient_fill_dir))
+                sdf.fill_keep(fill_color)
 
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir)
-                        self.border_size
-                    )
+                    sdf.stroke(stroke_color self.border_size)
                 }
                 return sdf.result
             }
@@ -210,26 +191,19 @@ script_mod! {
                                                 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size3)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                let mut border_color_2 = self.border_color
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
 
                 sdf.rect(
@@ -245,10 +219,9 @@ script_mod! {
                     sdf.clear(self.shadow_color*v)
                 }
                                                                 
-                sdf.fill_keep(mix(self.color color_2 gradient_fill_dir))
+                sdf.fill_keep(fill_color)
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir) self.border_size)
+                    sdf.stroke(stroke_color self.border_size)
                 }
                 return sdf.result
             }
@@ -297,26 +270,19 @@ script_mod! {
                                                         
             pixel: fn() {                                                
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size3)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                let mut border_color_2 = self.border_color
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
 
                 sdf.box(
@@ -333,12 +299,10 @@ script_mod! {
                     sdf.clear(self.shadow_color*v)
                 }
                                                                     
-                sdf.fill_keep(mix(self.color color_2 gradient_fill_dir))
+                sdf.fill_keep(fill_color)
 
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir)
-                        self.border_size)
+                    sdf.stroke(stroke_color self.border_size)
                 }
                 return sdf.result
             }
@@ -362,26 +326,19 @@ script_mod! {
                                 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                let mut border_color_2 = self.border_color
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
 
                 sdf.box(
@@ -391,14 +348,9 @@ script_mod! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                     max(1.0 self.border_radius)
                 )
-                sdf.fill_keep(
-                    mix(self.color color_2 gradient_fill_dir)
-                )
+                sdf.fill_keep(fill_color)
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir)
-                        self.border_size
-                    )
+                    sdf.stroke(stroke_color self.border_size)
                 }
                 return sdf.result
             }
@@ -423,26 +375,19 @@ script_mod! {
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                let mut border_color_2 = self.border_color
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
 
                 sdf.box_x(
@@ -453,14 +398,9 @@ script_mod! {
                     self.border_radius.x
                     self.border_radius.y
                 )
-                sdf.fill_keep(
-                    mix(self.color color_2 gradient_fill_dir)
-                )
+                sdf.fill_keep(fill_color)
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir)
-                        self.border_size
-                    )
+                    sdf.stroke(stroke_color self.border_size)
                 }
                 return sdf.result
             }
@@ -485,26 +425,19 @@ script_mod! {
                                                         
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                let mut border_color_2 = self.border_color
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
 
                 sdf.box_y(
@@ -516,15 +449,10 @@ script_mod! {
                     self.border_radius.y
                 )
 
-                sdf.fill_keep(
-                    mix(self.color color_2 gradient_fill_dir)
-                )
+                sdf.fill_keep(fill_color)
 
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir)
-                        self.border_size
-                    )
+                    sdf.stroke(stroke_color self.border_size)
                 }
 
                 return sdf.result
@@ -549,26 +477,19 @@ script_mod! {
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                let mut border_color_2 = self.border_color
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
                             
                 sdf.box_all(
@@ -582,15 +503,10 @@ script_mod! {
                     self.border_radius.w
                 )
 
-                sdf.fill_keep(
-                    mix(self.color color_2 gradient_fill_dir)
-                )
+                sdf.fill_keep(fill_color)
 
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir)
-                        self.border_size
-                    )
+                    sdf.stroke(stroke_color self.border_size)
                 }
 
                 return sdf.result
@@ -614,26 +530,19 @@ script_mod! {
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                let mut border_color_2 = self.border_color
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
                             
                 if self.border_radius > 0.0 {
@@ -654,15 +563,10 @@ script_mod! {
                     )
                 }
 
-                sdf.fill_keep(
-                    mix(self.color color_2 gradient_fill_dir)
-                )
+                sdf.fill_keep(fill_color)
 
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir)
-                        self.border_size
-                    )
+                    sdf.stroke(stroke_color self.border_size)
                 }
 
                 return sdf.result
@@ -688,26 +592,19 @@ script_mod! {
                             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
                 
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
 
-                let mut border_color_2 = self.border_color
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2
-                }
-
-                let mut gradient_border_dir = self.pos.y + dither
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x + dither
-                }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
+                let mut stroke_color = self.border_color
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_border_horizontal > 0.5 self.pos.x else self.pos.y
+                    stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
 
                 if self.border_radius.x > 0.0 {
@@ -728,15 +625,10 @@ script_mod! {
                     )
                 }
 
-                sdf.fill_keep(
-                    mix(self.color color_2 gradient_fill_dir)
-                )
+                sdf.fill_keep(fill_color)
 
                 if self.border_size > 0.0 {
-                    sdf.stroke(
-                        mix(self.border_color border_color_2 gradient_border_dir)
-                        self.border_size
-                    )
+                    sdf.stroke(stroke_color self.border_size)
                 }
                 
                 return sdf.result
@@ -753,18 +645,13 @@ script_mod! {
             color_2: uniform(vec4(-1))
 
             get_color: fn() {
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
-                let mut color_2 = self.color
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
+                let mut fill_color = self.color
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+                    fill_color = mix(self.color self.color_2 dir + dither)
                 }
-
-                let mut gradient_fill_dir = self.pos.y + dither
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither
-                }
-
-                return mix(self.color color_2 gradient_fill_dir + dither)
+                return fill_color
             }
                             
             pixel: fn() {
@@ -851,44 +738,44 @@ script_mod! {
     mod.widgets.CachedScrollXY = mod.widgets.CachedView {
         scroll_bars: mod.widgets.ScrollBars {
             show_scroll_x: true show_scroll_y: true
-            scroll_bar_x +: {drag_scrolling: true}
-            scroll_bar_y +: {drag_scrolling: true}
+            scroll_bar_x.drag_scrolling: true
+            scroll_bar_y.drag_scrolling: true
         }
     }
         
     mod.widgets.CachedScrollX = mod.widgets.CachedView {
         scroll_bars: mod.widgets.ScrollBars {
             show_scroll_x: true show_scroll_y: false
-            scroll_bar_x +: {drag_scrolling: true}
+            scroll_bar_x.drag_scrolling: true
         }
     }
         
     mod.widgets.CachedScrollY = mod.widgets.CachedView {
         scroll_bars: mod.widgets.ScrollBars {
             show_scroll_x: false show_scroll_y: true
-            scroll_bar_y +: {drag_scrolling: true}
+            scroll_bar_y.drag_scrolling: true
         }
     }
         
     mod.widgets.ScrollXYView = mod.widgets.ViewBase {
         scroll_bars: mod.widgets.ScrollBars {
             show_scroll_x: true show_scroll_y: true
-            scroll_bar_x +: {drag_scrolling: true}
-            scroll_bar_y +: {drag_scrolling: true}
+            scroll_bar_x.drag_scrolling: true
+            scroll_bar_y.drag_scrolling: true
         }
     }
 
     mod.widgets.ScrollXView = mod.widgets.ViewBase {
         scroll_bars: mod.widgets.ScrollBars {
             show_scroll_x: true show_scroll_y: false
-            scroll_bar_x +: {drag_scrolling: true}
+            scroll_bar_x.drag_scrolling: true
         }
     }
 
     mod.widgets.ScrollYView = mod.widgets.ViewBase {
         scroll_bars: mod.widgets.ScrollBars {
             show_scroll_x: false show_scroll_y: true
-            scroll_bar_y +: {drag_scrolling: true}
+            scroll_bar_y.drag_scrolling: true
         }
     }
 }
