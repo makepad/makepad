@@ -171,7 +171,6 @@ pub struct ShaderStack{
     pub(crate) types: Vec<ShaderType>,
     pub(crate) strings: Vec<String>,
     pub(crate) free: Vec<String>,
-    pub(crate) debug: bool,
 }
 
 macro_rules! push_fmt {
@@ -272,9 +271,7 @@ impl ShaderStack{
             return (s,self.strings.pop().unwrap())
         }
         else{
-            if self.debug {
-                log!("Stack underflow! Stack types: {:?}, strings: {:?}", self.types.len(), self.strings.len());
-            }
+
             script_err_stack!(trap, "shader stack underflow");
             (ShaderType::Error(NIL), String::new())
         }

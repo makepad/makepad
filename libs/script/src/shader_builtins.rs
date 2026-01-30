@@ -44,132 +44,132 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
         heap.set_value_def(math, id.into(),(val).into());
     }
     // 1 argument functions - support f64, Vec2f, Vec3f, Vec4f, Color
-    native.add_method(heap, math, id!(abs), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(abs), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.abs()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(acos), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(acos), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.acos()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(acosh), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(acosh), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.acosh()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(asin), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(asin), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.asin()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(asinh), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(asinh), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.asinh()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(atan), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(atan), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.atan()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(atanh), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(atanh), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.atanh()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(ceil), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(ceil), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.ceil()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(cos), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(cos), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.cos()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(cosh), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(cosh), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.cosh()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(degrees), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(degrees), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.to_degrees()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(exp), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(exp), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.exp()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(exp2), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(exp2), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.exp2()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(floor), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(floor), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.floor()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(fract), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(fract), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.fract()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(inverseSqrt), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(inverseSqrt), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.sqrt().recip()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(length), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(length), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let nv = NumericValue::from_script_value_vm(vm, x_val);
         // length returns a scalar for vectors
         ScriptValue::from_f64(nv.length())
     });
-    native.add_method(heap, math, id!(log), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(log), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.ln()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(log2), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(log2), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.log2()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(radians), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(radians), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.to_radians()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(round), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(round), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.round()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(sign), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(sign), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| {
             if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 }
         }).to_script_value_vm(vm)
     });
     // sin is already in mod_math but we can overwrite or duplicate here, the user asked to add to math_module
-    native.add_method(heap, math, id!(sin), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(sin), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.sin()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(sinh), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(sinh), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.sinh()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(sqrt), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(sqrt), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.sqrt()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(tan), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(tan), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.tan()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(tanh), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(tanh), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.tanh()).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(trunc), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(trunc), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.trunc()).to_script_value_vm(vm)
     });
     
     // Derivative functions (shader-only, return 0.0 in script runtime)
-    native.add_method(heap, math, id!(dFdx), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(dFdx), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         // Return zero with same type as input
         let nv = NumericValue::from_script_value_vm(vm, x_val);
         nv.zero_like().to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(dFdy), script_args!(x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(dFdy), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         // Return zero with same type as input
         let nv = NumericValue::from_script_value_vm(vm, x_val);
@@ -177,14 +177,14 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
     });
     
     // 2 argument functions - support f64, Vec2f, Vec3f, Vec4f, Color
-    native.add_method(heap, math, id!(atan2), script_args!(y=0.0, x=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(atan2), script_args!(y=0.0, x=0.0), |vm, args|{ 
         let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let y_nv = NumericValue::from_script_value_vm(vm, y_val);
         let x_nv = NumericValue::from_script_value_vm(vm, x_val);
         y_nv.zip_f32(x_nv, |y, x| y.atan2(x)).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(distance), script_args!(x=0.0, y=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(distance), script_args!(x=0.0, y=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
         let x_nv = NumericValue::from_script_value_vm(vm, x_val);
@@ -193,7 +193,7 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
         let diff = x_nv.zip_f32(y_nv, |a, b| a - b);
         ScriptValue::from_f64(diff.length())
     });
-    native.add_method(heap, math, id!(dot), script_args!(x=0.0, y=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(dot), script_args!(x=0.0, y=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
         let x_nv = NumericValue::from_script_value_vm(vm, x_val);
@@ -201,28 +201,36 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
         // dot returns a scalar (sum of component-wise products)
         ScriptValue::from_f64(x_nv.dot(y_nv))
     });
-    native.add_method(heap, math, id!(max), script_args!(x=0.0, y=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(max), script_args!(x=0.0, y=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
         let x_nv = NumericValue::from_script_value_vm(vm, x_val);
         let y_nv = NumericValue::from_script_value_vm(vm, y_val);
         x_nv.zip_f32(y_nv, |a, b| a.max(b)).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(min), script_args!(x=0.0, y=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(min), script_args!(x=0.0, y=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
         let x_nv = NumericValue::from_script_value_vm(vm, x_val);
         let y_nv = NumericValue::from_script_value_vm(vm, y_val);
         x_nv.zip_f32(y_nv, |a, b| a.min(b)).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(pow), script_args!(x=0.0, y=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(pow), script_args!(x=0.0, y=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
         let x_nv = NumericValue::from_script_value_vm(vm, x_val);
         let y_nv = NumericValue::from_script_value_vm(vm, y_val);
         x_nv.zip_f32(y_nv, |a, b| a.powf(b)).to_script_value_vm(vm)
     });
-    native.add_method(heap, math, id!(step), script_args!(edge=0.0, x=0.0), |vm, args|{ 
+    // modf (fmod) - float modulo
+    native.add_method(heap, math, id_lut!(modf), script_args!(x=0.0, y=0.0), |vm, args|{ 
+        let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
+        let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
+        let x_nv = NumericValue::from_script_value_vm(vm, x_val);
+        let y_nv = NumericValue::from_script_value_vm(vm, y_val);
+        x_nv.zip_f32(y_nv, |a, b| a % b).to_script_value_vm(vm)
+    });
+    native.add_method(heap, math, id_lut!(step), script_args!(edge=0.0, x=0.0), |vm, args|{ 
         let edge_val = vm.heap.value(args, id!(edge).into(), vm.thread.trap.pass());
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let x_nv = NumericValue::from_script_value_vm(vm, x_val);
@@ -236,7 +244,7 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
     });
 
     // 3 argument functions - support f64, Vec2f, Vec3f, Vec4f, Color
-    native.add_method(heap, math, id!(clamp), script_args!(x=0.0, min=0.0, max=0.0), |vm, args|{ 
+    native.add_method(heap, math, id_lut!(clamp), script_args!(x=0.0, min=0.0, max=0.0), |vm, args|{ 
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let min_val = vm.heap.value(args, id!(min).into(), vm.thread.trap.pass());
         let max_val = vm.heap.value(args, id!(max).into(), vm.thread.trap.pass());
@@ -252,7 +260,7 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
                 .to_script_value_vm(vm)
         }
     });
-    native.add_method(heap, math, id!(mix), script_args!(x=0.0, y=0.0, a=0.0), |vm, args|{
+    native.add_method(heap, math, id_lut!(mix), script_args!(x=0.0, y=0.0, a=0.0), |vm, args|{
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
         let y_val = vm.heap.value(args, id!(y).into(), vm.thread.trap.pass());
         let a_val = vm.heap.value(args, id!(a).into(), vm.thread.trap.pass());
@@ -305,7 +313,7 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
             }
         }
     });
-    native.add_method(heap, math, id!(smoothstep), script_args!(e0=0.0, e1=0.0, x=0.0), |vm, args|{
+    native.add_method(heap, math, id_lut!(smoothstep), script_args!(e0=0.0, e1=0.0, x=0.0), |vm, args|{
         let e0_val = vm.heap.value(args, id!(e0).into(), vm.thread.trap.pass());
         let e1_val = vm.heap.value(args, id!(e1).into(), vm.thread.trap.pass());
         let x_val = vm.heap.value(args, id!(x).into(), vm.thread.trap.pass());
@@ -372,7 +380,7 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
             }
         }
     });
-    native.add_method(heap, math, id!(fma), script_args!(a=0.0, b=0.0, c=0.0), |vm, args|{
+    native.add_method(heap, math, id_lut!(fma), script_args!(a=0.0, b=0.0, c=0.0), |vm, args|{
         let a_val = vm.heap.value(args, id!(a).into(), vm.thread.trap.pass());
         let b_val = vm.heap.value(args, id!(b).into(), vm.thread.trap.pass());
         let c_val = vm.heap.value(args, id!(c).into(), vm.thread.trap.pass());
@@ -471,7 +479,7 @@ pub fn type_table_builtin(
              return builtins.pod_void;
         }
         // Float 2 arguments
-        id!(atan2) | id!(pow) => {
+        id!(atan2) | id!(pow) | id!(modf) => {
              if args.len() != 2 {
                  script_err_invalid_args!(trap, "shader builtin {:?} requires 2 args, got {}", name, args.len());
                  return builtins.pod_void;
