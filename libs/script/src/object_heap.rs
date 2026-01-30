@@ -260,7 +260,7 @@ impl ScriptHeap{
                 if let Some(ty_index) = self.type_index.get(&type_prop.ty){
                     let check_prop = &self.type_check[ty_index.0 as usize];
                     if let Some(type_object) = &check_prop.object{
-                        if !(*type_object.check)(self, value){
+                        if !(type_object.check)(self, value){
                             let expected = format_expected_type(self, type_object);
                             return script_err_type_mismatch!(trap, "type mismatch for property {:?}: expected {}, got {}", key_id, expected, format_value_type(self, value))
                         }

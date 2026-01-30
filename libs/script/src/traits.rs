@@ -123,7 +123,7 @@ impl ScriptTypeProps {
 
 pub struct ScriptTypeObject{
     pub(crate) type_id: ScriptTypeId,
-    pub(crate) check: Box<dyn Fn(&ScriptHeap, ScriptValue)->bool>,
+    pub(crate) check: fn(&ScriptHeap, ScriptValue)->bool,  // Function pointer instead of boxed closure
     pub(crate) proto: ScriptValue,
     pub(crate) name: Option<LiveId>,
 }
@@ -136,6 +136,32 @@ pub struct ScriptTypeCheck{
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct ScriptTypeIndex(pub(crate) u32);
 
+
+// Non-generic helper to reduce monomorphization in script_proto
+#[inline(never)]
+fn register_type_inner(
+    vm: &mut ScriptVm,
+    type_id: ScriptTypeId,
+    proto: ScriptValue,
+    props: ScriptTypeProps,
+    check: fn(&ScriptHeap, ScriptValue) -> bool,
+    name: Option<LiveId>,
+) -> ScriptValue {
+    let ty_check = ScriptTypeCheck {
+        object: Some(ScriptTypeObject {
+            type_id,
+            proto,
+            check,
+            name,
+        }),
+        props,
+    };
+    let ty_index = vm.heap.register_type(Some(type_id), ty_check);
+    if let Some(obj) = proto.as_object() {
+        vm.heap.set_type(obj, ty_index);
+    }
+    proto
+}
 
 // implementation is procmacro generated
 pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
@@ -260,20 +286,8 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         }
         let mut props = ScriptTypeProps::default();
         let proto = Self::script_proto_build(vm, &mut props);
-        let ty_check = ScriptTypeCheck{
-            object: Some(ScriptTypeObject{
-                type_id,
-                proto,
-                check: Box::new(Self::script_type_check),
-                name: Self::script_type_name(),
-            }),
-            props
-        };
-        let ty_index = vm.heap.register_type(Some(type_id), ty_check);
-        if let Some(obj) = proto.as_object(){
-            vm.heap.set_type(obj, ty_index);
-        }
-        proto
+        // Use non-generic helper for registration to reduce monomorphization
+        register_type_inner(vm, type_id, proto, props, Self::script_type_check, Self::script_type_name())
     }
     
     fn script_proto_build(vm:&mut ScriptVm, props:&mut ScriptTypeProps)->ScriptValue{
