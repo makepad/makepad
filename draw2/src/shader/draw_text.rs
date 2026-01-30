@@ -27,47 +27,48 @@ use {
 script_mod!{
     use mod.pod.*
     use mod.math.*
-    use mod.shader
+    use mod.shader.*
     use mod.draw
     use mod.geom
     use mod.res
     
     mod.text = {
-        TextStyle: #(TextStyle::script_api(vm))
-        FontFamily: #(FontFamily::script_component(vm))
-        FontMember: #(FontMember::script_api(vm))
+        let text = me
+        FontFamily: mod.std.set_type_default() do #(FontFamily::script_component(vm))
+        FontMember: mod.std.set_type_default() do #(FontMember::script_api(vm))
+        TextStyle: mod.std.set_type_default() do #(TextStyle::script_api(vm)){
+            font_size: 10
+            font_family: text.FontFamily{
+                $latin: text.FontMember{res: res.crate("self:../../widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
+            }
+            line_spacing: 1.2
+        }
     }
     
     use mod.text.*
     
-    let test_text_style = TextStyle{
-        font_size: 20
-        font_family:FontFamily{
-            $latin: FontMember{res: res.crate("self:../../widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
-        }
-        line_spacing: 1.2
-    }
-    
     mod.draw.DrawText = mod.std.set_type_default() do #(DrawText::script_shader(vm)){
-        text_style: test_text_style,
-        vertex_pos: shader.vertex_position(vec4f)
-        fb0: shader.fragment_output(0, vec4f)
-        draw_call: shader.uniform_buffer(draw.DrawCallUniforms)
-        draw_pass: shader.uniform_buffer(draw.DrawPassUniforms)
-        draw_list: shader.uniform_buffer(draw.DrawListUniforms)
-        geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
         
-        color: #f0f
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
         
-        pos: shader.varying(vec2f)
-        t: shader.varying(vec2f)
-        world: shader.varying(vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
         
-        radius: shader.uniform(float)
-        cutoff: shader.uniform(float)
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+        
+        color: #fff
+        
+        pos: varying(vec2f)
+        t: varying(vec2f)
+        world: varying(vec4f)
+        
+        radius: uniform(float)
+        cutoff: uniform(float)
 
-        grayscale_texture: shader.texture_2d(float)
-        color_texture: shader.texture_2d(float)
+        grayscale_texture: texture_2d(float)
+        color_texture: texture_2d(float)
         
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
@@ -378,15 +379,7 @@ impl DrawText {
         let rasterizer = fonts.rasterizer().borrow();
         let sdfer_settings = rasterizer.sdfer().settings();
         self.draw_vars.dyn_uniforms[0] = sdfer_settings.radius;
-                
-        //self.draw_vars.dyn_uniforms[0] = sdfer_settings.radius;
         self.draw_vars.dyn_uniforms[1] = sdfer_settings.cutoff;
-        //let grayscale_atlas_size = rasterizer.grayscale_atlas().size();
-        //self.draw_vars.dyn_uniforms[2] = grayscale_atlas_size.width as f32;
-        //self.draw_vars.dyn_uniforms[3] = grayscale_atlas_size.height as f32;
-        //let color_atlas_size = rasterizer.color_atlas().size();
-        //self.draw_vars.dyn_uniforms[4] = color_atlas_size.width as f32;
-        //self.draw_vars.dyn_uniforms[5] = color_atlas_size.height as f32;
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
     }

@@ -166,20 +166,20 @@ New:
 INSTANCE VARIABLES
 --------------------------------------------------------------------------------
     OLD: instance drag: 0.0
-    NEW: drag: shader.instance(0.0)
+    NEW: drag: instance(0.0)
 
 UNIFORM VARIABLES
 --------------------------------------------------------------------------------
 Simple values:
     OLD: uniform size: 6.0
-    NEW: size: shader.uniform(6.0)
+    NEW: size: uniform(6.0)
 
 Theme references:
     OLD: uniform border_size: (THEME_BEVELING)
-    NEW: border_size: shader.uniform(theme.beveling)
+    NEW: border_size: uniform(theme.beveling)
 
     OLD: uniform color: (THEME_COLOR_OUTSET)
-    NEW: color: shader.uniform(theme.color_outset)
+    NEW: color: uniform(theme.color_outset)
 
     Pattern: THEME_COLOR_X -> theme.color_x (lowercase, underscores)
              THEME_X -> theme.x
