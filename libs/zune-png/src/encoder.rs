@@ -4,12 +4,11 @@
  * This software is free software; You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
 
-use alloc::vec;
 use alloc::vec::Vec;
 
-use zune_core::bytestream::ZByteWriter;
-use zune_core::options::EncoderOptions;
-use zune_inflate::DeflateEncoder;
+use makepad_zune_core::bytestream::{ZByteIoError, ZByteWriterTrait, ZWriter};
+use makepad_zune_core::options::EncoderOptions;
+use makepad_zune_inflate::DeflateEncoder;
 
 use crate::constants::PNG_SIGNATURE;
 use crate::decoder::PngChunk;
@@ -52,85 +51,72 @@ impl<'a> PngEncoder<'a> {
         self.exif = Some(exif);
     }
 
-    pub fn encode_headers(&self, writer: &mut ZByteWriter) {
+    pub fn encode_headers<T: ZByteWriterTrait>(
+        &self, writer: &mut ZWriter<T>
+    ) -> Result<(), ZByteIoError> {
         // write signature
         writer.write_u64_be(PNG_SIGNATURE);
         // write ihdr
-        write_header_fn(self, writer, b"IHDR", write_ihdr);
+        write_header_fn(self, writer, b"IHDR", write_ihdr)?;
 
         // extra headers
         // need to check their existence because  write_header_fn will do
         // some writing even if they don't exist
         if self.exif.is_some() {
-            write_header_fn(self, writer, b"eXIf", write_exif);
+            write_header_fn(self, writer, b"eXIf", write_exif)?;
         }
         if self.gamma.is_some() {
-            write_header_fn(self, writer, b"gAMA", write_gamma);
+            write_header_fn(self, writer, b"gAMA", write_gamma)?;
         }
+        Ok(())
     }
 
-    fn create_buffer(&self) -> Vec<u8> {
-        const MAX_HEADER_SIZE: usize = 2048;
-
-        let mut out_dims = self
+    pub fn encode<T: ZByteWriterTrait>(&mut self, sink: T) -> Result<usize, ZByteIoError> {
+        let expected_data_size = self
             .options
-            .get_width()
-            .checked_mul(self.options.get_height() + 1)
-            .unwrap()
-            .checked_mul(self.options.get_depth().size_of())
-            .unwrap()
-            .checked_mul(self.options.get_colorspace().num_components())
-            .unwrap()
-            .checked_add(MAX_HEADER_SIZE)
-            .unwrap();
+            .width()
+            .checked_mul(self.options.height())
+            .ok_or(ZByteIoError::Generic("Overflow"))?
+            .checked_mul(self.options.depth().size_of())
+            .ok_or(ZByteIoError::Generic("Overflow"))?
+            .checked_mul(self.options.colorspace().num_components())
+            .ok_or(ZByteIoError::Generic("Overflow"))?;
 
-        // now calculate how much uncompressed ihdrs would add
-        {
-            let raw_len = self.data.len() + self.options.get_height() /*each row has a filter byte */;
-            // divide each into 8192 bytes
-            let mut extra_bytes = (raw_len + 8191) / 8192;
-            // for each extra byte, add header, length and crc
-            extra_bytes *= 4 + 4 + 4;
-
-            out_dims += extra_bytes;
+        if self.data.len() != expected_data_size {
+            return Err(ZByteIoError::NotEnoughBytes(
+                expected_data_size,
+                self.data.len()
+            ));
         }
-        if let Some(exif) = self.exif {
-            out_dims += exif.len() + 40;
-        }
+        let mut writer = ZWriter::new(sink);
 
-        vec![0; out_dims]
-    }
-    pub fn encode(&mut self) -> Vec<u8> {
-        let mut out_size = self.create_buffer();
-        let mut writer = ZByteWriter::new(&mut out_size);
-
-        self.encode_headers(&mut writer);
+        self.encode_headers(&mut writer)?;
 
         // encode filters
         self.add_filters();
 
-        self.write_idat_chunks(&mut writer);
+        self.write_idat_chunks(&mut writer)?;
 
-        write_header_fn(self, &mut writer, b"IEND", write_iend);
+        write_header_fn(self, &mut writer, b"IEND", write_iend)?;
 
-        let position = writer.position();
-        out_size.truncate(position);
+        // let position = writer.position();
+        // out_size.truncate(position);
 
-        out_size
+        Ok(writer.bytes_written())
     }
 
     const fn calculate_scanline_size(&self) -> usize {
-        self.options.get_width()
-            * self.options.get_depth().size_of()
-            * self.options.get_colorspace().num_components()
+        self.options.width()
+            * self.options.depth().size_of()
+            * self.options.colorspace().num_components()
     }
 
     fn add_filters(&mut self) {
         let scanline_length = (self.calculate_scanline_size() + 1)
-            .checked_mul(self.options.get_height())
+            .checked_mul(self.options.height())
             .unwrap();
         let components =
-            self.options.get_colorspace().num_components() * self.options.get_depth().size_of();
+            self.options.colorspace().num_components() * self.options.depth().size_of();
 
         // allocate space for filtered scanline
         self.filter_scanline.resize(scanline_length, 0);
@@ -143,7 +129,7 @@ impl<'a> PngEncoder<'a> {
         for (i, filter_s) in self
             .filter_scanline
             .chunks_exact_mut(scanline_size + 1)
-            .take(self.options.get_height())
+            .take(self.options.height())
             .enumerate()
         {
             let (previous, current) = self.data.split_at(i * scanline_size);
@@ -166,7 +152,9 @@ impl<'a> PngEncoder<'a> {
         // encode filtered scanline
         self.encoded_chunks = DeflateEncoder::new(&self.filter_scanline).encode_zlib();
     }
-    fn write_idat_chunks(&self, writer: &mut ZByteWriter) {
+    fn write_idat_chunks<T: ZByteWriterTrait>(
+        &self, writer: &mut ZWriter<T>
+    ) -> Result<(), ZByteIoError> {
         debug_assert!(!self.encoded_chunks.is_empty());
         // Most decoders love data in 8KB chunks, since
         // probably libpng does that by default
@@ -178,15 +166,17 @@ impl<'a> PngEncoder<'a> {
                 chunk:      *b"IDAT",
                 crc:        0 // not needed
             };
-            write_chunk(chunk_type, chunk, writer);
+            write_chunk(chunk_type, chunk, writer)?;
         }
+        Ok(())
     }
 }
 
 #[test]
 fn test_simple_write() {
-    use zune_core::bit_depth::BitDepth;
-    use zune_core::colorspace::ColorSpace;
+    use makepad_zune_core::bit_depth::BitDepth;
+    use makepad_zune_core::bytestream::ZCursor;
+    use makepad_zune_core::colorspace::ColorSpace;
 
     use crate::PngDecoder;
 
@@ -201,9 +191,10 @@ fn test_simple_write() {
         .set_depth(BitDepth::Eight);
 
     let mut encoder = PngEncoder::new(&data, options);
+    let mut sink = vec![];
 
-    let result = encoder.encode();
-    let mut hello = PngDecoder::new(&result);
+    let _ = encoder.encode(&mut sink).unwrap();
+    let mut hello = PngDecoder::new(ZCursor::new(&sink));
     let bytes = hello.decode_raw().unwrap();
     assert_eq!(&data, &bytes);
 }

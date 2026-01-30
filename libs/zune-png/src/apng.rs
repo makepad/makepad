@@ -8,7 +8,7 @@
 #![allow(dead_code, unused_imports)] // when building for no_std
 use alloc::vec::Vec;
 
-use zune_core::colorspace::ColorSpace;
+use makepad_zune_core::colorspace::ColorSpace;
 
 use crate::error::PngDecodeErrors;
 use crate::PngInfo;
@@ -120,9 +120,9 @@ impl SingleFrame {
             fctl_info
         }
     }
-    /// Push a chunk onto this frame
-    pub fn push_chunk(&mut self, chunk: &[u8]) {
-        self.fdat.extend_from_slice(chunk);
+
+    pub fn chunk_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.fdat
     }
     /// Set Frame control details for this frame
     pub fn set_fctl(&mut self, fctl: FrameInfo) {
@@ -164,26 +164,27 @@ impl SingleFrame {
 /// # Examples
 ///
 /// ```no_run
-/// use zune_core::options::EncoderOptions;
+/// use makepad_zune_core::bytestream::ZCursor;
+/// use makepad_zune_core::options::EncoderOptions;
 /// use zune_png::{PngDecoder, post_process_image};
 /// // read the file
 /// // set up decoder
-/// let mut decoder = PngDecoder::new(&[]);
+/// let mut decoder = PngDecoder::new(ZCursor::new(&[]));
 /// // decode headers
 /// decoder.decode_headers().unwrap();
 /// // get useful information about the image
-/// let colorspace = decoder.get_colorspace().unwrap();
-/// let depth = decoder.get_depth().unwrap();
+/// let colorspace = decoder.colorspace().unwrap();
+/// let depth = decoder.depth().unwrap();
 /// //  get decoder information,we clone this because we need a standalone
 /// // info since we mutably modify decoder struct below
-/// let info = decoder.get_info().unwrap().clone();
+/// let info = decoder.info().unwrap().clone();
 /// // set up our background variable. Soon it will contain the data for the previous
 /// // frame, the first frame has no background hence why this is None
 /// let mut background: Option<Vec<u8>> = None;
 /// // the output, since we know that no frame will be bigger than the width and height, we can
 /// // set this up outside of the loop.
 /// let mut output =
-///  vec![0; info.width * info.height * decoder.get_colorspace().unwrap().num_components()];
+///  vec![0; info.width * info.height * decoder.colorspace().unwrap().num_components()];
 /// let mut i = 0;
 ///
 /// while decoder.more_frames() {
@@ -208,7 +209,8 @@ impl SingleFrame {
 ///     // create encoder parameters
 ///    let encoder_opts = EncoderOptions::new(info.width, info.height, colorspace, depth);
 ///
-///    let bytes = zune_png::PngEncoder::new(&output, encoder_opts).encode();
+///     let mut out = vec![];
+///    let bytes = zune_png::PngEncoder::new(&output, encoder_opts).encode(&mut out);
 ///
 ///     //std::fs::write(format!("./{i}.png"), bytes).unwrap();
 ///     // this is expensive, but we need a copy of the previous fully rendered frame
@@ -243,7 +245,7 @@ pub fn post_process_image(
 
     // ensure we can have at least enough space to write output
     if current_frame.len() < frame_dims {
-        let msg = format!(
+        let msg = alloc::format!(
             "Current frame dimensions ({}) less than  expected dimensions ({})",
             current_frame.len(),
             frame_dims
@@ -254,8 +256,39 @@ pub fn post_process_image(
     match frame_info.dispose_op {
         DisposeOp::None => {} // do nothing
         DisposeOp::Background => {
-            // output to fully black
+            // APNG_DISPOSE_OP_BACKGROUND: the frame's region of the output buffer
+            // is to be cleared to fully transparent black before rendering the next frame.
+            // for line_stride in output
+            //     .chunks_exact_mut(info.width * nc)
+            //     .skip(frame_info.y_offset)
+            //     .take(frame_info.width)
+            // {
+            //     let start_frame = frame_info.x_offset * nc;
+            //     let end_frame = (frame_info.x_offset + frame_info.width) * nc;
+            //
+            //     line_stride[start_frame..end_frame].fill(0);
+            // }
+            // // Also zero out the area around the frame
+            // //
+            // //{
+            // // zero out top area
+            // for line_stride in output
+            //     .chunks_exact_mut(info.width * nc)
+            //     .take(frame_info.y_offset)
+            // {
+            //     line_stride.fill(0);
+            // }
             output.fill(0);
+            //
+            //     // zero out area around frame
+            //     for line_stride in output
+            //         .chunks_exact_mut(info.width * nc)
+            //         .skip(frame_info.y_offset)
+            //         .take(frame_info.width)
+            //     {
+            //         line_stride[..].fill(0);
+            //     }
+            // }
         }
         DisposeOp::Previous => {
             // copy background if possible
@@ -273,18 +306,15 @@ pub fn post_process_image(
             }
         } // blend
     }
-    // move to the start of the y position to render frame
-    let start_pos = frame_info.y_offset * info.width * nc;
-
-    let start = &mut output[start_pos..];
     // deal with gamma
     let gamma_value = gamma.unwrap_or(2.2);
     let gamma_inv = 1.0 / gamma_value;
 
     // iterate by a width stride
     for (src_width, h) in current_frame.chunks_exact(frame_info.width * nc).zip(
-        start
+        output
             .chunks_exact_mut(info.width * nc)
+            .skip(frame_info.y_offset)
             .take(frame_info.height)
     ) {
         // move to the x offset
@@ -305,19 +335,37 @@ pub fn post_process_image(
                 }
                 // pre-calculate the gamma samples
                 let mut gamma_values = [0.0; 256];
+                let mut inv_gamma_values = [0.0; 256];
                 let max_sample = 255.0;
 
-                for (i, item) in gamma_values.iter_mut().enumerate() {
+                for (i, (item, c)) in gamma_values
+                    .iter_mut()
+                    .zip(inv_gamma_values.iter_mut())
+                    .enumerate()
+                {
                     let gam = (i as f32) / max_sample;
                     let linfg = f32::powf(gam, gamma_inv);
+                    let inv_fg = f32::powf(gam, gamma_value);
+                    *c = inv_fg;
                     *item = linfg;
                 }
 
-                for (src_comp, dst_comp) in src_width.chunks_exact(nc).zip(h.chunks_exact_mut(nc)) {
-                    let foreground_alpha = f32::from(*src_comp.last().unwrap()) / 255.0;
+                for (src_comp, dst_comp) in src_width.chunks_exact(nc).zip(h_x.chunks_exact_mut(nc))
+                {
+                    let alpha = *src_comp.last().unwrap();
+                    let foreground_alpha = f32::from(alpha) / 255.0;
                     let dst_alpha = 1.0 - foreground_alpha;
 
                     let max_sample = 255.0;
+
+                    if alpha == 0 {
+                        /*
+                         * Foreground image is transparent here.
+                         * If the background image is already in the frame
+                         * buffer, there is nothing to do.
+                         */
+                        continue;
+                    }
 
                     for (a, b) in src_comp.iter().zip(dst_comp).take(nc - 1) {
                         // convert to floating point, undo gamma encoding
@@ -325,8 +373,14 @@ pub fn post_process_image(
                         let linbg = gamma_values[usize::from(*b)];
                         // composite
                         let commpix = linfg * foreground_alpha + linbg * dst_alpha;
+                        // gamma encode for storage
+                        // NB: (cae): This function becomes quite expensive.
+                        // I'm not sure if memoization may help us here.
+                        //  Anyone with tricks??
+                        let gamout = f32::powf(commpix, gamma_value);
                         // scale up and output to b
-                        *b = (commpix * max_sample + 0.5) as u8;
+                        let pix = (gamout * max_sample + 0.5) as u8;
+                        *b = pix;
                     }
                 }
             }

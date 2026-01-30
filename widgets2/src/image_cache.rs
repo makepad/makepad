@@ -12,6 +12,8 @@ use std::sync::Arc;
 use makepad_zune_jpeg::JpegDecoder;
 #[cfg(feature = "png")]
 use makepad_zune_png::{PngDecoder, post_process_image};
+#[cfg(feature = "png")]
+use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 
 #[cfg(feature = "png")]
 pub use makepad_zune_png::error::PngDecodeErrors;
@@ -97,7 +99,8 @@ impl ImageBuffer {
 
     #[cfg(feature = "png")]
     pub fn from_png(data: &[u8]) -> Result<Self, ImageError> {
-        let mut decoder = PngDecoder::new(data);
+        let cursor = ZCursor::new(data);
+        let mut decoder = PngDecoder::new(cursor);
         decoder.decode_headers()?;
 
         if decoder.is_animated() {
@@ -110,7 +113,7 @@ impl ImageBuffer {
                 "Failed to decode PNG image data as a slice of u8 bytes"
             )),
         )?;
-        let (width, height) = decoder.get_dimensions().ok_or(
+        let (width, height) = decoder.dimensions().ok_or(
             ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                 "Failed to get PNG image dimensions"
             ))
@@ -119,13 +122,13 @@ impl ImageBuffer {
     }
 
     #[cfg(feature = "png")]
-    fn decode_animated_png(decoder: &mut PngDecoder<&[u8]>) -> Result<ImageBuffer, ImageError> {
-        let colorspace = decoder.get_colorspace().ok_or(
+    fn decode_animated_png<T: makepad_zune_png::makepad_zune_core::bytestream::ZByteReaderTrait>(decoder: &mut PngDecoder<T>) -> Result<ImageBuffer, ImageError> {
+        let colorspace = decoder.colorspace().ok_or(
             ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                 "Failed to get animated PNG colorspace"
             ))
         )?;
-        let (width, height) = decoder.get_dimensions().ok_or(
+        let (width, height) = decoder.dimensions().ok_or(
             ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                 "Failed to get animated PNG image dimensions"
             ))
@@ -157,7 +160,7 @@ impl ImageBuffer {
             decoder.decode_headers()?;
             let frame = decoder.frame_info().expect("to have already been decoded");
             let pix = decoder.decode_raw()?;
-            let info = decoder.get_info().ok_or(
+            let info = decoder.info().ok_or(
                 ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                     "Failed to get animated PNG image info"
                 ))
@@ -342,9 +345,10 @@ pub trait ImageCacheImpl {
         }
         #[cfg(feature = "png")]
         if image_path.extension().map(|s| s == "png").unwrap_or(false) {
-            let mut decoder = PngDecoder::new(data);
+            let cursor = ZCursor::new(data);
+            let mut decoder = PngDecoder::new(cursor);
             decoder.decode_headers()?;
-            let (width, height) = decoder.get_dimensions().ok_or(
+            let (width, height) = decoder.dimensions().ok_or(
                 ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                     "Failed to get PNG image dimensions"
                 ))

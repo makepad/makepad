@@ -9,6 +9,8 @@ use {
 
 #[cfg(feature = "png")]
 use makepad_zune_png::PngDecoder;
+#[cfg(feature = "png")]
+use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 
 #[derive(Clone, Debug)]
 pub struct GlyphRasterImage<'a> {
@@ -62,11 +64,12 @@ impl<'a> GlyphRasterImage<'a> {
 
     #[cfg(feature = "png")]
     fn decode_size_png(&self) -> Size<usize> {
-        let mut decoder = PngDecoder::new(self.data);
+        let cursor = ZCursor::new(self.data);
+        let mut decoder = PngDecoder::new(cursor);
         if decoder.decode_headers().is_err() {
             return Size { width: 0, height: 0 };
         }
-        decoder.get_dimensions()
+        decoder.dimensions()
             .map(|(w, h)| Size { width: w, height: h })
             .unwrap_or(Size { width: 0, height: 0 })
     }
@@ -85,17 +88,18 @@ impl<'a> GlyphRasterImage<'a> {
 
     #[cfg(feature = "png")]
     fn decode_png(&self, image: &mut SubimageMut<Bgra>) {
-        let mut decoder = PngDecoder::new(self.data);
+        let cursor = ZCursor::new(self.data);
+        let mut decoder = PngDecoder::new(cursor);
         if decoder.decode_headers().is_err() {
             return;
         }
         
-        let (width, height) = match decoder.get_dimensions() {
+        let (width, height) = match decoder.dimensions() {
             Some(dims) => dims,
             None => return,
         };
         
-        let colorspace = match decoder.get_colorspace() {
+        let colorspace = match decoder.colorspace() {
             Some(cs) => cs,
             None => return,
         };

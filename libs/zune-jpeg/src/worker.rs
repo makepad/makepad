@@ -7,11 +7,13 @@
  */
 
 use alloc::format;
+use core::convert::TryInto;
+use core::cmp::min;
 
 use makepad_zune_core::colorspace::ColorSpace;
 
 use crate::color_convert::ycbcr_to_grayscale;
-use crate::components::Components;
+use crate::components::{Components, SampleRatios};
 use crate::decoder::{ColorConvert16Ptr, MAX_COMPONENTS};
 use crate::errors::DecodeErrors;
 
@@ -26,17 +28,18 @@ fn blinn_8x8(in_val: u8, y: u8) -> u8 {
 }
 
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-pub(crate) fn color_convert_no_sampling(
+pub(crate) fn color_convert(
     unprocessed: &[&[i16]; MAX_COMPONENTS], color_convert_16: ColorConvert16Ptr,
     input_colorspace: ColorSpace, output_colorspace: ColorSpace, output: &mut [u8], width: usize,
     padded_width: usize
-) -> Result<(), DecodeErrors> // so many parameters..
-{
-    // maximum sampling factors are in Y-channel, no need to pass them.
-
+) -> Result<(), DecodeErrors> {
     if input_colorspace.num_components() == 3 && input_colorspace == output_colorspace {
         // sort things like RGB to RGB conversion
         copy_removing_padding(unprocessed, width, padded_width, output);
+        return Ok(());
+    }
+    if input_colorspace.num_components() == 4 && input_colorspace == output_colorspace {
+        copy_removing_padding_4x(unprocessed, width, padded_width, output);
         return Ok(());
     }
     // color convert
@@ -84,10 +87,44 @@ pub(crate) fn color_convert_no_sampling(
         (ColorSpace::CMYK, ColorSpace::RGBA) => {
             color_convert_cymk_to_rgb::<4>(unprocessed, width, padded_width, output);
         }
+        (ColorSpace::MultiBand(n), _) => {
+            if n.get() != 2 {
+                return Err(DecodeErrors::Format(format!(
+                    "Unknown multiband sample ({n}), please share sample"
+                )));
+            }
+            copy_removing_padding_generic(
+                unprocessed,
+                width,
+                padded_width,
+                output,
+                n.get() as usize
+            );
+        }
+        (ColorSpace::Luma, ColorSpace::RGB) => {
+            // duplicate the luma channel  three times to form RGB
+            // Note, this may assume the direct conversion
+            // from luma to RGB is by duplicating
+            //
+            // There may be a bit more complex ways
+            // of doing it but won't get onto it
+            convert_luma_to_rgb(unprocessed, width, padded_width, output)
+        }
+        (ColorSpace::Luma, ColorSpace::RGBA) => {
+            // duplicate the luma channel  three times to form RGB
+            // add 255 as alpha
+            // Note, this may assume the direct conversion
+            // from luma to RGB is by duplicating
+            //
+            // There may be a bit more complex ways
+            // of doing it but won't get onto it
+            convert_luma_to_rgba(unprocessed, width, padded_width, output)
+        }
+
         // For the other components we do nothing(currently)
         _ => {
             let msg = format!(
-                    "Unimplemented colorspace mapping from {input_colorspace:?} to {output_colorspace:?}");
+                "Unimplemented colorspace mapping from {input_colorspace:?} to {output_colorspace:?}");
 
             return Err(DecodeErrors::Format(msg));
         }
@@ -95,6 +132,35 @@ pub(crate) fn color_convert_no_sampling(
     Ok(())
 }
 
+fn convert_luma_to_rgb(
+    mcu_block: &[&[i16]; MAX_COMPONENTS], width: usize, padded_width: usize, output: &mut [u8]
+) {
+    for (pix_w, y_w) in output
+        .chunks_exact_mut(width * 3)
+        .zip(mcu_block[0].chunks_exact(padded_width))
+    {
+        for (pix, c) in pix_w.chunks_exact_mut(3).zip(y_w) {
+            pix[0] = *c as u8;
+            pix[1] = *c as u8;
+            pix[2] = *c as u8;
+        }
+    }
+}
+fn convert_luma_to_rgba(
+    mcu_block: &[&[i16]; MAX_COMPONENTS], width: usize, padded_width: usize, output: &mut [u8]
+) {
+    for (pix_w, y_w) in output
+        .chunks_exact_mut(width * 4)
+        .zip(mcu_block[0].chunks_exact(padded_width))
+    {
+        for (pix, c) in pix_w.chunks_exact_mut(4).zip(y_w) {
+            pix[0] = *c as u8;
+            pix[1] = *c as u8;
+            pix[2] = *c as u8;
+            pix[3] = 255;
+        }
+    }
+}
 /// Copy a block to output removing padding bytes from input
 /// if necessary
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -114,7 +180,53 @@ fn copy_removing_padding(
         }
     }
 }
-
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn copy_removing_padding_4x(
+    mcu_block: &[&[i16]; MAX_COMPONENTS], width: usize, padded_width: usize, output: &mut [u8]
+) {
+    for ((((pix_w, c_w), m_w), y_w), k_w) in output
+        .chunks_exact_mut(width * 4)
+        .zip(mcu_block[0].chunks_exact(padded_width))
+        .zip(mcu_block[1].chunks_exact(padded_width))
+        .zip(mcu_block[2].chunks_exact(padded_width))
+        .zip(mcu_block[3].chunks_exact(padded_width))
+    {
+        for ((((pix, c), y), m), k) in pix_w
+            .chunks_exact_mut(4)
+            .zip(c_w)
+            .zip(m_w)
+            .zip(y_w)
+            .zip(k_w)
+        {
+            pix[0] = *c as u8;
+            pix[1] = *y as u8;
+            pix[2] = *m as u8;
+            pix[3] = *k as u8;
+        }
+    }
+}
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn copy_removing_padding_generic(
+    mcu_block: &[&[i16]; MAX_COMPONENTS], width: usize, padded_width: usize, output: &mut [u8],
+    channels: usize
+) {
+    match channels {
+        // just do 2 for now
+        2 => {
+            for ((pix_w, y_w), k_w) in output
+                .chunks_exact_mut(width * channels)
+                .zip(mcu_block[0].chunks_exact(padded_width))
+                .zip(mcu_block[1].chunks_exact(padded_width))
+            {
+                for ((pix, c), k) in pix_w.chunks_exact_mut(2).zip(y_w).zip(k_w) {
+                    pix[0] = *c as u8;
+                    pix[1] = *k as u8;
+                }
+            }
+        }
+        _ => unreachable!()
+    }
+}
 /// Convert YCCK image to rgb
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn color_convert_ycck_to_rgb<const NUM_COMPONENTS: usize>(
@@ -186,7 +298,6 @@ fn color_convert_ycbcr(
     let num_components = output_colorspace.num_components();
 
     let stride = width * num_components;
-
     // Allocate temporary buffer for small widths less than  16.
     let mut temp = [0; 64];
     // We need to chunk per width to ensure we can discard extra values at the end of the width.
@@ -203,9 +314,12 @@ fn color_convert_ycbcr(
             let mut cb_out = [0; 16];
             let mut cr_out = [0; 16];
             // copy those small widths to that buffer
-            y_out[0..y_width.len()].copy_from_slice(y_width);
-            cb_out[0..cb_width.len()].copy_from_slice(cb_width);
-            cr_out[0..cr_width.len()].copy_from_slice(cr_width);
+            // Use a min with 16 to prevent some panics, see https://github.com/etemesi254/zune-image/issues/331
+            y_out[0..min(y_width.len(), 16)].copy_from_slice(&y_width[0..min(y_width.len(), 16)]);
+            cb_out[0..min(cb_width.len(), 16)]
+                .copy_from_slice(&cb_width[0..min(cb_width.len(), 16)]);
+            cr_out[0..min(cr_width.len(), 16)]
+                .copy_from_slice(&cr_width[0..min(cr_width.len(), 16)]);
             // we handle widths less than 16 a bit differently, allocating a temporary
             // buffer and writing to that and then flushing to the out buffer
             // because of the optimizations applied below,
@@ -258,283 +372,206 @@ fn color_convert_ycbcr(
         rem.copy_from_slice(&temp[0..rem.len()]);
     }
 }
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn upsample_and_color_convert_h(
-    component_data: &mut [Components], color_convert_16: ColorConvert16Ptr,
-    input_colorspace: ColorSpace, output_colorspace: ColorSpace, output: &mut [u8], width: usize,
-    padded_width: usize
+pub(crate) fn upsample(
+    component: &mut Components, mcu_height: usize, i: usize, upsampler_scratch_space: &mut [i16],
+    has_vertical_sample: bool
 ) -> Result<(), DecodeErrors> {
-    let v_samp = component_data[0].vertical_sample;
+    match component.sample_ratio {
+        SampleRatios::V | SampleRatios::HV => {
+            /*
+            When upsampling vertically sampled images, we have a certain problem
+            which is that we do not have all MCU's decoded, this usually sucks at boundaries
+            e.g we can't upsample the last mcu row, since the row_down currently doesn't exist
 
-    let out_stride = width * output_colorspace.num_components() * v_samp;
-    // Width of image which takes into account fill bytes
-    let width_stride = component_data[0].width_stride * v_samp;
+            To solve this we need to do two things
 
-    let (y, remainder) = component_data.split_at_mut(1);
-    for ((pos, out), y_stride) in output
-        .chunks_mut(out_stride)
-        .enumerate()
-        .zip(y[0].raw_coeff.chunks(width_stride))
-    {
-        for component in remainder.iter_mut() {
-            let raw_data = &component.raw_coeff;
+            1. Carry over coefficients when we lack enough data to upsample
+            2. Upsample when we have enough data
 
-            let comp_stride_start = pos * component.width_stride;
-            let comp_stride_stop = comp_stride_start + component.width_stride;
+            To achieve (1), we store a previous row, and the current row in components themselves
+            which will later be used to make (2)
 
-            let comp_stride = &raw_data[comp_stride_start..comp_stride_stop];
-            let out_stride = &mut component.upsample_dest;
+            To achieve (2), we take the stored previous row(second last MCU row),
+            current row(last mcu row) and row down(first row of newly decoded MCU)
 
-            // upsample using the fn pointer, should only be H, so no need for
-            // row up and row down
-            (component.up_sampler)(comp_stride, &[], &[], &mut [], out_stride);
-        }
+            and upsample that and store it in first_row_upsample_dest, this contains
+            up-sampled coefficients for the last for the previous decoded mcu row.
 
-        // by here, each component has been up-sampled, so let's color convert a row(s)
-        let cb_stride = &remainder[0].upsample_dest;
-        let cr_stride = &remainder[1].upsample_dest;
+            The caller is then expected to process first_row_upsample_dest before processing data
+            in component.upsample_dest which stores the up-sampled components excluding the last row
+            */
 
-        let iq_stride: &[i16] = if let Some(component) = remainder.get(2) {
-            &component.upsample_dest
-        } else {
-            &[]
-        };
+            let mut dest_start = 0;
+            let stride_bytes_written = component.width_stride * component.sample_ratio.sample();
 
-        color_convert_no_sampling(
-            &[y_stride, cb_stride, cr_stride, iq_stride],
-            color_convert_16,
-            input_colorspace,
-            output_colorspace,
-            out,
-            width,
-            padded_width
-        )?;
-    }
-    Ok(())
-}
+            if i > 0 {
+                // Handle the last MCU of the previous row
+                // This wasn't up-sampled as we didn't have the row_down
+                // so we do it now
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(crate) fn upsample_and_color_convert_v(
-    component_data: &mut [Components], color_convert_16: ColorConvert16Ptr,
-    input_colorspace: ColorSpace, output_colorspace: ColorSpace, output: &mut [u8], width: usize,
-    padded_width: usize, pixels_written: &mut usize, upsampler_scratch_space: &mut [i16], i: usize,
-    mcu_height: usize
-) -> Result<(), DecodeErrors> {
-    // HV and V sampling are a bust.
-    // They suck because we need top row and bottom row.
-    // but we haven't decoded the whole image, we only did a single
-    // MCU width.
-    //
-    // So to make it work we upsample and color convert in two steps
-    //
-    // These are the special conditions
-    // 1. First row of image
-    //  row_up points to the current row, since there is no row above it
-    //
-    // 2. Last row of MCU
-    //    We can't upsample yet since we don't have row_down , we haven't decoded it
-    //    - Save the row above us, which we will use
-    //    - Save the current row.
-    //
-    // 3. Before decoding a new  MCU.
-    //   We already had saved the last row, we now currently have the row_down
-    //   which is the first row of this MCU, so we can upsample the last row of the previous
-    //   MCU.
-    //
-    // 4. Decoding a new line for MCU
-    //      Previous row is provided by component.prev_row, the rest can be accessed
-    //      via stride calculations.
-    //  5. Decoding normal lines with no MCU boundary handling.
-    //     Use `component.raw_coeffs` to get raw coefficient data stride wise
+                let stride = component.width_stride;
 
-    // Most of the logic flows in the following:
-    // 1. Handle the previous MCU
-    // 2. Handle current MCU.
-    // 3. Prepare for future MCU
+                let dest = &mut component.first_row_upsample_dest[0..stride_bytes_written];
 
-    let (y_component, remainder) = component_data.split_at_mut(1);
+                // get current row
+                let row = &component.row[..];
+                let row_up = &component.row_up[..];
+                let row_down = &component.raw_coeff[0..stride];
+                (component.up_sampler)(row, row_up, row_down, upsampler_scratch_space, dest);
+            }
 
-    let out_stride = width * output_colorspace.num_components() * 2;
+            // we have the Y component width stride.
+            // this may be higher than the actual width,(2x because vertical sampling)
+            //
+            // This will not upsample the last row
 
-    let (max_h_sample, max_v_sample) = (
-        y_component[0].horizontal_sample,
-        y_component[0].vertical_sample
-    );
+            // if false, do not upsample.
+            // set to false on the last row of an mcu
+            let mut upsample = true;
 
-    let width_stride = y_component[0].width_stride * 2;
-    let stop_offset = y_component[0].raw_coeff.len() / width_stride;
+            let stride = component.width_stride * component.vertical_sample;
+            let stop_offset = component.raw_coeff.len() / component.width_stride;
 
-    if i > 0 {
-        // Handle the last MCU of the previous row
-        // This wasn't up-sampled as we didn't have the row_down
-        // so we do it now
-        for c in remainder.iter_mut() {
-            if c.horizontal_sample == max_h_sample
-                && c.vertical_sample == max_v_sample
-                && c.horizontal_sample == 2
+            if component.raw_coeff.len() != stop_offset * stride {
+                // slice would panic below
+                return Err(DecodeErrors::FormatStatic(
+                    "Invalid component dimensions, would panic"
+                ));
+            }
+            for (pos, curr_row) in component
+                .raw_coeff
+                .chunks_exact(component.width_stride)
+                .enumerate()
             {
-                // This one solves the following case
+                let mut dest: &mut [i16] = &mut [];
+                let mut row_up: &[i16] = &[];
+                // row below current sample
+                let mut row_down: &[i16] = &[];
 
-                //  Component ID:Y    HS:2 VS:2 QT:0
-                //  Component ID:Cb   HS:2 VS:2 QT:1
-                //  Component ID:Cr   HS:1 VS:1 QT:2
-                //
-                // Cb component should not be up-sampled, since it contains
-                // the same sampling factor as Y,so if it is the case do not
-                // try to sample it.
-                // Ideally, it should be using self.h_max, and self.v_max, but
-                // that's a story for another day.
-                continue;
+                // Order of ifs matters
+
+                if i == 0 && pos == 0 {
+                    // first IMAGE row, row_up is the same as current row
+                    // row_down is the row below.
+                    row_up = &component.raw_coeff[pos * stride..(pos + 1) * stride];
+                    row_down = &component.raw_coeff[(pos + 1) * stride..(pos + 2) * stride];
+                } else if i > 0 && pos == 0 {
+                    // first row of a new mcu, previous row was copied so use that
+                    row_up = &component.row[..];
+                    row_down = &component.raw_coeff[(pos + 1) * stride..(pos + 2) * stride];
+                } else if i == mcu_height.saturating_sub(1) && pos == stop_offset - 1 {
+                    // last IMAGE row, adjust pointer to use previous row and current row
+                    row_up = &component.raw_coeff[(pos - 1) * stride..pos * stride];
+                    row_down = &component.raw_coeff[pos * stride..(pos + 1) * stride];
+                } else if pos > 0 && pos < stop_offset - 1 {
+                    // other rows, get row up and row down relative to our current row
+                    // ignore last row of each mcu
+                    row_up = &component.raw_coeff[(pos - 1) * stride..pos * stride];
+                    row_down = &component.raw_coeff[(pos + 1) * stride..(pos + 2) * stride];
+                } else if pos == stop_offset - 1 {
+                    // last MCU in a row
+                    //
+                    // we need a row at the next MCU but we haven't decoded that MCU yet
+                    // so we should save this and when we have the next MCU,
+                    // do the upsampling
+
+                    // store the current row and previous row in a buffer
+                    let prev_row = &component.raw_coeff[(pos - 1) * stride..pos * stride];
+
+                    component.row_up.copy_from_slice(prev_row);
+                    component.row.copy_from_slice(curr_row);
+                    upsample = false;
+                } else {
+                    unreachable!("Uh oh!");
+                }
+                if upsample {
+                    dest =
+                        &mut component.upsample_dest[dest_start..dest_start + stride_bytes_written];
+                    dest_start += stride_bytes_written;
+                }
+
+                if upsample {
+                    // upsample
+                    (component.up_sampler)(
+                        curr_row,
+                        row_up,
+                        row_down,
+                        upsampler_scratch_space,
+                        dest
+                    );
+                }
             }
-
-            let stride = c.width_stride;
-
-            let dest = &mut c.upsample_dest;
-
-            // get current row
-            let row = &c.current_row[..];
-            let row_up = &c.prev_row[..];
-            let row_down = &c.raw_coeff[0..stride];
-
-            // upsample
-            (c.up_sampler)(row, row_up, row_down, upsampler_scratch_space, dest);
         }
-        // by here, each component has been up-sampled, so let's color convert a row(s)
-        let cb_stride = &remainder[0].upsample_dest;
-        let cr_stride = &remainder[1].upsample_dest;
+        SampleRatios::H => {
+            //assert_eq!(component.raw_coeff.len() * 2, component.upsample_dest.len());
+            // Before it was an assert, but numerous and numerous and numerous
+            // bug fixes and ad hoc solutions later, I have now just decided  to keep it as a resize
+            component
+                .upsample_dest
+                .resize(component.raw_coeff.len() * 2, 0);
 
-        let iq_stride: &[i16] = if let Some(component) = remainder.get(2) {
-            &component.upsample_dest
-        } else {
-            &[]
-        };
-        // color convert row
-        color_convert_no_sampling(
-            &[&y_component[0].current_row, cb_stride, cr_stride, iq_stride],
-            color_convert_16,
-            input_colorspace,
-            output_colorspace,
-            &mut output[*pixels_written..*pixels_written + out_stride],
-            width,
-            padded_width
-        )?;
-        *pixels_written += out_stride;
-    }
+            let raw_coeff = &component.raw_coeff;
+            let dest_coeff = &mut component.upsample_dest;
 
-    'top: for ((pos, out), y_stride) in output[*pixels_written..]
-        .chunks_mut(out_stride)
-        .enumerate()
-        .zip(y_component[0].raw_coeff.chunks_exact(width_stride))
-    {
-        // we have the Y component width stride.
-        // this may be higher than the actual width,(2x because vertical sampling)
-        //
-        // This will not upsample the last row
+            if has_vertical_sample {
+                /*
+                There have been images that have the following configurations.
 
-        // if false, do not upsample.
-        // set to false on the last row of an mcu
-        let mut upsample = true;
+                Component ID:Y    HS:2 VS:2 QT:0
+                Component ID:Cb   HS:1 VS:1 QT:1
+                Component ID:Cr   HS:1 VS:2 QT:1
 
-        for c in remainder.iter_mut() {
-            if c.horizontal_sample == max_h_sample
-                && c.vertical_sample == max_v_sample
-                && c.horizontal_sample == 2
+                This brings out a nasty case of misaligned sampling factors. Cr will need to save a row because
+                of the way we process boundaries but Cb won't since Cr is horizontally sampled while Cb is
+                HV sampled with respect to the image sampling factors.
+
+                So during decoding of one MCU, we could only do 7 and not 8 rows, but the SampleRatio::H never had to
+                save a single line, since it doesn't suffer from boundary issues.
+
+                Now this takes care of that, saving the last MCU row in case it will be needed.
+                We save the previous row before up-sampling this row because the boundary issue is in
+                the last MCU row of the previous MCU.
+
+                PS(cae): I can't add the image to the repo as it is nsfw, but can send if required
+                */
+                let length = component.first_row_upsample_dest.len();
+                component
+                    .first_row_upsample_dest
+                    .copy_from_slice(&dest_coeff.rchunks_exact(length).next().unwrap());
+            }
+            // up-sample each row
+            for (single_row, output_stride) in raw_coeff
+                .chunks_exact(component.width_stride)
+                .zip(dest_coeff.chunks_exact_mut(component.width_stride * 2))
             {
-                // see comment inside the same block when i > 0
-                continue;
-            }
-
-            let stride = c.width_stride * c.vertical_sample;
-            let mut row_up: &[i16] = &[];
-            // row below current sample
-            let mut row_down: &[i16] = &[];
-            let dest = &mut c.upsample_dest;
-
-            // get current row
-            let row = &c.raw_coeff[pos * stride..(pos + 1) * stride];
-
-            if i == 0 && pos == 0 {
-                // first IMAGE row, row_up is the same as current row
-                // row_down is the row below.
-                row_up = &c.raw_coeff[pos * stride..(pos + 1) * stride];
-                row_down = &c.raw_coeff[(pos + 1) * stride..(pos + 2) * stride];
-            } else if pos == 0 {
-                // first row of a new mcu, previous row was copied so use that
-                row_up = &c.prev_row;
-                row_down = &c.raw_coeff[(pos + 1) * stride..(pos + 2) * stride];
-            } else if pos > 0 && pos < stop_offset - 1 {
-                // other rows, get row up and row down relative to our current row
-                row_up = &c.raw_coeff[(pos - 1) * stride..pos * stride];
-                row_down = &c.raw_coeff[(pos + 1) * stride..(pos + 2) * stride];
-            } else if i == mcu_height.saturating_sub(1) && pos == stop_offset - 1 {
-                // last IMAGE row, adjust pointer to use previous row and current row
-
-                // other rows, get row up and row down relative to our current row
-                row_up = &c.raw_coeff[(pos - 1) * stride..pos * stride];
-                row_down = &c.raw_coeff[pos * stride..(pos + 1) * stride];
-            } else {
-                // the only fallthrough to this point is the last MCU in a row
-                // we need a row at the next MCU but we haven't decoded that MCU yet
-                // so we should save this and when we have the next MCU,
-                // do the due diligence
-
-                // store the current row and previous row in a buffer
-                let prev_row = &c.raw_coeff[(pos - 1) * stride..pos * stride];
-
-                c.prev_row.copy_from_slice(prev_row);
-                c.current_row.copy_from_slice(row);
-                upsample = false;
-            }
-
-            if upsample {
-                // upsample
-                (c.up_sampler)(row, row_up, row_down, upsampler_scratch_space, dest);
-            }
-            if pos == stop_offset - 1 {
-                // copy current last MCU row to be used in the next mcu row
-                c.prev_row.copy_from_slice(row);
+                // upsample using the fn pointer, should only be H, so no need for
+                // row up and row down
+                (component.up_sampler)(single_row, &[], &[], &mut [], output_stride);
             }
         }
-        // if we didn't upsample,means we are in the last row, so then there is no need
-        // to color convert
-        if !upsample {
-            break 'top;
+        SampleRatios::Generic(h, v) => {
+            let raw_coeff = &component.raw_coeff;
+            let dest_coeff = &mut component.upsample_dest;
+
+            //let size =  component.width_stride.div_ceil(v);
+
+            // for (single_row, output_stride) in raw_coeff
+            //     .chunks_exact(size)
+            //     .zip(dest_coeff.chunks_exact_mut(component.width_stride * h))
+            // {
+            //     (component.up_sampler)(single_row, &[], &[], &mut [], output_stride);
+            //
+            // }
+            for (single_row, output_stride) in raw_coeff
+                .chunks_exact(component.width_stride)
+                .zip(dest_coeff.chunks_exact_mut(component.width_stride * h * v))
+            {
+                for row in output_stride.chunks_exact_mut(component.width_stride * h) {
+                    (component.up_sampler)(single_row, &[], &[], &mut [], row);
+                }
+            }
         }
-        // by here, each component has been up-sampled, so let's color convert a row(s)
-        let cb_stride = &remainder[0].upsample_dest;
-        let cr_stride = &remainder[1].upsample_dest;
-
-        let iq_stride: &[i16] = if let Some(component) = remainder.get(2) {
-            &component.upsample_dest
-        } else {
-            &[]
-        };
-        // color convert row
-        color_convert_no_sampling(
-            &[y_stride, cb_stride, cr_stride, iq_stride],
-            color_convert_16,
-            input_colorspace,
-            output_colorspace,
-            out,
-            width,
-            padded_width
-        )?;
-        *pixels_written += out_stride;
-    }
-    // copy last row of current y to be used in the next invocation
-    if i < mcu_height - 1 {
-        let last_row = y_component[0]
-            .raw_coeff
-            .rchunks_exact(width_stride)
-            .next()
-            .unwrap();
-        let start = last_row
-            .len()
-            .saturating_sub(y_component[0].current_row.len());
-
-        y_component[0]
-            .current_row
-            .copy_from_slice(&last_row[start..]);
-    }
+        SampleRatios::None => {}
+    };
     Ok(())
 }

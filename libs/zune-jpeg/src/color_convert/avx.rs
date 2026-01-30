@@ -44,12 +44,23 @@ use core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
+use crate::color_convert::scalar::{CB_CF, CR_CF, C_G_CB_COEF_2, C_G_CR_COEF_1, YUV_RND, Y_CF};
+
 pub union YmmRegister {
     // both are 32 when using std::mem::size_of
     mm256: __m256i,
     // for avx color conversion
     array: [i16; 16]
 }
+
+const R_AVX_COEF: i32 = i32::from_ne_bytes([CR_CF.to_ne_bytes()[0], CR_CF.to_ne_bytes()[1], 0, 0]);
+const B_AVX_COEF: i32 = i32::from_ne_bytes([0, 0, CB_CF.to_ne_bytes()[0], CB_CF.to_ne_bytes()[1]]);
+const G_COEF_AVX_COEF: i32 = i32::from_ne_bytes([
+    C_G_CR_COEF_1.to_ne_bytes()[0],
+    C_G_CR_COEF_1.to_ne_bytes()[1],
+    C_G_CB_COEF_2.to_ne_bytes()[0],
+    C_G_CB_COEF_2.to_ne_bytes()[1]
+]);
 
 //--------------------------------------------------------------------------------------------------
 // AVX conversion routines
@@ -84,117 +95,59 @@ pub fn ycbcr_to_rgb_avx2(
 
 #[inline]
 #[target_feature(enable = "avx2")]
-#[target_feature(enable = "avx")]
 unsafe fn ycbcr_to_rgb_avx2_1(
     y: &[i16; 16], cb: &[i16; 16], cr: &[i16; 16], out: &mut [u8], offset: &mut usize
 ) {
-    // Load output buffer
-    let tmp: &mut [u8; 48] = out
-        .get_mut(*offset..*offset + 48)
-        .expect("Slice to small cannot write")
-        .try_into()
-        .unwrap();
+    let (mut r, mut g, mut b) = ycbcr_to_rgb_baseline_no_clamp(y, cb, cr);
 
-    let (r, g, b) = ycbcr_to_rgb_baseline(y, cb, cr);
+    r = _mm256_packus_epi16(r, _mm256_setzero_si256());
+    g = _mm256_packus_epi16(g, _mm256_setzero_si256());
+    b = _mm256_packus_epi16(b, _mm256_setzero_si256());
 
-    let mut j = 0;
-    let mut i = 0;
-    while i < 48 {
-        tmp[i] = r.array[j] as u8;
+    r = _mm256_permute4x64_epi64::<{ shuffle(3, 1, 2, 0) }>(r);
+    g = _mm256_permute4x64_epi64::<{ shuffle(3, 1, 2, 0) }>(g);
+    b = _mm256_permute4x64_epi64::<{ shuffle(3, 1, 2, 0) }>(b);
 
-        tmp[i + 1] = g.array[j] as u8;
-        tmp[i + 2] = b.array[j] as u8;
-        i += 3;
-        j += 1;
-    }
+    let sh_r = _mm256_setr_epi8(
+        0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4, 15, 10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14,
+        9, 4, 15, 10, 5
+    );
+    let sh_g = _mm256_setr_epi8(
+        5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4, 15, 10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3,
+        14, 9, 4, 15, 10
+    );
+    let sh_b = _mm256_setr_epi8(
+        10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4, 15, 10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8,
+        3, 14, 9, 4, 15
+    );
+
+    let r0 = _mm256_shuffle_epi8(r, sh_r);
+    let g0 = _mm256_shuffle_epi8(g, sh_g);
+    let b0 = _mm256_shuffle_epi8(b, sh_b);
+
+    let m0 = _mm256_setr_epi8(
+        0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1,
+        0, 0, -1, 0, 0
+    );
+    let m1 = _mm256_setr_epi8(
+        0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0,
+        -1, 0, 0, -1, 0
+    );
+
+    let p0 = _mm256_blendv_epi8(_mm256_blendv_epi8(r0, g0, m0), b0, m1);
+    let p1 = _mm256_blendv_epi8(_mm256_blendv_epi8(g0, b0, m0), r0, m1);
+    let p2 = _mm256_blendv_epi8(_mm256_blendv_epi8(b0, r0, m0), g0, m1);
+
+    let rgb0 = _mm256_permute2x128_si256::<32>(p0, p1);
+    let rgb1 = _mm256_permute2x128_si256::<48>(p2, p0);
+
+    _mm256_storeu_si256(out.as_mut_ptr().cast(), rgb0);
+    _mm_storeu_si128(out[32..].as_mut_ptr().cast(), _mm256_castsi256_si128(rgb1));
 
     *offset += 48;
 }
 
-/// Baseline implementation of YCBCR to RGB for avx,
-///
-/// It uses integer operations as opposed to floats, the approximation is
-/// difficult for the  eye to see, but this means that it may produce different
-/// values with libjpeg_turbo.  if accuracy is of utmost importance, use that.
-///
-/// this function should be called for most implementations, including
-/// - ycbcr->rgb
-/// - ycbcr->rgba
-/// - ycbcr->brga
-/// - ycbcr->rgbx
-#[inline]
-#[target_feature(enable = "avx2")]
-#[target_feature(enable = "avx")]
-unsafe fn ycbcr_to_rgb_baseline(
-    y: &[i16; 16], cb: &[i16; 16], cr: &[i16; 16]
-) -> (YmmRegister, YmmRegister, YmmRegister) {
-    // Load values into a register
-    //
-    // dst[127:0] := MEM[loaddr+127:loaddr]
-    // dst[255:128] := MEM[hiaddr+127:hiaddr]
-    let y_c = _mm256_loadu_si256(y.as_ptr().cast());
-
-    let cb_c = _mm256_loadu_si256(cb.as_ptr().cast());
-
-    let cr_c = _mm256_loadu_si256(cr.as_ptr().cast());
-
-    // AVX version of integer version in https://stackoverflow.com/questions/4041840/function-to-convert-ycbcr-to-rgb
-
-    // Cb = Cb-128;
-    let cb_r = _mm256_sub_epi16(cb_c, _mm256_set1_epi16(128));
-
-    // cr = Cb -128;
-    let cr_r = _mm256_sub_epi16(cr_c, _mm256_set1_epi16(128));
-
-    // Calculate Y->R
-    // r = Y + 45 * Cr / 32
-    // 45*cr
-    let r1 = _mm256_mullo_epi16(_mm256_set1_epi16(45), cr_r);
-
-    // r1>>5
-    let r2 = _mm256_srai_epi16::<5>(r1);
-
-    //y+r2
-
-    let r = YmmRegister {
-        mm256: clamp_avx(_mm256_add_epi16(y_c, r2))
-    };
-
-    // g = Y - (11 * Cb + 23 * Cr) / 32 ;
-
-    // 11*cb
-    let g1 = _mm256_mullo_epi16(_mm256_set1_epi16(11), cb_r);
-
-    // 23*cr
-    let g2 = _mm256_mullo_epi16(_mm256_set1_epi16(23), cr_r);
-
-    //(11
-    //(11 * Cb + 23 * Cr)
-    let g3 = _mm256_add_epi16(g1, g2);
-
-    // (11 * Cb + 23 * Cr) / 32
-    let g4 = _mm256_srai_epi16::<5>(g3);
-
-    // Y - (11 * Cb + 23 * Cr) / 32 ;
-    let g = YmmRegister {
-        mm256: clamp_avx(_mm256_sub_epi16(y_c, g4))
-    };
-
-    // b = Y + 113 * Cb / 64
-    // 113 * cb
-    let b1 = _mm256_mullo_epi16(_mm256_set1_epi16(113), cb_r);
-
-    //113 * Cb / 64
-    let b2 = _mm256_srai_epi16::<6>(b1);
-
-    // b = Y + 113 * Cb / 64 ;
-    let b = YmmRegister {
-        mm256: clamp_avx(_mm256_add_epi16(b2, y_c))
-    };
-
-    return (r, g, b);
-}
-
+// Enabled avx2 automatically enables avx.
 #[inline]
 #[target_feature(enable = "avx2")]
 /// A baseline implementation of YCbCr to RGB conversion which does not carry
@@ -208,58 +161,73 @@ unsafe fn ycbcr_to_rgb_baseline_no_clamp(
     // Load values into a register
     //
     let y_c = _mm256_loadu_si256(y.as_ptr().cast());
-
     let cb_c = _mm256_loadu_si256(cb.as_ptr().cast());
-
     let cr_c = _mm256_loadu_si256(cr.as_ptr().cast());
 
-    // AVX version of integer version in https://stackoverflow.com/questions/4041840/function-to-convert-ycbcr-to-rgb
+    // Here we want to use _mm256_madd_epi16 to perform 2 multiplications
+    // and one addition per instruction.
 
-    // Cb = Cb-128;
-    let cb_r = _mm256_sub_epi16(cb_c, _mm256_set1_epi16(128));
+    // At first, we have to pack i16 U and V that stores u8 into one u8 [U,V]
+    // then zero extend, and keep in mind that lanes is already been permuted.
 
-    // cr = Cb -128;
-    let cr_r = _mm256_sub_epi16(cr_c, _mm256_set1_epi16(128));
+    let y_coeff = _mm256_set1_epi32(i32::from(Y_CF));
+    let cr_coeff = _mm256_set1_epi32(R_AVX_COEF);
+    let cb_coeff = _mm256_set1_epi32(B_AVX_COEF);
+    let cg_coeff = _mm256_set1_epi32(G_COEF_AVX_COEF);
+    let v_rnd = _mm256_set1_epi32(i32::from(YUV_RND));
+    let uv_bias = _mm256_set1_epi16(128);
 
-    // Calculate Y->R
-    // r = Y + 45 * Cr / 32
-    // 45*cr
-    let r1 = _mm256_mullo_epi16(_mm256_set1_epi16(45), cr_r);
+    // UV in memory because x86/x86_64 is always little endian
+    let v_0 = _mm256_slli_epi16::<8>(cb_c);
+    let u_v_8 = _mm256_or_si256(v_0, cr_c);
 
-    // r1>>5
-    let r2 = _mm256_srai_epi16::<5>(r1);
+    let mut u_v_lo = _mm256_unpacklo_epi8(u_v_8, _mm256_setzero_si256());
+    let mut u_v_hi = _mm256_unpackhi_epi8(u_v_8, _mm256_setzero_si256());
 
-    //y+r2
+    let mut y_lo = _mm256_unpacklo_epi16(y_c, _mm256_setzero_si256());
+    let mut y_hi = _mm256_unpackhi_epi16(y_c, _mm256_setzero_si256());
 
-    let r = _mm256_add_epi16(y_c, r2);
+    u_v_lo = _mm256_sub_epi16(u_v_lo, uv_bias);
+    u_v_hi = _mm256_sub_epi16(u_v_hi, uv_bias);
 
-    // g = Y - (11 * Cb + 23 * Cr) / 32 ;
+    y_lo = _mm256_madd_epi16(y_lo, y_coeff);
+    y_hi = _mm256_madd_epi16(y_hi, y_coeff);
 
-    // 11*cb
-    let g1 = _mm256_mullo_epi16(_mm256_set1_epi16(11), cb_r);
+    let mut r_lo = _mm256_madd_epi16(u_v_lo, cr_coeff);
+    let mut r_hi = _mm256_madd_epi16(u_v_hi, cr_coeff);
 
-    // 23*cr
-    let g2 = _mm256_mullo_epi16(_mm256_set1_epi16(23), cr_r);
+    let mut g_lo = _mm256_madd_epi16(u_v_lo, cg_coeff);
+    let mut g_hi = _mm256_madd_epi16(u_v_hi, cg_coeff);
 
-    //(11
-    //(11 * Cb + 23 * Cr)
-    let g3 = _mm256_add_epi16(g1, g2);
+    // This ordering is preferred to reduce register file pressure.
 
-    // (11 * Cb + 23 * Cr) / 32
-    let g4 = _mm256_srai_epi16::<5>(g3);
+    y_lo = _mm256_add_epi32(y_lo, v_rnd);
+    y_hi = _mm256_add_epi32(y_hi, v_rnd);
 
-    // Y - (11 * Cb + 23 * Cr) / 32 ;
-    let g = _mm256_sub_epi16(y_c, g4);
+    let mut b_lo = _mm256_madd_epi16(u_v_lo, cb_coeff);
+    let mut b_hi = _mm256_madd_epi16(u_v_hi, cb_coeff);
 
-    // b = Y + 113 * Cb / 64
-    // 113 * cb
-    let b1 = _mm256_mullo_epi16(_mm256_set1_epi16(113), cb_r);
+    r_lo = _mm256_add_epi32(r_lo, y_lo);
+    r_hi = _mm256_add_epi32(r_hi, y_hi);
 
-    //113 * Cb / 64
-    let b2 = _mm256_srai_epi16::<6>(b1);
+    g_lo = _mm256_add_epi32(g_lo, y_lo);
+    g_hi = _mm256_add_epi32(g_hi, y_hi);
 
-    // b = Y + 113 * Cb / 64 ;
-    let b = _mm256_add_epi16(b2, y_c);
+    b_lo = _mm256_add_epi32(b_lo, y_lo);
+    b_hi = _mm256_add_epi32(b_hi, y_hi);
+
+    r_lo = _mm256_srai_epi32::<14>(r_lo);
+    r_hi = _mm256_srai_epi32::<14>(r_hi);
+
+    g_lo = _mm256_srai_epi32::<14>(g_lo);
+    g_hi = _mm256_srai_epi32::<14>(g_hi);
+
+    b_lo = _mm256_srai_epi32::<14>(b_lo);
+    b_hi = _mm256_srai_epi32::<14>(b_hi);
+
+    let r = _mm256_packus_epi32(r_lo, r_hi);
+    let g = _mm256_packus_epi32(g_lo, g_hi);
+    let b = _mm256_packus_epi32(b_lo, b_hi);
 
     return (r, g, b);
 }
@@ -291,7 +259,7 @@ unsafe fn ycbcr_to_rgba_unsafe(
 
     // And no these comments were not from me pressing the keyboard
 
-    // Pack the integers into u8's using signed saturation.
+    // Pack the integers into u8's using unsigned saturation.
     let c = _mm256_packus_epi16(r, g); //aaaaa_bbbbb_aaaaa_bbbbbb
     let d = _mm256_packus_epi16(b, _mm256_set1_epi16(255)); // cccccc_dddddd_ccccccc_ddddd
     // transpose_u16 and interleave channels
@@ -300,48 +268,27 @@ unsafe fn ycbcr_to_rgba_unsafe(
     // final transpose_u16
     let g = _mm256_unpacklo_epi8(e, f); //abcd_abcd_abcd_abcd_abcd
     let h = _mm256_unpackhi_epi8(e, f);
-
-
+    
     // undo packus shuffling...
     let i = _mm256_permute2x128_si256::<{ shuffle(3, 2, 1, 0) }>(g, h);
-
+    
     let j = _mm256_permute2x128_si256::<{ shuffle(1, 2, 3, 0) }>(g, h);
-
+    
     let k = _mm256_permute2x128_si256::<{ shuffle(3, 2, 0, 1) }>(g, h);
-
+    
     let l = _mm256_permute2x128_si256::<{ shuffle(0, 3, 2, 1) }>(g, h);
-
+    
     let m = _mm256_blend_epi32::<0b1111_0000>(i, j);
-
+    
     let n = _mm256_blend_epi32::<0b1111_0000>(k, l);
-
-
+    
     // Store
     // Use streaming instructions to prevent polluting the cache?
     _mm256_storeu_si256(tmp.as_mut_ptr().cast(), m);
-
+    
     _mm256_storeu_si256(tmp[32..].as_mut_ptr().cast(), n);
 
     *offset += 64;
-}
-
-/// Clamp values between 0 and 255
-///
-/// This function clamps all values in `reg` to be between 0 and 255
-///( the accepted values for RGB)
-#[inline]
-#[target_feature(enable = "avx2")]
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-unsafe fn clamp_avx(reg: __m256i) -> __m256i {
-    // the lowest value
-    let min_s = _mm256_set1_epi16(0);
-
-    // Highest value
-    let max_s = _mm256_set1_epi16(255);
-
-    let max_v = _mm256_max_epi16(reg, min_s); //max(a,0)
-    let min_v = _mm256_min_epi16(max_v, max_s); //min(max(a,0),255)
-    return min_v;
 }
 
 #[inline]

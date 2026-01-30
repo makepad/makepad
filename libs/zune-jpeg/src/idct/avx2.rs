@@ -40,22 +40,41 @@ use crate::unsafe_utils::{transpose, YmmRegister};
 
 const SCALE_BITS: i32 = 512 + 65536 + (128 << 17);
 
-/// SAFETY
-/// ------
-///
-/// It is the responsibility of the CALLER to ensure that  this function is
-/// called in contexts where the CPU supports it
-///
-///
-/// For documentation see module docs.
+// Pack i32 to i16's,
+// clamp them to be between 0-255
+// Undo shuffling
+// Store back to array
+macro_rules! permute_store {
+    ($x:tt,$y:tt,$index:tt,$out:tt,$stride:tt) => {
+        let a = _mm256_packs_epi32($x, $y);
 
-pub fn idct_avx2(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize) {
-    unsafe {
-        // We don't call this method directly because we need to flag the code function
-        // with #[target_feature] so that the compiler does do weird stuff with
-        // it
-        idct_int_avx2_inner(in_vector, out_vector, stride);
-    }
+        // Clamp the values after packing, we can clamp more values at once
+        let b = clamp_avx(a);
+
+        // /Undo shuffling
+        let c = _mm256_permute4x64_epi64(b, shuffle(3, 1, 2, 0));
+
+        // store first vector
+        _mm_storeu_si128(
+            ($out)
+                .get_mut($index..$index + 8)
+                .unwrap()
+                .as_mut_ptr()
+                .cast(),
+            _mm256_extractf128_si256::<0>(c),
+        );
+        $index += $stride;
+        // second vector
+        _mm_storeu_si128(
+            ($out)
+                .get_mut($index..$index + 8)
+                .unwrap()
+                .as_mut_ptr()
+                .cast(),
+            _mm256_extractf128_si256::<1>(c),
+        );
+        $index += $stride;
+    };
 }
 
 #[target_feature(enable = "avx2")]
@@ -67,8 +86,8 @@ pub fn idct_avx2(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usiz
     unused_assignments,
     clippy::zero_prefixed_literal
 )]
-pub unsafe fn idct_int_avx2_inner(
-    in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize
+pub unsafe fn idct_avx2(
+    in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize,
 ) {
     let mut pos = 0;
 
@@ -100,24 +119,20 @@ pub unsafe fn idct_int_avx2_inner(
     // we only care about AC terms
     let rw8 = _mm256_loadu_si256(in_vector[1..].as_ptr().cast());
 
-    let zero = _mm256_setzero_si256();
+    let mut bitmap = _mm256_or_si256(rw1, rw2);
+    bitmap = _mm256_or_si256(bitmap, rw3);
+    bitmap = _mm256_or_si256(bitmap, rw4);
+    bitmap = _mm256_or_si256(bitmap, rw5);
+    bitmap = _mm256_or_si256(bitmap, rw6);
+    bitmap = _mm256_or_si256(bitmap, rw7);
+    bitmap = _mm256_or_si256(bitmap, rw8);
 
-    let mut non_zero = 0;
-
-    non_zero += _mm256_movemask_epi8(_mm256_cmpeq_epi32(rw8, zero));
-    non_zero += _mm256_movemask_epi8(_mm256_cmpeq_epi32(rw1, zero));
-    non_zero += _mm256_movemask_epi8(_mm256_cmpeq_epi32(rw2, zero));
-    non_zero += _mm256_movemask_epi8(_mm256_cmpeq_epi64(rw3, zero));
-
-    non_zero += _mm256_movemask_epi8(_mm256_cmpeq_epi64(rw4, zero));
-    non_zero += _mm256_movemask_epi8(_mm256_cmpeq_epi64(rw5, zero));
-    non_zero += _mm256_movemask_epi8(_mm256_cmpeq_epi64(rw6, zero));
-    non_zero += _mm256_movemask_epi8(_mm256_cmpeq_epi64(rw7, zero));
-
-    if non_zero == -8 {
-        // AC terms all zero, idct of the block is  is ( coeff[0] * qt[0] )/8 + 128 (bias)
+    if _mm256_testz_si256(bitmap, bitmap) == 1 {
+        // AC terms all zero, idct of the block is ( coeff[0] * qt[0] )/8 + 128 (bias)
         // (and clamped to 255)
-        let idct_value = _mm_set1_epi16(((in_vector[0] >> 3) + 128).clamp(0, 255) as i16);
+        // Round by adding 0.5 * (1 << 3) and offset by adding (128 << 3) before scaling
+        let coeff = ((in_vector[0] + 4 + 1024) >> 3).clamp(0, 255) as i16;
+        let idct_value = _mm_set1_epi16(coeff);
 
         macro_rules! store {
             ($pos:tt,$value:tt) => {
@@ -128,7 +143,7 @@ pub unsafe fn idct_int_avx2_inner(
                         .unwrap()
                         .as_mut_ptr()
                         .cast(),
-                    $value
+                    $value,
                 );
                 $pos += stride;
             };
@@ -170,10 +185,10 @@ pub unsafe fn idct_int_avx2_inner(
             let mut t3 = p1 + row2 * 3135;
 
             let mut t0 = YmmRegister {
-                mm256: _mm256_slli_epi32((row0 + row4).mm256, 12)
+                mm256: _mm256_slli_epi32((row0 + row4).mm256, 12),
             };
             let mut t1 = YmmRegister {
-                mm256: _mm256_slli_epi32((row0 - row4).mm256, 12)
+                mm256: _mm256_slli_epi32((row0 - row4).mm256, 12),
             };
 
             let x0 = t0 + t3 + $SCALE_BITS;
@@ -217,56 +232,151 @@ pub unsafe fn idct_int_avx2_inner(
     // Process rows
     dct_pass!(512, 10);
     transpose(
-        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7
+        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7,
     );
 
     // process columns
     dct_pass!(SCALE_BITS, 17);
     transpose(
-        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7
+        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7,
+    );
+    // Pack and write the values back to the array
+    permute_store!((row0.mm256), (row1.mm256), pos, out_vector, stride);
+    permute_store!((row2.mm256), (row3.mm256), pos, out_vector, stride);
+    permute_store!((row4.mm256), (row5.mm256), pos, out_vector, stride);
+    permute_store!((row6.mm256), (row7.mm256), pos, out_vector, stride);
+}
+
+
+#[target_feature(enable = "avx2")]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::similar_names,
+    clippy::op_ref,
+    unused_assignments,
+    clippy::zero_prefixed_literal
+)]
+pub unsafe fn idct_avx2_4x4(
+    in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize,
+) {
+    let rw0 = _mm256_loadu_si256(in_vector[00..].as_ptr().cast());
+    let rw1 = _mm256_loadu_si256(in_vector[08..].as_ptr().cast());
+    let rw2 = _mm256_loadu_si256(in_vector[16..].as_ptr().cast());
+    let rw3 = _mm256_loadu_si256(in_vector[24..].as_ptr().cast());
+
+    let mut row0 = YmmRegister { mm256: rw0 };
+    let mut row1 = YmmRegister { mm256: rw1 };
+    let mut row2 = YmmRegister { mm256: rw2 };
+    let mut row3 = YmmRegister { mm256: rw3 };
+
+    let mut row4 = YmmRegister { mm256: rw0 };
+    let mut row5 = YmmRegister { mm256: rw0 };
+    let mut row6 = YmmRegister { mm256: rw0 };
+    let mut row7 = YmmRegister { mm256: rw0 };
+
+    {
+        row0.mm256 = _mm256_slli_epi32(row0.mm256, 12);
+        row0 += 512;
+
+        let i2 = row2;
+
+        let p1 = i2 * 2217;
+        let p3 = i2 * 5352;
+
+        let x0 = row0 + p3;
+        let x1 = row0 + p1;
+        let x2 = row0 - p1;
+        let x3 = row0 - p3;
+
+        // odd part
+        let i4 = row3;
+        let i3 = row1;
+
+        let p5 = (i4 + i3) * 4816;
+
+        let p1 = p5 + i3 * -3685;
+        let p2 = p5 + i4 * -10497;
+
+        let t3 = p5 + i3 * 867;
+        let t2 = p5 + i4 * -5945;
+
+        let t1 = p2 + i3 * -1597;
+        let t0 = p1 + i4 * -8034;
+
+        row0.mm256 = _mm256_srai_epi32((x0 + t3).mm256, 10);
+        row1.mm256 = _mm256_srai_epi32((x1 + t2).mm256, 10);
+        row2.mm256 = _mm256_srai_epi32((x2 + t1).mm256, 10);
+        row3.mm256 = _mm256_srai_epi32((x3 + t0).mm256, 10);
+
+        row4.mm256 = _mm256_srai_epi32((x3 - t0).mm256, 10);
+        row5.mm256 = _mm256_srai_epi32((x2 - t1).mm256, 10);
+        row6.mm256 = _mm256_srai_epi32((x1 - t2).mm256, 10);
+        row7.mm256 = _mm256_srai_epi32((x0 - t3).mm256, 10);
+    }
+
+    transpose(
+        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7,
     );
 
-    // Pack i32 to i16's,
-    // clamp them to be between 0-255
-    // Undo shuffling
-    // Store back to array
-    macro_rules! permute_store {
-        ($x:tt,$y:tt,$index:tt,$out:tt) => {
-            let a = _mm256_packs_epi32($x, $y);
+    {
+        let i2 = row2;
+        let i0 = row0;
 
-            // Clamp the values after packing, we can clamp more values at once
-            let b = clamp_avx(a);
+        row0.mm256 = _mm256_slli_epi32(i0.mm256, 12);
+        let t0 = row0 + SCALE_BITS;
 
-            // /Undo shuffling
-            let c = _mm256_permute4x64_epi64(b, shuffle(3, 1, 2, 0));
+        let t2 = i2 * 2217;
+        let t3 = i2 * 5352;
 
-            // store first vector
-            _mm_storeu_si128(
-                ($out)
-                    .get_mut($index..$index + 8)
-                    .unwrap()
-                    .as_mut_ptr()
-                    .cast(),
-                _mm256_extractf128_si256::<0>(c)
-            );
-            $index += stride;
-            // second vector
-            _mm_storeu_si128(
-                ($out)
-                    .get_mut($index..$index + 8)
-                    .unwrap()
-                    .as_mut_ptr()
-                    .cast(),
-                _mm256_extractf128_si256::<1>(c)
-            );
-            $index += stride;
-        };
+        // constants scaled things up by 1<<12, plus we had 1<<2 from first
+        // loop, plus horizontal and vertical each scale by sqrt(8) so together
+        // we've got an extra 1<<3, so 1<<17 total we need to remove.
+        // so we want to round that, which means adding 0.5 * 1<<17,
+        // aka 65536. Also, we'll end up with -128 to 127 that we want
+        // to encode as 0..255 by adding 128, so we'll add that before the shift
+        // Rounding constant is already added into `t0`
+        let x0 = t0 + t3;
+        let x3 = t0 - t3;
+        let x1 = t0 + t2;
+        let x2 = t0 - t2;
+
+        // odd part
+        let i3 = row3;
+        let i1 = row1;
+
+        let p5 = (i3 + i1) * 4816;
+
+        let p1 = p5 + i1 * -3685;
+        let p2 = p5 + i3 * -10497;
+
+        let t3 = p5 + i1 * 867;
+        let t2 = p5 + i3 * -5945;
+
+        let t1 = p2 + i1 * -1597;
+        let t0 = p1 + i3 * -8034;
+
+        row0.mm256 = _mm256_srai_epi32((x0 + t3).mm256, 17);
+        row1.mm256 = _mm256_srai_epi32((x1 + t2).mm256, 17);
+        row2.mm256 = _mm256_srai_epi32((x2 + t1).mm256, 17);
+        row3.mm256 = _mm256_srai_epi32((x3 + t0).mm256, 17);
+        row4.mm256 = _mm256_srai_epi32((x3 - t0).mm256, 17);
+        row5.mm256 = _mm256_srai_epi32((x2 - t1).mm256, 17);
+        row6.mm256 = _mm256_srai_epi32((x1 - t2).mm256, 17);
+        row7.mm256 = _mm256_srai_epi32((x0 - t3).mm256, 17);
     }
+
+    transpose(
+        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7,
+    );
+
+    let mut pos = 0;
+
     // Pack and write the values back to the array
-    permute_store!((row0.mm256), (row1.mm256), pos, out_vector);
-    permute_store!((row2.mm256), (row3.mm256), pos, out_vector);
-    permute_store!((row4.mm256), (row5.mm256), pos, out_vector);
-    permute_store!((row6.mm256), (row7.mm256), pos, out_vector);
+    permute_store!((row0.mm256), (row1.mm256), pos, out_vector, stride);
+    permute_store!((row2.mm256), (row3.mm256), pos, out_vector, stride);
+    permute_store!((row4.mm256), (row5.mm256), pos, out_vector, stride);
+    permute_store!((row6.mm256), (row7.mm256), pos, out_vector, stride);
 }
 
 #[inline]

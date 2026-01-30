@@ -4,21 +4,23 @@
  * This software is free software; You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
 
-use zune_core::bytestream::ZByteWriter;
-use zune_core::colorspace::ColorSpace;
+use alloc::vec::Vec;
 
-use crate::crc::calc_crc;
+use makepad_zune_core::bytestream::{ZByteIoError, ZByteWriterTrait, ZWriter};
+use makepad_zune_core::colorspace::ColorSpace;
+
+use crate::crc::{calc_crc, calc_crc_with_bytes};
 use crate::decoder::PngChunk;
 use crate::encoder::PngEncoder;
 
-pub(crate) fn write_ihdr(ctx: &PngEncoder, output: &mut ZByteWriter) {
+pub(crate) fn write_ihdr(ctx: &PngEncoder, output: &mut ZWriter<&mut Vec<u8>>) {
     // write width and height
-    output.write_u32_be(ctx.options.get_width() as u32);
-    output.write_u32_be(ctx.options.get_height() as u32);
+    output.write_u32_be(ctx.options.width() as u32);
+    output.write_u32_be(ctx.options.height() as u32);
     // write depth
-    output.write_u8(ctx.options.get_depth().bit_size() as u8);
+    output.write_u8(ctx.options.depth().bit_size() as u8);
     // write color
-    let color = ctx.options.get_colorspace();
+    let color = ctx.options.colorspace();
 
     let color_int = match color {
         ColorSpace::Luma => 0,
@@ -36,13 +38,13 @@ pub(crate) fn write_ihdr(ctx: &PngEncoder, output: &mut ZByteWriter) {
     output.write_u8(0);
 }
 
-pub fn write_exif(ctx: &PngEncoder, writer: &mut ZByteWriter) {
+pub fn write_exif(ctx: &PngEncoder, writer: &mut ZWriter<&mut alloc::vec::Vec<u8>>) {
     if let Some(exif) = ctx.exif {
         writer.write_all(exif).unwrap();
     }
 }
 
-pub fn write_gamma(ctx: &PngEncoder, writer: &mut ZByteWriter) {
+pub fn write_gamma(ctx: &PngEncoder, writer: &mut ZWriter<&mut Vec<u8>>) {
     if let Some(gamma) = ctx.gamma {
         // scale by 100000.0
         let gamma_value = (gamma * 100000.0) as u32;
@@ -51,7 +53,7 @@ pub fn write_gamma(ctx: &PngEncoder, writer: &mut ZByteWriter) {
 }
 
 // iend is a no-op
-pub fn write_iend(_: &PngEncoder, _: &mut ZByteWriter) {}
+pub fn write_iend(_: &PngEncoder, _: &mut ZWriter<&mut Vec<u8>>) {}
 
 /// Write header writes the boilerplate for each png chunk
 ///
@@ -60,60 +62,50 @@ pub fn write_iend(_: &PngEncoder, _: &mut ZByteWriter) {}
 ///
 /// This should be called with the appropriate inner function to write data
 ///
-pub fn write_header_fn<F: Fn(&PngEncoder, &mut ZByteWriter)>(
-    v: &PngEncoder, writer: &mut ZByteWriter, name: &[u8; 4], func: F
-) {
+pub fn write_header_fn<T: ZByteWriterTrait, F: Fn(&PngEncoder, &mut ZWriter<&mut Vec<u8>>)>(
+    v: &PngEncoder, writer: &mut ZWriter<T>, name: &[u8; 4], func: F
+) -> Result<(), ZByteIoError> {
+    // We use a vec so that we make crc calculations easier for myself
+    // and the problem is that how png chunks work is that you have to go back and write length
+    // but you can't know the length without writing the whole thing,
+    //
+
     // format
     // length - chunk type - [data] -  crc chunk
-    // add space for length
-    writer.skip(4);
-    // points to chunk type -> going forward
-    let start = writer.position();
+    let mut temp_space = Vec::with_capacity(10);
+    // space for length
+    temp_space.extend_from_slice(&[0; 4]);
+    let mut local_writer = ZWriter::new(&mut temp_space);
+    // write the type
+    local_writer.write_all(name).unwrap();
+    // call underlying function
+    (func)(v, &mut local_writer);
+    // get bytes written;
+    let bytes_written = local_writer.bytes_written();
+    // write length less the chunk name
+    temp_space[0..4].copy_from_slice(&(bytes_written as u32 - 4).to_be_bytes());
+    // write crc, ignore the length
+    let c = calc_crc(&temp_space[4..]);
+    temp_space.extend_from_slice(&c.to_be_bytes());
 
-    // write type
-    writer.write_all(name).unwrap();
-    // call the underlying function
-    (func)(v, writer);
-    // get end
-    let end = writer.position();
-
-    // skip to start and write length
-    let length_start = start - 4;
-    writer.set_position(length_start);
-    let length = end - start;
-    // length does not include the chunk type, so
-    // subtract 4
-    writer.write_u32_be((length - 4) as u32);
-
-    // go back to end and write hash
-    writer.set_position(start);
-
-    let bytes = writer.peek_at(0, length).unwrap();
-    let crc32 = calc_crc(bytes);
-
-    writer.set_position(end);
-    writer.write_u32_be(crc32);
+    writer.write_all(&temp_space)
 }
 
-pub(crate) fn write_chunk(chunk: PngChunk, data: &[u8], writer: &mut ZByteWriter) {
+pub(crate) fn write_chunk<T: ZByteWriterTrait>(
+    chunk: PngChunk, data: &[u8], writer: &mut ZWriter<T>
+) -> Result<(), ZByteIoError> {
     // write length
-    writer.write_u32_be(chunk.length as u32);
-    // points to chunk type+data
-    let start_chunk = writer.position();
-    // write chunk name
-    writer.write_all(&chunk.chunk).unwrap();
-    // write chunk data
-    writer.write_all(data).unwrap();
-    let end = writer.position();
-    // write crc
-    // go back to where start chunk points to
-    writer.set_position(start_chunk);
-    // get everything until where we wrote
+    writer.write_u32_be_err(chunk.length as u32)?;
+    // // write chunk name
+    writer.write_all(&chunk.chunk)?;
+    // // write chunk data
+    writer.write_all(data)?;
+    // crc is a continuous function, so first crc the chunk name
+    // and then crc that with the chunk bytes passing in the previous crc
 
-    let data = writer.peek_at(0, 4/*name*/ + data.len()).unwrap();
-    let crc32 = calc_crc(data);
-    // go back to bytes past data
-    writer.set_position(end);
-    // and write crc32
-    writer.write_u32_be(crc32);
+    // equal to crc((chunk.chunk + data) ,u32::MAX))
+    let crc = calc_crc_with_bytes(&chunk.chunk, u32::MAX);
+    let crc = !calc_crc_with_bytes(data, crc);
+    writer.write_u32_be_err(crc)?;
+    Ok(())
 }

@@ -41,15 +41,18 @@ impl InflateDecodeErrors {
     ///
     /// # Returns
     /// Itself
-    pub fn new(error: DecodeErrorStatus, data: Vec<u8>) -> InflateDecodeErrors {
-        InflateDecodeErrors { error, data }
+    pub fn new(error: DecodeErrorStatus, data: &Vec<u8>) -> InflateDecodeErrors {
+        InflateDecodeErrors {
+            error,
+            data: data.clone()
+        }
     }
     /// Create a new decode wrapper with an empty vector
     ///
     /// # Arguments
     /// - `error`: Error encountered during decoding.
     pub fn new_with_error(error: DecodeErrorStatus) -> InflateDecodeErrors {
-        InflateDecodeErrors::new(error, vec![])
+        InflateDecodeErrors::new(error, &vec![])
     }
 }
 

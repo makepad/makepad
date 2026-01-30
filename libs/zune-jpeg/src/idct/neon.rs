@@ -36,23 +36,6 @@ use crate::unsafe_utils::{transpose, YmmRegister};
 
 const SCALE_BITS: i32 = 512 + 65536 + (128 << 17);
 
-/// SAFETY
-/// ------
-///
-/// It is the responsibility of the CALLER to ensure that  this function is
-/// called in contexts where the CPU supports it
-///
-///
-/// For documentation see module docs.
-
-pub fn idct_neon(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize) {
-    unsafe {
-        // We don't call this method directly because we need to flag the code function
-        // with #[target_feature] so that the compiler does do weird stuff with
-        // it
-        idct_int_neon_inner(in_vector, out_vector, stride);
-    }
-}
 
 #[inline]
 #[target_feature(enable = "neon")]
@@ -75,7 +58,7 @@ unsafe fn condense_bottom_16(a: int32x4x2_t, b: int32x4x2_t) -> int16x8x2_t {
     unused_assignments,
     clippy::zero_prefixed_literal
 )]
-pub unsafe fn idct_int_neon_inner(
+pub unsafe fn idct_neon(
     in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize
 ) {
     let mut pos = 0;
@@ -112,10 +95,11 @@ pub unsafe fn idct_int_neon_inner(
     let or_tree = (((row1 | row8) | (row2 | row3)) | ((row4 | row5) | (row6 | row7)));
 
     if or_tree.all_zero() {
-        // AC terms all zero, idct of the block is  is ( coeff[0] * qt[0] )/8 + 128 (bias)
+        // AC terms all zero, idct of the block is ( coeff[0] * qt[0] )/8 + 128 (bias)
         // (and clamped to 255)
-        let clamped_16 = ((in_vector[0] >> 3) + 128).clamp(0, 255) as i16;
-        let idct_value = vdupq_n_s16(clamped_16);
+        // Round by adding 0.5 * (1 << 3) and offset by adding (128 << 3) before scaling
+        let coeff = ((in_vector[0] + 4 + 1024) >> 3).clamp(0, 255) as i16;
+        let idct_value = vdupq_n_s16(coeff);
 
         macro_rules! store {
             ($pos:tt,$value:tt) => {

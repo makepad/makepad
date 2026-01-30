@@ -8,6 +8,9 @@
 
 #![allow(clippy::upper_case_acronyms)]
 
+/// JPEG Markers
+///
+/// **NOTE** This doesn't cover all markers, just the ones zune-jpeg supports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Marker {
     /// Start Of Frame markers
@@ -47,12 +50,14 @@ pub enum Marker {
     /// Reserved for application segments
     APP(u8),
     /// Comment
-    COM
+    COM,
+    /// Unknown markers
+    UNKNOWN(u8)
 }
 
 impl Marker {
     pub fn from_u8(n: u8) -> Option<Marker> {
-        use self::Marker::{APP, COM, DAC, DHT, DNL, DQT, DRI, EOI, RST, SOF, SOI, SOS};
+        use self::Marker::{APP, COM, DAC, DHT, DNL, DQT, DRI, EOI, RST, SOF, SOI, SOS, UNKNOWN};
 
         match n {
             0xFE => Some(COM),
@@ -78,8 +83,9 @@ impl Marker {
             0xE0 => Some(APP(0)),
             0xE1 => Some(APP(1)),
             0xE2 => Some(APP(2)),
+            0xED => Some(APP(13)),
             0xEE => Some(APP(14)),
-            _ => None
+            _ => Some(UNKNOWN(n))
         }
     }
 }

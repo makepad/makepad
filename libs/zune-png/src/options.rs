@@ -8,16 +8,16 @@
 
 use alloc::format;
 
-use zune_core::bytestream::{ZByteReader, ZReaderTrait};
-use zune_core::log::trace;
+use makepad_zune_core::bytestream::{ZByteReaderTrait, ZReader};
+use makepad_zune_core::log::trace;
 
 use crate::error::PngDecodeErrors;
 
 pub fn default_chunk_handler<T>(
-    length: usize, chunk_type: [u8; 4], reader: &mut ZByteReader<T>, _crc: u32
+    length: usize, chunk_type: [u8; 4], reader: &mut ZReader<T>, _crc: u32
 ) -> Result<(), PngDecodeErrors>
 where
-    T: ZReaderTrait
+    T: ZByteReaderTrait
 {
     let chunk_name = core::str::from_utf8(&chunk_type).unwrap_or("XXXX");
 
@@ -31,7 +31,7 @@ where
     trace!("Length of chunk {}", length);
     trace!("Skipping {} bytes", length + 4);
 
-    reader.skip(length + 4);
+    reader.skip(length + 4)?;
 
     Ok(())
 }
