@@ -35,9 +35,6 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     prev_row[b_len]
 }
 
-/// Maximum distance threshold for "did you mean" suggestions
-const MAX_DISTANCE: usize = 3;
-
 /// Format a ScriptValue briefly for display in suggestions.
 /// Shows type and a short preview of the value, e.g.:
 /// - `#ff0000` for colors
@@ -380,7 +377,7 @@ struct FieldCandidate {
 }
 
 /// Format suggestions from a list of candidate names with values
-fn suggest_from_candidates(key_str: &str, candidates: Vec<FieldCandidate>) -> String {
+fn suggest_from_candidates(candidates: Vec<FieldCandidate>) -> String {
     let mut result = String::new();
     
     if candidates.is_empty() {
@@ -522,7 +519,7 @@ pub fn suggest_property(heap: &ScriptHeap, obj_ptr: ScriptObject, key: ScriptVal
         }
     }
     
-    suggest_from_candidates(&key_str, candidates)
+    suggest_from_candidates(candidates)
 }
 
 /// Convert a ScriptValue key to a string for display

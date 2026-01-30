@@ -1,120 +1,105 @@
 use makepad_widgets2::*;
-use makepad_widgets2::scroll_bar::{ScrollBar, ScrollAxis, ScrollBarAction};
 
-app_main!(App); 
+app_main!(App);
+
 script_mod!{
     use mod.prelude.widgets.*
-    
     mod.res.load_all()
     
-    let theme = {
-        test_color: #fff
-    }
-    #(App::script_component(vm)){
-        me.draw_quad.pixel = ||{
-            let sdf = Sdf2d.viewport(self.pos*self.rect_size)
-            sdf.circle(40 40 35)
-            sdf.fill(mix(theme.test_color #f00 self.pos.y))
-            sdf.result
+    let TestDraw = #(TestDraw::register_widget(vm)) {
+        width: 250
+        height: 150
+        draw_quad +: {
+            pixel: fn(){
+                let sdf = Sdf2d.viewport(self.pos*self.rect_size)
+                sdf.circle(40 40 35)
+                sdf.fill(mix(#0f0 #f00 self.pos.y))
+                sdf.result
+            }
         }
-        me.draw_text.color = #0f0
-        me.view = RoundedView{
-            width: 250, 
-            height: 300
-            draw_bg +: {
-                color: #444
+        draw_text +: {
+            color: #0f0
+        }
+    }
+    
+    #(App::script_component(vm)){
+        ui: Window{
+            pass +: { clear_color: vec4(0.25 0.05 0.05 1.0) }
+            window +: {
+                inner_size: vec2(800 600)
+            }
+            $body: View{
+                flow: Down
+                padding: 20
+                spacing: 10
+                
+                $test: TestDraw{}
+                
+                $view: RoundedView{
+                    width: 250 
+                    height: 100
+                    draw_bg +: {
+                        color: #444
+                    }
+                }
             }
         }
     }
 }
 
-impl App{
-    fn run(vm:&mut ScriptVm)->Self{
+impl App {
+    fn run(vm: &mut ScriptVm) -> Self {
         crate::makepad_widgets2::script_mod(vm);
         App::from_script_mod(vm, self::script_mod)
     }
 }
 
-#[derive(Script)]
+#[derive(Script, ScriptHook)]
 pub struct App {
-    #[new] window: WindowHandle,
-    #[new] pass: DrawPass,
-    #[new] depth_texture: Texture,
-    #[live] draw_quad: DrawQuad,
-    #[live] draw_text: DrawText,
-    #[live] scroll_bar: ScrollBar,
-    #[live] view: View,
-    #[new] main_draw_list: DrawList2d,
+    #[live] ui: WidgetRef,
 }
 
-impl ScriptHook for App{
-    fn on_alive(&self){
-        println!("ALIVE!")
-    }
-}
-
-impl MatchEvent for App{
-    
-    fn handle_startup(&mut self, cx:&mut Cx){
-        self.window.set_pass(cx, &self.pass);
-        self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32{
-            size: TextureSize::Auto,
-            initial: true,
-        });
-        self.pass.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        self.pass.set_window_clear_color(cx, vec4(0.05, 0.05, 0.05, 0.0));
-    }
-
-    fn handle_draw_2d(&mut self, cx: &mut Cx2d){
-        if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
-            return
-        }
-
-        cx.begin_pass(&self.pass, None);
-        self.main_draw_list.begin_always(cx);
-
-        let size = cx.current_pass_size();
-        cx.begin_root_turtle(size, Layout::flow_down());
-        // Draw the RoundedView with orange color
-        let _ = self.view.draw(cx, &mut Scope::empty());
-                
-        self.draw_quad.draw_abs(cx, rect(10.,10.,200.,100.));
-        self.draw_text.draw_abs(cx, dvec2(10., 100.), "Text output");
-        
-// Draw a vertical scrollbar on the right side
-        let view_rect = Rect { pos: dvec2(0., 0.), size:dvec2(200.,200.) };
-        let view_total = dvec2(size.x, 1000.0); // Content is 1000px tall
-        self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, view_rect, view_total);
-        
-        cx.end_pass_sized_turtle();
-        self.main_draw_list.end(cx);
-        cx.end_pass(&self.pass);
-    }
-        
-    fn handle_actions(&mut self, _cx: &mut Cx, _actions:&Actions){
+impl MatchEvent for App {
+    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {
     }
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::GameInputConnected(ev) = event{
-            println!("{:?}", ev);
-        }
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
+    }
+}
+
+// TestDraw widget with draw_quad and draw_text shaders
+#[derive(Script, ScriptHook, Widget)]
+pub struct TestDraw {
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
+    #[redraw] #[live] draw_quad: DrawQuad,
+    #[live] draw_text: DrawText,
+    #[rust] area: Area,
+}
+
+impl Widget for TestDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, self.layout);
         
-        // Handle scrollbar events
-        self.scroll_bar.handle_event_with(cx, event, &mut |cx, action| {
-            match action {
-                ScrollBarAction::Scroll { scroll_pos, .. } => {
-                    println!("Scrollbar position: {}", scroll_pos);
-                    cx.redraw_all()
-                }
-                ScrollBarAction::ScrollDone => {
-                    println!("Scroll done");
-                }
-                ScrollBarAction::None => {}
-            }
+        let rect = cx.turtle().rect();
+        
+        // Draw the quad with our custom shader
+        self.draw_quad.draw_abs(cx, Rect {
+            pos: rect.pos,
+            size: dvec2(100.0, 100.0)
         });
         
-        let _ = self.match_event_with_draw_2d(cx, event);
+        // Draw text below the quad
+        self.draw_text.draw_abs(cx, rect.pos + dvec2(0.0, 110.0), "Hello Splash!");
+        
+        cx.end_turtle_with_area(&mut self.area);
+        DrawStep::done()
+    }
+    
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 }
