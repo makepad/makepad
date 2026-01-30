@@ -37,6 +37,7 @@ DefaultNone derive:
     OLD: #[Derive(DefaultNone)]
     New: #[Derive(Default)] and put #[default] above None variant
 
+Don't implement WidgetNode yourself if its not in the original source.
 
 FIELD ATTRIBUTES
 --------------------------------------------------------------------------------

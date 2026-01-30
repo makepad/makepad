@@ -22,8 +22,8 @@ script_mod!{
     
     #(App::script_component(vm)){
         ui: Window{
-            me.pass.clear_color = vec4(0.25 0.05 0.05 1.0)
-            me.window.inner_size = vec2(800 600)
+            pass.clear_color: vec4(0.25 0.05 0.05 1.0)
+            window.inner_size: vec2(800 600)
             $body: View{
                 flow: Down
                 padding: 20
