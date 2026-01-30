@@ -4,61 +4,63 @@ use crate::{
     widget::*
 };
 
-live_design! {
-    link widgets
-    use link::shaders::*;
+#[cfg(feature = "svg")]
+use crate::makepad_draw::DrawSvg;
 
-    pub IconBase = {{Icon}} {}
-
-    pub Icon = <IconBase> {
-        width: Fit,
-        height: Fit,
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    
+    mod.widgets.IconBase = #(Icon::register_widget(vm))
+    
+    mod.widgets.Icon = mod.std.set_type_default() do mod.widgets.IconBase{
+        width: Fit
+        height: Fit
         
-        icon_walk: {
-            width: 17.5,
-            height: Fit,
+        icon_walk: Walk{
+            width: 17.5
+            height: Fit
         }
         
-        draw_bg: {
-            uniform color_dither: 1.0
-            uniform color: #0000,
-            uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
-            uniform gradient_fill_horizontal: 0.0; 
+        draw_bg +: {
+            color_dither: uniform(1.0)
+            color: #0000
+            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            fn pixel(self) -> vec4 {
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                let color_2 = self.color_2;
+            pixel: fn() {
+                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                let mut color_2 = self.color_2
 
-                let gradient_fill_dir = self.pos.y + dither;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither;
+                let mut gradient_fill_dir = self.pos.y + dither
+                if self.gradient_fill_horizontal > 0.5 {
+                    gradient_fill_dir = self.pos.x + dither
                 }
 
-                if (self.color_2.x < -0.5) {
-                    color_2 = self.color;
+                if self.color_2.x < -0.5 {
+                    color_2 = self.color
                 }
 
                 return mix(self.color, color_2, gradient_fill_dir)
             }
         }
 
-        draw_icon: {
-            uniform color_dither: 1.0
-            uniform color: #f00
-            uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
-            uniform gradient_fill_horizontal: 0.0; 
+        draw_icon +: {
+            color_dither: uniform(1.0)
+            color: #f00
+            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            fn get_color(self) -> vec4 {
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                let color_2 = self.color_2;
+            get_color: fn() {
+                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                let mut color_2 = self.color_2
 
-                let gradient_fill_dir = self.pos.y;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither;
+                let mut gradient_fill_dir = self.pos.y
+                if self.gradient_fill_horizontal > 0.5 {
+                    gradient_fill_dir = self.pos.x + dither
                 }
 
-                if (self.color_2.x < -0.5) {
-                    color_2 = self.color;
+                if self.color_2.x < -0.5 {
+                    color_2 = self.color
                 }
 
                 return mix(self.color, color_2, gradient_fill_dir)
@@ -66,30 +68,30 @@ live_design! {
         }
     }
 
-    pub IconGradientX = <Icon> {
-        draw_icon: {
-            uniform color: (#f00)
-            uniform color_2: (#00f)
-            uniform gradient_fill_horizontal: 1.0; 
+    mod.widgets.IconGradientX = mod.widgets.Icon{
+        draw_icon +: {
+            color: #f00
+            color_2: #00f
+            gradient_fill_horizontal: 1.0
         }
     }
 
-    pub IconGradientY = <Icon> {
-        draw_icon: {
-            color: (#f00)
-            color_2: (#00f)
+    mod.widgets.IconGradientY = mod.widgets.Icon{
+        draw_icon +: {
+            color: #f00
+            color_2: #00f
         }
     }
-
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct Icon {
     #[redraw]
     #[live]
     draw_bg: DrawQuad,
+    #[cfg(feature = "svg")]
     #[live]
-    draw_icon: DrawIcon,
+    draw_icon: DrawSvg,
     #[live]
     icon_walk: Walk,
     #[walk]
@@ -104,6 +106,7 @@ impl Widget for Icon {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
+        #[cfg(feature = "svg")]
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
         DrawStep::done()

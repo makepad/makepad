@@ -85,6 +85,7 @@ script_mod!{
                 return fract(sin(dot(v.xy, vec2(12.9898,78.233))) * 43758.5453);
             }
         }
+        let Math = me.Math
         
         Pal:{
             

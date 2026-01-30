@@ -406,6 +406,14 @@ impl CxDrawShaderMapping {
         // Allocate the buffer for scope uniforms (as f32 slots)
         let scope_uniforms_buf = vec![0.0f32; scope_uniforms.total_slots];
         
+        // Check if shader uses draw_pass->time (requires repaint every frame)
+        let uses_time = match &code {
+            CxDrawShaderCode::Combined { code } => code.contains("draw_pass->time"),
+            CxDrawShaderCode::Separate { vertex, fragment } => {
+                vertex.contains("draw_pass->time") || fragment.contains("draw_pass->time")
+            }
+        };
+        
         CxDrawShaderMapping {
             source,
             code,
@@ -415,7 +423,7 @@ impl CxDrawShaderMapping {
             dyn_uniforms,
             geometries,
             textures,
-            uses_time: false, // TODO: detect time usage in shader
+            uses_time,
             rect_pos,
             rect_size,
             draw_clip,

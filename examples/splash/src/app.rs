@@ -34,6 +34,10 @@ script_mod!{
                     height: 100
                     draw_bg.color: #494
                 }
+                $spinner: LoadingSpinner{
+                    width: 50
+                    height: 50
+                }
                 $label: Label{
                     text: "Hello from Label!"
                     draw_text.color: #ff0
@@ -61,6 +65,12 @@ script_mod!{
                     height: 150
                     fit: ImageFit.Stretch
                 }
+                $test_icon: Icon{
+                    draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                    draw_icon.color: #0ff
+                    icon_walk: Walk{width: 50, height: 50}
+                }
+                
             }
         }
     }

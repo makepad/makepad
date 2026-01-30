@@ -307,6 +307,7 @@ impl ShaderBackend{
                 id_lut!(ddx);
                 id_lut!(ddy);
                 id_lut!(rsqrt);
+                id_lut!(fmod);
             }
             Self::Glsl=>{
                 id_lut!(float);
@@ -347,6 +348,7 @@ impl ShaderBackend{
                     id!(dFdx)=>id!(dfdx),
                     id!(dFdy)=>id!(dfdy),
                     id!(inverseSqrt)=>id!(rsqrt),
+                    id!(modf)=>id!(fmod),
                     x=>x
                 }
             }
@@ -355,19 +357,20 @@ impl ShaderBackend{
                     id!(dFdx)=>id!(ddx),
                     id!(dFdy)=>id!(ddy),
                     id!(inverseSqrt)=>id!(rsqrt),
+                    id!(modf)=>id!(fmod),
                     x=>x
                 }
             }
             Self::Glsl=>{
                 match name_in{
-                    // GLSL uses dFdx/dFdy natively
+                    // GLSL uses dFdx/dFdy natively, mod is native
                     id!(inverseSqrt)=>id!(inversesqrt),
                     x=>x
                 }
             }
             Self::Wgsl=>{
                 match name_in{
-                    // WGSL uses dpdx/dpdy
+                    // WGSL uses dpdx/dpdy, mod is native (%)
                     id!(dFdx)=>id!(dpdx),
                     id!(dFdy)=>id!(dpdy),
                     id!(inverseSqrt)=>id!(inverseSqrt),
