@@ -11,20 +11,20 @@ use {
 script_mod!{
     use mod.pod.*
     use mod.math.*
-    use mod.shader
+    use mod.shader.*
     use mod.draw
     use mod.geom
     
     mod.draw.DrawQuad = mod.std.set_type_default() do #(DrawQuad::script_shader(vm)){
-        vertex_pos: shader.vertex_position(vec4f)
-        fb0: shader.fragment_output(0, vec4f)
-        draw_call: shader.uniform_buffer(draw.DrawCallUniforms)
-        draw_pass: shader.uniform_buffer(draw.DrawPassUniforms)
-        draw_list: shader.uniform_buffer(draw.DrawListUniforms)
-        geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
 
-        pos: shader.varying(vec2f)
-        world: shader.varying(vec4f)
+        pos: varying(vec2f)
+        world: varying(vec4f)
         
         clip_and_transform_vertex: fn(rect_pos, rect_size){
             let clipped = clamp(
@@ -74,9 +74,16 @@ script_mod!{
             #0f0
         }
     }
+    
+    mod.draw.DrawColor = mod.std.set_type_default() do #(DrawColor::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        pixel: fn(){
+            return vec4(self.color.rgb*self.color.a, self.color.a);
+        }
+    }
 }
 
-#[derive(Script, Debug)]
+#[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawQuad {
     #[rust] pub many_instances: Option<ManyInstances>,
@@ -88,11 +95,12 @@ pub struct DrawQuad {
     #[live(1.0)] pub draw_depth: f32,
 }
 
-impl ScriptHook for DrawQuad{
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue){
-    }
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawColor {
+    #[deref] pub draw_super: DrawQuad,
+    #[live] pub color: Vec4f
 }
-
 
 impl DrawQuad {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {

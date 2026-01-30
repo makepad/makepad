@@ -39,7 +39,7 @@ pub mod scroll_bars;
 // pub mod stack_navigation;
 // pub mod expandable_panel;
 // pub mod desktop_button;
-// pub mod window;
+pub mod window;
 // pub mod scroll_shadow;
 // pub mod window_menu;
 // pub mod html;
@@ -139,7 +139,7 @@ pub use crate::{
 //    stack_navigation::*,
 //    expandable_panel::*,
 //    command_text_input::*,
-//    window::*,
+    window::*,
 //    multi_window::*,
 //    web_view::*,
     scroll_bars::{ScrollBars},
@@ -177,33 +177,52 @@ scroll_bar::{ScrollBar},
 pub fn script_mod(vm: &mut ScriptVm){
     makepad_draw2::script_mod(vm);
     
+    vm.heap.new_module(id!(prelude));
     vm.heap.new_module(id!(themes));
     crate::theme_desktop_dark::script_mod(vm);
-    
     crate::animator::script_mod(vm);
-    
+    {
+        script_mod!{ 
+            mod.prelude.widgets_internal = {
+                ..mod.pod,
+                ..mod.math,
+                ..mod.sdf,
+                ..mod.shader,
+                ..mod.turtle,
+                ..mod.turtle.Size,
+                ..mod.turtle.Flow,
+                theme:mod.theme,
+                draw:mod.draw,
+                MouseCursor:mod.draw.MouseCursor
+            }                
+        }
+        script_mod(vm);    
+    }
+            
     vm.heap.new_module(id!(widgets));
     crate::scroll_bar::script_mod(vm);
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
     crate::view_ui::script_mod(vm);
+    crate::window::script_mod(vm);
     
-    
-    script_mod!{
-        mod.ui = {
-            ..mod.pod,
-            ..mod.math,
-            ..mod.sdf,
-            mod.theme,
-            mod.draw,
-            ..mod.shader,
-            ..mod.widgets,
-            ..mod.turtle,
-            ..mod.turtle.Size,
-            ..mod.turtle.Flow,
-        }                
+    {
+        script_mod!{
+            mod.prelude.widgets = {
+                ..mod.pod,
+                ..mod.math,
+                ..mod.sdf,
+                mod.theme,
+                mod.draw,
+                ..mod.shader,
+                ..mod.widgets,
+                ..mod.turtle,
+                ..mod.turtle.Size,
+                ..mod.turtle.Flow,
+            }                
+        }
+        script_mod(vm);
     }
-    script_mod(vm);
     //crate::theme_desktop_dark::script_mod(vm);
     //makepad_fonts_emoji2::script_mod(vm);
     //makepad_fonts_chinese_regular2::script_mod(vm);

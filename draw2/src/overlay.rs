@@ -4,16 +4,19 @@ use {
         cell::{RefCell},        
     },*/
     crate::{
+        makepad_script::*,
         makepad_platform::*,
         cx_2d::Cx2d,
     }
 };
 
-#[derive(Debug)]
+#[derive(Debug, Script, ScriptHook)]
 pub struct Overlay { // draw info per UI element
-    pub (crate) draw_list: DrawList,
+    #[new] pub draw_list: DrawList,
     //pub (crate) sweep_lock: Rc<RefCell<Area>>, 
 }
+
+
 
 impl Overlay {
     pub fn handle_event(&self, _cx:&Cx, _event:&Event){
