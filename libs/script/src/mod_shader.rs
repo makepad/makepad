@@ -32,35 +32,35 @@ pub const SHADER_IO_SAMPLER: ShaderIoType = ShaderIoType(18);
 pub const SHADER_IO_BUFFER_R: ShaderIoType = ShaderIoType(19);
 pub const SHADER_IO_BUFFER_W: ShaderIoType = ShaderIoType(20);
 pub const SHADER_IO_BUFFER_RW: ShaderIoType = ShaderIoType(21);
-pub const SHADER_IO_FRAGMENT_OUTPUT_0: ShaderIoType = ShaderIoType(22);
+pub const SHADER_IO_SCOPE_UNIFORM: ShaderIoType = ShaderIoType(22);
+pub const SHADER_IO_FRAGMENT_OUTPUT_0: ShaderIoType = ShaderIoType(23);
 pub const SHADER_IO_FRAGMENT_OUTPUT_MAX: ShaderIoType = ShaderIoType(SHADER_IO_FRAGMENT_OUTPUT_0.0 + 7);
-pub const SHADER_IO_SCOPE_UNIFORM: ShaderIoType = ShaderIoType(30);
 
 pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     let shader = heap.new_module(id!(shader));
     
-    native.add_method(heap, shader, id!(instance), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(instance), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_DYN_INSTANCE);
         obj.into()
     });
 
-    native.add_method(heap, shader, id!(uniform), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(uniform), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_DYN_UNIFORM);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(uniform_buffer), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(uniform_buffer), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_UNIFORM_BUFFER);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(vertex_buffer), script_args!(value=NIL, buf=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(vertex_buffer), script_args!(value=NIL, buf=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let buffer = script_value!(vm, args.buf);
         let obj = vm.heap.new_with_proto(value);
@@ -69,91 +69,91 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(varying), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(varying), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_VARYING);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(vertex_position), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(vertex_position), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_VERTEX_POSITION);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_1d), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_1d), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_1D);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_1d_array), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_1d_array), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_1D_ARRAY);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_2d), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_2d), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_2D);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_2d_array), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_2d_array), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_2D_ARRAY);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_3d), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_3d), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_3D);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_3d_array), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_3d_array), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_3D_ARRAY);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_cube), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_cube), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_CUBE);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_cube_array), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_cube_array), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_CUBE_ARRAY);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_depth), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_depth), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_DEPTH);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(texture_depth_array), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(texture_depth_array), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_TEXTURE_DEPTH_ARRAY);
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(fragment_output), script_args!(index=NIL, ty=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(fragment_output), script_args!(index=NIL, ty=NIL), |vm, args|{
         let index = script_value!(vm, args.index);
         let ty = script_value!(vm, args.ty);
         let obj = vm.heap.new_with_proto(ty);
@@ -162,7 +162,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         obj.into()
     });
         
-    native.add_method(heap, shader, id!(compile_draw), script_args!(io_self=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(compile_draw), script_args!(io_self=NIL), |vm, args|{
         // lets fetch the code
         let io_self = script_value!(vm, args.io_self);
         

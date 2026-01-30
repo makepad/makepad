@@ -22,7 +22,7 @@ pub mod label;
 pub mod image_cache;
 pub mod image;
 // pub mod image_blend;
-// pub mod icon;
+pub mod icon;
 // pub mod link_label;
 // pub mod drop_down;
 // pub mod popup_menu;
@@ -56,7 +56,7 @@ pub mod window;
 // pub mod modal;
 // pub mod tooltip;
 // pub mod popup_notification;
-// pub mod loading_spinner;
+pub mod loading_spinner;
 // pub mod web_view;
 
 // Only available on Android at the moment
@@ -121,7 +121,7 @@ pub use crate::{
     image::*,
     image_cache::*,
 //    image_blend::*,
-//    icon::*,
+    icon::*,
 //    label::*,
 //    slider::*,
 //    root::*,
@@ -220,6 +220,8 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::label::script_mod(vm);
     crate::button::script_mod(vm);
     crate::image::script_mod(vm);
+    crate::icon::script_mod(vm);
+    crate::loading_spinner::script_mod(vm);
     
     {
         script_mod!{
