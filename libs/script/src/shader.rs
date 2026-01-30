@@ -57,6 +57,8 @@ pub enum ShaderMe{
         if_branch_returned: bool, // remembers if the if-branch returned (used when in else)
     },
     BuiltinCall{name:LiveId, fnptr: NativeId, args:Vec<(ShaderType, String)>},
+    /// Pod builtin method call: x.mix(y, a) -> mix(x, y, a)
+    PodBuiltinMethod{name:LiveId, self_ty:ScriptPodType, args:Vec<(ShaderType, String)>},
     ScriptCall{out:String, name:LiveId, fnobj: ScriptObject, sself:ShaderType, args:Vec<ShaderType>},
     Pod{pod_ty:ScriptPodType, args: Vec<ShaderPodArg>},
     ArrayConstruct{args:Vec<String>, elem_ty:Option<ScriptPodType>},
@@ -1037,7 +1039,7 @@ impl ShaderFnCompiler{
                     out.push_str(&s);
                     self.stack.free_string(s);
                 }
-                ShaderMe::BuiltinCall{args, ..}=>{
+                ShaderMe::BuiltinCall{args, ..} | ShaderMe::PodBuiltinMethod{args, ..}=>{
                     let (ty, s) = self.stack.pop(self.trap.pass());
                     // Resolve Id to Pod type, but keep AbstractInt/AbstractFloat as-is
                     let resolved_ty = if let ShaderType::Id(id) = &ty {

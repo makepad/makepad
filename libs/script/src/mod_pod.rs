@@ -4,6 +4,8 @@ use crate::value::*;
 use crate::heap::*;
 use crate::native::*;
 use crate::pod::*;
+use crate::numeric::NumericValue;
+use crate::*;
 
 #[macro_export]
 macro_rules! script_pod_def{
@@ -84,7 +86,7 @@ impl ScriptPodBuiltins{
     }
 }
 
-pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->ScriptPodBuiltins{
+pub fn define_pod_module(heap:&mut ScriptHeap, native:&mut ScriptNative)->ScriptPodBuiltins{
     
     let pod = heap.new_module(id!(pod));
         
@@ -135,6 +137,25 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
     let pod_mat4x3f = heap.pod_def_mat(pod, id_lut!(mat4x3f), ScriptPodMat::Mat4x3f);
     let pod_mat4x4f = heap.pod_def_mat(pod, id_lut!(mat4x4f), ScriptPodMat::Mat4x4f);
                 
+    // Add mix method for all pod types (f32, vec2f, vec3f, vec4f, etc.)
+    // self.mix(other, alpha) -> mix(self, other, alpha)
+    native.add_type_method(heap, ScriptValueType::REDUX_POD, id!(mix), script_args!(other=0.0, a=0.0), |vm, args|{
+        let sself = vm.heap.value(args, id!(self).into(), vm.thread.trap.pass());
+        let other = vm.heap.value(args, id!(other).into(), vm.thread.trap.pass());
+        let a_val = vm.heap.value(args, id!(a).into(), vm.thread.trap.pass());
+        
+        let self_nv = NumericValue::from_script_value_heap(&vm.heap, sself, vm.thread.trap.ip);
+        let other_nv = NumericValue::from_script_value_heap(&vm.heap, other, vm.thread.trap.ip);
+        
+        // mix typically has scalar alpha, but can also have matching type alpha
+        if let Some(a_f) = a_val.as_f64() {
+            self_nv.mix_scalar(other_nv, a_f).to_script_value_heap(&mut vm.heap, &vm.code)
+        } else {
+            let a_nv = NumericValue::from_script_value_heap(&vm.heap, a_val, vm.thread.trap.ip);
+            self_nv.mix_componentwise(other_nv, a_nv).to_script_value_heap(&mut vm.heap, &vm.code)
+        }
+    });
+    
     let ps = ScriptPodBuiltins{
         pod_void,
         pod_struct,
@@ -172,7 +193,4 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
         pod_mat4x4f,
     };
     ps
-    // alright pod module.
-    // lets define the f32 type
-    // and vec2
 }
