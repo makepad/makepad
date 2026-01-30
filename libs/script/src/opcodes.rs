@@ -22,12 +22,12 @@ impl ScriptThread {
         match opcode {
 // ARITHMETIC            
             Opcode::NOT => self.handle_not(heap),
-            Opcode::NEG => self.handle_neg(heap),
-            Opcode::MUL => self.handle_f64_op(heap, opargs, |a,b| a*b),
-            Opcode::DIV => self.handle_f64_op(heap, opargs, |a,b| a/b),
+            Opcode::NEG => self.handle_neg(heap, code),
+            Opcode::MUL => self.handle_mul(heap, code, opargs),
+            Opcode::DIV => self.handle_div(heap, code, opargs),
             Opcode::MOD => self.handle_f64_op(heap, opargs, |a,b| a%b),
-            Opcode::ADD => self.handle_add(heap, opargs),
-            Opcode::SUB => self.handle_f64_op(heap, opargs, |a,b| a-b),
+            Opcode::ADD => self.handle_add(heap, code, opargs),
+            Opcode::SUB => self.handle_sub(heap, code, opargs),
             Opcode::SHL => self.handle_fu64_op(heap, opargs, |a,b| a>>b),
             Opcode::SHR => self.handle_fu64_op(heap, opargs, |a,b| a<<b),
             Opcode::AND => self.handle_fu64_op(heap, opargs, |a,b| a&b),

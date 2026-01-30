@@ -22,7 +22,7 @@ script_mod!{
     
     #(App::script_component(vm)){
         ui: Window{
-            pass.clear_color: vec4(0.25 0.05 0.05 1.0)
+            pass.clear_color: vec4(0.3 0.3 0.3 1.0)
             window.inner_size: vec2(800 600)
             $body +: {
                 flow: Down
@@ -40,6 +40,15 @@ script_mod!{
                 }
                 $heading: H1{
                     text: "This is a Heading"
+                }
+                $button: Button{
+                    text: "Click Me!"
+                }
+                $flat_button: ButtonFlat{
+                    text: "Flat Button"
+                }
+                $flatter_button: ButtonFlatter{
+                    text: "Flatter Button"
                 }
             }
         }
@@ -59,7 +68,16 @@ pub struct App {
 }
 
 impl MatchEvent for App {
-    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {
+    fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(ids!(button)).clicked(actions) {
+            log!("Button clicked!");
+        }
+        if self.ui.button(ids!(flat_button)).clicked(actions) {
+            log!("Flat button clicked!");
+        }
+        if self.ui.button(ids!(flatter_button)).clicked(actions) {
+            log!("Flatter button clicked!");
+        }
     }
 }
 
