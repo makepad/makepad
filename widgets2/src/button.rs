@@ -613,7 +613,7 @@ impl Widget for Button {
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
         self.draw_bg.end(cx);
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
     }
 

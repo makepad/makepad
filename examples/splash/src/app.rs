@@ -34,6 +34,15 @@ script_mod!{
                     height: 100
                     me.draw_bg.color = #494
                 }
+                $label: Label{
+                    text: "Hello from Label!"
+                    draw_text +: {
+                        color: #ff0
+                    }
+                }
+                $heading: H1{
+                    text: "This is a Heading"
+                }
             }
         }
     }

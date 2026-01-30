@@ -216,23 +216,25 @@ pub struct TouchUpdateEvent {
 // Finger API
 
 
+/// Inset represents spacing values for all four edges (left, top, right, bottom).
+/// Used for both margin (outer spacing) and padding (inner spacing).
 #[derive(Clone, Copy, Default, Debug, Script)]
-pub struct Margin {
-    /// The left margin.
+pub struct Inset {
+    /// The left inset.
     #[live] pub left: f64,
 
-    /// The top margin.
+    /// The top inset.
     #[live] pub top: f64,
     
-    /// The right margin.
+    /// The right inset.
     #[live] pub right: f64,
 
-    /// The bottom margin.
+    /// The bottom inset.
     #[live] pub bottom: f64
 }
 
-impl Margin {
-    /// Returns a copy of this `Margin` with the left margin set to the given value.
+impl Inset {
+    /// Returns a copy of this `Inset` with the left value set to the given value.
     pub fn with_left(mut self, left: f64) -> Self {
         Self {
             left,
@@ -240,7 +242,7 @@ impl Margin {
         }
     }
 
-    /// Returns a copy of this `Margin` with the top margin set to the given value.
+    /// Returns a copy of this `Inset` with the top value set to the given value.
     pub fn with_top(mut self, top: f64) -> Self {
         Self {
             top,
@@ -248,7 +250,7 @@ impl Margin {
         }
     }
 
-    /// Returns a copy of this `Margin` with the right margin set to the given value.
+    /// Returns a copy of this `Inset` with the right value set to the given value.
     pub fn with_right(mut self, right: f64) -> Self {
         Self {
             right,
@@ -256,7 +258,7 @@ impl Margin {
         }
     }
 
-    /// Returns a copy of this `Margin` with the bottom margin set to the given value.
+    /// Returns a copy of this `Inset` with the bottom value set to the given value.
     pub fn with_bottom(mut self, bottom: f64) -> Self {
         Self {
             bottom,
@@ -265,7 +267,7 @@ impl Margin {
     }
 }
 
-impl Margin {
+impl Inset {
     pub fn left_top(&self) -> Vec2d {
         dvec2(self.left, self.top)
     }
@@ -282,13 +284,13 @@ impl Margin {
         self.top + self.bottom
     }
     
-    pub fn rect_contains_with_margin(pos: Vec2d, rect: &Rect, margin: &Option<Margin>) -> bool {
-        if let Some(margin) = margin {
+    pub fn rect_contains_with_inset(pos: Vec2d, rect: &Rect, inset: &Option<Inset>) -> bool {
+        if let Some(inset) = inset {
             return
-            pos.x >= rect.pos.x - margin.left
-                && pos.x <= rect.pos.x + rect.size.x + margin.right
-                && pos.y >= rect.pos.y - margin.top
-                && pos.y <= rect.pos.y + rect.size.y + margin.bottom;
+            pos.x >= rect.pos.x - inset.left
+                && pos.x <= rect.pos.x + rect.size.x + inset.right
+                && pos.y >= rect.pos.y - inset.top
+                && pos.y <= rect.pos.y + rect.size.y + inset.bottom;
         }
         else {
             return rect.contains(pos);
@@ -296,20 +298,20 @@ impl Margin {
     }
 }
 
-impl ScriptHook for Margin {
+impl ScriptHook for Inset {
     fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
         // Accept numeric values - they will set all four sides
         value.as_f64().is_some() || value.as_number().is_some()
     }
     
     fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, value: ScriptValue) -> bool {
-        // Handle numeric values as uniform margin
+        // Handle numeric values as uniform inset
         if let Some(v) = value.as_f64() {
-            *self = Margin { left: v, top: v, right: v, bottom: v };
+            *self = Inset { left: v, top: v, right: v, bottom: v };
             return true;
         }
         if let Some(v) = value.as_number() {
-            *self = Margin { left: v, top: v, right: v, bottom: v };
+            *self = Inset { left: v, top: v, right: v, bottom: v };
             return true;
         }
         // Return false to let the generated code handle normal objects
@@ -806,7 +808,7 @@ pub enum HitTouch {
 
 #[derive(Clone, Debug, Default)]
 pub struct HitOptions {
-    pub margin: Option<Margin>,
+    pub margin: Option<Inset>,
     pub sweep_area: Area,
     pub capture_overload: bool,
 }
@@ -822,7 +824,7 @@ impl HitOptions {
             ..self
         }
     }
-    pub fn with_margin(self, margin: Margin) -> Self {
+    pub fn with_margin(self, margin: Inset) -> Self {
         Self {
             margin: Some(margin),
             ..self
@@ -867,7 +869,7 @@ impl Event {
     }
 
     pub fn hits_with_test<F>(&self, cx: &mut Cx, area: Area, hit_test:F) -> Hit 
-    where F: Fn(Vec2d, &Rect, &Option<Margin>)->bool{
+    where F: Fn(Vec2d, &Rect, &Option<Inset>)->bool{
         self.hits_with_options_and_test(cx, area,  HitOptions::new(), hit_test)
     }
 
@@ -881,12 +883,12 @@ impl Event {
     
     pub fn hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
         self.hits_with_options_and_test(cx, area, options, |abs, rect, margin|{
-            Margin::rect_contains_with_margin(abs, rect, margin)
+            Inset::rect_contains_with_inset(abs, rect, margin)
         })
     }
     
     pub fn hits_with_options_and_test<F>(&self, cx: &mut Cx, area: Area, options: HitOptions, hit_test:F) -> Hit 
-    where F: Fn(Vec2d, &Rect, &Option<Margin>)->bool
+    where F: Fn(Vec2d, &Rect, &Option<Inset>)->bool
     {
         if !area.is_valid(cx) {
             return Hit::Nothing
@@ -988,7 +990,7 @@ impl Event {
                             // Add touch radius to the margin to account for finger size
                             let margin_with_radius = if t.radius.x > 0.0 || t.radius.y > 0.0 {
                                 let base_margin = options.margin.unwrap_or_default();
-                                Some(Margin {
+                                Some(Inset {
                                     left: base_margin.left + t.radius.x,
                                     top: base_margin.top + t.radius.y,
                                     right: base_margin.right + t.radius.x,
@@ -1021,13 +1023,13 @@ impl Event {
                             if let Some(capture) = cx.fingers.find_area_capture(area) {
                                 // Check if finger is over the widget using touch radius if available
                                 let rect_check = if t.radius.x > 0.0 || t.radius.y > 0.0 {
-                                    let margin = Margin {
+                                    let margin = Inset {
                                         left: t.radius.x,
                                         top: t.radius.y,
                                         right: t.radius.x,
                                         bottom: t.radius.y,
                                     };
-                                    Margin::rect_contains_with_margin(t.abs, &rect, &Some(margin))
+                                    Inset::rect_contains_with_inset(t.abs, &rect, &Some(margin))
                                 } else {
                                     rect.contains(t.abs)
                                 };
