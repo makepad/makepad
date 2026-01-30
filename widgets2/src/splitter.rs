@@ -352,15 +352,15 @@ impl Splitter {
         self.align = align;
     }
     
-    fn margin(&self) -> Margin {
+    fn margin(&self) -> Inset {
         match self.axis {
-            SplitterAxis::Horizontal => Margin {
+            SplitterAxis::Horizontal => Inset {
                 left: 3.0,
                 top: 0.0,
                 right: 3.0,
                 bottom: 0.0,
             },
-            SplitterAxis::Vertical => Margin {
+            SplitterAxis::Vertical => Inset {
                 left: 0.0,
                 top: 3.0,
                 right: 0.0,

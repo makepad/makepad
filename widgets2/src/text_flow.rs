@@ -323,10 +323,10 @@ pub struct TextFlow {
     #[live] sep_walk: Walk, 
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
-    #[live] pub inline_code_padding: Padding,
-    #[live] pub inline_code_margin: Margin,
-    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub heading_margin: Margin,
-    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub paragraph_margin: Margin,
+    #[live] pub inline_code_padding: Inset,
+    #[live] pub inline_code_margin: Inset,
+    #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub heading_margin: Inset,
+    #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub paragraph_margin: Inset,
         
     
     
@@ -509,7 +509,7 @@ impl TextFlow{
         let font_based_padding = self.draw_normal.text_style.font_size as f64 * pad;
 
         cx.begin_turtle(self.list_item_walk, Layout{
-            padding:Padding{
+            padding:Inset{
                 left: self.list_item_layout.padding.left + font_based_padding,
                 ..self.list_item_layout.padding
             },
@@ -793,7 +793,7 @@ struct TextFlowLink {
     #[live(true)] click_on_down: bool,
     #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
-    #[live] margin: Margin,
+    #[live] margin: Inset,
     #[live] hovered: f32,
     #[live] down: f32,
     

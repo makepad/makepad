@@ -6,7 +6,7 @@ use {
         cx_draw::CxDraw,
         makepad_platform::Area,
         makepad_platform::DrawListId,
-        makepad_platform::Margin,
+        makepad_platform::Inset,
         makepad_platform::Cx,
     }
 };
@@ -49,7 +49,7 @@ pub enum NavOrder {
 pub struct NavStop {
     pub role: NavRole,
     pub order: NavOrder,
-    pub margin: Margin,
+    pub margin: Inset,
     pub area: Area
 }
 
@@ -127,7 +127,7 @@ impl<'a> CxDraw<'a> {
         nav_tree[draw_list_id].nav_list.push(item);
     }
     
-    pub fn add_nav_stop(&mut self, area: Area, role: NavRole, margin: Margin) {
+    pub fn add_nav_stop(&mut self, area: Area, role: NavRole, margin: Inset) {
         let draw_list_id = *self.draw_list_stack.last().unwrap();
         self.nav_list_item_push(draw_list_id, NavItem::Stop(NavStop {
             role,

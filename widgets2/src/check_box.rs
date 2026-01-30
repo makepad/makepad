@@ -956,7 +956,7 @@ impl CheckBox {
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done() 
    }
 }

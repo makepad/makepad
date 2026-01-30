@@ -4,6 +4,7 @@ script_mod!{
     use mod.math.*
     use mod.pod.*
     use mod.text.*
+    use mod.turtle.*
     use mod.res
 
     mod.themes.dark = {
@@ -24,15 +25,15 @@ script_mod!{
         space_2: 1.0 * theme.space_factor
         space_3: 1.5 * theme.space_factor
 
-        mspace_1: {top: theme.space_1, right: theme.space_1, bottom: theme.space_1, left: theme.space_1} 
-        mspace_h_1: {top: 0., right: theme.space_1, bottom: 0., left: theme.space_1}
-        mspace_v_1: {top: theme.space_1, right: 0., bottom: theme.space_1, left: 0.}
-        mspace_2: {top: theme.space_2, right: theme.space_2, bottom: theme.space_2, left: theme.space_2}
-        mspace_h_2: {top: 0., right: theme.space_2, bottom: 0., left: theme.space_2}
-        mspace_v_2: {top: theme.space_2, right: 0., bottom: theme.space_2, left: 0.}
-        mspace_3: {top: theme.space_3, right: theme.space_3, bottom: theme.space_3, left: theme.space_3}
-        mspace_h_3: {top: 0., right: theme.space_3, bottom: 0., left: theme.space_3}
-        mspace_v_3: {top: theme.space_3, right: 0., bottom: theme.space_3, left: 0.}
+        mspace_1: Inset{top: theme.space_1, right: theme.space_1, bottom: theme.space_1, left: theme.space_1} 
+        mspace_h_1: Inset{top: 0., right: theme.space_1, bottom: 0., left: theme.space_1}
+        mspace_v_1: Inset{top: theme.space_1, right: 0., bottom: theme.space_1, left: 0.}
+        mspace_2: Inset{top: theme.space_2, right: theme.space_2, bottom: theme.space_2, left: theme.space_2}
+        mspace_h_2: Inset{top: 0., right: theme.space_2, bottom: 0., left: theme.space_2}
+        mspace_v_2: Inset{top: theme.space_2, right: 0., bottom: theme.space_2, left: 0.}
+        mspace_3: Inset{top: theme.space_3, right: theme.space_3, bottom: theme.space_3, left: theme.space_3}
+        mspace_h_3: Inset{top: 0., right: theme.space_3, bottom: 0., left: theme.space_3}
+        mspace_v_3: Inset{top: theme.space_3, right: 0., bottom: theme.space_3, left: 0.}
 
         data_item_height: 7.75 * theme.space_1
         data_icon_width: 2.6 * theme.space_2

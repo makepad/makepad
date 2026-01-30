@@ -1284,7 +1284,7 @@ impl Widget for TextInput {
                 dvec2(cursor_bottom_pos.x, cursor_bottom_pos.y - self.scroll_y)
             );
         }
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
     }
 
