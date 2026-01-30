@@ -19,7 +19,7 @@ use alloc::format;
 use serde::ser::*;
 
 use crate::bit_depth::BitDepth;
-use crate::colorspace::{ColorCharacteristics, ColorSpace};
+use crate::colorspace::{ColorCharacteristics, ColorSpace, RenderingIntent};
 
 impl Serialize for ColorSpace {
     #[allow(clippy::uninlined_format_args)]
@@ -43,6 +43,16 @@ impl Serialize for BitDepth {
 }
 
 impl Serialize for ColorCharacteristics {
+    #[allow(clippy::uninlined_format_args)]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer
+    {
+        serializer.serialize_str(&format!("{:?}", self))
+    }
+}
+
+impl Serialize for RenderingIntent {
     #[allow(clippy::uninlined_format_args)]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

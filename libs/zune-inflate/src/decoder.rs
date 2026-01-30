@@ -320,12 +320,12 @@ impl<'a> DeflateDecoder<'a> {
                 if adler32_expected != adler32_found {
                     let err_msg =
                         DecodeErrorStatus::MismatchedAdler(adler32_expected, adler32_found);
-                    let err = InflateDecodeErrors::new(err_msg, data);
+                    let err = InflateDecodeErrors::new(err_msg, &data);
 
                     return Err(err);
                 }
             } else {
-                let err = InflateDecodeErrors::new(DecodeErrorStatus::InsufficientData, data);
+                let err = InflateDecodeErrors::new(DecodeErrorStatus::InsufficientData, &data);
 
                 return Err(err);
             }
@@ -475,12 +475,12 @@ impl<'a> DeflateDecoder<'a> {
 
                 if crc32_expected != crc32_found {
                     let err_msg = DecodeErrorStatus::MismatchedCRC(crc32_expected, crc32_found);
-                    let err = InflateDecodeErrors::new(err_msg, data);
+                    let err = InflateDecodeErrors::new(err_msg, &data);
 
                     return Err(err);
                 }
             } else {
-                let err = InflateDecodeErrors::new(DecodeErrorStatus::InsufficientData, data);
+                let err = InflateDecodeErrors::new(DecodeErrorStatus::InsufficientData, &data);
 
                 return Err(err);
             }
@@ -495,12 +495,12 @@ impl<'a> DeflateDecoder<'a> {
             if data.len() != ac {
                 let err = DecodeErrorStatus::Generic("ISIZE does not match actual bytes");
 
-                let err = InflateDecodeErrors::new(err, data);
+                let err = InflateDecodeErrors::new(err, &data);
 
                 return Err(err);
             }
         } else {
-            let err = InflateDecodeErrors::new(DecodeErrorStatus::InsufficientData, data);
+            let err = InflateDecodeErrors::new(DecodeErrorStatus::InsufficientData, &data);
 
             return Err(err);
         }
@@ -535,7 +535,16 @@ impl<'a> DeflateDecoder<'a> {
     }
     /// Main inner loop for decompressing deflate data
     #[allow(unused_assignments)]
+    #[allow(clippy::never_loop)] // wrong submission
     fn start_deflate_block(&mut self) -> Result<Vec<u8>, InflateDecodeErrors> {
+        let mut out_block = vec![0; self.options.size_hint];
+        self.start_deflate_block_inner(&mut out_block)?;
+        return Ok(out_block);
+    }
+    #[allow(unused_assignments)]
+    fn start_deflate_block_inner(
+        &mut self, out_block: &mut Vec<u8>
+    ) -> Result<(), InflateDecodeErrors> {
         // start deflate decode
         // re-read the stream so that we can remove code read by zlib
         self.stream = BitStreamReader::new(&self.data[self.position..]);
@@ -543,7 +552,6 @@ impl<'a> DeflateDecoder<'a> {
         self.stream.refill();
 
         // Output space for our decoded bytes.
-        let mut out_block = vec![0; self.options.size_hint];
         // bits used
 
         let mut src_offset = 0;
@@ -872,11 +880,7 @@ impl<'a> DeflateDecoder<'a> {
                         // Copy some bytes unconditionally
                         // This makes us copy smaller match lengths quicker because we don't need
                         // a loop + don't send too much pressure to the Memory unit.
-                        fixed_copy_within::<FASTCOPY_BYTES>(
-                            &mut out_block,
-                            src_offset,
-                            dest_offset
-                        );
+                        fixed_copy_within::<FASTCOPY_BYTES>(out_block, src_offset, dest_offset);
 
                         entry = litlen_decode_table[self.stream.peek_bits::<LITLEN_DECODE_BITS>()];
 
@@ -908,7 +912,7 @@ impl<'a> DeflateDecoder<'a> {
                             // that is intentional.
                             loop {
                                 fixed_copy_within::<FASTCOPY_BYTES>(
-                                    &mut out_block,
+                                    out_block,
                                     src_position,
                                     dest_position
                                 );
@@ -944,7 +948,7 @@ impl<'a> DeflateDecoder<'a> {
                                 // Reason: This is a latency critical loop, even branches start
                                 // to matter
                                 fixed_copy_within::<FASTCOPY_BYTES>(
-                                    &mut out_block,
+                                    out_block,
                                     dest_src_offset,
                                     current_position
                                 );
@@ -1013,7 +1017,7 @@ impl<'a> DeflateDecoder<'a> {
                     length = (entry >> 16) as usize;
 
                     if (entry & HUFFDEC_LITERAL) != 0 {
-                        resize_and_push(&mut out_block, dest_offset, length as u8);
+                        resize_and_push(out_block, dest_offset, length as u8);
 
                         dest_offset += 1;
 
@@ -1071,7 +1075,7 @@ impl<'a> DeflateDecoder<'a> {
                     if src_offset + length + FASTCOPY_BYTES > dest_offset {
                         // overlapping copy
                         // do a simple rep match
-                        copy_rep_matches(&mut out_block, src_offset, dest_offset, length);
+                        copy_rep_matches(out_block, src_offset, dest_offset, length);
                     } else {
                         dest_ptr[0..length]
                             .copy_from_slice(&dest_src[src_offset..src_offset + length]);
@@ -1113,7 +1117,7 @@ impl<'a> DeflateDecoder<'a> {
         // bytes written.
         out_block.truncate(dest_offset);
 
-        Ok(out_block)
+        Ok(())
     }
 
     /// Build decode tables for static and dynamic

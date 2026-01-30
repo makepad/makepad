@@ -14,9 +14,13 @@
 //!
 //! Useful for a lot of image readers and writers, it's put
 //! here to minimize code reuse
-pub use reader::ZByteReader;
+pub use reader::{ZReader, ZSeekFrom};
 pub use traits::*;
-pub use writer::ZByteWriter;
+pub use writer::ZWriter;
+
+pub use crate::bytestream::reader::no_std_readers::*;
+//use crate::bytestream::reader::std_readers::*;
+pub use crate::bytestream::reader::ZByteIoError;
 
 mod reader;
 mod traits;

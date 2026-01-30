@@ -9,52 +9,38 @@
 //! Global Decoder options
 #![allow(clippy::zero_prefixed_literal)]
 
-use bitflags::bitflags;
-
 use crate::bit_depth::ByteEndian;
 use crate::colorspace::ColorSpace;
 
-fn decoder_strict_mode() -> DecoderFlags {
-    let mut flags = DecoderFlags::empty();
-
-    flags.set(DecoderFlags::INFLATE_CONFIRM_ADLER, true);
-    flags.set(DecoderFlags::PNG_CONFIRM_CRC, true);
-    flags.set(DecoderFlags::JPG_ERROR_ON_NON_CONFORMANCE, true);
-
-    flags.set(DecoderFlags::ZUNE_USE_UNSAFE, true);
-    flags.set(DecoderFlags::ZUNE_USE_NEON, true);
-    flags.set(DecoderFlags::ZUNE_USE_AVX, true);
-    flags.set(DecoderFlags::ZUNE_USE_AVX2, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE2, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE3, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE41, true);
-    flags.set(DecoderFlags::PNG_ADD_ALPHA_CHANNEL, false);
-
-    flags
+/// A decoder that can handle errors
+fn decoder_error_tolerance_mode() -> DecoderFlags {
+    // similar to fast options currently, so no need to write a new one
+    fast_options()
 }
-
 /// Fast decoder options
 ///
 /// Enables all intrinsics + unsafe routines
 ///
 /// Disables png adler and crc checking.
 fn fast_options() -> DecoderFlags {
-    let mut flags = DecoderFlags::empty();
+    DecoderFlags {
+        inflate_confirm_adler:        false,
+        png_confirm_crc:              false,
+        jpg_error_on_non_conformance: false,
 
-    flags.set(DecoderFlags::INFLATE_CONFIRM_ADLER, false);
-    flags.set(DecoderFlags::PNG_CONFIRM_CRC, false);
-    flags.set(DecoderFlags::JPG_ERROR_ON_NON_CONFORMANCE, false);
+        zune_use_unsafe: true,
+        zune_use_neon:   true,
+        zune_use_avx:    true,
+        zune_use_avx2:   true,
+        zune_use_sse2:   true,
+        zune_use_sse3:   true,
+        zune_use_sse41:  true,
 
-    flags.set(DecoderFlags::ZUNE_USE_UNSAFE, true);
-    flags.set(DecoderFlags::ZUNE_USE_NEON, true);
-    flags.set(DecoderFlags::ZUNE_USE_AVX, true);
-    flags.set(DecoderFlags::ZUNE_USE_AVX2, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE2, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE3, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE41, true);
-    flags.set(DecoderFlags::PNG_ADD_ALPHA_CHANNEL, false);
-
-    flags
+        png_add_alpha_channel:     false,
+        png_strip_16_bit_to_8_bit: false,
+        png_decode_animated:       true,
+        jxl_decode_animated:       true
+    }
 }
 
 /// Command line options error resilient and fast
@@ -64,59 +50,65 @@ fn fast_options() -> DecoderFlags {
 /// - Do not error out on non-conformance in jpg
 /// - Use unsafe paths
 fn cmd_options() -> DecoderFlags {
-    let mut flags = DecoderFlags::empty();
+    DecoderFlags {
+        inflate_confirm_adler:        false,
+        png_confirm_crc:              false,
+        jpg_error_on_non_conformance: false,
 
-    flags.set(DecoderFlags::INFLATE_CONFIRM_ADLER, false);
-    flags.set(DecoderFlags::PNG_CONFIRM_CRC, false);
-    flags.set(DecoderFlags::JPG_ERROR_ON_NON_CONFORMANCE, false);
+        zune_use_unsafe: true,
+        zune_use_neon:   true,
+        zune_use_avx:    true,
+        zune_use_avx2:   true,
+        zune_use_sse2:   true,
+        zune_use_sse3:   true,
+        zune_use_sse41:  true,
 
-    flags.set(DecoderFlags::ZUNE_USE_UNSAFE, true);
-    flags.set(DecoderFlags::ZUNE_USE_NEON, true);
-    flags.set(DecoderFlags::ZUNE_USE_AVX, true);
-    flags.set(DecoderFlags::ZUNE_USE_AVX2, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE2, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE3, true);
-    flags.set(DecoderFlags::ZUNE_USE_SSE41, true);
-    flags.set(DecoderFlags::PNG_ADD_ALPHA_CHANNEL, false);
+        png_add_alpha_channel:     false,
+        png_strip_16_bit_to_8_bit: false,
 
-    flags
+        png_decode_animated: true,
+        jxl_decode_animated: true
+    }
 }
 
-bitflags! {
-    /// Decoder options that are flags
+/// Decoder options that are flags
+///
+/// NOTE: When you extend this, add true or false to
+/// all options above that return a `DecoderFlag`
+#[derive(Copy, Debug, Clone, Default)]
+pub struct DecoderFlags {
+    /// Whether the decoder should confirm and report adler mismatch
+    inflate_confirm_adler:        bool,
+    /// Whether the PNG decoder should confirm crc
+    png_confirm_crc:              bool,
+    /// Whether the png decoder should error out on image non-conformance
+    jpg_error_on_non_conformance: bool,
+    /// Whether the decoder should use unsafe  platform specific intrinsics
     ///
-    /// NOTE: When you extend this, add true or false to
-    /// all options above that return a `DecoderFlag`
-    #[derive(Copy,Debug,Clone)]
-    pub struct  DecoderFlags:u64{
-        /// Whether the decoder should confirm and report adler mismatch
-        const INFLATE_CONFIRM_ADLER         = 1<<01;
-        /// Whether the PNG decoder should confirm crc
-        const PNG_CONFIRM_CRC               = 1<<02;
-        /// Whether the png decoder should error out on image non-conformance
-        const JPG_ERROR_ON_NON_CONFORMANCE  = 1<<03;
-        /// Whether the decoder should use unsafe  platform specific intrinsics
-        ///
-        /// This will also shut down platform specific intrinsics `(ZUNE_USE_{EXT})` value
-        const ZUNE_USE_UNSAFE               = 0b0000_0000_0000_0000_0000_0000_0000_1000;
-        /// Whether we should use SSE2.
-        ///
-        /// This should be enabled for all x64 platforms but can be turned off if
-        /// `ZUNE_USE_UNSAFE` is false
-        const ZUNE_USE_SSE2                 =  1<<05;
-        /// Whether we should use SSE3 instructions where possible.
-        const ZUNE_USE_SSE3                 =  1<<06;
-        /// Whether we should use sse4.1 instructions where possible.
-        const ZUNE_USE_SSE41                =  1<<07;
-        /// Whether we should use avx instructions where possible.
-        const ZUNE_USE_AVX                  =  1<<08;
-        /// Whether we should use avx2 instructions where possible.
-        const ZUNE_USE_AVX2                 =  1<<09;
-        /// Whether the png decoder should add alpha channel where possible.
-        const PNG_ADD_ALPHA_CHANNEL         =  1<<10;
-        /// Whether we should use neon instructions where possible.
-        const ZUNE_USE_NEON                 =  1<<11;
-    }
+    /// This will also shut down platform specific intrinsics `(ZUNE_USE_{EXT})` value
+    zune_use_unsafe:              bool,
+    /// Whether we should use SSE2.
+    ///
+    /// This should be enabled for all x64 platforms but can be turned off if
+    /// `ZUNE_USE_UNSAFE` is false
+    zune_use_sse2:                bool,
+    /// Whether we should use SSE3 instructions where possible.
+    zune_use_sse3:                bool,
+    /// Whether we should use sse4.1 instructions where possible.
+    zune_use_sse41:               bool,
+    /// Whether we should use avx instructions where possible.
+    zune_use_avx:                 bool,
+    /// Whether we should use avx2 instructions where possible.
+    zune_use_avx2:                bool,
+    /// Whether the png decoder should add alpha channel where possible.
+    png_add_alpha_channel:        bool,
+    /// Whether we should use neon instructions where possible.
+    zune_use_neon:                bool,
+    /// Whether the png decoder should strip 16 bit to 8 bit
+    png_strip_16_bit_to_8_bit:    bool,
+    /// Decode all frames for an animated images
+    png_decode_animated:          bool,
+    jxl_decode_animated:          bool
 }
 
 /// Decoder options
@@ -206,29 +198,27 @@ impl DecoderOptions {
 impl DecoderOptions {
     /// Get maximum width configured for which the decoder
     /// should not try to decode images greater than this width
-    pub const fn get_max_width(&self) -> usize {
+    pub const fn max_width(&self) -> usize {
         self.max_width
     }
 
     /// Get maximum height configured for which the decoder should
     /// not try to decode images greater than this height
-    pub const fn get_max_height(&self) -> usize {
+    pub const fn max_height(&self) -> usize {
         self.max_height
     }
 
     /// Return true whether the decoder should be in strict mode
     /// And reject most errors
-    pub fn get_strict_mode(&self) -> bool {
-        let flags = DecoderFlags::JPG_ERROR_ON_NON_CONFORMANCE
-            | DecoderFlags::PNG_CONFIRM_CRC
-            | DecoderFlags::INFLATE_CONFIRM_ADLER;
-
-        self.flags.contains(flags)
+    pub fn strict_mode(&self) -> bool {
+        self.flags.jpg_error_on_non_conformance
+            | self.flags.png_confirm_crc
+            | self.flags.inflate_confirm_adler
     }
     /// Return true if the decoder should use unsafe
     /// routines where possible
-    pub const fn get_use_unsafe(&self) -> bool {
-        self.flags.contains(DecoderFlags::ZUNE_USE_UNSAFE)
+    pub const fn use_unsafe(&self) -> bool {
+        self.flags.zune_use_unsafe
     }
 
     /// Set maximum width for which the decoder should not try
@@ -272,7 +262,7 @@ impl DecoderOptions {
     /// - Respected by: `png` and `jpeg`(decoders with unsafe routines)
     pub fn set_use_unsafe(mut self, yes: bool) -> Self {
         // first clear the flag
-        self.flags.set(DecoderFlags::ZUNE_USE_UNSAFE, yes);
+        self.flags.zune_use_unsafe = yes;
         self
     }
 
@@ -293,11 +283,9 @@ impl DecoderOptions {
     /// returns: DecoderOptions
     ///
     pub fn set_strict_mode(mut self, yes: bool) -> Self {
-        let flags = DecoderFlags::JPG_ERROR_ON_NON_CONFORMANCE
-            | DecoderFlags::PNG_CONFIRM_CRC
-            | DecoderFlags::INFLATE_CONFIRM_ADLER;
-
-        self.flags.set(flags, yes);
+        self.flags.jpg_error_on_non_conformance = yes;
+        self.flags.png_confirm_crc = yes;
+        self.flags.inflate_confirm_adler = yes;
         self
     }
 
@@ -321,7 +309,7 @@ impl DecoderOptions {
 
     /// Get the byte endian for which samples that span more than one byte will
     /// be treated
-    pub const fn get_byte_endian(&self) -> ByteEndian {
+    pub const fn byte_endian(&self) -> ByteEndian {
         self.endianness
     }
 }
@@ -331,12 +319,12 @@ impl DecoderOptions {
     /// Whether the inflate decoder should confirm
     /// adler checksums
     pub const fn inflate_get_confirm_adler(&self) -> bool {
-        self.flags.contains(DecoderFlags::INFLATE_CONFIRM_ADLER)
+        self.flags.inflate_confirm_adler
     }
     /// Set whether the inflate decoder should confirm
     /// adler checksums
     pub fn inflate_set_confirm_adler(mut self, yes: bool) -> Self {
-        self.flags.set(DecoderFlags::INFLATE_CONFIRM_ADLER, yes);
+        self.flags.inflate_confirm_adler = yes;
         self
     }
     /// Get default inflate limit for which the decoder
@@ -354,13 +342,13 @@ impl DecoderOptions {
     /// Whether the inflate decoder should confirm
     /// crc 32 checksums
     pub const fn png_get_confirm_crc(&self) -> bool {
-        self.flags.contains(DecoderFlags::PNG_CONFIRM_CRC)
+        self.flags.png_confirm_crc
     }
     /// Set whether the png decoder should confirm
     /// CRC 32 checksums
     #[must_use]
     pub fn png_set_confirm_crc(mut self, yes: bool) -> Self {
-        self.flags.set(DecoderFlags::PNG_CONFIRM_CRC, yes);
+        self.flags.png_confirm_crc = yes;
         self
     }
     /// Set whether the png decoder should add an alpha channel to
@@ -370,13 +358,40 @@ impl DecoderOptions {
     ///
     /// For RGB images it converts it to RGB+Alpha
     pub fn png_set_add_alpha_channel(mut self, yes: bool) -> Self {
-        self.flags.set(DecoderFlags::PNG_ADD_ALPHA_CHANNEL, yes);
+        self.flags.png_add_alpha_channel = yes;
         self
     }
     /// Return true whether the png decoder should add an alpha
     /// channel to images where possible
     pub const fn png_get_add_alpha_channel(&self) -> bool {
-        self.flags.contains(DecoderFlags::PNG_ADD_ALPHA_CHANNEL)
+        self.flags.png_add_alpha_channel
+    }
+
+    /// Whether the png decoder should reduce 16 bit images to 8 bit
+    /// images implicitly.
+    ///
+    /// Equivalent to [png::Transformations::STRIP_16](https://docs.rs/png/latest/png/struct.Transformations.html#associatedconstant.STRIP_16)
+    pub fn png_set_strip_to_8bit(mut self, yes: bool) -> Self {
+        self.flags.png_strip_16_bit_to_8_bit = yes;
+        self
+    }
+
+    /// Return a boolean indicating whether the png decoder should reduce
+    /// 16 bit images to 8 bit images implicitly
+    pub const fn png_get_strip_to_8bit(&self) -> bool {
+        self.flags.png_strip_16_bit_to_8_bit
+    }
+
+    /// Return whether `zune-image` should decode animated images or
+    /// whether we should just decode the first frame only
+    pub const fn png_decode_animated(&self) -> bool {
+        self.flags.png_decode_animated
+    }
+    /// Set  whether `zune-image` should decode animated images or
+    /// whether we should just decode the first frame only
+    pub const fn png_set_decode_animated(mut self, yes: bool) -> Self {
+        self.flags.png_decode_animated = yes;
+        self
     }
 }
 
@@ -424,9 +439,7 @@ impl DecoderOptions {
     /// false if it's not present
     #[allow(unreachable_code)]
     pub fn use_sse2(&self) -> bool {
-        let opt = self
-            .flags
-            .contains(DecoderFlags::ZUNE_USE_SSE2 | DecoderFlags::ZUNE_USE_UNSAFE);
+        let opt = self.flags.zune_use_sse2 | self.flags.zune_use_unsafe;
         // options says no
         if !opt {
             return false;
@@ -459,9 +472,7 @@ impl DecoderOptions {
     /// it's not present
     #[allow(unreachable_code)]
     pub fn use_sse3(&self) -> bool {
-        let opt = self
-            .flags
-            .contains(DecoderFlags::ZUNE_USE_SSE3 | DecoderFlags::ZUNE_USE_UNSAFE);
+        let opt = self.flags.zune_use_sse3 | self.flags.zune_use_unsafe;
         // options says no
         if !opt {
             return false;
@@ -493,9 +504,7 @@ impl DecoderOptions {
     /// is not present
     #[allow(unreachable_code)]
     pub fn use_sse41(&self) -> bool {
-        let opt = self
-            .flags
-            .contains(DecoderFlags::ZUNE_USE_SSE41 | DecoderFlags::ZUNE_USE_UNSAFE);
+        let opt = self.flags.zune_use_sse41 | self.flags.zune_use_unsafe;
         // options says no
         if !opt {
             return false;
@@ -527,9 +536,7 @@ impl DecoderOptions {
     /// not present
     #[allow(unreachable_code)]
     pub fn use_avx(&self) -> bool {
-        let opt = self
-            .flags
-            .contains(DecoderFlags::ZUNE_USE_AVX | DecoderFlags::ZUNE_USE_UNSAFE);
+        let opt = self.flags.zune_use_avx | self.flags.zune_use_unsafe;
         // options says no
         if !opt {
             return false;
@@ -561,9 +568,7 @@ impl DecoderOptions {
     /// present
     #[allow(unreachable_code)]
     pub fn use_avx2(&self) -> bool {
-        let opt = self
-            .flags
-            .contains(DecoderFlags::ZUNE_USE_AVX2 | DecoderFlags::ZUNE_USE_UNSAFE);
+        let opt = self.flags.zune_use_avx2 | self.flags.zune_use_unsafe;
         // options says no
         if !opt {
             return false;
@@ -591,9 +596,7 @@ impl DecoderOptions {
 
     #[allow(unreachable_code)]
     pub fn use_neon(&self) -> bool {
-        let opt = self
-            .flags
-            .contains(DecoderFlags::ZUNE_USE_NEON | DecoderFlags::ZUNE_USE_UNSAFE);
+        let opt = self.flags.zune_use_neon | self.flags.zune_use_unsafe;
         // options says no
         if !opt {
             return false;
@@ -610,7 +613,45 @@ impl DecoderOptions {
     }
 }
 
+/// JPEG_XL specific options
+impl DecoderOptions {
+    /// Return whether `zune-image` should decode animated images or
+    /// whether we should just decode the first frame only
+    pub const fn jxl_decode_animated(&self) -> bool {
+        self.flags.jxl_decode_animated
+    }
+    /// Set  whether `zune-image` should decode animated images or
+    /// whether we should just decode the first frame only
+    pub const fn jxl_set_decode_animated(mut self, yes: bool) -> Self {
+        self.flags.jxl_decode_animated = yes;
+        self
+    }
+}
 impl Default for DecoderOptions {
+    /// Create a default and sane option for decoders
+    ///
+    /// The following are the defaults
+    ///
+    /// - All decoders
+    ///     - max_width: 16536
+    ///     - max_height: 16535
+    ///     - use_unsafe: Use unsafe intrinsics where possible.
+    ///
+    /// - JPEG
+    ///     - max_scans: 100 (progressive images only, artificial cap to prevent a specific DOS)
+    ///     - error_on_non_conformance: False (slightly corrupt images will be allowed)
+    /// - DEFLATE
+    ///     - deflate_limit: 1GB (will not continue decoding deflate archives larger than this)
+    /// - PNG
+    ///   - endianness: Default endianess is Big Endian when decoding 16 bit images to be viewed as 8 byte images
+    ///   - confirm_crc: False (CRC will not be confirmed to be safe)
+    ///   - strip_16_bit_to_8: False, 16 bit images are handled as 16 bit images
+    ///   - add alpha: False, alpha channel is not added where it isn't present
+    ///   - decode_animated: True: All frames in an animated image are decoded
+    ///
+    ///  - JXL
+    ///    - decode_animated: True: All frames in an animated image are decoded
+    ///
     fn default() -> Self {
         Self {
             out_colorspace: ColorSpace::RGB,
@@ -618,7 +659,7 @@ impl Default for DecoderOptions {
             max_height:     1 << 14,
             max_scans:      100,
             deflate_limit:  1 << 30,
-            flags:          decoder_strict_mode(),
+            flags:          decoder_error_tolerance_mode(),
             endianness:     ByteEndian::BE
         }
     }

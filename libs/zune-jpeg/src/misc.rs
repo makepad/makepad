@@ -12,11 +12,13 @@
 use alloc::format;
 use core::cmp::max;
 use core::fmt;
+use core::num::NonZeroU32;
 
-use makepad_zune_core::bytestream::{ZByteReader, ZReaderTrait};
+use makepad_zune_core::bytestream::ZByteReaderTrait;
 use makepad_zune_core::colorspace::ColorSpace;
+use makepad_zune_core::log::{trace, warn};
 
-use crate::components::SampleRatios;
+use crate::components::{ComponentID, SampleRatios};
 use crate::errors::DecodeErrors;
 use crate::huffman::HuffmanTable;
 use crate::JpegDecoder;
@@ -50,6 +52,8 @@ pub const START_OF_FRAME_PROG_DCT_AR: u16 = 0xffca;
 pub const START_OF_FRAME_LOS_SEQ_AR: u16 = 0xffcb;
 
 /// Undo run length encoding of coefficients by placing them in natural order
+///
+/// This is an index from position-in-bitstream to position-in-row-major-order.
 #[rustfmt::skip]
 pub const UN_ZIGZAG: [usize; 64 + 16] = [
      0,  1,  8, 16,  9,  2,  3, 10,
@@ -183,29 +187,11 @@ impl fmt::Debug for SOFMarkers {
     }
 }
 
-/// Read `buf.len()*2` data from the underlying `u8` buffer and convert it into
-/// u16, and store it into `buf`
-///
-/// # Arguments
-/// - reader: A mutable reference to the underlying reader.
-/// - buf: A mutable reference to a slice containing u16's
-#[inline]
-pub fn read_u16_into<T>(reader: &mut ZByteReader<T>, buf: &mut [u16]) -> Result<(), DecodeErrors>
-where
-    T: ZReaderTrait
-{
-    for i in buf {
-        *i = reader.get_u16_be_err()?;
-    }
-
-    Ok(())
-}
-
 /// Set up component parameters.
 ///
 /// This modifies the components in place setting up details needed by other
 /// parts fo the decoder.
-pub(crate) fn setup_component_params<T: ZReaderTrait>(
+pub(crate) fn setup_component_params<T: ZByteReaderTrait>(
     img: &mut JpegDecoder<T>
 ) -> Result<(), DecodeErrors> {
     let img_width = img.width();
@@ -233,9 +219,9 @@ pub(crate) fn setup_component_params<T: ZReaderTrait>(
         img.mcu_width = img.h_max * 8;
         img.mcu_height = img.v_max * 8;
         // Number of MCU's per width
-        img.mcu_x = (usize::from(img.info.width) + img.mcu_width - 1) / img.mcu_width;
+        img.mcu_x = usize::from(img.info.width).div_ceil(img.mcu_width);
         // Number of MCU's per height
-        img.mcu_y = (usize::from(img.info.height) + img.mcu_height - 1) / img.mcu_height;
+        img.mcu_y = usize::from(img.info.height).div_ceil(img.mcu_height);
 
         if img.h_max != 1 || img.v_max != 1 {
             // interleaved images have horizontal and vertical sampling factors
@@ -262,13 +248,43 @@ pub(crate) fn setup_component_params<T: ZReaderTrait>(
         // initially stride contains its horizontal sub-sampling
         component.width_stride *= img.mcu_x * 8;
     }
-    if img.is_interleaved
-        && img.components[0].horizontal_sample == 1
-        && img.components[0].vertical_sample == 1
     {
-        return Err(DecodeErrors::FormatStatic(
-            "Unsupported unsampled Y component with sampled Cb / Cr components"
-        ));
+        // Sampling factors are one thing that suck
+        // this fixes a specific problem with images like
+        //
+        // (2 2) None
+        // (2 1) H
+        // (2 1) H
+        //
+        // The images exist in the wild, the images are not meant to exist
+        // but they do, it's just an annoying horizontal sub-sampling that
+        // I don't know why it exists.
+        // But it does
+        // So we try to cope with that.
+        // I am not sure of how to explain how to fix it, but it involved a debugger
+        // and to much coke(the legal one)
+        //
+        // If this wasn't present, self.upsample_dest would have the wrong length
+        let mut handle_that_annoying_bug = false;
+
+        if let Some(y_component) = img
+            .components
+            .iter()
+            .find(|c| c.component_id == ComponentID::Y)
+        {
+            if y_component.horizontal_sample == 2 || y_component.vertical_sample == 2 {
+                handle_that_annoying_bug = true;
+            }
+        }
+        if handle_that_annoying_bug {
+            for comp in &mut img.components {
+                if (comp.component_id != ComponentID::Y)
+                    && (comp.horizontal_sample != 1 || comp.vertical_sample != 1)
+                {
+                    comp.fix_an_annoying_bug = 2;
+                }
+            }
+        }
     }
 
     if img.is_mjpeg {
@@ -279,6 +295,54 @@ pub(crate) fn setup_component_params<T: ZReaderTrait>(
         );
     }
 
+    // check colorspace matches
+    if img.input_colorspace.num_components() > img.components.len() {
+        if img.input_colorspace == ColorSpace::YCCK {
+            // Some images may have YCCK format (from adobe app14 segment) which is supposed to be 4 components
+            // but only 3 components, see issue https://github.com/etemesi254/zune-image/issues/275
+            // So this is the behaviour of other decoders
+            // - stb_image: Treats it as YCbCr image
+            // - libjpeg_turbo: Does not know how to parse YCCK images (transform 2 app14) so treats
+            // it as YCbCr
+            // So I will match that to match existing ones
+            warn!("Treating YCCK colorspace as YCbCr as component length does not match");
+            img.input_colorspace = ColorSpace::YCbCr
+        } else {
+            // Note, translated this to a warning to handle valid images of the sort
+            // See https://github.com/etemesi254/zune-image/issues/288 where there
+            // was a CMYK image with two components which would be decoded to 4 components
+            // by the decoder.
+            // So with a warning that becomes supported.
+            //
+            // djpeg fails to render an image from that also probably because it does not
+            // understand the expected format.
+            if !img.options.strict_mode() {
+                warn!(
+                    "Expected {} number of components but found {}",
+                    img.input_colorspace.num_components(),
+                    img.components.len()
+                );
+                warn!("Defaulting to multisample to decode");
+
+                // N/B: We do not post process the color of such, treating it as multiband
+                // is the best option since I am not aware of grayscale+alpha which is the most common
+                // two band format in jpeg.
+                if img.components.len() > 0 {
+                    img.input_colorspace = ColorSpace::MultiBand(
+                        NonZeroU32::new(img.components.len() as u32).unwrap()
+                    );
+                }
+            } else {
+                let msg = format!(
+                    "Expected {} number of components but found {}",
+                    img.input_colorspace.num_components(),
+                    img.components.len()
+                );
+
+                return Err(DecodeErrors::Format(msg));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -304,6 +368,9 @@ pub fn calculate_padded_width(actual_width: usize, sub_sample: SampleRatios) -> 
         SampleRatios::H | SampleRatios::HV => {
             // sends two rows, width can be expanded by up to 15 more bytes
             ((actual_width + 15) / 16) * 16
+        }
+        SampleRatios::Generic(h, _) => {
+            ((actual_width + ((h * 8).saturating_sub(1))) / (h * 8)) * (h * 8)
         }
     }
 }

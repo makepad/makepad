@@ -23,39 +23,101 @@
 //!
 //! ```toml
 //! [dependencies]
-//! zune_jpeg = "0.3"
+//! zune_jpeg = "0.5"
 //! ```
 //! # Examples
 //!
 //! ## Decode a JPEG file with default arguments.
 //!```no_run
 //! use std::fs::read;
+//! use std::io::BufReader;
 //! use zune_jpeg::JpegDecoder;
-//! let file_contents = read("a_jpeg.file").unwrap();
-//! let mut decoder = JpegDecoder::new(&file_contents);
+//! let file_contents = BufReader::new(std::fs::File::open("a_jpeg.file").unwrap());
+//! let mut decoder = JpegDecoder::new(file_contents);
 //! let mut pixels = decoder.decode().unwrap();
 //! ```
+//!
+//! ## Migrating from version 0.4--
+//!
+//! ### Motivation
+//! zune v 0.5 reworks mainly the internal architecture of how we perform I/O
+//! ,before the decoder accepted byte slices that represent the whole data as contiguous
+//! but that was not ideal for all use cases, increasing memory e.g on massive files that had
+//! to be read to memory.
+//!
+//! With v 0.5 a new I/O system is introduced, which generally introduces mechanisms to process
+//! `std::io::Read + std::io::Seek` type of data feeds, (but which works in no-std), which means...
+//!
+//! ### What changes
+//!
+//! I/O code that looked like this
+//!
+//!```ignore
+//! use makepad_zune_core::colorspace::ColorSpace;
+//! use zune_jpeg::JpegDecoder;
+//! // Read file into memory
+//! let image = std::fs::read("image.jpg").unwrap();
+//! // Make a decoder from the slice
+//! let mut decoder = JpegDecoder::new(&image);
+//! // decode
+//! decoder.decode().unwrap();
+//! ```
+//!
+//! Now can be rewritten in two ways.
+//!
+//! 1. File I/O (Using bufreader)
+//!
+//!```no_run
+//! use std::io::BufReader;
+//! use makepad_zune_core::colorspace::ColorSpace;
+//! use zune_jpeg::JpegDecoder;
+//!
+//! let image = BufReader::new(std::fs::File::open("image.jpg").unwrap());
+//! let mut decoder = JpegDecoder::new(image);
+//! // decode
+//! decoder.decode().unwrap();
+//! ```
+//!
+//! 2. Reading to memory (but wrapping it in a Cursor like object)
+//!```no_run
+//! use makepad_zune_core::bytestream::ZCursor;
+//! use zune_jpeg::JpegDecoder;
+//!
+//! let image_data =std::fs::read("image.jpg").unwrap();
+//! // Alternatively, you can use std::io::Cursor,
+//! // but it is better speed wise to use ZCursor, and it also works in
+//! // no-std environments
+//! let mut cursor = ZCursor::new(image_data);
+//! // use the wrapped item
+//! let mut decoder = JpegDecoder::new(cursor);
+//! // decode
+//! decoder.decode().unwrap();
+//! ```
+//!
+//! 3. Anything that implements [ZByteReaderTrait](makepad_zune_core::bytestream::traits::ZByteReaderTrait)
 //!
 //! ## Decode a JPEG file to RGBA format
 //!
 //! - Other (limited) supported formats are and  BGR, BGRA
 //!
 //!```no_run
-//! use zune_core::colorspace::ColorSpace;
-//! use zune_core::options::DecoderOptions;
+//! use makepad_zune_core::bytestream::ZCursor;
+//! use makepad_zune_core::colorspace::ColorSpace;
+//! use makepad_zune_core::options::DecoderOptions;
 //! use zune_jpeg::JpegDecoder;
 //!
 //! let mut options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
 //!
-//! let mut decoder = JpegDecoder::new_with_options(&[],options);
+//! let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&[]),options);
 //! let pixels = decoder.decode().unwrap();
 //! ```
 //!
-//! ## Decode an image and get it's width and height.
+//! ## Decode an image and get its width and height.
 //!```no_run
+//! use makepad_zune_core::bytestream::ZCursor;
 //! use zune_jpeg::JpegDecoder;
 //!
-//! let mut decoder = JpegDecoder::new(&[]);
+//! let mut decoder = JpegDecoder::new(ZCursor::new(&[]));
 //! decoder.decode_headers().unwrap();
 //! let image_info = decoder.info().unwrap();
 //! println!("{},{}",image_info.width,image_info.height)
@@ -76,7 +138,7 @@
 //! , this means a lot of images may  get silent warnings and wrong output, but if you are sure you will be handling
 //! images that follow the spec, set `ZuneJpegOptions::set_strict` to true.
 //!
-//![`DecoderOptions::set_use_unsafe(false)`]:  https://docs.rs/zune-core/0.2.1/zune_core/options/struct.DecoderOptions.html#method.set_use_unsafe
+//![`DecoderOptions::set_use_unsafe(false)`]:  https://docs.rs/zune-core/latest/makepad_zune_core/options/struct.DecoderOptions.html#method.set_use_unsafe
 
 #![warn(
     clippy::correctness,
@@ -98,31 +160,18 @@
 )]
 // no_std compatibility
 #![deny(clippy::std_instead_of_alloc, clippy::alloc_instead_of_core)]
-#![cfg_attr(not(feature = "x86"), forbid(unsafe_code))]
+#![cfg_attr(not(any(feature = "x86", feature = "neon")), forbid(unsafe_code))]
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(feature = "portable_simd", feature(portable_simd))]
 #![macro_use]
 extern crate alloc;
 extern crate core;
-//#[macro_use]
-//extern crate log;
-macro_rules!trace {
-    ( $ ( $ t: tt) *) => {}
-}
-macro_rules!warn {
-    ( $ ( $ t: tt) *) => {}
-}
-macro_rules!error {
-    ( $ ( $ t: tt) *) => {}
-}
-macro_rules!debug {
-    ( $ ( $ t: tt) *) => {}
-}
-
 
 pub use makepad_zune_core;
 
+pub use crate::components::SampleRatios;
 pub use crate::decoder::{ImageInfo, JpegDecoder};
-
+pub use crate::marker::Marker;
 mod bitstream;
 mod color_convert;
 mod components;

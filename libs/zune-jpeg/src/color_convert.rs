@@ -57,7 +57,9 @@ pub use crate::color_convert::avx::{ycbcr_to_rgb_avx2, ycbcr_to_rgba_avx2};
 use crate::decoder::ColorConvert16Ptr;
 
 mod avx;
+mod neon64;
 mod scalar;
+
 #[allow(unused_variables)]
 pub fn choose_ycbcr_to_rgb_convert_func(
     type_need: ColorSpace, options: &DecoderOptions
@@ -65,6 +67,7 @@ pub fn choose_ycbcr_to_rgb_convert_func(
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[cfg(feature = "x86")]
     {
+        use makepad_zune_core::log::debug;
         if options.use_avx2() {
             debug!("Using AVX optimised color conversion functions");
 
@@ -73,6 +76,17 @@ pub fn choose_ycbcr_to_rgb_convert_func(
             match type_need {
                 ColorSpace::RGB => return Some(ycbcr_to_rgb_avx2),
                 ColorSpace::RGBA => return Some(ycbcr_to_rgba_avx2),
+                _ => () // fall through to scalar, which has more types
+            };
+        }
+    }
+    #[cfg(all(feature = "neon", target_arch = "aarch64"))]
+    {
+        if options.use_neon() {
+            use crate::color_convert::neon64::{ycbcr_to_rgb_neon, ycbcr_to_rgba_neon};
+            match type_need {
+                ColorSpace::RGB => return Some(ycbcr_to_rgb_neon),
+                ColorSpace::RGBA => return Some(ycbcr_to_rgba_neon),
                 _ => () // fall through to scalar, which has more types
             };
         }

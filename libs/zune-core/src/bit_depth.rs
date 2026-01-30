@@ -63,6 +63,17 @@ pub enum BitType {
     F32
 }
 
+impl BitType {
+    /// Return the equivalent of the image bit type's depth
+    pub fn to_depth(self) -> BitDepth {
+        match self {
+            BitType::U8 => BitDepth::Eight,
+            BitType::U16 => BitDepth::Sixteen,
+            BitType::F32 => BitDepth::Float32
+        }
+    }
+}
+
 impl Default for BitDepth {
     fn default() -> Self {
         Self::Unknown
@@ -143,6 +154,7 @@ impl BitDepth {
         self.size_of() * 8
     }
 }
+
 /// Byte endianness of returned samples
 /// this is useful when the decoder returns samples which span more
 /// than one byte yet the type returned is `&[u8]`
