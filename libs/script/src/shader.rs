@@ -387,7 +387,7 @@ impl ShaderFnCompiler{
                 output.has_errors = true;
                 if let Some(ptr) = err.value.as_err(){
                     if let Some(loc2) = vm.code.ip_to_loc(ptr.ip){
-                        log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} {} ({}:{})", err.value, err.message, err.origin_file, err.origin_line), LogLevel::Error);
+                        log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} ({}:{})",  err.message, err.origin_file, err.origin_line), LogLevel::Error);
                     }
                 }
             }
