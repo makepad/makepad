@@ -52,8 +52,8 @@ html = ["dep:makepad-html"]
 ## Enables Markdown widget support
 markdown = ["dep:pulldown-cmark"]
 
-## Enables SVG rendering support (placeholder - resvg not yet integrated)
-svg = []
+## Enables SVG rendering support
+svg = ["makepad-draw2/svg"]
 
 ## Enables certain public-facing types to derive serde serialization traits.
 serde = ["dep:serde", "makepad-draw2/serde", "makepad-derive-widget2/serde"]

@@ -5,6 +5,9 @@ use crate::{
     animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
 };
 
+#[cfg(feature = "svg")]
+use crate::makepad_draw::DrawSvg;
+
 script_mod!{
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -45,7 +48,7 @@ script_mod!{
             }
         }
         
-        // TODO: icon_walk and draw_icon not yet available (DrawIcon missing from draw2)
+        icon_walk: Walk{width: Fit, height: Fit}
         
         draw_bg +: {
             hover: instance(0.0)
@@ -361,11 +364,11 @@ pub struct Button {
     draw_bg: DrawQuad,
     #[live]
     draw_text: DrawText,
-    // TODO: DrawIcon not yet available in draw2
-    // #[live]
-    // draw_icon: DrawIcon,
-    // #[live]
-    // icon_walk: Walk,
+    #[cfg(feature = "svg")]
+    #[live]
+    draw_icon: DrawSvg,
+    #[live]
+    icon_walk: Walk,
     #[live]
     label_walk: Walk,
     #[walk]
@@ -496,8 +499,8 @@ impl Widget for Button {
         }
 
         self.draw_bg.begin(cx, walk, self.layout);
-        // TODO: draw_icon not yet available (DrawIcon missing from draw2)
-        // self.draw_icon.draw_walk(cx, self.icon_walk);
+        #[cfg(feature = "svg")]
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
         self.draw_bg.end(cx);
@@ -519,8 +522,8 @@ impl Button {
         
     pub fn draw_button(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
-        // TODO: draw_icon not yet available (DrawIcon missing from draw2)
-        // self.draw_icon.draw_walk(cx, self.icon_walk);
+        #[cfg(feature = "svg")]
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), label);
         self.draw_bg.end(cx);

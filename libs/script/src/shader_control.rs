@@ -127,6 +127,11 @@ impl ShaderFnCompiler {
                             self.stack.free_string(s);
                         }
                     }
+                } else if *has_return {
+                    // If branch had a return with no else branch and no phi value.
+                    // The following POP_TO_ME opcode expects a value but there isn't one.
+                    // Skip it to avoid stack underflow.
+                    self.skip_next_pop_to_me = true;
                 }
                 self.out.push_str("}\n");
                 self.shader_scope.exit_scope();
@@ -252,11 +257,15 @@ impl ShaderFnCompiler {
         }
     }
 
-    /// Handle if/else phi when in unreachable code - just close the structure
+    /// Handle if/else phi when in unreachable code - close the structure properly
     pub(crate) fn handle_if_else_phi_unreachable(&mut self) {
         if let Some(ShaderMe::IfBody { target_ip, has_return, if_branch_returned, .. }) = self.mes.last() {
             if self.trap.ip.index >= *target_ip {
                 let both_returned = *if_branch_returned && *has_return;
+                
+                // Still need to close the if block in generated code and exit scope
+                self.out.push_str("}\n");
+                self.shader_scope.exit_scope();
                 self.mes.pop();
 
                 // If both branches returned, propagate up

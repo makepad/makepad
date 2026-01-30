@@ -160,6 +160,9 @@ pub struct ShaderFnCompiler{
     pub shader_scope: ShaderScope,
     pub mes: Vec<ShaderMe>,
     pub trap: ScriptTrapInner,
+    pub debug: bool,
+    /// Skip the next POP_TO_ME opcode - used when closing an if that had a return
+    pub skip_next_pop_to_me: bool,
 }
 
 #[derive(Default)]
@@ -168,6 +171,7 @@ pub struct ShaderStack{
     pub(crate) types: Vec<ShaderType>,
     pub(crate) strings: Vec<String>,
     pub(crate) free: Vec<String>,
+    pub(crate) debug: bool,
 }
 
 macro_rules! push_fmt {
@@ -268,6 +272,9 @@ impl ShaderStack{
             return (s,self.strings.pop().unwrap())
         }
         else{
+            if self.debug {
+                log!("Stack underflow! Stack types: {:?}, strings: {:?}", self.types.len(), self.strings.len());
+            }
             script_err_stack!(trap, "shader stack underflow");
             (ShaderType::Error(NIL), String::new())
         }
@@ -959,6 +966,11 @@ impl ShaderFnCompiler{
     }
     
     pub(crate) fn pop_to_me(&mut self, vm:&ScriptVm){
+        // Skip if we just closed an if block that had a return without a value
+        if self.skip_next_pop_to_me {
+            self.skip_next_pop_to_me = false;
+            return;
+        }
         if let Some(me) = self.mes.last_mut(){
             match me{
                 ShaderMe::FnBody{ .. } | ShaderMe::ForLoop{..} | ShaderMe::IfBody{..}=>{
