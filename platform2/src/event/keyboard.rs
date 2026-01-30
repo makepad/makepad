@@ -141,7 +141,9 @@ impl Default for KeyCode {
 
 
 // lowest common denominator keymap between desktop and web
-#[derive(Script, ScriptHook, Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, Eq, PartialEq)]
+// Note: Using manual SerJson/DeJson impl with integer encoding to reduce code bloat
+// (derive-based string matching generates ~9500 lines of LLVM IR for 80 variants)
+#[derive(Script, ScriptHook, Clone, Copy, Debug, SerBin, DeBin, Eq, PartialEq)]
 pub enum KeyCode {
     #[pick] Escape,
 
@@ -337,5 +339,51 @@ impl KeyCode{
             KeyCode::Numpad9 => Some('9'),
             _ => None
         }
+    }
+}
+
+// Const array for efficient index-to-variant conversion (all 102 variants in order)
+const KEYCODE_VARIANTS: [KeyCode; 102] = [
+    KeyCode::Escape, KeyCode::Back, KeyCode::Backtick,
+    KeyCode::Key0, KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4,
+    KeyCode::Key5, KeyCode::Key6, KeyCode::Key7, KeyCode::Key8, KeyCode::Key9,
+    KeyCode::Minus, KeyCode::Equals, KeyCode::Backspace, KeyCode::Tab,
+    KeyCode::KeyQ, KeyCode::KeyW, KeyCode::KeyE, KeyCode::KeyR, KeyCode::KeyT,
+    KeyCode::KeyY, KeyCode::KeyU, KeyCode::KeyI, KeyCode::KeyO, KeyCode::KeyP,
+    KeyCode::LBracket, KeyCode::RBracket, KeyCode::ReturnKey,
+    KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyD, KeyCode::KeyF, KeyCode::KeyG,
+    KeyCode::KeyH, KeyCode::KeyJ, KeyCode::KeyK, KeyCode::KeyL,
+    KeyCode::Semicolon, KeyCode::Quote, KeyCode::Backslash,
+    KeyCode::KeyZ, KeyCode::KeyX, KeyCode::KeyC, KeyCode::KeyV, KeyCode::KeyB,
+    KeyCode::KeyN, KeyCode::KeyM, KeyCode::Comma, KeyCode::Period, KeyCode::Slash,
+    KeyCode::Control, KeyCode::Alt, KeyCode::Shift, KeyCode::Logo,
+    KeyCode::Space, KeyCode::Capslock,
+    KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4, KeyCode::F5, KeyCode::F6,
+    KeyCode::F7, KeyCode::F8, KeyCode::F9, KeyCode::F10, KeyCode::F11, KeyCode::F12,
+    KeyCode::PrintScreen, KeyCode::ScrollLock, KeyCode::Pause,
+    KeyCode::Insert, KeyCode::Delete, KeyCode::Home, KeyCode::End,
+    KeyCode::PageUp, KeyCode::PageDown,
+    KeyCode::Numpad0, KeyCode::Numpad1, KeyCode::Numpad2, KeyCode::Numpad3,
+    KeyCode::Numpad4, KeyCode::Numpad5, KeyCode::Numpad6, KeyCode::Numpad7,
+    KeyCode::Numpad8, KeyCode::Numpad9,
+    KeyCode::NumpadEquals, KeyCode::NumpadSubtract, KeyCode::NumpadAdd, KeyCode::NumpadDecimal,
+    KeyCode::NumpadMultiply, KeyCode::NumpadDivide, KeyCode::Numlock, KeyCode::NumpadEnter,
+    KeyCode::ArrowUp, KeyCode::ArrowDown, KeyCode::ArrowLeft, KeyCode::ArrowRight,
+    KeyCode::Unknown,
+];
+
+// Manual SerJson/DeJson implementations using integer encoding
+// This reduces LLVM IR from ~9500 lines (string matching) to ~100 lines (integer parsing + array lookup)
+impl SerJson for KeyCode {
+    fn ser_json(&self, _d: usize, s: &mut SerJsonState) {
+        let idx = KEYCODE_VARIANTS.iter().position(|k| k == self).unwrap_or(101);
+        s.out.push_str(&idx.to_string());
+    }
+}
+
+impl DeJson for KeyCode {
+    fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> Result<Self, DeJsonErr> {
+        let val = u64::de_json(s, i)? as usize;
+        Ok(KEYCODE_VARIANTS.get(val).copied().unwrap_or(KeyCode::Unknown))
     }
 }
