@@ -24,7 +24,7 @@ script_mod!{
         ui: Window{
             pass.clear_color: vec4(0.25 0.05 0.05 1.0)
             window.inner_size: vec2(800 600)
-            $body: View{
+            $body +: {
                 flow: Down
                 padding: 20
                 spacing: 10
