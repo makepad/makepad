@@ -13,12 +13,21 @@ metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
 makepad-draw2 = { path = "../draw2", version = "2.0.0" }
 makepad-derive-widget2 = {path = "./derive_widget", version="2.0.0"}
 
-makepad-zune-jpeg ={ version = "0.3.17 ",  path = "../libs/zune-jpeg" }
-makepad-zune-png ={ version = "0.4.10", path = "../libs/zune-png"  }
+# Image decoding - optional via features (using fast zune decoders)
+makepad-zune-jpeg = { version = "0.3.17", path = "../libs/zune-jpeg", optional = true }
+makepad-zune-png = { version = "0.4.10", path = "../libs/zune-png", optional = true }
 
-makepad-html ={ path = "../libs/html", version = "1.0.0" }
+# HTML parsing - optional via feature
+makepad-html = { path = "../libs/html", version = "1.0.0", optional = true }
+
+# Text processing
 unicode-segmentation = "1.11.0"
-pulldown-cmark = { version = "0.12.2", default-features = false, features = ["simd"] }
+
+# Markdown parsing - optional via feature
+pulldown-cmark = { version = "0.12.2", default-features = false, features = ["simd"], optional = true }
+
+# SVG rendering - optional via feature (currently not in use)
+#resvg = { version = "0.43.0", optional = true }
 
 #makepad-fonts-emoji2 = {path = "./fonts/emoji", version = "2.0.0"}
 #makepad-fonts-chinese-regular2 = {path = "./fonts/chinese_regular", version = "2.0.0"}
@@ -30,5 +39,21 @@ serde = { version = "1.0", optional = true, features = ["derive"] }
 
 [features]
 default = []
+
+## Enables JPEG image decoding support
+jpg = ["dep:makepad-zune-jpeg"]
+
+## Enables PNG image decoding support (also enables png feature in draw2 for emoji fonts)
+png = ["dep:makepad-zune-png", "makepad-draw2/png"]
+
+## Enables HTML widget support
+html = ["dep:makepad-html"]
+
+## Enables Markdown widget support
+markdown = ["dep:pulldown-cmark"]
+
+## Enables SVG rendering support (placeholder - resvg not yet integrated)
+svg = []
+
 ## Enables certain public-facing types to derive serde serialization traits.
 serde = ["dep:serde", "makepad-draw2/serde", "makepad-derive-widget2/serde"]
