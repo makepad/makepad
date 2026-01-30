@@ -17,7 +17,7 @@ script_mod!{
                 sdf.result
             }
         }
-        me.draw_text.color = #0f0
+        draw_text.color: #0f0
     }
     
     #(App::script_component(vm)){
@@ -32,13 +32,11 @@ script_mod!{
                 $view: RoundedView{
                     width: 250 
                     height: 100
-                    me.draw_bg.color = #494
+                    draw_bg.color: #494
                 }
                 $label: Label{
                     text: "Hello from Label!"
-                    draw_text +: {
-                        color: #ff0
-                    }
+                    draw_text.color: #ff0
                 }
                 $heading: H1{
                     text: "This is a Heading"
