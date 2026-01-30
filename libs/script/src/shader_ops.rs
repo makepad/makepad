@@ -99,7 +99,7 @@ impl ShaderFnCompiler {
                 write!(s, " {} {}", op, s2).ok();
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
             } else {
-                script_err_not_found!(self.trap, "shader: variable {:?} not found in scope", id);
+                script_err_not_found!(self.trap, "shader: variable {} not found in scope", id);
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
             }
         } else {
