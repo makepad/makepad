@@ -71,7 +71,7 @@ pub fn script_mod(vm:&mut ScriptVm){
     script_mod!{
         use mod.animator;
         animator.Animator = mod.std.set_type_default() do #(Animator::script_ext(vm)){}
-        animator.AnimatorStates = #(AnimatorState::script_ext(vm)){}
+        animator.AnimatorGroup = #(AnimatorGroup::script_ext(vm)){}
         animator.AnimatorState =  #(AnimatorState::script_api(vm)){}
         animator.Play =  #(Play::script_api(vm))
         animator.Ease = #(Ease::script_api(vm))
@@ -128,12 +128,12 @@ pub enum Animate {
 
 /// Container for all states within a state group (e.g., hover: {off, on, drag})
 #[derive(Default, Script)]
-pub struct AnimatorStates {
+pub struct AnimatorGroup {
     #[live] default: LiveId,
     #[rust] states: LiveIdMap<LiveId, AnimatorState>
 }
 
-impl ScriptHook for AnimatorStates {
+impl ScriptHook for AnimatorGroup {
     fn on_custom_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
         let Some(obj) = value.as_object() else {
             return false;
@@ -191,7 +191,7 @@ struct AnimatorTrack {
 pub struct Animator {
     #[rust] pub is_defined: bool,
     #[rust] pub next_frame: NextFrame,
-    #[rust] pub state_groups: LiveIdMap<LiveId, AnimatorStates>,
+    #[rust] pub groups: LiveIdMap<LiveId, AnimatorGroup>,
     /// Runtime: Current state for each state group
     #[rust] current_states: LiveIdMap<LiveId, LiveId>,
     /// Runtime: Active animation tracks (one per state group that's animating)
@@ -211,8 +211,8 @@ impl ScriptHook for Animator {
         vm.map_mut_with(obj, |vm, map| {
             for (key, map_value) in map.iter() {
                 if let Some(group_id) = key.as_id() {
-                    let states = AnimatorStates::script_from_value(vm, map_value.value);
-                    self.state_groups.insert(group_id, states);
+                    let group = AnimatorGroup::script_from_value(vm, map_value.value);
+                    self.groups.insert(group_id, group);
                 }
             }
         });
@@ -227,8 +227,8 @@ impl ScriptApplyDefault for Animator{
             return None
         }
         let index = apply.as_default().map_or(0, |x| x + 1);
-        let (_, states) = self.state_groups.iter().nth(index)?;
-        let state = states.states.get(&states.default)?;
+        let (_, group) = self.groups.iter().nth(index)?;
+        let state = group.states.get(&group.default)?;
         
         // Return the apply value from that state
         let apply = state.apply?.into();
@@ -259,10 +259,10 @@ impl Animator{
         let target_state_id = state[1];
         
         // Get the state group
-        let states = self.state_groups.get(&group_id)?;
+        let group = self.groups.get(&group_id)?;
         
         // Get the target state
-        let target_state = states.states.get(&target_state_id)?;
+        let target_state = group.states.get(&target_state_id)?;
         
         // Get the apply object
         let target_apply = target_state.apply?;
@@ -272,7 +272,7 @@ impl Animator{
         
         // Get the current state for this group (from current_states or default)
         let current_state_id = self.current_states.get(&group_id).copied()
-            .unwrap_or(states.default);
+            .unwrap_or(group.default);
         
         // Determine from_state_id for Play mode lookup:
         // If there's an active track, we're coming from that track's target state
@@ -323,7 +323,7 @@ impl Animator{
             self.last_values.get(&group_id).copied()
         }.or_else(|| {
             // Fall back to the current state's static apply
-            let current_state = states.states.get(&current_state_id)?;
+            let current_state = group.states.get(&current_state_id)?;
             current_state.apply
         })?;
         
@@ -358,10 +358,10 @@ impl Animator{
         let target_state_id = state[1];
         
         // Get the state group
-        let states = self.state_groups.get(&group_id)?;
+        let group = self.groups.get(&group_id)?;
         
         // Get the target state
-        let target_state = states.states.get(&target_state_id)?;
+        let target_state = group.states.get(&target_state_id)?;
         
         // Get the apply object
         let target_apply = target_state.apply?;
@@ -395,8 +395,8 @@ impl Animator{
         }
         
         // Fall back to default
-        if let Some(states) = self.state_groups.get(&group_id) {
-            return states.default == state_id;
+        if let Some(group) = self.groups.get(&group_id) {
+            return group.default == state_id;
         }
         
         false

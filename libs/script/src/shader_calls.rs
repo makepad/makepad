@@ -613,6 +613,7 @@ impl ShaderFnCompiler {
                 | Some(ShaderMe::ScriptCall { .. })
                 | Some(ShaderMe::TextureBuiltin { .. })
                 | Some(ShaderMe::BuiltinCall { .. })
+                | Some(ShaderMe::PodBuiltinMethod { .. })
         );
         if !is_call_me {
             // No call ME was pushed - the call setup must have failed
@@ -636,58 +637,12 @@ impl ShaderFnCompiler {
                     self.handle_texture_builtin_exec(vm, output, method_id, texture_expr, args);
                 }
                 ShaderMe::BuiltinCall { name, fnptr: _, args } => {
-                    let builtins = &vm.code.builtins.pod;
-
-                    // Check if any arg is a float type - if so, abstract ints should be floats
-                    let has_float = args.iter().any(|(ty, _)| match ty {
-                        ShaderType::Pod(pt) => vm.heap.pod_types[pt.index as usize].ty.is_float_type(),
-                        ShaderType::AbstractFloat => true,
-                        _ => false,
-                    });
-
-                    // Build concrete args for type_table_builtin and format output
-                    let mut concrete_args = Vec::new();
-                    let mut out = self.stack.new_string();
-                    let mapped_name = output.backend.map_builtin_name(name);
-                    write!(out, "{}(", mapped_name).ok();
-
-                    for (i, (ty, s)) in args.into_iter().enumerate() {
-                        if i > 0 {
-                            out.push_str(", ");
-                        }
-
-                        match &ty {
-                            ShaderType::AbstractInt | ShaderType::AbstractFloat => {
-                                if has_float {
-                                    // Format as float literal
-                                    concrete_args.push(builtins.pod_f32);
-                                    // Check if s is a simple integer that needs .0 suffix
-                                    if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
-                                        out.push_str(&s);
-                                        out.push_str(".0");
-                                    } else {
-                                        out.push_str(&s);
-                                    }
-                                } else {
-                                    concrete_args.push(ty.make_concrete(builtins).unwrap_or(builtins.pod_void));
-                                    out.push_str(&s);
-                                }
-                            }
-                            ShaderType::Pod(pt) => {
-                                concrete_args.push(*pt);
-                                out.push_str(&s);
-                            }
-                            _ => {
-                                concrete_args.push(ty.make_concrete(builtins).unwrap_or(builtins.pod_void));
-                                out.push_str(&s);
-                            }
-                        }
-                        self.stack.free_string(s);
-                    }
-
-                    out.push_str(")");
-                    let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
-                    self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
+                    self.handle_builtin_call(vm, output, name, args);
+                }
+                ShaderMe::PodBuiltinMethod { name, self_ty: _, args } => {
+                    // Pod builtin method: x.mix(y, a) -> mix(x, y, a)
+                    // Reuse the same logic as BuiltinCall
+                    self.handle_builtin_call(vm, output, name, args);
                 }
                 _ => {
                     // This case should not be reached due to the guard at the top of handle_call_exec
@@ -695,6 +650,62 @@ impl ShaderFnCompiler {
                 }
             }
         }
+    }
+    
+    /// Handle a builtin function call (either from BuiltinCall or PodBuiltinMethod)
+    fn handle_builtin_call(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, name: LiveId, args: Vec<(ShaderType, String)>) {
+        let builtins = &vm.code.builtins.pod;
+
+        // Check if any arg is a float type - if so, abstract ints should be floats
+        let has_float = args.iter().any(|(ty, _)| match ty {
+            ShaderType::Pod(pt) => vm.heap.pod_types[pt.index as usize].ty.is_float_type(),
+            ShaderType::AbstractFloat => true,
+            _ => false,
+        });
+
+        // Build concrete args for type_table_builtin and format output
+        let mut concrete_args = Vec::new();
+        let mut out = self.stack.new_string();
+        let mapped_name = output.backend.map_builtin_name(name);
+        write!(out, "{}(", mapped_name).ok();
+
+        for (i, (ty, s)) in args.into_iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+
+            match &ty {
+                ShaderType::AbstractInt | ShaderType::AbstractFloat => {
+                    if has_float {
+                        // Format as float literal
+                        concrete_args.push(builtins.pod_f32);
+                        // Check if s is a simple integer that needs .0 suffix
+                        if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                            out.push_str(&s);
+                            out.push_str(".0");
+                        } else {
+                            out.push_str(&s);
+                        }
+                    } else {
+                        concrete_args.push(ty.make_concrete(builtins).unwrap_or(builtins.pod_void));
+                        out.push_str(&s);
+                    }
+                }
+                ShaderType::Pod(pt) => {
+                    concrete_args.push(*pt);
+                    out.push_str(&s);
+                }
+                _ => {
+                    concrete_args.push(ty.make_concrete(builtins).unwrap_or(builtins.pod_void));
+                    out.push_str(&s);
+                }
+            }
+            self.stack.free_string(s);
+        }
+
+        out.push_str(")");
+        let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
+        self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
     }
 
     pub(crate) fn handle_texture_builtin_exec(
@@ -855,7 +866,21 @@ impl ShaderFnCompiler {
                 }
             }
             
-            // self_ty wasn't an Id - could be a Pod or other type
+            // self_ty is directly a Pod type (not an Id that resolves to a Pod)
+            if let ShaderType::Pod(pod_ty) = self_ty {
+                if self.handle_pod_method_call_args(vm, output, opargs, method_id, pod_ty, &self_s.clone(), &self_s) {
+                    return;
+                }
+                // Method not found on pod type
+                let type_name = vm.heap.pod_type_name(pod_ty)
+                    .map(|id| id.as_string(|s| s.unwrap_or("unknown").to_string()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                self.stack.free_string(self_s);
+                script_err_not_found!(self.trap, "method {:?} not found on {}", method_id, type_name);
+                return;
+            }
+            
+            // self_ty wasn't an Id or Pod - some other type
             let type_name = self.shader_type_to_string(vm, &self_ty);
             self.stack.free_string(self_s);
             script_err_not_found!(self.trap, "method {:?} not found on {}", method_id, type_name);
@@ -1083,8 +1108,24 @@ impl ShaderFnCompiler {
         self_s_slice: &str,
         self_s: &String,
     ) -> bool {
+        // First check for known shader builtin methods (mix, clamp, etc.)
+        // These translate to builtin shader functions: x.mix(y, a) -> mix(x, y, a)
+        if Self::is_pod_builtin_method(method_id) {
+            let mut self_arg = self.stack.new_string();
+            write!(self_arg, "{}", self_s_slice).ok();
+            self.mes.push(ShaderMe::PodBuiltinMethod {
+                name: method_id,
+                self_ty: pod_ty,
+                args: vec![(ShaderType::Pod(pod_ty), self_arg)],
+            });
+            self.stack.free_string(self_s.clone());
+            self.maybe_pop_to_me(vm, opargs);
+            return true;
+        }
+        
+        // Look up method on the pod type's object (use NoTrap to avoid error messages)
         let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
-        let fnobj = vm.heap.value(pod_ty_data.object, method_id.into(), self.trap.pass());
+        let fnobj = vm.heap.value(pod_ty_data.object, method_id.into(), NoTrap);
 
         if let Some(fnobj) = fnobj.as_object() {
             if let Some(fnptr) = vm.heap.as_fn(fnobj) {
@@ -1138,7 +1179,18 @@ impl ShaderFnCompiler {
                 return true;
             }
         }
+        
         false
+    }
+    
+    /// Check if a method name is a known shader builtin that can be called on pod types
+    fn is_pod_builtin_method(method_id: LiveId) -> bool {
+        method_id == id!(mix) || 
+        method_id == id!(clamp) || 
+        method_id == id!(smoothstep) || 
+        method_id == id!(step) || 
+        method_id == id!(min) || 
+        method_id == id!(max)
     }
 
     pub(crate) fn handle_pod_type_method_call_args(

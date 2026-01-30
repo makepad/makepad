@@ -37,19 +37,11 @@ script_mod!{
                 font_size: theme.font_size_p
             }
             get_color: fn() {
-                return mix(
-                    mix(
-                        mix(
-                            mix(self.color, self.color_focus, self.focus)
-                            self.color_hover
-                            self.hover
-                        )
-                        self.color_down
-                        self.down
-                    )
-                    self.color_disabled
-                    self.disabled
-                )
+                return self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                    .mix(self.color_disabled, self.disabled)
             }
         }
         
@@ -168,45 +160,20 @@ script_mod!{
                     self.border_radius
                 )
                 
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color, color_2, gradient_fill_dir)
-                                    mix(self.color_focus, color_2_focus, gradient_fill_dir)
-                                    self.focus
-                                )
-                                mix(self.color_hover, color_2_hover, gradient_fill_dir)
-                                self.hover
-                            )
-                            mix(self.color_down, color_2_down, gradient_fill_dir)
-                            self.down
-                        )
-                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir)
-                        self.disabled
-                    )
-                )
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.border_color, border_color_2, gradient_border_dir)
-                                    mix(self.border_color_focus, border_color_2_focus, gradient_border_dir)
-                                    self.focus
-                                )
-                                mix(self.border_color_hover, border_color_2_hover, gradient_border_dir)
-                                self.hover
-                            )
-                            mix(self.border_color_down, border_color_2_down, gradient_border_dir)
-                            self.down
-                        )
-                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir)
-                        self.disabled
-                    )
-                    self.border_size
-                )
+                let fill = mix(self.color, color_2, gradient_fill_dir)
+                    .mix(mix(self.color_focus, color_2_focus, gradient_fill_dir), self.focus)
+                    .mix(mix(self.color_hover, color_2_hover, gradient_fill_dir), self.hover)
+                    .mix(mix(self.color_down, color_2_down, gradient_fill_dir), self.down)
+                    .mix(mix(self.color_disabled, color_2_disabled, gradient_fill_dir), self.disabled)
+                
+                let stroke = mix(self.border_color, border_color_2, gradient_border_dir)
+                    .mix(mix(self.border_color_focus, border_color_2_focus, gradient_border_dir), self.focus)
+                    .mix(mix(self.border_color_hover, border_color_2_hover, gradient_border_dir), self.hover)
+                    .mix(mix(self.border_color_down, border_color_2_down, gradient_border_dir), self.down)
+                    .mix(mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir), self.disabled)
+                
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
                 return sdf.result
             }
         }
