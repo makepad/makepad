@@ -59,8 +59,8 @@ script_mod!{
             hover: instance(0.0)
             focus: instance(0.0)
             down: instance(0.0)
-            enabled: instance(1.0)
-            disabled: instance(1.0)
+            enabled: instance(0.0)
+            disabled: instance(0.0)
 
             border_size: uniform(theme.beveling)
             border_radius: uniform(theme.corner_radius)
@@ -159,7 +159,7 @@ script_mod!{
                 if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = gradient_fill.x
                 }
-
+                
                 sdf.box(
                     self.border_size
                     self.border_size
