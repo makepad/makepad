@@ -839,6 +839,14 @@ impl ScriptNew for WidgetRef {
     fn script_new(_vm: &mut ScriptVm) -> Self {
         Self(Rc::new(RefCell::new(None)))
     }
+    
+    fn script_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
+        // WidgetRef is a polymorphic container that can hold any widget type.
+        // Accept nil (for empty widget refs) or any object.
+        // The actual widget type validation happens at apply time when we
+        // look up the type in the WidgetRegistry.
+        value.is_nil() || value.is_object()
+    }
 }
 
 pub trait WidgetActionTrait: 'static + Send+ Sync {
