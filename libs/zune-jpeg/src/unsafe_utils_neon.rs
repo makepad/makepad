@@ -6,15 +6,14 @@
  * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
 
-#![cfg(target_arch = "aarch64")]
-#![cfg(feature = "neon")]
+#![cfg(all(feature = "neon", target_arch = "aarch64"))]
 // TODO can this be extended to armv7
 
 //! This module provides unsafe ways to do some things
 #![allow(clippy::wildcard_imports)]
 
-use std::arch::aarch64::*;
-use std::ops::{Add, AddAssign, BitOr, BitOrAssign, Mul, MulAssign, Sub};
+use core::arch::aarch64::*;
+use core::ops::{Add, AddAssign, BitOr, BitOrAssign, Mul, MulAssign, Sub};
 
 pub type VecType = int32x4x2_t;
 
@@ -229,7 +228,7 @@ pub unsafe fn transpose(
     v0: &mut YmmRegister, v1: &mut YmmRegister, v2: &mut YmmRegister, v3: &mut YmmRegister,
     v4: &mut YmmRegister, v5: &mut YmmRegister, v6: &mut YmmRegister, v7: &mut YmmRegister
 ) {
-    use std::mem::swap;
+    use core::mem::swap;
 
     let ul0 = &mut v0.mm256.0;
     let ul1 = &mut v1.mm256.0;
@@ -285,7 +284,7 @@ mod tests {
                 }
             }
 
-            let mut regs: [YmmRegister; 8] = std::mem::transmute(vals);
+            let mut regs: [YmmRegister; 8] = core::mem::transmute(vals);
             let mut reg0 = regs[0];
             let mut reg1 = regs[1];
             let mut reg2 = regs[2];
@@ -309,7 +308,7 @@ mod tests {
             regs[6] = reg6;
             regs[7] = reg7;
 
-            let vals_from_reg: [i32; 8 * 8] = std::mem::transmute(regs);
+            let vals_from_reg: [i32; 8 * 8] = core::mem::transmute(regs);
 
             for i in 0..8 {
                 for j in 0..i {

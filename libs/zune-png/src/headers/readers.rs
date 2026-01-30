@@ -6,9 +6,9 @@
 
 use alloc::{format, vec};
 
-use zune_core::bytestream::ZReaderTrait;
-use zune_core::log::{trace, warn};
-use zune_inflate::DeflateDecoder;
+use makepad_zune_core::bytestream::ZByteReaderTrait;
+use makepad_zune_core::log::{trace, warn};
+use makepad_zune_inflate::DeflateDecoder;
 
 use crate::apng::{ActlChunk, BlendOp, DisposeOp, FrameInfo, SingleFrame};
 use crate::decoder::{ItxtChunk, PLTEEntry, PngChunk, TextChunk, TimeInfo, ZtxtChunk};
@@ -16,7 +16,7 @@ use crate::enums::{FilterMethod, InterlaceMethod, PngChunkType, PngColor};
 use crate::error::PngDecodeErrors;
 use crate::PngDecoder;
 
-impl<T: ZReaderTrait> PngDecoder<T> {
+impl<T: ZByteReaderTrait> PngDecoder<T> {
     pub(crate) fn parse_ihdr(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
         if self.seen_hdr {
             return Err(PngDecodeErrors::GenericStatic("Multiple IHDR, corrupt PNG"));
@@ -25,8 +25,6 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         if chunk.length != 13 {
             return Err(PngDecodeErrors::GenericStatic("BAD IHDR length"));
         }
-
-        let pos_start = self.stream.get_position();
 
         self.png_info.width = self.stream.get_u32_be() as usize;
         self.png_info.height = self.stream.get_u32_be() as usize;
@@ -37,24 +35,24 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             ));
         }
 
-        if self.png_info.width > self.options.get_max_width() {
+        if self.png_info.width > self.options.max_width() {
             return Err(PngDecodeErrors::Generic(format!(
                 "Image width {}, larger than maximum configured width {}, aborting",
                 self.png_info.width,
-                self.options.get_max_width()
+                self.options.max_width()
             )));
         }
 
-        if self.png_info.height > self.options.get_max_height() {
+        if self.png_info.height > self.options.max_height() {
             return Err(PngDecodeErrors::Generic(format!(
                 "Image height {}, larger than maximum configured height {}, aborting",
                 self.png_info.height,
-                self.options.get_max_height()
+                self.options.max_height()
             )));
         }
 
-        self.png_info.depth = self.stream.get_u8();
-        let color = self.stream.get_u8();
+        self.png_info.depth = self.stream.read_u8();
+        let color = self.stream.read_u8();
 
         if let Some(img_color) = PngColor::from_int(color) {
             self.png_info.color = img_color;
@@ -82,11 +80,11 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             }
         }
 
-        if self.stream.get_u8() != 0 {
+        if self.stream.read_u8() != 0 {
             return Err(PngDecodeErrors::GenericStatic("Unknown compression method"));
         }
 
-        let filter_method = self.stream.get_u8();
+        let filter_method = self.stream.read_u8();
 
         if let Some(method) = FilterMethod::from_int(filter_method) {
             self.png_info.filter_method = method;
@@ -96,7 +94,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             )));
         }
 
-        let interlace_method = self.stream.get_u8();
+        let interlace_method = self.stream.read_u8();
 
         if let Some(method) = InterlaceMethod::from_int(interlace_method) {
             self.png_info.interlace_method = method;
@@ -106,12 +104,8 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             )));
         }
 
-        let pos_end = self.stream.get_position();
-
-        assert_eq!(pos_end - pos_start, 13); //we read all bytes
-
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
 
         trace!("Width: {}", self.png_info.width);
         trace!("Height: {}", self.png_info.height);
@@ -150,13 +144,13 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         self.palette.resize(256, PLTEEntry::default());
 
         for pal_chunk in self.palette.iter_mut().take(chunk.length / 3) {
-            pal_chunk.red = self.stream.get_u8();
-            pal_chunk.green = self.stream.get_u8();
-            pal_chunk.blue = self.stream.get_u8();
+            pal_chunk.red = self.stream.read_u8();
+            pal_chunk.green = self.stream.read_u8();
+            pal_chunk.blue = self.stream.read_u8();
         }
 
         // skip crc chunk
-        self.stream.skip(4);
+        self.stream.skip(4)?;
         self.seen_ptle = true;
         Ok(())
     }
@@ -169,15 +163,18 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         // we will later pass these to the deflate decoder as a whole, to get the whole
         // uncompressed stream.
 
-        let idat_stream = self.stream.get(png_chunk.length)?;
+        let chunk = self.frames[0].chunk_mut();
+        let prev_len = chunk.len();
+        chunk.resize(chunk.len() + png_chunk.length, 0);
+        self.stream.read_exact_bytes(&mut chunk[prev_len..])?;
 
         // the first frame always contains the idat chunks
         // so we push this chunk there
-        self.frames[0].push_chunk(idat_stream);
+        // self.frames[0].push_chunk(idat_stream);
         //self.idat_chunks.extend_from_slice(idat_stream);
 
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
 
         Ok(())
     }
@@ -204,7 +201,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                     )));
                 }
                 for i in 0..chunk.length {
-                    self.palette[i].alpha = self.stream.get_u8();
+                    self.palette[i].alpha = self.stream.read_u8();
                 }
             }
             _ => {
@@ -214,13 +211,13 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             }
         }
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
         self.seen_trns = true;
 
         Ok(())
     }
     pub(crate) fn parse_gama(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
-        if self.options.get_strict_mode() && chunk.length != 4 {
+        if self.options.strict_mode() && chunk.length != 4 {
             let error = format!("Gama chunk length is not 4 but {}", chunk.length);
             return Err(PngDecodeErrors::Generic(error));
         }
@@ -234,7 +231,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         }
         self.png_info.gamma = Some(gama);
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
 
         Ok(())
     }
@@ -243,7 +240,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
     pub(crate) fn parse_actl(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
         if chunk.length != 8 {
             warn!("Invalid chunk length for ACTL, skipping");
-            self.stream.skip(chunk.length + 4);
+            self.stream.skip(chunk.length + 4)?;
         }
         // extract num_frames
         let num_frames = self.stream.get_u32_be();
@@ -256,7 +253,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         self.actl_info = Some(actl);
 
         // skip CRC
-        self.stream.skip(4);
+        self.stream.skip(4)?;
 
         Ok(())
     }
@@ -264,21 +261,21 @@ impl<T: ZReaderTrait> PngDecoder<T> {
     /// Parse the tIME chunk if present in PNG
     pub(crate) fn parse_time(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
         if chunk.length != 7 {
-            if self.options.get_strict_mode() {
+            if self.options.strict_mode() {
                 return Err(PngDecodeErrors::GenericStatic("Invalid tIME chunk length"));
             }
             warn!("Invalid time chunk length {:?}", chunk.length);
             // skip chunk + crc
-            self.stream.skip(chunk.length + 4);
+            self.stream.skip(chunk.length + 4)?;
             return Ok(());
         }
 
         let year = self.stream.get_u16_be();
-        let month = self.stream.get_u8() % 13;
-        let day = self.stream.get_u8() % 32;
-        let hour = self.stream.get_u8() % 24;
-        let minute = self.stream.get_u8() % 60;
-        let second = self.stream.get_u8() % 61;
+        let month = self.stream.read_u8() % 13;
+        let day = self.stream.read_u8() % 32;
+        let hour = self.stream.read_u8() % 24;
+        let minute = self.stream.read_u8() % 60;
+        let second = self.stream.read_u8() % 61;
 
         let time = TimeInfo {
             year,
@@ -290,18 +287,12 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         };
         self.png_info.time_info = Some(time);
         // skip past crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
 
         Ok(())
     }
 
     pub(crate) fn parse_exif(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
-        if !self.stream.has(chunk.length) {
-            warn!("Too large exif chunk");
-            self.stream.skip(chunk.length + 4);
-
-            return Ok(());
-        }
         let data = self.stream.peek_at(0, chunk.length).unwrap();
 
         // recommended that we check for first four bytes compatibility
@@ -309,7 +300,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         // First check does litle endian, and second big endian
         // See https://ftp-osl.osuosl.org/pub/libpng/documents/pngext-1.5.0.html#C.eXIf
         if !(data.starts_with(&[73, 73, 42, 0]) || data.starts_with(&[77, 77, 0, 42])) {
-            if self.options.get_strict_mode() {
+            if self.options.strict_mode() {
                 return Err(PngDecodeErrors::GenericStatic(
                     "[strict-mode]: Invalid exif chunk"
                 ));
@@ -317,25 +308,25 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                 warn!("Invalid exif chunk, it doesn't start with the magic bytes")
             }
             // do not parse
-            self.stream.skip(chunk.length + 4);
+            self.stream.skip(chunk.length + 4)?;
             return Ok(());
         }
         self.png_info.exif = Some(data.to_vec());
         // skip past crc
-        self.stream.skip(chunk.length + 4);
+        self.stream.skip(chunk.length + 4)?;
 
         Ok(())
     }
 
     /// Parse the iCCP chunk
-    pub(crate) fn parse_iccp(&mut self, chunk: PngChunk) {
+    pub(crate) fn parse_iccp(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
         let length = core::cmp::min(chunk.length, 79);
         let keyword_bytes = self.stream.peek_at(0, length).unwrap();
         let keyword_position = keyword_bytes.iter().position(|x| *x == 0);
 
         if let Some(pos) = keyword_position {
             // skip name plus null byte
-            self.stream.skip(pos + 1);
+            self.stream.skip(pos + 1)?;
 
             let remainder = chunk
                 .length
@@ -344,7 +335,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                 .saturating_sub(1); // compression method
 
             // read compression method
-            let _ = self.stream.get_u8();
+            let _ = self.stream.read_u8();
 
             // read remaining chunk
             let data = self.stream.peek_at(0, remainder).unwrap();
@@ -355,18 +346,19 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             } else {
                 warn!("Could not decode ICC profile, error with zlib stream");
             }
-            self.stream.skip(remainder);
+            self.stream.skip(remainder)?;
         } else {
             warn!("Could not find keyword in iCCP chunk, possibly corrupt chunk");
             // skip the length
-            self.stream.skip(chunk.length);
+            self.stream.skip(chunk.length)?;
         }
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
+        Ok(())
     }
 
     /// Parse the text chunk
-    pub(crate) fn parse_text(&mut self, chunk: PngChunk) {
+    pub(crate) fn parse_text(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
         let length = core::cmp::min(chunk.length, 79);
         let keyword_bytes = self.stream.peek_at(0, length).unwrap();
         let keyword_position = keyword_bytes.iter().position(|x| *x == 0);
@@ -374,7 +366,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         if let Some(pos) = keyword_position {
             let keyword = keyword_bytes[..pos].to_vec();
             // skip name plus null byte
-            self.stream.skip(pos + 1);
+            self.stream.skip(pos + 1)?;
 
             let remainder = chunk.length.saturating_sub(pos).saturating_sub(1); // null byte
 
@@ -385,17 +377,18 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             let text_chunk = TextChunk { keyword, text };
             self.png_info.text_chunk.push(text_chunk);
 
-            self.stream.skip(remainder);
+            self.stream.skip(remainder)?;
         } else {
             warn!("Could not find keyword in text chunk, possibly corrupt chunk");
             // skip the length
-            self.stream.skip(chunk.length);
+            self.stream.skip(chunk.length)?;
         }
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
+        Ok(())
     }
     /// Parse the itXT chunk
-    pub(crate) fn parse_itxt(&mut self, chunk: PngChunk) {
+    pub(crate) fn parse_itxt(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
         let length = core::cmp::min(chunk.length, 79);
         let keyword_bytes = self.stream.peek_at(0, length).unwrap();
         let keyword_position = keyword_bytes.iter().position(|x| *x == 0);
@@ -409,7 +402,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                 + 1  // null separator
                 + 1; // null separator
 
-            self.stream.skip(bytes_to_skip);
+            self.stream.skip(bytes_to_skip)?;
             let remainder = chunk.length.saturating_sub(bytes_to_skip);
             let raw_data = self.stream.peek_at(0, remainder).unwrap().to_vec();
 
@@ -419,17 +412,18 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             };
             self.png_info.itxt_chunk.push(itxt_chunk);
             // skip bytes we read
-            self.stream.skip(remainder);
+            self.stream.skip(remainder)?;
         } else {
             warn!("Possibly corrupt iTXT chunk");
-            self.stream.skip(chunk.length);
+            self.stream.skip(chunk.length)?;
         }
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
+        Ok(())
     }
 
     /// Parse zTxt chunk
-    pub(crate) fn parse_ztxt(&mut self, chunk: PngChunk) {
+    pub(crate) fn parse_ztxt(&mut self, chunk: PngChunk) -> Result<(), PngDecodeErrors> {
         let length = core::cmp::min(chunk.length, 79);
         let keyword_bytes = self.stream.peek_at(0, length).unwrap();
         let keyword_position = keyword_bytes.iter().position(|x| *x == 0);
@@ -438,7 +432,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             let keyword = keyword_bytes[..pos].to_vec();
 
             // skip name plus null byte
-            self.stream.skip(pos + 1);
+            self.stream.skip(pos + 1)?;
 
             let remainder = chunk
                 .length
@@ -447,7 +441,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                 .saturating_sub(1); // compression method
 
             // read compression method
-            let _ = self.stream.get_u8();
+            let _ = self.stream.read_u8();
 
             // read remaining chunk
             let data = self.stream.peek_at(0, remainder).unwrap();
@@ -462,14 +456,15 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             } else {
                 warn!("Could not decode ztxt profile, error with zlib stream");
             }
-            self.stream.skip(remainder);
+            self.stream.skip(remainder)?;
         } else {
             warn!("Could not find keyword in iCCP chunk, possibly corrupt chunk");
             // skip the length
-            self.stream.skip(chunk.length);
+            self.stream.skip(chunk.length)?;
         }
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
+        Ok(())
     }
 
     /// Parse the FCTL chunk
@@ -489,7 +484,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             if next_header.chunk_type == PngChunkType::IEND {
                 // moves behind chunk length and chunk header
                 // the caller will read it as IEND and terminate
-                self.stream.rewind(8);
+                self.stream.rewind(8)?;
                 self.seen_iend = true;
                 break;
             }
@@ -503,7 +498,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                 //
                 // we will decode the frame we have before we
                 // go to the next frame
-                self.stream.rewind(8);
+                self.stream.rewind(8)?;
                 break;
             } else if next_header.chunk_type == PngChunkType::fdAT {
                 if should_add_fctl {
@@ -514,10 +509,16 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                 }
                 // get frame data
                 // skip four  bytes since it's usually sequence number
-                let stream = &self.stream.peek_at(0, next_header.length)?[4..];
-                self.frames.last_mut().unwrap().push_chunk(stream);
+                let chunk = self.frames.last_mut().unwrap().chunk_mut();
+                let prev_len = chunk.len();
+                // skip the header
+                self.stream.skip(4)?;
+                // allocate space for header ignoring content
+                chunk.resize(chunk.len() + next_header.length.saturating_sub(4), 0);
+
+                self.stream.read_exact_bytes(&mut chunk[prev_len..])?;
                 // skip crc
-                self.stream.skip(next_header.length + 4);
+                self.stream.skip(4)?;
             } else {
                 warn!(
                     "Found marker {:?} in between fctl when it shouldn't be there",
@@ -549,8 +550,8 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         let y_offset = self.stream.get_u32_be() as usize;
         let delay_num = self.stream.get_u16_be();
         let delay_denom = self.stream.get_u16_be();
-        let dispose_op = DisposeOp::from_int(self.stream.get_u8())?;
-        let blend_op = BlendOp::from_int(self.stream.get_u8())?;
+        let dispose_op = DisposeOp::from_int(self.stream.read_u8())?;
+        let blend_op = BlendOp::from_int(self.stream.read_u8())?;
 
         let fctl_info = FrameInfo {
             seq_number,
@@ -565,7 +566,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             is_part_of_seq: true
         };
         // skip crc
-        self.stream.skip(4);
+        self.stream.skip(4)?;
         Ok(fctl_info)
     }
 }

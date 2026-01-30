@@ -240,19 +240,19 @@ pub fn handle_avg_first(raw: &[u8], current: &mut [u8], components: usize) {
 
 #[inline(always)]
 pub fn paeth(a: u8, b: u8, c: u8) -> u8 {
-    let a = i16::from(a);
-    let b = i16::from(b);
-    let c = i16::from(c);
-    let p = a + b - c;
-    let pa = (p - a).abs();
-    let pb = (p - b).abs();
-    let pc = (p - c).abs();
+    // FROM STB
+    // This formulation looks very different from the reference in the PNG spec, but is
+    // actually equivalent and has favorable data dependencies and admits straightforward
+    // generation of branch-free code, which helps performance significantly.
 
-    if pa <= pb && pa <= pc {
-        return a as u8;
-    }
-    if pb <= pc {
-        return b as u8;
-    }
-    c as u8
+    let a = i32::from(a);
+    let b = i32::from(b);
+    let c = i32::from(c);
+    let thresh = c * 3 - (a + b);
+    let lo = if a < b { a } else { b };
+    let hi = if a < b { b } else { a };
+
+    let t0 = if hi <= thresh { lo } else { c };
+    let t1 = if thresh <= lo { hi } else { t0 };
+    return t1 as u8;
 }

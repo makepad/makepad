@@ -11,11 +11,16 @@
 //!
 //! The data is extracted from a SOF header.
 
+use alloc::vec::Vec;
 use alloc::{format, vec};
 
+use makepad_zune_core::log::trace;
+
+use crate::alloc::string::ToString;
 use crate::decoder::MAX_COMPONENTS;
 use crate::errors::DecodeErrors;
 use crate::upsampler::upsample_no_op;
+const MAX_SAMP_FACTOR: usize = 4;
 
 /// Represents an up-sampler function, this function will be called to upsample
 /// a down-sampled image
@@ -61,13 +66,17 @@ pub(crate) struct Components {
     /// Upsample destination, stores a scanline worth of sub sampled data
     pub upsample_dest: Vec<i16>,
     /// previous row, used to handle MCU boundaries
-    pub prev_row: Vec<i16>,
+    pub row_up: Vec<i16>,
     /// current row, used to handle MCU boundaries again
-    pub current_row: Vec<i16>,
+    pub row: Vec<i16>,
+    pub first_row_upsample_dest: Vec<i16>,
     pub idct_pos: usize,
     pub x: usize,
     pub w2: usize,
-    pub y: usize
+    pub y: usize,
+    pub sample_ratio: SampleRatios,
+    // a very annoying bug
+    pub fix_an_annoying_bug: usize
 }
 
 impl Components {
@@ -95,6 +104,19 @@ impl Components {
 
         let horizontal_sample = (a[1] >> 4) as usize;
         let vertical_sample = (a[1] & 0x0f) as usize;
+        // Match libjpeg turbo on checking for sampling factors
+        // Reject anything above 4
+        if horizontal_sample > MAX_SAMP_FACTOR {
+            return Err(DecodeErrors::Format(format!(
+                "Bogus Horizontal Sampling Factor {horizontal_sample}"
+            )));
+        }
+        if vertical_sample > MAX_SAMP_FACTOR {
+            return Err(DecodeErrors::Format(format!(
+                "Bogus Vertical Sampling Factor {vertical_sample}"
+            )));
+        }
+
         let quantization_table_number = a[2];
         // confirm quantization number is between 0 and MAX_COMPONENTS
         if usize::from(quantization_table_number) >= MAX_COMPONENTS {
@@ -110,12 +132,15 @@ impl Components {
             )));
         }
 
-        if !vertical_sample.is_power_of_two() {
-            return Err(DecodeErrors::Format(format!(
-                "Vertical sub-sample is not power of two({vertical_sample}) cannot decode"
-            )));
+        // if !vertical_sample.is_power_of_two() {
+        //     return Err(DecodeErrors::Format(format!(
+        //         "Vertical sub-sample is not power of two({vertical_sample}) cannot decode"
+        //     )));
+        // }
+        if vertical_sample == 0 {
+            // Check for invalid vertical sample
+            return Err(DecodeErrors::Format("Vertical sample is zero".to_string()));
         }
-
         trace!(
             "Component ID:{:?} \tHS:{} VS:{} QT:{}",
             id,
@@ -129,6 +154,7 @@ impl Components {
             vertical_sample,
             horizontal_sample,
             quantization_table_number,
+            first_row_upsample_dest: vec![],
             // These two will be set with sof marker
             dc_huff_table: 0,
             ac_huff_table: 0,
@@ -141,12 +167,14 @@ impl Components {
             needed: true,
             raw_coeff: vec![],
             upsample_dest: vec![],
-            prev_row: vec![],
-            current_row: vec![],
+            row_up: vec![],
+            row: vec![],
             idct_pos: 0,
             x: 0,
             y: 0,
-            w2: 0
+            w2: 0,
+            sample_ratio: SampleRatios::None,
+            fix_an_annoying_bug: 1
         })
     }
     /// Setup space for upsampling
@@ -159,10 +187,13 @@ impl Components {
     ///
     /// # Requirements
     ///  - width stride of this element is set for the component.
-    pub fn setup_upsample_scanline(&mut self, h_max: usize, v_max: usize) {
-        self.current_row = vec![0; self.width_stride * self.vertical_sample];
-        self.prev_row = vec![0; self.width_stride * self.vertical_sample];
-        self.upsample_dest = vec![128; self.width_stride * h_max * v_max];
+    pub fn setup_upsample_scanline(&mut self) {
+        self.row = vec![0; self.width_stride * self.vertical_sample];
+        self.row_up = vec![0; self.width_stride * self.vertical_sample];
+        self.first_row_upsample_dest =
+            vec![128; self.vertical_sample * self.width_stride * self.sample_ratio.sample()];
+        self.upsample_dest =
+            vec![0; self.width_stride * self.sample_ratio.sample() * self.fix_an_annoying_bug * 8];
     }
 }
 
@@ -179,10 +210,23 @@ pub enum ComponentID {
     Q
 }
 
-#[derive(Copy, Debug, Clone, PartialEq, Eq)]
+#[derive(Copy, Debug, Clone, PartialEq, Eq, Default)]
 pub enum SampleRatios {
     HV,
     V,
     H,
+    Generic(usize, usize),
+    #[default]
     None
+}
+
+impl SampleRatios {
+    pub fn sample(self) -> usize {
+        match self {
+            SampleRatios::HV => 4,
+            SampleRatios::V | SampleRatios::H => 2,
+            SampleRatios::Generic(a, b) => a * b,
+            SampleRatios::None => 1
+        }
+    }
 }

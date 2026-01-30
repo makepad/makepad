@@ -14,8 +14,8 @@ makepad-draw2 = { path = "../draw2", version = "2.0.0" }
 makepad-derive-widget2 = {path = "./derive_widget", version="2.0.0"}
 
 # Image decoding - optional via features (using fast zune decoders)
-makepad-zune-jpeg = { version = "0.3.17", path = "../libs/zune-jpeg", optional = true }
-makepad-zune-png = { version = "0.4.10", path = "../libs/zune-png", optional = true }
+makepad-zune-jpeg = { version = "0.5.12", path = "../libs/zune-jpeg", optional = true }
+makepad-zune-png = { version = "0.5.1", path = "../libs/zune-png", optional = true }
 
 # HTML parsing - optional via feature
 makepad-html = { path = "../libs/html", version = "1.0.0", optional = true }

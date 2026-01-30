@@ -6,7 +6,7 @@
 
 //! Utilities required by multiple implementations
 //! that help to do small things
-use zune_core::bit_depth::{BitDepth, ByteEndian};
+use makepad_zune_core::bit_depth::{BitDepth, ByteEndian};
 
 use crate::decoder::PLTEEntry;
 use crate::enums::PngColor;

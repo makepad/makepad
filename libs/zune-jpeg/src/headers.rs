@@ -11,19 +11,24 @@
 //! This file deals with decoding header information in a jpeg file
 //!
 use alloc::format;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 
-use makepad_zune_core::bytestream::ZReaderTrait;
+use makepad_zune_core::bytestream::ZByteReaderTrait;
 use makepad_zune_core::colorspace::ColorSpace;
+use makepad_zune_core::log::{debug, trace, warn};
 
-use crate::components::Components;
-use crate::decoder::{ICCChunk, JpegDecoder, MAX_COMPONENTS};
+use core::cmp::max;
+
+use crate::components::{Components, SampleRatios};
+use crate::decoder::{GainMapInfo, ICCChunk, JpegDecoder, MAX_COMPONENTS};
 use crate::errors::DecodeErrors;
 use crate::huffman::HuffmanTable;
 use crate::misc::{SOFMarkers, UN_ZIGZAG};
 
 ///**B.2.4.2 Huffman table-specification syntax**
 #[allow(clippy::similar_names, clippy::cast_sign_loss)]
-pub(crate) fn parse_huffman<T: ZReaderTrait>(
+pub(crate) fn parse_huffman<T: ZByteReaderTrait>(
     decoder: &mut JpegDecoder<T>
 ) -> Result<(), DecodeErrors>
 where
@@ -35,7 +40,7 @@ where
 
     while dht_length > 16 {
         // HT information
-        let ht_info = decoder.stream.get_u8_err()?;
+        let ht_info = decoder.stream.read_u8_err()?;
         // third bit indicates whether the huffman encoding is DC or AC type
         let dc_or_ac = (ht_info >> 4) & 0xF;
         // Indicate the position of this table, should be less than 4;
@@ -55,10 +60,7 @@ where
             )));
         }
 
-        decoder
-            .stream
-            .read_exact(&mut num_symbols[1..17])
-            .map_err(|_| DecodeErrors::ExhaustedData)?;
+        decoder.stream.read_exact_bytes(&mut num_symbols[1..17])?;
 
         dht_length -= 1 + 16;
 
@@ -81,10 +83,7 @@ where
 
         decoder
             .stream
-            .read_exact(&mut symbols[0..(symbols_sum as usize)])
-            .map_err(|x| {
-                DecodeErrors::Format(format!("Could not read symbols into the buffer\n{x}"))
-            })?;
+            .read_exact_bytes(&mut symbols[0..(symbols_sum as usize)])?;
         // store
         match dc_or_ac {
             0 => {
@@ -115,7 +114,7 @@ where
 
 ///**B.2.4.1 Quantization table-specification syntax**
 #[allow(clippy::cast_possible_truncation, clippy::needless_range_loop)]
-pub(crate) fn parse_dqt<T: ZReaderTrait>(img: &mut JpegDecoder<T>) -> Result<(), DecodeErrors> {
+pub(crate) fn parse_dqt<T: ZByteReaderTrait>(img: &mut JpegDecoder<T>) -> Result<(), DecodeErrors> {
     // read length
     let mut qt_length =
         img.stream
@@ -126,7 +125,7 @@ pub(crate) fn parse_dqt<T: ZReaderTrait>(img: &mut JpegDecoder<T>) -> Result<(),
             ))?;
     // A single DQT header may have multiple QT's
     while qt_length > 0 {
-        let qt_info = img.stream.get_u8_err()?;
+        let qt_info = img.stream.read_u8_err()?;
         // 0 = 8 bit otherwise 16 bit dqt
         let precision = (qt_info >> 4) as usize;
         // last 4 bits give us position
@@ -141,9 +140,8 @@ pub(crate) fn parse_dqt<T: ZReaderTrait>(img: &mut JpegDecoder<T>) -> Result<(),
             0 => {
                 let mut qt_values = [0; 64];
 
-                img.stream.read_exact(&mut qt_values).map_err(|x| {
-                    DecodeErrors::Format(format!("Could not read symbols into the buffer\n{x}"))
-                })?;
+                img.stream.read_exact_bytes(&mut qt_values)?;
+
                 qt_length -= (precision_value as u16) + 1 /*QT BIT*/;
                 // carry out un zig-zag here
                 un_zig_zag(&qt_values)
@@ -172,6 +170,7 @@ pub(crate) fn parse_dqt<T: ZReaderTrait>(img: &mut JpegDecoder<T>) -> Result<(),
             )));
         }
 
+        trace!("Assigning qt table {table_position} with precision {precision}");
         img.qt_tables[table_position] = Some(dct_table);
     }
 
@@ -180,7 +179,7 @@ pub(crate) fn parse_dqt<T: ZReaderTrait>(img: &mut JpegDecoder<T>) -> Result<(),
 
 /// Section:`B.2.2 Frame header syntax`
 
-pub(crate) fn parse_start_of_frame<T: ZReaderTrait>(
+pub(crate) fn parse_start_of_frame<T: ZByteReaderTrait>(
     sof: SOFMarkers, img: &mut JpegDecoder<T>
 ) -> Result<(), DecodeErrors> {
     if img.seen_sof {
@@ -192,7 +191,7 @@ pub(crate) fn parse_start_of_frame<T: ZReaderTrait>(
     let length = img.stream.get_u16_be_err()?;
     // usually 8, but can be 12 and 16, we currently support only 8
     // so sorry about that 12 bit images
-    let dt_precision = img.stream.get_u8_err()?;
+    let dt_precision = img.stream.read_u8_err()?;
 
     if dt_precision != 8 {
         return Err(DecodeErrors::SofError(format!(
@@ -213,12 +212,12 @@ pub(crate) fn parse_start_of_frame<T: ZReaderTrait>(
     trace!("Image width  :{}", img_width);
     trace!("Image height :{}", img_height);
 
-    if usize::from(img_width) > img.options.get_max_width() {
-        return Err(DecodeErrors::Format(format!("Image width {} greater than width limit {}. If use `set_limits` if you want to support huge images", img_width, img.options.get_max_width())));
+    if usize::from(img_width) > img.options.max_width() {
+        return Err(DecodeErrors::Format(format!("Image width {} greater than width limit {}. If use `set_limits` if you want to support huge images", img_width, img.options.max_width())));
     }
 
-    if usize::from(img_height) > img.options.get_max_height() {
-        return Err(DecodeErrors::Format(format!("Image height {} greater than height limit {}. If use `set_limits` if you want to support huge images", img_height, img.options.get_max_height())));
+    if usize::from(img_height) > img.options.max_height() {
+        return Err(DecodeErrors::Format(format!("Image height {} greater than height limit {}. If use `set_limits` if you want to support huge images", img_height, img.options.max_height())));
     }
 
     // Check image width or height is zero
@@ -227,7 +226,7 @@ pub(crate) fn parse_start_of_frame<T: ZReaderTrait>(
     }
 
     // Number of components for the image.
-    let num_components = img.stream.get_u8_err()?;
+    let num_components = img.stream.read_u8_err()?;
 
     if num_components == 0 {
         return Err(DecodeErrors::SofError(
@@ -250,8 +249,13 @@ pub(crate) fn parse_start_of_frame<T: ZReaderTrait>(
         // and that to us translates to setting input and output
         // colorspaces to zero
         img.input_colorspace = ColorSpace::Luma;
-        img.options = img.options.jpeg_set_out_colorspace(ColorSpace::Luma);
+        //img.options = img.options.jpeg_set_out_colorspace(ColorSpace::Luma);
         debug!("Overriding default colorspace set to Luma");
+    }
+    if num_components == 4 && img.input_colorspace == ColorSpace::YCbCr {
+        trace!("Input image has 4 components, defaulting to CMYK colorspace");
+        // https://entropymine.wordpress.com/2018/10/22/how-is-a-jpeg-images-color-type-determined/
+        img.input_colorspace = ColorSpace::CMYK;
     }
 
     // set number of components
@@ -262,9 +266,8 @@ pub(crate) fn parse_start_of_frame<T: ZReaderTrait>(
 
     for pos in 0..num_components {
         // read 3 bytes for each component
-        img.stream
-            .read_exact(&mut temp)
-            .map_err(|x| DecodeErrors::Format(format!("Could not read component data\n{x}")))?;
+        img.stream.read_exact_bytes(&mut temp)?;
+
         // create a component.
         let component = Components::from(temp, pos)?;
 
@@ -276,21 +279,40 @@ pub(crate) fn parse_start_of_frame<T: ZReaderTrait>(
 
     img.components = components;
 
+    let mut h_max = 1;
+    let mut v_max = 1;
+
+    for comp in &img.components {
+        h_max = max(h_max, comp.horizontal_sample);
+        v_max = max(v_max, comp.vertical_sample);
+    }
+
+    img.info.sample_ratio = match (h_max, v_max) {
+        (1, 1) => SampleRatios::None,
+        (1, 2) => SampleRatios::V,
+        (2, 1) => SampleRatios::H,
+        (2, 2) => SampleRatios::HV,
+        (hs, vs) => SampleRatios::Generic(hs, vs)
+    };
+
     Ok(())
 }
 
 /// Parse a start of scan data
-pub(crate) fn parse_sos<T: ZReaderTrait>(image: &mut JpegDecoder<T>) -> Result<(), DecodeErrors> {
+pub(crate) fn parse_sos<T: ZByteReaderTrait>(
+    image: &mut JpegDecoder<T>
+) -> Result<(), DecodeErrors> {
     // Scan header length
-    let ls = image.stream.get_u16_be_err()?;
+    let ls = usize::from(image.stream.get_u16_be_err()?);
     // Number of image components in scan
-    let ns = image.stream.get_u8_err()?;
+    let ns = image.stream.read_u8_err()?;
 
-    let mut seen = [-1; { MAX_COMPONENTS + 1 }];
+    let mut seen: [_; 5] = [-1; { MAX_COMPONENTS + 1 }];
 
     image.num_scans = ns;
+    let smallest_size = 6 + 2 * usize::from(ns);
 
-    if ls != 6 + 2 * u16::from(ns) {
+    if ls != smallest_size {
         return Err(DecodeErrors::SosError(format!(
             "Bad SOS length {ls},corrupt jpeg"
         )));
@@ -299,7 +321,7 @@ pub(crate) fn parse_sos<T: ZReaderTrait>(image: &mut JpegDecoder<T>) -> Result<(
     // Check number of components.
     if !(1..5).contains(&ns) {
         return Err(DecodeErrors::SosError(format!(
-            "Number of components in start of scan should be less than 3 but more than 0. Found {ns}"
+            "Invalid number of components in start of scan {ns}, expected in range 1..5"
         )));
     }
 
@@ -310,9 +332,10 @@ pub(crate) fn parse_sos<T: ZReaderTrait>(image: &mut JpegDecoder<T>) -> Result<(
     }
 
     // consume spec parameters
+    image.scan_subsampled = false;
+
     for i in 0..ns {
-        // CS_i parameter, I don't need it so I might as well delete it
-        let id = image.stream.get_u8_err()?;
+        let id = image.stream.read_u8_err()?;
 
         if seen.contains(&i32::from(id)) {
             return Err(DecodeErrors::SofError(format!(
@@ -324,7 +347,7 @@ pub(crate) fn parse_sos<T: ZReaderTrait>(image: &mut JpegDecoder<T>) -> Result<(
         // DC and AC huffman table position
         // top 4 bits contain dc huffman destination table
         // lower four bits contain ac huffman destination table
-        let y = image.stream.get_u8_err()?;
+        let y = image.stream.read_u8_err()?;
 
         let mut j = 0;
 
@@ -338,15 +361,27 @@ pub(crate) fn parse_sos<T: ZReaderTrait>(image: &mut JpegDecoder<T>) -> Result<(
 
         if j == image.info.components {
             return Err(DecodeErrors::SofError(format!(
-                "Invalid component id {}, expected a value between 0 and {}",
+                "Invalid component id {}, expected one one of {:?}",
                 id,
-                image.components.len()
+                image.components.iter().map(|c| c.id).collect::<Vec<_>>()
             )));
         }
 
-        image.components[usize::from(j)].dc_huff_table = usize::from((y >> 4) & 0xF);
-        image.components[usize::from(j)].ac_huff_table = usize::from(y & 0xF);
+        let component = &mut image.components[usize::from(j)];
+        component.dc_huff_table = usize::from((y >> 4) & 0xF);
+        component.ac_huff_table = usize::from(y & 0xF);
         image.z_order[i as usize] = j as usize;
+
+        if component.vertical_sample != 1 || component.horizontal_sample != 1 {
+            image.scan_subsampled = true;
+        }
+
+        trace!(
+            "Assigned huffman tables {}/{} to component {j}, id={}",
+            image.components[usize::from(j)].dc_huff_table,
+            image.components[usize::from(j)].ac_huff_table,
+            image.components[usize::from(j)].id,
+        );
     }
 
     // Collect the component spec parameters
@@ -359,11 +394,11 @@ pub(crate) fn parse_sos<T: ZReaderTrait>(image: &mut JpegDecoder<T>) -> Result<(
     // Page 42
 
     // Start of spectral / predictor selection. (between 0 and 63)
-    image.spec_start = image.stream.get_u8_err()?;
+    image.spec_start = image.stream.read_u8_err()?;
     // End of spectral selection
-    image.spec_end = image.stream.get_u8_err()?;
+    image.spec_end = image.stream.read_u8_err()?;
 
-    let bit_approx = image.stream.get_u8_err()?;
+    let bit_approx = image.stream.read_u8_err()?;
     // successive approximation bit position high
     image.succ_high = bit_approx >> 4;
 
@@ -394,6 +429,8 @@ pub(crate) fn parse_sos<T: ZReaderTrait>(image: &mut JpegDecoder<T>) -> Result<(
             image.succ_low
         )));
     }
+    // skip any bytes not read
+    image.stream.skip(smallest_size.saturating_sub(ls))?;
 
     trace!(
         "Ss={}, Se={} Ah={} Al={}",
@@ -406,28 +443,58 @@ pub(crate) fn parse_sos<T: ZReaderTrait>(image: &mut JpegDecoder<T>) -> Result<(
     Ok(())
 }
 
+/// Parse the APP13 (IPTC) segment.
+pub(crate) fn parse_app13<T: ZByteReaderTrait>(
+    decoder: &mut JpegDecoder<T>
+) -> Result<(), DecodeErrors> {
+    const IPTC_PREFIX: &[u8] = b"Photoshop 3.0\0";
+    // skip length.
+    let mut length = usize::from(decoder.stream.get_u16_be());
+
+    if length < 2 {
+        return Err(DecodeErrors::FormatStatic("Too small APP13 length"));
+    }
+    // length bytes.
+    length -= 2;
+
+    if length > IPTC_PREFIX.len() && decoder.stream.peek_at(0, IPTC_PREFIX.len())? == IPTC_PREFIX {
+        // skip bytes we read above.
+        decoder.stream.skip(IPTC_PREFIX.len())?;
+        length -= IPTC_PREFIX.len();
+
+        let iptc_bytes = decoder.stream.peek_at(0, length)?.to_vec();
+
+        decoder.info.iptc_data = Some(iptc_bytes);
+    }
+
+    decoder.stream.skip(length)?;
+    Ok(())
+}
+
 /// Parse Adobe App14 segment
-pub(crate) fn parse_app14<T: ZReaderTrait>(
+pub(crate) fn parse_app14<T: ZByteReaderTrait>(
     decoder: &mut JpegDecoder<T>
 ) -> Result<(), DecodeErrors> {
     // skip length
     let mut length = usize::from(decoder.stream.get_u16_be());
 
-    if length < 2 || !decoder.stream.has(length - 2) {
-        return Err(DecodeErrors::ExhaustedData);
+    if length < 2 {
+        return Err(DecodeErrors::FormatStatic("Too small APP14 length"));
     }
-    if length < 14 {
-        return Err(DecodeErrors::FormatStatic(
-            "Too short of a length for App14 segment"
-        ));
-    }
-    if decoder.stream.peek_at(0, 5) == Ok(b"Adobe") {
+
+    if decoder.stream.peek_at(0, 5)? == b"Adobe" {
+        if length < 14 {
+            return Err(DecodeErrors::FormatStatic(
+                "Too short of a length for App14 segment"
+            ));
+        }
         // move stream 6 bytes to remove adobe id
-        decoder.stream.skip(6);
+        decoder.stream.skip(6)?;
         // skip version, flags0 and flags1
-        decoder.stream.skip(5);
+        decoder.stream.skip(5)?;
         // get color transform
-        let transform = decoder.stream.get_u8();
+        let transform = decoder.stream.read_u8();
+        // https://exiftool.org/TagNames/JPEG.html#Adobe
         match transform {
             0 => decoder.input_colorspace = ColorSpace::CMYK,
             1 => decoder.input_colorspace = ColorSpace::YCbCr,
@@ -443,15 +510,13 @@ pub(crate) fn parse_app14<T: ZReaderTrait>(
         // version =  5
         // transform = 1
         length = length.saturating_sub(14);
-    } else if decoder.options.get_strict_mode() {
-        return Err(DecodeErrors::FormatStatic("Corrupt Adobe App14 segment"));
     } else {
+        warn!("Not a valid Adobe APP14 Segment, skipping {} bytes", length);
         length = length.saturating_sub(2);
-        error!("Not a valid Adobe APP14 Segment");
     }
     // skip any proceeding lengths.
     // we do not need them
-    decoder.stream.skip(length);
+    decoder.stream.skip(length)?;
 
     Ok(())
 }
@@ -459,57 +524,70 @@ pub(crate) fn parse_app14<T: ZReaderTrait>(
 /// Parse the APP1 segment
 ///
 /// This contains the exif tag
-pub(crate) fn parse_app1<T: ZReaderTrait>(
+pub(crate) fn parse_app1<T: ZByteReaderTrait>(
     decoder: &mut JpegDecoder<T>
 ) -> Result<(), DecodeErrors> {
+    const XMP_NAMESPACE_PREFIX: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+
     // contains exif data
     let mut length = usize::from(decoder.stream.get_u16_be());
 
-    if length < 2 || !decoder.stream.has(length - 2) {
-        return Err(DecodeErrors::ExhaustedData);
+    if length < 2 {
+        return Err(DecodeErrors::FormatStatic("Too small app1 length"));
     }
     // length bytes
     length -= 2;
 
-    if length > 6 && decoder.stream.peek_at(0, 6).unwrap() == b"Exif\x00\x00" {
+    if length > 6 && decoder.stream.peek_at(0, 6)? == b"Exif\x00\x00" {
         trace!("Exif segment present");
         // skip bytes we read above
-        decoder.stream.skip(6);
+        decoder.stream.skip(6)?;
         length -= 6;
 
-        let exif_bytes = decoder.stream.peek_at(0, length).unwrap().to_vec();
+        let exif_bytes = decoder.stream.peek_at(0, length)?.to_vec();
 
-        decoder.exif_data = Some(exif_bytes);
+        decoder.info.exif_data = Some(exif_bytes);
+    } else if length > XMP_NAMESPACE_PREFIX.len()
+        && decoder.stream.peek_at(0, XMP_NAMESPACE_PREFIX.len())? == XMP_NAMESPACE_PREFIX
+    {
+        trace!("XMP Data Present");
+        decoder.stream.skip(XMP_NAMESPACE_PREFIX.len())?;
+        length -= XMP_NAMESPACE_PREFIX.len();
+        let xmp_data = decoder.stream.peek_at(0, length)?.to_vec();
+        decoder.info.xmp_data = Some(xmp_data);
     } else {
-        warn!("Wrongly formatted exif tag");
+        warn!("Unknown format for APP1 tag, skipping");
     }
 
-    decoder.stream.skip(length);
+    decoder.stream.skip(length)?;
     Ok(())
 }
 
-pub(crate) fn parse_app2<T: ZReaderTrait>(
+pub(crate) fn parse_app2<T: ZByteReaderTrait>(
     decoder: &mut JpegDecoder<T>
 ) -> Result<(), DecodeErrors> {
+    static HDR_META: &[u8] = b"urn:iso:std:iso:ts:21496:-1\0";
+    static MPF_DATA: &[u8] = b"MPF\0";
+
     let mut length = usize::from(decoder.stream.get_u16_be());
 
-    if length < 2 || !decoder.stream.has(length - 2) {
-        return Err(DecodeErrors::ExhaustedData);
+    if length < 2 {
+        return Err(DecodeErrors::FormatStatic("Too small app2 segment"));
     }
     // length bytes
     length -= 2;
 
-    if length > 14 && decoder.stream.peek_at(0, 12).unwrap() == *b"ICC_PROFILE\0" {
+    if length > 14 && decoder.stream.peek_at(0, 12)? == *b"ICC_PROFILE\0" {
         trace!("ICC Profile present");
         // skip 12 bytes which indicate ICC profile
         length -= 12;
-        decoder.stream.skip(12);
-        let seq_no = decoder.stream.get_u8();
-        let num_markers = decoder.stream.get_u8();
+        decoder.stream.skip(12)?;
+        let seq_no = decoder.stream.read_u8();
+        let num_markers = decoder.stream.read_u8();
         // deduct the two bytes we read above
         length -= 2;
 
-        let data = decoder.stream.peek_at(0, length).unwrap().to_vec();
+        let data = decoder.stream.peek_at(0, length)?.to_vec();
 
         let icc_chunk = ICCChunk {
             seq_no,
@@ -517,9 +595,52 @@ pub(crate) fn parse_app2<T: ZReaderTrait>(
             data
         };
         decoder.icc_data.push(icc_chunk);
+    } else if length > HDR_META.len() && decoder.stream.peek_at(0, HDR_META.len())? == HDR_META {
+        length = length.saturating_sub(HDR_META.len());
+        decoder.stream.skip(HDR_META.len())?;
+        trace!("Gain Map metadata found");
+        match length {
+            4 => {
+                // If gain map metadata length == 4 then here it variables
+                // https://github.com/google/libultrahdr/blob/bf2aa439eea9ad5da483003fa44182f990f74091/lib/src/jpegr.cpp#L1076C1-L1077C35
+                // 2 bytes minimum_version: (00 00)
+                // 2 bytes writer_version: (00 00)
+                // Perhaps nothing to do with it ?
+                let _ = decoder.stream.get_u16_be();
+                let _ = decoder.stream.get_u16_be();
+                length -= 4;
+                decoder
+                    .info
+                    .gain_map_info
+                    .push(GainMapInfo { data: Vec::new() });
+            }
+            n if n > 4 => {
+                // If there is perhaps useful gain map info
+                // we'll read this until end
+                // https://github.com/google/libultrahdr/blob/bf2aa439eea9ad5da483003fa44182f990f74091/lib/src/jpegr.cpp#L1323
+                let data = decoder.stream.peek_at(0, length)?.to_vec();
+                length -= data.len();
+                decoder.stream.skip(data.len())?;
+
+                decoder.info.gain_map_info.push(GainMapInfo { data });
+            }
+            _ => {}
+        }
+    } else if length > MPF_DATA.len() && decoder.stream.peek_at(0, MPF_DATA.len())? == MPF_DATA {
+        trace!("MPF Signature present");
+        length = length.saturating_sub(MPF_DATA.len());
+        decoder.stream.skip(MPF_DATA.len())?;
+        // MPF signature taken from here
+        // https://github.com/google/libultrahdr/blob/bf2aa439eea9ad5da483003fa44182f990f74091/lib/include/ultrahdr/multipictureformat.h#L50
+        // https://github.com/google/libultrahdr/blob/bf2aa439eea9ad5da483003fa44182f990f74091/lib/src/multipictureformat.cpp#L36
+        // More info https://www.cipa.jp/std/documents/e/DC-X007-KEY_E.pdf
+        let data = decoder.stream.peek_at(0, length)?.to_vec();
+        length -= data.len();
+        decoder.stream.skip(data.len())?;
+        decoder.info.multi_picture_information = Some(data);
     }
 
-    decoder.stream.skip(length);
+    decoder.stream.skip(length)?;
 
     Ok(())
 }

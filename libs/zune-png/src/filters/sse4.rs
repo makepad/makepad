@@ -278,6 +278,7 @@ pub fn de_filter_paeth_sse41<const SIZE: usize>(prev_row: &[u8], raw: &[u8], cur
 }
 
 #[cfg(target_feature = "sse2")]
+#[target_feature(enable = "sse2")]
 unsafe fn defilter_avg_sse2_inner<const SIZE: usize>(
     prev_row: &[u8], raw: &[u8], current: &mut [u8]
 ) {

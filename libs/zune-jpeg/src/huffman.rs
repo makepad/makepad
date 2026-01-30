@@ -10,6 +10,8 @@
 //! stores Huffman tables needed during `BitStream` decoding.
 #![allow(clippy::similar_names, clippy::module_name_repetitions)]
 
+use alloc::string::ToString;
+
 use crate::errors::DecodeErrors;
 
 /// Determines how many bits of lookahead we have for our bitstream decoder.

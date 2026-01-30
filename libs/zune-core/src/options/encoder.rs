@@ -6,33 +6,18 @@
  * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
 
-use bitflags::bitflags;
-
 use crate::bit_depth::BitDepth;
 use crate::colorspace::ColorSpace;
 
-bitflags! {
-    /// Encoder options that are flags
-    #[derive(Copy,Debug,Clone)]
-    struct EncoderFlags:u64{
-        /// Whether JPEG images should be encoded as progressive images
-        const JPEG_ENCODE_PROGRESSIVE = 1<<1;
-        /// Whether JPEG images should use optimized huffman tables
-        const JPEG_OPTIMIZED_HUFFMAN  = 1<<2;
-        /// Whether to not preserve metadata across image transformations
-        const IMAGE_STRIP_METADATA    = 1<<3;
-
-    }
-}
-impl Default for EncoderFlags {
-    fn default() -> Self {
-        let mut options = EncoderFlags::empty();
-        options.set(EncoderFlags::JPEG_ENCODE_PROGRESSIVE, false);
-        options.set(EncoderFlags::JPEG_OPTIMIZED_HUFFMAN, false);
-        options.set(EncoderFlags::IMAGE_STRIP_METADATA, false);
-
-        options
-    }
+/// Encoder options that are flags
+#[derive(Copy, Debug, Clone, Default)]
+struct EncoderFlags {
+    /// Whether JPEG images should be encoded as progressive images
+    jpeg_encode_progressive: bool,
+    /// Whether JPEG images should use optimized huffman tables
+    jpeg_optimize_huffman:   bool,
+    /// Whether to not preserve metadata across image transformations
+    image_strip_metadata:    bool
 }
 
 /// Options shared by some of the encoders in
@@ -88,7 +73,7 @@ impl EncoderOptions {
         }
     }
     /// Get the width for which the image will be encoded in
-    pub const fn get_width(&self) -> usize {
+    pub const fn width(&self) -> usize {
         self.width
     }
 
@@ -98,12 +83,12 @@ impl EncoderOptions {
     ///
     /// # Panics
     /// If height is zero
-    pub fn get_height(&self) -> usize {
+    pub fn height(&self) -> usize {
         assert_ne!(self.height, 0);
         self.height
     }
     /// Get the depth for which the image will be encoded in
-    pub const fn get_depth(&self) -> BitDepth {
+    pub const fn depth(&self) -> BitDepth {
         self.depth
     }
     /// Get the quality for which the image will be encoded with
@@ -119,14 +104,14 @@ impl EncoderOptions {
     /// smaller
     ///
     /// - Low quality indicates less time is spent in making the file bigger
-    pub const fn get_quality(&self) -> u8 {
+    pub const fn quality(&self) -> u8 {
         self.quality
     }
     /// Get the colorspace for which the image will be encoded in
-    pub const fn get_colorspace(&self) -> ColorSpace {
+    pub const fn colorspace(&self) -> ColorSpace {
         self.colorspace
     }
-    pub const fn get_effort(&self) -> u8 {
+    pub const fn effort(&self) -> u8 {
         self.effort
     }
 
@@ -151,7 +136,7 @@ impl EncoderOptions {
     /// Quality is clamped from 0..100
     ///
     /// Quality means different options depending on the encoder, see
-    /// [get_quality](Self::get_quality)
+    /// [get_quality](Self::quality)
     pub fn set_quality(mut self, quality: u8) -> Self {
         self.quality = quality.clamp(0, 100);
         self
@@ -180,7 +165,7 @@ impl EncoderOptions {
     ///
     /// This is used for multi-threaded encoders,
     /// currently only jpeg-xl
-    pub const fn get_num_threads(&self) -> u8 {
+    pub const fn num_threads(&self) -> u8 {
         self.num_threads
     }
 
@@ -190,7 +175,7 @@ impl EncoderOptions {
     /// from the resulting image. If set to false, where supported, encoders
     /// will not remove metadata from images
     pub fn set_strip_metadata(mut self, yes: bool) -> Self {
-        self.flags.set(EncoderFlags::IMAGE_STRIP_METADATA, yes);
+        self.flags.image_strip_metadata = yes;
         self
     }
     /// Whether or not the encoder should remove metadata from the image
@@ -198,7 +183,7 @@ impl EncoderOptions {
     /// The default value is false, and encoders that respect this try to preserve as much
     /// data as possible from one image to another
     pub const fn strip_metadata(&self) -> bool {
-        !self.flags.contains(EncoderFlags::IMAGE_STRIP_METADATA)
+        !self.flags.image_strip_metadata
     }
 }
 
@@ -211,7 +196,7 @@ impl EncoderOptions {
     /// This may be used to create slightly smaller images at the cost of more processing
     /// time
     pub const fn jpeg_encode_progressive(&self) -> bool {
-        self.flags.contains(EncoderFlags::JPEG_ENCODE_PROGRESSIVE)
+        self.flags.jpeg_encode_progressive
     }
 
     /// Whether the jpeg encoder should optimize huffman tables to create smaller files
@@ -219,14 +204,14 @@ impl EncoderOptions {
     ///
     /// Default is `false`.
     pub const fn jpeg_optimized_huffman_tables(&self) -> bool {
-        self.flags.contains(EncoderFlags::JPEG_OPTIMIZED_HUFFMAN)
+        self.flags.jpeg_optimize_huffman
     }
 
     /// Set whether the jpeg encoder should encode the imagei in progressive mode
     ///
     /// Default is `false`
     pub fn set_jpeg_encode_progressive(mut self, yes: bool) -> Self {
-        self.flags.set(EncoderFlags::JPEG_OPTIMIZED_HUFFMAN, yes);
+        self.flags.jpeg_optimize_huffman = yes;
         self
     }
 }

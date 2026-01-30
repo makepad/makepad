@@ -9,7 +9,10 @@
 //! Contains most common errors that may be encountered in decoding a Decoder
 //! image
 
+use alloc::string::String;
 use core::fmt::{Debug, Display, Formatter};
+
+use makepad_zune_core::bytestream::ZByteIoError;
 
 use crate::misc::{
     START_OF_FRAME_EXT_AR, START_OF_FRAME_EXT_SEQ, START_OF_FRAME_LOS_SEQ,
@@ -18,7 +21,6 @@ use crate::misc::{
 
 /// Common Decode errors
 #[allow(clippy::module_name_repetitions)]
-#[derive(Clone)]
 pub enum DecodeErrors {
     /// Any other thing we do not know
     Format(String),
@@ -46,7 +48,9 @@ pub enum DecodeErrors {
     /// Large image dimensions(Corrupted data)?
     LargeDimensions(usize),
     /// Too small output for size
-    TooSmallOutput(usize, usize)
+    TooSmallOutput(usize, usize),
+
+    IoErrors(ZByteIoError)
 }
 
 #[cfg(feature = "std")]
@@ -58,6 +62,11 @@ impl From<&'static str> for DecodeErrors {
     }
 }
 
+impl From<ZByteIoError> for DecodeErrors {
+    fn from(data: ZByteIoError) -> Self {
+        return Self::IoErrors(data);
+    }
+}
 impl Debug for DecodeErrors {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match &self
@@ -75,7 +84,7 @@ impl Debug for DecodeErrors {
             Self::SofError(ref reason) => write!(f, "Error parsing SOF segment. Reason:{reason}"),
             Self::IllegalMagicBytes(bytes) =>
             {
-                write!(f, "Error parsing image. Illegal start bytes:{bytes}")
+                write!(f, "Error parsing image. Illegal start bytes:{bytes:X}")
             }
             Self::MCUError(ref reason) => write!(f, "Error in decoding MCU. Reason {reason}"),
             Self::Unsupported(ref image_type) =>
@@ -87,7 +96,8 @@ impl Debug for DecodeErrors {
                 f,
                 "Too large dimensions {dimensions},library supports up to {}", crate::decoder::MAX_DIMENSIONS
             ),
-            Self::TooSmallOutput(expected, found) => write!(f, "Too small output, expected buffer with at least {expected} bytes but got one with {found} bytes")
+            Self::TooSmallOutput(expected, found) => write!(f, "Too small output, expected buffer with at least {expected} bytes but got one with {found} bytes"),
+            Self::IoErrors(error)=>write!(f,"I/O errors {error:?}"),
         }
     }
 }
