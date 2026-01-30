@@ -19,7 +19,8 @@ pub mod animator;
 pub mod button;
 // pub mod cached_widget;
 pub mod label;
-// pub mod image;
+pub mod image_cache;
+pub mod image;
 // pub mod image_blend;
 // pub mod icon;
 // pub mod link_label;
@@ -94,7 +95,6 @@ pub mod theme_desktop_skeleton;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 
-// pub mod image_cache;
 // pub mod bare_step;
 // pub mod turtle_step;
 /*
@@ -118,7 +118,8 @@ pub use crate::{
     label::*,
     view::*,
 //    adaptive_view::*,
-//    image::*,
+    image::*,
+    image_cache::*,
 //    image_blend::*,
 //    icon::*,
 //    label::*,
@@ -218,6 +219,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::window::script_mod(vm);
     crate::label::script_mod(vm);
     crate::button::script_mod(vm);
+    crate::image::script_mod(vm);
     
     {
         script_mod!{

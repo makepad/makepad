@@ -20,10 +20,10 @@ pub use makepad_zune_png::error::PngDecodeErrors;
 #[cfg(feature = "jpg")]
 pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 
-#[derive(Live, LiveHook, Clone, Copy)]
-#[live_ignore]
+#[derive(Clone, Copy, Debug, Default, Script, ScriptHook)]
 pub enum ImageFit {
-    #[pick] Stretch,
+    #[default]
+    Stretch,
     Horizontal,
     Vertical,
     Smallest,
@@ -31,11 +31,6 @@ pub enum ImageFit {
     Size
 }
 
-impl Default for ImageFit {
-    fn default() -> Self {
-        ImageFit::Stretch
-    }
-}
 
 #[derive(Debug, Default, Clone)]
 pub struct ImageBuffer {
