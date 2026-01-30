@@ -1,107 +1,114 @@
 use crate::{
     makepad_derive_widget::*,
-    debug_view::DebugView,
-    performance_view::PerformanceView,
     makepad_draw::*,
-    nav_control::NavControl,
-    desktop_button::*,
     view::*,
     widget::*,
+    animator::*,
 };
 
-live_design!{
-    link widgets;
-    use link::widgets::*;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.View
+    use mod.widgets.SolidView
+    //use mod.widgets.KeyboardView
+    //use mod.widgets.SolidView
+    //use mod.widgets.Label
+    // use mod.widgets.DesktopButton
+    //use mod.widgets.WindowMenu
+    // use mod.widgets.NavControl
     
-    pub WindowBase = {{Window}} {demo:false}
-    pub Window = <WindowBase> {
-        pass: { clear_color: (THEME_COLOR_BG_APP) }
+    mod.widgets.WindowBase = #(Window::register_widget(vm))
+    mod.widgets.Window = mod.std.set_type_default() do mod.widgets.WindowBase{
+        demo: false
+        pass +: { clear_color: theme.color_bg_app }
         flow: Down
-        nav_control: <NavControl> {}
-        caption_bar = <SolidView> {
-            visible: false,
+        //nav_control: NavControl {}
+        $caption_bar: SolidView {
+            visible: false
             
             flow: Right
             
-            draw_bg: {color: (THEME_COLOR_APP_CAPTION_BAR)}
-            height: 27,
-            caption_label = <View> {
-                width: Fill, height: Fill,
-                align: {x: 0.5, y: 0.5},
-                label = <Label> {text: "Makepad", margin: {left: 100}}
+            draw_bg +: {color: theme.color_app_caption_bar}
+            height: 27
+            $caption_label: View {
+                width: Fill height: Fill
+                align: Align{x: 0.5 y: 0.5}
+                //$label: Label {text: "Makepad" margin: {left: 100}}
             }
-            windows_buttons = <View> {
-                visible: false,
-                width: Fit, height: Fit,
-                min = <DesktopButton> {draw_bg: {button_type: WindowsMin}}
-                max = <DesktopButton> {draw_bg: {button_type: WindowsMax}}
-                close = <DesktopButton> {draw_bg: {button_type: WindowsClose}}
+            /*
+            $windows_buttons: View {
+                visible: false
+                width: Size.Fit height: Size.Fit
+                $min: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsMin}}
+                $max: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsMax}}
+                $close: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsClose}}
             }
-            web_fullscreen = <View> {
-                visible: false,
-                width: Fit, height: Fit,
-                fullscreen = <DesktopButton> {draw_bg: {button_type: Fullscreen}}
+            $web_fullscreen: View {
+                visible: false
+                width: Size.Fit height: Size.Fit
+                $fullscreen: DesktopButton {draw_bg +: {button_type: DesktopButtonType.Fullscreen}}
             }
-            web_xr = <View> {
-                visible: false,
-                width: Fit, height: Fit,
-                xr_on = <DesktopButton> {draw_bg: {button_type: XRMode}}
-            }
+            $web_xr: View {
+                visible: false
+                width: Size.Fit height: Size.Fit
+                $xr_on: DesktopButton {draw_bg +: {button_type: DesktopButtonType.XRMode}}
+            }*/
         }
-        
-        window_menu = <WindowMenu> {
-            main = Main{items:[app]}
-            app = Sub { name:"Makepad", items:[quit] }
-            quit = Item {
-                name:"Quit",
-                shift: false,
-                key: KeyQ,
+        $body: View{
+            
+        }
+        /*
+        $window_menu: WindowMenu {
+            main: Main{items:[app]}
+            app: Sub { name:"Makepad" items:[quit] }
+            quit: Item {
+                name:"Quit"
+                shift: false
+                key: Key.Q
                 enabled: true
             }
         }
-        body = <KeyboardView> {
-            width: Fill, height: Fill,
-            keyboard_min_shift: 30,
+        $body: KeyboardView {
+            width: Size.Fill height: Size.Fill
+            keyboard_min_shift: 30
         }
         
-        cursor: Default
-        mouse_cursor_size: vec2(20, 20),
-        draw_cursor: {
-            uniform border_size: 1.5
-            uniform color: (THEME_COLOR_CURSOR)
-            uniform border_color: (THEME_COLOR_CURSOR_BORDER)
+        cursor: MouseCursor.Default
+        mouse_cursor_size: vec2(20 20)
+        draw_cursor +: {
+            border_size: shader.uniform(1.5)
+            color: shader.uniform(theme.color_cursor)
+            border_color: shader.uniform(theme.color_cursor_border)
             
-            fn get_color(self) -> vec4 {
+            get_color: fn() {
                 return self.color
             }
             
-            fn get_border_color(self) -> vec4 {
+            get_border_color: fn() {
                 return self.border_color
             }
             
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.move_to(1.0, 1.0);
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.move_to(1.0, 1.0)
                 sdf.line_to(self.rect_size.x - 1.0, self.rect_size.y * 0.5)
                 sdf.line_to(self.rect_size.x * 0.5, self.rect_size.y - 1.0)
-                sdf.close_path();
+                sdf.close_path()
                 sdf.fill_keep(self.get_color())
                 if self.border_size > 0.0 {
                     sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result
             }
-        }
-        window: {
-            inner_size: vec2(1024, 768)
+        }*/
+        window +: {
+            inner_size: vec2(1024 768)
         }
     }
     
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct Window {
     //#[rust] caption_size: Vec2d,
     #[live] last_mouse_pos: Vec2d,
@@ -110,34 +117,24 @@ pub struct Window {
     #[rust] demo_next_frame: NextFrame,
     #[live] cursor_draw_list: DrawList2d,
     #[live] draw_cursor: DrawQuad,
-    #[live] debug_view: DebugView,
-    #[live] performance_view: PerformanceView,
-    #[live] nav_control: NavControl,
+    //#[live] debug_view: DebugView,
+    //#[live] performance_view: PerformanceView,
+    //#[live] nav_control: NavControl,
     #[live] window: WindowHandle,
     #[live] stdin_size: DrawColor,
     #[rust] last_known_area: Area,
-    #[rust(Overlay::new(cx))] overlay: Overlay,
-    #[rust(DrawList2d::new(cx))] main_draw_list: DrawList2d,
-    #[live] pass: Pass,
-    #[rust(Texture::new(cx))] depth_texture: Texture,
+    #[new] overlay: Overlay,
+    #[new] main_draw_list: DrawList2d,
+    #[live] pass: DrawPass,
+    #[new] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[live] show_performance_view: bool,
     #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))] xr_view_matrix: Mat4f,
     #[deref] view: View,
-    // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
-    /*#[rust(Menu::main(vec![
-        Menu::sub("App", vec![
-            //Menu::item("Quit App", Cx::command_quit()),
-        ]),
-    ]))]*/
-    
-    //#[live] _default_menu: Menu,
-    
-    //#[rust] last_menu: Option<Menu>,
     
     // testing
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    
+    #[rust] initialized: bool,
 }
 
 #[derive(Clone)]
@@ -145,26 +142,40 @@ enum DrawState {
     Drawing,
 }
 
-impl LiveHook for Window {
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+#[derive(Clone, Debug, Default)]
+pub enum WindowAction {
+    EventForOtherWindow,
+    WindowClosed,
+    WindowGeomChange(WindowGeomChangeEvent),
+    #[default]
+    None
+}
+
+impl Window {
+
+    fn ensure_initialized(&mut self, cx: &mut Cx) {
+        if self.initialized {
+            return;
+        }
+        self.initialized = true;
+        
         self.window.set_pass(cx, &self.pass);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
         self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32{
-            size:TextureSize::Auto,
+            size: TextureSize::Auto,
             initial: true,
         });
-        self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
+        self.pass.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
+        
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
             // lets show a VR button
             self.view(ids!(web_xr)).set_visible(cx, true);
             log!("VR IS SUPPORTED");
         }
-       
-    }
-    
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
-        if self.demo{
+        
+        // OS-specific caption bar setup
+        if self.demo {
             self.demo_next_frame = cx.new_next_frame();
         }
         match cx.os_type() {
@@ -177,16 +188,6 @@ impl LiveHook for Window {
             OsType::Macos => {
                 //self.view(ids!(caption_bar)).set_visible(true);
                 //self.view(ids!(windows_buttons)).set_visible(true);
-                //self.view(ids!(caption_bar)).set_visible(true);
-                //self.view(ids!(windows_buttons)).set_visible(true);
-                /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                    self.apply_over(cx, live!{
-                        caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
-                    }); 
-                }*/
-                                
-                //draw_bg: {color: (THEME_COLOR_BG_APP)}  
-                // self.frame.get_view(ids!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
             OsType::LinuxDirect |
@@ -199,19 +200,9 @@ impl LiveHook for Window {
             _ => ()
         }
     }
-}
-
-#[derive(Clone, Debug, DefaultNone)]
-pub enum WindowAction {
-    EventForOtherWindow,
-    WindowClosed,
-    WindowGeomChange(WindowGeomChangeEvent),
-    None
-}
-
-impl Window {
 
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
+        self.ensure_initialized(cx);
 
         if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
             return Redrawing::no()
@@ -231,7 +222,7 @@ impl Window {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         //while self.frame.draw_widget_continue(cx).is_not_done() {}
-        self.debug_view.draw(cx);
+        //self.debug_view.draw(cx);
         
         // lets draw our cursor
         if let OsType::LinuxDirect = cx.os_type() {
@@ -262,9 +253,9 @@ impl Window {
             self.stdin_size.draw_abs(cx, Rect{pos:dvec2(1.0/df,0.0),size:dvec2(1.0/df,1.0/df)});
         }
 
-        if self.show_performance_view {
-            self.performance_view.draw_all(cx, &mut Scope::empty());
-        }
+        //if self.show_performance_view {
+        //    self.performance_view.draw_all(cx, &mut Scope::empty());
+        //}
 
         cx.end_pass_sized_turtle();
         
@@ -356,18 +347,18 @@ impl Widget for Window {
         
         let uid = self.widget_uid();
         
-        self.debug_view.handle_event(cx, event);
-        if self.show_performance_view {
-            self.performance_view.handle_widget(cx, event);
-        }
+        //self.debug_view.handle_event(cx, event);
+        //if self.show_performance_view {
+        //    self.performance_view.handle_widget(cx, event);
+        //}
         
-        self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
+        //self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
         self.overlay.handle_event(cx, event);
         if self.demo_next_frame.is_event(event).is_some(){
             if self.demo{
                 self.demo_next_frame = cx.new_next_frame();
             }
-            cx.repaint_pass_and_child_passes(self.pass.pass_id());
+            cx.repaint_pass_and_child_passes(self.pass.draw_pass_id());
         }
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
@@ -466,10 +457,10 @@ impl Widget for Window {
         }
         
         if let Event::Actions(actions) = event{
-            if self.desktop_button(ids!(windows_buttons.min)).clicked(&actions) {
-                self.window.minimize(cx);
-            }
-            if self.desktop_button(ids!(windows_buttons.max)).clicked(&actions) {
+            // if self.desktop_button(ids!(windows_buttons.min)).clicked(&actions) {
+            //    self.window.minimize(cx);
+            //}
+            /*if self.desktop_button(ids!(windows_buttons.max)).clicked(&actions) {
                 if self.window.is_fullscreen(cx) {
                     self.window.restore(cx);
                 }
@@ -482,12 +473,12 @@ impl Widget for Window {
             }
             if self.desktop_button(ids!(web_xr.xr_on)).clicked(&actions) {
                 cx.xr_start_presenting();
-            }
+            }*/
         }
                 
-        if let Event::ClearAtlasses = event {
-            CxDraw::reset_icon_atlas(cx);
-        }
+        //if let Event::ClearAtlasses = event {
+        //    CxDraw::reset_icon_atlas(cx);
+        //}
         
         if let Event::MouseMove(ev) = event {
             if let OsType::LinuxDirect = cx.os_type() {
@@ -531,7 +522,7 @@ impl Widget for Window {
         
         self.view.draw_walk_all(cx, scope, Walk::default());
         
-        self.debug_view.draw(cx);
+        //self.debug_view.draw(cx);
                         
         self.main_draw_list.set_view_transform(cx, &self.xr_view_matrix);
         

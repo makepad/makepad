@@ -3,7 +3,7 @@ use makepad_widgets2::scroll_bar::{ScrollBar, ScrollAxis, ScrollBarAction};
 
 app_main!(App); 
 script_mod!{
-    use mod.ui.*
+    use mod.prelude.widgets.*
     
     mod.res.load_all()
     

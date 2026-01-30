@@ -1,0 +1,287 @@
+================================================================================
+MAKEPAD WIDGET REFACTOR GUIDE: widgets/ -> widgets2/
+================================================================================
+
+This document provides a complete reference for refactoring widgets from the old
+`live_design!` system to the new `script_mod!` system.
+
+================================================================================
+1. RUST CODE CHANGES
+================================================================================
+
+IMPORTS
+--------------------------------------------------------------------------------
+ADD these imports at the top of the file:
+    use crate::makepad_derive_widget::*;
+    use crate::animator::*;
+
+DERIVE MACROS
+--------------------------------------------------------------------------------
+STRUCTS (main widgets):
+    OLD: #[derive(Live, LiveHook, LiveRegister)]
+    NEW: #[derive(Script, ScriptHook, Animator)]
+
+    Note: Only add `Animator` if the struct has an animator field.
+
+DRAW STRUCTS:
+    OLD: #[derive(Live, LiveHook, LiveRegister)]
+    NEW: #[derive(Script, ScriptHook)]
+
+ENUMS:
+    OLD: #[derive(Copy, Clone, Debug, Live, LiveHook)]
+         #[live_ignore]
+    NEW: #[derive(Copy, Clone, Debug, Script, ScriptHook)]
+         (remove #[live_ignore] entirely)
+
+DefaultNone derive:
+    OLD: #[Derive(DefaultNone)]
+    New: #[Derive(Default)] and put #[default] above None variant
+
+
+FIELD ATTRIBUTES
+--------------------------------------------------------------------------------
+Self/Source reference:
+    When we have an animator ALSO add this:
+    NEW: #[source] source: ScriptObjectRef,
+
+Animator field:
+    OLD: #[animator] animator: Animator,
+    NEW: #[apply_default] animator: Animator,
+
+Other attributes remain the same:
+    #[live]
+    #[rust]
+    #[deref]
+
+Rename pass to DrawPass
+--------------------------------------------------------------------------------
+    OLD: Pass / PassClearColor
+    NEW: DrawPass / DrawPassClearColor
+
+Rename calling 'new' on objects with cx
+--------------------------------------------------------------------------------
+    OLD: #[rust(Texture::new(cx))] field: Texture
+    NEW: #[new] field: Texture
+
+LiveHook implementation
+--------------------------------------------------------------------------------
+impl LiveHook becomes impl ScriptHook. Look up traits rs in libs/script.rs,
+and for examples how the implementation has changed widget/src/view.rs for old and
+ widget2/src/view.rs for new
+
+================================================================================
+2. SCRIPT_MOD! MACRO CHANGES
+================================================================================
+
+MACRO NAME
+--------------------------------------------------------------------------------
+    OLD: live_design!{
+    NEW: script_mod!{
+
+USE STATEMENTS (replace entire block)
+--------------------------------------------------------------------------------
+OLD:
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+
+NEW:
+    use mod.prelude.widgets_internal.*
+
+    Note: Add additional specific imports as needed (e.g., mod.draw.MouseCursor)
+
+DRAW SHADER REGISTRATION
+--------------------------------------------------------------------------------
+OLD:
+    DrawWidgetName = {{DrawWidgetName}} {}
+
+NEW:
+    mod.std.set_type_default() do #(DrawWidgetName::script_shader(vm)){
+        ..mod.draw.DrawQuad // or appropriate parent draw type
+    }
+
+WIDGET BASE REGISTRATION
+--------------------------------------------------------------------------------
+OLD:
+    pub WidgetNameBase = {{WidgetName}} {}
+
+NEW:
+    mod.widgets.WidgetNameBase = #(WidgetName::register_widget(vm))
+
+WIDGET DEFINITION (main widget from base)
+--------------------------------------------------------------------------------
+OLD:
+    pub WidgetName = <WidgetNameBase> {
+
+NEW:
+    mod.widgets.WidgetName = mod.std.set_type_default() do mod.widgets.WidgetNameBase{
+
+    Note: Use set_type_default() when this is the "default" configuration.
+
+DERIVED WIDGETS (widget extending another widget)
+--------------------------------------------------------------------------------
+OLD:
+    pub DerivedWidget = <ParentWidget> {
+
+NEW:
+    mod.widgets.DerivedWidget = mod.widgets.ParentWidget {
+
+Use of other widgets
+--------------------------------------------------------------------------------
+OLD:
+    <Widget>{}
+
+NEW:
+    Widget{}
+
+Make sure they are imported at the top as well 
+use mod.widgets.Widget
+
+Use of Align
+--------------------------------------------------------------------------------
+OLD:
+    align: {x:0.5,y:0.5}
+New:
+    align: Align{x:0.5, y:0.5}
+
+================================================================================
+3. SHADER/DSL SYNTAX CHANGES
+================================================================================
+
+INSTANCE VARIABLES
+--------------------------------------------------------------------------------
+    OLD: instance drag: 0.0
+    NEW: drag: shader.instance(0.0)
+
+UNIFORM VARIABLES
+--------------------------------------------------------------------------------
+Simple values:
+    OLD: uniform size: 6.0
+    NEW: size: shader.uniform(6.0)
+
+Theme references:
+    OLD: uniform border_size: (THEME_BEVELING)
+    NEW: border_size: shader.uniform(theme.beveling)
+
+    OLD: uniform color: (THEME_COLOR_OUTSET)
+    NEW: color: shader.uniform(theme.color_outset)
+
+    Pattern: THEME_COLOR_X -> theme.color_x (lowercase, underscores)
+             THEME_X -> theme.x
+
+PIXEL FUNCTION
+--------------------------------------------------------------------------------
+    OLD: fn pixel(self) -> vec4 {
+    NEW: pixel: fn() {
+
+    Note: Remove `self` parameter and `-> vec4` return type.
+    Inside the function, `self.` references still work.
+
+SDF2D VIEWPORT
+--------------------------------------------------------------------------------
+    OLD: let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+    NEW: let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+    Pattern: Sdf2d::method -> Sdf2d.method (dot instead of double colon)
+
+FUNCTION CALL SYNTAX
+--------------------------------------------------------------------------------
+In the new DSL, commas between arguments are OPTIONAL (can use newlines):
+HOWEVER do not remove ,'s before -s signs or +signs as they turn the result into an expression
+    OLD: sdf.box(1., x, y, z, radius);
+    NEW: sdf.box(
+             1.
+             x
+             y
+             z
+             radius
+         )
+
+    Semicolons at end of statements are also optional.
+
+EXTEND SYNTAX FOR NESTED PROPERTIES
+--------------------------------------------------------------------------------
+When extending/overriding nested properties:
+    NEW: draw_bg +: {
+             // additions/overrides here
+         }
+
+    The `+:` syntax merges with existing properties.
+
+Naming child components
+--------------------------------------------------------------------------------
+
+    OLD: child_name = <View>{
+    New: $child_name: View{
+
+Accessing child components in Rust:
+    OLD: self.desktop_button(ids!(windows_buttons.min))
+    NEW: self.desktop_button(ids!($windows_buttons.$min))
+    
+--------------------------------------------------------------------------------
+    OLD: 
+
+
+================================================================================
+4. ANIMATOR CHANGES
+================================================================================
+
+4.1 ANIMATOR BLOCK STRUCTURE
+--------------------------------------------------------------------------------
+OLD:
+    animator: {
+        state_group = {
+            default: state_name
+            state_name = {
+                from: {all: Forward {duration: 0.1}}
+                apply: { ... }
+            }
+        }
+    }
+
+NEW:
+    animator: Animator{
+        state_group: {
+            default: @state_name
+            state_name: AnimatorState{
+                from: {all: Forward {duration: 0.1}}
+                apply: { ... }
+            }
+        }
+    }
+
+4.2 STATE DEFAULT REFERENCE
+--------------------------------------------------------------------------------
+    OLD: default: off
+    NEW: default: @off
+
+    Note: Prefix state name with @ symbol
+
+4.3 ANIMATION EASING/TIMING STAYS THE SAME
+--------------------------------------------------------------------------------
+    OLD: Forward {duration: 0.1}
+    NEW: Forward {duration: 0.1}
+
+    OLD: Snap
+    NEW: Snap
+
+    Pattern: EasingName -> EasingName
+
+4.4 CURSOR VALUES
+--------------------------------------------------------------------------------
+    OLD: cursor: Default,
+    NEW: cursor: MouseCursor.Default
+
+    Pattern: CursorName -> MouseCursor.CursorName
+
+4.5 KEYFRAME SYNTAX
+--------------------------------------------------------------------------------
+OLD:
+    hover: [{time: 0.0, value: 1.0}],
+
+NEW:
+    hover: snap(1)
+
+    Pattern: [{time: 0.0, value: X}] -> snap(X)
+    
+    For immediate/snap values at time 0, use snap(value)
