@@ -206,18 +206,21 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
 use proc_macro::TokenTree;
     
 #[cfg(not(lines))]
+#[allow(dead_code)]
 struct SpanFallbackApiInfo {
     line: usize,
     column: usize
 }
     
 #[cfg(not(lines))]
+#[allow(dead_code)]
 impl SpanFallbackApiInfo{
     fn line(&self)->usize{self.line}
     fn column(&self)->usize{self.column}
 }
     
 #[cfg(not(lines))]
+#[allow(dead_code)]
 trait SpanFallbackApi {
     fn start(&self) -> SpanFallbackApiInfo {
         SpanFallbackApiInfo {line: 1, column: 1}

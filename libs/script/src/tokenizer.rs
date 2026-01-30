@@ -506,36 +506,65 @@ impl ScriptTokenizer{
                     }
                 }
                 State::Operator=>{
+                    // Helper to check if a string is a valid operator or valid prefix of an operator
+                    fn is_valid_operator(s: &str) -> bool {
+                        matches!(s,
+                            // Single character operators
+                            "!" | "~" | "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" |
+                            "<" | ">" | "=" | "." | "?" | ":" | "@" |
+                            // Double character operators  
+                            "==" | "!=" | "<=" | ">=" | "&&" | "||" | "|?" |
+                            "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" |
+                            "<<" | ">>" | ".." | "->" | ".?" | ">:" | "<:" | "^:" | "+:" | "?=" |
+                            "++" | "-:" |
+                            "/*" | "//" |
+                            // Triple character operators
+                            "===" | "!==" | "<<=" | ">>=" | "..."
+                        )
+                    }
                     
-                    // splice off prefix operator
-                    // all double character operators
-                    if self.temp == "@"{
-                        if c == '('{
-                            self.temp.clear();
-                            self.state = State::RustValue
-                        }
-                        else{
-                            self.emit_operator()
-                        }
-                    } 
-                    if c == '|' && self.temp == "="{
-                        self.emit_operator();
+                    fn could_be_operator_prefix(s: &str) -> bool {
+                        // Check if s could be the start of a valid multi-char operator
+                        matches!(s,
+                            // Single chars that could become 2-char operators
+                            "!" |  // !=, !==
+                            "=" |  // ==, ===
+                            "<" |  // <=, <<, <:, <<=
+                            ">" |  // >=, >>, >:, >>=
+                            "&" |  // &&
+                            "|" |  // ||, |?, |=
+                            "+" |  // +=, +:, ++
+                            "-" |  // -=, ->, -:
+                            "*" |  // *=
+                            "/" |  // /=, /*, //
+                            "%" |  // %=
+                            "^" |  // ^=, ^:
+                            "." |  // .., .?, ...
+                            "?" |  // ?=
+                            // Double chars that could become 3-char operators
+                            "==" | // ===
+                            "!=" | // !==
+                            "<<" | // <<=
+                            ">>" | // >>=
+                            ".."   // ...
+                        )
                     }
-                    if c == '*' && self.temp == "."{
-                        self.emit_operator();
+                    
+                    // Special case: @( starts a RustValue
+                    if self.temp == "@" && c == '(' {
+                        self.temp.clear();
+                        self.state = State::RustValue;
+                        continue;
                     }
-                    if c == '~' || self.temp == ":" || self.temp == "~"{
-                        self.emit_operator();
-                    }
-                    // detect comments
-                    if c.is_whitespace(){
+                    
+                    // Handle non-operator characters - emit current operator and transition
+                    if c.is_whitespace() {
                         self.emit_operator();
                         self.state = State::Whitespace;
                     }
-                    else if c.is_numeric(){
+                    else if c.is_numeric() {
                         // Handle .5 as 0.5 (float literal starting with dot)
                         if self.temp == "." {
-                            // Keep the dot in temp, transition to Number state
                             self.temp.push(c);
                             self.state = State::Number;
                         } else {
@@ -544,74 +573,64 @@ impl ScriptTokenizer{
                             self.temp.push(c);
                         }
                     }
-                    else if is_separator(c){
+                    else if is_separator(c) {
                         self.emit_operator();
                         self.emit_separator(c);
                         self.state = State::Whitespace;
                     }
-                    else if c == '_' || c == '$' || c.is_alphabetic(){
+                    else if c == '_' || c == '$' || c.is_alphabetic() {
                         self.emit_operator();
                         self.state = State::Identifier(c == '$');
                         self.temp.push(c);
                     }
-                    else if c == '#'{
+                    else if c == '#' {
                         self.emit_operator();
                         self.state = State::Color;
                     }
-                    else if is_operator(c){
-                        self.temp.push(c);
-                    }
-                    else if c == '"'{
+                    else if c == '"' {
                         self.emit_operator();
                         self.state = State::String(true);
                     }
-                    else if c == '\''{
+                    else if c == '\'' {
                         self.emit_operator();
                         self.state = State::String(false);
                     }
-                    else if let Some(tok) = is_block(c){
+                    else if let Some(tok) = is_block(c) {
                         self.emit_operator();
                         self.emit_token_here(tok);
                         self.state = State::Whitespace;
                     }
-                    else{
+                    else if is_operator(c) {
+                        // Try to extend the current operator
+                        let mut extended = self.temp.clone();
+                        extended.push(c);
+                        
+                        if is_valid_operator(&extended) || could_be_operator_prefix(&extended) {
+                            // Valid extension, keep building
+                            self.temp.push(c);
+                        } else {
+                            // Can't extend - emit current operator and start new one
+                            self.emit_operator();
+                            self.temp.push(c);
+                        }
+                    }
+                    else {
                         self.emit_operator();
                         self.state = State::Whitespace;
                     }
                     
-                    if self.temp.len() == 2{
-                        match self.temp.as_str(){
-                            "/*"=>{
-                                self.state = State::BlockComment(0);
-                                self.temp.clear();
-                            },
-                            "//"=>{
-                                self.state = State::LineComment;
-                                self.temp.clear();
-                            },
-                            ">:" | "<:" | "^:" | "+:" | "?=" |
-                            "<=" | ">=" | "&&" | "||" | "|?" |
-                            "+=" | "-=" | "*=" | "/=" | 
-                            "%=" | "&=" | "|=" | "^=" | ".?" =>{
-                                self.emit_operator();
-                            }
-                            _=>{ // lets keep going
-                                if self.state != State::Operator{
-                                    
-                                }
-                            }
-                        }
+                    // Check for comment start
+                    if self.temp == "/*" {
+                        self.state = State::BlockComment(0);
+                        self.temp.clear();
                     }
-                    if self.temp.len() == 3{ 
-                        match self.temp.as_str(){
-                            "<<=" | ">>=" | "===" | "!=="=>{
-                                self.emit_operator();
-                            }
-                            _=>{
-                                println!("Tokenizer, invalid operator encountered: {}", self.temp);
-                                self.temp.clear();
-                            }
-                        }
+                    else if self.temp == "//" {
+                        self.state = State::LineComment;
+                        self.temp.clear();
+                    }
+                    // Emit complete operators that can't be extended
+                    else if is_valid_operator(&self.temp) && !could_be_operator_prefix(&self.temp) {
+                        self.emit_operator();
                     }
                 }
                 State::EscapeInString(double)=>{

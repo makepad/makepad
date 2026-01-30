@@ -17,30 +17,22 @@ script_mod!{
                 sdf.result
             }
         }
-        draw_text +: {
-            color: #0f0
-        }
+        me.draw_text.color = #0f0
     }
     
     #(App::script_component(vm)){
         ui: Window{
-            pass +: { clear_color: vec4(0.25 0.05 0.05 1.0) }
-            window +: {
-                inner_size: vec2(800 600)
-            }
+            me.pass.clear_color = vec4(0.25 0.05 0.05 1.0)
+            me.window.inner_size = vec2(800 600)
             $body: View{
                 flow: Down
                 padding: 20
                 spacing: 10
-                
                 $test: TestDraw{}
-                
                 $view: RoundedView{
                     width: 250 
                     height: 100
-                    draw_bg +: {
-                        color: #444
-                    }
+                    me.draw_bg.color = #494
                 }
             }
         }

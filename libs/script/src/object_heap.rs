@@ -429,7 +429,7 @@ impl ScriptHeap{
             } 
         }
         // alright nothing found
-        script_err_not_found!(trap, "scope variable {:?} not found in chain{}", key, suggest_scope_var(self, root_ptr, key))
+        script_err_not_found!(trap, "variable {} not found in scope{}", key, suggest_scope_var(self, root_ptr, key))
     }
         
     pub fn scope_value(&self, ptr:ScriptObject, key: LiveId, trap:ScriptTrap)->ScriptValue{
@@ -456,7 +456,7 @@ impl ScriptHeap{
             } 
         }
         // alright nothing found
-        script_err_not_found!(trap, "scope variable {:?} not found{}", key, suggest_scope_var(self, root_ptr, key))
+        script_err_not_found!(trap, "variable {} not found in scope{}", key, suggest_scope_var(self, root_ptr, key))
     }
         
     pub fn def_scope_value(&mut self, ptr:ScriptObject, key:LiveId, value:ScriptValue)->Option<ScriptObject>{
