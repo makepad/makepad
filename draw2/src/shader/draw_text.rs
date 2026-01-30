@@ -43,7 +43,7 @@ script_mod!{
     let test_text_style = TextStyle{
         font_size: 20
         font_family:FontFamily{
-            $latin: FontMember{res: res.file("/Users/admin/makepad/widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
+            $latin: FontMember{res: res.crate("self:../../widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
         }
         line_spacing: 1.2
     }
