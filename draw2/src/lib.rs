@@ -57,12 +57,17 @@ pub use crate::{
     },*/
 };
 
+#[cfg(feature = "svg")]
+pub use crate::shader::draw_svg::DrawSvg;
+
 pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{
     crate::turtle::script_mod(vm);
     crate::shader::sdf::script_mod(vm);
     crate::geometry::script_mod(vm);
     crate::shader::draw_quad::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
+    #[cfg(feature = "svg")]
+    crate::shader::draw_svg::script_mod(vm);
     NIL
 }
 /*

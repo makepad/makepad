@@ -27,6 +27,9 @@ unicode-segmentation = "1.11.0"
 # PNG support for emoji fonts - optional via feature (using fast zune-png decoder)
 makepad-zune-png = { version = "0.5.1", path = "../libs/zune-png", optional = true }
 
+# SVG rendering support - optional via feature
+resvg = { version = "0.43.0", optional = true }
+
 serde = { version = "1.0", optional = true, features = ["derive"] }
 
 [features]
@@ -34,6 +37,9 @@ default = []
 
 ## Enables PNG glyph support for emoji fonts
 png = ["dep:makepad-zune-png"]
+
+## Enables SVG rendering support
+svg = ["dep:resvg"]
 
 ## Enables certain public-facing types to derive serde serialization traits.
 serde = ["dep:serde", "makepad-live-id/serde"]

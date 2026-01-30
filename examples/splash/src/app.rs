@@ -4,7 +4,6 @@ app_main!(App);
 
 script_mod!{
     use mod.prelude.widgets.*
-    mod.res.load_all()
     
     let TestDraw = #(TestDraw::register_widget(vm)) {
         width: 250
@@ -20,7 +19,7 @@ script_mod!{
         draw_text.color: #0f0
     }
     
-    #(App::script_component(vm)){
+    let app = #(App::script_component(vm)){
         ui: Window{
             pass.clear_color: vec4(0.3 0.3 0.3 1.0)
             window.inner_size: vec2(800 600)
@@ -50,9 +49,17 @@ script_mod!{
                 $flatter_button: ButtonFlatter{
                     text: "Flatter Button"
                 }
+                $icon_button: Button{
+                    text: "Icon Button"
+                    icon_walk: Walk{width: 20, height: 20}
+                    draw_icon.color: #fff
+                    draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                }
             }
         }
     }
+    mod.res.load_all()
+    app
 }
 
 impl App {
@@ -77,6 +84,9 @@ impl MatchEvent for App {
         }
         if self.ui.button(ids!($flatter_button)).clicked(actions) {
             log!("Flatter button clicked!");
+        }
+        if self.ui.button(ids!($icon_button)).clicked(actions) {
+            log!("Icon button clicked!");
         }
     }
 }
