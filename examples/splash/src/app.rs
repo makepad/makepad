@@ -69,13 +69,13 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(ids!(button)).clicked(actions) {
+        if self.ui.button(ids!($button)).clicked(actions) {
             log!("Button clicked!");
         }
-        if self.ui.button(ids!(flat_button)).clicked(actions) {
+        if self.ui.button(ids!($flat_button)).clicked(actions) {
             log!("Flat button clicked!");
         }
-        if self.ui.button(ids!(flatter_button)).clicked(actions) {
+        if self.ui.button(ids!($flatter_button)).clicked(actions) {
             log!("Flatter button clicked!");
         }
     }
