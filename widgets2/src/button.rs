@@ -51,7 +51,6 @@ script_mod!{
             hover: instance(0.0)
             focus: instance(0.0)
             down: instance(0.0)
-            enabled: instance(0.0)
             disabled: instance(0.0)
 
             border_size: uniform(theme.beveling)
@@ -304,9 +303,7 @@ script_mod!{
     }
 
     mod.widgets.ButtonGradientY = mod.widgets.ButtonGradientX{
-        draw_bg +: {
-            gradient_fill_horizontal: 1.0
-        } 
+        draw_bg.gradient_fill_horizontal: 1.0
     }
   
     mod.widgets.ButtonIcon = mod.widgets.Button{
@@ -330,7 +327,7 @@ script_mod!{
     }
     
     mod.widgets.ButtonFlatterIcon = mod.widgets.ButtonFlatter{
-        draw_bg +: {color_focus: theme.color_u_hidden}
+        draw_bg.color_focus: theme.color_u_hidden
         spacing: 0.
         text: ""
     }
