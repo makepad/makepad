@@ -1,12 +1,18 @@
 pub use makepad_draw::makepad_platform;
 pub use makepad_platform::makepad_script;
 pub use makepad_draw2 as makepad_draw;
-pub use makepad_html;
 pub use makepad_derive_widget2 as makepad_derive_widget;
 pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
 pub use makepad_platform::log;
+
+#[cfg(feature = "html")]
+pub use makepad_html;
+
+#[cfg(feature = "jpg")]
 pub use makepad_zune_jpeg;
+
+#[cfg(feature = "png")]
 pub use makepad_zune_png;
 
 pub mod animator;
