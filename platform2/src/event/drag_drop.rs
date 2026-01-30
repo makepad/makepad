@@ -6,7 +6,7 @@ use {
         makepad_math::*,
         event::{
             KeyModifiers,
-            finger::{HitOptions, Margin},
+            finger::{HitOptions, Inset},
             event::{Event, DragHit}
         },
         cx::Cx,
@@ -112,7 +112,7 @@ impl Event {
             Event::Drag(event) => {
                 let rect = area.clipped_rect(cx);
                 if area == cx.drag_drop.drag_area {
-                    if !*event.handled.lock().unwrap() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
+                    if !*event.handled.lock().unwrap() && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin) {
                         //log!("drag_hist_with_options: Drag, in drag area, event handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                         cx.drag_drop.next_drag_area = area;
                         *event.handled.lock().unwrap() = true;
@@ -136,7 +136,7 @@ impl Event {
                         })
                     }
                 } else {
-                    if !*event.handled.lock().unwrap() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
+                    if !*event.handled.lock().unwrap() && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin) {
                         //log!("drag_hits_with_options: Drag, not in drag_area, event not handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                         cx.drag_drop.next_drag_area = area;
                         *event.handled.lock().unwrap() = true;
@@ -156,7 +156,7 @@ impl Event {
             }
             Event::Drop(event) => {
                 let rect = area.clipped_rect(cx);
-                if !*event.handled.lock().unwrap() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
+                if !*event.handled.lock().unwrap() && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin) {
                     //log!("drag_hits_with_options: Drop, event not handled and rect {:?} contains ({},{}) in margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                     cx.drag_drop.next_drag_area = Area::default();
                     *event.handled.lock().unwrap() = true;

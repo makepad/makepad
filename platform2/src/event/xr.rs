@@ -1,7 +1,7 @@
 use {
     crate::{
         cx::Cx,
-        Margin,
+        Inset,
         Area,
         HitOptions,
         Hit,
@@ -349,7 +349,7 @@ impl XrLocalEvent{
     }
     
     pub fn hits_with_options_and_test<F>(&self, cx: &mut Cx, area: Area, options: HitOptions, hit_test:F) -> Hit 
-    where F: Fn(Vec2d, &Rect, &Option<Margin>)->bool
+    where F: Fn(Vec2d, &Rect, &Option<Inset>)->bool
     {
         let rect = area.clipped_rect(cx);
         for tip in &self.finger_tips{

@@ -8,6 +8,7 @@ pub mod log;
 #[macro_use]
 mod cx;
 mod cx_api;
+mod arc_string_mut;
 
 pub mod action;
 pub mod game_input;
@@ -80,7 +81,9 @@ pub use {
     log::*,
     makepad_math::*,
     makepad_math::makepad_micro_serde,
+    arc_string_mut::ArcStringMut,
     makepad_script::{
+        string::*,
         trap::*,
         apply::*,
         heap::*,
@@ -152,7 +155,7 @@ pub use {
             NetworkResponse,
             NetworkResponsesEvent,
             GameInputState,
-            Margin,
+            Inset,
             KeyCode,
             Event,
             Hit,

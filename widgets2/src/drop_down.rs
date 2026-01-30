@@ -491,7 +491,7 @@ impl DropDown {
         }
         self.draw_bg.end(cx);
         
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Margin::default());
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Inset::default());
         
         if self.is_active && self.popup_menu.is_some() {
             //cx.set_sweep_lock(self.draw_bg.area());

@@ -18,7 +18,7 @@ pub use makepad_zune_png;
 pub mod animator;
 // pub mod button;
 // pub mod cached_widget;
-// pub mod label;
+pub mod label;
 // pub mod image;
 // pub mod image_blend;
 // pub mod icon;
@@ -115,6 +115,7 @@ pub use crate::{
 //    data_binding::{DataBindingStore, DataBindingMap},
 //    button::*,
 //    cached_widget::*,
+    label::*,
     view::*,
 //    adaptive_view::*,
 //    image::*,
@@ -212,6 +213,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::view::script_mod(vm);
     crate::view_ui::script_mod(vm);
     crate::window::script_mod(vm);
+    crate::label::script_mod(vm);
     
     {
         script_mod!{

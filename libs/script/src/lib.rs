@@ -65,6 +65,7 @@ pub use makepad_script_derive::*;
 pub use apply::*;
 pub use traits::*;
 pub use thread::*;
+pub use string::*;
 pub use heap::*;
 pub use object::*;
 pub use array::*;
