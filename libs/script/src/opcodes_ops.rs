@@ -7,6 +7,8 @@ use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
 use crate::thread::*;
+use crate::numeric::NumericValue;
+use crate::vm::ScriptCode;
 
 impl ScriptThread {
     // ARITHMETIC handlers
@@ -24,13 +26,21 @@ impl ScriptThread {
         }
     }
     
-    pub(crate) fn handle_neg(&mut self, heap: &mut ScriptHeap) {
-        let v = heap.cast_to_f64(self.pop_stack_resolved(heap), self.trap.ip);
-        self.push_stack_unchecked(ScriptValue::from_f64(-v));
+    pub(crate) fn handle_neg(&mut self, heap: &mut ScriptHeap, code: &ScriptCode) {
+        let value = self.pop_stack_resolved(heap);
+        // Fast path for numbers
+        if let Some(f) = value.as_number() {
+            self.push_stack_unchecked(ScriptValue::from_f64(-f));
+            self.trap.goto_next();
+            return;
+        }
+        let num = NumericValue::from_script_value_heap(heap, value, self.trap.ip);
+        let result = num.zip_f32(NumericValue::F64(-1.0), |a, b| a * b);
+        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
         self.trap.goto_next();
     }
     
-    pub(crate) fn handle_add(&mut self, heap: &mut ScriptHeap, opargs: OpcodeArgs) {
+    pub(crate) fn handle_add(&mut self, heap: &mut ScriptHeap, code: &ScriptCode, opargs: OpcodeArgs) {
         let b = if opargs.is_u32(){
             (opargs.to_u32()).into()
         }
@@ -38,18 +48,30 @@ impl ScriptThread {
             self.pop_stack_resolved(heap)
         };
         let a = self.pop_stack_resolved(heap);
+        
+        // String concatenation takes precedence
         if a.is_string_like() || b.is_string_like(){
             let ptr = heap.new_string_with(|heap, out|{
                 heap.cast_to_string(a, out);
                 heap.cast_to_string(b, out);
             });
             self.push_stack_unchecked(ptr.into());
+            self.trap.goto_next();
+            return;
         }
-        else{
-            let fa = heap.cast_to_f64(a, self.trap.ip);
-            let fb = heap.cast_to_f64(b, self.trap.ip);
+        
+        // Fast path: both are simple numbers
+        if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
             self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip));
+            self.trap.goto_next();
+            return;
         }
+        
+        // Slow path: handle all numeric types
+        let na = NumericValue::from_script_value_heap(heap, a, self.trap.ip);
+        let nb = NumericValue::from_script_value_heap(heap, b, self.trap.ip);
+        let result = na.zip_f32(nb, |x, y| x + y);
+        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
         self.trap.goto_next();
     }
 
@@ -108,7 +130,7 @@ impl ScriptThread {
         self.trap.goto_next();
     }
 
-    // Generic arithmetic operation handlers
+    // Generic arithmetic operation handlers (legacy, for operations that don't need type preservation)
 
     pub fn handle_f64_op<F>(&mut self, heap: &mut ScriptHeap, args: OpcodeArgs, f: F)
     where F: FnOnce(f64, f64) -> f64
@@ -166,6 +188,78 @@ impl ScriptThread {
         let ba = heap.cast_to_bool(a);
         let bb = heap.cast_to_bool(b);
         self.push_stack_unchecked(ScriptValue::from_bool(f(ba, bb)));
+        self.trap.goto_next();
+    }
+
+    /// Handle multiplication with full numeric type support including matrix operations
+    pub fn handle_mul(&mut self, heap: &mut ScriptHeap, code: &ScriptCode, args: OpcodeArgs) {
+        let b = if args.is_u32() {
+            ScriptValue::from_f64(args.to_u32() as f64)
+        } else {
+            self.pop_stack_resolved(heap)
+        };
+        let a = self.pop_stack_resolved(heap);
+        
+        // Fast path: both are simple numbers
+        if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
+            self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa * fb, self.trap.ip));
+            self.trap.goto_next();
+            return;
+        }
+        
+        // Slow path: handle all numeric types including matrix
+        let na = NumericValue::from_script_value_heap(heap, a, self.trap.ip);
+        let nb = NumericValue::from_script_value_heap(heap, b, self.trap.ip);
+        let result = na.multiply(nb);
+        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
+        self.trap.goto_next();
+    }
+
+    /// Handle division with full numeric type support
+    pub fn handle_div(&mut self, heap: &mut ScriptHeap, code: &ScriptCode, args: OpcodeArgs) {
+        let b = if args.is_u32() {
+            ScriptValue::from_f64(args.to_u32() as f64)
+        } else {
+            self.pop_stack_resolved(heap)
+        };
+        let a = self.pop_stack_resolved(heap);
+        
+        // Fast path: both are simple numbers
+        if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
+            self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa / fb, self.trap.ip));
+            self.trap.goto_next();
+            return;
+        }
+        
+        // Slow path: handle all numeric types
+        let na = NumericValue::from_script_value_heap(heap, a, self.trap.ip);
+        let nb = NumericValue::from_script_value_heap(heap, b, self.trap.ip);
+        let result = na.zip_f32(nb, |x, y| if y != 0.0 { x / y } else { 0.0 });
+        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
+        self.trap.goto_next();
+    }
+
+    /// Handle subtraction with full numeric type support
+    pub fn handle_sub(&mut self, heap: &mut ScriptHeap, code: &ScriptCode, args: OpcodeArgs) {
+        let b = if args.is_u32() {
+            ScriptValue::from_f64(args.to_u32() as f64)
+        } else {
+            self.pop_stack_resolved(heap)
+        };
+        let a = self.pop_stack_resolved(heap);
+        
+        // Fast path: both are simple numbers
+        if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
+            self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa - fb, self.trap.ip));
+            self.trap.goto_next();
+            return;
+        }
+        
+        // Slow path: handle all numeric types
+        let na = NumericValue::from_script_value_heap(heap, a, self.trap.ip);
+        let nb = NumericValue::from_script_value_heap(heap, b, self.trap.ip);
+        let result = na.zip_f32(nb, |x, y| x - y);
+        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
         self.trap.goto_next();
     }
 }

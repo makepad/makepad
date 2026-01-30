@@ -98,7 +98,7 @@ script_mod!{
         color_opaque_d_3: mix(theme.color_fg_app, #0, 0.45)
         color_opaque_d_4: mix(theme.color_fg_app, #0, 0.6)
         color_opaque_d_5: mix(theme.color_fg_app, #0, 0.75)
-
+        
         // BASICS
         color_makepad: #FF5C39FF
 

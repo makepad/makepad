@@ -16,7 +16,7 @@ pub use makepad_zune_jpeg;
 pub use makepad_zune_png;
 
 pub mod animator;
-// pub mod button;
+pub mod button;
 // pub mod cached_widget;
 pub mod label;
 // pub mod image;
@@ -113,7 +113,7 @@ pub mod designer_toolbox;
 pub use crate::{
     
 //    data_binding::{DataBindingStore, DataBindingMap},
-//    button::*,
+    button::*,
 //    cached_widget::*,
     label::*,
     view::*,
@@ -192,6 +192,9 @@ pub fn script_mod(vm: &mut ScriptVm){
     {
         script_mod!{ 
             mod.prelude.widgets_internal = {
+                ..mod.animator,
+                ..mod.animator.Play,
+                ..mod.animator.Ease,
                 ..mod.pod,
                 ..mod.math,
                 ..mod.sdf,
@@ -214,6 +217,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::view_ui::script_mod(vm);
     crate::window::script_mod(vm);
     crate::label::script_mod(vm);
+    crate::button::script_mod(vm);
     
     {
         script_mod!{
@@ -223,6 +227,9 @@ pub fn script_mod(vm: &mut ScriptVm){
                 ..mod.sdf,
                 mod.theme,
                 mod.draw,
+                ..mod.animator,
+                ..mod.animator.Play,
+                ..mod.animator.Ease,
                 ..mod.shader,
                 ..mod.widgets,
                 ..mod.turtle,

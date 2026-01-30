@@ -22,6 +22,7 @@ pub mod vm;
 pub mod thread;
 pub mod opcode;
 pub mod value;
+pub mod numeric;
 pub mod opcodes;
 pub mod opcodes_ops;
 pub mod opcodes_assign;
