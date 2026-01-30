@@ -6,7 +6,7 @@ use makepad_script::id;
 use std::io::Read;
 use std::io::Write;
 
-pub fn define_fs_module(vm:&mut ScriptVm){
+pub fn script_mod(vm:&mut ScriptVm){
     let fs = vm.new_module(id!(fs));
     
     for sym in [id_lut!(read), id_lut!(read_to_string)]{    

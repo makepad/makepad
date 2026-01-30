@@ -220,11 +220,12 @@ pub use {
         cursor::MouseCursor,
         macos_menu::MacosMenu,
         draw_matrix::DrawMatrix,
-        window::{WindowHandle,CxWindowPool, WindowId},
+        window::{ScriptWindowHandle, WindowHandle, CxWindowPool, WindowId},
         draw_pass::{
             DrawPassId,
             CxDrawPassParent,
             CxDrawPassRect,
+            ScriptDrawPass,
             DrawPass,
             DrawPassClearColor,
             DrawPassClearDepth

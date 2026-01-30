@@ -136,11 +136,13 @@ impl ScriptThread {
         let start = self.pop_stack_resolved(heap);
         // Validate that both operands are numbers
         if !start.is_number() {
-            self.push_stack_unchecked(script_err_type_mismatch!(self.trap, "range start must be a number"));
+            self.push_stack_unchecked(script_err_type_mismatch!(self.trap, "range must start with a number, did you forget a , before a splat operator?"));
+            self.trap.goto_next();
             return;
         }
         if !end.is_number() {
             self.push_stack_unchecked(script_err_type_mismatch!(self.trap, "range end must be a number"));
+            self.trap.goto_next();
             return;
         }
         let range = heap.new_with_proto(code.builtins.range.into());

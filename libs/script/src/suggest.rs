@@ -336,10 +336,10 @@ pub fn format_pod_type_from_builtins(pod_ty: ScriptPodType, builtins: &crate::mo
 }
 
 /// Maximum number of items to show in "Available:" list
-const MAX_AVAILABLE_ITEMS: usize = 10;
+const MAX_AVAILABLE_ITEMS: usize = 4;
 
 /// Format suggestions from a list of candidate names
-/// Returns a string like: `. Did you mean 'foo'? Available: bar, baz, foo`
+/// Returns a string like: `. Did you mean: foo or bar, baz (+2 more)`
 pub fn suggest_from_iter<'a>(key_str: &str, candidates: impl Iterator<Item = &'a str>) -> String {
     let mut result = String::new();
     let mut scored: Vec<(&str, usize)> = candidates
@@ -350,32 +350,23 @@ pub fn suggest_from_iter<'a>(key_str: &str, candidates: impl Iterator<Item = &'a
         return result;
     }
     
-    // Sort by distance to find best match for "Did you mean"
+    // Sort by distance to find best matches
     scored.sort_by_key(|(_, dist)| *dist);
     
-    // Check if there's a close match
-    if let Some((best_name, best_dist)) = scored.first() {
-        if *best_dist <= MAX_DISTANCE && *best_dist < key_str.len() {
-            write!(result, ". Did you mean {:?}?", best_name).ok();
-        }
-    }
-    
-    // Sort alphabetically for the available list
-    scored.sort_by_key(|(name, _)| *name);
-    
-    // List available items (truncated to MAX_AVAILABLE_ITEMS)
     let total_count = scored.len();
-    if result.is_empty() {
-        write!(result, ". Available: ").ok();
-    } else {
-        write!(result, " Available: ").ok();
-    }
-    for (i, (name, _)) in scored.iter().take(MAX_AVAILABLE_ITEMS).enumerate() {
-        if i > 0 { result.push_str(", "); }
-        result.push_str(name);
-    }
-    if total_count > MAX_AVAILABLE_ITEMS {
-        write!(result, " (+{} more)", total_count - MAX_AVAILABLE_ITEMS).ok();
+    
+    // Format: "Did you mean: first or second, third, fourth (+x more)"
+    write!(result, ". Did you mean: {}", scored[0].0).ok();
+    
+    if total_count > 1 {
+        write!(result, " or ").ok();
+        for (i, (name, _)) in scored.iter().skip(1).take(MAX_AVAILABLE_ITEMS).enumerate() {
+            if i > 0 { result.push_str(", "); }
+            write!(result, "{}", name).ok();
+        }
+        if total_count > MAX_AVAILABLE_ITEMS + 1 {
+            write!(result, " (+{} more)", total_count - MAX_AVAILABLE_ITEMS - 1).ok();
+        }
     }
     
     result
@@ -396,37 +387,34 @@ fn suggest_from_candidates(key_str: &str, candidates: Vec<FieldCandidate>) -> St
         return result;
     }
     
-    // Sort by distance to find best match for "Did you mean"
+    // Sort by distance to find best matches
     let mut sorted = candidates;
     sorted.sort_by_key(|c| c.distance);
     
-    // Check if there's a close match
-    if let Some(best) = sorted.first() {
-        if best.distance <= MAX_DISTANCE && best.distance < key_str.len() {
-            write!(result, ". Did you mean {:?}?", best.name).ok();
-        }
-    }
-    
-    // Sort alphabetically for the available list
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    
-    // List available items (truncated to MAX_AVAILABLE_ITEMS)
     let total_count = sorted.len();
-    if result.is_empty() {
-        write!(result, ". Available: ").ok();
+    
+    // Format first item
+    let first = &sorted[0];
+    if first.value_preview.is_empty() {
+        write!(result, ". Did you mean: {}", first.name).ok();
     } else {
-        write!(result, " Available: ").ok();
+        write!(result, ". Did you mean: {}({})", first.name, first.value_preview).ok();
     }
-    for (i, candidate) in sorted.iter().take(MAX_AVAILABLE_ITEMS).enumerate() {
-        if i > 0 { result.push_str(", "); }
-        if candidate.value_preview.is_empty() {
-            result.push_str(&candidate.name);
-        } else {
-            write!(result, "{}({})", candidate.name, candidate.value_preview).ok();
+    
+    // Format remaining items
+    if total_count > 1 {
+        write!(result, " or ").ok();
+        for (i, candidate) in sorted.iter().skip(1).take(MAX_AVAILABLE_ITEMS).enumerate() {
+            if i > 0 { result.push_str(", "); }
+            if candidate.value_preview.is_empty() {
+                write!(result, "{}", candidate.name).ok();
+            } else {
+                write!(result, "{}({})", candidate.name, candidate.value_preview).ok();
+            }
         }
-    }
-    if total_count > MAX_AVAILABLE_ITEMS {
-        write!(result, " (+{} more)", total_count - MAX_AVAILABLE_ITEMS).ok();
+        if total_count > MAX_AVAILABLE_ITEMS + 1 {
+            write!(result, " (+{} more)", total_count - MAX_AVAILABLE_ITEMS - 1).ok();
+        }
     }
     
     result

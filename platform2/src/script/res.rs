@@ -87,7 +87,7 @@ fn parse_crate_path(path: &str) -> Option<(&str, &str)> {
     Some((crate_part, file_path))
 }
 
-pub fn extend_std_module_with_res(vm: &mut ScriptVm) {
+pub fn script_mod(vm: &mut ScriptVm) {
     let res = vm.new_module(id!(res));
     let res_type = vm.new_handle_type(id_lut!(res));
     

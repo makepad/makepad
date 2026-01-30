@@ -81,7 +81,7 @@ impl Cx{
     }
 }
 
-pub fn extend_std_module_with_task(vm:&mut ScriptVm){
+pub fn script_mod(vm:&mut ScriptVm){
     let std = vm.module(id!(std));
     let task_type = vm.new_handle_type(id_lut!(task));
     

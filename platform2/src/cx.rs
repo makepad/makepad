@@ -280,7 +280,7 @@ impl Cx {
         
         let mut script_vm = Box::new(ScriptVmBase::new());
         
-        crate::script::define_script_modules(&mut (*script_vm).as_ref());
+        crate::script::script_mod(&mut (*script_vm).as_ref());
         
         Self {
             package_root: None,

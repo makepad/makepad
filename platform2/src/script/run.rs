@@ -98,7 +98,7 @@ impl Cx{
     }
 }
 
-pub fn define_run_module(vm:&mut ScriptVm){
+pub fn script_mod(vm:&mut ScriptVm){
     let run = vm.new_module(id_lut!(run));
     
     set_script_value_to_api!(vm, run.ChildEvents);

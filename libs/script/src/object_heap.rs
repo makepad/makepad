@@ -272,7 +272,7 @@ impl ScriptHeap{
                 }
             }
             else if !object.tag.is_map_add(){
-                return script_err_not_found!(trap, "property {:?} not defined on type", key_id)
+                return script_err_not_found!(trap, "property {:?} not defined on type{}", key_id, suggest_property(self, top_ptr, key))
             }
             let object = &mut self.objects[top_ptr.index as usize];
             object.map_insert(key, value);

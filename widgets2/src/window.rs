@@ -3,7 +3,7 @@ use crate::{
     makepad_draw::*,
     view::*,
     widget::*,
-    animator::*,
+    //animator::*,
 };
 
 script_mod!{
@@ -120,12 +120,12 @@ pub struct Window {
     //#[live] debug_view: DebugView,
     //#[live] performance_view: PerformanceView,
     //#[live] nav_control: NavControl,
-    #[live] window: WindowHandle,
+    #[live] window: ScriptWindowHandle,
     #[live] stdin_size: DrawColor,
     #[rust] last_known_area: Area,
     #[new] overlay: Overlay,
     #[new] main_draw_list: DrawList2d,
-    #[live] pass: DrawPass,
+    #[live] pass: ScriptDrawPass,
     #[new] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[live] show_performance_view: bool,
@@ -159,13 +159,13 @@ impl Window {
         }
         self.initialized = true;
         
-        self.window.set_pass(cx, &self.pass);
+        self.window.handle.set_pass(cx, &self.pass.handle);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
         self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32{
             size: TextureSize::Auto,
             initial: true,
         });
-        self.pass.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
+        self.pass.handle.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
         
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
@@ -208,7 +208,7 @@ impl Window {
             return Redrawing::no()
         }
         
-        cx.begin_pass(&self.pass, None);
+        cx.begin_pass(&self.pass.handle, None);
 
         self.main_draw_list.begin_always(cx);
         
@@ -246,7 +246,7 @@ impl Window {
         // if we are running in stdin mode, write a tracking pixel with the pass size
         if cx.in_makepad_studio(){
             let df = cx.current_dpi_factor();
-            let size = self.pass.size(cx).unwrap() * df;
+            let size = self.pass.handle.size(cx).unwrap() * df;
             self.stdin_size.color = encode_size(size.x);
             self.stdin_size.draw_abs(cx, Rect{pos:dvec2(0.0,0.0),size:dvec2(1.0/df,1.0/df)});
             self.stdin_size.color = encode_size(size.y);
@@ -260,26 +260,26 @@ impl Window {
         cx.end_pass_sized_turtle();
         
         self.main_draw_list.end(cx);
-        cx.end_pass(&self.pass);
+        cx.end_pass(&self.pass.handle);
     }
     pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
-        self.window.resize(cx, size);
+        self.window.handle.resize(cx, size);
     }
     pub fn reposition(&self, cx: &mut Cx, size: Vec2d) {
-        self.window.reposition(cx, size);
+        self.window.handle.reposition(cx, size);
     }
     pub fn set_fullscreen(&mut self, cx: &mut Cx) {
-        self.window.fullscreen(cx);
+        self.window.handle.fullscreen(cx);
     }
     pub fn configure_window(&mut self, cx: &mut Cx, inner_size: Vec2d, position: Vec2d, is_fullscreen: bool, title: String) {
-        self.window.configure_window(cx, inner_size, position, is_fullscreen, title);
+        self.window.handle.configure_window(cx, inner_size, position, is_fullscreen, title);
     }
 }
 
 impl WindowRef{
     pub fn get_inner_size(&self, cx:&Cx)->Vec2d{
         if let Some(inner) = self.borrow(){
-            inner.window.get_inner_size(cx)
+            inner.window.handle.get_inner_size(cx)
         }
         else{
             dvec2(0.0,0.0)
@@ -288,7 +288,7 @@ impl WindowRef{
 
     pub fn get_position(&self, cx:&Cx)->Vec2d{
         if let Some(inner) = self.borrow(){
-            inner.window.get_position(cx)
+            inner.window.handle.get_position(cx)
         }
         else{
             dvec2(0.0,0.0)
@@ -296,7 +296,7 @@ impl WindowRef{
     }
     pub fn is_fullscreen(&self, cx:&Cx)->bool{
         if let Some(inner) = self.borrow(){
-            inner.window.is_fullscreen(cx)
+            inner.window.handle.is_fullscreen(cx)
         }
         else{
             false
@@ -358,7 +358,7 @@ impl Widget for Window {
             if self.demo{
                 self.demo_next_frame = cx.new_next_frame();
             }
-            cx.repaint_pass_and_child_passes(self.pass.draw_pass_id());
+            cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
         }
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
@@ -456,20 +456,20 @@ impl Widget for Window {
             }
         }
         
-        if let Event::Actions(actions) = event{
+        if let Event::Actions(_actions) = event{
             // if self.desktop_button(ids!(windows_buttons.min)).clicked(&actions) {
-            //    self.window.minimize(cx);
+            //    self.window.handle.minimize(cx);
             //}
             /*if self.desktop_button(ids!(windows_buttons.max)).clicked(&actions) {
-                if self.window.is_fullscreen(cx) {
-                    self.window.restore(cx);
+                if self.window.handle.is_fullscreen(cx) {
+                    self.window.handle.restore(cx);
                 }
                 else {
-                    self.window.maximize(cx);
+                    self.window.handle.maximize(cx);
                 }
             }
             if self.desktop_button(ids!(windows_buttons.close)).clicked(&actions) {
-                self.window.close(cx);
+                self.window.handle.close(cx);
             }
             if self.desktop_button(ids!(web_xr.xr_on)).clicked(&actions) {
                 cx.xr_start_presenting();

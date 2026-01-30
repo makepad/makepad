@@ -200,7 +200,7 @@ impl ShaderFnCompiler {
                         }
                     }
                 }
-                script_err_shader!(self.trap, "no matching shader type for IoSelf field");
+                script_err_shader!(self.trap, "no matching shader type for self field");
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
             } else {
                 script_err_shader!(self.trap, "no matching shader type for instance");
@@ -730,9 +730,16 @@ impl ShaderFnCompiler {
                         return;
                     }
                 }
+                
+                // Field not found on self
+                script_err_not_found!(self.trap, "field {:?} not found on self{}", field_id, suggest_property(&vm.heap, obj, field_id.into()));
+                self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                self.stack.free_string(field_s);
+                self.stack.free_string(instance_s);
+                return;
             }
         }
-        script_err_not_found!(self.trap, "field not found on shader type");
+        script_err_not_found!(self.trap, "field {:?} not found on shader type {:?}", field_ty, instance_ty);
         self.stack.push(self.trap.pass(), ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         self.stack.free_string(field_s);
         self.stack.free_string(instance_s);
