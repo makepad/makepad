@@ -2,66 +2,48 @@ use crate::{
     makepad_derive_widget::*,
     image_cache::*,
     makepad_draw::*,
-    widget::*
+    widget::*,
+    animator::{Animator, AnimatorImpl, AnimatorAction},
 };
 use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
-live_design!{
-    link widgets;
-    use link::shaders::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
     
-    DrawImage= {{DrawImage}} {
-        texture image: texture2d
+    mod.widgets.ImageFit = #(ImageFit::script_api(vm))
+    
+    mod.std.set_type_default() do #(DrawImage::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        image_texture: texture_2d(float)
         opacity: 1.0
         image_scale: vec2(1.0, 1.0)
         image_pan: vec2(0.0, 0.0)
+        async_load: 0.0
                 
-        fn get_color_scale_pan(self, scale: vec2, pan: vec2) -> vec4 {
-            return sample2d(self.image, self.pos * scale + pan).xyzw;
+        get_color_scale_pan: fn(scale: vec2, pan: vec2) {
+            return self.image_texture.sample(self.pos * scale + pan)
         }
                                 
-        fn get_color(self) -> vec4 {
+        get_color: fn() {
             return self.get_color_scale_pan(self.image_scale, self.image_pan)
         }
         
-        fn pixel(self) -> vec4 {
-            let color = mix(self.get_color(), #3, self.async_load);
-            return Pal::premul(vec4(color.xyz, color.w * self.opacity))
+        pixel: fn() {
+            let color = mix(self.get_color(), #3, self.async_load)
+            return Pal.premul(vec4(color.xyz, color.w * self.opacity))
         }
-        
     }
     
-    pub ImageBase = {{Image}} {}
+    mod.widgets.ImageBase = #(Image::register_widget(vm))
     
-    pub Image = <ImageBase> {
-        animator: {
-            async_load = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_bg: {async_load: 0.0}
-                    }
-                }
-                on = {
-                    from: {
-                        all: Forward {duration: 0.1}
-                    }
-                    apply: {
-                        draw_bg: {async_load: 1.0}
-                    }
-                }
-            }
-        }
-        
+    mod.widgets.Image = mod.std.set_type_default() do mod.widgets.ImageBase{
         width: 100
         height: 100
     }
-    
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawImage {
     #[deref] draw_super: DrawQuad,
@@ -72,12 +54,12 @@ pub struct DrawImage {
 }
 
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[live_ignore]
+#[derive(Copy, Clone, Debug, Default, Script, ScriptHook)]
 pub enum ImageAnimation {
     Stop,
     Once,
-    #[pick] Loop,
+    #[default]
+    Loop,
     Bounce,
     #[live(0.0)] Frame(f64),
     #[live(0.0)] Factor(f64),
@@ -86,13 +68,14 @@ pub enum ImageAnimation {
     #[live(60.0)] BounceFps(f64),
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Image {
+    #[source] source: ScriptObjectRef,
     #[walk] walk: Walk,
-    #[animator] animator: Animator,
+    #[apply_default] animator: Animator,
     #[redraw] #[live] pub draw_bg: DrawImage,
-    #[live] min_width: i64,
-    #[live] min_height: i64,
+    #[live] min_width: u64,
+    #[live] min_height: u64,
     #[live(1.0)] width_scale: f64,
     #[live(ImageAnimation::BounceFps(25.0))] animation: ImageAnimation,
     #[rust] last_time: Option<f64>,
@@ -100,53 +83,35 @@ pub struct Image {
     #[visible] #[live(true)] visible: bool,
     #[rust] next_frame: NextFrame,
     #[live] fit: ImageFit,
-    #[live] source: LiveDependency,
     #[rust] async_image_path: Option<PathBuf>,
     #[rust] async_image_size: Option<(usize, usize)>,
     #[rust] texture: Option<Texture>,
 }
 
 impl ImageCacheImpl for Image {
-    fn get_texture(&self, _id:usize) -> &Option<Texture> {
+    fn get_texture(&self, _id: usize) -> &Option<Texture> {
         &self.texture
     }
     
-    fn set_texture(&mut self, texture: Option<Texture>, _id:usize) {
+    fn set_texture(&mut self, texture: Option<Texture>, _id: usize) {
         self.texture = texture;
     }
 }
 
-impl LiveHook for Image{
-    fn after_apply(&mut self, cx: &mut Cx, apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
-        match apply.from{
-            ApplyFrom::NewFromDoc{..}|// newed from DSL,
-            ApplyFrom:: UpdateFromDoc{..}|
-            ApplyFrom::Over{..}=>{
-                self.lazy_create_image_cache(cx);
-                let source = self.source.clone();
-                if source.as_str().len()>0 {
-                    let _ = self.load_image_dep_by_path(cx, source.as_str(), 0);
-                }
-            }
-            _=>()
-        }
-    }
-}
-
 impl Widget for Image {
-    fn handle_event(&mut self, cx:&mut Cx, event:&Event, _scope:&mut Scope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
         // lets check if we have a post action
-        if let Event::Actions(actions) = &event{
-            for action in actions{
-                if let Some(AsyncImageLoad{image_path, result}) = &action.downcast_ref(){
-                    if let Some(result) = result.borrow_mut().take(){
+        if let Event::Actions(actions) = &event {
+            for action in actions {
+                if let Some(AsyncImageLoad{image_path, result}) = &action.downcast_ref() {
+                    if let Some(result) = result.borrow_mut().take() {
                         // we have a result for the image_cache to load up
                         self.process_async_image_load(cx, image_path, result);
                     }
-                    if self.async_image_size.is_some() && self.async_image_path.clone() == Some(image_path.to_path_buf()){ // see if we can load from cache
+                    if self.async_image_size.is_some() && self.async_image_path.clone() == Some(image_path.to_path_buf()) { // see if we can load from cache
                         self.load_image_from_cache(cx, image_path, 0);
                         self.async_image_size = None;
                         self.animator_play(cx, ids!(async_load.off));
@@ -159,67 +124,67 @@ impl Widget for Image {
             // compute the next frame and patch things up
             if let Some(image_texture) = &self.texture {
                 let (texture_width, texture_height) = image_texture.get_format(cx).vec_width_height().unwrap_or((self.min_width as usize, self.min_height as usize));
-                if let Some(animation) = image_texture.animation(cx).clone(){
-                    let delta = if let Some(last_time) = &self.last_time{
+                if let Some(animation) = image_texture.animation(cx).clone() {
+                    let delta = if let Some(last_time) = &self.last_time {
                         nf.time - last_time
                     }
-                    else{
+                    else {
                         0.0
                     };
                     self.last_time = Some(nf.time);
                     let num_frames = animation.num_frames as f64;
-                    match self.animation{
-                        ImageAnimation::Stop=>{
+                    match self.animation {
+                        ImageAnimation::Stop => {
                             
                         }
-                        ImageAnimation::Frame(frame)=>{
+                        ImageAnimation::Frame(frame) => {
                             self.animation_frame = frame;                                                   
                         }
-                        ImageAnimation::Factor(pos)=>{
+                        ImageAnimation::Factor(pos) => {
                             self.animation_frame = pos * (num_frames - 1.0);         
                         }
-                        ImageAnimation::Once=>{
+                        ImageAnimation::Once => {
                             self.animation_frame += 1.0;
-                            if self.animation_frame >= num_frames{
+                            if self.animation_frame >= num_frames {
                                 self.animation_frame = num_frames - 1.0;
                             }
-                            else{
+                            else {
                                 self.next_frame = cx.new_next_frame();
                             }
                         }
-                        ImageAnimation::Loop=>{
+                        ImageAnimation::Loop => {
                             self.animation_frame += 1.0;
-                            if self.animation_frame >= num_frames{
+                            if self.animation_frame >= num_frames {
                                 self.animation_frame = 0.0;
                             }
                             self.next_frame = cx.new_next_frame();
                         }
-                        ImageAnimation::Bounce=>{
+                        ImageAnimation::Bounce => {
                             self.animation_frame += 1.0;
-                            if self.animation_frame >= num_frames * 2.0{
+                            if self.animation_frame >= num_frames * 2.0 {
                                 self.animation_frame = 0.0;
                             }
                             self.next_frame = cx.new_next_frame();
                         }
-                        ImageAnimation::OnceFps(fps)=>{
+                        ImageAnimation::OnceFps(fps) => {
                             self.animation_frame += delta * fps;
-                            if self.animation_frame >= num_frames{
+                            if self.animation_frame >= num_frames {
                                 self.animation_frame = num_frames - 1.0;
                             }
-                            else{
+                            else {
                                 self.next_frame = cx.new_next_frame();
                             }
                         }
-                        ImageAnimation::LoopFps(fps)=>{
+                        ImageAnimation::LoopFps(fps) => {
                             self.animation_frame += delta * fps;
-                            if self.animation_frame >= num_frames{
+                            if self.animation_frame >= num_frames {
                                 self.animation_frame = 0.0;
                             }
                             self.next_frame = cx.new_next_frame();
                         }
-                        ImageAnimation::BounceFps(fps)=>{
+                        ImageAnimation::BounceFps(fps) => {
                             self.animation_frame += delta * fps;
-                            if self.animation_frame >= num_frames * 2.0{
+                            if self.animation_frame >= num_frames * 2.0 {
                                 self.animation_frame = 0.0;
                             }
                             self.next_frame = cx.new_next_frame();
@@ -228,10 +193,10 @@ impl Widget for Image {
                     // alright now lets turn animation_frame into the right image_pan
                     let last_pan = self.draw_bg.image_pan;
                     
-                    let frame = if self.animation_frame >= num_frames{
+                    let frame = if self.animation_frame >= num_frames {
                         num_frames * 2.0 - 1.0 - self.animation_frame
                     }
-                    else{
+                    else {
                         self.animation_frame
                     } as usize;
                     
@@ -239,7 +204,7 @@ impl Widget for Image {
                     let xpos = ((frame % horizontal_frames) * animation.width) as f32 / texture_width as f32;
                     let ypos = ((frame / horizontal_frames) * animation.height) as f32 / texture_height as f32;
                     self.draw_bg.image_pan = vec2(xpos, ypos);
-                    if self.draw_bg.image_pan != last_pan{
+                    if self.draw_bg.image_pan != last_pan {
                         // patch it into the area
                         self.draw_bg.update_instance_area_value(cx, ids!(image_pan))
                     }
@@ -249,7 +214,7 @@ impl Widget for Image {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_walk(cx, walk)
+        self.draw_walk_image(cx, walk)
     }
 }
 
@@ -267,8 +232,8 @@ impl Image {
         self.texture.is_some()
     }
 
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
-        if !self.visible{
+    pub fn draw_walk_image(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
+        if !self.visible {
             return DrawStep::done()
         }
         // alright we get a walk. depending on our aspect ratio
@@ -276,23 +241,22 @@ impl Image {
         let rect = cx.peek_walk_turtle(walk);
         let dpi = cx.current_dpi_factor();
         
-        let (width, height) = if let Some((w,h)) = &self.async_image_size{
+        let (width, height) = if let Some((w, h)) = &self.async_image_size {
             // still loading
-            
-            (*w as f64,*h as f64)
-        }else if let Some(image_texture) = &self.texture {
+            (*w as f64, *h as f64)
+        } else if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
-            let (width,height) = image_texture.get_format(cx).vec_width_height().unwrap_or((self.min_width as usize, self.min_height as usize));
-            if let Some(animation) = image_texture.animation(cx){
-                let (w,h) = (animation.width as f64, animation.height as f64);
+            let (width, height) = image_texture.get_format(cx).vec_width_height().unwrap_or((self.min_width as usize, self.min_height as usize));
+            if let Some(animation) = image_texture.animation(cx) {
+                let (w, h) = (animation.width as f64, animation.height as f64);
                 self.next_frame = cx.new_next_frame();
                 // we have an animation. lets compute the scale and zoom for a certain frame
                 let scale_x = w as f32 / width as f32;
                 let scale_y = h as f32 / height as f32;
                 self.draw_bg.image_scale = vec2(scale_x, scale_y);
-                (w,h)
+                (w, h)
             }
-            else{
+            else {
                 (width as f64 * self.width_scale, height as f64)
             }
         }
@@ -335,50 +299,50 @@ impl Image {
             }
         }
         
-        
         self.draw_bg.draw_walk(cx, walk);
         
         DrawStep::done()
     }
     
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
-    pub fn load_image_file_by_path_async(&mut self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
-        if let Ok(result) = self.load_image_file_by_path_async_impl(cx, image_path, 0){
-            match result{
-                AsyncLoadResult::Loading(w,h)=>{
-                    self.async_image_size = Some((w,h));
+    pub fn load_image_file_by_path_async(&mut self, cx: &mut Cx, image_path: &Path) -> Result<(), ImageError> {
+        self.lazy_create_image_cache(cx);
+        if let Ok(result) = self.load_image_file_by_path_async_impl(cx, image_path, 0) {
+            match result {
+                AsyncLoadResult::Loading(w, h) => {
+                    self.async_image_size = Some((w, h));
                     self.async_image_path = Some(image_path.into());
                     self.animator_play(cx, ids!(async_load.on));
                     self.redraw(cx);
                 }
-                AsyncLoadResult::Loaded=>{
+                AsyncLoadResult::Loaded => {
                     self.redraw(cx);
                 }
             }
-            // lets set the w-h
         }
         Ok(())
-    }    
+    }
+    
     pub fn load_image_from_data_async(&mut self, cx: &mut Cx, image_path: &Path, data: Arc<Vec<u8>>) -> Result<(), ImageError> {
-        if let Ok(result) = self.load_image_from_data_async_impl(cx, image_path, data, 0){
-            match result{
-                AsyncLoadResult::Loading(w,h)=>{
-                    self.async_image_size = Some((w,h));
+        self.lazy_create_image_cache(cx);
+        if let Ok(result) = self.load_image_from_data_async_impl(cx, image_path, data, 0) {
+            match result {
+                AsyncLoadResult::Loading(w, h) => {
+                    self.async_image_size = Some((w, h));
                     self.async_image_path = Some(image_path.into());
                     self.animator_play(cx, ids!(async_load.on));
                     self.redraw(cx);
                 }
-                AsyncLoadResult::Loaded=>{
+                AsyncLoadResult::Loaded => {
                     self.redraw(cx);
                 }
             }
-            // lets set the w-h
         }
         Ok(())
     }
 }
 
-pub enum AsyncLoad{
+pub enum AsyncLoad {
     Yes,
     No
 }
@@ -387,6 +351,7 @@ impl ImageRef {
     /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
             inner.load_image_dep_by_path(cx, image_path, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
@@ -394,8 +359,9 @@ impl ImageRef {
     }
     
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
-    pub fn load_image_file_by_path(&self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
+    pub fn load_image_file_by_path(&self, cx: &mut Cx, image_path: &Path) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
             inner.load_image_file_by_path(cx, image_path, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
@@ -403,43 +369,47 @@ impl ImageRef {
     }
     
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
-    pub fn load_image_file_by_path_async(&self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
+    pub fn load_image_file_by_path_async(&self, cx: &mut Cx, image_path: &Path) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             return inner.load_image_file_by_path_async(cx, image_path)
         }
         Ok(())
-    }    
+    }
             
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
-    pub fn load_image_from_data_async(&self, cx: &mut Cx,  image_path: &Path, data:Arc<Vec<u8>>) -> Result<(), ImageError> {
+    pub fn load_image_from_data_async(&self, cx: &mut Cx, image_path: &Path, data: Arc<Vec<u8>>) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             return inner.load_image_from_data_async(cx, image_path, data)
         }
         Ok(())
-    }    
+    }
     
     /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
+    #[cfg(feature = "jpg")]
     pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.load_jpg_from_data(cx, data, 0)
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_jpg_from_data(&mut *inner, cx, data, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
     
     /// Loads a PNG into this `ImageRef` by decoding the given encoded PNG `data`.
+    #[cfg(feature = "png")]
     pub fn load_png_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.load_png_from_data(cx, data, 0)
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_png_from_data(&mut *inner, cx, data, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
     
-    pub fn set_texture(&self, cx:&mut Cx, texture: Option<Texture>) {
+    pub fn set_texture(&self, cx: &mut Cx, texture: Option<Texture>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.texture = texture;
-            if cx.in_draw_event(){
+            if cx.in_draw_event() {
                 inner.redraw(cx);
             }
         }
@@ -469,4 +439,3 @@ impl ImageRef {
         }
     }
 }
-

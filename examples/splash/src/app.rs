@@ -1,4 +1,5 @@
 use makepad_widgets2::*;
+use std::path::Path;
 
 app_main!(App);
 
@@ -55,6 +56,11 @@ script_mod!{
                     draw_icon.color: #fff
                     draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
                 }
+                $test_image: Image{
+                    width: 200
+                    height: 150
+                    fit: ImageFit.Stretch
+                }
             }
         }
     }
@@ -75,6 +81,14 @@ pub struct App {
 }
 
 impl MatchEvent for App {
+    fn handle_startup(&mut self, cx: &mut Cx) {
+        // Load a test image into the Image widget
+        let image_path = Path::new("tools/open_harmony/deveco/AppScope/resources/base/media/app_icon.png");
+        if let Err(e) = self.ui.image(ids!($test_image)).load_image_file_by_path(cx, image_path) {
+            log!("Failed to load image: {:?}", e);
+        }
+    }
+    
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions) {
         if self.ui.button(ids!($button)).clicked(actions) {
             log!("Button clicked!");
