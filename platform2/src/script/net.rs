@@ -298,7 +298,7 @@ impl Cx{
     }
 }
 
-pub fn define_net_module(vm:&mut ScriptVm){
+pub fn script_mod(vm:&mut ScriptVm){
     let net = vm.new_module(id_lut!(net));
     
     set_script_value_to_api!(vm, net.HttpRequest);

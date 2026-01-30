@@ -142,7 +142,21 @@ Use of Align
 OLD:
     align: {x:0.5,y:0.5}
 New:
-    align: Align{x:0.5, y:0.5}
+    align: Center
+OLD:
+    align: {x:0.5}
+New:
+    align: HCenter
+OLD:
+    align: {y:0.5}
+New:
+    align: VCenter
+
+Any numbers not 0.5 should translate to use Align{} instead of a bare {} 
+Old: 
+    align: {x:0.2, y:0.4}
+New:    
+    align: Align{x:0.2,y:0.4}
 
 ================================================================================
 3. SHADER/DSL SYNTAX CHANGES

@@ -5,30 +5,25 @@ use {
     }
 };
 
-pub fn script_mod(vm: &mut ScriptVm) {
-    let turtle = vm.new_module(id_lut!(turtle));
-    
-    // Register in dependency order:
-    // Base has no dependencies
-    set_script_value_to_api!(vm, turtle.Base);
-    // FitBound depends on Base
-    set_script_value_to_api!(vm, turtle.FitBound);
-    // Size depends on FitBound
-    set_script_value_to_api!(vm, turtle.Size);
-    // Metrics has no dependencies among our types
-    set_script_value_to_api!(vm, turtle.Metrics);
-    // RowAlign has no dependencies
-    set_script_value_to_api!(vm, turtle.RowAlign);
-    // Flow depends on RowAlign
-    set_script_value_to_api!(vm, turtle.Flow);
-    // Align has no dependencies among our types
-    set_script_value_to_api!(vm, turtle.Align);
-    // Padding has no dependencies among our types
-    set_script_value_to_api!(vm, turtle.Padding);
-    // Layout depends on Flow, Padding, Align
-    set_script_value_to_api!(vm, turtle.Layout);
-    // Walk depends on Size, Metrics (and Margin from platform)
-    set_script_value_to_api!(vm, turtle.Walk);
+script_mod!{
+    mod.turtle = {
+        Base: #(Base::script_api(vm))
+        FitBound: #(FitBound::script_api(vm))
+        Size: #(Size::script_api(vm)),
+        ..me.Size,
+        Metrics: #(Metrics::script_api(vm))
+        RowAlign: #(RowAlign::script_api(vm))
+        Base: #(Base::script_api(vm))
+        Flow: #(Flow::script_api(vm)),
+        ..me.Flow,
+        Align: #(Align::script_api(vm))
+        Padding: #(Padding::script_api(vm))
+        Layout: #(Layout::script_api(vm))
+        Walk: #(Walk::script_api(vm)),
+        Center: me.Align{x:0.5, y:0.5}
+        HCenter: me.Align{x:0.5, y:0.}
+        VCenter: me.Align{x:0., y:0.5}
+    }
 }
 
 #[derive(Clone, Debug)]

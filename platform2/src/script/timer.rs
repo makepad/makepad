@@ -39,7 +39,7 @@ impl Cx{
     }
 }
 
-pub fn extend_std_module_with_timer(vm:&mut ScriptVm){
+pub fn script_mod(vm:&mut ScriptVm){
     let std = vm.module(id!(std));
     
     vm.new_handle_type(id_lut!(timer));
