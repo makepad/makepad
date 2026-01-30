@@ -64,29 +64,37 @@ impl std::ops::IndexMut<DrawPassId> for CxDrawPassPool {
         &mut self.0.pool[index.0].item
     }
 }
+
 impl ScriptHook for DrawPass {}
 impl ScriptNew for DrawPass {
-    fn script_new(vm:&mut ScriptVm)->Self{
-        let cx = vm.cx_mut();
-        Self::new(cx)
-    }
+    fn script_new(vm: &mut ScriptVm) -> Self { Self::new(vm.cx_mut()) }
+}
+impl ScriptApply for DrawPass {
+    fn script_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {}
 }
 
-impl DrawPass{
-    pub fn new(cx:&mut Cx)->Self{
+impl DrawPass {
+    pub fn new(cx: &mut Cx) -> Self {
         cx.passes.alloc()
     }
 }
 
+#[derive(Script)]
+pub struct ScriptDrawPass{
+    #[rust(DrawPass::new(vm.cx_mut()))] pub handle: DrawPass,
+    #[live] pub clear_color: Vec4f,
+    #[live] pub dont_clear: bool
+}
 
-impl ScriptApply for DrawPass {
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue) {
-        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(clear_color)){
-            vm.host.cx_mut().passes[self.draw_pass_id()].clear_color = v;
-        }
-        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(dont_clear)){
-            vm.host.cx_mut().passes[self.draw_pass_id()].dont_clear = v;
-        }
+impl std::ops::Deref for ScriptDrawPass {
+    type Target = DrawPass;
+    fn deref(&self) -> &Self::Target { &self.handle }
+}
+
+impl ScriptHook for ScriptDrawPass {
+    fn on_after_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue) {
+        vm.host.cx_mut().passes[self.handle.draw_pass_id()].clear_color = self.clear_color;
+        vm.host.cx_mut().passes[self.handle.draw_pass_id()].dont_clear = self.dont_clear;
     }
 }
 

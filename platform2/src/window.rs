@@ -103,8 +103,14 @@ impl std::ops::IndexMut<WindowId> for CxWindowPool {
 
 impl ScriptHook for WindowHandle {}
 impl ScriptNew for WindowHandle {
-    fn script_new(vm:&mut ScriptVm)->Self{
-        let cx = vm.cx_mut();
+    fn script_new(vm: &mut ScriptVm) -> Self { Self::new(vm.cx_mut()) }
+}
+impl ScriptApply for WindowHandle {
+    fn script_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {}
+}
+
+impl WindowHandle {
+    pub fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
@@ -116,25 +122,41 @@ impl ScriptNew for WindowHandle {
     }
 }
 
-impl ScriptApply for WindowHandle {
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue) {
-        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(inner_size)){
-            vm.host.cx_mut().windows[self.window_id()].create_inner_size = Some(v);
+#[derive(Script)]
+pub struct ScriptWindowHandle {
+    #[rust(WindowHandle::new(vm.cx_mut()))] pub handle: WindowHandle,
+    #[live] pub title: String,
+    #[live] pub inner_size: Option<Vec2d>,
+    #[live] pub position: Option<Vec2d>,
+    #[live] pub kind_id: usize,
+    #[live] pub dpi_override: Option<f64>,
+    #[live] pub topmost: bool,
+}
+
+impl std::ops::Deref for ScriptWindowHandle {
+    type Target = WindowHandle;
+    fn deref(&self) -> &Self::Target { &self.handle }
+}
+
+impl ScriptHook for ScriptWindowHandle {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        let cx = vm.host.cx_mut();
+        let window_id = self.handle.window_id();
+        if !self.title.is_empty() {
+            cx.windows[window_id].create_title = self.title.clone();
         }
-        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(title)){
-            vm.host.cx_mut().windows[self.window_id()].create_title = v;
+        if self.inner_size.is_some() {
+            cx.windows[window_id].create_inner_size = self.inner_size;
         }
-        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(kind_id)){
-            vm.host.cx_mut().windows[self.window_id()].kind_id = v;
+        if self.position.is_some() {
+            cx.windows[window_id].create_position = self.position;
         }
-        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(position)){
-            vm.host.cx_mut().windows[self.window_id()].create_position = Some(v);
+        cx.windows[window_id].kind_id = self.kind_id;
+        if self.dpi_override.is_some() {
+            cx.windows[window_id].dpi_override = self.dpi_override;
         }
-        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(dpi_override)){
-            vm.host.cx_mut().windows[self.window_id()].dpi_override = Some(v);
-        }
-        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(topmost)){
-            self.set_topmost(vm.host.cx_mut(), v);
+        if self.topmost {
+            self.handle.set_topmost(cx, self.topmost);
         }
     }
 }
