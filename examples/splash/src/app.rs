@@ -28,6 +28,12 @@ script_mod!{
                 flow: Down
                 padding: 20
                 spacing: 10
+                //$checkbox: CheckBox{
+                //    text: "Enable feature"
+                //}
+                $toggle: Toggle{
+                    text: "Dark mode"
+                }
                 $dropdown: DropDown{
                     labels: ["Option A", "Option B", "Option C", "Option D"]
                 }
@@ -121,6 +127,12 @@ impl MatchEvent for App {
         }
         if self.ui.button(ids!($icon_button)).clicked(actions) {
             log!("Icon button clicked!");
+        }
+        if let Some(value) = self.ui.check_box(ids!($checkbox)).changed(actions) {
+            log!("Checkbox changed: {}", value);
+        }
+        if let Some(value) = self.ui.check_box(ids!($toggle)).changed(actions) {
+            log!("Toggle changed: {}", value);
         }
     }
 }
