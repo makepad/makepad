@@ -199,6 +199,35 @@ impl <'a> ScriptVm<'a>{
         }
     }
     
+    #[inline(never)]
+    #[cold]
+    fn handle_errors(&mut self) {
+        if self.bx.threads.cur().call_has_try(){
+            // pop all errors
+            self.bx.threads.cur().trap.err.borrow_mut().clear();
+            let try_frame = self.bx.threads.cur().tries.pop().unwrap();
+            self.bx.threads.cur().truncate_bases(try_frame.bases, &mut self.bx.heap);
+            if try_frame.push_nil{
+                self.bx.threads.cur().push_stack_unchecked(NIL)
+            }
+            self.bx.threads.cur().trap.goto(try_frame.start_ip + try_frame.jump);
+        }
+        else{
+            loop {
+                let err = self.bx.threads.cur().trap.err.borrow_mut().pop_front();
+                if let Some(err) = err {
+                    if let Some(ptr) = err.value.as_err(){
+                        if let Some(loc2) = self.bx.code.ip_to_loc(ptr.ip){
+                            log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} ({}:{})", err.message, err.origin_file, err.origin_line), LogLevel::Error);
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    
     pub fn run_core(&mut self)->ScriptValue{
         // Cache opcodes pointer to avoid RefCell borrow on every iteration
         let mut cached_body_index: usize = usize::MAX;
@@ -230,33 +259,11 @@ impl <'a> ScriptVm<'a>{
                 self.opcode(opcode, args);
                 // if exception tracing - is_empty() is faster than len()>0
                 if !self.bx.threads.cur().trap.err.borrow().is_empty(){
-                    if self.bx.threads.cur().call_has_try(){
-                        // pop all errors
-                        self.bx.threads.cur().trap.err.borrow_mut().clear();
-                        let try_frame = self.bx.threads.cur().tries.pop().unwrap();
-                        self.bx.threads.cur().truncate_bases(try_frame.bases, &mut self.bx.heap);
-                        if try_frame.push_nil{
-                            self.bx.threads.cur().push_stack_unchecked(NIL)
-                        }
-                        self.bx.threads.cur().trap.goto(try_frame.start_ip + try_frame.jump);
-                    }
-                    else{
-                        loop {
-                            let err = self.bx.threads.cur().trap.err.borrow_mut().pop_front();
-                            if let Some(err) = err {
-                                if let Some(ptr) = err.value.as_err(){
-                                    if let Some(loc2) = self.bx.code.ip_to_loc(ptr.ip){
-                                        log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} ({}:{})", err.message, err.origin_file, err.origin_line), LogLevel::Error);
-                                    }
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
+                    self.handle_errors();
                 }
-                if let Some(trap) = self.bx.threads.cur().trap.on.take(){
-                    match trap{
+                // Check with get() first to avoid unnecessary write in common case (None)
+                if self.bx.threads.cur().trap.on.get().is_some(){
+                    match self.bx.threads.cur().trap.on.take().unwrap(){
                         ScriptTrapOn::Pause=>{
                             return NIL
                         }
@@ -266,7 +273,7 @@ impl <'a> ScriptVm<'a>{
                     }
                 }
             }
-            else{ // its a direct value-to-stack?
+            else{ // its a direct value-to-stack
                 self.bx.threads.cur().push_stack_value(opcode);
                 self.bx.threads.cur().trap.goto_next();
             }

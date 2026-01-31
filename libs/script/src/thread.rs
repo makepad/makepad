@@ -220,7 +220,6 @@ impl ScriptThread{
     }
     
     // lets resolve an id to a ScriptValue
-    #[inline]
     pub fn scope_value(&mut  self, heap:&ScriptHeap, id: LiveId)->ScriptValue{
         heap.scope_value(*self.scopes.last().unwrap(), id.into(), self.trap.pass())
     }
