@@ -768,7 +768,7 @@ impl ScriptValue{
         }
     }
     
-    pub  fn from_f64_traced_nan(val:f64, ip:ScriptIp)->Self{
+    pub fn from_f64_traced_nan(val:f64, ip:ScriptIp)->Self{
         let bits = val.to_bits();
         if val.is_nan(){
             if bits >= Self::TYPE_NAN && bits <= Self::TYPE_TRACED_NAN_MAX{
@@ -783,7 +783,6 @@ impl ScriptValue{
         }
     }
     
-        
     pub const fn is_f64(&self)->bool{
         self.0 <= Self::TYPE_TRACED_NAN_MAX
     }
