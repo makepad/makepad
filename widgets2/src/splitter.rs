@@ -1,142 +1,142 @@
 use crate::{
     makepad_derive_widget::*,
-    makepad_micro_serde::*,
     makepad_draw::*,
     widget::*,
+    animator::{Animator, AnimatorImpl, AnimatorAction},
 };
 
-live_design!{
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
     
-    pub DrawSplitter= {{DrawSplitter}} {}
-    pub SplitterBase = {{Splitter}} {}
-    pub Splitter = <SplitterBase> {
-        draw_bg: {
-            instance drag: 0.0
-            instance hover: 0.0
+    mod.widgets.SplitterAxis = #(SplitterAxis::script_api(vm))
+    mod.widgets.splat(mod.widgets.SplitterAxis)
+    
+    mod.widgets.SplitterAlign = #(SplitterAlign::script_api(vm))
+    mod.widgets.splat(mod.widgets.SplitterAlign)
+    
+    mod.std.set_type_default() do #(DrawSplitter::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
+    
+    mod.widgets.SplitterBase = #(Splitter::register_widget(vm))
+    
+    mod.widgets.Splitter = mod.std.set_type_default() do mod.widgets.SplitterBase{
+        width: Fill
+        height: Fill
+        
+        size: 6.0
+        min_horizontal: 50.0
+        max_horizontal: 50.0
+        min_vertical: 50.0
+        max_vertical: 50.0
+        
+        draw_bg +: {
+            drag: instance(0.0)
+            hover: instance(0.0)
             
-            uniform size: 110.0
-
-            uniform color: (THEME_COLOR_D_HIDDEN),
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER),
-            uniform color_drag: (THEME_COLOR_OUTSET_DRAG)
+            bar_size: uniform(110.0)
             
-            uniform border_radius: 1.0
-            uniform splitter_pad: 1.0
+            color: uniform(theme.color_d_hidden)
+            color_hover: uniform(theme.color_outset_hover)
+            color_drag: uniform(theme.color_outset_drag)
             
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(THEME_COLOR_BG_APP); // TODO: This should be a transparent color instead.
+            border_radius: uniform(1.0)
+            splitter_pad: uniform(1.0)
+            
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.clear(theme.color_bg_app)
                 
                 if self.is_vertical > 0.5 {
                     sdf.box(
-                        self.splitter_pad,
-                        self.rect_size.y * 0.5 - self.size * 0.5,
-                        self.rect_size.x - 2.0 * self.splitter_pad,
-                        self.size,
+                        self.splitter_pad
+                        self.rect_size.y * 0.5 - self.bar_size * 0.5
+                        self.rect_size.x - 2.0 * self.splitter_pad
+                        self.bar_size
                         self.border_radius
-                    );
+                    )
                 }
                 else {
                     sdf.box(
-                        self.rect_size.x * 0.5 - self.size * 0.5,
-                        self.splitter_pad,
-                        self.size,
-                        self.rect_size.y - 2.0 * self.splitter_pad,
+                        self.rect_size.x * 0.5 - self.bar_size * 0.5
+                        self.splitter_pad
+                        self.bar_size
+                        self.rect_size.y - 2.0 * self.splitter_pad
                         self.border_radius
-                    );
+                    )
                 }
 
                 return sdf.fill_keep(
                     mix(
-                        self.color,
+                        self.color
                         mix(
-                            self.color_hover,
-                            self.color_drag,
+                            self.color_hover
+                            self.color_drag
                             self.drag
-                        ),
+                        )
                         self.hover
                     )
-                );
+                )
             }
         }
-
-        size: (THEME_SPLITTER_SIZE)
-        min_horizontal: (THEME_SPLITTER_MIN_HORIZONTAL)
-        max_horizontal: (THEME_SPLITTER_MAX_HORIZONTAL)
-        min_vertical: (THEME_SPLITTER_MIN_VERTICAL)
-        max_vertical: (THEME_SPLITTER_MAX_VERTICAL)
         
-        animator: {
-            hover = {
-                default: off
-                off = {
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {drag: 0.0, hover: 0.0}
                     }
                 }
                 
-                on = {
+                on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
-                        state_drag: Forward {duration: 0.01}
+                        drag: Forward {duration: 0.01}
                     }
                     apply: {
                         draw_bg: {
-                            drag: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
+                            drag: 0.0
+                            hover: snap(1.0)
                         }
                     }
                 }
                 
-                drag = {
-                    from: { all: Forward { duration: 0.1 }}
+                drag: AnimatorState{
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {
-                            drag: [{time: 0.0, value: 1.0}],
-                            hover: 1.0,
+                            drag: snap(1.0)
+                            hover: 1.0
                         }
                     }
                 }
             }
         }
     }
-    
 }
 
-
-#[derive(Live, LiveHook, LiveRegister)]
-#[repr(C)]
-pub struct DrawSplitter {
-    #[deref] draw_super: DrawQuad,
-    #[live] is_vertical: f32,
-}
-
-#[derive(Copy, Clone, Debug, Live, LiveHook, SerRon, DeRon)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[live_ignore]
+#[derive(Copy, Clone, Debug, Script, ScriptHook, Default)]
 pub enum SplitterAxis {
-    #[pick] Horizontal,
+    #[pick] 
+    #[default]
+    Horizontal,
     Vertical
 }
 
-impl Default for SplitterAxis {
-    fn default() -> Self {
-        SplitterAxis::Horizontal
-    }
-}
-
-
-#[derive(Clone, Copy, Debug, Live, LiveHook, SerRon, DeRon)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[live_ignore]
+#[derive(Clone, Copy, Debug, Script, ScriptHook)]
 pub enum SplitterAlign {
     #[live(50.0)] FromA(f64),
     #[live(50.0)] FromB(f64),
     #[pick(0.5)] Weighted(f64),
+}
+
+impl Default for SplitterAlign {
+    fn default() -> Self {
+        SplitterAlign::Weighted(0.5)
+    }
 }
 
 impl SplitterAlign {
@@ -156,16 +156,38 @@ impl SplitterAlign {
     }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSplitter {
+    #[deref] draw_super: DrawQuad,
+    #[live] is_vertical: f32,
+}
+
+#[derive(Clone)]
+enum DrawState {
+    DrawA,
+    DrawSplit,
+    DrawB
+}
+
+#[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Splitter {
-    #[live(SplitterAxis::Horizontal)] pub axis: SplitterAxis,
-    #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
+    #[source] source: ScriptObjectRef,
+    
+    #[walk] walk: Walk,
+    #[apply_default]
+    animator: Animator,
+    
+    #[live(SplitterAxis::Horizontal)] 
+    pub axis: SplitterAxis,
+    #[live(SplitterAlign::Weighted(0.5))] 
+    pub align: SplitterAlign,
+    
     #[rust] rect: Rect,
     #[rust] position: f64,
     #[rust] drag_start_align: Option<SplitterAlign>,
     #[rust] area_a: Area,
     #[rust] area_b: Area,
-    #[animator] animator: Animator,
     
     #[live] min_vertical: f64,
     #[live] max_vertical: f64,
@@ -179,21 +201,25 @@ pub struct Splitter {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[find] #[live] a: WidgetRef,
     #[find] #[live] b: WidgetRef,
-    #[walk] walk: Walk,
+    
+    #[action_data] #[rust] action_data: WidgetActionData,
 }
 
-#[derive(Clone)]
-enum DrawState {
-    DrawA,
-    DrawSplit,
-    DrawB
+#[derive(Clone, Debug, Default)]
+pub enum SplitterAction {
+    #[default]
+    None,
+    Changed {axis: SplitterAxis, align: SplitterAlign},
 }
 
 impl Widget for Splitter {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
-        self.animator_handle_event(cx, event);
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.draw_bg.redraw(cx);
+        }
+        
         match event.hits_with_options(cx, self.draw_bg.area(), HitOptions::new().with_margin(self.margin())) {
             Hit::FingerHoverIn(_) => {
                 match self.axis {
@@ -253,7 +279,7 @@ impl Widget for Splitter {
                         }
                     };
                     self.draw_bg.redraw(cx);
-                    cx.widget_action(uid, &scope.path, SplitterAction::Changed {axis: self.axis, align: self.align});
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, SplitterAction::Changed {axis: self.axis, align: self.align});
                     
                     self.a.redraw(cx);
                     self.b.redraw(cx);
@@ -265,12 +291,12 @@ impl Widget for Splitter {
         self.b.handle_event(cx, event, scope);
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }
         if let Some(DrawState::DrawA) = self.draw_state.get() {
-            self.a.draw(cx, scope) ?;
+            self.a.draw(cx, scope)?;
             self.draw_state.set(DrawState::DrawSplit);
         }
         if let Some(DrawState::DrawSplit) = self.draw_state.get() {
@@ -278,7 +304,7 @@ impl Widget for Splitter {
             self.draw_state.set(DrawState::DrawB)
         }
         if let Some(DrawState::DrawB) = self.draw_state.get() {
-            self.b.draw(cx, scope) ?;
+            self.b.draw(cx, scope)?;
             self.end(cx);
             self.draw_state.end();
         }
@@ -368,10 +394,41 @@ impl Splitter {
             },
         }
     }
+    
+    pub fn changed(&self, actions: &Actions) -> Option<(SplitterAxis, SplitterAlign)> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let SplitterAction::Changed { axis, align } = item.cast() {
+                return Some((axis, align));
+            }
+        }
+        None
+    }
 }
 
-#[derive(Clone, Debug, DefaultNone)]
-pub enum SplitterAction {
-    None,
-    Changed {axis: SplitterAxis, align: SplitterAlign},
+impl SplitterRef {
+    pub fn changed(&self, actions: &Actions) -> Option<(SplitterAxis, SplitterAlign)> {
+        self.borrow().and_then(|inner| inner.changed(actions))
+    }
+    
+    pub fn set_axis(&self, cx: &mut Cx, axis: SplitterAxis) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_axis(axis);
+            inner.redraw(cx);
+        }
+    }
+    
+    pub fn set_align(&self, cx: &mut Cx, align: SplitterAlign) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_align(align);
+            inner.redraw(cx);
+        }
+    }
+    
+    pub fn axis(&self) -> Option<SplitterAxis> {
+        self.borrow().map(|inner| inner.axis())
+    }
+    
+    pub fn align(&self) -> Option<SplitterAlign> {
+        self.borrow().map(|inner| inner.align())
+    }
 }
