@@ -52,6 +52,124 @@ script_mod!{
                         $radio3: RadioButton{
                             text: "Option C"
                         }
+                        $link: LinkLabel{
+                            text: "Visit Makepad"
+                            url: "https://makepad.dev"
+                        }
+                        
+                        // TextInput test
+                        Label{
+                            text: "Username:"
+                            draw_text.color: #aaa
+                        }
+                        $username: TextInput{
+                            width: Fill
+                            height: Fit
+                            empty_message: "Enter your username"
+                        }
+                        Label{
+                            text: "Password:"
+                            draw_text.color: #aaa
+                        }
+                        $password: TextInput{
+                            width: Fill
+                            height: Fit
+                            empty_message: "Enter your password"
+                            is_password: true
+                        }
+                        
+                        // First FoldHeader - Settings
+                        FoldHeader{
+                            header: View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                align: Align{y: 0.5}
+                                padding: Inset{top: 5, bottom: 5}
+                                spacing: 8
+                                FoldButton{}
+                                Label{
+                                    text: "Settings"
+                                    draw_text.color: #fff
+                                    draw_text.text_style.font_size: 11
+                                }
+                            }
+                            body: View{
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                padding: Inset{left: 23, top: 5, bottom: 10}
+                                spacing: 8
+                                CheckBox{text: "Enable notifications"}
+                                CheckBox{text: "Auto-save"}
+                                CheckBox{text: "Dark theme"}
+                                Toggle{text: "Sounds"}
+                            }
+                        }
+                        
+                        // Second FoldHeader - Files
+                        FoldHeader{
+                            header: View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                align: Align{y: 0.5}
+                                padding: Inset{top: 5, bottom: 5}
+                                spacing: 8
+                                FoldButton{}
+                                Label{
+                                    text: "Recent Files"
+                                    draw_text.color: #fff
+                                    draw_text.text_style.font_size: 11
+                                }
+                            }
+                            body: View{
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                padding: Inset{left: 23, top: 5, bottom: 10}
+                                spacing: 5
+                                Label{text: "document.txt", draw_text.color: #8af}
+                                Label{text: "project.rs", draw_text.color: #8af}
+                                Label{text: "config.toml", draw_text.color: #8af}
+                                Label{text: "readme.md", draw_text.color: #8af}
+                                Label{text: "main.rs", draw_text.color: #8af}
+                            }
+                        }
+                        
+                        // Third FoldHeader - Nested example
+                        FoldHeader{
+                            header: View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                align: Align{y: 0.5}
+                                padding: Inset{top: 5, bottom: 5}
+                                spacing: 8
+                                FoldButton{}
+                                Label{
+                                    text: "More Options"
+                                    draw_text.color: #fff
+                                    draw_text.text_style.font_size: 11
+                                }
+                            }
+                            body: View{
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                padding: Inset{left: 23, top: 5, bottom: 10}
+                                spacing: 8
+                                Button{text: "Import..."}
+                                Button{text: "Export..."}
+                                Slider{
+                                    width: Fill
+                                    text: "Opacity"
+                                    min: 0.0
+                                    max: 100.0
+                                    default: 75.0
+                                }
+                            }
+                        }
                     }
                     b: Splitter{
                         axis: SplitterAxis.Vertical
