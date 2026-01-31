@@ -28,11 +28,20 @@ script_mod!{
                 flow: Down
                 padding: 20
                 spacing: 10
-                //$checkbox: CheckBox{
-                //    text: "Enable feature"
-                //}
+                $checkbox: CheckBox{
+                    text: "Enable feature"
+                }
                 $toggle: Toggle{
                     text: "Dark mode"
+                }
+                $radio1: RadioButton{
+                    text: "Option A"
+                }
+                $radio2: RadioButton{
+                    text: "Option B"
+                }
+                $radio3: RadioButton{
+                    text: "Option C"
                 }
                 $dropdown: DropDown{
                     labels: ["Option A", "Option B", "Option C", "Option D"]
@@ -133,6 +142,9 @@ impl MatchEvent for App {
         }
         if let Some(value) = self.ui.check_box(ids!($toggle)).changed(actions) {
             log!("Toggle changed: {}", value);
+        }
+        if let Some(index) = self.ui.radio_button_set(ids_list!($radio1, $radio2, $radio3)).selected(_cx, actions) {
+            log!("Radio button selected: {}", index);
         }
     }
 }

@@ -27,7 +27,7 @@ pub mod icon;
 pub mod drop_down;
 pub mod popup_menu;
 pub mod check_box;
-// pub mod radio_button;
+pub mod radio_button;
 pub mod text_input;
 pub mod slider;
 pub mod scroll_bar;
@@ -131,11 +131,13 @@ pub use crate::{
 //    markdown::*,
 //    html::*,
     check_box::*,
+    radio_button::*,
+//    bare_step::*,
+//    turtle_step::*,
 //    modal::*,
 //    tooltip::*,
 //    popup_notification::*,
 //    video::*,
-//    radio_button::*,
 //    text_input::*,
 //    link_label::*,
 //    portal_list::*,
@@ -229,7 +231,10 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::slider::script_mod(vm);
     crate::loading_spinner::script_mod(vm);
     crate::check_box::script_mod(vm);
-    
+    crate::radio_button::script_mod(vm);
+    //crate::bare_step::script_mod(vm);
+    //crate::turtle_step::script_mod(vm);
+        
     {
         script_mod!{
             mod.prelude.widgets = {
