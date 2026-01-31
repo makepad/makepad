@@ -394,7 +394,7 @@ pub fn main(){
         assert(y.a == 1 && y.b == 3)
     };
             
-    let _code = script!{
+    let code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };

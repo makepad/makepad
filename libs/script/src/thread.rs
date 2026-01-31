@@ -138,6 +138,7 @@ impl ScriptThread{
         }
     }
     
+    #[inline]
     pub fn pop_stack_resolved(&mut self, heap:&ScriptHeap)->ScriptValue{
         if let Some(val) = self.stack.pop(){
             if let Some(id) = val.as_id(){
@@ -205,6 +206,7 @@ impl ScriptThread{
         }
     }
     
+    #[inline]
     pub fn push_stack_unchecked(&mut self, value:ScriptValue){
         self.stack.push(value);
     }
@@ -218,6 +220,7 @@ impl ScriptThread{
     }
     
     // lets resolve an id to a ScriptValue
+    #[inline]
     pub fn scope_value(&mut  self, heap:&ScriptHeap, id: LiveId)->ScriptValue{
         heap.scope_value(*self.scopes.last().unwrap(), id.into(), self.trap.pass())
     }
