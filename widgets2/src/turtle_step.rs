@@ -1,9 +1,9 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
-live_design! {
-    TurtleStep = {{TurtleStep}} {}
+script_mod!{
+    mod.widgets.BareStep = #(BareStep::register_widget(vm))
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct TurtleStep {
     #[walk] walk: Walk,
     #[layout] layout: Layout,

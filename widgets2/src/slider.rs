@@ -578,7 +578,7 @@ script_mod!{
                 // Value line
                 let track_length = self.rect_size.x - offset_sides * 4.
                 let val_x = self.slide_pos * track_length + offset_sides * 2.
-                let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5 + 0.5
+                let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5
                 let move_x = mix(offset_sides, self.rect_size.x * 0.5, self.bipolar)
                 
                 sdf.move_to(move_x, offset_top)
