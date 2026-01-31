@@ -26,7 +26,7 @@ pub mod icon;
 // pub mod link_label;
 pub mod drop_down;
 pub mod popup_menu;
-// pub mod check_box;
+pub mod check_box;
 // pub mod radio_button;
 pub mod text_input;
 pub mod slider;
@@ -130,7 +130,7 @@ pub use crate::{
 //    text_flow::*,
 //    markdown::*,
 //    html::*,
-//    check_box::*,
+    check_box::*,
 //    modal::*,
 //    tooltip::*,
 //    popup_notification::*,
@@ -228,6 +228,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
     crate::loading_spinner::script_mod(vm);
+    crate::check_box::script_mod(vm);
     
     {
         script_mod!{

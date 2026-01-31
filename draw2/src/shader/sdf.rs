@@ -265,31 +265,37 @@ script_mod!{
             
             glow: fn(color: vec4, width: float) -> vec4 {
                 self.glow_keep(color, width);
-                self.old_shape = self.shape = 1e+20;
+                self.shape = 1e+20;
+                self.old_shape = self.shape;
                 self.clip = -1e+20;
                 self.has_clip = 0.;
                 return self.result;
             }
             
             union: fn() {
-                self.old_shape = self.shape = min(self.dist, self.old_shape);
+                self.shape = min(self.dist, self.old_shape);
+                self.old_shape = self.shape;
             }
             
             intersect: fn() {
-                self.old_shape = self.shape = max(self.dist, self.old_shape);
+                self.shape = max(self.dist, self.old_shape);
+                self.old_shape = self.shape;
             }
             
             subtract: fn() {
-                self.old_shape = self.shape = max(-self.dist, self.old_shape);
+                self.shape = max(-self.dist, self.old_shape);
+                self.old_shape = self.shape;
             }
             
             gloop: fn(k: float) {
                 let h = clamp(0.5 + 0.5 * (self.old_shape - self.dist) / k, 0.0, 1.0);
-                self.old_shape = self.shape = mix(self.old_shape, self.dist, h) - k * h * (1.0 - h);
+                self.shape = mix(self.old_shape, self.dist, h) - k * h * (1.0 - h);
+                self.old_shape = self.shape;
             }
             
             blend: fn(k: float) {
-                self.old_shape = self.shape = mix(self.old_shape, self.dist, k);
+                self.shape = mix(self.old_shape, self.dist, k);
+                self.old_shape = self.shape;
             }
             
             circle: fn(x: float, y: float, r: float) {
