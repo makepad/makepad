@@ -7,19 +7,19 @@ use {
 
 script_mod!{
     mod.turtle = {
-        Base: #(Base::script_api(vm))
-        FitBound: #(FitBound::script_api(vm))
-        Size: #(Size::script_api(vm)),
+        Base: mod.std.set_type_default() do #(Base::script_api(vm))
+        FitBound: mod.std.set_type_default() do #(FitBound::script_api(vm))
+        Size: mod.std.set_type_default() do #(Size::script_api(vm)),
         ..me.Size,
-        Metrics: #(Metrics::script_api(vm))
-        RowAlign: #(RowAlign::script_api(vm))
-        Base: #(Base::script_api(vm))
-        Flow: #(Flow::script_api(vm)),
+        Metrics: mod.std.set_type_default() do #(Metrics::script_api(vm))
+        RowAlign: mod.std.set_type_default() do #(RowAlign::script_api(vm))
+        Base: mod.std.set_type_default() do #(Base::script_api(vm))
+        Flow: mod.std.set_type_default() do #(Flow::script_api(vm)),
         ..me.Flow,
-        Align: #(Align::script_api(vm))
-        Inset: #(Inset::script_api(vm))
-        Layout: #(Layout::script_api(vm))
-        Walk: #(Walk::script_api(vm)),
+        Align: mod.std.set_type_default() do #(Align::script_api(vm))
+        Inset: mod.std.set_type_default() do #(Inset::script_api(vm))
+        Layout: mod.std.set_type_default() do #(Layout::script_api(vm))
+        Walk: mod.std.set_type_default() do #(Walk::script_api(vm)),
         
         Center: me.Align{x:0.5, y:0.5}
         HCenter: me.Align{x:0.5, y:0.}

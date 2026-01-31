@@ -426,6 +426,14 @@ impl IosApp {
         }))
     }
     
+    pub fn send_text_range_replace(start: usize, end: usize, text: String) {
+        IosApp::do_callback(IosEvent::TextRangeReplace(TextRangeReplaceEvent {
+            start,
+            end,
+            text,
+        }))
+    }
+    
     pub fn send_backspace() {
         let time = with_ios_app(|app| app.time_now());
         IosApp::do_callback(IosEvent::KeyDown(KeyEvent {

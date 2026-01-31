@@ -28,8 +28,8 @@ pub mod icon;
 // pub mod popup_menu;
 // pub mod check_box;
 // pub mod radio_button;
-// pub mod text_input;
-// pub mod slider;
+pub mod text_input;
+pub mod slider;
 pub mod scroll_bar;
 pub mod scroll_bars;
 // pub mod splitter;
@@ -123,7 +123,8 @@ pub use crate::{
 //    image_blend::*,
     icon::*,
 //    label::*,
-//    slider::*,
+    slider::*,
+    text_input::*,
 //    root::*,
 //    text_flow::*,
 //    markdown::*,
@@ -221,6 +222,8 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::button::script_mod(vm);
     crate::image::script_mod(vm);
     crate::icon::script_mod(vm);
+    crate::text_input::script_mod(vm);
+    crate::slider::script_mod(vm);
     crate::loading_spinner::script_mod(vm);
     
     {

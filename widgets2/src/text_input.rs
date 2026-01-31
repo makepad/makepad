@@ -18,374 +18,288 @@ use {
             *
         },
         widget::*,
+        animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
     },
     std::rc::Rc,
     unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
 };
 
 
-live_design! {
-    link widgets;
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
-
-    pub TextInputBase = {{TextInput}} {}
+    mod.widgets.TextInputBase = #(TextInput::register_widget(vm))
     
-    pub TextInputFlat = <TextInputBase> {
-        width: Fill, height: Fit,
-        padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
-        margin: <THEME_MSPACE_V_1> {}
-        flow: Right { wrap: true },
-        is_password: false,
-        is_read_only: false,
+    mod.widgets.TextInputFlat = mod.std.set_type_default() do mod.widgets.TextInputBase{
+        width: Fill
+        height: Fit
+        padding: theme.mspace_1{left: theme.space_2, right: theme.space_2}
+        margin: theme.mspace_v_1
+        flow: Right {wrap: true}
+        is_password: false
+        is_read_only: false
         is_numeric_only: false
-        empty_text: "Your text here",
+        empty_text: "Your text here"
         
-        draw_bg: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance disabled: 0.0
-            instance empty: 0.0
+        draw_bg +: {
+            hover: instance(0.0)
+            focus: instance(0.0)
+            down: instance(0.0)
+            disabled: instance(0.0)
+            empty: instance(0.0)
 
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform border_size: (THEME_BEVELING)
+            border_radius: uniform(theme.corner_radius)
+            border_size: uniform(theme.beveling)
 
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            uniform color_dither: 1.0
+            color_dither: uniform(1.0)
 
-            color: (THEME_COLOR_INSET)
-            uniform color_hover: (THEME_COLOR_INSET_HOVER)
-            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
-            uniform color_down: (THEME_COLOR_INSET_DOWN)
-            uniform color_empty: (THEME_COLOR_INSET_EMPTY)
-            uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
+            color: theme.color_inset
+            color_hover: uniform(theme.color_inset_hover)
+            color_focus: uniform(theme.color_inset_focus)
+            color_down: uniform(theme.color_inset_down)
+            color_empty: uniform(theme.color_inset_empty)
+            color_disabled: uniform(theme.color_inset_disabled)
 
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            uniform color_2_down: (THEME_COLOR_INSET_2_DOWN)
-            uniform color_2_empty: (THEME_COLOR_INSET_2_EMPTY)
-            uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_2_hover: uniform(theme.color_inset_2_hover)
+            color_2_focus: uniform(theme.color_inset_2_focus)
+            color_2_down: uniform(theme.color_inset_2_down)
+            color_2_empty: uniform(theme.color_inset_2_empty)
+            color_2_disabled: uniform(theme.color_inset_2_disabled)
 
-            uniform border_color: (THEME_COLOR_BEVEL)
-            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
-            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
-            uniform border_color_down: (THEME_COLOR_BEVEL_DOWN)
-            uniform border_color_empty: (THEME_COLOR_BEVEL_EMPTY)
-            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            border_color: uniform(theme.color_bevel)
+            border_color_hover: uniform(theme.color_bevel_hover)
+            border_color_focus: uniform(theme.color_bevel_focus)
+            border_color_down: uniform(theme.color_bevel_down)
+            border_color_empty: uniform(theme.color_bevel_empty)
+            border_color_disabled: uniform(theme.color_bevel_disabled)
 
-            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            uniform border_color_2_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            border_color_2_hover: uniform(theme.color_bevel_inset_2_hover)
+            border_color_2_focus: uniform(theme.color_bevel_inset_2_focus)
+            border_color_2_down: uniform(theme.color_bevel_inset_2_down)
+            border_color_2_empty: uniform(theme.color_bevel_inset_2_empty)
+            border_color_2_disabled: uniform(theme.color_bevel_inset_2_disabled)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let color_2 = self.color;
-                let color_2_hover = self.color_hover;
-                let color_2_focus = self.color_focus;
-                let color_2_down = self.color_down;
-                let color_2_empty = self.color_empty;
-                let color_2_disabled = self.color_disabled;
-
-                let border_color_2 = self.border_color;
-                let border_color_2_hover = self.border_color_hover;
-                let border_color_2_focus = self.border_color_focus;
-                let border_color_2_down = self.border_color_down;
-                let border_color_2_empty = self.border_color_empty;
-                let border_color_2_disabled = self.border_color_disabled;
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2;
-                    color_2_hover = self.color_2_hover;
-                    color_2_focus = self.color_2_focus;
-                    color_2_down = self.color_2_down;
-                    color_2_empty = self.color_2_empty;
-                    color_2_disabled = self.color_2_disabled;
-                }
-
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2;
-                    border_color_2_hover = self.border_color_2_hover;
-                    border_color_2_focus = self.border_color_2_focus;
-                    border_color_2_down = self.border_color_2_down;
-                    border_color_2_empty = self.border_color_2_empty;
-                    border_color_2_disabled = self.border_color_2_disabled;
-                }
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 
                 let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
                 )
 
-                let scale_factor_border = vec2(
-                    self.rect_size.x / self.rect_size.x,
-                    self.rect_size.y / self.rect_size.y
-                );
-
-                let gradient_border = vec2(
-                    self.pos.x * scale_factor_border.x + dither,
-                    self.pos.y * scale_factor_border.y + dither
-                )
-
                 let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.x - self.border_size * 2.
                     self.rect_size.y - self.border_size * 2.
-                );
+                )
 
                 let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.x / sz_inner_px.x
                     self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
-                
-                let gradient_border_dir = gradient_border.y;
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = gradient_border.x;
-                }
-
-                let gradient_fill_dir = gradient_fill.y;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = gradient_fill.x;
-                }
 
                 sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
                     self.border_radius
                 )
 
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color, color_2, gradient_fill_dir),
-                                    mix(self.color_empty, color_2_empty, gradient_fill_dir),
-                                    self.empty
-                                ),
-                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
-                                mix(self.color_down, color_2_down, gradient_fill_dir),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
-                        self.disabled
-                    )
-                );
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_focus = self.color_focus
+                let mut color_fill_down = self.color_down
+                let mut color_fill_empty = self.color_empty
+                let mut color_fill_disabled = self.color_disabled
 
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.border_color, border_color_2, gradient_border_dir),
-                                    mix(self.border_color_empty, border_color_2_empty, gradient_border_dir),
-                                    self.empty
-                                ),
-                                mix(self.border_color_focus, border_color_2_focus, gradient_border_dir),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
-                                mix(self.border_color_down, border_color_2_down, gradient_border_dir),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir),
-                        self.disabled
-                    ),
-                    self.border_size
-                );
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_fill = vec2(
+                        self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
+                        self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                    )
+                    let dir = if self.gradient_fill_horizontal > 0.5 gradient_fill.x else gradient_fill.y
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
+                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
+                    color_fill_empty = mix(self.color_empty, self.color_2_empty, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                }
+
+                let mut color_stroke = self.border_color
+                let mut color_stroke_hover = self.border_color_hover
+                let mut color_stroke_focus = self.border_color_focus
+                let mut color_stroke_down = self.border_color_down
+                let mut color_stroke_empty = self.border_color_empty
+                let mut color_stroke_disabled = self.border_color_disabled
+
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_border = vec2(
+                        self.pos.x + dither
+                        self.pos.y + dither
+                    )
+                    let dir = if self.gradient_border_horizontal > 0.5 gradient_border.x else gradient_border.y
+                    color_stroke = mix(self.border_color, self.border_color_2, dir)
+                    color_stroke_hover = mix(self.border_color_hover, self.border_color_2_hover, dir)
+                    color_stroke_focus = mix(self.border_color_focus, self.border_color_2_focus, dir)
+                    color_stroke_down = mix(self.border_color_down, self.border_color_2_down, dir)
+                    color_stroke_empty = mix(self.border_color_empty, self.border_color_2_empty, dir)
+                    color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
+                }
+
+                let fill = color_fill
+                    .mix(color_fill_empty, self.empty)
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover.mix(color_fill_down, self.down), self.hover)
+                    .mix(color_fill_disabled, self.disabled)
+
+                let stroke = color_stroke
+                    .mix(color_stroke_empty, self.empty)
+                    .mix(color_stroke_focus, self.focus)
+                    .mix(color_stroke_hover.mix(color_stroke_down, self.down), self.hover)
+                    .mix(color_stroke_disabled, self.disabled)
+
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
                 
                 return sdf.result
             }
         }
 
-        draw_text: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance empty: 0.0
-            instance disabled: 0.0
+        draw_text +: {
+            hover: instance(0.0)
+            focus: instance(0.0)
+            down: instance(0.0)
+            empty: instance(0.0)
+            disabled: instance(0.0)
 
-            color: (THEME_COLOR_TEXT)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
-            uniform color_down: (THEME_COLOR_TEXT_DOWN)
-            uniform color_disabled: (THEME_COLOR_TEXT_DISABLED)
-            uniform color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
-            uniform color_empty_hover: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
-            uniform color_empty_focus: (THEME_COLOR_TEXT_FOCUS)
+            color: theme.color_text
+            color_hover: uniform(theme.color_text_hover)
+            color_focus: uniform(theme.color_text_focus)
+            color_down: uniform(theme.color_text_down)
+            color_disabled: uniform(theme.color_text_disabled)
+            color_empty: uniform(theme.color_text_placeholder)
+            color_empty_hover: uniform(theme.color_text_placeholder_hover)
+            color_empty_focus: uniform(theme.color_text_focus)
 
-            text_style: <THEME_FONT_REGULAR> {
-                line_spacing: (THEME_FONT_WDGT_LINE_SPACING),
-                font_size: (THEME_FONT_SIZE_P)
+            text_style: theme.font_regular{
+                line_spacing: theme.font_wdgt_line_spacing
+                font_size: theme.font_size_p
             }
 
-            fn get_color(self) -> vec4 {
-                return
-                    mix( 
-                        mix(
-                            mix(
-                                mix(
-                                    self.color,
-                                    mix(
-                                        self.color_hover,
-                                        self.color_down,
-                                        self.down
-                                    ),
-                                    self.hover
-                                ),
-                                self.color_empty,
-                                self.empty
-                            ),
-                            self.color_focus,
-                            self.focus
-                        ),
-                        self.color_disabled,
-                        self.disabled
-                    )
+            get_color: fn() {
+                return self.color
+                    .mix(self.color_hover.mix(self.color_down, self.down), self.hover)
+                    .mix(self.color_empty, self.empty)
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_disabled, self.disabled)
             }
         }
 
-        draw_selection: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance empty: 0.0
-            instance disabled: 0.0
+        draw_selection +: {
+            hover: instance(0.0)
+            focus: instance(0.0)
+            down: instance(0.0)
+            empty: instance(0.0)
+            disabled: instance(0.0)
 
-            uniform color_dither: 1.0
-            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
-            uniform gradient_fill_horizontal: 0.0
+            color_dither: uniform(1.0)
+            border_radius: uniform(theme.textselection_corner_radius)
+            gradient_fill_horizontal: uniform(0.0)
 
-            uniform color: (THEME_COLOR_SELECTION)
-            uniform color_hover: (THEME_COLOR_SELECTION_HOVER)
-            uniform color_focus: (THEME_COLOR_SELECTION_FOCUS)
-            uniform color_down: (THEME_COLOR_SELECTION_DOWN)
-            uniform color_empty: (THEME_COLOR_SELECTION_EMPTY)
-            uniform color_disabled: (THEME_COLOR_SELECTION_DISABLED)
+            color: uniform(theme.color_selection)
+            color_hover: uniform(theme.color_selection_hover)
+            color_focus: uniform(theme.color_selection_focus)
+            color_down: uniform(theme.color_selection_down)
+            color_empty: uniform(theme.color_selection_empty)
+            color_disabled: uniform(theme.color_selection_disabled)
 
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_2_hover: (THEME_COLOR_SELECTION_HOVER)
-            uniform color_2_focus: (THEME_COLOR_SELECTION_FOCUS)
-            uniform color_2_down: (THEME_COLOR_SELECTION_DOWN)
-            uniform color_2_empty: (THEME_COLOR_SELECTION_EMPTY)
-            uniform color_2_disabled: (THEME_COLOR_SELECTION_DISABLED)
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_2_hover: uniform(theme.color_selection_hover)
+            color_2_focus: uniform(theme.color_selection_focus)
+            color_2_down: uniform(theme.color_selection_down)
+            color_2_empty: uniform(theme.color_selection_empty)
+            color_2_disabled: uniform(theme.color_selection_disabled)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let color_2 = self.color;
-                let color_2_hover = self.color_hover;
-                let color_2_focus = self.color_focus;
-                let color_2_down = self.color_down;
-                let color_2_empty = self.color_empty;
-                let color_2_disabled = self.color_disabled;
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2;
-                    color_2_hover = self.color_2_hover;
-                    color_2_focus = self.color_2_focus;
-                    color_2_down = self.color_2_down;
-                    color_2_empty = self.color_2_empty;
-                    color_2_disabled = self.color_2_disabled;
-                }
-
-                let gradient_fill_dir = self.pos.y + dither;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither;
-                }
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
                 sdf.box(
-                    0.0,
-                    0.0,
-                    self.rect_size.x,
-                    self.rect_size.y,
+                    0.0
+                    0.0
+                    self.rect_size.x
+                    self.rect_size.y
                     self.border_radius
                 )
 
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color, color_2, gradient_fill_dir),
-                                    mix(self.color_empty, color_2_empty, gradient_fill_dir),
-                                    self.empty
-                                ),
-                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
-                                mix(self.color_down, color_2_down, gradient_fill_dir),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
-                        self.disabled
-                    )
-                );
-                return sdf.result;
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_focus = self.color_focus
+                let mut color_fill_down = self.color_down
+                let mut color_fill_empty = self.color_empty
+                let mut color_fill_disabled = self.color_disabled
+
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x + dither else self.pos.y + dither
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
+                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
+                    color_fill_empty = mix(self.color_empty, self.color_2_empty, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                }
+
+                let fill = color_fill
+                    .mix(color_fill_empty, self.empty)
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover.mix(color_fill_down, self.down), self.hover)
+                    .mix(color_fill_disabled, self.disabled)
+
+                sdf.fill(fill)
+                return sdf.result
             }
         }
 
-        draw_cursor: {
-            instance focus: 0.0
-            instance down: 0.0
-            instance empty: 0.0
-            instance disabled: 0.0
-            instance blink: 0.0
+        draw_cursor +: {
+            focus: instance(0.0)
+            down: instance(0.0)
+            empty: instance(0.0)
+            disabled: instance(0.0)
+            blink: instance(0.0)
             
-            uniform border_radius: 0.5
+            border_radius: uniform(0.5)
 
-            uniform color: (THEME_COLOR_TEXT_CURSOR)
+            color: uniform(theme.color_text_cursor)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(
-                    0.0,
-                    0.0,
-                    self.rect_size.x,
-                    self.rect_size.y,
+                    0.0
+                    0.0
+                    self.rect_size.x
+                    self.rect_size.y
                     self.border_radius
-                );
+                )
                 sdf.fill(
-                    mix(THEME_COLOR_U_HIDDEN, self.color, (1.0-self.blink) * self.focus)
-                );
-                return sdf.result;
+                    mix(theme.color_u_hidden, self.color, (1.0 - self.blink) * self.focus)
+                )
+                return sdf.result
             }
         }
 
-        animator: {
-            empty = {
-                default: off,
-                off = {
+        animator: Animator{
+            empty: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
                         draw_bg: {empty: 0.0}
@@ -394,7 +308,7 @@ live_design! {
                         draw_cursor: {empty: 0.0}
                     }
                 }
-                on = {
+                on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {empty: 1.0}
@@ -404,24 +318,24 @@ live_design! {
                     }
                 }
             }
-            blink = {
-                default: off
-                off = {
-                    from: {all: Forward {duration:0.05}}
-                    apply: {
-                        draw_cursor: {blink:0.0}
-                    }
-                }
-                on = {
+            blink: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.05}}
                     apply: {
-                        draw_cursor: {blink:1.0}
+                        draw_cursor: {blink: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink: 1.0}
                     }
                 }
             }
-            hover = {
-                default: off,
-                off = {
+            hover: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {down: 0.0, hover: 0.0}
@@ -429,28 +343,28 @@ live_design! {
                     }
                 }
                 
-                on = {
+                on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
                         down: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {down: 0.0, hover: snap(1.0)}
+                        draw_text: {down: 0.0, hover: snap(1.0)}
                     }
                 }
                 
-                down = {
+                down: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {down: snap(1.0), hover: 1.0}
+                        draw_text: {down: snap(1.0), hover: 1.0}
                     }
                 }
             }
-            disabled = {
-                default: off,
-                off = {
+            disabled: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
                         draw_bg: {disabled: 0.0}
@@ -459,7 +373,7 @@ live_design! {
                         draw_cursor: {disabled: 0.0}
                     }
                 }
-                on = {
+                on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {disabled: 1.0}
@@ -469,124 +383,94 @@ live_design! {
                     }
                 }
             }
-            hover = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.1}}
+            focus: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.25}}
                     apply: {
-                        draw_bg: {down: 0.0, hover: 0.0}
-                        draw_text: {down: 0.0, hover: 0.0}
+                        draw_bg: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                        draw_cursor: {focus: 0.0}
+                        draw_selection: {focus: 0.0}
                     }
                 }
-                
-                on = {
-                    from: {
-                        all: Forward {duration: 0.1}
-                        down: Forward {duration: 0.01}
-                    }
+                on: AnimatorState{
+                    from: {all: Snap}
                     apply: {
-                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                    }
-                }
-                
-                down = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                    }
-                }
-            }
-            focus = {
-                default: off
-                off = {
-                    from: {
-                        all: Forward { duration: 0.25 }
-                    }
-                    apply: {
-                        draw_bg: { focus: 0.0 }
-                        draw_text: { focus: 0.0 },
-                        draw_cursor: { focus: 0.0 },
-                        draw_selection: { focus: 0.0 }
-                    }
-                }
-                on = {
-                    from: { all: Snap }
-                    apply: {
-                        draw_bg: { focus: 1.0 }
-                        draw_text: { focus: 1.0 }
-                        draw_cursor: { focus: 1.0 },
-                        draw_selection: { focus: 1.0 }
+                        draw_bg: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                        draw_cursor: {focus: 1.0}
+                        draw_selection: {focus: 1.0}
                     }
                 }
             }
         }
     }
 
-    pub TextInput = <TextInputFlat> {
-        draw_bg: {
-            border_color: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            border_color_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
-            border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+    mod.widgets.TextInput = mod.widgets.TextInputFlat{
+        draw_bg +: {
+            border_color: theme.color_bevel_inset_1
+            border_color_hover: theme.color_bevel_inset_1_hover
+            border_color_focus: theme.color_bevel_inset_1_focus
+            border_color_down: theme.color_bevel_inset_1_down
+            border_color_empty: theme.color_bevel_inset_1_empty
+            border_color_disabled: theme.color_bevel_inset_1_disabled
 
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_2: theme.color_bevel_inset_1
         }
     }
 
-    pub TextInputGradientX = <TextInput> {
-        draw_bg: {
-            gradient_border_horizontal: 1.0; 
-            gradient_fill_horizontal: 1.0; 
+    mod.widgets.TextInputGradientX = mod.widgets.TextInput{
+        draw_bg +: {
+            gradient_border_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
 
-            color: (THEME_COLOR_INSET_1)
-            color_hover: (THEME_COLOR_INSET_1_HOVER)
-            color_focus: (THEME_COLOR_INSET_1_FOCUS)
-            color_down: (THEME_COLOR_INSET_1_DOWN)
-            color_empty: (THEME_COLOR_INSET_1_EMPTY)
-            color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            color: theme.color_inset_1
+            color_hover: theme.color_inset_1_hover
+            color_focus: theme.color_inset_1_focus
+            color_down: theme.color_inset_1_down
+            color_empty: theme.color_inset_1_empty
+            color_disabled: theme.color_inset_1_disabled
 
-            color_2: (THEME_COLOR_INSET_2)
+            color_2: theme.color_inset_2
         }
 
-        draw_selection: {
-            gradient_fill_horizontal: 1.0; 
+        draw_selection +: {
+            gradient_fill_horizontal: 1.0
 
-            color: (THEME_COLOR_SELECTION)
-            color_hover: (THEME_COLOR_SELECTION_HOVER)
-            color_focus: (THEME_COLOR_SELECTION_FOCUS)
-            color_down: (THEME_COLOR_SELECTION_DOWN)
-            color_empty: (THEME_COLOR_SELECTION_EMPTY)
-            color_disabled: (THEME_COLOR_SELECTION_DISABLED)
+            color: theme.color_selection
+            color_hover: theme.color_selection_hover
+            color_focus: theme.color_selection_focus
+            color_down: theme.color_selection_down
+            color_empty: theme.color_selection_empty
+            color_disabled: theme.color_selection_disabled
 
-            color_2: (THEME_COLOR_SELECTION)
-            color_2_hover: (THEME_COLOR_SELECTION_HOVER)
-            color_2_focus: (THEME_COLOR_SELECTION_FOCUS)
-            color_2_down: (THEME_COLOR_SELECTION_DOWN)
-            color_2_empty: (THEME_COLOR_SELECTION_EMPTY)
-            color_2_disabled: (THEME_COLOR_SELECTION_DISABLED)
+            color_2: theme.color_selection
+            color_2_hover: theme.color_selection_hover
+            color_2_focus: theme.color_selection_focus
+            color_2_down: theme.color_selection_down
+            color_2_empty: theme.color_selection_empty
+            color_2_disabled: theme.color_selection_disabled
         }
     }
         
 
-    pub TextInputGradientY = <TextInputGradientX> {
-        draw_bg: {
-            gradient_border_horizontal: 0.0; 
-            gradient_fill_horizontal: 0.0; 
+    mod.widgets.TextInputGradientY = mod.widgets.TextInputGradientX{
+        draw_bg +: {
+            gradient_border_horizontal: 0.0
+            gradient_fill_horizontal: 0.0
         }
 
-        draw_selection: {
-            gradient_fill_horizontal: 0.0; 
+        draw_selection +: {
+            gradient_fill_horizontal: 0.0
         }
     }
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, Widget, Animator)]
 pub struct TextInput {
-    #[animator] animator: Animator,
+    #[source] source: ScriptObjectRef,
+    #[apply_default] animator: Animator,
 
     #[redraw] #[live] draw_bg: DrawColor,
     #[live] draw_text: DrawText,
@@ -620,22 +504,12 @@ pub struct TextInput {
     #[rust] composition_length: usize,
 }
 
- impl LiveHook for TextInput{
-     fn apply_value_unknown(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        if nodes[index].id == live_id!(text){
-            if !apply.from.is_update_from_doc(){
-                return self.text.apply(cx, apply, index, nodes)
-            }
-        }
-        else{
-            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-        }
-        nodes.skip_node(index)
-     }
-     fn after_new_from_doc(&mut self, cx:&mut Cx){
-         self.check_text_is_empty(cx);
-     }
- }
+impl ScriptHook for TextInput {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        let cx = vm.cx_mut();
+        self.check_text_is_empty(cx);
+    }
+}
 
 impl TextInput {
     pub fn is_password(&self) -> bool {
@@ -1348,8 +1222,6 @@ impl Widget for TextInput {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
-                // Sync text to iOS for autocorrect context
-                cx.set_ime_text(&self.text, self.selection.cursor.index);
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
@@ -2032,8 +1904,9 @@ pub struct TextInputState {
     history: History,
 }
 
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum TextInputAction {
+    #[default]
     None,
     KeyFocus,
     KeyFocusLost,

@@ -54,6 +54,13 @@ script_mod!{
                 $flatter_button: ButtonFlatter{
                     text: "Flatter Button"
                 }
+                $slider: Slider{
+                    width: 200
+                    text: "Volume"
+                    min: 0.0
+                    max: 100.0
+                    default: 50.0
+                }
                 $icon_button: Button{
                     text: "Icon Button"
                     icon_walk: Walk{width: 20, height: 20}

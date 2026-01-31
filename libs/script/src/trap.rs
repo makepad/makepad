@@ -1,6 +1,7 @@
 use crate::value::*;
 use crate::makepad_script_derive::*;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub struct ScriptError{
@@ -18,7 +19,7 @@ pub enum ScriptTrapOn{
 use std::cell::Cell;
 #[derive(Default, Debug)]
 pub struct ScriptTrapInner{
-    pub(crate) err: RefCell<Vec<ScriptError>>,
+    pub(crate) err: RefCell<VecDeque<ScriptError>>,
     pub(crate) on: Cell<Option<ScriptTrapOn>>,
     pub ip: ScriptIp,
 }
@@ -41,7 +42,7 @@ impl ScriptTrapInner{
 
 impl ScriptTrapInner{
     pub fn push_err(&self, value:ScriptValue,  message:String, origin_file:String, origin_line:u32)->ScriptValue{
-        self.err.borrow_mut().push(ScriptError{
+        self.err.borrow_mut().push_back(ScriptError{
             value,
             message,
             origin_file,
