@@ -165,6 +165,7 @@ pub struct AnimatorState {
     #[live] pub ease: Option<Ease>,
     #[live] pub from: LiveIdMap<LiveId, Play>,
     #[live] pub apply: Option<ScriptObject>,
+    #[live] pub redraw: bool,
 }
 
 /// Runtime state for a single animation track
@@ -182,8 +183,9 @@ struct AnimatorTrack {
     ease: Ease,
     /// The target apply object (what we're animating to)
     target_apply: ScriptObject,
-    /// The starting values (captured when animation begins)
-    from_values: ScriptObject,
+    /// The starting values SNAPSHOT (captured/copied when animation begins)
+    /// This is a SEPARATE object from state_object - it must not be mutated during animation
+    from_snapshot: ScriptObject,
     /// Whether this track needs redraw
     redraw: bool,
 }
@@ -197,10 +199,9 @@ pub struct Animator {
     #[rust] current_states: LiveIdMap<LiveId, LiveId>,
     /// Runtime: Active animation tracks (one per state group that's animating)
     #[rust] tracks: Vec<AnimatorTrack>,
-    /// Runtime: Last applied values per state group (for interpolation)
-    #[rust] last_values: LiveIdMap<LiveId, ScriptObject>,
-    /// Runtime: Cached interpolation result object (reused each frame to avoid allocations)
-    #[rust] interpolation_cache: Option<ScriptObject>,
+    /// Runtime: The shared state object containing current values from ALL animation groups
+    /// This is the source of truth for "from" values when starting new animations
+    #[rust] state_object: Option<ScriptObject>,
 }
 
 impl ScriptHook for Animator {
@@ -306,33 +307,39 @@ impl Animator{
             self.tracks.retain(|t| t.group_id != group_id);
             // Update current state
             self.current_states.insert(group_id, target_state_id);
-            // Store last values
-            self.last_values.insert(group_id, target_apply);
+            // Merge target values into state_object
+            cx.with_vm(|vm| {
+                let state_obj = self.state_object.get_or_insert_with(|| vm.bx.heap.new_object());
+                Self::merge_object(vm, *state_obj, target_apply);
+            });
             // Return the apply object directly
             return Some(target_apply.into());
         }
         
-        // Get the from values - this is what we animate FROM:
-        // 1. If there's an active track with interpolation_cache, use the cache (current interpolated state)
-        // 2. Otherwise use last_values (the state from last completed animation)
-        // 3. Fall back to current_state's static apply
-        let from_values = if existing_track_idx.is_some() {
-            // Interrupting an animation - use cached interpolation state if available,
-            // otherwise use the existing track's from_values (where that animation started)
-            self.interpolation_cache.or_else(|| {
-                existing_track_idx.map(|idx| self.tracks[idx].from_values)
-            })
-        } else {
-            // No active animation - use last completed values
-            self.last_values.get(&group_id).copied()
-        }.or_else(|| {
-            // Fall back to the current state's static apply
-            let current_state = group.states.get(&current_state_id)?;
-            current_state.apply
-        })?;
-        
         // Remove any existing track for this group
         self.tracks.retain(|t| t.group_id != group_id);
+        
+        // Create a SNAPSHOT of the current "from" values at animation START.
+        // This is the only place we allocate objects for from_snapshot - it happens
+        // once per play() call, NOT during animation frames.
+        // The snapshot must be a separate object that won't be mutated during animation.
+        // We sample from state_object (current animated values) or fall back to static state apply.
+        let from_snapshot = cx.with_vm(|vm| {
+            let snapshot = vm.bx.heap.new_object();
+            
+            // Copy values from state_object (the live animated state)
+            if let Some(state_obj) = self.state_object {
+                Self::copy_matching_keys(vm, snapshot, state_obj, target_apply);
+            } else {
+                // Fall back to copying from the current state's static apply
+                if let Some(current_state) = group.states.get(&current_state_id) {
+                    if let Some(static_apply) = current_state.apply {
+                        Self::copy_matching_keys(vm, snapshot, static_apply, target_apply);
+                    }
+                }
+            }
+            snapshot
+        });
         
         // Create new track
         // Use NEG_INFINITY as marker - will be set to actual time on first NextFrame
@@ -343,8 +350,8 @@ impl Animator{
             play,
             ease,
             target_apply,
-            from_values,
-            redraw: true,
+            from_snapshot,
+            redraw: target_state.redraw,
         };
         
         self.tracks.push(track);
@@ -352,8 +359,8 @@ impl Animator{
         // Request next frame
         self.next_frame = cx.new_next_frame();
         
-        // Return the interpolated value at t=0 (which is the from_values)
-        Some(from_values.into())
+        // Return the snapshot (from values at t=0)
+        Some(from_snapshot.into())
     }
     
     /// Immediately cut to a state without animation
@@ -381,8 +388,11 @@ impl Animator{
         // Update current state
         self.current_states.insert(group_id, target_state_id);
         
-        // Store last values
-        self.last_values.insert(group_id, target_apply);
+        // Merge target values into state_object
+        cx.with_vm(|vm| {
+            let state_obj = self.state_object.get_or_insert_with(|| vm.bx.heap.new_object());
+            Self::merge_object(vm, *state_obj, target_apply);
+        });
         
         // Return the apply object directly
         Some(target_apply.into())
@@ -429,11 +439,13 @@ impl Animator{
             let mut any_animating = false;
             let mut any_redraw = false;
             
-            // Process tracks and interpolate in one pass
+            // Process tracks and interpolate into the shared state_object.
+            // NOTE: After the first frame, no new objects should be allocated here.
+            // The state_object structure is populated on first frame and reused thereafter.
             let result = cx.with_vm(|vm| {
-                // Get or create the cached result object (reused across frames)
-                let result = self.interpolation_cache.get_or_insert_with(|| vm.bx.heap.new_object());
-                let result = *result;
+                // Get or create the shared state object (created once, reused forever)
+                let state_obj = self.state_object.get_or_insert_with(|| vm.bx.heap.new_object());
+                let state_obj = *state_obj;
                 
                 for track in &self.tracks {
                     let elapsed = current_time - track.start_time;
@@ -447,10 +459,11 @@ impl Animator{
                         any_redraw = true;
                     }
                     
-                    // Interpolate directly using from_values from the track
-                    Self::interpolate_object(vm, result, track.from_values, track.target_apply, mix);
+                    // Interpolate from the snapshot (frozen, read-only) to target (read-only),
+                    // writing results into state_obj. Reuses nested objects in state_obj.
+                    Self::interpolate_object(vm, state_obj, track.from_snapshot, track.target_apply, mix);
                 }
-                result
+                state_obj
             });
             
             // Update state and remove ended tracks
@@ -459,7 +472,6 @@ impl Animator{
                 let (ended, _) = track.play.get_ended_time(elapsed);
                 if ended {
                     self.current_states.insert(track.group_id, track.state_id);
-                    self.last_values.insert(track.group_id, track.target_apply);
                     false
                 } else {
                     true
@@ -478,24 +490,116 @@ impl Animator{
         None
     }
     
-    /// Recursively interpolate between two objects
+    /// Recursively interpolate between two objects, writing results into `result`.
+    /// 
+    /// IMPORTANT: This function reuses nested objects from `result` (state_object) to avoid
+    /// allocating new objects on every animation frame. After the first frame populates
+    /// the structure, subsequent frames reuse the same nested objects.
+    /// 
+    /// - `result`: The state_object we write interpolated values into (reuses nested objects)
+    /// - `from`: The from_snapshot (read-only, frozen at animation start)
+    /// - `to`: The target_apply template (read-only, never mutated)
     fn interpolate_object(vm: &mut ScriptVm, result: ScriptObject, from: ScriptObject, to: ScriptObject, mix: f64) {
-        // Iterate over the 'to' object's properties
+        // Iterate over the 'to' object's properties (read-only)
         vm.map_mut_with(to, |vm, to_map| {
             for (key, to_value) in to_map.iter() {
                 let to_val = to_value.value;
                 
-                // Try to get corresponding value from 'from'
+                // Read from 'from' snapshot (never mutated)
                 let from_val = vm.bx.heap.value(from, *key, NoTrap);
                 
-                // Get existing value at this key in result (for reusing nested objects)
+                // Get existing value at this key in result for reusing nested objects
+                // After first frame, this should always find existing objects
                 let existing = vm.bx.heap.value(result, *key, NoTrap);
                 
-                // Interpolate based on type, reusing existing nested objects from result
+                // Interpolate - reuses `existing` nested objects from result
                 let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
                 
-                // Set on result
+                // Write to result (state_object)
                 vm.bx.heap.set_value_def(result, *key, interpolated);
+            }
+        });
+    }
+    
+    /// Merge source object's values into target object (used for snap/cut operations)
+    /// IMPORTANT: This deep-copies objects from source to avoid mutating templates
+    fn merge_object(vm: &mut ScriptVm, target: ScriptObject, source: ScriptObject) {
+        vm.map_mut_with(source, |vm, source_map| {
+            for (key, source_value) in source_map.iter() {
+                let source_val = source_value.value;
+                
+                // Get existing value at this key in target
+                let existing = vm.bx.heap.value(target, *key, NoTrap);
+                
+                if let Some(source_obj) = source_val.as_object() {
+                    // Source is an object - we need to handle it carefully
+                    if let Some(existing_obj) = existing.as_object() {
+                        // Both exist as objects - recursively merge into existing
+                        Self::merge_object(vm, existing_obj, source_obj);
+                    } else {
+                        // Target doesn't have this as object yet - create a COPY, don't reference
+                        let new_obj = vm.bx.heap.new_object();
+                        Self::deep_copy_object(vm, new_obj, source_obj);
+                        vm.bx.heap.set_value_def(target, *key, new_obj.into());
+                    }
+                } else {
+                    // Primitive value - just copy it directly (primitives are value types)
+                    vm.bx.heap.set_value_def(target, *key, source_val);
+                }
+            }
+        });
+    }
+    
+    /// Deep copy all values from source object to dest object
+    /// This ensures we never share object references with templates
+    fn deep_copy_object(vm: &mut ScriptVm, dest: ScriptObject, source: ScriptObject) {
+        vm.map_mut_with(source, |vm, source_map| {
+            for (key, source_value) in source_map.iter() {
+                let source_val = source_value.value;
+                
+                if let Some(source_obj) = source_val.as_object() {
+                    // Recursively copy nested objects
+                    let new_obj = vm.bx.heap.new_object();
+                    Self::deep_copy_object(vm, new_obj, source_obj);
+                    vm.bx.heap.set_value_def(dest, *key, new_obj.into());
+                } else {
+                    // Primitive - copy directly
+                    vm.bx.heap.set_value_def(dest, *key, source_val);
+                }
+            }
+        });
+    }
+    
+    /// Copy values from source to dest, but only for keys that exist in template.
+    /// This creates a snapshot of the current values for the properties we're about to animate.
+    /// The copy is deep for nested objects to avoid sharing references.
+    fn copy_matching_keys(vm: &mut ScriptVm, dest: ScriptObject, source: ScriptObject, template: ScriptObject) {
+        vm.map_mut_with(template, |vm, template_map| {
+            for (key, template_value) in template_map.iter() {
+                let template_val = template_value.value;
+                
+                // Get the current value from source for this key
+                let source_val = vm.bx.heap.value(source, *key, NoTrap);
+                
+                // If template value is an object, we need to recurse
+                if let Some(template_obj) = template_val.as_object() {
+                    // Check if it has apply_transform (snap/timeline) - these are values, not nested objects
+                    if vm.bx.heap.has_apply_transform(template_val) {
+                        // Copy the source value (primitive expected)
+                        vm.bx.heap.set_value_def(dest, *key, source_val);
+                    } else if let Some(source_obj) = source_val.as_object() {
+                        // Both are regular objects - create nested object and recurse
+                        let nested_dest = vm.bx.heap.new_object();
+                        Self::copy_matching_keys(vm, nested_dest, source_obj, template_obj);
+                        vm.bx.heap.set_value_def(dest, *key, nested_dest.into());
+                    } else {
+                        // Source doesn't have this as object - copy the primitive value
+                        vm.bx.heap.set_value_def(dest, *key, source_val);
+                    }
+                } else {
+                    // Template value is a primitive - copy source value directly
+                    vm.bx.heap.set_value_def(dest, *key, source_val);
+                }
             }
         });
     }
@@ -517,7 +621,9 @@ impl Animator{
             
             // If it's an object, recursively interpolate
             if let Some(from_obj) = from.as_object() {
-                // Reuse existing nested object from result if available, otherwise create new
+                // Reuse existing nested object from state_object if available.
+                // Only creates new object on first frame when state_object structure is empty.
+                // After first frame, `existing` will always be an object and we reuse it.
                 let result_obj = existing.as_object().unwrap_or_else(|| vm.bx.heap.new_object());
                 Self::interpolate_object(vm, result_obj, from_obj, to_obj, mix);
                 return result_obj.into();

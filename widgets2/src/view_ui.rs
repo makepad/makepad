@@ -16,8 +16,8 @@ script_mod! {
 
         show_bg: true
         draw_bg +: {
-            color: uniform(theme.color_bevel_outset_2)
-            color_2: uniform(theme.color_bevel_outset_1)
+            color: instance(theme.color_bevel_outset_2)
+            color_2: instance(theme.color_bevel_outset_1)
             border_size: uniform(theme.beveling)
 
             pixel: fn() {
@@ -53,8 +53,8 @@ script_mod! {
 
         show_bg: true
         draw_bg +: {
-            color: uniform(theme.color_bevel_outset_2)
-            color_2: uniform(theme.color_bevel_outset_1)
+            color: instance(theme.color_bevel_outset_2)
+            color_2: instance(theme.color_bevel_outset_1)
             border_size: uniform(theme.beveling)
 
             pixel: fn() {
@@ -89,7 +89,7 @@ script_mod! {
     mod.widgets.SolidView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
 
             get_color: fn() {
                 return self.color
@@ -105,17 +105,17 @@ script_mod! {
         show_bg: true
 
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
             color_dither: uniform(1.0)
             border_size: uniform(0.0)
             border_inset: uniform(vec4(0))
             gradient_fill_horizontal: uniform(0.0)
             gradient_border_horizontal: uniform(0.0)
 
-            color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
 
-            border_color: uniform(#0000)
-            border_color_2: uniform(vec4(-1))
+            border_color: instance(#0000)
+            border_color_2: instance(vec4(-1))
                         
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -157,17 +157,17 @@ script_mod! {
                 
         show_bg: true
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
             color_dither: uniform(1.0)
             border_size: uniform(0.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
 
-            color_2: uniform(vec4(-1))
-            border_color: uniform(#f00)
-            border_color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
+            border_color: instance(#f00)
+            border_color_2: instance(vec4(-1))
 
-            shadow_color: uniform(#0007)
+            shadow_color: instance(#0007)
             shadow_offset: uniform(vec2(0))
             shadow_radius: uniform(10.0)
             
@@ -234,18 +234,18 @@ script_mod! {
                             
         show_bg: true
         draw_bg +: {
-            color: uniform(#8)
+            color: instance(#8)
             color_dither: uniform(1.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
-            color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
 
             border_radius: uniform(2.5)
             border_size: uniform(0.0)
-            border_color: uniform(#0000)
-            border_color_2: uniform(vec4(-1))
+            border_color: instance(#0000)
+            border_color_2: instance(vec4(-1))
 
-            shadow_color: uniform(#0007)
+            shadow_color: instance(#0007)
             shadow_radius: uniform(20.0)
             shadow_offset: uniform(vec2(0))
             
@@ -312,16 +312,16 @@ script_mod! {
     mod.widgets.RoundedView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
             color_dither: uniform(1.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
 
             border_size: uniform(0.0)
             border_radius: uniform(2.5)
-            color_2: uniform(vec4(-1))
-            border_color: uniform(#0000)
-            border_color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
+            border_color: instance(#0000)
+            border_color_2: instance(vec4(-1))
             border_inset: uniform(vec4(0))
                                 
             pixel: fn() {
@@ -360,16 +360,16 @@ script_mod! {
     mod.widgets.RoundedXView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
             color_dither: uniform(1.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
 
-            color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
 
             border_size: uniform(0.0)
-            border_color: uniform(#0000)
-            border_color_2: uniform(vec4(-1))
+            border_color: instance(#0000)
+            border_color_2: instance(vec4(-1))
             border_inset: uniform(vec4(0))
             border_radius: uniform(vec2(2.5 2.5))
                             
@@ -410,16 +410,16 @@ script_mod! {
     mod.widgets.RoundedYView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
             color_dither: uniform(1.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
 
-            color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
 
             border_size: uniform(0.0)
-            border_color: uniform(#0000)
-            border_color_2: uniform(vec4(-1))
+            border_color: instance(#0000)
+            border_color_2: instance(vec4(-1))
             border_inset: uniform(vec4(0))
             border_radius: uniform(vec2(2.5 2.5))
                                                         
@@ -463,15 +463,15 @@ script_mod! {
     mod.widgets.RoundedAllView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
             color_dither: uniform(1.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
 
-            color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
             border_size: uniform(0.0)
-            border_color: uniform(#0000)
-            border_color_2: uniform(vec4(-1))
+            border_color: instance(#0000)
+            border_color_2: instance(vec4(-1))
             border_inset: uniform(vec4(0))
             border_radius: uniform(vec4(2.5))
                             
@@ -517,14 +517,14 @@ script_mod! {
     mod.widgets.CircleView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
             color_dither: uniform(1.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
-            color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
             border_size: uniform(0.0)
-            border_color: uniform(#0000)
-            border_color_2: uniform(vec4(-1))
+            border_color: instance(#0000)
+            border_color_2: instance(vec4(-1))
             border_inset: uniform(vec4(0.0))
             border_radius: uniform(5.0)
                             
@@ -577,16 +577,16 @@ script_mod! {
     mod.widgets.HexagonView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: uniform(#0000)
+            color: instance(#0000)
             color_dither: uniform(1.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
 
-            color_2: uniform(vec4(-1))
-            border_color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
+            border_color_2: instance(vec4(-1))
 
             border_size: uniform(0.0)
-            border_color: uniform(#0000)
+            border_color: instance(#0000)
             border_inset: uniform(vec4(0.0))
             border_radius: uniform(vec2(0.0 1.0))
                             
@@ -639,10 +639,10 @@ script_mod! {
     mod.widgets.GradientXView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {
-            color: uniform(#00f)
+            color: instance(#00f)
             gradient_fill_horizontal: uniform(1.0)
             color_dither: uniform(1.0)
-            color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
 
             get_color: fn() {
                 let mut fill_color = self.color
@@ -663,9 +663,9 @@ script_mod! {
     mod.widgets.GradientYView = mod.widgets.GradientXView {
         show_bg: true
         draw_bg +: {
-            color: uniform(#00f)
+            color: instance(#00f)
             gradient_fill_horizontal: uniform(0.0)
-            color_2: uniform(vec4(-1))
+            color_2: instance(vec4(-1))
             color_dither: uniform(1.0)
         }
     }
@@ -694,7 +694,7 @@ script_mod! {
         optimize: ViewOptimize.Texture
         draw_bg +: {
             border_size: uniform(0.0)
-            border_color: uniform(#000F)
+            border_color: instance(#000F)
             border_inset: uniform(vec4(0))
             border_radius: uniform(2.5)
                                 

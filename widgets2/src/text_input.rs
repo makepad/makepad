@@ -1174,6 +1174,7 @@ impl Widget for TextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
+            self.draw_cursor.redraw(cx);
         }
 
         if self.blink_timer.is_event(event).is_some() {
@@ -1182,6 +1183,7 @@ impl Widget for TextInput {
             } else {
                 self.animator_play(cx, ids!(blink.off));
             }
+            self.draw_cursor.redraw(cx);
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
 
@@ -1215,6 +1217,7 @@ impl Widget for TextInput {
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Text);
                 self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {

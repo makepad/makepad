@@ -1,31 +1,17 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-
 script_mod!{
-    mod.widgets.BareStep = #(BareStep::register_widget(vm))
+    use mod.prelude.widgets_internal.*
+    
+    mod.widgets.BareStep = #(BareStep::register_widget(vm)){}
 }
 
-#[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct BareStep {
+    #[source] source: ScriptObjectRef,
+    #[redraw] #[rust] area: Area,
     #[rust] draw_state: DrawStateWrap<()>
 }
-
-impl WidgetNode for BareStep{
-    fn walk(&mut self, _cx:&mut Cx) -> Walk{
-        Walk::default()
-    }
-    
-    fn area(&self)->Area{Area::Empty}
-    
-    fn redraw(&mut self, _cx: &mut Cx){}
-        
-    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {
-    }
-    
-    fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef{
-        WidgetRef::empty()
-    }
-}   
 
 impl Widget for BareStep {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
