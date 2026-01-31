@@ -64,6 +64,9 @@ impl<'a> ScriptVmCx for ScriptVm<'a>{
         self.host.downcast_ref().unwrap()
     }
     fn with_cx<R, F: FnOnce(&Cx) -> R>(&mut self, f: F) -> R {
+        // Store current thread ID to restore after
+        let saved_thread_id = self.bx.threads.current();
+        
         let cx: &mut Cx = self.host.downcast_mut().unwrap();
         // Swap bx back onto Cx
         let bx = std::mem::replace(&mut self.bx, Box::new(ScriptVmBase::empty()));
@@ -71,9 +74,15 @@ impl<'a> ScriptVmCx for ScriptVm<'a>{
         let r = f(cx);
         // Swap bx back out
         self.bx = cx.script_vm.take().unwrap();
+        
+        // Restore current thread
+        self.bx.threads.set_current(saved_thread_id);
         r
     }
     fn with_cx_mut<R, F: FnOnce(&mut Cx) -> R>(&mut self, f: F) -> R {
+        // Store current thread ID to restore after
+        let saved_thread_id = self.bx.threads.current();
+        
         let cx: &mut Cx = self.host.downcast_mut().unwrap();
         // Swap bx back onto Cx
         let bx = std::mem::replace(&mut self.bx, Box::new(ScriptVmBase::empty()));
@@ -81,6 +90,9 @@ impl<'a> ScriptVmCx for ScriptVm<'a>{
         let r = f(cx);
         // Swap bx back out
         self.bx = cx.script_vm.take().unwrap();
+        
+        // Restore current thread
+        self.bx.threads.set_current(saved_thread_id);
         r
     }
 }

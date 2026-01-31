@@ -60,13 +60,20 @@ impl<'a> ScriptVm<'a> {
                         let native = self.bx.code.native.borrow();
                         &*native.functions[ni.index as usize] as *const _
                     };
+                    // Pause thread before native call so re-entrant calls get a different thread
+                    self.bx.threads.cur().is_paused = true;
                     // SAFETY: The function pointer is valid as long as native functions aren't removed during execution
                     let ret = unsafe { (*func_ptr)(self, args) };
                     
-                    if self.bx.threads.cur_ref().is_paused{
+                    // Check if native explicitly paused (via pause() which sets trap.on to Pause)
+                    if matches!(self.bx.threads.cur().trap.on.get(), Some(ScriptTrapOn::Pause)) {
+                        // Native explicitly paused, leave is_paused = true
                         self.bx.threads.cur().mes.push(me);
                         return false // Paused: skip pop_to_me, function not complete
                     }
+                    
+                    // Native didn't explicitly pause, unpause the thread
+                    self.bx.threads.cur().is_paused = false;
                     
                     self.bx.threads.cur().trap.ip = ip;
                     self.bx.threads.cur().push_stack_value(ret);
