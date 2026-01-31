@@ -63,7 +63,7 @@ pub fn main(){
         }
     }
         
-    let code = script!{
+    let _code = script!{
         use mod.std.*
         use mod.shader
         use mod.pod.*
@@ -394,9 +394,9 @@ pub fn main(){
         assert(y.a == 1 && y.b == 3)
     };
             
-    let code = script!{
+    let _code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
-        ~fib(36);
+        ~fib(38);
     };
         
     let _code = script!{

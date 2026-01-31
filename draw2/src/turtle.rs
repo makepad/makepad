@@ -20,7 +20,7 @@ script_mod!{
         Inset: mod.std.set_type_default() do #(Inset::script_api(vm))
         Layout: mod.std.set_type_default() do #(Layout::script_api(vm))
         Walk: mod.std.set_type_default() do #(Walk::script_api(vm)),
-        
+        TopLeft: me.Align{x:0., y:0.}
         Center: me.Align{x:0.5, y:0.5}
         HCenter: me.Align{x:0.5, y:0.}
         VCenter: me.Align{x:0., y:0.5}

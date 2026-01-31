@@ -28,6 +28,9 @@ script_mod!{
                 flow: Down
                 padding: 20
                 spacing: 10
+                $dropdown: DropDown{
+                    labels: ["Option A", "Option B", "Option C", "Option D"]
+                }
                 $test: TestDraw{}
                 $view: RoundedView{
                     width: 250 
