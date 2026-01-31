@@ -483,7 +483,7 @@ script_mod!{
             }
             
             move_to: fn(x: float, y: float) {
-                self.last_pos =
+                self.last_pos = vec2(x, y);
                 self.start_pos = vec2(x, y);
             }
             

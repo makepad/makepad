@@ -167,8 +167,14 @@ impl <'a> ScriptVm<'a>{
                         let native = self.bx.code.native.borrow();
                         &*native.functions[ni.index as usize] as *const _
                     };
+                    // Pause thread before native call so re-entrant calls get a different thread
+                    self.bx.threads.cur().is_paused = true;
                     // SAFETY: The function pointer is valid as long as native functions aren't removed during execution
                     let result = unsafe { (*func_ptr)(self, scope) };
+                    // Only unpause if native didn't explicitly pause (via pause() which sets trap.on to Pause)
+                    if !matches!(self.bx.threads.cur().trap.on.get(), Some(ScriptTrapOn::Pause)) {
+                        self.bx.threads.cur().is_paused = false;
+                    }
                     return result;
                 }
                 ScriptFnPtr::Script(sip)=>{
@@ -285,7 +291,13 @@ impl <'a> ScriptVm<'a>{
                     let native = self.bx.code.native.borrow();
                     &*native.functions[ni.index as usize] as *const _
                 };
+                // Pause thread before native call so re-entrant calls get a different thread
+                self.bx.threads.cur().is_paused = true;
                 let result = unsafe { (*func_ptr)(self, obj) };
+                // Only unpause if native didn't explicitly pause
+                if !matches!(self.bx.threads.cur().trap.on.get(), Some(ScriptTrapOn::Pause)) {
+                    self.bx.threads.cur().is_paused = false;
+                }
                 return Some(result);
             }
         }
@@ -298,7 +310,13 @@ impl <'a> ScriptVm<'a>{
                     let native = self.bx.code.native.borrow();
                     &*native.functions[ni.index as usize] as *const _
                 };
+                // Pause thread before native call so re-entrant calls get a different thread
+                self.bx.threads.cur().is_paused = true;
                 let result = unsafe { (*func_ptr)(self, args_obj) };
+                // Only unpause if native didn't explicitly pause
+                if !matches!(self.bx.threads.cur().trap.on.get(), Some(ScriptTrapOn::Pause)) {
+                    self.bx.threads.cur().is_paused = false;
+                }
                 return Some(result);
             }
         }
