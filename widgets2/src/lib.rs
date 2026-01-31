@@ -32,7 +32,7 @@ pub mod text_input;
 pub mod slider;
 pub mod scroll_bar;
 pub mod scroll_bars;
-// pub mod splitter;
+pub mod splitter;
 // pub mod vectorline;
 // pub mod fold_header;
 // pub mod fold_button;
@@ -156,6 +156,7 @@ pub use crate::{
     scroll_bars::{ScrollBars},
 //    scroll_shadow::{DrawScrollShadow},
 scroll_bar::{ScrollBar},
+    splitter::*,
 //    slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
 //    toggle_panel::*,
@@ -232,6 +233,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::loading_spinner::script_mod(vm);
     crate::check_box::script_mod(vm);
     crate::radio_button::script_mod(vm);
+    crate::splitter::script_mod(vm);
     //crate::bare_step::script_mod(vm);
     //crate::turtle_step::script_mod(vm);
         
