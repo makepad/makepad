@@ -59,6 +59,7 @@ impl ScriptTrapInner{
     pub fn goto_rel(&mut self, wh:u32){
         self.ip.index += wh;
     }
+    #[inline]
     pub fn goto_next(&mut self){
         self.ip.index += 1;
     }

@@ -200,20 +200,36 @@ impl <'a> ScriptVm<'a>{
     }
     
     pub fn run_core(&mut self)->ScriptValue{
+        // Cache opcodes pointer to avoid RefCell borrow on every iteration
+        let mut cached_body_index: usize = usize::MAX;
+        let mut opcodes_ptr: *const ScriptValue = std::ptr::null();
+        let mut opcodes_len: usize = 0;
+        
         loop {
-            let bodies = self.bx.code.bodies.borrow();
-            let body_index = self.bx.threads.cur_ref().trap.ip.body as usize;
-            let body = &bodies[body_index];
-            if (self.bx.threads.cur_ref().trap.ip.index as usize) >= body.parser.opcodes.len() {
+            let thread = self.bx.threads.cur();
+            let body_index = thread.trap.ip.body as usize;
+            let ip_index = thread.trap.ip.index as usize;
+            
+            // Only re-borrow bodies when body changes
+            if body_index != cached_body_index {
+                let bodies = self.bx.code.bodies.borrow();
+                let body = &bodies[body_index];
+                opcodes_ptr = body.parser.opcodes.as_ptr();
+                opcodes_len = body.parser.opcodes.len();
+                cached_body_index = body_index;
+            }
+            
+            if ip_index >= opcodes_len {
                 return NIL
             }
-            let opcode = body.parser.opcodes[self.bx.threads.cur_ref().trap.ip.index as usize];
-            drop(bodies);
+            
+            // SAFETY: opcodes_ptr is valid as long as bodies isn't mutated during execution
+            let opcode = unsafe { *opcodes_ptr.add(ip_index) };
             
             if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(opcode, args);
-                // if exception tracing
-                if self.bx.threads.cur().trap.err.borrow().len()>0{
+                // if exception tracing - is_empty() is faster than len()>0
+                if !self.bx.threads.cur().trap.err.borrow().is_empty(){
                     if self.bx.threads.cur().call_has_try(){
                         // pop all errors
                         self.bx.threads.cur().trap.err.borrow_mut().clear();
