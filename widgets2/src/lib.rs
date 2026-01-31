@@ -53,8 +53,9 @@ pub mod window;
 // pub mod scroll_shadow;
 // pub mod window_menu;
 // pub mod html;
-// pub mod markdown;
-// pub mod text_flow;
+#[cfg(feature = "markdown")]
+pub mod markdown;
+pub mod text_flow;
 // pub mod multi_image;
 // pub mod modal;
 // pub mod tooltip;
@@ -130,8 +131,7 @@ pub use crate::{
     slider::*,
     text_input::*,
 //    root::*,
-//    text_flow::*,
-//    markdown::*,
+    text_flow::*,
 //    html::*,
     check_box::*,
     radio_button::*,
@@ -196,6 +196,9 @@ scroll_bar::{ScrollBar},
     }
 };
 
+#[cfg(feature = "markdown")]
+pub use crate::markdown::*;
+
 pub fn script_mod(vm: &mut ScriptVm){
     makepad_draw2::script_mod(vm);
     
@@ -249,6 +252,9 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
     crate::portal_list::script_mod(vm);
+    crate::text_flow::script_mod(vm);
+    #[cfg(feature = "markdown")]
+    crate::markdown::script_mod(vm);
     //crate::bare_step::script_mod(vm);
     //crate::turtle_step::script_mod(vm);
         
