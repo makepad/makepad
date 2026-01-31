@@ -14,6 +14,7 @@ use crate::vm::ScriptVm;
 
 impl<'a> ScriptVm<'a> {
     
+    #[inline]
     pub fn opcode(&mut self, opcode: Opcode, opargs: OpcodeArgs) {
         
         match opcode {
