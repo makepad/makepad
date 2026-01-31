@@ -104,6 +104,18 @@ enum State{
     VarTypedAssign{index:u32},
     EmitVarDyn{index:u32},
     EmitVarTyped{index:u32},
+    
+    MatchSubject{temp_id:LiveId, index:u32},
+    MatchBlock{temp_id:LiveId, index:u32},
+    MatchArmPattern{temp_id:LiveId, first:bool, prev_else_start:u32, index:u32},
+    MatchArmArrow{temp_id:LiveId, prev_else_start:u32, index:u32},
+    MatchArmBody{temp_id:LiveId, if_start:u32, prev_else_start:u32, index:u32},
+    MatchArmBlock{temp_id:LiveId, if_start:u32, prev_else_start:u32, last_was_sep:bool, index:u32},
+    MatchWildcardArrow{prev_else_start:u32, index:u32},
+    MatchWildcardBody{prev_else_start:u32, index:u32},
+    MatchWildcardBlock{prev_else_start:u32, last_was_sep:bool, index:u32},
+    MatchMaybeArm{temp_id:LiveId, if_start:u32, prev_else_start:u32, index:u32},
+    MatchWildcardEnd{prev_else_start:u32, index:u32},
 }
 
 // we have a stack, and we have operations
@@ -479,6 +491,170 @@ impl ScriptParser{
                     self.state.push(State::ForExpr{code_start});
                     self.state.push(State::BeginExpr{required:true});
                 }
+            }
+            // Match expression desugaring:
+            // match x { 1 => true, 2 => {false} }
+            // becomes:
+            // let $mN = x
+            // if $mN == 1 true else if $mN == 2 {false}
+            State::MatchSubject{temp_id, index}=>{
+                // Subject expression has been parsed
+                // Order is now: [temp_id, subject_value] - emit LET_DYN
+                self.push_code(Opcode::LET_DYN.into(), index);
+                self.state.push(State::MatchBlock{temp_id, index});
+            }
+            State::MatchBlock{temp_id, index}=>{
+                if tok.is_open_curly(){
+                    self.state.push(State::MatchArmPattern{temp_id, first:true, prev_else_start:0, index});
+                    return 1
+                }
+                else{
+                    error!(self, tokenizer, "Expected {{ after match expression");
+                }
+            }
+            State::MatchArmPattern{temp_id, first:_, prev_else_start, index}=>{
+                if tok.is_close_curly(){
+                    // Empty match - patch any pending IF_ELSE and push nil
+                    if prev_else_start > 0 {
+                        self.set_opcode_args(prev_else_start, OpcodeArgs::from_u32(self.code_len() as u32 - prev_else_start));
+                    }
+                    self.push_code(NIL, index);
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                // Check for wildcard pattern `_`
+                if id == id!(_) {
+                    // Wildcard pattern - just expect => and body
+                    self.state.push(State::MatchWildcardArrow{prev_else_start, index});
+                    return 1
+                }
+                // Emit temp_id to push the match subject value
+                self.push_code(ScriptValue::from_id(temp_id), index);
+                // Parse the pattern expression
+                self.state.push(State::MatchArmArrow{temp_id, prev_else_start, index});
+                self.state.push(State::BeginExpr{required:true});
+            }
+            State::MatchArmArrow{temp_id, prev_else_start, index}=>{
+                // Pattern expression done, emit EQ and IF_TEST
+                self.push_code(Opcode::EQ.into(), index);
+                let if_start = self.code_len();
+                self.push_code(Opcode::IF_TEST.into(), index);
+                // Expect =>
+                if op == id!(=>){
+                    // Parse arm body - check for block or expression
+                    self.state.push(State::MatchArmBody{temp_id, if_start, prev_else_start, index});
+                    return 1
+                }
+                else{
+                    error!(self, tokenizer, "Expected => after match pattern, got {:?}", tok);
+                }
+            }
+            State::MatchArmBody{temp_id, if_start, prev_else_start, index}=>{
+                // Check if arm body is a block or expression (like IfTest does)
+                if tok.is_open_curly(){
+                    // Block body - use BeginStmt like if blocks
+                    self.state.push(State::MatchArmBlock{temp_id, if_start, prev_else_start, last_was_sep:false, index});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                // Expression body
+                self.state.push(State::MatchMaybeArm{temp_id, if_start, prev_else_start, index});
+                self.state.push(State::BeginExpr{required:true});
+            }
+            State::MatchArmBlock{temp_id, if_start, prev_else_start, last_was_sep, index}=>{
+                // Block body done, expect }
+                if tok.is_close_curly(){
+                    if !last_was_sep && self.has_pop_to_me(){
+                        self.clear_pop_to_me();
+                    }
+                    self.state.push(State::MatchMaybeArm{temp_id, if_start, prev_else_start, index});
+                    return 1
+                }
+                else{
+                    error!(self, tokenizer, "Expected }} in match arm block");
+                }
+            }
+            State::MatchWildcardArrow{prev_else_start, index}=>{
+                // Wildcard pattern done, expect =>
+                if op == id!(=>){
+                    // Parse wildcard arm body - check for block or expression
+                    self.state.push(State::MatchWildcardBody{prev_else_start, index});
+                    return 1
+                }
+                else{
+                    error!(self, tokenizer, "Expected => after _ wildcard pattern, got {:?}", tok);
+                }
+            }
+            State::MatchWildcardBody{prev_else_start, index}=>{
+                // Check if wildcard body is a block or expression
+                if tok.is_open_curly(){
+                    // Block body
+                    self.state.push(State::MatchWildcardBlock{prev_else_start, last_was_sep:false, index});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                // Expression body
+                self.state.push(State::MatchWildcardEnd{prev_else_start, index});
+                self.state.push(State::BeginExpr{required:true});
+            }
+            State::MatchWildcardBlock{prev_else_start, last_was_sep, index}=>{
+                // Wildcard block body done, expect }
+                if tok.is_close_curly(){
+                    if !last_was_sep && self.has_pop_to_me(){
+                        self.clear_pop_to_me();
+                    }
+                    self.state.push(State::MatchWildcardEnd{prev_else_start, index});
+                    return 1
+                }
+                else{
+                    error!(self, tokenizer, "Expected }} in wildcard arm block");
+                }
+            }
+            State::MatchWildcardEnd{prev_else_start, index:_}=>{
+                // Wildcard body done - patch any pending IF_ELSE to jump here
+                if prev_else_start > 0 {
+                    self.set_opcode_args(prev_else_start, OpcodeArgs::from_u32(self.code_len() as u32 - prev_else_start));
+                }
+                // Expect }
+                if tok.is_close_curly(){
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                else{
+                    error!(self, tokenizer, "Expected }} after wildcard arm (no more arms allowed after _)");
+                }
+            }
+            State::MatchMaybeArm{temp_id, if_start, prev_else_start, index}=>{
+                // Arm body parsed. Now emit IF_ELSE and patch IF_TEST.
+                
+                // First, patch any previous arm's IF_ELSE to jump here (to current position)
+                if prev_else_start > 0 {
+                    self.set_opcode_args(prev_else_start, OpcodeArgs::from_u32(self.code_len() as u32 - prev_else_start));
+                }
+                
+                if tok.is_close_curly(){
+                    // End of match - no more arms, patch IF_TEST with need_nil flag
+                    self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 - if_start).set_need_nil());
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                
+                // More arms coming - emit IF_ELSE to skip remaining arms after this arm's body
+                let else_start = self.code_len();
+                self.push_code(Opcode::IF_ELSE.into(), index);
+                
+                // Patch IF_TEST to jump here (after arm body and IF_ELSE) to next arm
+                self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 - if_start));
+                
+                // Check for wildcard or regular arm
+                if id == id!(_) {
+                    // Next arm is wildcard - it's the final else body
+                    self.state.push(State::MatchWildcardArrow{prev_else_start: else_start, index});
+                    return 1
+                }
+                
+                // Continue with next regular arm, passing this arm's else_start
+                self.state.push(State::MatchArmPattern{temp_id, first:false, prev_else_start: else_start, index});
             }
             State::ForExpr{code_start}=>{
                 self.set_pop_to_me();
@@ -1359,6 +1535,16 @@ impl ScriptParser{
                     self.state.push(State::While{index:self.index});
                     return 1
                 }
+                if id == id!(match){
+                    // Generate temp variable name based on code position
+                    let temp_name = format!("$m{}", self.code_len());
+                    let temp_id = LiveId::from_str(&temp_name);
+                    // Emit temp_id FIRST, then parse subject expression, then LET_DYN
+                    self.push_code(ScriptValue::from_id(temp_id), self.index);
+                    self.state.push(State::MatchSubject{temp_id, index:self.index});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
                 if id == id!(use){
                     self.state.push(State::Use{index:self.index});
                     self.state.push(State::BeginExpr{required:true});
@@ -1620,6 +1806,9 @@ impl ScriptParser{
                             return 0
                         }
                         else if let State::ForBody{..} = state{
+                            return 0
+                        }
+                        else if let State::MatchSubject{..} = state{
                             return 0
                         }
                         else{

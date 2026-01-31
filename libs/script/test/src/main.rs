@@ -334,7 +334,6 @@ pub fn main(){
         assert(x() == 4)
         fn test(a,b){a+b}
         assert(test(2 3) == 5)
-        println("Test done")
                 
         // POD testing
         let struct_3 = pod.struct{ // extendable pods 
@@ -392,6 +391,43 @@ pub fn main(){
         let x = {a:1 b:2}
         let y = {b:3, ..x}
         assert(y.a == 1 && y.b == 3)
+        
+        // test the NORMAL version
+        let x = 2
+        let result = if x == 1{5}
+        else if x == 2{6}
+        else{7}
+        assert(result == 6)
+        
+        let x = 1
+        // We need to parse this syntax:
+        let result = match x{ 
+             1 => 5
+             2 => {6}
+             _=> {7}
+        }
+        assert(result == 5)
+        
+        // Test match with second arm
+        let y = 2
+        let result2 = match y{
+            1 => true
+            2 => {false}
+        }
+        assert(result2 == false)
+        
+        // Test match with wildcard default case
+        let z = 99
+        let result3 = match z{
+            1 => "one"
+            2 => "two"
+            _ => "other"
+        }
+        assert(result3 == "other")
+        
+        println("Test done")
+        
+        // Match desugars to: let temp = expr; if temp == pattern1 body1 else if temp == pattern2 body2...
     };
             
     let _code = script!{
