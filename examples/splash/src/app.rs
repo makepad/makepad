@@ -25,77 +25,111 @@ script_mod!{
             pass.clear_color: vec4(0.3 0.3 0.3 1.0)
             window.inner_size: vec2(800 600)
             $body +: {
-                flow: Down
-                padding: 20
-                spacing: 10
-                $checkbox: CheckBox{
-                    text: "Enable feature"
+                $splitter: Splitter{
+                    axis: SplitterAxis.Horizontal
+                    align: SplitterAlign.Weighted(0.3)
+                    a: RoundedView{
+                        draw_bg.color: #335
+                        flow: Down
+                        padding: 10
+                        spacing: 10
+                        Label{
+                            text: "Left Panel"
+                            draw_text.color: #fff
+                        }
+                        $checkbox: CheckBox{
+                            text: "Enable feature"
+                        }
+                        $toggle: Toggle{
+                            text: "Dark mode"
+                        }
+                        $radio1: RadioButton{
+                            text: "Option A"
+                        }
+                        $radio2: RadioButton{
+                            text: "Option B"
+                        }
+                        $radio3: RadioButton{
+                            text: "Option C"
+                        }
+                    }
+                    b: Splitter{
+                        axis: SplitterAxis.Vertical
+                        align: SplitterAlign.Weighted(0.6)
+                        a: RoundedView{
+                            draw_bg.color: #353
+                            flow: Down
+                            padding: 10
+                            spacing: 10
+                            Label{
+                                text: "Top Panel"
+                                draw_text.color: #fff
+                            }
+                            $dropdown: DropDown{
+                                labels: ["Option A", "Option B", "Option C", "Option D"]
+                            }
+                            $test: TestDraw{}
+                            $view: RoundedView{
+                                width: 250 
+                                height: 100
+                                draw_bg.color: #494
+                            }
+                            $spinner: LoadingSpinner{
+                                width: 50
+                                height: 50
+                            }
+                            $label: Label{
+                                text: "Hello from Label!"
+                                draw_text.color: #ff0
+                            }
+                        }
+                        b: RoundedView{
+                            draw_bg.color: #533
+                            flow: Down
+                            padding: 10
+                            spacing: 10
+                            Label{
+                                text: "Bottom Panel"
+                                draw_text.color: #fff
+                            }
+                            $heading: H1{
+                                text: "This is a Heading"
+                            }
+                            $button: Button{
+                                text: "Click Me!"
+                            }
+                            $flat_button: ButtonFlat{
+                                text: "Flat Button"
+                            }
+                            $flatter_button: ButtonFlatter{
+                                text: "Flatter Button"
+                            }
+                            $slider: Slider{
+                                width: 200
+                                text: "Volume"
+                                min: 0.0
+                                max: 100.0
+                                default: 50.0
+                            }
+                            $icon_button: Button{
+                                text: "Icon Button"
+                                icon_walk: Walk{width: 20, height: 20}
+                                draw_icon.color: #fff
+                                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                            }
+                            $test_image: Image{
+                                width: 200
+                                height: 150
+                                fit: ImageFit.Stretch
+                            }
+                            $test_icon: Icon{
+                                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                                draw_icon.color: #0ff
+                                icon_walk: Walk{width: 50, height: 50}
+                            }
+                        }
+                    }
                 }
-                $toggle: Toggle{
-                    text: "Dark mode"
-                }
-                $radio1: RadioButton{
-                    text: "Option A"
-                }
-                $radio2: RadioButton{
-                    text: "Option B"
-                }
-                $radio3: RadioButton{
-                    text: "Option C"
-                }
-                $dropdown: DropDown{
-                    labels: ["Option A", "Option B", "Option C", "Option D"]
-                }
-                $test: TestDraw{}
-                $view: RoundedView{
-                    width: 250 
-                    height: 100
-                    draw_bg.color: #494
-                }
-                $spinner: LoadingSpinner{
-                    width: 50
-                    height: 50
-                }
-                $label: Label{
-                    text: "Hello from Label!"
-                    draw_text.color: #ff0
-                }
-                $heading: H1{
-                    text: "This is a Heading"
-                }
-                $button: Button{
-                    text: "Click Me!"
-                }
-                $flat_button: ButtonFlat{
-                    text: "Flat Button"
-                }
-                $flatter_button: ButtonFlatter{
-                    text: "Flatter Button"
-                }
-                $slider: Slider{
-                    width: 200
-                    text: "Volume"
-                    min: 0.0
-                    max: 100.0
-                    default: 50.0
-                }
-                $icon_button: Button{
-                    text: "Icon Button"
-                    icon_walk: Walk{width: 20, height: 20}
-                    draw_icon.color: #fff
-                    draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
-                }
-                $test_image: Image{
-                    width: 200
-                    height: 150
-                    fit: ImageFit.Stretch
-                }
-                $test_icon: Icon{
-                    draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
-                    draw_icon.color: #0ff
-                    icon_walk: Walk{width: 50, height: 50}
-                }
-                
             }
         }
     }
