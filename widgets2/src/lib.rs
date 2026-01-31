@@ -35,6 +35,7 @@ pub mod scroll_bars;
 pub mod splitter;
 // pub mod vectorline;
 pub mod fold_button;
+pub mod portal_list;
 pub mod fold_header;
 pub mod bare_step;
 pub mod turtle_step;
@@ -164,6 +165,7 @@ scroll_bar::{ScrollBar},
     fold_header::*,
     bare_step::*,
     turtle_step::*,
+    portal_list::*,
 //    slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
 //    toggle_panel::*,
@@ -246,6 +248,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::fold_header::script_mod(vm);
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
+    crate::portal_list::script_mod(vm);
     //crate::bare_step::script_mod(vm);
     //crate::turtle_step::script_mod(vm);
         
