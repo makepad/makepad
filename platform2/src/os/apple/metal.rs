@@ -705,12 +705,7 @@ impl Cx {
     } 
     
     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
-        let compile_count = self.draw_shaders.compile_set.len();
-        if compile_count > 0 {
-            log!("mtl_compile_shaders: {} shaders to compile", compile_count);
-        }
         for draw_shader_id in self.draw_shaders.compile_set.iter().cloned().collect::<Vec<_>>() {
-            let start = std::time::Instant::now();
             let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
             
             let mtlsl = match &cx_shader.mapping.code {
