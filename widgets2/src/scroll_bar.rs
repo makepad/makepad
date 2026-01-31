@@ -284,7 +284,6 @@ impl ScrollBar {
         let new_scroll_pos = (
             (self.view_total * (1. - vy) * (finger / self.scroll_size)) / (1. - norm_handle)
         ).max(0.).min(self.view_total - self.view_visible);
-        //log!("SCROLL POS {} {}", new_scroll_pos, self.view_total - self.view_visible);
         // lets snap new_scroll_pos
         let changed = self.scroll_pos != new_scroll_pos;
         self.scroll_pos = new_scroll_pos;
@@ -293,13 +292,12 @@ impl ScrollBar {
     }
     
     // writes the norm_scroll value into the shader
-    pub fn update_shader_scroll_pos(&mut self, _cx: &mut Cx) {
-        let (_norm_scroll, _) = self.get_normalized_scroll_pos();
-        todo!()
-        //self.draw_bg.apply_over(cx, live!{
-        //    norm_scroll: (norm_scroll)
-        //});
-        //self.draw_bg.set_norm_scroll(cx, norm_scroll);
+    pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
+        let (norm_scroll, _) = self.get_normalized_scroll_pos();
+        script_apply_eval!(cx, self.draw_bg, {
+            ~@HI
+            norm_scroll:#(norm_scroll)
+        });
     }
     
     // turns scroll_pos into an event on this.event
@@ -713,7 +711,7 @@ impl ScrollBar {
                     self.draw_bg.norm_scroll = norm_scroll as f32;
                     self.draw_bg.norm_handle = norm_handle as f32;
                     let scroll = cx.turtle().scroll();
-                    self.draw_bg.draw_abs(
+                    self.draw_bg.draw_rel(
                         cx,
                         Rect {
                             pos: dvec2(view_rect.size.x - self.bar_size, self.bar_side_margin) + scroll,
