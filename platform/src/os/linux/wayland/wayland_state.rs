@@ -468,7 +468,8 @@ delegate_noop!(WaylandState: ignore zxdg_toplevel_decoration_v1::ZxdgToplevelDec
 
 impl WaylandState {
     pub(crate) fn available(&self) -> bool {
-        self.compositor.is_some() && self.wm_base.is_some() && self.seat.is_some() && self.decoration_manager.is_some()
+        // Only require core protocols - decorations are optional (GNOME doesn't support server-side)
+        self.compositor.is_some() && self.wm_base.is_some() && self.seat.is_some()
     }
     fn do_callback(&mut self, event: XlibEvent) {
         if let Some(mut callback) = self.event_callback.take() {

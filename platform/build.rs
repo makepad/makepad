@@ -68,9 +68,7 @@ fn main() {
             }
             println!("cargo:rustc-link-lib=framework=MetalKit");
         }
-        "linux"=>{
-            println!("cargo:rustc-link-lib=xkbcommon");
-        }
+        "linux"=>{}
         _=>()
     }
 }

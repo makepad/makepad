@@ -39,3 +39,11 @@ impl Drop for ModuleLoader {
         unsafe { dlclose(self.0.as_ptr()) };
     }
 }
+
+// SAFETY: The dlopen handle is safe to send between threads.
+// The underlying library is reference counted by the dynamic linker.
+unsafe impl Send for ModuleLoader {}
+
+// SAFETY: The dlopen handle is safe to share between threads.
+// All operations (dlsym, dlclose) are thread-safe.
+unsafe impl Sync for ModuleLoader {}
