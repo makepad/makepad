@@ -142,7 +142,7 @@ pub fn script_mod(vm:&mut ScriptVm){
                     return NIL
                 }
             }
-            script_err_unexpected!(vm.thread().trap.pass(), "unexpected task state")
+            script_err_unexpected!(vm.trap(), "unexpected task state")
         });
     }
     
@@ -156,7 +156,7 @@ pub fn script_mod(vm:&mut ScriptVm){
                 }
             }
         }
-        script_err_not_found!(vm.thread().trap.pass(), "invalid task prop")
+        script_err_not_found!(vm.trap(), "invalid task prop")
     });
     
     vm.add_method(std, id_lut!(task), script_args_def!(start_fn_or_depth = NIL), move |vm, args|{

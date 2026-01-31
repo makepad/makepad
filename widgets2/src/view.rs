@@ -130,24 +130,24 @@ impl ScriptHook for View {
         
         // Handle $prop children from the object's vec
         if let Some(obj) = value.as_object() {
-            // Copy vec data first to allow mutable vm access in the loop
-            let vec_data: SmallVec<[ScriptVecValue; 8]> = vm.bx.heap.vec_ref(obj).iter().copied().collect();
-            for kv in vec_data {
-                if kv.key.is_prefixed_id() {  // $prop children
-                    if let Some(id) = kv.key.as_id() {
-                        if apply.is_update() {
-                            self.live_update_order.push(id);
-                        }
-                        
-                        if let Some((_, node)) = self.children.iter_mut().find(|(id2, _)| *id2 == id) {
-                            node.script_apply(vm, apply, scope, kv.value);
-                        } else {
-                            let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
-                            self.children.push((id, widget));
+            vm.vec_with(obj, |vm, vec| {
+                for kv in vec {
+                    if kv.key.is_prefixed_id() {  // $prop children
+                        if let Some(id) = kv.key.as_id() {
+                            if apply.is_update() {
+                                self.live_update_order.push(id);
+                            }
+                            
+                            if let Some((_, node)) = self.children.iter_mut().find(|(id2, _)| *id2 == id) {
+                                node.script_apply(vm, apply, scope, kv.value);
+                            } else {
+                                let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                                self.children.push((id, widget));
+                            }
                         }
                     }
                 }
-            }
+            });
         }
         
         if apply.is_reload() {
