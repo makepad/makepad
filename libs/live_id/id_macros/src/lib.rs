@@ -105,8 +105,7 @@ pub fn ids(item: TokenStream) -> TokenStream {
     tb.end()
 }
 
-#[proc_macro] 
-pub fn ids_array(item: TokenStream) -> TokenStream {
+fn ids_array_impl(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let mut parser = TokenParser::new(item);
     fn parse(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
@@ -139,6 +138,16 @@ pub fn ids_array(item: TokenStream) -> TokenStream {
         return e
     };
     tb.end()
+}
+
+#[proc_macro] 
+pub fn ids_array(item: TokenStream) -> TokenStream {
+    ids_array_impl(item)
+}
+
+#[proc_macro] 
+pub fn ids_list(item: TokenStream) -> TokenStream {
+    ids_array_impl(item)
 }
 
 

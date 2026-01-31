@@ -1,10 +1,11 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
-live_design! {
-    link widgets;
-    pub BareStep = {{BareStep}} {}
+
+
+script_mod!{
+    mod.widgets.BareStep = #(BareStep::register_widget(vm))
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct BareStep {
     #[rust] draw_state: DrawStateWrap<()>
 }
