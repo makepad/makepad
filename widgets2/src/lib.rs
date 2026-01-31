@@ -77,8 +77,7 @@ pub mod loading_spinner;
 // pub mod nav_control;
 
 pub mod view;
-
-// pub mod adaptive_view;
+pub mod adaptive_view;
 pub mod view_ui;
 
 // pub mod toggle_panel;
@@ -117,7 +116,7 @@ pub use crate::{
 //    cached_widget::*,
     label::*,
     view::*,
-//    adaptive_view::*,
+    adaptive_view::*,
     image::*,
     image_cache::*,
 //    image_blend::*,
@@ -155,7 +154,7 @@ pub use crate::{
 //    scroll_shadow::{DrawScrollShadow},
 scroll_bar::{ScrollBar},
 //    slides_view::{SlidesView},
-//    widget_match_event::WidgetMatchEvent,
+    widget_match_event::WidgetMatchEvent,
 //    toggle_panel::*,
 //    defer_with_redraw::*,
 
@@ -216,6 +215,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::scroll_bar::script_mod(vm);
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
+    crate::adaptive_view::script_mod(vm);
     crate::view_ui::script_mod(vm);
     crate::window::script_mod(vm);
     crate::label::script_mod(vm);
