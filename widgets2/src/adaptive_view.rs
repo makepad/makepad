@@ -63,7 +63,7 @@ script_mod! {
 /// device layouts (Currently `Desktop` and `Mobile`). You can override this through the `set_variant_selector` method.
 ///
 /// Check out [VariantSelector] for more information on how to define custom selectors, and what information is available to them.
-#[derive(Script, ScriptHook, WidgetRegister, WidgetRef)]
+#[derive(Script, WidgetRegister, WidgetRef)]
 pub struct AdaptiveView {
     #[source] source: ScriptObjectRef,
     
@@ -166,7 +166,7 @@ impl ScriptHook for AdaptiveView {
                         if let Some(id) = kv.key.as_id() {
                             self.templates.insert(id, kv.value);
 
-                            if id != live_id!(Desktop) && id != live_id!(Mobile) {
+                            if id != id!($Desktop) && id != id!($Mobile) {
                                 self.has_custom_templates = true;
                             }
 
@@ -189,7 +189,7 @@ impl ScriptHook for AdaptiveView {
         // If there are no custom templates, create a default widget with the default variant Desktop
         // This is needed so that methods that run before drawing (find_widgets, walk) have something to work with
         if !self.has_custom_templates {
-            let template = self.templates.get(&live_id!(Desktop)).unwrap();
+            let template = self.templates.get(&id!($Desktop)).unwrap();
             let widget_ref = WidgetRef::script_from_value_scoped(vm, scope, *template);
             self.active_widget = Some(WidgetVariant {
                 template_id: live_id!(Desktop),
@@ -272,8 +272,8 @@ impl AdaptiveView {
 
         // Otherwise create a new widget from the template
         let template = *self.templates.get(&template_id).unwrap();
-        let widget_ref = cx.with_script_vm(|vm, scope| {
-            WidgetRef::script_from_value_scoped(vm, scope, template)
+        let widget_ref = cx.with_vm(|vm| {
+            WidgetRef::script_from_value(vm, template)
         });
 
         // Update this widget's walk to match the walk of the active widget,
