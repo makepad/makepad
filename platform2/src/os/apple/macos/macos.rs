@@ -774,8 +774,11 @@ impl CxOsApi for Cx {
         Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
     }
     
-    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
-        crate::error!("open_url not implemented on this platform");
+    fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
+        // Use the macOS `open` command to open URLs
+        let _ = std::process::Command::new("open")
+            .arg(url)
+            .spawn();
     }
     
     fn max_texture_width()->usize{16384}

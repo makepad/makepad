@@ -23,7 +23,7 @@ pub mod image_cache;
 pub mod image;
 // pub mod image_blend;
 pub mod icon;
-// pub mod link_label;
+pub mod link_label;
 pub mod drop_down;
 pub mod popup_menu;
 pub mod check_box;
@@ -34,8 +34,10 @@ pub mod scroll_bar;
 pub mod scroll_bars;
 pub mod splitter;
 // pub mod vectorline;
-// pub mod fold_header;
-// pub mod fold_button;
+pub mod fold_button;
+pub mod fold_header;
+pub mod bare_step;
+pub mod turtle_step;
 // pub mod multi_window;
 // pub mod dock;
 // pub mod tab;
@@ -157,6 +159,11 @@ pub use crate::{
 //    scroll_shadow::{DrawScrollShadow},
 scroll_bar::{ScrollBar},
     splitter::*,
+    link_label::*,
+    fold_button::*,
+    fold_header::*,
+    bare_step::*,
+    turtle_step::*,
 //    slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
 //    toggle_panel::*,
@@ -234,6 +241,11 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::check_box::script_mod(vm);
     crate::radio_button::script_mod(vm);
     crate::splitter::script_mod(vm);
+    crate::link_label::script_mod(vm);
+    crate::fold_button::script_mod(vm);
+    crate::fold_header::script_mod(vm);
+    crate::bare_step::script_mod(vm);
+    crate::turtle_step::script_mod(vm);
     //crate::bare_step::script_mod(vm);
     //crate::turtle_step::script_mod(vm);
         
