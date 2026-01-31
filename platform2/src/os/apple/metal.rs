@@ -865,15 +865,10 @@ impl DrawVars{
             }
             
             // Cache 2: Compute function hash and check if we've seen these functions before
-            let t0 = std::time::Instant::now();
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
-            let hash_time = t0.elapsed();
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
-                    if hash_time.as_micros() > 100 {
-                        log!("Shader cache HIT (fnhash) - hash took {:?}", hash_time);
-                    }
                     // Add to object_id cache for faster lookup next time
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders.cache_object_id_to_shader.insert(io_self, shader_id);
