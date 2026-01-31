@@ -213,6 +213,7 @@ impl ScriptHeap{
     }
                 
         
+    #[inline]
     pub fn cast_to_f64(&self, v:ScriptValue, ip:ScriptIp)->f64{
         if let Some(v) = v.as_f64(){
             return v
