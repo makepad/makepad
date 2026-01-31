@@ -863,7 +863,7 @@ impl DrawVars{
             }
             
             // Cache 2: Compute function hash and check if we've seen these functions before
-            let fnhash = DrawVars::compute_shader_functions_hash(&vm.heap, io_self);
+            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
@@ -882,7 +882,7 @@ impl DrawVars{
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
             
-            if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), vm.thread.trap.pass()).as_object(){
+            if let Some(fnobj) = vm.bx.heap.object_method(io_self, id!(vertex).into(), vm.thread().trap.pass()).as_object(){
                 output.mode = ShaderMode::Vertex;
                 // Entry point shaders don't have script-level arguments to validate, use NoTrap
                 ShaderFnCompiler::compile_shader_def(
@@ -895,7 +895,7 @@ impl DrawVars{
                     vec![],
                 );
             }
-            if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), vm.thread.trap.pass()).as_object(){
+            if let Some(fnobj) = vm.bx.heap.object_method(io_self, id!(fragment).into(), vm.thread().trap.pass()).as_object(){
                 output.mode = ShaderMode::Fragment;
                 // Entry point shaders don't have script-level arguments to validate, use NoTrap
                 ShaderFnCompiler::compile_shader_def(
@@ -916,7 +916,7 @@ impl DrawVars{
             
             // Assign buffer indices to uniform buffers before generating Metal code
             // Buffer indices start at 3 (0=vertex buffer, 1=instance buffer, 2=uniform struct)
-            output.assign_uniform_buffer_indices(vm.heap, 3);
+            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
             
             let mut out = String::new();
             write!(out, "#include <metal_stdlib>\nusing namespace metal;\n").ok();
@@ -935,7 +935,7 @@ impl DrawVars{
             output.metal_create_vertex_fn(vm, &mut out);
             output.metal_create_fragment_main_fn(vm, &mut out);
             
-            let source = vm.heap.new_object_ref(io_self);
+            let source = vm.bx.heap.new_object_ref(io_self);
             
             // Create the shader mapping and allocate CxDrawShader
             let code = CxDrawShaderCode::Combined { code: out };
@@ -955,9 +955,9 @@ impl DrawVars{
             
             // Extract geometry_id from the vertex buffer object before creating the mapping
             let geometry_id = if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
-                let buffer_value = vm.heap.value(vb_obj, id!(buffer).into(), vm.thread.trap.pass());
+                let buffer_value = vm.bx.heap.value(vb_obj, id!(buffer).into(), vm.thread().trap.pass());
                 if let Some(handle) = buffer_value.as_handle() {
-                    vm.heap.handle_ref::<Geometry>(handle).map(|g| g.geometry_id())
+                    vm.bx.heap.handle_ref::<Geometry>(handle).map(|g| g.geometry_id())
                 } else {
                     None
                 }
@@ -965,16 +965,16 @@ impl DrawVars{
                 None
             };
             
-            let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), &vm.heap, &output, geometry_id);
+            let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), &vm.bx.heap, &output, geometry_id);
             
             // Fill the scope uniform buffer from current script values
             mapping.fill_scope_uniforms_buffer(
-                &vm.heap,
-                &vm.thread.trap.pass(),
+                &vm.bx.heap,
+                &vm.thread().trap.pass(),
             );
             
             // Check for debug: true on the shader object
-            let debug_value = vm.heap.value(io_self, id!(debug).into(), vm.thread.trap.pass());
+            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), vm.thread().trap.pass());
             if let Some(true) = debug_value.as_bool() {
                 mapping.flags.debug = true;
             }

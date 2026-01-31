@@ -382,7 +382,7 @@ impl ScriptPodTy{
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Copy, Clone)]
 pub struct ScriptPodOffset{
     pub offset_of: usize,
     pub field_index: usize

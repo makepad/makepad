@@ -3,263 +3,257 @@
 //! This module contains handle functions for arithmetic operations (+, -, *, /, etc.),
 //! comparison operations (==, !=, <, >, etc.), and logical operations (&&, ||).
 
-use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
-use crate::thread::*;
 use crate::numeric::NumericValue;
-use crate::vm::ScriptCode;
+use crate::vm::ScriptVm;
 
-impl ScriptThread {
+impl<'a> ScriptVm<'a> {
     // ARITHMETIC handlers
     
-    pub(crate) fn handle_not(&mut self, heap: &mut ScriptHeap) {
-        let value = self.pop_stack_resolved(heap);
+    pub(crate) fn handle_not(&mut self) {
+        let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         if let Some(v) = value.as_f64(){
-            self.push_stack_unchecked(ScriptValue::from_f64(!(v as u64) as f64));
-            self.trap.goto_next();
+            self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_f64(!(v as u64) as f64));
+            self.bx.threads.cur().trap.goto_next();
         }
         else{
-            let v = heap.cast_to_bool(value);
-            self.push_stack_unchecked(ScriptValue::from_bool(!v));
-            // Note: original code did NOT have goto_next() here
+            let v = self.bx.heap.cast_to_bool(value);
+            self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_bool(!v));
         }
     }
     
-    pub(crate) fn handle_neg(&mut self, heap: &mut ScriptHeap, code: &ScriptCode) {
-        let value = self.pop_stack_resolved(heap);
-        // Fast path for numbers
+    pub(crate) fn handle_neg(&mut self) {
+        let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         if let Some(f) = value.as_number() {
-            self.push_stack_unchecked(ScriptValue::from_f64(-f));
-            self.trap.goto_next();
+            self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_f64(-f));
+            self.bx.threads.cur().trap.goto_next();
             return;
         }
-        let num = NumericValue::from_script_value_heap(heap, value, self.trap.ip);
+        let ip = self.bx.threads.cur_ref().trap.ip;
+        let num = NumericValue::from_script_value_heap(&self.bx.heap, value, ip);
         let result = num.zip_f32(NumericValue::F64(-1.0), |a, b| a * b);
-        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
-        self.trap.goto_next();
+        self.bx.threads.cur().push_stack_unchecked(result.to_script_value_heap(&mut self.bx.heap, &self.bx.code));
+        self.bx.threads.cur().trap.goto_next();
     }
     
-    pub(crate) fn handle_add(&mut self, heap: &mut ScriptHeap, code: &ScriptCode, opargs: OpcodeArgs) {
+    pub(crate) fn handle_add(&mut self, opargs: OpcodeArgs) {
         let b = if opargs.is_u32(){
             (opargs.to_u32()).into()
         }
         else{
-            self.pop_stack_resolved(heap)
+            self.bx.threads.cur().pop_stack_resolved(&self.bx.heap)
         };
-        let a = self.pop_stack_resolved(heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         
-        // String concatenation takes precedence
         if a.is_string_like() || b.is_string_like(){
-            let ptr = heap.new_string_with(|heap, out|{
+            let ptr = self.bx.heap.new_string_with(|heap, out|{
                 heap.cast_to_string(a, out);
                 heap.cast_to_string(b, out);
             });
-            self.push_stack_unchecked(ptr.into());
-            self.trap.goto_next();
+            self.bx.threads.cur().push_stack_unchecked(ptr.into());
+            self.bx.threads.cur().trap.goto_next();
             return;
         }
         
-        // Fast path: both are simple numbers
         if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
-            self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip));
-            self.trap.goto_next();
+            let ip = self.bx.threads.cur_ref().trap.ip;
+            self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa + fb, ip));
+            self.bx.threads.cur().trap.goto_next();
             return;
         }
         
-        // Slow path: handle all numeric types
-        let na = NumericValue::from_script_value_heap(heap, a, self.trap.ip);
-        let nb = NumericValue::from_script_value_heap(heap, b, self.trap.ip);
+        let ip = self.bx.threads.cur_ref().trap.ip;
+        let na = NumericValue::from_script_value_heap(&self.bx.heap, a, ip);
+        let nb = NumericValue::from_script_value_heap(&self.bx.heap, b, ip);
         let result = na.zip_f32(nb, |x, y| x + y);
-        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
-        self.trap.goto_next();
+        self.bx.threads.cur().push_stack_unchecked(result.to_script_value_heap(&mut self.bx.heap, &self.bx.code));
+        self.bx.threads.cur().trap.goto_next();
     }
 
     // CONCAT handler
     
-    pub(crate) fn handle_concat(&mut self, heap: &mut ScriptHeap) {
-        let op1 = self.pop_stack_resolved(heap);
-        let op2 = self.pop_stack_resolved(heap);
-        let ptr = heap.new_string_with(|heap, out|{
+    pub(crate) fn handle_concat(&mut self) {
+        let op1 = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let op2 = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let ptr = self.bx.heap.new_string_with(|heap, out|{
             heap.cast_to_string(op1, out);
             heap.cast_to_string(op2, out);
         });
-        self.push_stack_unchecked(ptr.into());
-        self.trap.goto_next();
+        self.bx.threads.cur().push_stack_unchecked(ptr.into());
+        self.bx.threads.cur().trap.goto_next();
     }
 
     // EQUALITY handlers
     
-    pub(crate) fn handle_eq(&mut self, heap: &mut ScriptHeap) {
-        let b = self.pop_stack_resolved(heap);
-        let a = self.pop_stack_resolved(heap);
-        self.push_stack_unchecked(heap.deep_eq(a, b).into());
-        self.trap.goto_next();
+    pub(crate) fn handle_eq(&mut self) {
+        let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        self.bx.threads.cur().push_stack_unchecked(self.bx.heap.deep_eq(a, b).into());
+        self.bx.threads.cur().trap.goto_next();
     }
     
-    pub(crate) fn handle_neq(&mut self, heap: &mut ScriptHeap) {
-        let b = self.pop_stack_resolved(heap);
-        let a = self.pop_stack_resolved(heap);
-        self.push_stack_unchecked((!heap.deep_eq(a, b)).into());
-        self.trap.goto_next();
+    pub(crate) fn handle_neq(&mut self) {
+        let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        self.bx.threads.cur().push_stack_unchecked((!self.bx.heap.deep_eq(a, b)).into());
+        self.bx.threads.cur().trap.goto_next();
     }
     
-    pub(crate) fn handle_nil_or(&mut self, heap: &mut ScriptHeap) {
-        let op1 = self.pop_stack_resolved(heap);
-        let op2 = self.pop_stack_resolved(heap);
+    pub(crate) fn handle_nil_or(&mut self) {
+        let op1 = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let op2 = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         if op1.is_nil(){
-            self.push_stack_unchecked(op2);
+            self.bx.threads.cur().push_stack_unchecked(op2);
         }
         else{
-            self.push_stack_unchecked(op1);
+            self.bx.threads.cur().push_stack_unchecked(op1);
         }
-        self.trap.goto_next();
+        self.bx.threads.cur().trap.goto_next();
     }
     
-    pub(crate) fn handle_shallow_eq(&mut self, heap: &mut ScriptHeap) {
-        let b = self.pop_stack_resolved(heap);
-        let a = self.pop_stack_resolved(heap);
-        self.push_stack_value((a == b).into());
-        self.trap.goto_next();
+    pub(crate) fn handle_shallow_eq(&mut self) {
+        let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        self.bx.threads.cur().push_stack_value((a == b).into());
+        self.bx.threads.cur().trap.goto_next();
     }
     
-    pub(crate) fn handle_shallow_neq(&mut self, heap: &mut ScriptHeap) {
-        let b = self.pop_stack_resolved(heap);
-        let a = self.pop_stack_resolved(heap);
-        self.push_stack_unchecked((a != b).into());
-        self.trap.goto_next();
+    pub(crate) fn handle_shallow_neq(&mut self) {
+        let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        self.bx.threads.cur().push_stack_unchecked((a != b).into());
+        self.bx.threads.cur().trap.goto_next();
     }
 
-    // Generic arithmetic operation handlers (legacy, for operations that don't need type preservation)
-
-    pub fn handle_f64_op<F>(&mut self, heap: &mut ScriptHeap, args: OpcodeArgs, f: F)
+    pub fn handle_f64_op<F>(&mut self, args: OpcodeArgs, f: F)
     where F: FnOnce(f64, f64) -> f64
     {
+        let ip = self.bx.threads.cur_ref().trap.ip;
         let fb = if args.is_u32(){
             args.to_u32() as f64
         }
         else{
-            let b = self.pop_stack_resolved(heap);
-            heap.cast_to_f64(b, self.trap.ip)
+            let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+            self.bx.heap.cast_to_f64(b, ip)
         };
-        let a = self.pop_stack_resolved(heap);
-        let fa = heap.cast_to_f64(a, self.trap.ip);
-        self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip));
-        self.trap.goto_next();
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let fa = self.bx.heap.cast_to_f64(a, ip);
+        self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_f64_traced_nan(f(fa, fb), ip));
+        self.bx.threads.cur().trap.goto_next();
     }
 
-    pub fn handle_fu64_op<F>(&mut self, heap: &mut ScriptHeap, args: OpcodeArgs, f: F)
+    pub fn handle_fu64_op<F>(&mut self, args: OpcodeArgs, f: F)
     where F: FnOnce(u64, u64) -> u64
     {
+        let ip = self.bx.threads.cur_ref().trap.ip;
         let ub = if args.is_u32(){
             args.to_u32() as u64
         }
         else{
-            let b = self.pop_stack_resolved(heap);
-            heap.cast_to_f64(b, self.trap.ip) as u64
+            let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+            self.bx.heap.cast_to_f64(b, ip) as u64
         };
-        let a = self.pop_stack_resolved(heap);
-        let ua = heap.cast_to_f64(a, self.trap.ip) as u64;
-        self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(f(ua, ub) as f64, self.trap.ip));
-        self.trap.goto_next();
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let ua = self.bx.heap.cast_to_f64(a, ip) as u64;
+        self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_f64_traced_nan(f(ua, ub) as f64, ip));
+        self.bx.threads.cur().trap.goto_next();
     }
 
-    pub fn handle_f64_cmp_op<F>(&mut self, heap: &mut ScriptHeap, args: OpcodeArgs, f: F)
+    pub fn handle_f64_cmp_op<F>(&mut self, args: OpcodeArgs, f: F)
     where F: FnOnce(f64, f64) -> bool
     {
+        let ip = self.bx.threads.cur_ref().trap.ip;
         let fb = if args.is_u32(){
             args.to_u32() as f64
         }
         else{
-            let b = self.pop_stack_resolved(heap);
-            heap.cast_to_f64(b, self.trap.ip)
+            let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+            self.bx.heap.cast_to_f64(b, ip)
         };
-        let a = self.pop_stack_resolved(heap);
-        let fa = heap.cast_to_f64(a, self.trap.ip);
-        self.push_stack_unchecked(ScriptValue::from_bool(f(fa, fb)));
-        self.trap.goto_next();
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let fa = self.bx.heap.cast_to_f64(a, ip);
+        self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_bool(f(fa, fb)));
+        self.bx.threads.cur().trap.goto_next();
     }
 
-    pub fn handle_bool_op<F>(&mut self, heap: &mut ScriptHeap, f: F)
+    pub fn handle_bool_op<F>(&mut self, f: F)
     where F: FnOnce(bool, bool) -> bool
     {
-        let b = self.pop_stack_resolved(heap);
-        let a = self.pop_stack_resolved(heap);
-        let ba = heap.cast_to_bool(a);
-        let bb = heap.cast_to_bool(b);
-        self.push_stack_unchecked(ScriptValue::from_bool(f(ba, bb)));
-        self.trap.goto_next();
+        let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let ba = self.bx.heap.cast_to_bool(a);
+        let bb = self.bx.heap.cast_to_bool(b);
+        self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_bool(f(ba, bb)));
+        self.bx.threads.cur().trap.goto_next();
     }
 
-    /// Handle multiplication with full numeric type support including matrix operations
-    pub fn handle_mul(&mut self, heap: &mut ScriptHeap, code: &ScriptCode, args: OpcodeArgs) {
+    pub fn handle_mul(&mut self, args: OpcodeArgs) {
         let b = if args.is_u32() {
             ScriptValue::from_f64(args.to_u32() as f64)
         } else {
-            self.pop_stack_resolved(heap)
+            self.bx.threads.cur().pop_stack_resolved(&self.bx.heap)
         };
-        let a = self.pop_stack_resolved(heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         
-        // Fast path: both are simple numbers
         if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
-            self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa * fb, self.trap.ip));
-            self.trap.goto_next();
+            let ip = self.bx.threads.cur_ref().trap.ip;
+            self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa * fb, ip));
+            self.bx.threads.cur().trap.goto_next();
             return;
         }
         
-        // Slow path: handle all numeric types including matrix
-        let na = NumericValue::from_script_value_heap(heap, a, self.trap.ip);
-        let nb = NumericValue::from_script_value_heap(heap, b, self.trap.ip);
+        let ip = self.bx.threads.cur_ref().trap.ip;
+        let na = NumericValue::from_script_value_heap(&self.bx.heap, a, ip);
+        let nb = NumericValue::from_script_value_heap(&self.bx.heap, b, ip);
         let result = na.multiply(nb);
-        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
-        self.trap.goto_next();
+        self.bx.threads.cur().push_stack_unchecked(result.to_script_value_heap(&mut self.bx.heap, &self.bx.code));
+        self.bx.threads.cur().trap.goto_next();
     }
 
-    /// Handle division with full numeric type support
-    pub fn handle_div(&mut self, heap: &mut ScriptHeap, code: &ScriptCode, args: OpcodeArgs) {
+    pub fn handle_div(&mut self, args: OpcodeArgs) {
         let b = if args.is_u32() {
             ScriptValue::from_f64(args.to_u32() as f64)
         } else {
-            self.pop_stack_resolved(heap)
+            self.bx.threads.cur().pop_stack_resolved(&self.bx.heap)
         };
-        let a = self.pop_stack_resolved(heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         
-        // Fast path: both are simple numbers
         if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
-            self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa / fb, self.trap.ip));
-            self.trap.goto_next();
+            let ip = self.bx.threads.cur_ref().trap.ip;
+            self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa / fb, ip));
+            self.bx.threads.cur().trap.goto_next();
             return;
         }
         
-        // Slow path: handle all numeric types
-        let na = NumericValue::from_script_value_heap(heap, a, self.trap.ip);
-        let nb = NumericValue::from_script_value_heap(heap, b, self.trap.ip);
+        let ip = self.bx.threads.cur_ref().trap.ip;
+        let na = NumericValue::from_script_value_heap(&self.bx.heap, a, ip);
+        let nb = NumericValue::from_script_value_heap(&self.bx.heap, b, ip);
         let result = na.zip_f32(nb, |x, y| if y != 0.0 { x / y } else { 0.0 });
-        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
-        self.trap.goto_next();
+        self.bx.threads.cur().push_stack_unchecked(result.to_script_value_heap(&mut self.bx.heap, &self.bx.code));
+        self.bx.threads.cur().trap.goto_next();
     }
 
-    /// Handle subtraction with full numeric type support
-    pub fn handle_sub(&mut self, heap: &mut ScriptHeap, code: &ScriptCode, args: OpcodeArgs) {
+    pub fn handle_sub(&mut self, args: OpcodeArgs) {
         let b = if args.is_u32() {
             ScriptValue::from_f64(args.to_u32() as f64)
         } else {
-            self.pop_stack_resolved(heap)
+            self.bx.threads.cur().pop_stack_resolved(&self.bx.heap)
         };
-        let a = self.pop_stack_resolved(heap);
+        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         
-        // Fast path: both are simple numbers
         if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
-            self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa - fb, self.trap.ip));
-            self.trap.goto_next();
+            let ip = self.bx.threads.cur_ref().trap.ip;
+            self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa - fb, ip));
+            self.bx.threads.cur().trap.goto_next();
             return;
         }
         
-        // Slow path: handle all numeric types
-        let na = NumericValue::from_script_value_heap(heap, a, self.trap.ip);
-        let nb = NumericValue::from_script_value_heap(heap, b, self.trap.ip);
+        let ip = self.bx.threads.cur_ref().trap.ip;
+        let na = NumericValue::from_script_value_heap(&self.bx.heap, a, ip);
+        let nb = NumericValue::from_script_value_heap(&self.bx.heap, b, ip);
         let result = na.zip_f32(nb, |x, y| x - y);
-        self.push_stack_unchecked(result.to_script_value_heap(heap, code));
-        self.trap.goto_next();
+        self.bx.threads.cur().push_stack_unchecked(result.to_script_value_heap(&mut self.bx.heap, &self.bx.code));
+        self.bx.threads.cur().trap.goto_next();
     }
 }

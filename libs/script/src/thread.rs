@@ -1,14 +1,10 @@
 use crate::makepad_live_id::*;
-use crate::makepad_error_log::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
-use crate::vm::*;
-use crate::function::*;
 use crate::trap::*;
 use crate::json::*;
 use crate::pod::*;
-use std::any::Any;
 use crate::*;
 
 #[derive(Debug, Default)]
@@ -236,138 +232,126 @@ impl ScriptThread{
             self.scopes.push(new_scope);
         }
     }
-    
-    pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any, fnobj:ScriptValue, args:&[ScriptValue])->ScriptValue{
-        let scope = heap.new_with_proto(fnobj);
-        
-        heap.clear_object_deep(scope);
-        if fnobj.is_err(){
-            return fnobj
-        }
-        
-        let err = heap.push_all_fn_args(scope, args, self.trap.pass());
-        if err.is_err(){
-            return err
-        }
-        
-        heap.set_object_deep(scope);
-        heap.set_object_storage_auto(scope);
-                
-        if let Some(fnptr) = heap.parent_as_fn(scope){
-            match fnptr{
-                ScriptFnPtr::Native(ni)=>{
-                    return (*code.native.borrow().functions[ni.index as usize])(&mut ScriptVm{
-                        host,
-                        heap,
-                        thread:self,
-                        code
-                    }, scope);
-                }
-                ScriptFnPtr::Script(sip)=>{
-                    let call = CallFrame{
-                        bases: self.new_bases(),
-                        args: OpcodeArgs::default(),
-                        return_ip: None
-                    };
-                    self.scopes.push(scope);
-                    self.calls.push(call);
-                    self.trap.ip = sip;
-                    return self.run_core(heap, code, host);
-                }
-            }
-        }
-        else{
-            return script_err_wrong_value!(self.trap, "call target is not a function (got {:?})", heap.proto(scope).value_type())
+}
+
+/// Wrapper around Vec<ScriptThread> with a current thread index.
+/// This allows accessing the current thread without borrowing the entire container,
+/// enabling split borrows between threads and other fields like heap/code.
+pub struct ScriptThreads {
+    threads: Vec<ScriptThread>,
+    current: usize,
+    /// Cached raw pointer to current thread for fast access in hot paths.
+    /// SAFETY: This must be updated whenever `current` changes or threads are reallocated.
+    cur_ptr: *mut ScriptThread,
+}
+
+impl ScriptThreads {
+    pub fn new() -> Self {
+        let mut threads = vec![ScriptThread::new(ScriptThreadId(0))];
+        let cur_ptr = threads.as_mut_ptr();
+        Self {
+            threads,
+            current: 0,
+            cur_ptr,
         }
     }
     
-    pub fn run_core(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any)->ScriptValue{
-        let bodies = code.bodies.borrow();
-        let mut body = &bodies[self.trap.ip.body as usize];
-        while (self.trap.ip.index as usize) < body.parser.opcodes.len(){
-            let opcode = body.parser.opcodes[self.trap.ip.index as usize];
-            if let Some((opcode, args)) = opcode.as_opcode(){
-                self.opcode(opcode, args, heap, code, host);
-                // if exception tracing
-                if self.trap.err.borrow_mut().len()>0{
-                    if self.call_has_try(){
-                        // pop all errors
-                        self.trap.err.borrow_mut().clear();
-                        let try_frame = self.tries.pop().unwrap();
-                        self.truncate_bases(try_frame.bases, heap);
-                        if try_frame.push_nil{
-                            self.push_stack_unchecked(NIL)
-                        }
-                        self.trap.goto(try_frame.start_ip + try_frame.jump);
-                        //self.last_err = err.value;
-                    }
-                    else{
-                        while let Some(err) = self.trap.err.borrow_mut().pop_front(){
-                            if let Some(ptr) = err.value.as_err(){
-                                if let Some(loc2) = code.ip_to_loc(ptr.ip){
-                                    log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} ({}:{})", err.message, err.origin_file, err.origin_line), LogLevel::Error);
-                                }
-                            }
-                        }
-                    }
-                }
-                if let Some(trap) = self.trap.on.take(){
-                    match trap{
-                        
-                        ScriptTrapOn::Pause=>{
-                            return NIL
-                        }
-                        ScriptTrapOn::Return(value)=>{
-                            return value
-                        }
-                    }
-                }
-            }
-            else{ // its a direct value-to-stack?
-                self.push_stack_value(opcode);
-                self.trap.goto_next();
-            }
-            body = &bodies[self.trap.ip.body as usize];
+    pub fn empty() -> Self {
+        Self {
+            threads: vec![],
+            current: 0,
+            cur_ptr: std::ptr::null_mut(),
         }
-        NIL
     }
     
-    pub fn run_root(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any, body_id: u16)->ScriptValue{
-        
-        self.calls.push(CallFrame{
-            bases: StackBases{
-                tries: 0,
-                loops: 0,
-                stack: 0,
-                scope: 0,
-                mes: 0,
-            },
-            args: Default::default(),
-            return_ip: None,
-        });
-        
-        let bodies = code.bodies.borrow();
-        
-        self.scopes.push(bodies[body_id as usize].scope);
-        self.mes.push(ScriptMe::Object(bodies[body_id as usize].me));
-        
-        self.trap.ip.body = body_id;
-        self.trap.ip.index = 0;
-        //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
-        
-        // the main interpreter loop
-        let value = self.run_core(heap, code, host);
-        //println!("{:?}", profile);
-        // lets have a look at our scope
-        let _call = self.calls.last();
-        let _scope = self.scopes.last();
-        //opcodes.sort_by(|a,b| a.count.cmp(&b.count));
-        //println!("{:?}", opcodes);
-        //heap.print(*scope, true);
-        //print!("Global:");
-        //heap.print(global, true);
-        //println!("");                                
-        //self.heap.free_object(scope);
-        value
+    /// Update the cached pointer after any operation that might invalidate it
+    #[inline(always)]
+    fn update_ptr(&mut self) {
+        if !self.threads.is_empty() {
+            self.cur_ptr = unsafe { self.threads.as_mut_ptr().add(self.current) };
+        } else {
+            self.cur_ptr = std::ptr::null_mut();
+        }
+    }
+    
+    /// Get a mutable reference to the current thread using cached pointer
+    /// SAFETY: The pointer is kept in sync with the current index and thread vector
+    #[inline(always)]
+    pub fn cur(&mut self) -> &mut ScriptThread {
+        debug_assert!(!self.cur_ptr.is_null(), "cur() called on empty ScriptThreads");
+        unsafe { &mut *self.cur_ptr }
+    }
+    
+    pub fn trap<'a>(&'a self)-> ScriptTrap<'a>{
+        debug_assert!(!self.cur_ptr.is_null(), "trap() called on empty ScriptThreads");
+        unsafe { (*self.cur_ptr).trap.pass() }
+    }
+    
+    /// Get an immutable reference to the current thread using cached pointer
+    /// SAFETY: The pointer is kept in sync with the current index and thread vector
+    #[inline(always)]
+    pub fn cur_ref(&self) -> &ScriptThread {
+        debug_assert!(!self.cur_ptr.is_null(), "cur_ref() called on empty ScriptThreads");
+        unsafe { &*self.cur_ptr }
+    }
+    
+    /// Set which thread is current
+    pub fn set_current(&mut self, id: usize) {
+        self.current = id;
+        self.update_ptr();
+    }
+    
+    /// Get the current thread index
+    pub fn current(&self) -> usize {
+        self.current
+    }
+    
+    /// Find the first unpaused thread (creating one if needed) and set it as current
+    pub fn set_current_to_first_unpaused_thread(&mut self) {
+        for (id, thread) in self.threads.iter().enumerate() {
+            if !thread.is_paused {
+                self.current = id;
+                self.update_ptr();
+                return;
+            }
+        }
+        // No unpaused thread found, create a new one
+        let id = self.threads.len();
+        self.threads.push(ScriptThread::new(ScriptThreadId(id as u32)));
+        self.current = id;
+        self.update_ptr();
+    }
+    
+    /// Set the current thread by ScriptThreadId
+    pub fn set_current_thread_id(&mut self, thread_id: ScriptThreadId) {
+        self.current = thread_id.to_index();
+        self.update_ptr();
+    }
+    
+    /// Get the number of threads
+    pub fn len(&self) -> usize {
+        self.threads.len()
+    }
+    
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.threads.is_empty()
+    }
+    
+    /// Push a new thread
+    pub fn push(&mut self, thread: ScriptThread) {
+        self.threads.push(thread);
+        // push may reallocate, so update pointer
+        self.update_ptr();
+    }
+    
+    /// Get thread by index
+    pub fn get(&self, index: usize) -> Option<&ScriptThread> {
+        self.threads.get(index)
+    }
+    
+    /// Get thread by index mutably
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut ScriptThread> {
+        self.threads.get_mut(index)
     }
 }

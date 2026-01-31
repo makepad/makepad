@@ -100,7 +100,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
 
         for field in &fields {
             if field.attrs.iter().any( | a | a.name == "live" || a.name == "source" || a.name == "apply_default"){
-                tb.add("if let Some(v) = vm.heap.value_for_apply(value, id!(")
+                tb.add("if let Some(v) = vm.bx.heap.value_for_apply(value, id!(")
                     .ident(&field.name).add(").into()){");
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(",vm, apply, scope, v);");
                 tb.add("}");
@@ -124,7 +124,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    fn script_to_value(&self, vm: &mut ScriptVm)->ScriptValue {");
         
         tb.add("        let proto = Self::script_proto(vm).into();");
-        tb.add("        let obj = vm.heap.new_with_proto(proto);");
+        tb.add("        let obj = vm.bx.heap.new_with_proto(proto);");
         tb.add("        self.script_to_value_props(vm, obj);");
         tb.add("        obj.into()");
         tb.add("     }");
@@ -141,8 +141,8 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             }
             if let Some(_) = field.attrs.iter().find(|a| a.name == "live" || a.name == "apply_default"){
                 tb.add("let value:ScriptValue = <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_to_value( &self.").ident(&field.name).add(", vm); ");
-                tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
-                .ident(&field.name).add(")), value, vm.thread.trap.pass());");
+                tb.add("vm.bx.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
+                .ident(&field.name).add(")), value, vm.bx.threads.cur().trap.pass());");
             }
         }
                 
@@ -346,29 +346,29 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    }");
         
         tb.add("    fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{");
-        tb.add("        let enum_object = vm.heap.new_object();");
+        tb.add("        let enum_object = vm.bx.heap.new_object();");
 
         for item in &items {
             match &item.kind {
                 EnumKind::Bare => {
-                    tb.add("let bare = vm.heap.new_with_proto(id_lut!(").ident(&item.name).add(").into());");
-                    tb.add("vm.heap.set_value(enum_object, id!(").ident(&item.name).add(").into(), bare.into(), vm.thread.trap.pass());");
-                    tb.add("vm.heap.freeze(bare);");
+                    tb.add("let bare = vm.bx.heap.new_with_proto(id_lut!(").ident(&item.name).add(").into());");
+                    tb.add("vm.bx.heap.set_value(enum_object, id!(").ident(&item.name).add(").into(), bare.into(), vm.bx.threads.cur().trap.pass());");
+                    tb.add("vm.bx.heap.freeze(bare);");
                 },
                 EnumKind::Tuple(args) => {
                     tb.add("vm.add_method(enum_object, id_lut!(").ident(&item.name).add("), &[], |vm, args|{");
-                    tb.add("    let tuple = vm.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
-                    tb.add("    if vm.heap.vec_len(args) != ").unsuf_usize(args.len()).add("{");
-                    tb.add("        makepad_script::script_err_invalid_args!(vm.thread.trap, \"wrong argument count\");");
+                    tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
+                    tb.add("    if vm.bx.heap.vec_len(args) != ").unsuf_usize(args.len()).add("{");
+                    tb.add("        makepad_script::script_err_invalid_args!(vm.bx.threads.cur().trap, \"wrong argument count\");");
                     tb.add("    }");
                     for (i, arg) in args.iter().enumerate(){
-                        tb.add("if let Some(a) = vm.heap.vec_value_if_exist(args, ").unsuf_usize(i).add("){");
-                        tb.add("    if!<").stream(Some(arg.clone())).add(" as ScriptNew>::script_type_check(vm.heap, a){");
-                        tb.add("        makepad_script::script_err_type_mismatch!(vm.thread.trap, \"argument type mismatch\");");
+                        tb.add("if let Some(a) = vm.bx.heap.vec_value_if_exist(args, ").unsuf_usize(i).add("){");
+                        tb.add("    if!<").stream(Some(arg.clone())).add(" as ScriptNew>::script_type_check(&vm.bx.heap, a){");
+                        tb.add("        makepad_script::script_err_type_mismatch!(vm.bx.threads.cur().trap, \"argument type mismatch\");");
                         tb.add("    }");
                         tb.add("}");
                     }
-                    tb.add("    vm.heap.vec_push_vec(tuple, args, vm.thread.trap.pass());");
+                    tb.add("    vm.bx.heap.vec_push_vec(tuple, args, vm.bx.threads.cur().trap.pass());");
                     tb.add("    tuple.into()");
                     tb.add("});");
                 }
@@ -376,7 +376,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("let def =");
                     item.gen_new(tb) ?;
                     tb.add(";");
-                    tb.add("let named = vm.heap.new_with_proto(id_lut!(").ident(&item.name).add(").into());");
+                    tb.add("let named = vm.bx.heap.new_with_proto(id_lut!(").ident(&item.name).add(").into());");
                     tb.add("let mut props = ScriptTypeProps::default();");
                     tb.add("if let Self::").ident(&item.name).add("{");
                     for (i, field) in fields.iter().enumerate(){
@@ -386,14 +386,14 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     for (i, field) in fields.iter().enumerate(){
                         tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
                         tb.add("props.insert(id_lut!(").ident(&field.name).add("), <").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
-                        tb.add(" vm.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, vm.thread.trap.pass());");
+                        tb.add(" vm.bx.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, vm.bx.threads.cur().trap.pass());");
                     }
                     tb.add("}");
                     tb.add("let ty_check = ScriptTypeCheck{props, object: None};");
-                    tb.add("let ty_index = vm.heap.register_type(None, ty_check);");
-                    tb.add("vm.heap.set_type(named, ty_index);");
-                    tb.add("vm.heap.freeze_component(named);");
-                    tb.add("vm.heap.set_value(enum_object, id!(").ident(&item.name).add(").into(), named.into(), vm.thread.trap.pass());");
+                    tb.add("let ty_index = vm.bx.heap.register_type(None, ty_check);");
+                    tb.add("vm.bx.heap.set_type(named, ty_index);");
+                    tb.add("vm.bx.heap.freeze_component(named);");
+                    tb.add("vm.bx.heap.set_value(enum_object, id!(").ident(&item.name).add(").into(), named.into(), vm.bx.threads.cur().trap.pass());");
                     // uh oh crap. we need to get the default value out of the unparsed defaults
                 }
             }
@@ -416,7 +416,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("            return");
         tb.add("        }");
         tb.add("        if let Some(object) = value.as_object(){");
-        tb.add("            let root_proto = vm.heap.root_proto(object);");
+        tb.add("            let root_proto = vm.bx.heap.root_proto(object);");
         tb.add("            if let Some(id) = root_proto.as_id(){");
         tb.add("                match id{");
         for item in &items {
@@ -440,7 +440,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     }
                     tb.add(") = self{");
                     for (i, arg) in args.iter().enumerate(){
-                        tb.add("            if let Some(v) = vm.heap.vec_value_if_exist(object, ").unsuf_usize(i).add("){");
+                        tb.add("            if let Some(v) = vm.bx.heap.vec_value_if_exist(object, ").unsuf_usize(i).add("){");
                         tb.add("                 <").stream(Some(arg.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, scope, v);");
                         tb.add("            }");
                     }
@@ -461,7 +461,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     }
                     tb.add("} = self{");
                     for (i, field) in fields.iter().enumerate(){
-                        tb.add("if let Some(v) = vm.heap.value_for_apply(value, ScriptValue::from_id(id!(").ident(&field.name).add("))){");
+                        tb.add("if let Some(v) = vm.bx.heap.value_for_apply(value, ScriptValue::from_id(id!(").ident(&field.name).add("))){");
                         tb.add("    <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, scope, v);");
                         tb.add("}");
                     }
@@ -475,7 +475,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("                }");
         tb.add("            }");
         tb.add("        }");
-        tb.add("        makepad_script::script_err_unknown_type!(vm.thread.trap, \"unknown enum variant\");");
+        tb.add("        makepad_script::script_err_unknown_type!(vm.bx.threads.cur().trap, \"unknown enum variant\");");
         tb.add("    }");
         
                 
@@ -494,10 +494,10 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                         tb.ident(&format!("v{i}")).add(",");
                     }
                     tb.add(")=>{");
-                    tb.add("    let tuple = vm.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
+                    tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
                     for (i, arg) in args.iter().enumerate(){
                         tb.add("let value = <").stream(Some(arg.clone())).add(" as ScriptApply>::script_to_value(").ident(&format!("v{i}")).add(",vm);");
-                        tb.add("vm.heap.vec_push(tuple, NIL, value, vm.thread.trap.pass());");
+                        tb.add("vm.bx.heap.vec_push(tuple, NIL, value, vm.bx.threads.cur().trap.pass());");
                     }
                     tb.add("    tuple.into()");
                     tb.add("}");
@@ -509,10 +509,10 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     }
                     tb.add("}=>{");
                     tb.add("    let proto = Self::script_enum_lookup_variant(vm,id!(").ident(&item.name).add("));");
-                    tb.add("    let named = vm.heap.new_with_proto(proto);");
+                    tb.add("    let named = vm.bx.heap.new_with_proto(proto);");
                     for (i, field) in fields.iter().enumerate(){
                         tb.add("let value = <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_to_value(").ident(&format!("v{i}")).add(", vm);");
-                        tb.add("vm.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, vm.thread.trap.pass());");
+                        tb.add("vm.bx.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, vm.bx.threads.cur().trap.pass());");
                     }
                     tb.add("    named.into()");
                     tb.add("}");
@@ -599,44 +599,44 @@ impl ScriptNew for EnumTest{
     }
             
     fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
-        let enum_object = vm.heap.new();
+        let enum_object = vm.bx.heap.new();
                     
         // how do we typecheck an enum type eh
-        let bare = vm.heap.new_with_proto(id!(Bare).into());
-        vm.heap.set_value(enum_object, id_lut!(Bare).into(), bare.into(), vm.thread.trap.pass());
-        vm.heap.freeze(bare);
+        let bare = vm.bx.heap.new_with_proto(id!(Bare).into());
+        vm.bx.heap.set_value(enum_object, id_lut!(Bare).into(), bare.into(), vm.bx.threads.cur().trap.pass());
+        vm.bx.heap.freeze(bare);
                     
         // alright next one the tuple
         vm.add_method(enum_object, id!(Tuple), &[], |vm, args|{
-            let tuple = vm.heap.new_with_proto(id!(Tuple).into());
-            if vm.heap.vec_len(args) != 1 {
-                script_err_invalid_args!(vm.thread.trap, "EnumTest::Tuple requires 1 arg");
+            let tuple = vm.bx.heap.new_with_proto(id!(Tuple).into());
+            if vm.bx.heap.vec_len(args) != 1 {
+                script_err_invalid_args!(vm.bx.threads.cur().trap, "EnumTest::Tuple requires 1 arg");
             }
-            if let Some(a) = vm.heap.vec_value_if_exist(args, 0){
-                if !f64::script_type_check(vm.heap, a){
-                    script_err_type_mismatch!(vm.thread.trap, "EnumTest::Tuple arg must be f64");
+            if let Some(a) = vm.bx.heap.vec_value_if_exist(args, 0){
+                if !f64::script_type_check(&vm.bx.heap, a){
+                    script_err_type_mismatch!(vm.bx.threads.cur().trap, "EnumTest::Tuple arg must be f64");
                 }
             }
-            vm.heap.vec_push_vec(tuple, args, vm.thread.trap.pass());
+            vm.bx.heap.vec_push_vec(tuple, args, vm.bx.threads.cur().trap.pass());
             tuple.into()
         });
                     
         // we can make a type index prop check for sself thing
         let def = Self::Named{named_field: 1.0};
-        let named = vm.heap.new_with_proto(id_lut!(Named).into());
+        let named = vm.bx.heap.new_with_proto(id_lut!(Named).into());
         let mut props = ScriptTypeProps::default();
         if let Self::Named{named_field:v0} = def{
                             
             let value = v0.script_to_value(vm);
             props.insert(id_lut!(named_field), f64::script_type_id_static());
-            vm.heap.set_value(named, id!(named_field).into(), value, vm.thread.trap.pass());
+            vm.bx.heap.set_value(named, id!(named_field).into(), value, vm.bx.threads.cur().trap.pass());
                             
         }
                     
         let ty_check = ScriptTypeCheck{props, object: None};
-        let ty_index = vm.heap.register_type(None, ty_check);
-        vm.heap.freeze_with_type(named, ty_index);
-        vm.heap.set_value(enum_object, id!(Named).into(), named.into(), vm.thread.trap.pass());
+        let ty_index = vm.bx.heap.register_type(None, ty_check);
+        vm.bx.heap.freeze_with_type(named, ty_index);
+        vm.bx.heap.set_value(enum_object, id!(Named).into(), named.into(), vm.bx.threads.cur().trap.pass());
                     
         enum_object.into()
     }
@@ -649,16 +649,16 @@ impl ScriptToValue for EnumTest{
                 Self::script_enum_lookup_variant(vm, id!(Bare))
             }
             Self::Tuple(x)=>{
-                let tuple = vm.heap.new_with_proto(id!(Tuple).into());
+                let tuple = vm.bx.heap.new_with_proto(id!(Tuple).into());
                 let value = x.script_to_value(vm);
-                vm.heap.vec_push(tuple, NIL, value, vm.thread.trap.pass());
+                vm.bx.heap.vec_push(tuple, NIL, value, vm.bx.threads.cur().trap.pass());
                 tuple.into()
             }
             Self::Named{named_field}=>{
                 let proto = Self::script_enum_lookup_variant(vm, id!(Named));
-                let named = vm.heap.new_with_proto(proto);
+                let named = vm.bx.heap.new_with_proto(proto);
                 let value = named_field.script_to_value(vm);
-                vm.heap.set_value(named, id_lut!(named_field).into(), value, vm.thread.trap.pass());
+                vm.bx.heap.set_value(named, id_lut!(named_field).into(), value, vm.bx.threads.cur().trap.pass());
                 named.into()
             }
         }
@@ -672,7 +672,7 @@ impl ScriptApply for EnumTest{
             return
         }
         if let Some(object) = value.as_object(){
-            let root_proto = vm.heap.root_proto(object);
+            let root_proto = vm.bx.heap.root_proto(object);
             // we now have to fetch the proto LiveId of the object
             if let Some(id) = root_proto.as_id(){
                 match id{
@@ -683,7 +683,7 @@ impl ScriptApply for EnumTest{
                     id!(Tuple)=>{
                         if let Self::Tuple(..) = self{} else {*self = Self::Tuple(1.0)};
                         if let Self::Tuple(a1) = self{
-                            if let Some(v) = vm.heap.vec_value_if_exist(object, 0){
+                            if let Some(v) = vm.bx.heap.vec_value_if_exist(object, 0){
                                 a1.script_apply(vm, apply, v);
                             }
                             return
@@ -693,7 +693,7 @@ impl ScriptApply for EnumTest{
                     id!(Named)=>{
                         if let Self::Named{..} = self{} else { *self = Self::Named{named_field:1.0}};
                         if let Self::Named{named_field} = self{
-                            if let Some(v) = vm.heap.value_apply_if_dirty(value, ScriptValue::from_id(id!(named_field))){
+                            if let Some(v) = vm.bx.heap.value_apply_if_dirty(value, ScriptValue::from_id(id!(named_field))){
                                 named_field.script_apply(vm, apply, v);
                             }
                             return
@@ -704,6 +704,6 @@ impl ScriptApply for EnumTest{
                 }
             }
         }
-        script_err_unknown_type!(vm.thread.trap, "unknown EnumTest variant");
+        script_err_unknown_type!(vm.bx.threads.cur().trap, "unknown EnumTest variant");
     }
 }*/

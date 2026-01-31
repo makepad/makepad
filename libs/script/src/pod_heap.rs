@@ -429,7 +429,7 @@ impl ScriptHeap{
                     if rem != 0{
                         offset.offset_of += align_bytes - rem
                     }
-                                        
+                    
                     self.pod_write_field(&field.ty, offset.offset_of, &mut out_data, value, trap);
                     // alright lets do the align and all that
                     offset.field_index += 1;
@@ -1163,7 +1163,6 @@ impl ScriptHeap{
                         offset_of += align_bytes - rem
                     }
                     if field.name == field_name{
-                                                
                         match &field.ty.data.ty{
                             ScriptPodTy::Void | ScriptPodTy::ArrayBuilder | ScriptPodTy::UndefinedStruct => {
                                 script_err_unexpected!(trap, "cannot read pod field {:?} with type {:?}", field_name, field.ty.data.ty);

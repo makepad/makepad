@@ -17,11 +17,11 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_api!(vm, draw.MouseCursor);
     
     let pass_default = ScriptDrawPass::script_api(vm);
-    vm.heap.set_type_default(pass_default.as_object().unwrap());
+    vm.bx.heap.set_type_default(pass_default.as_object().unwrap());
     set_script_value!(vm, draw.ScriptDrawPass = pass_default);
     
     let window_default = ScriptWindowHandle::script_api(vm);
-    vm.heap.set_type_default(window_default.as_object().unwrap());
+    vm.bx.heap.set_type_default(window_default.as_object().unwrap());
     set_script_value!(vm, draw.ScriptWindowHandle = window_default);
     
     NIL

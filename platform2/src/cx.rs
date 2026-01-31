@@ -1,6 +1,6 @@
 use {
     makepad_futures::{executor, executor::{Executor, Spawner}},
-    makepad_script::ScriptVmBase,
+    makepad_script::{ScriptVmBase,ScriptVm},
     std::{
         collections::{
             HashMap,
@@ -278,9 +278,10 @@ impl Cx {
             *sender = Some(action_sender);
         }
         
-        let mut script_vm = Box::new(ScriptVmBase::new());
+        let mut vm = ScriptVm{host:&mut 0, bx: Box::new(ScriptVmBase::new())}; 
         
-        crate::script::script_mod(&mut (*script_vm).as_ref());
+        //todo!();
+        crate::script::script_mod(&mut vm);
         
         Self {
             package_root: None,
@@ -350,7 +351,7 @@ impl Cx {
 
             widget_query_invalidation_event: None,
             
-            script_vm: Some(script_vm),
+            script_vm: Some(vm.bx),
             script_data: Default::default(),
         }
     }

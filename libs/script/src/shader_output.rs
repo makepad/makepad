@@ -226,28 +226,28 @@ impl ShaderOutput{
     fn pre_collect_rust_instance_io_recursive(&mut self, vm: &mut ScriptVm, obj: ScriptObject) {
         // First, recurse to prototype (to process deepest ancestor first)
         // This ensures parent's RustInstance fields come before child's fields
-        if let Some(proto_obj) = vm.heap.proto(obj).as_object() {
+        if let Some(proto_obj) = vm.bx.heap.proto(obj).as_object() {
             self.pre_collect_rust_instance_io_recursive(vm, proto_obj);
         }
         
         // Then process this object's type properties
-        let obj_data = vm.heap.object_data(obj);
+        let obj_data = vm.bx.heap.object_data(obj);
         let ty_index = obj_data.tag.as_type_index();
         
         if let Some(ty_index) = ty_index {
             // Collect the ordered props - iter_rust_instance_ordered returns all instance fields
             // (parent fields + this type's fields after deref) because rust_instance_start is now
             // correctly left at 0 (config fields before deref are skipped during script_proto_props)
-            let type_check = vm.heap.type_check(ty_index);
+            let type_check = vm.bx.heap.type_check(ty_index);
             // Collect into a Vec first to avoid borrow issues with heap mutation below
             let ordered_props: Vec<_> = type_check.props.iter_rust_instance_ordered().collect();
             
             for (field_id, type_id) in ordered_props {
                 // Get the pod type from the type_id
-                if let Some(pod_ty) = vm.heap.type_id_to_pod_type(type_id, &vm.code.builtins.pod) {
+                if let Some(pod_ty) = vm.bx.heap.type_id_to_pod_type(type_id, &vm.bx.code.builtins.pod) {
                     // Skip if already added (handles duplicate prototypes in chain)
                     if !self.io.iter().any(|io| io.name == field_id) {
-                        vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
+                        vm.bx.heap.pod_type_name_if_not_set(pod_ty, field_id);
                         self.io.push(ShaderIo {
                             kind: ShaderIoKind::RustInstance,
                             name: field_id,
@@ -273,7 +273,7 @@ impl ShaderOutput{
         // Set pod type names for uniforms (requires mutable heap, done after iteration)
         for io in &self.io {
             if matches!(io.kind, ShaderIoKind::Uniform) {
-                vm.heap.pod_type_name_if_not_set(io.ty, io.name);
+                vm.bx.heap.pod_type_name_if_not_set(io.ty, io.name);
             }
         }
     }
@@ -282,15 +282,15 @@ impl ShaderOutput{
         use crate::mod_shader::*;
         
         // First recurse to prototype (to process deepest first)
-        if let Some(proto_obj) = vm.heap.proto(obj).as_object() {
+        if let Some(proto_obj) = vm.bx.heap.proto(obj).as_object() {
             self.pre_collect_shader_io_recursive(vm, proto_obj);
         }
         
         // Then process this object's map entries in insertion order
-        let obj_data = vm.heap.object_data(obj);
+        let obj_data = vm.bx.heap.object_data(obj);
         obj_data.map_iter_ordered(|key, value| {
             if let Some(value_obj) = value.as_object() {
-                if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
+                if let Some(io_type) = vm.bx.heap.as_shader_io(value_obj) {
                     if let Some(field_id) = key.as_id() {
                         // Skip if already exists (derived class overrides)
                         if self.io.iter().any(|io| io.name == field_id) {
@@ -298,7 +298,7 @@ impl ShaderOutput{
                         }
                         
                         // Get the pod type from the prototype
-                        let proto_value = vm.heap.proto(value_obj);
+                        let proto_value = vm.bx.heap.proto(value_obj);
                         let pod_ty = Self::get_pod_type_from_value(vm, proto_value);
                         
                         // Handle different shader IO types
@@ -358,20 +358,20 @@ impl ShaderOutput{
     
     pub(crate) fn get_pod_type_from_value(vm: &ScriptVm, value: ScriptValue) -> Option<ScriptPodType> {
         // Check if it's a primitive type (f32, f64, bool, etc.)
-        if let Some(pod_ty) = vm.code.builtins.pod.value_to_exact_type(value) {
+        if let Some(pod_ty) = vm.bx.code.builtins.pod.value_to_exact_type(value) {
             return Some(pod_ty);
         }
         // Check if it's a color - colors map to vec4f
         if value.is_color() {
-            return Some(vm.code.builtins.pod.pod_vec4f);
+            return Some(vm.bx.code.builtins.pod.pod_vec4f);
         }
         // Check if it's a pod type object
-        if let Some(pod_ty) = vm.heap.pod_type(value) {
+        if let Some(pod_ty) = vm.bx.heap.pod_type(value) {
             return Some(pod_ty);
         }
         // Check if it's a pod instance
         if let Some(pod) = value.as_pod() {
-            let pod = &vm.heap.pods[pod.index as usize];
+            let pod = &vm.bx.heap.pods[pod.index as usize];
             return Some(pod.ty);
         }
         // Check if it's a pod type reference
@@ -384,11 +384,11 @@ impl ShaderOutput{
     pub fn create_struct_defs(&mut self, vm:&ScriptVm, out:&mut String){
         for io in &self.io{
             let ty = io.ty;
-            if let ScriptPodTy::Struct{..} = vm.heap.pod_type_ref(ty).ty{
+            if let ScriptPodTy::Struct{..} = vm.bx.heap.pod_type_ref(ty).ty{
                 self.structs.insert(ty);
             }
         }
-        self.backend.pod_struct_defs(vm.heap, &self.structs, out);
+        self.backend.pod_struct_defs(&vm.bx.heap, &self.structs, out);
     }
     
     pub fn create_functions(&self, out: &mut String) {
@@ -404,12 +404,12 @@ impl ShaderOutput{
         // Walk the prototype chain looking for vertex buffer properties
         let mut current = Some(io_self);
         while let Some(obj) = current {
-            let obj_data = vm.heap.object_data(obj);
+            let obj_data = vm.bx.heap.object_data(obj);
             
             // Check map properties
             if let Some(ret) = obj_data.map_iter_ret(|_key, value| {
                 if let Some(value_obj) = value.as_object() {
-                    if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
+                    if let Some(io_type) = vm.bx.heap.as_shader_io(value_obj) {
                         if io_type == SHADER_IO_VERTEX_BUFFER {
                             return Some(value_obj);
                         }
@@ -421,7 +421,7 @@ impl ShaderOutput{
             }
             
             // Move to next prototype
-            current = vm.heap.proto(obj).as_object();
+            current = vm.bx.heap.proto(obj).as_object();
         }
         None
     }

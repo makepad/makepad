@@ -18,9 +18,9 @@ pub fn script_mod(vm:&mut ScriptVm){
     // it will return the stored value
     vm.add_method(animator, id!(snap), script_args!(value = NIL), move |vm, args|{
         let value = script_value!(vm, args.value);
-        let snap_obj = vm.heap.new_object();
-        vm.heap.set_value_def(snap_obj, id!(value).into(), value);
-        vm.heap.set_object_apply_transform(snap_obj, snap_transform_id);
+        let snap_obj = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(snap_obj, id!(value).into(), value);
+        vm.bx.heap.set_object_apply_transform(snap_obj, snap_transform_id);
         snap_obj.into()
     });
     
@@ -36,7 +36,7 @@ pub fn script_mod(vm:&mut ScriptVm){
     // Times should be in range 0-1 (representing animation progress)
     vm.add_method(animator, id!(timeline), script_args!(), move |vm, args|{
         // Get positional args from the vec part
-        let len = vm.heap.vec_len(args);
+        let len = vm.bx.heap.vec_len(args);
         
         // Error if not mod 2 (must be pairs of time/value)
         if len % 2 != 0 {
@@ -50,20 +50,20 @@ pub fn script_mod(vm:&mut ScriptVm){
         }
         
         // Create timeline object
-        let timeline_obj = vm.heap.new_object();
+        let timeline_obj = vm.bx.heap.new_object();
         
         // Create a keyframes array to store the time/value pairs
-        let keyframes = vm.heap.new_object();
+        let keyframes = vm.bx.heap.new_object();
         
         // Copy keyframes from args
         for i in 0..len {
-            let value = vm.heap.vec_value(args, i, NoTrap);
-            vm.heap.vec_push(keyframes, ScriptValue::NIL, value, NoTrap);
+            let value = vm.bx.heap.vec_value(args, i, NoTrap);
+            vm.bx.heap.vec_push(keyframes, ScriptValue::NIL, value, NoTrap);
         }
         
         // Store keyframes on timeline object
-        vm.heap.set_value_def(timeline_obj, id!(keyframes).into(), keyframes.into());
-        vm.heap.set_object_apply_transform(timeline_obj, timeline_transform_id);
+        vm.bx.heap.set_value_def(timeline_obj, id!(keyframes).into(), keyframes.into());
+        vm.bx.heap.set_object_apply_transform(timeline_obj, timeline_transform_id);
         
         timeline_obj.into()
     });
@@ -432,7 +432,7 @@ impl Animator{
             // Process tracks and interpolate in one pass
             let result = cx.with_vm(|vm| {
                 // Get or create the cached result object (reused across frames)
-                let result = self.interpolation_cache.get_or_insert_with(|| vm.heap.new_object());
+                let result = self.interpolation_cache.get_or_insert_with(|| vm.bx.heap.new_object());
                 let result = *result;
                 
                 for track in &self.tracks {
@@ -486,16 +486,16 @@ impl Animator{
                 let to_val = to_value.value;
                 
                 // Try to get corresponding value from 'from'
-                let from_val = vm.heap.value(from, *key, NoTrap);
+                let from_val = vm.bx.heap.value(from, *key, NoTrap);
                 
                 // Get existing value at this key in result (for reusing nested objects)
-                let existing = vm.heap.value(result, *key, NoTrap);
+                let existing = vm.bx.heap.value(result, *key, NoTrap);
                 
                 // Interpolate based on type, reusing existing nested objects from result
                 let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
                 
                 // Set on result
-                vm.heap.set_value_def(result, *key, interpolated);
+                vm.bx.heap.set_value_def(result, *key, interpolated);
             }
         });
     }
@@ -505,20 +505,20 @@ impl Animator{
     fn interpolate_value(vm: &mut ScriptVm, from: ScriptValue, to: ScriptValue, mix: f64, existing: ScriptValue) -> ScriptValue {
         // Handle apply_transform objects (snap and timeline)
         if let Some(to_obj) = to.as_object() {
-            if vm.heap.has_apply_transform(to) {
+            if vm.bx.heap.has_apply_transform(to) {
                 // Check if it's a timeline object (has keyframes property)
-                let keyframes = vm.heap.value(to_obj, id!(keyframes).into(), NoTrap);
+                let keyframes = vm.bx.heap.value(to_obj, id!(keyframes).into(), NoTrap);
                 if let Some(kf_obj) = keyframes.as_object() {
                     return Self::interpolate_timeline(vm, from, kf_obj, mix, existing);
                 }
                 // Otherwise it's a snap object - return the stored value
-                return vm.heap.value(to_obj, id!(value).into(), NoTrap);
+                return vm.bx.heap.value(to_obj, id!(value).into(), NoTrap);
             }
             
             // If it's an object, recursively interpolate
             if let Some(from_obj) = from.as_object() {
                 // Reuse existing nested object from result if available, otherwise create new
-                let result_obj = existing.as_object().unwrap_or_else(|| vm.heap.new_object());
+                let result_obj = existing.as_object().unwrap_or_else(|| vm.bx.heap.new_object());
                 Self::interpolate_object(vm, result_obj, from_obj, to_obj, mix);
                 return result_obj.into();
             } else {
@@ -580,7 +580,7 @@ impl Animator{
     /// `from` is the current value to use if timeline doesn't start at time 0
     /// Assumes keyframes are already sorted by time
     fn interpolate_timeline(vm: &mut ScriptVm, from: ScriptValue, keyframes: ScriptObject, mix: f64, existing: ScriptValue) -> ScriptValue {
-        let len = vm.heap.vec_len(keyframes);
+        let len = vm.bx.heap.vec_len(keyframes);
         let num_pairs = len / 2;
         
         if num_pairs == 0 {
@@ -588,8 +588,8 @@ impl Animator{
         }
         
         // Get first keyframe
-        let first_time = vm.heap.vec_value(keyframes, 0, NoTrap).as_f64().unwrap_or(0.0);
-        let first_value = vm.heap.vec_value(keyframes, 1, NoTrap);
+        let first_time = vm.bx.heap.vec_value(keyframes, 0, NoTrap).as_f64().unwrap_or(0.0);
+        let first_value = vm.bx.heap.vec_value(keyframes, 1, NoTrap);
         
         // If mix is before first keyframe, interpolate from `from` to first keyframe value
         if mix <= first_time {
@@ -601,8 +601,8 @@ impl Animator{
         }
         
         // Get last keyframe
-        let last_time = vm.heap.vec_value(keyframes, (num_pairs - 1) * 2, NoTrap).as_f64().unwrap_or(1.0);
-        let last_value = vm.heap.vec_value(keyframes, (num_pairs - 1) * 2 + 1, NoTrap);
+        let last_time = vm.bx.heap.vec_value(keyframes, (num_pairs - 1) * 2, NoTrap).as_f64().unwrap_or(1.0);
+        let last_value = vm.bx.heap.vec_value(keyframes, (num_pairs - 1) * 2 + 1, NoTrap);
         
         // If mix is at or after last keyframe, return last value
         if mix >= last_time {
@@ -614,8 +614,8 @@ impl Animator{
         let mut v0 = first_value;
         
         for i in 1..num_pairs {
-            let t1 = vm.heap.vec_value(keyframes, i * 2, NoTrap).as_f64().unwrap_or(1.0);
-            let v1 = vm.heap.vec_value(keyframes, i * 2 + 1, NoTrap);
+            let t1 = vm.bx.heap.vec_value(keyframes, i * 2, NoTrap).as_f64().unwrap_or(1.0);
+            let v1 = vm.bx.heap.vec_value(keyframes, i * 2 + 1, NoTrap);
             
             if mix <= t1 {
                 // Interpolate between t0,v0 and t1,v1

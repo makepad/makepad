@@ -506,8 +506,9 @@ pub struct TextInput {
 
 impl ScriptHook for TextInput {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        let cx = vm.cx_mut();
-        self.check_text_is_empty(cx);
+        vm.with_cx_mut(|cx|{
+            self.check_text_is_empty(cx);
+        });
     }
 }
 

@@ -44,16 +44,16 @@ impl ScriptHook for DrawVars{
         if self.draw_shader_id.is_some() {
             if let Some(io_self) = value.as_object(){
                 let cx = vm.host.cx_mut();
-                self.fill_dyn_instances(cx, &vm.heap, io_self);
-                self.fill_dyn_uniforms(cx, &vm.heap, io_self);
+                self.fill_dyn_instances(cx, &vm.bx.heap, io_self);
+                self.fill_dyn_uniforms(cx, &vm.bx.heap, io_self);
             }
         }
         // Update areas for animated properties only
         if apply.is_animate() {
             if let Some(io_self) = value.as_object() {
                 let cx = vm.host.cx_mut();
-                self.update_instance_areas_when_in_object(cx, &vm.heap, io_self);
-                self.update_uniform_areas_when_in_object(cx, &vm.heap, io_self);
+                self.update_instance_areas_when_in_object(cx, &vm.bx.heap, io_self);
+                self.update_uniform_areas_when_in_object(cx, &vm.bx.heap, io_self);
             }
         }
     }

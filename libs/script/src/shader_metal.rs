@@ -36,7 +36,7 @@ impl ShaderOutput {
                 }
                 ShaderIoKind::UniformBuffer => {
                     write!(out, "    constant ").ok();
-                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                    self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                     writeln!(out, " *u_{};", io.name).ok();
                 }
                 _=>()
@@ -68,7 +68,7 @@ impl ShaderOutput {
         for io in &self.io {
             if let ShaderIoKind::ScopeUniform = io.kind {
                 write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                 writeln!(out, " {};", io.name).ok();
             }
         }
@@ -83,7 +83,7 @@ impl ShaderOutput {
         for io in &self.io {
             if let ShaderIoKind::DynInstance = io.kind {
                 write!(out, "    ").ok();
-                self.backend.pod_type_name_packed_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
                 writeln!(out, " {};", io.name).ok();
             }
         }
@@ -93,7 +93,7 @@ impl ShaderOutput {
         for io in &self.io {
             if let ShaderIoKind::RustInstance = io.kind {
                 write!(out, "    ").ok();
-                self.backend.pod_type_name_packed_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
                 writeln!(out, " {};", io.name).ok();
             }
         }
@@ -107,7 +107,7 @@ impl ShaderOutput {
             match &io.kind {
                 ShaderIoKind::Uniform => {
                     write!(out, "    ").ok();
-                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                    self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                     writeln!(out, " {};", io.name).ok();
                 }
                 _=>()
@@ -124,7 +124,7 @@ impl ShaderOutput {
             match io.kind {
                 ShaderIoKind::Varying => {
                     write!(out, "    ").ok();
-                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                    self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                     writeln!(out, " {};", io.name).ok();
                 }
                 _=>()
@@ -140,7 +140,7 @@ impl ShaderOutput {
         for io in &self.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
                 write!(out, "    ").ok();
-                self.backend.pod_type_name_packed_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
                 writeln!(out, " {};", io.name).ok();
             }
         }
@@ -168,7 +168,7 @@ impl ShaderOutput {
             if let ShaderIoKind::UniformBuffer = io.kind {
                 let buf_idx = io.buffer_index.expect("UniformBuffer must have buffer_index assigned");
                 write!(out, "    constant ").ok();
-                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                 writeln!(out, " *u_{} [[buffer({})]],", io.name, buf_idx).ok();
             }
         }
@@ -265,7 +265,7 @@ impl ShaderOutput {
                 let buf_idx = io.buffer_index.expect("UniformBuffer must have buffer_index assigned");
                 writeln!(out, ",").ok();
                 write!(out, "    constant ").ok();
-                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                 write!(out, " *u_{} [[buffer({})]]", io.name, buf_idx).ok();
             }
         }
@@ -355,7 +355,7 @@ impl ShaderOutput {
         for io in &self.io {
             if let ShaderIoKind::FragmentOutput(index) = io.kind {
                 write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                 writeln!(out, " fb{} [[color({})]];", index, index).ok();
             }
         }

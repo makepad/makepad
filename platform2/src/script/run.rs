@@ -64,7 +64,7 @@ impl Cx{
                     ChildOut::StdOut(s)=>{
                         if let Some(handler) = self.script_data.child_processes[i].events.on_stdout.as_object(){
                             self.with_vm_and_async(|vm|{
-                                let str = vm.heap.new_string_from_str(&s);
+                                let str = vm.bx.heap.new_string_from_str(&s);
                                 vm.call(handler.into(), &[str.into()]);
                             })
                         }
@@ -72,7 +72,7 @@ impl Cx{
                     ChildOut::StdErr(s)=>{
                         if let Some(handler) = self.script_data.child_processes[i].events.on_stderr.as_object(){
                             self.with_vm_and_async(|vm|{
-                                let str = vm.heap.new_string_from_str(&s);
+                                let str = vm.bx.heap.new_string_from_str(&s);
                                 vm.call(handler.into(), &[str.into()]);
                             })
                         }
@@ -111,7 +111,7 @@ pub fn script_mod(vm:&mut ScriptVm){
                 
         if !script_has_proto!(vm, cmd, run.ChildCmd) || 
             !script_has_proto!(vm, events, run.ChildEvents){
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid run arg type")
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid run arg type")
         }
         
         let cmd = ChildCmd::script_from_value(vm, cmd);
@@ -150,7 +150,7 @@ pub fn script_mod(vm:&mut ScriptVm){
             }
             Err(_e)=>{
                
-                script_err_io!(vm.thread.trap.pass(), "child process error")
+                script_err_io!(vm.thread().trap.pass(), "child process error")
             }
         }
     });
