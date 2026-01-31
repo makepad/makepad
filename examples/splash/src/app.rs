@@ -20,7 +20,7 @@ script_mod!{
         draw_text.color: #0f0
     }
     
-    let app = #(App::script_component(vm)){
+    mod.res.load_all() do #(App::script_component(vm)){
         ui: Window{
             pass.clear_color: vec4(0.3 0.3 0.3 1.0)
             window.inner_size: vec2(800 600)
@@ -133,8 +133,6 @@ script_mod!{
             }
         }
     }
-    mod.res.load_all()
-    app
 }
 
 impl App {

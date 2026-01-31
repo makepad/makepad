@@ -137,10 +137,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
     });
     
     // res.load_all() - loads all pending resources from disk
-    vm.add_method(res, id_lut!(load_all), script_args_def!(), move |vm, _args| {
+    vm.add_method(res, id_lut!(load_all), script_args_def!(value=NIL), move |vm, args| {
+        let value = script_value!(vm, args.value);
         let cx = vm.host.cx_mut();
         cx.script_data.resources.load_all();
-        NIL
+        value
     });
     
     // res.file("/absolute/path/to/file")
