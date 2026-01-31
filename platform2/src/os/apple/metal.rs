@@ -6,6 +6,7 @@ use {
         sel_impl,
     },
     crate::{
+        log,
         script::vm::*,
         makepad_objc_sys::objc_block,
         makepad_script::*,
@@ -704,7 +705,12 @@ impl Cx {
     } 
     
     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
+        let compile_count = self.draw_shaders.compile_set.len();
+        if compile_count > 0 {
+            log!("mtl_compile_shaders: {} shaders to compile", compile_count);
+        }
         for draw_shader_id in self.draw_shaders.compile_set.iter().cloned().collect::<Vec<_>>() {
+            let start = std::time::Instant::now();
             let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
             
             let mtlsl = match &cx_shader.mapping.code {
@@ -857,16 +863,22 @@ impl DrawVars{
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                    // log!("Shader cache HIT (object_id)");
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
             }
             
             // Cache 2: Compute function hash and check if we've seen these functions before
+            let t0 = std::time::Instant::now();
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            let hash_time = t0.elapsed();
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
+                    if hash_time.as_micros() > 100 {
+                        log!("Shader cache HIT (fnhash) - hash took {:?}", hash_time);
+                    }
                     // Add to object_id cache for faster lookup next time
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders.cache_object_id_to_shader.insert(io_self, shader_id);

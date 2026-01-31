@@ -29,11 +29,6 @@ script_mod!{
         draw_bg.radius: 5.0
         flow: Right align: Align{y: 0.5} spacing: 10
         
-        $icon: Icon{
-            draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
-            draw_icon.color: #8cf
-            icon_walk: Walk{width: 24 height: 24}
-        }
         View{
             width: Fill height: Fit flow: Down spacing: 4
             $title: Label{text: "Item Title" draw_text.color: #fff draw_text.text_style.font_size: 11}
