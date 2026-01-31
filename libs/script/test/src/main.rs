@@ -63,7 +63,7 @@ pub fn main(){
         }
     }
         
-    let _code = script!{
+    let code = script!{
         use mod.std.*
         use mod.shader
         use mod.pod.*
@@ -120,6 +120,10 @@ pub fn main(){
                 let q = theme.TEST_COL
                 let o = test_tex.sample(vec2(2.0))
                 let s = 1.0
+                let k = match s{
+                    1=>1
+                    2=>2
+                }
                 return s
             }
             vertex: fn(){
@@ -146,7 +150,7 @@ pub fn main(){
         
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
