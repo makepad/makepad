@@ -130,7 +130,7 @@ script_mod!{
         }
     }
     
-    // Top right panel with dropdown, custom draw, spinner
+    // Top right panel with dropdown, custom draw, spinner, and Markdown
     let TopPanel = RoundedView{
         draw_bg.color: #353 width: Fill height: Fill
         ScrollYView{
@@ -141,6 +141,12 @@ script_mod!{
             $view: RoundedView{width: 250 height: 100 draw_bg.color: #494}
             $spinner: LoadingSpinner{width: 50 height: 50}
             $label: Label{text: "Hello from Label!" draw_text.color: #ff0}
+            
+            // Markdown widget test
+            $markdown: Markdown{
+                width: Fill height: Fit
+                body: "# Markdown Test\n\nThis is a **bold** and *italic* text.\n\n## Features\n\n- List item 1\n- List item 2\n- List item 3\n\n> This is a blockquote\n\nSome `inline code` here.\n\n```\nCode block example\n```"
+            }
         }
     }
     

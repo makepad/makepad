@@ -6,7 +6,6 @@ use {
         sel_impl,
     },
     crate::{
-        log,
         script::vm::*,
         makepad_objc_sys::objc_block,
         makepad_script::*,

@@ -3,231 +3,178 @@ use crate::{
     makepad_draw::*,
     widget::*,
 }; 
+
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
     
-live_design!{
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
-    use crate::button::Button;
+    mod.widgets.DrawFlowBlock = #(DrawFlowBlock::script_api(vm))
+    mod.widgets.FlowBlockType = #(FlowBlockType::script_api(vm))
     
-    pub DrawFlowBlock = {{DrawFlowBlock}} {}
-    pub TextFlowBase = {{TextFlow}} {
-        // ok so we can use one drawtext
-        // change to italic, change bold (SDF), strikethrough
-        font_size: 8,
-        // font_color: (THEME_COLOR_TEXT),
-        flow: Right { wrap: true },
+    mod.widgets.TextFlowBase = #(TextFlow::register_widget(vm)){
+        font_size: 8
+        flow: Flow.right_wrap()
     }
     
-    pub TextFlowLinkBase = {{TextFlowLink}} {
-        link = {
-            draw_text = {
-                // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
-                color: #1a0dab
-            }
-        }
+    mod.widgets.TextFlowLinkBase = #(TextFlowLink::register_widget(vm)){
+        link: TextFlowLink{}
     }
     
-    pub TextFlowLink = <TextFlowLinkBase> {
-        color: #xa,
-        color_hover: #xf,
-        color_down: #x3,
-                
-        margin:{right:5}
-                
-        animator: {
-            hover = {
-                default: off,
-                off = {
-                    redraw: true,
+    mod.widgets.TextFlowLink = mod.widgets.TextFlowLinkBase{
+        color: #xa
+        color_hover: #xf
+        color_down: #x3
+        margin: Inset{right: 5}
+        
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    redraw: true
                     from: {all: Forward {duration: 0.01}}
                     apply: {
-                        hovered: 0.0,
-                        down: 0.0,
+                        hovered: 0.0
+                        down: 0.0
                     }
                 }
                 
-                on = {
-                    redraw: true,
+                on: AnimatorState{
+                    redraw: true
                     from: {
                         all: Forward {duration: 0.1}
                         down: Forward {duration: 0.01}
                     }
                     apply: {
-                        hovered: [{time: 0.0, value: 1.0}],
-                        down: [{time: 0.0, value: 1.0}],
+                        hovered: snap(1.0)
+                        down: snap(1.0)
                     }
                 }
                                 
-                down = {
-                    redraw: true,
+                down: AnimatorState{
+                    redraw: true
                     from: {all: Forward {duration: 0.01}}
                     apply: {
-                        hovered: [{time: 0.0, value: 1.0}],
-                        down: [{time: 0.0, value: 1.0}],
+                        hovered: snap(1.0)
+                        down: snap(1.0)
                     }
                 }
             }
         }
     }
         
-    pub TextFlow = <TextFlowBase> {
-        width: Fill, height: Fit,
-        flow: Right { wrap: true },
-        width:Fill,
-        height:Fit,
+    mod.widgets.TextFlow = mod.std.set_type_default() do mod.widgets.TextFlowBase{
+        width: Fill height: Fit
+        flow: Flow.right_wrap()
         padding: 0
                 
-        font_size: (THEME_FONT_SIZE_P),
-        font_color: (THEME_COLOR_TEXT),
+        font_size: theme.font_size_p
+        font_color: theme.color_text
                 
-        draw_normal: {
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
+        draw_normal +: {
+            text_style: theme.font_regular{
+                font_size: theme.font_size_p
             }
-            color: (THEME_COLOR_TEXT)
+            color: theme.color_text
         }
                 
-        draw_italic: {
-            text_style: <THEME_FONT_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
+        draw_italic +: {
+            text_style: theme.font_italic{
+                font_size: theme.font_size_p
             }
-            color: (THEME_COLOR_TEXT)
+            color: theme.color_text
         }
                 
-        draw_bold: {
-            text_style: <THEME_FONT_BOLD> {
-                font_size: (THEME_FONT_SIZE_P)
+        draw_bold +: {
+            text_style: theme.font_bold{
+                font_size: theme.font_size_p
             }
-            color: (THEME_COLOR_TEXT)
+            color: theme.color_text
         }
                 
-        draw_bold_italic: {
-            text_style: <THEME_FONT_BOLD_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
+        draw_bold_italic +: {
+            text_style: theme.font_bold_italic{
+                font_size: theme.font_size_p
             }
-            color: (THEME_COLOR_TEXT)
+            color: theme.color_text
         }
                 
-        draw_fixed: {
-            text_style: <THEME_FONT_CODE> {
-                font_size: (THEME_FONT_SIZE_P)
+        draw_fixed +: {
+            text_style: theme.font_code{
+                font_size: theme.font_size_p
             }
-            color: (THEME_COLOR_TEXT)
+            color: theme.color_text
         }
                 
-        code_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        code_layout: Layout{
+            flow: Flow.right_wrap()
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
-        code_walk: { width: Fill, height: Fit }
+        code_walk: Walk{width: Fill, height: Fit}
                 
-        quote_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        quote_layout: Layout{
+            flow: Flow.right_wrap()
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
-        quote_walk: { width: Fill, height: Fit, }
+        quote_walk: Walk{width: Fill, height: Fit}
                 
-        list_item_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_1> {}
+        list_item_layout: Layout{
+            flow: Flow.right_wrap()
+            padding: theme.mspace_1
         }
-        list_item_walk: {
-            height: Fit, width: Fill,
-        }
-                
-        inline_code_padding: <THEME_MSPACE_1> {},
-        inline_code_margin: <THEME_MSPACE_1> {},
-                
-        sep_walk: {
-            width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_1> {}
+        list_item_walk: Walk{
+            height: Fit width: Fill
         }
                 
-        link = <TextFlowLink> {}
+        inline_code_padding: theme.mspace_1
+        inline_code_margin: theme.mspace_1
                 
-        draw_block:{
-            line_color: (THEME_COLOR_TEXT)
-            sep_color: (THEME_COLOR_SHADOW)
-            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_TEXT)
-            code_color: (THEME_COLOR_BG_HIGHLIGHT)
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+        sep_walk: Walk{
+            width: Fill height: 4.
+            margin: theme.mspace_v_1
+        }
+                
+        link: mod.widgets.TextFlowLink{}
+                
+        draw_block +: {
+            line_color: theme.color_text
+            sep_color: theme.color_shadow
+            quote_bg_color: theme.color_bg_highlight
+            quote_fg_color: theme.color_text
+            code_color: theme.color_bg_highlight
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 match self.block_type {
-                    FlowBlockType::Quote => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
+                    FlowBlockType.Quote => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
                         sdf.fill(self.quote_bg_color)
-                        sdf.box(
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            self.rect_size.y - THEME_SPACE_2,
-                            1.5
-                        );
-                        sdf.fill(self.quote_fg_color);
-                        return sdf.result;
+                        sdf.box(theme.space_1 theme.space_1 theme.space_1 (self.rect_size.y - theme.space_2) 1.5)
+                        sdf.fill(self.quote_fg_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Sep => {
-                        sdf.box(
-                            0.,
-                            1.,
-                            self.rect_size.x-1,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.sep_color);
-                        return sdf.result;
+                    FlowBlockType.Sep => {
+                        sdf.box(0. 1. (self.rect_size.x - 1.) (self.rect_size.y - 2.) 2.)
+                        sdf.fill(self.sep_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Code => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
+                    FlowBlockType.Code => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
-                    FlowBlockType::InlineCode => {
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
+                    FlowBlockType.InlineCode => {
+                        sdf.box(1. 1. (self.rect_size.x - 2.) (self.rect_size.y - 2.) 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Underline => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y-2,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
+                    FlowBlockType.Underline => {
+                        sdf.box(0. (self.rect_size.y - 2.) self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Strikethrough => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y * 0.45,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
+                    FlowBlockType.Strikethrough => {
+                        sdf.box(0. (self.rect_size.y * 0.45) self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
                     }
                 }
                 return #f00
@@ -236,8 +183,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_ignore]
+#[derive(Script, ScriptHook)]
 #[repr(u32)]
 pub enum FlowBlockType {
     #[pick] Quote = shader_enum(1),
@@ -248,7 +194,7 @@ pub enum FlowBlockType {
     Strikethrough = shader_enum(6)
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawFlowBlock {
     #[deref] draw_super: DrawQuad,
@@ -280,7 +226,7 @@ impl StackCounter{
 }
       
 // this widget has a retained and an immediate mode api
-#[derive(Live, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct TextFlow {
     #[live] pub draw_normal: DrawText,
     #[live] pub draw_italic: DrawText,
@@ -298,8 +244,6 @@ pub struct TextFlow {
     #[rust] area_stack: SmallVec<[Area;4]>,
     #[rust] pub font_sizes: SmallVec<[f32;8]>,
     #[rust] pub font_colors: SmallVec<[Vec4f;8]>,
-   // #[rust] pub font: SmallVec<[Font;2]>,
-    //#[rust] pub top_drop: SmallVec<[f64;4]>,
     #[rust] pub combine_spaces: SmallVec<[bool;4]>,
     #[rust] pub ignore_newlines: SmallVec<[bool;4]>,
     #[rust] pub bold: StackCounter,
@@ -324,43 +268,43 @@ pub struct TextFlow {
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
     #[live] pub inline_code_padding: Inset,
-    #[live] pub inline_code_margin: Inset,
-    #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub heading_margin: Inset,
-    #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub paragraph_margin: Inset,
-        
-    
+    #[live] pub inline_code_margin: Margin,
+    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub heading_margin: Margin,
+    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub paragraph_margin: Margin,
     
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust(Some(Default::default()))] items: Option<ComponentMap<LiveId,(WidgetRef, LiveId)>>,
-    #[rust] templates: ComponentMap<LiveId, LivePtr>,
+    #[rust] templates: ComponentMap<LiveId, ScriptObjectRef>,
 }
 
-impl LiveHook for TextFlow{
-    // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        let id = nodes[index].id;
-        match apply.from {
-            ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id,..} => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
-                    let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                    self.templates.insert(id, live_ptr);
-                    // lets apply this thing over all our childnodes with that template
-                    for (node, templ_id) in self.items.as_mut().unwrap().values_mut() {
-                        if *templ_id == id {
-                            node.apply(cx, apply, index, nodes);
+impl TextFlow {
+    fn apply_template(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, id: LiveId, obj: ScriptObjectRef) {
+        self.templates.insert(id, obj);
+        // Apply to existing items with matching template
+        for (node, templ_id) in self.items.as_mut().unwrap().values_mut() {
+            if *templ_id == id {
+                node.script_apply(vm, apply, scope, obj.into());
+            }
+        }
+    }
+}
+
+impl ScriptHook for TextFlow {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        if let Some(obj) = value.as_object() {
+            vm.vec_with(obj, |vm, vec| {
+                for kv in vec {
+                    if let Some(id) = kv.key.as_id() {
+                        if let Some(child_obj) = kv.value.as_object() {
+                            self.apply_template(vm, apply, scope, id, child_obj);
                         }
                     }
                 }
-                else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                }
-            }
-            _ => ()
+            });
         }
-        nodes.skip_node(index)
     }
-} 
+}
 
 #[derive(Default)]
 pub struct RectAreasTracker{
@@ -404,7 +348,6 @@ enum DrawState {
 
 impl Widget for TextFlow {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
-        //self.draw_text.draw_walk(cx, walk.with_add_padding(self.padding), self.align, self.text.as_ref());
         if self.draw_state.begin(cx, DrawState::Begin) {
             self.begin(cx, walk);
             return DrawStep::make_step()
@@ -415,19 +358,9 @@ impl Widget for TextFlow {
         }
         DrawStep::done()
     }
-    /*
-    fn text(&self)->String{
-        "".into()
-        //self.text.as_ref().to_string()
-    }
-    
-    fn set_text(&mut self, _v:&str){
-        //self.text.as_mut_empty().push_str(v);
-    }*/
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for (id,(entry,_)) in self.items.as_mut().unwrap().iter_mut(){
-            
             scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });
@@ -437,9 +370,6 @@ impl Widget for TextFlow {
 
 impl TextFlow{
     pub fn begin(&mut self, cx: &mut Cx2d, walk:Walk){
-        // lets begin a turtle 
-        // well know if we have a known width to wrap
-        // if we dont we just dont wrap
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
         self.draw_block.append_to_draw_call(cx);
@@ -455,11 +385,9 @@ impl TextFlow{
         self.underline.clear();
         self.strikethrough.clear();
         self.inline_code.clear();
-        //self.font.clear();
         self.font_sizes.clear();
         self.font_colors.clear();
         self.area_stack.clear();
-        //self.top_drop.clear();
         self.combine_spaces.clear();
         self.ignore_newlines.clear();
         self.first_thing_on_a_line = true;
@@ -479,13 +407,11 @@ impl TextFlow{
     }
 
     pub fn end(&mut self, cx: &mut Cx2d){
-        // lets end the turtle with how far we walked
         cx.end_turtle_with_area(&mut self.area);
         self.items.as_mut().unwrap().retain_visible();
     } 
 
     pub fn begin_code(&mut self, cx:&mut Cx2d){
-        // alright we are going to push a block with a layout and a walk
         self.draw_block.block_type = FlowBlockType::Code;
         self.draw_block.begin(cx, self.code_walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
@@ -493,19 +419,16 @@ impl TextFlow{
     }
     
     pub fn end_code(&mut self, cx:&mut Cx2d){
-        // check if we need to use a widget
         self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
         self.draw_block.end(cx);
     }
     
     pub fn begin_list_item(&mut self, cx:&mut Cx2d, dot:&str, pad:f64){
-        // alright we are going to push a block with a layout and a walk
         let fs = self.font_sizes.last().unwrap_or(&self.font_size);
         self.draw_normal.text_style.font_size = *fs as _;
         let fc = self.font_colors.last().unwrap_or(&self.font_color);
         self.draw_normal.color = *fc;
 
-        // Use the provided padding to reserve space for the marker
         let font_based_padding = self.draw_normal.text_style.font_size as f64 * pad;
 
         cx.begin_turtle(self.list_item_walk, Layout{
@@ -516,14 +439,10 @@ impl TextFlow{
             ..self.list_item_layout
         });
 
-        // Move turtle back to draw the marker
         cx.turtle_mut().move_right_down(dvec2(-font_based_padding, 0.0));
 
-        // Draw the marker and space using the turtle system
         self.draw_text(cx, dot);
         self.draw_text(cx, " ");
-
-        // The turtle is now positioned after the marker+space, content will flow naturally
         
         self.area_stack.push(self.draw_block.draw_vars.area);
     }
@@ -534,13 +453,11 @@ impl TextFlow{
     }
     
     pub fn new_line_collapsed(&mut self, cx:&mut Cx2d){
-        // if all we emitted is a single whitespace
         cx.turtle_new_line();
         self.first_thing_on_a_line = true;
     }
     
     pub fn new_line_collapsed_with_spacing(&mut self, cx:&mut Cx2d, spacing: f64){
-        // if all we emitted is a single whitespace
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
     }
@@ -551,7 +468,6 @@ impl TextFlow{
     }
     
     pub fn begin_quote(&mut self, cx:&mut Cx2d){
-        // alright we are going to push a block with a layout and a walk
         self.draw_block.block_type = FlowBlockType::Quote;
         self.draw_block.begin(cx, self.quote_walk, self.quote_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
@@ -561,17 +477,6 @@ impl TextFlow{
         self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
         self.draw_block.end(cx);
     }
-    /*
-    pub fn counted_item(&mut self, cx: &mut Cx, template: LiveId) -> Option<WidgetRef> {
-        self.item_counter += 1;
-        if let Some(ptr) = self.templates.get(&template) {
-            let entry = self.items.as_mut().unwrap().get_or_insert(cx, (LiveId(self.item_counter), template), | cx | {
-                WidgetRef::new_from_ptr(cx, Some(*ptr))
-            });
-            return Some(entry.clone())
-        }
-        None 
-    }*/
     
     pub fn draw_item_counted(&mut self, cx: &mut Cx2d, template: LiveId,)->LiveId{
         let entry_id = self.new_counted_id();
@@ -611,8 +516,9 @@ impl TextFlow{
     where F:FnOnce(&mut Cx2d, &WidgetRef, &mut TextFlow)->R{
         let mut items = self.items.take().unwrap();
         let r = if let Some(ptr) = self.templates.get(&template) {
+            let ptr = *ptr;
             let entry = items.get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
+                (WidgetRef::script_from_value(cx, ptr.into()), template)
             });
             f(cx, &entry.0, self)
         }else{
@@ -625,8 +531,9 @@ impl TextFlow{
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> WidgetRef {
         if let Some(ptr) = self.templates.get(&template) {
+            let ptr = *ptr;
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
+                (WidgetRef::script_from_value(cx, ptr.into()), template)
             });
             return entry.0.clone()
         }
@@ -637,8 +544,9 @@ impl TextFlow{
     pub fn item_counted(&mut self, cx: &mut Cx, template: LiveId) -> WidgetRef {
         let entry_id = self.new_counted_id();
         if let Some(ptr) = self.templates.get(&template) {
+            let ptr = *ptr;
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
+                (WidgetRef::script_from_value(cx, ptr.into()), template)
             });
             return entry.0.clone()
         }
@@ -661,8 +569,9 @@ impl TextFlow{
 
     pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
+            let ptr = *ptr;
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::new_from_ptr_with_scope(cx, Some(*ptr), scope), template)
+                (WidgetRef::script_from_value_scoped(cx, scope, ptr.into()), template)
             });
             return Some(entry.0.clone())
         }
@@ -701,13 +610,8 @@ impl TextFlow{
             };
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
-            //dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
             dt.text_style.font_size = *font_size as _;
             dt.color = *font_color;
-            //dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
-            //dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
-            //if let Some(font) = self.font
-            // the turtle is at pos X so we walk it.
            
             let areas_tracker = &mut self.areas_tracker;
             if self.inline_code.value() > 0{
@@ -780,20 +684,16 @@ pub enum TextFlowLinkAction {
     None,
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 struct TextFlowLink {
     #[animator] animator: Animator,
     
-    // TODO: this is unusued; just here to invalidly satisfy the area provider.
-    //       I'm not sure how to implement `fn area()` given that it has multiple area rects.
     #[redraw] #[area] area: Area,
     
-    // TODO: remove these if they're unneeded
-    //#[walk] walk: Walk,
     #[live(true)] click_on_down: bool,
     #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
-    #[live] margin: Inset,
+    #[live] margin: Margin,
     #[live] hovered: f32,
     #[live] down: f32,
     
@@ -808,8 +708,6 @@ struct TextFlowLink {
         
     #[action_data] #[rust] action_data: WidgetActionData,
 }
-
-impl LiveHook for TextFlowLink {}
 
 impl Widget for TextFlowLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -933,23 +831,3 @@ impl Widget for TextFlowLink {
         self.redraw(cx);
     }    
 }
-/*
-#[derive(Clone)]
-pub struct HtmlId(pub HtmlString);
-impl HtmlId{
-    pub fn new(rc:&Rc<String>, start:usize, end:usize)->Self{
-        Self(HtmlString(rc.clone(), start, end))
-    }
-    pub fn as_id(&self)->LiveId{
-        LiveId::from_str(&self.0.0[self.0.1..self.0.2])
-    }
-}
-
-impl fmt::Debug for HtmlId{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0.as_str())
-    }
-}
-*/
-
-// HTML Dom tree-flat vector
