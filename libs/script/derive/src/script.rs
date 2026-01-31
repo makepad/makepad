@@ -20,15 +20,61 @@ pub fn script_mod_impl(input: TokenStream) -> TokenStream {
     tb.add("}");
     tb.end()
 }
+
+pub fn script_apply_eval_impl(input: TokenStream) -> TokenStream {
+    let mut parser = TokenParser::new(input);
+    let mut tb = TokenBuilder::new();
+    
+    // Parse: cx, target, { script code }
+    // First get the cx expression
+    let cx_expr = parser.eat_any_ident().expect("Expected cx identifier");
+    parser.eat_punct_alone(',');
+    
+    // Get the target expression (could be self.draw_bg or similar)
+    let mut target_tb = TokenBuilder::new();
+    while !parser.eat_punct_alone(',') {
+        if let Some(tt) = parser.current.clone() {
+            target_tb.extend(tt);
+            parser.advance();
+        } else {
+            break;
+        }
+    }
+    let target_stream = target_tb.end();
+    
+    // The rest is the script code (already includes braces from eat_level)
+    let script_code: TokenStream = parser.eat_level();
+    
+    // Generate the script_impl output (the ScriptMod struct)
+    // Use script_impl_expr to NOT add semicolon - we want to return the expression value
+    let script_mod = script_impl_expr(script_code);
+    
+    // Build: cx.with_vm(|vm| { let script = ScriptMod{...}; target.script_apply_eval(vm, script) })
+    tb.ident(&cx_expr).add(".with_vm(|vm|{");
+    tb.add("let script =").stream(Some(script_mod)).add(";");
+    tb.stream(Some(target_stream));
+    tb.add(".script_apply_eval(vm, script)");
+    tb.add("})");
+    
+    tb.end()
+}
     
 
 pub fn script_impl(input: TokenStream) -> TokenStream {
+    script_impl_inner(input, true)
+}
+
+pub fn script_impl_expr(input: TokenStream) -> TokenStream {
+    script_impl_inner(input, false)
+}
+
+fn script_impl_inner(input: TokenStream, add_semicolon: bool) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     
     
     if let Some(span) = parser.span() {
-        let (s, values) = token_parser_to_whitespace_matching_string(&mut parser, span);
+        let (s, values) = token_parser_to_whitespace_matching_string(&mut parser, span, add_semicolon);
         
         tb.add("ScriptMod {");
         tb.add("    cargo_manifest_path: env!(").string("CARGO_MANIFEST_DIR").add(").trim_start_matches(").string("\\\\?\\").add(").to_string(),");
@@ -53,13 +99,15 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
 }
  
 // sself function parses tokens into a source-equal whitespaced output string
-fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Span) -> (String, Vec<TokenStream>) {
+fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Span, add_semicolon: bool) -> (String, Vec<TokenStream>) {
         
     let mut s = String::new();
     let mut values = Vec::new();
         
     tp_to_str(parser, span, &mut s, &mut values, &mut None);
-    s.push(';');
+    if add_semicolon {
+        s.push(';');
+    }
     return (s, values);
         
     #[derive(Clone, Copy)]

@@ -30,143 +30,149 @@ script_mod!{
                     align: SplitterAlign.Weighted(0.3)
                     a: RoundedView{
                         draw_bg.color: #335
-                        flow: Down
-                        padding: 10
-                        spacing: 10
-                        Label{
-                            text: "Left Panel"
-                            draw_text.color: #fff
-                        }
-                        $checkbox: CheckBox{
-                            text: "Enable feature"
-                        }
-                        $toggle: Toggle{
-                            text: "Dark mode"
-                        }
-                        $radio1: RadioButton{
-                            text: "Option A"
-                        }
-                        $radio2: RadioButton{
-                            text: "Option B"
-                        }
-                        $radio3: RadioButton{
-                            text: "Option C"
-                        }
-                        $link: LinkLabel{
-                            text: "Visit Makepad"
-                            url: "https://makepad.dev"
-                        }
-                        
-                        // TextInput test
-                        Label{
-                            text: "Username:"
-                            draw_text.color: #aaa
-                        }
-                        $username: TextInput{
+                        width: Fill
+                        height: Fill
+                        ScrollYView{
                             width: Fill
-                            height: Fit
-                            empty_message: "Enter your username"
-                        }
-                        Label{
-                            text: "Password:"
-                            draw_text.color: #aaa
-                        }
-                        $password: TextInput{
-                            width: Fill
-                            height: Fit
-                            empty_message: "Enter your password"
-                            is_password: true
-                        }
-                        
-                        // First FoldHeader - Settings
-                        FoldHeader{
-                            header: View{
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                align: Align{y: 0.5}
-                                padding: Inset{top: 5, bottom: 5}
-                                spacing: 8
-                                FoldButton{}
-                                Label{
-                                    text: "Settings"
-                                    draw_text.color: #fff
-                                    draw_text.text_style.font_size: 11
-                                }
+                            height: Fill
+                            flow: Down
+                            padding: 10
+                            spacing: 10
+                            Label{
+                                text: "Left Panel"
+                                draw_text.color: #fff
                             }
-                            body: View{
-                                width: Fill
-                                height: Fit
-                                flow: Down
-                                padding: Inset{left: 23, top: 5, bottom: 10}
-                                spacing: 8
-                                CheckBox{text: "Enable notifications"}
-                                CheckBox{text: "Auto-save"}
-                                CheckBox{text: "Dark theme"}
-                                Toggle{text: "Sounds"}
+                            $checkbox: CheckBox{
+                                text: "Enable feature"
                             }
-                        }
-                        
-                        // Second FoldHeader - Files
-                        FoldHeader{
-                            header: View{
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                align: Align{y: 0.5}
-                                padding: Inset{top: 5, bottom: 5}
-                                spacing: 8
-                                FoldButton{}
-                                Label{
-                                    text: "Recent Files"
-                                    draw_text.color: #fff
-                                    draw_text.text_style.font_size: 11
-                                }
+                            $toggle: Toggle{
+                                text: "Dark mode"
                             }
-                            body: View{
-                                width: Fill
-                                height: Fit
-                                flow: Down
-                                padding: Inset{left: 23, top: 5, bottom: 10}
-                                spacing: 5
-                                Label{text: "document.txt", draw_text.color: #8af}
-                                Label{text: "project.rs", draw_text.color: #8af}
-                                Label{text: "config.toml", draw_text.color: #8af}
-                                Label{text: "readme.md", draw_text.color: #8af}
-                                Label{text: "main.rs", draw_text.color: #8af}
+                            $radio1: RadioButton{
+                                text: "Option A"
                             }
-                        }
-                        
-                        // Third FoldHeader - Nested example
-                        FoldHeader{
-                            header: View{
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                align: Align{y: 0.5}
-                                padding: Inset{top: 5, bottom: 5}
-                                spacing: 8
-                                FoldButton{}
-                                Label{
-                                    text: "More Options"
-                                    draw_text.color: #fff
-                                    draw_text.text_style.font_size: 11
-                                }
+                            $radio2: RadioButton{
+                                text: "Option B"
                             }
-                            body: View{
+                            $radio3: RadioButton{
+                                text: "Option C"
+                            }
+                            $link: LinkLabel{
+                                text: "Visit Makepad"
+                                url: "https://makepad.dev"
+                            }
+                            
+                            // TextInput test
+                            Label{
+                                text: "Username:"
+                                draw_text.color: #aaa
+                            }
+                            $username: TextInput{
                                 width: Fill
                                 height: Fit
-                                flow: Down
-                                padding: Inset{left: 23, top: 5, bottom: 10}
-                                spacing: 8
-                                Button{text: "Import..."}
-                                Button{text: "Export..."}
-                                Slider{
+                                empty_text: "Enter your username"
+                            }
+                            Label{
+                                text: "Password:"
+                                draw_text.color: #aaa
+                            }
+                            $password: TextInput{
+                                width: Fill
+                                height: Fit
+                                empty_text: "Enter your password"
+                                is_password: true
+                            }
+                            
+                            // First FoldHeader - Settings
+                            FoldHeader{
+                                header: View{
                                     width: Fill
-                                    text: "Opacity"
-                                    min: 0.0
-                                    max: 100.0
-                                    default: 75.0
+                                    height: Fit
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    padding: Inset{top: 5, bottom: 5}
+                                    spacing: 8
+                                    FoldButton{}
+                                    Label{
+                                        text: "Settings"
+                                        draw_text.color: #fff
+                                        draw_text.text_style.font_size: 11
+                                    }
+                                }
+                                body: View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Down
+                                    padding: Inset{left: 23, top: 5, bottom: 10}
+                                    spacing: 8
+                                    CheckBox{text: "Enable notifications"}
+                                    CheckBox{text: "Auto-save"}
+                                    CheckBox{text: "Dark theme"}
+                                    Toggle{text: "Sounds"}
+                                }
+                            }
+                            
+                            // Second FoldHeader - Files
+                            FoldHeader{
+                                header: View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    padding: Inset{top: 5, bottom: 5}
+                                    spacing: 8
+                                    FoldButton{}
+                                    Label{
+                                        text: "Recent Files"
+                                        draw_text.color: #fff
+                                        draw_text.text_style.font_size: 11
+                                    }
+                                }
+                                body: View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Down
+                                    padding: Inset{left: 23, top: 5, bottom: 10}
+                                    spacing: 5
+                                    Label{text: "document.txt", draw_text.color: #8af}
+                                    Label{text: "project.rs", draw_text.color: #8af}
+                                    Label{text: "config.toml", draw_text.color: #8af}
+                                    Label{text: "readme.md", draw_text.color: #8af}
+                                    Label{text: "main.rs", draw_text.color: #8af}
+                                }
+                            }
+                            
+                            // Third FoldHeader - Nested example
+                            FoldHeader{
+                                header: View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    padding: Inset{top: 5, bottom: 5}
+                                    spacing: 8
+                                    FoldButton{}
+                                    Label{
+                                        text: "More Options"
+                                        draw_text.color: #fff
+                                        draw_text.text_style.font_size: 11
+                                    }
+                                }
+                                body: View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Down
+                                    padding: Inset{left: 23, top: 5, bottom: 10}
+                                    spacing: 8
+                                    Button{text: "Import..."}
+                                    Button{text: "Export..."}
+                                    Slider{
+                                        width: Fill
+                                        text: "Opacity"
+                                        min: 0.0
+                                        max: 100.0
+                                        default: 75.0
+                                    }
                                 }
                             }
                         }
@@ -176,74 +182,86 @@ script_mod!{
                         align: SplitterAlign.Weighted(0.6)
                         a: RoundedView{
                             draw_bg.color: #353
-                            flow: Down
-                            padding: 10
-                            spacing: 10
-                            Label{
-                                text: "Top Panel"
-                                draw_text.color: #fff
-                            }
-                            $dropdown: DropDown{
-                                labels: ["Option A", "Option B", "Option C", "Option D"]
-                            }
-                            $test: TestDraw{}
-                            $view: RoundedView{
-                                width: 250 
-                                height: 100
-                                draw_bg.color: #494
-                            }
-                            $spinner: LoadingSpinner{
-                                width: 50
-                                height: 50
-                            }
-                            $label: Label{
-                                text: "Hello from Label!"
-                                draw_text.color: #ff0
+                            width: Fill
+                            height: Fill
+                            ScrollYView{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                padding: 10
+                                spacing: 10
+                                Label{
+                                    text: "Top Panel"
+                                    draw_text.color: #fff
+                                }
+                                $dropdown: DropDown{
+                                    labels: ["Option A", "Option B", "Option C", "Option D"]
+                                }
+                                $test: TestDraw{}
+                                $view: RoundedView{
+                                    width: 250 
+                                    height: 100
+                                    draw_bg.color: #494
+                                }
+                                $spinner: LoadingSpinner{
+                                    width: 50
+                                    height: 50
+                                }
+                                $label: Label{
+                                    text: "Hello from Label!"
+                                    draw_text.color: #ff0
+                                }
                             }
                         }
                         b: RoundedView{
                             draw_bg.color: #533
-                            flow: Down
-                            padding: 10
-                            spacing: 10
-                            Label{
-                                text: "Bottom Panel"
-                                draw_text.color: #fff
-                            }
-                            $heading: H1{
-                                text: "This is a Heading"
-                            }
-                            $button: Button{
-                                text: "Click Me!"
-                            }
-                            $flat_button: ButtonFlat{
-                                text: "Flat Button"
-                            }
-                            $flatter_button: ButtonFlatter{
-                                text: "Flatter Button"
-                            }
-                            $slider: Slider{
-                                width: 200
-                                text: "Volume"
-                                min: 0.0
-                                max: 100.0
-                                default: 50.0
-                            }
-                            $icon_button: Button{
-                                text: "Icon Button"
-                                icon_walk: Walk{width: 20, height: 20}
-                                draw_icon.color: #fff
-                                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
-                            }
-                            $test_image: Image{
-                                width: 200
-                                height: 150
-                                fit: ImageFit.Stretch
-                            }
-                            $test_icon: Icon{
-                                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
-                                draw_icon.color: #0ff
-                                icon_walk: Walk{width: 50, height: 50}
+                            width: Fill
+                            height: Fill
+                            ScrollYView{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                padding: 10
+                                spacing: 10
+                                Label{
+                                    text: "Bottom Panel"
+                                    draw_text.color: #fff
+                                }
+                                $heading: H1{
+                                    text: "This is a Heading"
+                                }
+                                $button: Button{
+                                    text: "Click Me!"
+                                }
+                                $flat_button: ButtonFlat{
+                                    text: "Flat Button"
+                                }
+                                $flatter_button: ButtonFlatter{
+                                    text: "Flatter Button"
+                                }
+                                $slider: Slider{
+                                    width: 200
+                                    text: "Volume"
+                                    min: 0.0
+                                    max: 100.0
+                                    default: 50.0
+                                }
+                                $icon_button: Button{
+                                    text: "Icon Button"
+                                    icon_walk: Walk{width: 20, height: 20}
+                                    draw_icon.color: #fff
+                                    draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                                }
+                                $test_image: Image{
+                                    width: 200
+                                    height: 150
+                                    fit: ImageFit.Stretch
+                                }
+                                $test_icon: Icon{
+                                    draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                                    draw_icon.color: #0ff
+                                    icon_walk: Walk{width: 50, height: 50}
+                                }
                             }
                         }
                     }
