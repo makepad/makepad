@@ -917,6 +917,11 @@ impl Event {
                     return Hit::TextInput(ti.clone())
                 }
             },
+            Event::TextRangeReplace(tr) => {
+                if cx.keyboard.has_key_focus(area) {
+                    return Hit::TextRangeReplace(tr.clone())
+                }
+            },
             Event::TextCopy(tc) => {
                 if cx.keyboard.has_key_focus(area) {
                     return Hit::TextCopy(tc.clone());

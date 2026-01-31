@@ -248,6 +248,9 @@ impl Cx {
             IosEvent::TextInput(e) => {
                 self.call_event_handler(&Event::TextInput(e))
             }
+            IosEvent::TextRangeReplace(e) => {
+                self.call_event_handler(&Event::TextRangeReplace(e))
+            }
 
             IosEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());

@@ -624,7 +624,7 @@ impl ScriptObjectData{
             script_err_unexpected!(vm.thread.trap, "extend called on non-object value")
         });
                     
-        native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(import), &[], |vm, args|{
+        native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(splat), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
                 return vm.heap.vec_push_vec_of_vec(sself, args, true, vm.thread.trap.pass());
             }

@@ -8,6 +8,7 @@ use {
             ScrollEvent,
             WindowGeomChangeEvent,
             TextInputEvent,
+            TextRangeReplaceEvent,
             KeyEvent,
             TextClipboardEvent,
             TimerEvent,
@@ -37,6 +38,7 @@ pub enum IosEvent {
     Scroll(ScrollEvent),
     
     TextInput(TextInputEvent),
+    TextRangeReplace(TextRangeReplaceEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextCopy(TextClipboardEvent),

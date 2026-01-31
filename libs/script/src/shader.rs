@@ -389,7 +389,7 @@ impl ShaderFnCompiler{
                 self.handle_if_else_phi(vm, output);
             }
             // alright lets see if we have a trap, ifso we can log it
-            if let Some(err) = self.trap.err.borrow_mut().pop(){
+            if let Some(err) = self.trap.err.borrow_mut().pop_front(){
                 output.has_errors = true;
                 if let Some(ptr) = err.value.as_err(){
                     if let Some(loc2) = vm.code.ip_to_loc(ptr.ip){

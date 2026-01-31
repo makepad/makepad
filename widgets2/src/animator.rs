@@ -162,6 +162,7 @@ impl ScriptHook for AnimatorGroup {
 #[derive(Default, Script, ScriptHook)]
 pub struct AnimatorState {
     #[live] pub cursor: Option<MouseCursor>,
+    #[live] pub ease: Option<Ease>,
     #[live] pub from: LiveIdMap<LiveId, Play>,
     #[live] pub apply: Option<ScriptObject>,
 }
@@ -291,6 +292,9 @@ impl Animator{
             .copied()
             .unwrap_or(Play::Forward { duration: 0.3 });
         
+        // Get the ease from the target state, default to Linear
+        let ease = target_state.ease.unwrap_or(Ease::Linear);
+        
         // Set cursor if specified
         if let Some(cursor) = target_state.cursor {
             cx.set_cursor(cursor);
@@ -337,7 +341,7 @@ impl Animator{
             state_id: target_state_id,
             start_time: f64::NEG_INFINITY,
             play,
-            ease: Ease::Linear, // Could be made configurable
+            ease,
             target_apply,
             from_values,
             redraw: true,
