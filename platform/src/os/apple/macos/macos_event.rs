@@ -1,6 +1,6 @@
 use crate::{
     event::{
-        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent, WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent
+        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent, ImageInputEvent, TextClipboardEvent, TextInputEvent, TimerEvent, WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent
     }, makepad_live_id::*, permission::PermissionResult, window::WindowId
 };
 
@@ -22,6 +22,7 @@ pub enum MacosEvent {
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     TextInput(TextInputEvent),
+    ImageInput(ImageInputEvent),
     Drag(DragEvent),
     Drop(DropEvent),
     DragEnd,

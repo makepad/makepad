@@ -204,6 +204,7 @@ pub use {
             KeyEvent,
             KeyFocusEvent,
             TextInputEvent,
+            ImageInputEvent,
             TextClipboardEvent,
             WindowCloseRequestedEvent,
             WindowClosedEvent,

@@ -922,6 +922,11 @@ impl Event {
                     return Hit::TextInput(ti.clone())
                 }
             },
+            Event::ImageInput(ii) => {
+                if cx.keyboard.has_key_focus(area) {
+                    return Hit::ImageInput(ii.clone())
+                }
+            },
             Event::TextRangeReplace(tr) => {
                 if cx.keyboard.has_key_focus(area) {
                     return Hit::TextRangeReplace(tr.clone())
