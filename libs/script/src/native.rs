@@ -33,16 +33,16 @@ macro_rules! script_value_bool{
 #[macro_export]
 macro_rules! script_value{
     ($vm:ident, $obj:ident.$id: ident)=>{
-        $vm.heap.value(($obj).into(), id!($id).into(),$vm.thread.trap.pass())
+        $vm.bx.heap.value(($obj).into(), id!($id).into(),$vm.bx.threads.cur_ref().trap.pass())
     };
     ($vm:ident, $obj:ident.$id:ident.$id2:ident)=>{
-        $vm.heap.value($vm.heap.value(($obj).into(), id!($id).into(), $vm.thread.trap.pass()).into(), id!($id2).into(),$vm.thread.trap.pass())
+        $vm.bx.heap.value($vm.bx.heap.value(($obj).into(), id!($id).into(), $vm.bx.threads.cur_ref().trap.pass()).into(), id!($id2).into(),$vm.bx.threads.cur_ref().trap.pass())
     };
     ($vm:ident, $obj:ident[$index: expr])=>{
-        $vm.heap.vec_value(($obj).into(), ($index) as usize, $vm.thread.trap.pass())
+        $vm.bx.heap.vec_value(($obj).into(), ($index) as usize, $vm.bx.threads.cur_ref().trap.pass())
     };
     ($vm:ident, $obj:ident as array[$index: expr])=>{
-        $vm.heap.array_index(($obj).into(), ($index) as usize, $vm.thread.trap.pass())
+        $vm.bx.heap.array_index(($obj).into(), ($index) as usize, $vm.bx.threads.cur_ref().trap.pass())
     }
 }
 
@@ -50,8 +50,8 @@ macro_rules! script_value{
 macro_rules! script_has_proto{
     ($vm:ident, $what:ident, $obj:ident.$id: ident)=>{
         {
-           let proto = $vm.heap.value(($obj).into(), id!($id).into(),$vm.thread.trap.pass());
-           $vm.heap.has_proto(($what).into(), proto)
+           let proto = $vm.bx.heap.value(($obj).into(), id!($id).into(),$vm.bx.threads.cur_ref().trap.pass());
+           $vm.bx.heap.has_proto(($what).into(), proto)
         }
     };
 }
@@ -60,7 +60,7 @@ macro_rules! script_has_proto{
 macro_rules! script_is_fn{
     ($vm:ident, $what:ident, $obj:expr)=>{
         {
-            $vm.heap.is_fn(($obj).into())
+            $vm.bx.heap.is_fn(($obj).into())
         }
     };
 }
@@ -68,17 +68,26 @@ macro_rules! script_is_fn{
 #[macro_export]
 macro_rules! script_array_index{
     ($vm:ident, $obj:ident[$index: expr])=>{
-        $vm.heap.array_index(($obj).into(), ($index) as usize,$vm.thread.trap.pass())
+        {
+            let trap = $vm.bx.threads.cur().trap.pass();
+            $vm.bx.heap.array_index(($obj).into(), ($index) as usize, trap)
+        }
     }
 }
 
 #[macro_export]
 macro_rules! set_script_value{
     ($vm:ident, $obj:ident.$id: ident=$value:expr)=>{
-        $vm.heap.set_value($obj, id!($id).into(), ($value).into(), $vm.thread.trap.pass())
+        {
+            let trap = $vm.bx.threads.cur().trap.pass();
+            $vm.bx.heap.set_value($obj, id!($id).into(), ($value).into(), trap)
+        }
     };
     ($vm:ident, $obj:ident[$index: expr]=$value:expr)=>{
-        $vm.heap.set_vec_value($obj, ($index) as usize, ($value).into(), $vm.thread.trap.pass())
+        {
+            let trap = $vm.bx.threads.cur().trap.pass();
+            $vm.bx.heap.set_vec_value($obj, ($index) as usize, ($value).into(), trap)
+        }
     }
 }
 
@@ -87,13 +96,15 @@ macro_rules! set_script_value_to_api{
     ($vm:ident, $obj:ident.$id: ident=$val:expr)=>{
         {
             let v = $val::script_api($vm);
-            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, $vm.thread.trap.pass());
+            let trap = $vm.bx.threads.cur().trap.pass();
+            $vm.bx.heap.set_value(($obj).into(), id_lut!($id).into(), v, trap);
         }
     };
     ($vm:ident, $obj:ident.$id: ident)=>{
         {
             let v = $id::script_api($vm);
-            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, $vm.thread.trap.pass());
+            let trap = $vm.bx.threads.cur().trap.pass();
+            $vm.bx.heap.set_value(($obj).into(), id_lut!($id).into(), v, trap);
         }
     };
 }
@@ -103,15 +114,15 @@ macro_rules! set_script_value_to_pod{
     ($vm:ident, $obj:ident.$id: ident=$val:expr)=>{
         {
             let v = $val::script_pod($vm).expect("Cant make a pod type");
-            $vm.heap.pod_type_name_set(v, id_lut!($id));
-            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), $vm.thread.trap.pass());
+            $vm.bx.heap.pod_type_name_set(v, id_lut!($id));
+            $vm.bx.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), $vm.bx.threads.cur_ref().trap.pass());
         }
     };
     ($vm:ident, $obj:ident.$id: ident)=>{
         {
             let v = $id::script_pod($vm).expect("Cant make a pod type");
-            $vm.heap.pod_type_name_set(v, id_lut!($id));
-            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), $vm.thread.trap.pass());
+            $vm.bx.heap.pod_type_name_set(v, id_lut!($id));
+            $vm.bx.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), $vm.bx.threads.cur_ref().trap.pass());
         }
     };
 }
@@ -222,10 +233,10 @@ impl ScriptNative{
         if ty_redux.to_index() as usize >= self.type_table.len() {
             self.type_table.resize_with(ty_redux.to_index() + 1, || Default::default());
             self.getters.resize_with(ty_redux.to_index() + 1, || Box::new(|vm, value, field| {
-                script_err_not_found!(vm.thread.trap, "no getter for field {:?} on type {:?}", field, value.value_type())
+                script_err_not_found!(vm.bx.threads.cur_ref().trap, "no getter for field {:?} on type {:?}", field, value.value_type())
             }));
             self.setters.resize_with(ty_redux.to_index() + 1, || Box::new(|vm, value, field, _| {
-                script_err_not_found!(vm.thread.trap, "no setter for field {:?} on type {:?}", field, value.value_type())
+                script_err_not_found!(vm.bx.threads.cur_ref().trap, "no setter for field {:?} on type {:?}", field, value.value_type())
             }));
         }
     }
@@ -266,11 +277,11 @@ impl ScriptNative{
                         
         for (ty,_) in types {
             self.add_type_method(heap, ty, id!(to_json), &[], |vm, args|{
-                let sself = script_value!(vm, args.self);vm.heap.to_json(sself)
+                let sself = script_value!(vm, args.self);vm.bx.heap.to_json(sself)
             });
             self.add_type_method(heap, ty, id!(to_number), &[], |vm, args|{
                 let sself = script_value!(vm, args.self);
-                vm.heap.cast_to_f64(sself, vm.thread.trap.ip).into()
+                vm.bx.heap.cast_to_f64(sself, vm.bx.threads.cur_ref().trap.ip).into()
             });
             if ty != ScriptValueType::REDUX_ARRAY{
                 self.add_type_method(heap, ty, id!(to_string), &[], |vm, args|{
@@ -278,7 +289,7 @@ impl ScriptNative{
                     if sself.is_string_like(){
                         return sself
                     }
-                    vm.heap.new_string_with(|heap, out|{
+                    vm.bx.heap.new_string_with(|heap, out|{
                         heap.cast_to_string(sself, out);
                     })
                 });

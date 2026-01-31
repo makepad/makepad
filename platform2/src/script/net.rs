@@ -131,7 +131,7 @@ impl Cx{
                         }
                         if let Some(handler) = handler.as_object(){
                             self.with_vm_and_async(|vm|{
-                                let array = vm.heap.new_array_from_vec_u8(data);
+                                let array = vm.bx.heap.new_array_from_vec_u8(data);
                                 vm.call(handler.into(), &[array.into()]);
                             });
                         }
@@ -143,7 +143,7 @@ impl Cx{
                         }
                          if let Some(handler) = handler.as_object(){
                             self.with_vm_and_async(|vm|{
-                                let string = vm.heap.new_string_from_str(&string);
+                                let string = vm.bx.heap.new_string_from_str(&string);
                                 vm.call(handler.into(), &[string.into()]);
                             });
                         }
@@ -174,7 +174,7 @@ impl Cx{
                              self.with_vm_and_async(|vm|{
                                  let net = vm.module(id_lut!(net));
                                  let headers_val = headers.script_to_value(vm);
-                                 let body_array = vm.heap.new_array_from_vec_u8(body);
+                                 let body_array = vm.bx.heap.new_array_from_vec_u8(body);
                                  let ret = vm.call(handler.into(), &[headers_val, body_array.into()]);
                                  
                                  if script_has_proto!(vm, ret, net.HttpServerResponse) {
@@ -203,7 +203,7 @@ impl Cx{
                 Ok(WebSocketMessage::String(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_object(){
                         self.with_vm_and_async(|vm|{
-                            let str = vm.heap.new_string_from_str(&s);
+                            let str = vm.bx.heap.new_string_from_str(&s);
                             vm.call(handler.into(), &[str.into()]);
                         })
                     }
@@ -211,7 +211,7 @@ impl Cx{
                 Ok(WebSocketMessage::Binary(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_object(){
                         self.with_vm_and_async(|vm|{
-                            let array = vm.heap.new_array_from_vec_u8(s);
+                            let array = vm.bx.heap.new_array_from_vec_u8(s);
                             vm.call(handler.into(), &[array.into()]);
                         })
                     }
@@ -234,7 +234,7 @@ impl Cx{
                 Ok(WebSocketMessage::Error(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_object(){
                         self.with_vm_and_async(|vm|{
-                            let str = vm.heap.new_string_from_str(&s);
+                            let str = vm.bx.heap.new_string_from_str(&s);
                             vm.call(handler.into(), &[str.into()]);
                         })
                     }
@@ -314,7 +314,7 @@ pub fn script_mod(vm:&mut ScriptVm){
         let events = script_value!(vm, args.events);
         if !script_has_proto!(vm, options, net.HttpServerOptions) || 
         !script_has_proto!(vm, events, net.HttpServerEvents) {
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid net arg type")
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid net arg type")
         }
         
         let options = HttpServerOptions::script_from_value(vm, options);
@@ -355,7 +355,7 @@ pub fn script_mod(vm:&mut ScriptVm){
         // we should check if options is actually of type HttpRequest
         if !script_has_proto!(vm, request, net.HttpRequest) || 
             !script_has_proto!(vm, events, net.HttpEvents) {
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid net arg type")
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid net arg type")
         }
         let request = HttpRequest::script_from_value(vm, request);
         let events = HttpEvents::script_from_value(vm, events);
@@ -378,7 +378,7 @@ pub fn script_mod(vm:&mut ScriptVm){
         // we should check if options is actually of type HttpRequest
         
         let request = if request.is_string_like(){
-            vm.heap.string_with(request, |_heap, s|{
+            vm.bx.heap.string_with(request, |_heap, s|{
                 HttpRequest{
                     url: s.to_string(),
                     ..Default::default()
@@ -387,13 +387,13 @@ pub fn script_mod(vm:&mut ScriptVm){
         }
         else{
             if !script_has_proto!(vm, request, net.HttpRequest){
-                return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid net arg type")
+                return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid net arg type")
             }
             HttpRequest::script_from_value(vm, request)
         };
         
         if !script_has_proto!(vm, events, net.WebSocketEvents) {
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid net arg type")
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid net arg type")
         }
         let events = WebSocketEvents::script_from_value(vm, events);
         

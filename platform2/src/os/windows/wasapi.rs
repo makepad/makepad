@@ -641,26 +641,26 @@ impl WasapiOutput {
     pub fn wait_for_buffer(&mut self) -> Result<WasapiAudioOutputBuffer, ()> {
         unsafe {
             loop {
-                if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
+                if WaitForSingleObject(self.bx.event, 2000) != WAIT_OBJECT_0 {
                     return Err(())
                 };
-                let padding = self.base.client.GetCurrentPadding();
+                let padding = self.bx.client.GetCurrentPadding();
                 if padding.is_err() {
                     return Err(())
                 }
                 let padding = padding.unwrap();
-                let buffer_size = self.base.client.GetBufferSize().unwrap();
+                let buffer_size = self.bx.client.GetBufferSize().unwrap();
                 let req_size = buffer_size - padding;
                 if req_size > 0 {
                     let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
-                    let mut audio_buffer = self.base.audio_buffer.take().unwrap();
-                    let channel_count = self.base.channel_count;
+                    let mut audio_buffer = self.bx.audio_buffer.take().unwrap();
+                    let channel_count = self.bx.channel_count;
                     let frame_count = (req_size / channel_count as u32) as usize;
                     audio_buffer.clear_final_size();
                     audio_buffer.resize(frame_count, channel_count);
                     audio_buffer.set_final_size();
-                    if (frame_count as u32) < self.base.frames{
-                        println!("Wasapi glitch detected, resettting output device {}<{}", frame_count, self.base.frames);
+                    if (frame_count as u32) < self.bx.frames{
+                        println!("Wasapi glitch detected, resettting output device {}<{}", frame_count, self.bx.frames);
                         return Err(())
                     }
                     return Ok(WasapiAudioOutputBuffer {
@@ -679,7 +679,7 @@ impl WasapiOutput {
             let device_buffer = std::slice::from_raw_parts_mut(output.device_buffer, output.frame_count * output.channel_count);
             output.audio_buffer.copy_to_interleaved(device_buffer);
             self.render_client.ReleaseBuffer(output.frame_count as u32, 0).unwrap();
-            self.base.audio_buffer = Some(output.audio_buffer);
+            self.bx.audio_buffer = Some(output.audio_buffer);
         }
     }
 }
@@ -706,7 +706,7 @@ impl WasapiInput {
     pub fn wait_for_buffer(&mut self) -> Result<AudioBuffer, ()> {
         unsafe {
             loop {
-                if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
+                if WaitForSingleObject(self.bx.event, 2000) != WAIT_OBJECT_0 {
                     println!("Wait for object error");
                     return Err(())
                 };
@@ -722,9 +722,9 @@ impl WasapiInput {
                     continue;
                 }
                                 
-                let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.base.channel_count);
-                let mut audio_buffer = self.base.audio_buffer.take().unwrap();
-                audio_buffer.copy_from_interleaved(self.base.channel_count, device_buffer);
+                let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.bx.channel_count);
+                let mut audio_buffer = self.bx.audio_buffer.take().unwrap();
+                audio_buffer.copy_from_interleaved(self.bx.channel_count, device_buffer);
                                 
                 self.capture_client.ReleaseBuffer(frame_count).unwrap();
                                 
@@ -734,7 +734,7 @@ impl WasapiInput {
     }
         
     pub fn release_buffer(&mut self, buffer: AudioBuffer) {
-        self.base.audio_buffer = Some(buffer);
+        self.bx.audio_buffer = Some(buffer);
     }
 }
 
@@ -755,13 +755,13 @@ impl WasapiLoopback {
     }
         
     fn get_ref(&self) -> WasapiBaseRef {
-        self.base.get_ref()
+        self.bx.get_ref()
     }
         
     pub fn wait_for_buffer(&mut self) -> Result<AudioBuffer, ()> {
         unsafe {
             loop {
-                if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
+                if WaitForSingleObject(self.bx.event, 2000) != WAIT_OBJECT_0 {
                     println!("Loopback: Wait for object error");
                     return Err(())
                 };
@@ -777,9 +777,9 @@ impl WasapiLoopback {
                     continue;
                 }
                                                 
-                let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.base.channel_count);
-                let mut audio_buffer = self.base.audio_buffer.take().unwrap();
-                audio_buffer.copy_from_interleaved(self.base.channel_count, device_buffer);
+                let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.bx.channel_count);
+                let mut audio_buffer = self.bx.audio_buffer.take().unwrap();
+                audio_buffer.copy_from_interleaved(self.bx.channel_count, device_buffer);
                                 
                 self.capture_client.ReleaseBuffer(frame_count).unwrap();
                                 
@@ -789,7 +789,7 @@ impl WasapiLoopback {
     }
         
     pub fn release_buffer(&mut self, buffer: AudioBuffer) {
-        self.base.audio_buffer = Some(buffer);
+        self.bx.audio_buffer = Some(buffer);
     }
 }
 

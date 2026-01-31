@@ -101,7 +101,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     _ if prop == id!(path) => {
                         let path = res.abs_path.clone();
                         drop(resources);
-                        return vm.heap.new_string_with(|_heap, s| {
+                        return vm.bx.heap.new_string_with(|_heap, s| {
                             s.push_str(&path);
                         }).into()
                     }
@@ -115,7 +115,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         if let CxScriptResourceData::Error(ref e) = res.data {
                             let err = e.clone();
                             drop(resources);
-                            return vm.heap.new_string_with(|_heap, s| {
+                            return vm.bx.heap.new_string_with(|_heap, s| {
                                 s.push_str(&err);
                             }).into()
                         }
@@ -125,7 +125,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         if let CxScriptResourceData::Loaded(ref data) = res.data {
                             let data: Vec<u8> = (**data).clone();
                             drop(resources);
-                            return vm.heap.new_array_from_vec_u8(data).into()
+                            return vm.bx.heap.new_array_from_vec_u8(data).into()
                         }
                         return NIL
                     }
@@ -133,7 +133,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 }
             }
         }
-        script_err_not_found!(vm.thread.trap.pass(), "invalid res prop")
+        script_err_not_found!(vm.thread().trap.pass(), "invalid res prop")
     });
     
     // res.load_all() - loads all pending resources from disk
@@ -148,16 +148,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
     vm.add_method(res, id_lut!(file), script_args_def!(path = NIL), move |vm, args| {
         let path = script_value!(vm, args.path);
         if !path.is_string_like() {
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid res arg type")
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid res arg type")
         }
         
-        if let Some(abs_path) = vm.heap.string_with(path, |_heap, s| s.to_string()) {
+        if let Some(abs_path) = vm.bx.heap.string_with(path, |_heap, s| s.to_string()) {
             let cx = vm.host.cx_mut();
             let handle_gc = CxScriptResourceGc {
                 resources: cx.script_data.resources.resources.clone(),
                 handle: ScriptHandle::ZERO
             };
-            let handle = vm.heap.new_handle(res_type, Box::new(handle_gc));
+            let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
             
             cx.script_data.resources.resources.borrow_mut().push(
                 CxScriptResource {
@@ -170,7 +170,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             return handle.into()
         }
         
-        script_err_type_mismatch!(vm.thread.trap.pass(), "invalid res arg type")
+        script_err_type_mismatch!(vm.thread().trap.pass(), "invalid res arg type")
     });
     
     // res.crate("self:path/to/file") or res.crate("crate_name:path/to/file")
@@ -178,18 +178,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
     vm.add_method(res, id_lut!(crate), script_args_def!(path = NIL), move |vm, args| {
         let path = script_value!(vm, args.path);
         if !path.is_string_like() {
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid res arg type")
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid res arg type")
         }
         
-        let path_string = vm.heap.string_with(path, |_heap, s| s.to_string());
+        let path_string = vm.bx.heap.string_with(path, |_heap, s| s.to_string());
         
         if let Some(path_string) = path_string {
             // Parse "crate:path" format
             if let Some((crate_part, file_path)) = parse_crate_path(&path_string) {
                 let abs_path = if crate_part == "self" {
                     // Get cargo_manifest_path from current script body
-                    let bodies = vm.code.bodies.borrow();
-                    let body_id = vm.thread.trap.ip.body as usize;
+                    let bodies = vm.bx.code.bodies.borrow();
+                    let body_id = vm.thread().trap.ip.body as usize;
                     if let Some(body) = bodies.get(body_id) {
                         if let ScriptSource::Mod(script_mod) = &body.source {
                             let mut final_path = script_mod.cargo_manifest_path.clone();
@@ -205,7 +205,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 } else {
                     // Look up crate name in the manifest table on ScriptCode
                     let crate_name = crate_part.replace('-', "_");
-                    let manifests = vm.code.crate_manifests.borrow();
+                    let manifests = vm.bx.code.crate_manifests.borrow();
                     if let Some(manifest_path) = manifests.get(&crate_name) {
                         let mut final_path = manifest_path.clone();
                         final_path.push('/');
@@ -221,7 +221,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         resources: cx.script_data.resources.resources.clone(),
                         handle: ScriptHandle::ZERO
                     };
-                    let handle = vm.heap.new_handle(res_type, Box::new(handle_gc));
+                    let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
                     
                     cx.script_data.resources.resources.borrow_mut().push(
                         CxScriptResource {
@@ -236,6 +236,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
         }
         
-        script_err_type_mismatch!(vm.thread.trap.pass(), "invalid res arg type")
+        script_err_type_mismatch!(vm.thread().trap.pass(), "invalid res arg type")
     });
 }

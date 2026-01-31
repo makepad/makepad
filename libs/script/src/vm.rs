@@ -1,4 +1,5 @@
 use crate::makepad_live_id::*;
+use crate::makepad_error_log::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::parser::*;
@@ -11,7 +12,9 @@ use crate::mod_pod::*;
 use crate::mod_shader::*;
 use crate::object::*;
 use crate::function::*;
+use crate::opcode::*;
 use crate::trap::*;
+use crate::*;
 use std::cell::RefCell;
 use std::any::Any;
 use std::collections::HashMap;
@@ -42,6 +45,7 @@ pub struct ScriptBody{
     pub me: ScriptObject,
 }
 
+#[derive(Default)]
 pub struct ScriptBuiltins{
     pub range: ScriptObject,
     pub pod: ScriptPodBuiltins,
@@ -56,6 +60,7 @@ impl ScriptBuiltins{
     }
 }
 
+#[derive(Default)]
 pub struct ScriptCode{
     pub builtins: ScriptBuiltins,
     pub native: RefCell<ScriptNative>,
@@ -116,55 +121,184 @@ impl ScriptCode{
 
 pub struct ScriptVm<'a>{
     pub host: &'a mut dyn Any,
-    pub thread: &'a mut ScriptThread,
-    pub code: &'a ScriptCode,
-    pub heap: &'a mut ScriptHeap
+    pub bx: Box<ScriptVmBase>,
 }
 
 impl <'a> ScriptVm<'a>{
+    pub fn thread(&self) -> &ScriptThread {
+        self.bx.threads.cur_ref()
+    }
+    
+    pub fn thread_mut(&mut self) -> &mut ScriptThread {
+        self.bx.threads.cur()
+    }
+    
+    pub fn set_thread(&mut self, id: usize) {
+        self.bx.threads.set_current(id);
+    }
+    
+    
     pub fn with_vm<R,F:FnOnce(&mut ScriptVm)->R>(&mut self, f:F)->R{
         f(self)
     }
     
-    pub fn call(&mut self,fnobj:ScriptValue, args:&[ScriptValue])->ScriptValue{
-        self.thread.call(self.heap, self.code, self.host, fnobj, args)
+    pub fn call(&mut self, fnobj:ScriptValue, args:&[ScriptValue])->ScriptValue{
+        let scope = self.bx.heap.new_with_proto(fnobj);
+        
+        self.bx.heap.clear_object_deep(scope);
+        if fnobj.is_err(){
+            return fnobj
+        }
+        
+        let trap = self.bx.threads.cur().trap.pass();
+        let err = self.bx.heap.push_all_fn_args(scope, args, trap);
+        if err.is_err(){
+            return err
+        }
+        
+        self.bx.heap.set_object_deep(scope);
+        self.bx.heap.set_object_storage_auto(scope);
+                
+        if let Some(fnptr) = self.bx.heap.parent_as_fn(scope){
+            match fnptr{
+                ScriptFnPtr::Native(ni)=>{
+                    // Get the function pointer and drop the borrow before calling
+                    let func_ptr: *const dyn Fn(&mut ScriptVm, ScriptObject)->ScriptValue = {
+                        let native = self.bx.code.native.borrow();
+                        &*native.functions[ni.index as usize] as *const _
+                    };
+                    // SAFETY: The function pointer is valid as long as native functions aren't removed during execution
+                    let result = unsafe { (*func_ptr)(self, scope) };
+                    return result;
+                }
+                ScriptFnPtr::Script(sip)=>{
+                    let call = CallFrame{
+                        bases: self.bx.threads.cur_ref().new_bases(),
+                        args: OpcodeArgs::default(),
+                        return_ip: None
+                    };
+                    self.bx.threads.cur().scopes.push(scope);
+                    self.bx.threads.cur().calls.push(call);
+                    self.bx.threads.cur().trap.ip = sip;
+                    return self.run_core();
+                }
+            }
+        }
+        else{
+            return script_err_wrong_value!(self.bx.threads.cur_ref().trap, "call target is not a function (got {:?})", self.bx.heap.proto(scope).value_type())
+        }
+    }
+    
+    pub fn run_core(&mut self)->ScriptValue{
+        loop {
+            let bodies = self.bx.code.bodies.borrow();
+            let body_index = self.bx.threads.cur_ref().trap.ip.body as usize;
+            let body = &bodies[body_index];
+            if (self.bx.threads.cur_ref().trap.ip.index as usize) >= body.parser.opcodes.len() {
+                return NIL
+            }
+            let opcode = body.parser.opcodes[self.bx.threads.cur_ref().trap.ip.index as usize];
+            drop(bodies);
+            
+            if let Some((opcode, args)) = opcode.as_opcode(){
+                self.opcode(opcode, args);
+                // if exception tracing
+                if self.bx.threads.cur().trap.err.borrow().len()>0{
+                    if self.bx.threads.cur().call_has_try(){
+                        // pop all errors
+                        self.bx.threads.cur().trap.err.borrow_mut().clear();
+                        let try_frame = self.bx.threads.cur().tries.pop().unwrap();
+                        self.bx.threads.cur().truncate_bases(try_frame.bases, &mut self.bx.heap);
+                        if try_frame.push_nil{
+                            self.bx.threads.cur().push_stack_unchecked(NIL)
+                        }
+                        self.bx.threads.cur().trap.goto(try_frame.start_ip + try_frame.jump);
+                    }
+                    else{
+                        loop {
+                            let err = self.bx.threads.cur().trap.err.borrow_mut().pop_front();
+                            if let Some(err) = err {
+                                if let Some(ptr) = err.value.as_err(){
+                                    if let Some(loc2) = self.bx.code.ip_to_loc(ptr.ip){
+                                        log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} ({}:{})", err.message, err.origin_file, err.origin_line), LogLevel::Error);
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(trap) = self.bx.threads.cur().trap.on.take(){
+                    match trap{
+                        ScriptTrapOn::Pause=>{
+                            return NIL
+                        }
+                        ScriptTrapOn::Return(value)=>{
+                            return value
+                        }
+                    }
+                }
+            }
+            else{ // its a direct value-to-stack?
+                self.bx.threads.cur().push_stack_value(opcode);
+                self.bx.threads.cur().trap.goto_next();
+            }
+        }
+    }
+    
+    pub fn run_root(&mut self, body_id: u16)->ScriptValue{
+        // Extract values from bodies before modifying thread state
+        let (scope, me) = {
+            let bodies = self.bx.code.bodies.borrow();
+            (bodies[body_id as usize].scope, bodies[body_id as usize].me)
+        };
+        
+        self.bx.threads.cur().calls.push(CallFrame{
+            bases: StackBases{
+                tries: 0,
+                loops: 0,
+                stack: 0,
+                scope: 0,
+                mes: 0,
+            },
+            args: Default::default(),
+            return_ip: None,
+        });
+        
+        self.bx.threads.cur().scopes.push(scope);
+        self.bx.threads.cur().mes.push(ScriptMe::Object(me));
+        
+        self.bx.threads.cur().trap.ip.body = body_id;
+        self.bx.threads.cur().trap.ip.index = 0;
+        
+        // the main interpreter loop
+        self.run_core()
     }
     
     /// Checks if the value has an apply transform and calls it, returning the transformed value.
     /// Returns None if no transform exists, Some(transformed) if a transform was applied.
     pub fn call_apply_transform(&mut self, value: ScriptValue) -> Option<ScriptValue> {
         if let Some(obj) = value.as_object() {
-            if let Some(ni) = self.heap.objects[obj.index as usize].tag.as_apply_transform() {
-                let native = self.code.native.borrow();
-                let result = (*native.functions[ni.index as usize])(
-                    &mut ScriptVm {
-                        host: self.host,
-                        heap: self.heap,
-                        thread: self.thread,
-                        code: self.code
-                    },
-                    obj
-                );
-                drop(native);
+            if let Some(ni) = self.bx.heap.objects[obj.index as usize].tag.as_apply_transform() {
+                let func_ptr: *const dyn Fn(&mut ScriptVm, ScriptObject)->ScriptValue = {
+                    let native = self.bx.code.native.borrow();
+                    &*native.functions[ni.index as usize] as *const _
+                };
+                let result = unsafe { (*func_ptr)(self, obj) };
                 return Some(result);
             }
         }
         else if let Some(arr) = value.as_array() {
-            if let Some(ni) = self.heap.arrays[arr.index as usize].tag.as_apply_transform() {
+            if let Some(ni) = self.bx.heap.arrays[arr.index as usize].tag.as_apply_transform() {
                 // For arrays, we need to create a temporary args object
-                let args_obj = self.heap.new_object();
-                self.heap.set_value_def(args_obj, id!(self).into(), value);
-                let native = self.code.native.borrow();
-                let result = (*native.functions[ni.index as usize])(
-                    &mut ScriptVm {
-                        host: self.host,
-                        heap: self.heap,
-                        thread: self.thread,
-                        code: self.code
-                    },
-                    args_obj
-                );
-                drop(native);
+                let args_obj = self.bx.heap.new_object();
+                self.bx.heap.set_value_def(args_obj, id!(self).into(), value);
+                let func_ptr: *const dyn Fn(&mut ScriptVm, ScriptObject)->ScriptValue = {
+                    let native = self.bx.code.native.borrow();
+                    &*native.functions[ni.index as usize] as *const _
+                };
+                let result = unsafe { (*func_ptr)(self, args_obj) };
                 return Some(result);
             }
         }
@@ -172,29 +306,29 @@ impl <'a> ScriptVm<'a>{
     }
     
     pub fn resume(&mut self)->ScriptValue{
-        self.thread.is_paused = false;
-        self.thread.run_core(self.heap, self.code, self.host)
+        self.bx.threads.cur().is_paused = false;
+        self.run_core()
     }
           
     pub fn cast_to_f64(&self, v:ScriptValue)->f64{
-        self.heap.cast_to_f64(v, self.thread.trap.ip)
+        self.bx.heap.cast_to_f64(v, self.bx.threads.cur_ref().trap.ip)
     }
     
     pub fn handle_type(&self, id:LiveId)->ScriptHandleType{
-        *self.code.native.borrow().handle_type.get(&id).unwrap()
+        *self.bx.code.native.borrow().handle_type.get(&id).unwrap()
     }
     
     pub fn new_handle_type(&mut self, id:LiveId)->ScriptHandleType{
-        self.code.native.borrow_mut().new_handle_type(
-            self.heap,
+        self.bx.code.native.borrow_mut().new_handle_type(
+            &mut self.bx.heap,
             id
         )
     }
     
     pub fn add_handle_method<F>(&mut self, ht:ScriptHandleType, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
-        self.code.native.borrow_mut().add_type_method(
-            self.heap,
+        self.bx.code.native.borrow_mut().add_type_method(
+            &mut self.bx.heap,
             ht.to_redux(),
             method,
             args,
@@ -204,7 +338,7 @@ impl <'a> ScriptVm<'a>{
     
     pub fn set_handle_setter<F>(&mut self, ht:ScriptHandleType, f: F) 
     where F: Fn(&mut ScriptVm, ScriptValue, LiveId, ScriptValue)->ScriptValue + 'static{
-        self.code.native.borrow_mut().set_type_setter(
+        self.bx.code.native.borrow_mut().set_type_setter(
             ht.to_redux(),
             f
         )
@@ -212,38 +346,38 @@ impl <'a> ScriptVm<'a>{
     
     pub fn set_handle_getter<F>(&mut self, ht:ScriptHandleType, f: F) 
     where F: Fn(&mut ScriptVm, ScriptValue, LiveId)->ScriptValue + 'static{
-        self.code.native.borrow_mut().set_type_getter(
+        self.bx.code.native.borrow_mut().set_type_getter(
             ht.to_redux(),
             f
         )
     }
     
     pub fn new_module(&mut self, id:LiveId)->ScriptObject{
-        self.heap.new_module(id)
+        self.bx.heap.new_module(id)
     }
           
     pub fn module(&mut self, id:LiveId)->ScriptObject{
-        self.heap.module(id)
+        self.bx.heap.module(id)
     }
     
     pub fn map_mut_with<R,F:FnOnce(&mut Self, &mut ScriptObjectMap)->R>(&mut self, object:ScriptObject, f:F)->R{
         let mut map = ScriptObjectMap::default();
-        std::mem::swap(&mut map, &mut self.heap.objects[object.index as usize].map);
+        std::mem::swap(&mut map, &mut self.bx.heap.objects[object.index as usize].map);
         let r = f(self, &mut map);
-        std::mem::swap(&mut map, &mut self.heap.objects[object.index as usize].map);
+        std::mem::swap(&mut map, &mut self.bx.heap.objects[object.index as usize].map);
         r
     }
     
     pub fn add_method<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
-        self.code.native.borrow_mut().add_method(&mut self.heap, module, method, args, f)
+        self.bx.code.native.borrow_mut().add_method(&mut self.bx.heap, module, method, args, f)
     }
     
     /// Registers a native function to be used as an apply_transform and returns its NativeId.
     /// This is used for creating objects that transform to a computed value when applied.
     pub fn add_apply_transform_fn<F>(&mut self, f: F) -> NativeId
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
-        self.code.native.borrow_mut().add_apply_transform_fn(f)
+        self.bx.code.native.borrow_mut().add_apply_transform_fn(f)
     }
     
     
@@ -251,16 +385,16 @@ impl <'a> ScriptVm<'a>{
         // Register this crate's manifest path for crate path resolution
         let crate_name = new_mod.module_path.split("::").next().unwrap_or("");
         if !crate_name.is_empty() {
-            self.code.crate_manifests.borrow_mut().insert(
+            self.bx.code.crate_manifests.borrow_mut().insert(
                 crate_name.replace('-', "_"),
                 new_mod.cargo_manifest_path.clone()
             );
         }
         
-        let scope = self.heap.new_with_proto(id!(scope).into());
-        self.heap.set_object_deep(scope);
-        self.heap.set_value_def(scope, id!(mod).into(), self.heap.modules.into());
-        let me = self.heap.new_with_proto(id!(root_me).into());
+        let scope = self.bx.heap.new_with_proto(id!(scope).into());
+        self.bx.heap.set_object_deep(scope);
+        self.bx.heap.set_value_def(scope, id!(mod).into(), self.bx.heap.modules.into());
+        let me = self.bx.heap.new_with_proto(id!(root_me).into());
                 
         let new_body = ScriptBody{
             source: ScriptSource::Mod(new_mod),
@@ -269,7 +403,7 @@ impl <'a> ScriptVm<'a>{
             scope,
             me,
         };
-        let mut bodies = self.code.bodies.borrow_mut();
+        let mut bodies = self.bx.code.bodies.borrow_mut();
         for (i, body) in bodies.iter_mut().enumerate(){
             if let ScriptSource::Mod(script_mod) = &body.source{
                 if let ScriptSource::Mod(new_mod)= &new_body.source{
@@ -289,16 +423,16 @@ impl <'a> ScriptVm<'a>{
         
     pub fn eval(&mut self, script_mod: ScriptMod)->ScriptValue{
         let body_id = self.add_script_mod(script_mod);
-        let mut bodies = self.code.bodies.borrow_mut();
+        let mut bodies = self.bx.code.bodies.borrow_mut();
         let body = &mut bodies[body_id as usize];
                 
         if let ScriptSource::Mod(script_mod) = &body.source{
-            body.tokenizer.tokenize(&script_mod.code, &mut self.heap);
+            body.tokenizer.tokenize(&script_mod.code, &mut self.bx.heap);
             body.parser.parse(&body.tokenizer, &script_mod.file, (script_mod.line, script_mod.column), &script_mod.values);
             drop(bodies);
             // lets point our thread to it
             
-            self.thread.run_root(&mut self.heap, &self.code, self.host, body_id)
+            self.run_root(body_id)
         }
         else{
             NIL
@@ -311,48 +445,17 @@ pub struct ScriptVmBase{
     pub void: usize,
     pub code: ScriptCode,
     pub heap: ScriptHeap,
-    pub threads: Vec<ScriptThread>,
+    pub threads: ScriptThreads,
 }
 
 impl ScriptVmBase{
-    pub fn as_ref<'a>(&'a mut self)->ScriptVm<'a>{
-        ScriptVm{
-            host: &mut self.void,
-            code: &mut self.code,
-            heap: &mut self.heap,
-            thread: &mut self.threads[0]
+    pub fn empty() -> Self {
+        Self {
+            void: 0,
+            code: ScriptCode::default(),
+            threads: ScriptThreads::empty(),
+            heap: ScriptHeap::empty(),
         }
-    }
-    
-    pub fn as_ref_host_thread<'a>(&'a mut self, thread:ScriptThreadId, host:&'a mut dyn Any)->ScriptVm<'a>{
-        ScriptVm{
-            host,
-            code: &self.code,
-            heap: &mut self.heap,
-            thread: &mut self.threads[thread.to_index()]
-        }
-    }
-    
-    pub fn as_ref_host<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptVm<'a>{
-        let id = self.get_unpaused_thread();
-        // lets get an unpaused thread
-        ScriptVm{
-            host,
-            code: &self.code,
-            heap: &mut self.heap,
-            thread: &mut self.threads[id.to_index()]
-        }
-    }
-    
-    pub fn get_unpaused_thread(&mut self)->ScriptThreadId{
-        for (id,thread) in self.threads.iter().enumerate(){
-            if !thread.is_paused{
-                return ScriptThreadId(id as u32)
-            }
-        }
-        let id = ScriptThreadId(self.threads.len() as u32);
-        self.threads.push(ScriptThread::new(id));
-        id
     }
     
     pub fn new()->Self{
@@ -373,7 +476,7 @@ impl ScriptVmBase{
                 bodies: Default::default(),
                 crate_manifests: Default::default(),
             },
-            threads: vec![ScriptThread::new(ScriptThreadId(0))],
+            threads: ScriptThreads::new(),
             heap: heap,
         }
     }

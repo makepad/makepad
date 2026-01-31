@@ -297,91 +297,110 @@ impl ScriptArrayData{
     pub fn add_type_methods(native: &mut ScriptNative, heap: &mut ScriptHeap){
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(to_string), &[], |vm, args|{
             if let Some(arr) = script_value!(vm, args.self).as_array(){
-                return vm.heap.new_string_with(|heap, s|{
+                return vm.bx.heap.new_string_with(|heap, s|{
                     heap.array_storage(arr).to_string(heap, s);
                 }).into();
             }
-            script_err_unexpected!(vm.thread.trap, "unexpected array type")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "unexpected array type")
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(parse_json), &[], |vm, args|{
             if let Some(array) = script_value!(vm, args.self).as_array(){
-                return vm.heap.array_mut_self_with(array, |heap, storage|{
+                // Take json_parser out to avoid borrow conflict
+                let mut json_parser = std::mem::take(&mut vm.bx.threads.cur().json_parser);
+                let result = vm.bx.heap.array_mut_self_with(array, |heap, storage|{
                     match storage{
                         ScriptArrayStorage::U8(bytes)=>{
                              let v = String::from_utf8_lossy(bytes);
-                            vm.thread.json_parser.read_json(v.as_ref(), heap)
+                            json_parser.read_json(v.as_ref(), heap)
                         }
                         _=>{
-                            script_err_type_mismatch!(vm.thread.trap, "parse_json requires U8 byte array, got different array storage type")
+                            NIL // Error handled below
                         }
                     }
-                }).into()
+                });
+                vm.bx.threads.cur().json_parser = json_parser;
+                if result == NIL {
+                    // Check if it was due to wrong storage type
+                    let storage = vm.bx.heap.array_storage(array);
+                    if !matches!(storage, ScriptArrayStorage::U8(_)) {
+                        return script_err_type_mismatch!(vm.bx.threads.cur_ref().trap, "parse_json requires U8 byte array, got different array storage type");
+                    }
+                }
+                return result.into()
             }
-            script_err_unexpected!(vm.thread.trap, "parse_json called on non-array value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "parse_json called on non-array value")
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(parse_json), &[], |vm, args|{
             if let Some(arr) = script_value!(vm, args.self).as_array(){
-                return vm.heap.temp_string_with(|heap, temp|{
+                // Take json_parser out to avoid borrow conflict
+                let mut json_parser = std::mem::take(&mut vm.bx.threads.cur().json_parser);
+                let result = vm.bx.heap.temp_string_with(|heap, temp|{
                     let storage = heap.array_storage(arr);
                     storage.to_string(heap, temp);
-                    vm.thread.json_parser.read_json(temp, heap)
-                })
+                    json_parser.read_json(temp, heap)
+                });
+                vm.bx.threads.cur().json_parser = json_parser;
+                return result
             }
-            script_err_unexpected!(vm.thread.trap, "to_string called on non-array value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "to_string called on non-array value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(push), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
-                vm.heap.array_push_vec(sself, args, vm.thread.trap.pass());
+                let trap = vm.bx.threads.cur().trap.pass();
+                vm.bx.heap.array_push_vec(sself, args, trap);
                 return NIL
             }
-            script_err_unexpected!(vm.thread.trap, "push called on non-array value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "push called on non-array value")
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(pop), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
-                return vm.heap.array_pop(sself, vm.thread.trap.pass())
+                let trap = vm.bx.threads.cur().trap.pass();
+                return vm.bx.heap.array_pop(sself, trap)
             }
-            script_err_unexpected!(vm.thread.trap, "pop called on non-array value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "pop called on non-array value")
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(clear), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
-                vm.heap.array_clear(sself, vm.thread.trap.pass());
+                let trap = vm.bx.threads.cur().trap.pass();
+                vm.bx.heap.array_clear(sself, trap);
                 return NIL
             }
-            script_err_unexpected!(vm.thread.trap, "clear called on non-array value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "clear called on non-array value")
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(len), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
-                return vm.heap.array_len(sself).into()
+                return vm.bx.heap.array_len(sself).into()
             }
-            script_err_unexpected!(vm.thread.trap, "len called on non-array value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "len called on non-array value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(freeze), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
-                vm.heap.freeze_array(sself);
+                vm.bx.heap.freeze_array(sself);
                 return sself.into()
             }
-            script_err_unexpected!(vm.thread.trap, "freeze called on non-array value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "freeze called on non-array value")
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(retain), script_args!(cb=NIL), |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_array(){
                 let fnptr = script_value!(vm, args.cb);
                 let mut i = 0;
-                while i < vm.heap.array_len(sself){
+                while i < vm.bx.heap.array_len(sself){
                     let value = script_array_index!(vm, sself[i]);
                     let ret = vm.call(fnptr, &[value]);
                     if ret.is_err(){
                         return ret;
                     }
-                    if !vm.heap.cast_to_bool(ret){
-                        vm.heap.array_remove(sself, i, vm.thread.trap.pass());
+                    if !vm.bx.heap.cast_to_bool(ret){
+                        let trap = vm.bx.threads.cur().trap.pass();
+                        vm.bx.heap.array_remove(sself, i, trap);
                     }
                     else{
                         i += 1
@@ -389,7 +408,7 @@ impl ScriptArrayData{
                 }
                 return NIL
             }
-            script_err_not_impl!(vm.thread.trap, "retain called on non-array value")
+            script_err_not_impl!(vm.bx.threads.cur_ref().trap, "retain called on non-array value")
         });
         
         

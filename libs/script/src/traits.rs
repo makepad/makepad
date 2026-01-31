@@ -156,9 +156,9 @@ fn register_type_inner(
         }),
         props,
     };
-    let ty_index = vm.heap.register_type(Some(type_id), ty_check);
+    let ty_index = vm.bx.heap.register_type(Some(type_id), ty_check);
     if let Some(obj) = proto.as_object() {
-        vm.heap.set_type(obj, ty_index);
+        vm.bx.heap.set_type(obj, ty_index);
     }
     proto
 }
@@ -193,7 +193,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         Self::script_proto(vm);
         
         let type_id = Self::script_type_id_static();
-        let type_check = vm.heap.registered_type(type_id)?;
+        let type_check = vm.bx.heap.registered_type(type_id)?;
         
         // Build pod fields from the type props
         // Use iter_rust_instance_ordered to skip config fields (live fields before #[deref])
@@ -201,8 +201,8 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         
         for (field_name, field_type_id) in type_check.props.iter_rust_instance_ordered() {
             // Try to get the pod type for this field's type
-            if let Some(pod_type) = vm.heap.type_id_to_pod_type(field_type_id, &vm.code.builtins.pod) {
-                let pod_type_data = vm.heap.pod_type_ref(pod_type);
+            if let Some(pod_type) = vm.bx.heap.type_id_to_pod_type(field_type_id, &vm.bx.code.builtins.pod) {
+                let pod_type_data = vm.bx.heap.pod_type_ref(pod_type);
                 
                 fields.push(ScriptPodField {
                     name: field_name,
@@ -219,21 +219,21 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         }
         
         // Create the pod type using the centralized layout calculation
-        let pod_obj = vm.heap.new_with_proto(id!(pod_struct).into());
-        vm.heap.set_object_storage_vec2(pod_obj);
-        vm.heap.set_notproto(pod_obj);
+        let pod_obj = vm.bx.heap.new_with_proto(id!(pod_struct).into());
+        vm.bx.heap.set_object_storage_vec2(pod_obj);
+        vm.bx.heap.set_notproto(pod_obj);
         
         let pod_ty = ScriptPodTy::new_struct(fields);
         
-        let pt = vm.heap.new_pod_type(pod_obj, None, pod_ty, NIL);
-        vm.heap.set_object_pod_type(pod_obj, pt);
-        vm.heap.freeze(pod_obj);
+        let pt = vm.bx.heap.new_pod_type(pod_obj, None, pod_ty, NIL);
+        vm.bx.heap.set_object_pod_type(pod_obj, pt);
+        vm.bx.heap.freeze(pod_obj);
         
         Some(pt)
     }
     
     fn script_from_apply_value(vm:&mut ScriptVm, object:ScriptValue, id:LiveId)->Option<Self> where Self:Sized{
-        if let Some(value) = vm.heap.value_for_apply(object, id.into()){
+        if let Some(value) = vm.bx.heap.value_for_apply(object, id.into()){
             Some(ScriptNew::script_from_value(vm, value))
         }
         else{
@@ -251,7 +251,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_new_with_default(vm:&mut ScriptVm)->Self where Self:Sized{
         let type_id = Self::script_type_id_static();
-        if let Some(default_obj) = vm.heap.type_default_for_id(type_id){
+        if let Some(default_obj) = vm.bx.heap.type_default_for_id(type_id){
             Self::script_from_value(vm, default_obj.into())
         }
         else{
@@ -281,7 +281,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_proto(vm:&mut ScriptVm)->ScriptValue{  
         let type_id = Self::script_type_id_static();
-        if let Some(check) = vm.heap.registered_type(type_id){
+        if let Some(check) = vm.bx.heap.registered_type(type_id){
             return check.object.as_ref().unwrap().proto
         }
         let mut props = ScriptTypeProps::default();
@@ -291,7 +291,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     }
     
     fn script_proto_build(vm:&mut ScriptVm, props:&mut ScriptTypeProps)->ScriptValue{
-        let proto = vm.heap.new_object();
+        let proto = vm.bx.heap.new_object();
         // build prototype here
         Self::script_proto_props(vm, proto, props);
         Self::on_proto_build(vm, proto, props);
@@ -303,32 +303,32 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_api(vm:&mut ScriptVm)->ScriptValue{
         let val = Self::script_proto(vm);
-        vm.heap.freeze_api(val.into());
+        vm.bx.heap.freeze_api(val.into());
         val
     }
     
     fn script_component(vm:&mut ScriptVm)->ScriptValue{
         let val = Self::script_proto(vm);
-        vm.heap.freeze_component(val.into());
+        vm.bx.heap.freeze_component(val.into());
         val
     }
     
     fn script_shader(vm:&mut ScriptVm)->ScriptValue{
         let val = Self::script_proto(vm);
-        vm.heap.freeze_shader(val.into());
+        vm.bx.heap.freeze_shader(val.into());
         val
     }
     
     fn script_ext(vm:&mut ScriptVm)->ScriptValue{
         let val = Self::script_proto(vm);
-        vm.heap.freeze_ext(val.into());
+        vm.bx.heap.freeze_ext(val.into());
         val
     }
         
     fn script_enum_lookup_variant(vm:&mut ScriptVm, variant:LiveId)->ScriptValue{
-        let rt = vm.heap.registered_type(Self::script_type_id_static()).unwrap();
+        let rt = vm.bx.heap.registered_type(Self::script_type_id_static()).unwrap();
         let obj = rt.object.as_ref().unwrap().proto.into();
-        vm.heap.value(obj, variant.into(), vm.thread.trap.pass())
+        vm.bx.heap.value(obj, variant.into(), vm.bx.threads.cur_ref().trap.pass())
     }
 }
 

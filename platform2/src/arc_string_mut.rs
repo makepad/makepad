@@ -86,7 +86,7 @@ impl ScriptApply for ArcStringMut {
     fn script_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, value: ScriptValue) {
         // Convert to owned String using the heap's cast method
         let mut s = String::new();
-        vm.heap.cast_to_string(value, &mut s);
+        vm.bx.heap.cast_to_string(value, &mut s);
         *self = ArcStringMut::String(s);
     }
     
@@ -95,6 +95,6 @@ impl ScriptApply for ArcStringMut {
         if let Some(val) = ScriptValue::from_inline_string(s) {
             return val;
         }
-        vm.heap.new_string_from_str(s).into()
+        vm.bx.heap.new_string_from_str(s).into()
     }
 }

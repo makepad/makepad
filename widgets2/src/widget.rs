@@ -777,7 +777,7 @@ impl WidgetRef {
         
         // Get the TypeId from the value if it's an object with a registered type
         let type_id = if let Some(obj) = value.as_object() {
-            vm.heap.object_type_id(obj)
+            vm.bx.heap.object_type_id(obj)
         } else {
             None
         };

@@ -69,8 +69,8 @@ impl ShaderFnCompiler {
                     let (ty, val) = self.stack.pop(self.trap.pass());
                     
                     // Check if the else value is void
-                    let else_concrete = ty.make_concrete(&vm.code.builtins.pod);
-                    let else_is_void = else_concrete.map(|t| t == vm.code.builtins.pod.pod_void).unwrap_or(false);
+                    let else_concrete = ty.make_concrete(&vm.bx.code.builtins.pod);
+                    let else_is_void = else_concrete.map(|t| t == vm.bx.code.builtins.pod.pod_void).unwrap_or(false);
                     
                     if else_is_void {
                         // Emit void value as statement
@@ -81,13 +81,13 @@ impl ShaderFnCompiler {
                     } else if let Some(phi) = phi {
                         if let Some(phi_type) = phi_type {
                             // declare the phi at start
-                            let ty = type_table_if_else(phi_type, &ty, self.trap.pass(), &vm.code.builtins.pod);
-                            let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
+                            let ty = type_table_if_else(phi_type, &ty, self.trap.pass(), &vm.bx.code.builtins.pod);
+                            let ty = ty.make_concrete(&vm.bx.code.builtins.pod).unwrap_or(vm.bx.code.builtins.pod.pod_void);
                             
                             // Skip phi handling if type is void
-                            if ty != vm.code.builtins.pod.pod_void {
+                            if ty != vm.bx.code.builtins.pod.pod_void {
                                 self.out.push_str(&format!("{} = {};\n", phi, val));
-                                let ty_name = if let Some(name) = vm.heap.pod_type_name(ty) {
+                                let ty_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {
                                     output.backend.map_pod_name(name)
                                 } else {
                                     id!(unknown)
@@ -111,11 +111,11 @@ impl ShaderFnCompiler {
                     // However, since only one branch has a value, we can't use this as
                     // an expression result, so we don't push it onto the stack.
                     if let Some(phi_type) = phi_type {
-                        let ty = phi_type.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
+                        let ty = phi_type.make_concrete(&vm.bx.code.builtins.pod).unwrap_or(vm.bx.code.builtins.pod.pod_void);
                         
                         // Skip phi handling if type is void
-                        if ty != vm.code.builtins.pod.pod_void {
-                            let ty_name = if let Some(name) = vm.heap.pod_type_name(ty) {
+                        if ty != vm.bx.code.builtins.pod.pod_void {
+                            let ty_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {
                                 output.backend.map_pod_name(name)
                             } else {
                                 id!(unknown)
@@ -206,8 +206,8 @@ impl ShaderFnCompiler {
             if self.stack.types.len() > *stack_depth {
                 let (ty, val) = self.stack.pop(self.trap.pass());
                 // Check if the type is void - if so, don't create a phi, just emit as statement
-                let concrete_ty = ty.make_concrete(&vm.code.builtins.pod);
-                let is_void = concrete_ty.map(|t| t == vm.code.builtins.pod.pod_void).unwrap_or(false);
+                let concrete_ty = ty.make_concrete(&vm.bx.code.builtins.pod);
+                let is_void = concrete_ty.map(|t| t == vm.bx.code.builtins.pod.pod_void).unwrap_or(false);
                 
                 if is_void {
                     // Emit as statement without phi assignment
@@ -310,10 +310,10 @@ impl ShaderFnCompiler {
         // Pop and resolve the return value BEFORE borrowing self.mes mutably
         // Use pop_resolved to resolve Id types (like variable names) to their actual Pod types
         let (ty, s) = if opargs.is_nil() {
-            (vm.code.builtins.pod.pod_void, self.stack.new_string())
+            (vm.bx.code.builtins.pod.pod_void, self.stack.new_string())
         } else {
             let (ty, s) = self.pop_resolved(vm, output);
-            let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
+            let ty = ty.make_concrete(&vm.bx.code.builtins.pod).unwrap_or(vm.bx.code.builtins.pod.pod_void);
             (ty, s)
         };
 
@@ -327,7 +327,7 @@ impl ShaderFnCompiler {
                 }
                 *ret = Some(ty);
 
-                if ty == vm.code.builtins.pod.pod_void {
+                if ty == vm.bx.code.builtins.pod.pod_void {
                     self.out.push_str(&s);
                     self.out.push_str(";\nreturn;\n");
                 } else {
@@ -394,12 +394,12 @@ impl ShaderFnCompiler {
         let (end_ty, end_s) = self.stack.pop(self.trap.pass());
         let (start_ty, start_s) = self.stack.pop(self.trap.pass());
         // Validate that both operands can be made into concrete numeric types
-        let start_concrete = start_ty.make_concrete(&vm.code.builtins.pod);
-        let end_concrete = end_ty.make_concrete(&vm.code.builtins.pod);
+        let start_concrete = start_ty.make_concrete(&vm.bx.code.builtins.pod);
+        let end_concrete = end_ty.make_concrete(&vm.bx.code.builtins.pod);
         if let (Some(start_pod), Some(end_pod)) = (start_concrete, end_concrete) {
             // Check that both are numeric types
-            let start_is_number = vm.heap.pod_type_ref(start_pod).ty.is_number();
-            let end_is_number = vm.heap.pod_type_ref(end_pod).ty.is_number();
+            let start_is_number = vm.bx.heap.pod_type_ref(start_pod).ty.is_number();
+            let end_is_number = vm.bx.heap.pod_type_ref(end_pod).ty.is_number();
             if !start_is_number || !end_is_number {
                 self.stack.free_string(start_s);
                 self.stack.free_string(end_s);

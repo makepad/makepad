@@ -14,7 +14,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                 return NIL
             }
         }
-        script_err_assert_fail!(vm.thread.trap, "assertion failed")
+        script_err_assert_fail!(vm.bx.threads.cur_ref().trap, "assertion failed")
     });
     
     //native.add_method(heap, std, id!(err), script_args!(), |vm, _args|{
@@ -36,16 +36,16 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     
     native.add_method(heap, std, id_lut!(log), script_args_def!(what=NIL), |vm, args|{
         let what = script_value!(vm, args.what);
-        vm.thread.log(vm.heap, vm.code, what);
+        vm.log(what);
         NIL
     });
     
     native.add_method(heap, std, id_lut!(print), script_args_def!(what=NIL), |vm, args|{
         let what = script_value!(vm, args.what);
-        if vm.heap.string_with(what, |_heap, str|{
+        if vm.bx.heap.string_with(what, |_heap, str|{
             print!("{}", str);
         }).is_none(){
-            vm.heap.temp_string_with(|heap, temp|{
+            vm.bx.heap.temp_string_with(|heap, temp|{
                 heap.cast_to_string(what, temp);
                 print!("{}", what)
             });
@@ -55,10 +55,10 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     
     native.add_method(heap, std, id_lut!(println), script_args_def!(what=NIL), |vm, args|{
         let what = script_value!(vm, args.what);
-        if vm.heap.string_with(what, |_heap, str|{
+        if vm.bx.heap.string_with(what, |_heap, str|{
             println!("{}", str);
         }).is_none(){
-            vm.heap.temp_string_with(|heap, temp|{
+            vm.bx.heap.temp_string_with(|heap, temp|{
                 heap.cast_to_string(what, temp);
                 println!("{}", what)
             });
@@ -73,7 +73,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     
     native.add_method(heap, std, id_lut!(set_type_default), script_args!(obj=NIL), |vm, args|{
         if let Some(obj) = script_value!(vm, args.obj).as_object(){
-            if vm.heap.set_type_default(obj){
+            if vm.bx.heap.set_type_default(obj){
                 return obj.into()
             }
         }

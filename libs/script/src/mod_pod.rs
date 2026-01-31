@@ -21,6 +21,7 @@ macro_rules! script_pod_def{
     };
 }
 
+#[derive(Default)]
 pub struct ScriptPodBuiltins{
     pub pod_void: ScriptPodType,
     pub pod_struct: ScriptPodType,
@@ -140,19 +141,19 @@ pub fn define_pod_module(heap:&mut ScriptHeap, native:&mut ScriptNative)->Script
     // Add mix method for all pod types (f32, vec2f, vec3f, vec4f, etc.)
     // self.mix(other, alpha) -> mix(self, other, alpha)
     native.add_type_method(heap, ScriptValueType::REDUX_POD, id!(mix), script_args!(other=0.0, a=0.0), |vm, args|{
-        let sself = vm.heap.value(args, id!(self).into(), vm.thread.trap.pass());
-        let other = vm.heap.value(args, id!(other).into(), vm.thread.trap.pass());
-        let a_val = vm.heap.value(args, id!(a).into(), vm.thread.trap.pass());
+        let sself = vm.bx.heap.value(args, id!(self).into(), vm.bx.threads.cur_ref().trap.pass());
+        let other = vm.bx.heap.value(args, id!(other).into(), vm.bx.threads.cur_ref().trap.pass());
+        let a_val = vm.bx.heap.value(args, id!(a).into(), vm.bx.threads.cur_ref().trap.pass());
         
-        let self_nv = NumericValue::from_script_value_heap(&vm.heap, sself, vm.thread.trap.ip);
-        let other_nv = NumericValue::from_script_value_heap(&vm.heap, other, vm.thread.trap.ip);
+        let self_nv = NumericValue::from_script_value_heap(&vm.bx.heap, sself, vm.bx.threads.cur_ref().trap.ip);
+        let other_nv = NumericValue::from_script_value_heap(&vm.bx.heap, other, vm.bx.threads.cur_ref().trap.ip);
         
         // mix typically has scalar alpha, but can also have matching type alpha
         if let Some(a_f) = a_val.as_f64() {
-            self_nv.mix_scalar(other_nv, a_f).to_script_value_heap(&mut vm.heap, &vm.code)
+            self_nv.mix_scalar(other_nv, a_f).to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
         } else {
-            let a_nv = NumericValue::from_script_value_heap(&vm.heap, a_val, vm.thread.trap.ip);
-            self_nv.mix_componentwise(other_nv, a_nv).to_script_value_heap(&mut vm.heap, &vm.code)
+            let a_nv = NumericValue::from_script_value_heap(&vm.bx.heap, a_val, vm.bx.threads.cur_ref().trap.ip);
+            self_nv.mix_componentwise(other_nv, a_nv).to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
         }
     });
     

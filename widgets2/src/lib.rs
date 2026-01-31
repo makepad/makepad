@@ -187,8 +187,8 @@ scroll_bar::{ScrollBar},
 pub fn script_mod(vm: &mut ScriptVm){
     makepad_draw2::script_mod(vm);
     
-    vm.heap.new_module(id!(prelude));
-    vm.heap.new_module(id!(themes));
+    vm.bx.heap.new_module(id!(prelude));
+    vm.bx.heap.new_module(id!(themes));
     crate::theme_desktop_dark::script_mod(vm);
     crate::animator::script_mod(vm);
     {
@@ -212,7 +212,7 @@ pub fn script_mod(vm: &mut ScriptVm){
         script_mod(vm);    
     }
             
-    vm.heap.new_module(id!(widgets));
+    vm.bx.heap.new_module(id!(widgets));
     crate::scroll_bar::script_mod(vm);
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
