@@ -55,6 +55,7 @@ pub enum ShaderMe{
         phi_type: Option<ShaderType>,
         has_return: bool,         // true if current branch has a return
         if_branch_returned: bool, // remembers if the if-branch returned (used when in else)
+        phi_assigned_by_inner: bool, // true if an inner if assigned to this phi (for match/else-if chains)
     },
     BuiltinCall{name:LiveId, fnptr: NativeId, args:Vec<(ShaderType, String)>},
     /// Pod builtin method call: x.mix(y, a) -> mix(x, y, a)

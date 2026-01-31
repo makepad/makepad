@@ -1537,8 +1537,9 @@ impl ScriptParser{
                 }
                 if id == id!(match){
                     // Generate temp variable name based on code position
-                    let temp_name = format!("$m{}", self.code_len());
-                    let temp_id = LiveId::from_str(&temp_name);
+                    let temp_name = format!("_match_{}", self.code_len());
+                    // Use from_str_with_lut to register the temp name in the LUT for lookup
+                    let temp_id = LiveId::from_str_with_lut(&temp_name).unwrap_or_else(|_| LiveId::from_str(&temp_name));
                     // Emit temp_id FIRST, then parse subject expression, then LET_DYN
                     self.push_code(ScriptValue::from_id(temp_id), self.index);
                     self.state.push(State::MatchSubject{temp_id, index:self.index});
