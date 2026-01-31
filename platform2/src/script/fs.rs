@@ -12,18 +12,17 @@ pub fn script_mod(vm:&mut ScriptVm){
     for sym in [id_lut!(read), id_lut!(read_to_string)]{    
         vm.add_method(fs, sym, script_args_def!(path=NIL), |vm, args|{
             let path =  script_value!(vm, args.path);
-            if let Some(Some(mut file)) = vm.bx.heap.string_with(path, |_heap,s|{
+            if let Some(Some(mut file)) = vm.string_with(path, |_vm, s|{
                 fs::File::open(s).ok()
             }){
-                let thread = vm.bx.threads.cur();
-                vm.bx.heap.new_string_with(|_heap, s|{
+                vm.new_string_with(|vm, s|{
                     if file.read_to_string(s).is_err(){
-                        script_err_io!(thread.trap.pass(), "file system error");
+                        script_err_io!(vm.bx.threads.trap(), "file system error");
                     }
                 }).into()
             }
             else{
-                script_err_io!(vm.thread().trap.pass(), "file system error")
+                script_err_io!(vm.trap(), "file system error")
             }
         })
     }
@@ -31,14 +30,13 @@ pub fn script_mod(vm:&mut ScriptVm){
         vm.add_method(fs, sym, script_args_def!(path=NIL, data=NIL), |vm, args|{
             let path =  script_value!(vm, args.path);
             let data =  script_value!(vm, args.data);
-            if let Some(Some(mut file)) = vm.bx.heap.string_with(path, |_heap,s|{
+            if let Some(Some(mut file)) = vm.string_with(path, |_vm, s|{
                 fs::File::create(s).ok()
             }){
-                let thread = &vm.thread();
                 if data.is_string_like(){
-                    vm.bx.heap.string_with(data, |_heap,s|{
+                    vm.string_with(data, |vm, s|{
                         if file.write_all(&s.as_bytes()).is_err(){
-                            script_err_io!(thread.trap.pass(), "file system error");
+                            script_err_io!(vm.bx.threads.trap(), "file system error");
                         }
                     });
                 }
@@ -46,11 +44,11 @@ pub fn script_mod(vm:&mut ScriptVm){
                     match vm.bx.heap.array_storage(data){
                         ScriptArrayStorage::U8(data)=>{
                             if file.write_all(&data).is_err(){
-                                script_err_io!(thread.trap.pass(), "file system error");
+                                script_err_io!(vm.trap(), "file system error");
                             }
                         }
                         _=>{
-                            script_err_type_mismatch!(vm.thread().trap.pass(), "invalid fs arg type");
+                            script_err_type_mismatch!(vm.trap(), "invalid fs arg type");
                         }
                     }
                     
@@ -58,7 +56,7 @@ pub fn script_mod(vm:&mut ScriptVm){
                 return NIL
             }
             else{
-                script_err_io!(vm.thread().trap.pass(), "file system error")
+                script_err_io!(vm.trap(), "file system error")
             }
         })
     }

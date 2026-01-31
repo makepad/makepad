@@ -133,6 +133,10 @@ impl <'a> ScriptVm<'a>{
         self.bx.threads.cur()
     }
     
+    pub fn trap(&'a self) -> ScriptTrap<'a> {
+        self.bx.threads.cur_ref().trap.pass()
+    }
+    
     pub fn set_thread(&mut self, id: usize) {
         self.bx.threads.set_current(id);
     }
@@ -384,6 +388,42 @@ impl <'a> ScriptVm<'a>{
         let r = f(self, &mut map);
         std::mem::swap(&mut map, &mut self.bx.heap.objects[object.index as usize].map);
         r
+    }
+    
+    pub fn vec_with<R,F:FnOnce(&mut Self, &[ScriptVecValue])->R>(&mut self, object:ScriptObject, f:F)->R{
+        let mut vec = Vec::new();
+        std::mem::swap(&mut vec, &mut self.bx.heap.objects[object.index as usize].vec);
+        let r = f(self, &vec);
+        std::mem::swap(&mut vec, &mut self.bx.heap.objects[object.index as usize].vec);
+        r
+    }
+    
+    pub fn vec_mut_with<R,F:FnOnce(&mut Self, &mut Vec<ScriptVecValue>)->R>(&mut self, object:ScriptObject, f:F)->R{
+        let mut vec = Vec::new();
+        std::mem::swap(&mut vec, &mut self.bx.heap.objects[object.index as usize].vec);
+        let r = f(self, &mut vec);
+        std::mem::swap(&mut vec, &mut self.bx.heap.objects[object.index as usize].vec);
+        r
+    }
+    
+    pub fn string_with<R,F:FnOnce(&mut Self, &str)->R>(&mut self, value:ScriptValue, f:F)->Option<R>{
+        if let Some(s) = value.as_string(){
+            if let Some(s) = &self.bx.heap.strings[s.index as usize]{
+                let s = s.string.clone();
+                return Some(f(self, &s.0))
+            }
+            return None
+        }
+        if let Some(r) = value.as_inline_string(|s| f(self, s)){
+            return Some(r)
+        }
+        None
+    }
+    
+    pub fn new_string_with<F:FnOnce(&mut Self, &mut String)>(&mut self, f:F)->ScriptValue{
+        let mut out = if let Some(s) = self.bx.heap.strings_reuse.pop(){s} else {String::new()};
+        f(self, &mut out);
+        self.bx.heap.intern_or_store_string(out)
     }
     
     pub fn add_method<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 

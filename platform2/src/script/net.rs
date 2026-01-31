@@ -314,7 +314,7 @@ pub fn script_mod(vm:&mut ScriptVm){
         let events = script_value!(vm, args.events);
         if !script_has_proto!(vm, options, net.HttpServerOptions) || 
         !script_has_proto!(vm, events, net.HttpServerEvents) {
-            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid net arg type")
+            return script_err_type_mismatch!(vm.trap(), "invalid net arg type")
         }
         
         let options = HttpServerOptions::script_from_value(vm, options);
@@ -355,7 +355,7 @@ pub fn script_mod(vm:&mut ScriptVm){
         // we should check if options is actually of type HttpRequest
         if !script_has_proto!(vm, request, net.HttpRequest) || 
             !script_has_proto!(vm, events, net.HttpEvents) {
-            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid net arg type")
+            return script_err_type_mismatch!(vm.trap(), "invalid net arg type")
         }
         let request = HttpRequest::script_from_value(vm, request);
         let events = HttpEvents::script_from_value(vm, events);
@@ -378,7 +378,7 @@ pub fn script_mod(vm:&mut ScriptVm){
         // we should check if options is actually of type HttpRequest
         
         let request = if request.is_string_like(){
-            vm.bx.heap.string_with(request, |_heap, s|{
+            vm.string_with(request, |_vm, s|{
                 HttpRequest{
                     url: s.to_string(),
                     ..Default::default()
@@ -387,13 +387,13 @@ pub fn script_mod(vm:&mut ScriptVm){
         }
         else{
             if !script_has_proto!(vm, request, net.HttpRequest){
-                return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid net arg type")
+                return script_err_type_mismatch!(vm.trap(), "invalid net arg type")
             }
             HttpRequest::script_from_value(vm, request)
         };
         
         if !script_has_proto!(vm, events, net.WebSocketEvents) {
-            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid net arg type")
+            return script_err_type_mismatch!(vm.trap(), "invalid net arg type")
         }
         let events = WebSocketEvents::script_from_value(vm, events);
         

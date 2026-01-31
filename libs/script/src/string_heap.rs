@@ -65,9 +65,13 @@ impl ScriptHeap{
                     
     pub fn new_string_with<F:FnOnce(&mut Self, &mut String)>(&mut self,cb:F)->ScriptValue{
         let mut out = if let Some(s) = self.strings_reuse.pop(){s} else {String::new()};
-                
         cb(self, &mut out);
-                
+        self.intern_or_store_string(out)
+    }
+    
+    /// Takes an owned String and either interns it, reuses an existing interned value, or stores it as a new string.
+    /// The String is consumed and may be returned to the reuse pool.
+    pub fn intern_or_store_string(&mut self, mut out: String)->ScriptValue{
         if let Some(v) = ScriptValue::from_inline_string(&out){
             out.clear();
             self.strings_reuse.push(out);

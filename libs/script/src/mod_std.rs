@@ -42,7 +42,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     
     native.add_method(heap, std, id_lut!(print), script_args_def!(what=NIL), |vm, args|{
         let what = script_value!(vm, args.what);
-        if vm.bx.heap.string_with(what, |_heap, str|{
+        if vm.string_with(what, |_vm, str|{
             print!("{}", str);
         }).is_none(){
             vm.bx.heap.temp_string_with(|heap, temp|{
@@ -55,7 +55,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     
     native.add_method(heap, std, id_lut!(println), script_args_def!(what=NIL), |vm, args|{
         let what = script_value!(vm, args.what);
-        if vm.bx.heap.string_with(what, |_heap, str|{
+        if vm.string_with(what, |_vm, str|{
             println!("{}", str);
         }).is_none(){
             vm.bx.heap.temp_string_with(|heap, temp|{
