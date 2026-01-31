@@ -6,8 +6,7 @@ use makepad_script::heap::*;
 use makepad_script::*;
 
 pub fn main(){
-    let mut vmbase = ScriptVmBase::new();
-    let vm = &mut vmbase.as_ref();
+    let vm = &mut ScriptVm{host:&mut 0, bx: Box::new(ScriptVmBase::new())}; 
         
     #[derive(Script)]
     pub struct StructTest{
@@ -147,7 +146,7 @@ pub fn main(){
         
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
@@ -246,7 +245,8 @@ pub fn main(){
         // struct tests
         let s = #(StructTest::script_api(vm));
         try{s{field:5}} assert(false) ok assert(true)
-        try{s{field:true}} assert(true) ok assert(false)
+        
+        try{s{field:"HI"}} assert(true) ok assert(false)
         assert(s.return_two() == 2)
                         
         // check handle features
@@ -258,11 +258,11 @@ pub fn main(){
         let x = EnumTest.Bare
         // test tuple typechecking
         try{EnumTest.Tuple(1.0)} assert(false) ok assert(true)
-        try{EnumTest.Tuple(false)} assert(true) ok assert(false)
+        try{EnumTest.Tuple("false")} assert(true) ok assert(false)
         try{EnumTest.Tuple()} assert(true) ok assert(false)
         try{EnumTest.Tuple(1,2)} assert(true) ok assert(false)
         try{EnumTest.Named{named_field:1.0}} assert(false) ok assert(true)
-        try{EnumTest.Named{named_field:true}} assert(true) ok assert(false)
+        try{EnumTest.Named{named_field:"true"}} assert(true) ok assert(false)
                         
         //assert(s.enm == EnumTest.Bare)
         try{s{enm: EnumTest.Bare}} assert(false) ok assert(true)
@@ -273,7 +273,7 @@ pub fn main(){
         // check the option
         try{s{opt:nil}} assert(false) ok assert(true)
         try{s{opt:1.0}} assert(false) ok assert(true)
-        try{s{opt:false}} assert(true) ok assert(false)
+        try{s{opt:"false"}} assert(true) ok assert(false)
                         
         // check the vec
         let x = s{vec:[1 2 3 4]}

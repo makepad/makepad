@@ -576,9 +576,9 @@ impl ScriptHook for FontFamily {
         if !fonts.is_font_family_known(font_family_id) {
             let mut font_ids = Vec::new();
             
-            let len = vm.heap.vec_len(obj);
+            let len = vm.bx.heap.vec_len(obj);
             for i in 0..len {
-                let kv = vm.heap.vec_key_value(obj, i, NoTrap);
+                let kv = vm.bx.heap.vec_key_value(obj, i, NoTrap);
                 let member = FontMember::script_from_value(vm, kv.value);
                 
                 if let Some(ref handle_ref) = member.res {

@@ -58,7 +58,7 @@ impl std::ops::IndexMut<GeometryId> for CxGeometryPool{
 impl Geometry{
     pub fn into_script_handle(self, vm: &mut ScriptVm) -> ScriptValue {
         let ty = vm.handle_type(id!(geometry));
-        let handle = vm.heap.new_handle(ty, Box::new(self));
+        let handle = vm.bx.heap.new_handle(ty, Box::new(self));
         handle.into()
     }
     

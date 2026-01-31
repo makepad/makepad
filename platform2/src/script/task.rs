@@ -90,19 +90,19 @@ pub fn script_mod(vm:&mut ScriptVm){
             if let Some(handle) = script_value!(vm, args.self).as_handle(){
                 let cx = vm.host.cx_mut();
                 if let Some(chan) = cx.script_data.tasks.tasks.borrow_mut().iter_mut().find(|v| v.handle == handle){
-                    let array_len = vm.heap.array_len(chan.queue.as_array());
+                    let array_len = vm.bx.heap.array_len(chan.queue.as_array());
                     
                     if chan.max_depth == 0 || array_len < chan.max_depth{
-                        let vec_len = vm.heap.vec_len(args.into());
+                        let vec_len = vm.bx.heap.vec_len(args.into());
                         if vec_len == 0{
-                            vm.heap.array_push(chan.queue.as_array(), NIL, vm.thread.trap.pass());
+                            vm.bx.heap.array_push(chan.queue.as_array(), NIL, vm.bx.threads.cur().trap.pass());
                         }
                         else if vec_len== 1{
-                            let value = vm.heap.vec_value(args, 0, vm.thread.trap.pass());
-                            vm.heap.array_push(chan.queue.as_array(), value, vm.thread.trap.pass());
+                            let value = vm.bx.heap.vec_value(args, 0, vm.bx.threads.cur().trap.pass());
+                            vm.bx.heap.array_push(chan.queue.as_array(), value, vm.bx.threads.trap());
                         }
                         else{
-                            vm.heap.array_push(chan.queue.as_array(), args.into(), vm.thread.trap.pass());
+                            vm.bx.heap.array_push(chan.queue.as_array(), args.into(), vm.bx.threads.trap());
                         }
                         if fn_id == id!(end){
                             chan.ended = true;
@@ -111,9 +111,9 @@ pub fn script_mod(vm:&mut ScriptVm){
                     }
                     else {
                         if chan.send_pause.len() > 100{
-                            return script_err_limit!(vm.thread.trap.pass(), "too many paused calls")
+                            return script_err_limit!(vm.bx.threads.trap(), "too many paused calls")
                         }
-                        chan.send_pause.push_front(vm.thread.pause());
+                        chan.send_pause.push_front(vm.bx.threads.cur().pause());
                         return NIL
                     }
                 }
@@ -127,7 +127,7 @@ pub fn script_mod(vm:&mut ScriptVm){
             if let Some(handle) = script_value!(vm, args.self).as_handle(){
                 let cx = vm.host.cx_mut();
                 if let Some(task) = cx.script_data.tasks.tasks.borrow_mut().iter_mut().find(|v| v.handle == handle){
-                    if let Some(value) = vm.heap.array_pop_front_option(task.queue.as_array()){
+                    if let Some(value) = vm.bx.heap.array_pop_front_option(task.queue.as_array()){
                         if fn_id == id!(next) || fn_id == id!(last) && task.ended{
                             return value
                         }
@@ -136,13 +136,13 @@ pub fn script_mod(vm:&mut ScriptVm){
                         return NIL
                     }
                     if task.recv_pause.len() > 100{
-                        return script_err_limit!(vm.thread.trap.pass(), "too many paused calls")
+                        return script_err_limit!(vm.bx.threads.trap(), "too many paused calls")
                     }
-                    task.recv_pause.push_front(vm.thread.pause());
+                    task.recv_pause.push_front(vm.bx.threads.cur().pause());
                     return NIL
                 }
             }
-            script_err_unexpected!(vm.thread.trap.pass(), "unexpected task state")
+            script_err_unexpected!(vm.thread().trap.pass(), "unexpected task state")
         });
     }
     
@@ -156,14 +156,14 @@ pub fn script_mod(vm:&mut ScriptVm){
                 }
             }
         }
-        script_err_not_found!(vm.thread.trap.pass(), "invalid task prop")
+        script_err_not_found!(vm.thread().trap.pass(), "invalid task prop")
     });
     
     vm.add_method(std, id_lut!(task), script_args_def!(start_fn_or_depth = NIL), move |vm, args|{
         // lets make a new channel
         let start_fn_or_depth = script_value!(vm, args.start_fn_or_depth);
-        let (start_task, max_depth) = if vm.heap.is_fn(start_fn_or_depth.into()){
-            (Some(vm.heap.new_fn_ref(start_fn_or_depth.as_object().unwrap())), 1)
+        let (start_task, max_depth) = if vm.bx.heap.is_fn(start_fn_or_depth.into()){
+            (Some(vm.bx.heap.new_fn_ref(start_fn_or_depth.as_object().unwrap())), 1)
         }
         else{
             (None, start_fn_or_depth.as_f64().unwrap_or(0.0) as usize)
@@ -174,9 +174,9 @@ pub fn script_mod(vm:&mut ScriptVm){
             tasks: cx.script_data.tasks.tasks.clone(),
             handle: ScriptHandle::ZERO
         };
-        let handle = vm.heap.new_handle(task_type, Box::new(handle_gc));
-        let array = vm.heap.new_array();
-        let queue = vm.heap.new_array_ref(array);
+        let handle = vm.bx.heap.new_handle(task_type, Box::new(handle_gc));
+        let array = vm.bx.heap.new_array();
+        let queue = vm.bx.heap.new_array_ref(array);
         cx.script_data.tasks.tasks.borrow_mut().push(
             CxScriptTask{
                 max_depth,

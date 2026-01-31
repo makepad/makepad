@@ -87,8 +87,8 @@ pub fn script_mod(vm:&mut ScriptVm){
     vm.add_method(std, id_lut!(start_timeout), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
         let delay = script_value!(vm, args.delay);
         let callback = script_value!(vm, args.callback);
-        if !delay.is_number() || !vm.heap.is_fn(callback.into()){
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid timer arg type")
+        if !delay.is_number() || !vm.bx.heap.is_fn(callback.into()){
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid timer arg type")
         }
         let callback = ScriptFnRef::script_from_value(vm, callback);
         
@@ -109,8 +109,8 @@ pub fn script_mod(vm:&mut ScriptVm){
         let delay = script_value!(vm, args.delay);
         let callback = script_value!(vm, args.callback);
                 
-        if !delay.is_number() || !ScriptFnRef::script_type_check(vm.heap, callback){
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid timer arg type")
+        if !delay.is_number() || !ScriptFnRef::script_type_check(&vm.bx.heap, callback){
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid timer arg type")
         }
         let callback = ScriptFnRef::script_from_value(vm, callback);
                 
@@ -131,7 +131,7 @@ pub fn script_mod(vm:&mut ScriptVm){
     vm.add_method(std, id_lut!(stop_timer), script_args_def!(timer=NIL), |vm, args|{
         let timer = script_value!(vm, args.timer);
         if !timer.is_id(){ 
-            return script_err_type_mismatch!(vm.thread.trap.pass(), "invalid timer arg type")
+            return script_err_type_mismatch!(vm.thread().trap.pass(), "invalid timer arg type")
         }
         let timer = timer.as_id().unwrap_or(id!());
         let cx = vm.cx_mut();

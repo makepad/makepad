@@ -58,19 +58,19 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
             return self.script_apply(vm, apply, scope, transformed);
         }
         if let Some(obj) = value.as_object(){
-            let len = vm.heap.vec_len(obj);
+            let len = vm.bx.heap.vec_len(obj);
             self.resize_with(len, || ScriptNew::script_new(vm));
             for i in 0..len{
-                if let Some(value) = vm.heap.vec_value_if_exist(obj, i){
+                if let Some(value) = vm.bx.heap.vec_value_if_exist(obj, i){
                     self[i].script_apply(vm, apply, scope, value);
                 }
             }
         }
         else if let Some(arr) = value.as_array(){
-            let len = vm.heap.array_len(arr);
+            let len = vm.bx.heap.array_len(arr);
             self.resize_with(len, || ScriptNew::script_new(vm));
             for i in 0..len{
-                let value = vm.heap.array_index_unchecked(arr, i);
+                let value = vm.bx.heap.array_index_unchecked(arr, i);
                 self[i].script_apply(vm, apply, scope, value);
             }
         }
@@ -83,8 +83,9 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
-        let arr = vm.heap.new_array();
-        let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
+        let arr = vm.bx.heap.new_array();
+        let trap = vm.bx.threads.cur().trap.pass();
+        let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
         // we swap the vec off of the heap to be able to script_to_value the rest
         let mut vec_store = ScriptArrayStorage::ScriptValue(Default::default());
         std::mem::swap(&mut vec_store, astore);
@@ -93,7 +94,8 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
             for v in self{
                 vec.push_back(v.script_to_value(vm));
             }
-            let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
+            let trap = vm.bx.threads.cur().trap.pass();
+            let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
             std::mem::swap(&mut vec_store, astore);
         }
         else{
@@ -102,7 +104,8 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
                 for v in self{
                     vec.push_back(v.script_to_value(vm));
                 }
-                let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
+                let trap = vm.bx.threads.cur().trap.pass();
+                let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
                 std::mem::swap(&mut vec_store, astore);
             }
         }
@@ -141,11 +144,11 @@ impl ScriptNew for Vec<u8> {
         value.is_string_like() || value.is_nil() || heap.has_apply_transform(value)
     }
     fn script_default(vm:&mut ScriptVm)->ScriptValue{
-        vm.heap.new_object().into()
+        vm.bx.heap.new_object().into()
     }
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
     fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
-        vm.heap.new_object().into()
+        vm.bx.heap.new_object().into()
     }
 }
 
@@ -158,13 +161,13 @@ impl ScriptApply for Vec<u8> {
         }
         if let Some(obj) = value.as_object(){
             self.clear();
-            for kv in vm.heap.vec_ref(obj){
+            for kv in vm.bx.heap.vec_ref(obj){
                 self.push(kv.value.as_f64().unwrap_or(0.0) as _);
             }
         }
         else if let Some(arr) = value.as_array(){
             self.clear();
-            match vm.heap.array_storage(arr){
+            match vm.bx.heap.array_storage(arr){
                 ScriptArrayStorage::ScriptValue(vec)=> for v in vec{ self.push((*v).into()) }
                 ScriptArrayStorage::F32(vec)=> for v in vec{ self.push(*v as _) }
                 ScriptArrayStorage::U32(vec)=> for v in vec{ self.push(*v as _) }
@@ -173,7 +176,7 @@ impl ScriptApply for Vec<u8> {
             }
         }
         else if let Some(str) = value.as_string(){
-            let str = vm.heap.string(str);
+            let str = vm.bx.heap.string(str);
             self.clear();
             self.extend(str.as_bytes());
         }
@@ -186,12 +189,13 @@ impl ScriptApply for Vec<u8> {
             self.clear();
         }
         else{
-            script_err_type_mismatch!(vm.thread.trap, "wrong vec type in apply");
+            script_err_type_mismatch!(vm.bx.threads.cur_ref().trap, "wrong vec type in apply");
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
-        let arr = vm.heap.new_array();
-        let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
+        let arr = vm.bx.heap.new_array();
+        let trap = vm.bx.threads.cur().trap.pass();
+        let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
         if let ScriptArrayStorage::U8(v) = astore{v.clear();v.extend(self)}
         else{*astore = ScriptArrayStorage::U8(self.clone());}
         arr.into()
@@ -205,11 +209,11 @@ impl ScriptNew for Vec<ScriptValue> {
          true
     }
     fn script_default(vm:&mut ScriptVm)->ScriptValue{
-        vm.heap.new_object().into()
+        vm.bx.heap.new_object().into()
     }
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
     fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
-        vm.heap.new_object().into()
+        vm.bx.heap.new_object().into()
     }
 }
 
@@ -222,13 +226,13 @@ impl ScriptApply for Vec<ScriptValue> {
         }
         if let Some(obj) = value.as_object(){
             self.clear();
-            for kv in vm.heap.vec_ref(obj){
+            for kv in vm.bx.heap.vec_ref(obj){
                 self.push(kv.value);
             }
         }
         else if let Some(arr) = value.as_array(){
             self.clear();
-            match vm.heap.array_storage(arr){
+            match vm.bx.heap.array_storage(arr){
                 ScriptArrayStorage::ScriptValue(vec)=> for v in vec{ self.push((*v).into()) }
                 ScriptArrayStorage::F32(vec)=> for v in vec{ self.push((*v).into()) }
                 ScriptArrayStorage::U32(vec)=> for v in vec{ self.push((*v).into()) }
@@ -245,8 +249,9 @@ impl ScriptApply for Vec<ScriptValue> {
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
-        let arr = vm.heap.new_array();
-        let astore = vm.heap.array_mut(arr, vm.thread.trap.pass()).unwrap();
+        let arr = vm.bx.heap.new_array();
+        let trap = vm.bx.threads.cur().trap.pass();
+        let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
         if let ScriptArrayStorage::ScriptValue(v) = astore{v.clear();v.extend(self)}
         else{*astore = ScriptArrayStorage::ScriptValue(self.iter().cloned().collect());}
         arr.into()
@@ -307,11 +312,11 @@ impl<K,V> ScriptApply for HashMap<K,V>
             self.clear()
         }
         else{
-            script_err_type_mismatch!(vm.thread.trap, "wrong vec type in apply");
+            script_err_type_mismatch!(vm.bx.threads.cur_ref().trap, "wrong vec type in apply");
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
-        let obj = vm.heap.new_object();
+        let obj = vm.bx.heap.new_object();
         vm.map_mut_with(obj, |vm, obj_map|{
             for (key,value) in self.iter(){
                 let key = key.script_to_value(vm);
@@ -378,11 +383,11 @@ impl<K,V> ScriptApply for BTreeMap<K,V>
             self.clear()
         }
         else{
-            script_err_type_mismatch!(vm.thread.trap, "wrong vec type in apply");
+            script_err_type_mismatch!(vm.bx.threads.cur_ref().trap, "wrong vec type in apply");
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
-        let obj = vm.heap.new_object();
+        let obj = vm.bx.heap.new_object();
         vm.map_mut_with(obj, |vm, obj_map|{
             for (key,value) in self.iter(){
                 let key = key.script_to_value(vm);

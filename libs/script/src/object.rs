@@ -584,97 +584,102 @@ impl ScriptObjectData{
     pub fn add_type_methods(native:&mut ScriptNative, heap: &mut ScriptHeap){
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(proto), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                return vm.heap.proto(sself)
+                return vm.bx.heap.proto(sself)
             }
-            script_err_unexpected!(vm.thread.trap, "proto called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "proto called on non-object value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(push), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                return vm.heap.vec_push_vec(sself, args, vm.thread.trap.pass());
+                let trap = vm.bx.threads.cur().trap.pass();
+                return vm.bx.heap.vec_push_vec(sself, args, trap);
             }
-            script_err_unexpected!(vm.thread.trap, "push called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "push called on non-object value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(pop), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                return vm.heap.vec_pop(sself, vm.thread.trap.pass()).value
+                let trap = vm.bx.threads.cur().trap.pass();
+                return vm.bx.heap.vec_pop(sself, trap).value
             }
-            script_err_unexpected!(vm.thread.trap, "pop called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "pop called on non-object value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(len), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                return vm.heap.vec_len(sself).into()
+                return vm.bx.heap.vec_len(sself).into()
             }
-            script_err_unexpected!(vm.thread.trap, "len called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "len called on non-object value")
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(gc_id), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
                 return sself.index().into()
             }
-            script_err_unexpected!(vm.thread.trap, "gc_id called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "gc_id called on non-object value")
         });
                     
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(extend), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                return vm.heap.vec_push_vec_of_vec(sself, args, false, vm.thread.trap.pass());
+                let trap = vm.bx.threads.cur().trap.pass();
+                return vm.bx.heap.vec_push_vec_of_vec(sself, args, false, trap);
             }
-            script_err_unexpected!(vm.thread.trap, "extend called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "extend called on non-object value")
         });
                     
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(splat), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                return vm.heap.vec_push_vec_of_vec(sself, args, true, vm.thread.trap.pass());
+                let trap = vm.bx.threads.cur().trap.pass();
+                return vm.bx.heap.vec_push_vec_of_vec(sself, args, true, trap);
             }
-            script_err_unexpected!(vm.thread.trap, "import called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "import called on non-object value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(freeze), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                vm.heap.freeze(sself);
+                vm.bx.heap.freeze(sself);
                 return sself.into()
             }
-            script_err_unexpected!(vm.thread.trap, "freeze called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "freeze called on non-object value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(freeze_api), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                vm.heap.freeze_api(sself);
+                vm.bx.heap.freeze_api(sself);
                 return sself.into()
             }
-            script_err_unexpected!(vm.thread.trap, "freeze_api called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "freeze_api called on non-object value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(freeze_module), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                vm.heap.freeze_module(sself);
+                vm.bx.heap.freeze_module(sself);
                 return sself.into()
             }
-            script_err_unexpected!(vm.thread.trap, "freeze_module called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "freeze_module called on non-object value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(freeze_component), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
-                vm.heap.freeze_component(sself);
+                vm.bx.heap.freeze_component(sself);
                 return sself.into()
             }
-            script_err_unexpected!(vm.thread.trap, "freeze_component called on non-object value")
+            script_err_unexpected!(vm.bx.threads.cur_ref().trap, "freeze_component called on non-object value")
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(retain), script_args!(cb=NIL), |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){
                 let fnptr = script_value!(vm, args.cb);
                 let mut i = 0;
-                while i < vm.heap.vec_len(sself){
+                while i < vm.bx.heap.vec_len(sself){
                     let value = script_value!(vm, sself[i]);
                     let ret = vm.call(fnptr, &[value]);
                     if ret.is_err(){
                         return ret;
                     }
-                    if !vm.heap.cast_to_bool(ret){
-                        vm.heap.vec_remove(sself, i, vm.thread.trap.pass());
+                    if !vm.bx.heap.cast_to_bool(ret){
+                        let trap = vm.bx.threads.cur().trap.pass();
+                        vm.bx.heap.vec_remove(sself, i, trap);
                     }
                     else{
                         i += 1
@@ -682,7 +687,7 @@ impl ScriptObjectData{
                 }
                 return NIL
             }
-            script_err_not_impl!(vm.thread.trap, "retain called on non-object value")
+            script_err_not_impl!(vm.bx.threads.cur_ref().trap, "retain called on non-object value")
         });
     }     
     

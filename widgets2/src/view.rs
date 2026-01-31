@@ -131,7 +131,7 @@ impl ScriptHook for View {
         // Handle $prop children from the object's vec
         if let Some(obj) = value.as_object() {
             // Copy vec data first to allow mutable vm access in the loop
-            let vec_data: SmallVec<[ScriptVecValue; 8]> = vm.heap.vec_ref(obj).iter().copied().collect();
+            let vec_data: SmallVec<[ScriptVecValue; 8]> = vm.bx.heap.vec_ref(obj).iter().copied().collect();
             for kv in vec_data {
                 if kv.key.is_prefixed_id() {  // $prop children
                     if let Some(id) = kv.key.as_id() {
