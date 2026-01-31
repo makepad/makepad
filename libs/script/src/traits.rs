@@ -337,6 +337,14 @@ pub trait ScriptApply{
     fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue){}
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{NIL}
     fn script_to_value_props(&self, _vm:&mut ScriptVm, _obj:ScriptObject){}
+    
+    /// Evaluates a ScriptMod and applies the result to self.
+    /// The ScriptMod is deduplicated by file/line/column so calling this repeatedly
+    /// with the same source location won't create multiple code blocks.
+    fn script_apply_eval(&mut self, vm:&mut ScriptVm, script_mod: ScriptMod){
+        let value = vm.eval(script_mod);
+        self.script_apply(vm, &Apply::Eval, &mut Scope::default(), value);
+    }
 }
 
 pub trait ScriptApplyDefault{

@@ -180,6 +180,7 @@ pub enum Apply {
     Reload,
     Update,
     Animate,
+    Eval,
     Default(usize),
     #[default]
     Over,
@@ -198,6 +199,7 @@ impl Apply {
     pub fn is_from_rust(&self) -> bool {
         match self {
             Self::Animate => true,
+            Self::Eval => true,
             Self::Over => true,
             _ => false
         }
@@ -227,6 +229,13 @@ impl Apply {
     pub fn is_animate(&self) -> bool {
         match self {
             Self::Animate => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_eval(&self) -> bool {
+        match self {
+            Self::Eval => true,
             _ => false
         }
     }

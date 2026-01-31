@@ -20,6 +20,11 @@ pub fn script_mod(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
+pub fn script_apply_eval(input: TokenStream) -> TokenStream {
+    script_apply_eval_impl(input)
+}
+
+#[proc_macro]
 pub fn script_err_gen(input: TokenStream) -> TokenStream {
     script_err_gen_impl(input)
 }
