@@ -24,8 +24,8 @@ pub mod image;
 // pub mod image_blend;
 pub mod icon;
 // pub mod link_label;
-// pub mod drop_down;
-// pub mod popup_menu;
+pub mod drop_down;
+pub mod popup_menu;
 // pub mod check_box;
 // pub mod radio_button;
 pub mod text_input;
@@ -122,6 +122,8 @@ pub use crate::{
 //    image_blend::*,
     icon::*,
 //    label::*,
+    popup_menu::*,
+    drop_down::*,
     slider::*,
     text_input::*,
 //    root::*,
@@ -129,7 +131,6 @@ pub use crate::{
 //    markdown::*,
 //    html::*,
 //    check_box::*,
-//    drop_down::*,
 //    modal::*,
 //    tooltip::*,
 //    popup_notification::*,
@@ -222,6 +223,8 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::button::script_mod(vm);
     crate::image::script_mod(vm);
     crate::icon::script_mod(vm);
+    crate::popup_menu::script_mod(vm);
+    crate::drop_down::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
     crate::loading_spinner::script_mod(vm);
