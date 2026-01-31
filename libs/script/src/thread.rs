@@ -302,7 +302,7 @@ impl ScriptThread{
                         //self.last_err = err.value;
                     }
                     else{
-                        while let Some(err) = self.trap.err.borrow_mut().pop(){
+                        while let Some(err) = self.trap.err.borrow_mut().pop_front(){
                             if let Some(ptr) = err.value.as_err(){
                                 if let Some(loc2) = code.ip_to_loc(ptr.ip){
                                     log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{} ({}:{})", err.message, err.origin_file, err.origin_line), LogLevel::Error);
