@@ -557,11 +557,13 @@ impl ScriptValue{
         
     pub const fn from_opcode(op:Opcode)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32)}
             
+    #[inline]
     pub const fn is_opcode(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OPCODE
     }
     
     pub const fn from_opcode_args(op:Opcode, args:OpcodeArgs)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32 | (args.0 as u64))}
+    #[inline]
     pub const fn as_opcode(&self)->Option<(Opcode,OpcodeArgs)>{
         if self.is_opcode(){
             return Some((Opcode(((self.0>>32) & 0xff) as u8),OpcodeArgs((self.0 & 0xffff_ffff) as u32)))
@@ -743,6 +745,7 @@ impl ScriptValue{
     
     
     
+    #[inline]
     pub const fn from_f64(val:f64)->Self{
         if val.is_nan(){
             Self::NAN
@@ -752,6 +755,7 @@ impl ScriptValue{
         }
     }
         
+    #[inline]
     pub const fn as_f64(&self)->Option<f64>{
         if self.is_f64(){
             return Some(f64::from_bits(self.0))
@@ -768,6 +772,7 @@ impl ScriptValue{
         }
     }
     
+    #[inline]
     pub fn from_f64_traced_nan(val:f64, ip:ScriptIp)->Self{
         let bits = val.to_bits();
         if val.is_nan(){
@@ -783,6 +788,7 @@ impl ScriptValue{
         }
     }
     
+    #[inline]
     pub const fn is_f64(&self)->bool{
         self.0 <= Self::TYPE_TRACED_NAN_MAX
     }
