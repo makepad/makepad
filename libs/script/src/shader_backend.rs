@@ -243,6 +243,95 @@ impl ShaderBackend{
         }
     }
     
+    /// Generate a variable declaration with zero initialization for the backend.
+    /// For C-style backends (Metal, HLSL, GLSL): `type_name var_name = type_name(0);\n`
+    /// For WGSL: `var var_name:type_name = type_name();\n` (zero-initialized)
+    pub fn write_var_decl_zero_init(&self, out: &mut String, ty_name: LiveId, var_name: &str) {
+        match self {
+            Self::Metal | Self::Hlsl => {
+                // Use constructor with zero for compound types, literal for scalars
+                let zero = self.zero_literal(ty_name);
+                write!(out, "{} {} = {};\n", ty_name, var_name, zero).ok();
+            }
+            Self::Glsl => {
+                let zero = self.zero_literal(ty_name);
+                write!(out, "{} {} = {};\n", ty_name, var_name, zero).ok();
+            }
+            Self::Wgsl => {
+                let zero = self.zero_literal(ty_name);
+                write!(out, "var {}:{} = {};\n", var_name, ty_name, zero).ok();
+            }
+        }
+    }
+    
+    /// Returns the zero literal for a given backend type name.
+    fn zero_literal(&self, ty_name: LiveId) -> String {
+        match self {
+            Self::Metal | Self::Hlsl => {
+                match ty_name {
+                    // Scalars
+                    id!(float) => "0.0".to_string(),
+                    id!(half) => "0.0h".to_string(),
+                    id!(uint) => "0".to_string(),
+                    id!(int) => "0".to_string(),
+                    id!(bool) => "false".to_string(),
+                    // Vectors - use constructor syntax
+                    id!(float2) | id!(float3) | id!(float4) |
+                    id!(half2) | id!(half3) | id!(half4) |
+                    id!(uint2) | id!(uint3) | id!(uint4) |
+                    id!(int2) | id!(int3) | id!(int4) |
+                    id!(bool2) | id!(bool3) | id!(bool4) => format!("{}(0)", ty_name),
+                    // Matrices - use constructor syntax
+                    id!(float2x2) | id!(float2x3) | id!(float2x4) |
+                    id!(float3x2) | id!(float3x3) | id!(float3x4) |
+                    id!(float4x2) | id!(float4x3) | id!(float4x4) => format!("{}(0.0)", ty_name),
+                    // Default: use constructor with zero
+                    _ => format!("{}()", ty_name),
+                }
+            }
+            Self::Glsl => {
+                match ty_name {
+                    // Scalars
+                    id!(float) => "0.0".to_string(),
+                    id!(uint) => "0u".to_string(),
+                    id!(int) => "0".to_string(),
+                    id!(bool) => "false".to_string(),
+                    // Vectors - use constructor syntax
+                    id!(vec2) | id!(vec3) | id!(vec4) => format!("{}(0.0)", ty_name),
+                    id!(uvec2) | id!(uvec3) | id!(uvec4) => format!("{}(0u)", ty_name),
+                    id!(ivec2) | id!(ivec3) | id!(ivec4) => format!("{}(0)", ty_name),
+                    id!(bvec2) | id!(bvec3) | id!(bvec4) => format!("{}(false)", ty_name),
+                    // Matrices - use constructor syntax
+                    id!(mat2) | id!(mat3) | id!(mat4) => format!("{}(0.0)", ty_name),
+                    // Default: use constructor with zero
+                    _ => format!("{}(0)", ty_name),
+                }
+            }
+            Self::Wgsl => {
+                match ty_name {
+                    // Scalars
+                    id!(f32) => "0.0".to_string(),
+                    id!(f16) => "0.0h".to_string(),
+                    id!(u32) => "0u".to_string(),
+                    id!(i32) => "0i".to_string(),
+                    id!(bool) => "false".to_string(),
+                    // Vectors - use constructor syntax (WGSL allows empty constructor for zero)
+                    id!(vec2f) | id!(vec3f) | id!(vec4f) |
+                    id!(vec2h) | id!(vec3h) | id!(vec4h) |
+                    id!(vec2u) | id!(vec3u) | id!(vec4u) |
+                    id!(vec2i) | id!(vec3i) | id!(vec4i) |
+                    id!(vec2b) | id!(vec3b) | id!(vec4b) => format!("{}()", ty_name),
+                    // Matrices - empty constructor for zero
+                    id!(mat2x2f) | id!(mat2x3f) | id!(mat2x4f) |
+                    id!(mat3x2f) | id!(mat3x3f) | id!(mat3x4f) |
+                    id!(mat4x2f) | id!(mat4x3f) | id!(mat4x4f) => format!("{}()", ty_name),
+                    // Default: use empty constructor
+                    _ => format!("{}()", ty_name),
+                }
+            }
+        }
+    }
+    
     pub fn register_ids(&self){
         match self{
             Self::Metal | Self::Hlsl=>{

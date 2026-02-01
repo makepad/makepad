@@ -1,4 +1,5 @@
 use crate::{
+    makepad_micro_serde::*,
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
@@ -118,7 +119,7 @@ script_mod!{
     }
 }
 
-#[derive(Copy, Clone, Debug, Script, ScriptHook, Default)]
+#[derive(Copy, Clone, Debug, Script, ScriptHook, Default, SerRon, DeRon)]
 pub enum SplitterAxis {
     #[pick] 
     #[default]
@@ -126,7 +127,7 @@ pub enum SplitterAxis {
     Vertical
 }
 
-#[derive(Clone, Copy, Debug, Script, ScriptHook)]
+#[derive(Clone, Copy, Debug, Script, ScriptHook, SerRon, DeRon)]
 pub enum SplitterAlign {
     #[live(50.0)] FromA(f64),
     #[live(50.0)] FromB(f64),

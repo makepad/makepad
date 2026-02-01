@@ -723,69 +723,10 @@ impl ShaderFnCompiler {
                     return;
                 }
                 
-                // Not a RustInstance field - check if the actual value has a pod type
-                // (This path handles dynamically defined script fields)
-                let actual_value = vm.bx.heap.value(obj, field_id.into(), self.trap.pass());
-                let ty = Self::type_from_value(vm, actual_value);
-                let concrete_ty = match ty {
-                    ShaderType::Pod(pt) => Some(pt),
-                    ShaderType::PodType(pt) => Some(pt),
-                    _ => None,
-                };
-
-                if let Some(pod_ty) = concrete_ty {
-                    // This is a script-defined pod value
-                    let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE);
-                    vm.bx.heap.pod_type_name_if_not_set(pod_ty, field_id);
-                    if !output.io.iter().any(|io| io.name == field_id) {
-                        output.io.push(ShaderIo {
-                            kind,
-                            name: field_id,
-                            ty: pod_ty,
-                            buffer_index: None,
-                        });
-                    }
-                    let mut s = self.stack.new_string();
-                    match prefix {
-                        ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
-                        ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
-                        ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
-                    };
-                    self.stack.push(self.trap.pass(), ShaderType::Pod(pod_ty), s);
-                    self.stack.free_string(field_s);
-                    self.stack.free_string(instance_s);
-                    return;
-                }
-                
-                // Fallback: Look up field type from type-check structure
-                self.trap.err.take(); // Clear any error
-                if let Some(field_type_id) = vm.bx.heap.field_type_from_type_check(obj, field_id) {
-                    if let Some(pod_ty) = vm.bx.heap.type_id_to_pod_type(field_type_id, &vm.bx.code.builtins.pod) {
-                        let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE);
-                        vm.bx.heap.pod_type_name_if_not_set(pod_ty, field_id);
-                        if !output.io.iter().any(|io| io.name == field_id) {
-                            output.io.push(ShaderIo {
-                                kind,
-                                name: field_id,
-                                ty: pod_ty,
-                                buffer_index: None,
-                            });
-                        }
-                        let mut s = self.stack.new_string();
-                        match prefix {
-                            ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
-                            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
-                            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
-                        };
-                        self.stack.push(self.trap.pass(), ShaderType::Pod(pod_ty), s);
-                        self.stack.free_string(field_s);
-                        self.stack.free_string(instance_s);
-                        return;
-                    }
-                }
-                
-                // Field not found on self
-                script_err_not_found!(self.trap, "field {:?} not found on self{}", field_id, suggest_property(&vm.bx.heap, obj, field_id.into()));
+                // Not a RustInstance field and no shader IO marker found.
+                // Script-defined shader fields MUST have an explicit marker: uniform(), instance(), varying(), etc.
+                // This prevents confusing inheritance behavior where child values are ignored.
+                script_err_shader!(self.trap, "shader field `{}` requires an explicit IO marker: use uniform(...), instance(...), or varying(...)", field_id);
                 self.stack.push(self.trap.pass(), ShaderType::Pod(vm.bx.code.builtins.pod.pod_void), String::new());
                 self.stack.free_string(field_s);
                 self.stack.free_string(instance_s);

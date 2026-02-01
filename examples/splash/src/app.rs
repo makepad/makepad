@@ -61,23 +61,174 @@ script_mod!{
         }
     }
     
-    // Left panel with controls, inputs, and fold headers
-    let LeftPanel = RoundedView{
-        draw_bg.color: #335 width: Fill height: Fill
+    // ===========================================
+    // TAB CONTENT TEMPLATES BY WIDGET TYPE
+    // ===========================================
+    
+    // Buttons tab - all button variants
+    let TabButtons = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
         ScrollYView{
-            width: Fill height: Fill flow: Down padding: 10 spacing: 10
-            Label{text: "Left Panel" draw_text.color: #fff}
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+            
+            Label{text: "Button Variants" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            
+            View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
+            $button: Button{text: "Standard"}
+            $flat_button: ButtonFlat{text: "Flat"}
+            $flatter_button: ButtonFlatter{text: "Flatter"}
+            
+            $icon_button: Button{
+                text: "With Icon"
+                icon_walk: Walk{width: 16 height: 16}
+                draw_icon.color: #fff
+                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+            }
+            
+            Hr{}
+            
+            Label{text: "Icon Only" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            View{width: Fill height: Fit flow: Right spacing: 15}
+            $test_icon: Icon{
+                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                draw_icon.color: #0ff
+                icon_walk: Walk{width: 32 height: 32}
+            }
+            Icon{
+                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_search.svg")
+                draw_icon.color: #f80
+                icon_walk: Walk{width: 32 height: 32}
+            }
+        }
+    }
+    
+    // Toggles tab - checkboxes, toggles, radio buttons
+    let TabToggles = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 10
+            
+            Label{text: "Checkboxes" draw_text.color: #fff draw_text.text_style.font_size: 13}
             $checkbox: CheckBox{text: "Enable feature"}
+            CheckBox{text: "Show notifications"}
+            CheckBox{text: "Auto-save on exit"}
+            
+            Hr{}
+            
+            Label{text: "Toggles" draw_text.color: #fff draw_text.text_style.font_size: 13}
             $toggle: Toggle{text: "Dark mode"}
+            Toggle{text: "Compact view"}
+            Toggle{text: "Developer mode"}
+            
+            Hr{}
+            
+            Label{text: "Radio Buttons" draw_text.color: #fff draw_text.text_style.font_size: 13}
             $radio1: RadioButton{text: "Option A"}
             $radio2: RadioButton{text: "Option B"}
             $radio3: RadioButton{text: "Option C"}
-            $link: LinkLabel{text: "Visit Makepad" url: "https://makepad.dev"}
+        }
+    }
+    
+    // Sliders tab - sliders and numeric inputs
+    let TabSliders = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
             
-            Label{text: "Username:" draw_text.color: #aaa}
-            $username: TextInput{width: Fill height: Fit empty_text: "Enter your username"}
-            Label{text: "Password:" draw_text.color: #aaa}
-            $password: TextInput{width: Fill height: Fit empty_text: "Enter your password" is_password: true}
+            Label{text: "Sliders" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            
+            $slider: Slider{width: Fill text: "Volume" min: 0.0 max: 100.0 default: 50.0}
+            Slider{width: Fill text: "Brightness" min: 0.0 max: 100.0 default: 75.0}
+            Slider{width: Fill text: "Contrast" min: -50.0 max: 50.0 default: 0.0}
+            Slider{width: Fill text: "Saturation" min: 0.0 max: 200.0 default: 100.0}
+            
+            Hr{}
+            
+            Label{text: "Fine Control" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            Slider{width: Fill text: "Font Size" min: 8.0 max: 24.0 default: 12.0}
+            Slider{width: Fill text: "Line Height" min: 1.0 max: 3.0 default: 1.5}
+        }
+    }
+    
+    // Text tab - labels, headings, text inputs
+    let TabText = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 10
+            
+            Label{text: "Headings" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            $heading: H1{text: "Heading 1"}
+            H2{text: "Heading 2"}
+            H3{text: "Heading 3"}
+            
+            Hr{}
+            
+            Label{text: "Text Inputs" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "Username:" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            $username: TextInput{width: Fill height: Fit empty_text: "Enter username"}
+            Label{text: "Password:" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            $password: TextInput{width: Fill height: Fit empty_text: "Enter password" is_password: true}
+            
+            Hr{}
+            
+            Label{text: "Links" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            $link: LinkLabel{text: "Visit Makepad" url: "https://makepad.dev"}
+        }
+    }
+    
+    // Dropdowns tab - dropdown and selection widgets
+    let TabDropdowns = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+            
+            Label{text: "Dropdown" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            $dropdown: DropDown{labels: ["Option A" "Option B" "Option C" "Option D"]}
+            
+            Hr{}
+            
+            Label{text: "More Dropdowns" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            DropDown{labels: ["Small" "Medium" "Large" "Extra Large"]}
+            DropDown{labels: ["Red" "Green" "Blue" "Yellow" "Purple"]}
+        }
+    }
+    
+    // HTML/Markdown tab
+    let TabMarkup = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 15
+            
+            Label{text: "Markdown" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            $markdown: Markdown{
+                width: Fill height: Fit
+                body: "# Heading\n\nThis is **bold** and *italic*.\n\n- List item 1\n- List item 2\n\n> Blockquote\n\n`inline code`"
+            }
+            
+            Hr{}
+            
+            Label{text: "HTML" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            $html: Html{
+                width: Fill height: Fit
+                body: "<h3>HTML Content</h3><p><b>Bold</b> and <i>italic</i> text.</p><ul><li>Item one</li><li>Item two</li></ul><p><a href='https://makepad.dev'>Link</a></p>"
+            }
+        }
+    }
+    
+    // Fold Headers tab
+    let TabFolds = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 10
+            
+            Label{text: "Fold Headers" draw_text.color: #fff draw_text.text_style.font_size: 13}
             
             FoldHeader{
                 header: View{
@@ -91,8 +242,7 @@ script_mod!{
                     padding: Inset{left: 23 top: 5 bottom: 10} spacing: 8
                     CheckBox{text: "Enable notifications"}
                     CheckBox{text: "Auto-save"}
-                    CheckBox{text: "Dark theme"}
-                    Toggle{text: "Sounds"}
+                    Toggle{text: "Dark theme"}
                 }
             }
             FoldHeader{
@@ -108,8 +258,6 @@ script_mod!{
                     Label{text: "document.txt" draw_text.color: #8af}
                     Label{text: "project.rs" draw_text.color: #8af}
                     Label{text: "config.toml" draw_text.color: #8af}
-                    Label{text: "readme.md" draw_text.color: #8af}
-                    Label{text: "main.rs" draw_text.color: #8af}
                 }
             }
             FoldHeader{
@@ -117,7 +265,7 @@ script_mod!{
                     width: Fill height: Fit flow: Right align: Align{y: 0.5}
                     padding: Inset{top: 5 bottom: 5} spacing: 8
                     FoldButton{}
-                    Label{text: "More Options" draw_text.color: #fff draw_text.text_style.font_size: 11}
+                    Label{text: "Advanced" draw_text.color: #fff draw_text.text_style.font_size: 11}
                 }
                 body: View{
                     width: Fill height: Fit flow: Down
@@ -130,83 +278,145 @@ script_mod!{
         }
     }
     
-    // Top right panel with dropdown, custom draw, spinner, and Markdown
-    let TopPanel = RoundedView{
-        draw_bg.color: #353 width: Fill height: Fill
+    // Lists tab - PortalList demo
+    let TabLists = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        NewsListTest{}
+    }
+    
+    // Media tab - images, spinners, custom draws
+    let TabMedia = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
         ScrollYView{
-            width: Fill height: Fill flow: Down padding: 10 spacing: 10
-            Label{text: "Top Panel" draw_text.color: #fff}
-            $dropdown: DropDown{labels: ["Option A" "Option B" "Option C" "Option D"]}
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+            
+            Label{text: "Images" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            $test_image: Image{width: 180 height: 120 fit: ImageFit.Stretch}
+            
+            Hr{}
+            
+            Label{text: "Loading Spinner" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            $spinner: LoadingSpinner{width: 40 height: 40}
+            
+            Hr{}
+            
+            Label{text: "Custom Shader" draw_text.color: #fff draw_text.text_style.font_size: 13}
             $test: TestDraw{}
-            $view: RoundedView{width: 250 height: 100 draw_bg.color: #494}
-            $spinner: LoadingSpinner{width: 50 height: 50}
-            $label: Label{text: "Hello from Label!" draw_text.color: #ff0}
-            
-            // Markdown widget test
-            $markdown: Markdown{
-                width: Fill height: Fit
-                body: "# Markdown Test\n\nThis is a **bold** and *italic* text.\n\n## Features\n\n- List item 1\n- List item 2\n- List item 3\n\n> This is a blockquote\n\nSome `inline code` here.\n\n```\nCode block example\n```"
-            }
-            
-            // Html widget test
-            $html: Html{
-                width: Fill height: Fit
-                body: "<h2>HTML Test</h2><p>This is a <b>bold</b> and <i>italic</i> paragraph.</p><ul><li>Item one</li><li>Item two</li><li>Item three</li></ul><blockquote>A quote block</blockquote><p>Here is some <code>inline code</code> and a <a href='https://makepad.dev'>link</a>.</p>"
-            }
         }
-    }
-    
-    // Bottom left panel with buttons, sliders, images
-    let BottomLeftPanel = RoundedView{
-        draw_bg.color: #533 width: Fill height: Fill
-        ScrollYView{
-            width: Fill height: Fill flow: Down padding: 10 spacing: 10
-            Label{text: "Bottom Panel" draw_text.color: #fff}
-            $heading: H1{text: "This is a Heading"}
-            $button: Button{text: "Click Me!"}
-            $flat_button: ButtonFlat{text: "Flat Button"}
-            $flatter_button: ButtonFlatter{text: "Flatter Button"}
-            $slider: Slider{width: 200 text: "Volume" min: 0.0 max: 100.0 default: 50.0}
-            $icon_button: Button{
-                text: "Icon Button"
-                icon_walk: Walk{width: 20 height: 20}
-                draw_icon.color: #fff
-                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
-            }
-            $test_image: Image{width: 200 height: 150 fit: ImageFit.Stretch}
-            $test_icon: Icon{
-                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
-                draw_icon.color: #0ff
-                icon_walk: Walk{width: 50 height: 50}
-            }
-        }
-    }
-    
-    // Bottom right panel with PortalList demo
-    let BottomRightPanel = RoundedView{
-        draw_bg.color: #353 width: Fill height: Fill
-        $news_list: NewsListTest{}
     }
     
     mod.res.load_all() do #(App::script_component(vm)){
-        ui: Window{
-            pass.clear_color: vec4(0.3 0.3 0.3 1.0)
-            window.inner_size: vec2(800 600)
-            $body +: {
-                $splitter: Splitter{
-                    axis: SplitterAxis.Horizontal
-                    align: SplitterAlign.Weighted(0.3)
-                    a: LeftPanel{}
-                    b: Splitter{
-                        axis: SplitterAxis.Vertical
-                        align: SplitterAlign.Weighted(0.6)
-                        a: TopPanel{}
-                        b: Splitter{
+        ui: Root{
+            $main_window: Window{
+                pass.clear_color: vec4(0.3 0.3 0.3 1.0)
+                window.inner_size: vec2(1000 700)
+                $body +: {
+                        $dock: Dock{
+                        width: Fill height: Fill
+                        
+                        // Dock structure - organized by widget type
+                        $root: DockSplitter{
                             axis: SplitterAxis.Horizontal
-                            align: SplitterAlign.Weighted(0.5)
-                            a: BottomLeftPanel{}
-                            b: BottomRightPanel{}
+                            align: SplitterAlign.FromA(280.0)
+                            a: @$left_tabs
+                            b: @$split1
                         }
+                        
+                        $split1: DockSplitter{
+                            axis: SplitterAxis.Vertical
+                            align: SplitterAlign.FromB(250.0)
+                            a: @$center_tabs
+                            b: @$bottom_tabs
+                        }
+                        
+                        // Left panel - input widgets
+                        $left_tabs: DockTabs{
+                            tabs: [@$toggles_tab, @$sliders_tab, @$text_tab, @$dropdowns_tab]
+                            selected: 0
+                            closable: false
+                        }
+                        
+                        // Center panel - content widgets
+                        $center_tabs: DockTabs{
+                            tabs: [@$buttons_tab, @$markup_tab, @$media_tab]
+                            selected: 0
+                            closable: true
+                        }
+                        
+                        // Bottom panel - containers/lists
+                        $bottom_tabs: DockTabs{
+                            tabs: [@$lists_tab, @$folds_tab]
+                            selected: 0
+                            closable: true
+                        }
+                        
+                        // Individual tabs
+                        $buttons_tab: DockTab{
+                            name: "Buttons"
+                            template: @$CloseableTab
+                            kind: @$TabButtons
+                        }
+                        
+                        $toggles_tab: DockTab{
+                            name: "Toggles"
+                            template: @$CloseableTab
+                            kind: @$TabToggles
+                        }
+                        
+                        $sliders_tab: DockTab{
+                            name: "Sliders"
+                            template: @$CloseableTab
+                            kind: @$TabSliders
+                        }
+                        
+                        $text_tab: DockTab{
+                            name: "Text"
+                            template: @$CloseableTab
+                            kind: @$TabText
+                        }
+                        
+                        $dropdowns_tab: DockTab{
+                            name: "Selects"
+                            template: @$CloseableTab
+                            kind: @$TabDropdowns
+                        }
+                        
+                        $markup_tab: DockTab{
+                            name: "Markup"
+                            template: @$CloseableTab
+                            kind: @$TabMarkup
+                        }
+                        
+                        $folds_tab: DockTab{
+                            name: "Folds"
+                            template: @$CloseableTab
+                            kind: @$TabFolds
+                        }
+                        
+                        $lists_tab: DockTab{
+                            name: "Lists"
+                            template: @$CloseableTab
+                            kind: @$TabLists
+                        }
+                        
+                        $media_tab: DockTab{
+                            name: "Media"
+                            template: @$CloseableTab
+                            kind: @$TabMedia
+                        }
+                        
+                        // Content templates by widget type
+                        $TabButtons: TabButtons{}
+                        $TabToggles: TabToggles{}
+                        $TabSliders: TabSliders{}
+                        $TabText: TabText{}
+                        $TabDropdowns: TabDropdowns{}
+                        $TabMarkup: TabMarkup{}
+                        $TabFolds: TabFolds{}
+                        $TabLists: TabLists{}
+                        $TabMedia: TabMedia{}
                     }
                 }
             }

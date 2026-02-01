@@ -6,10 +6,10 @@ use crate::{
     widget::*,
 };
 
-live_design! {
-    link widgets;
+script_mod!{
+    use mod.prelude.widgets_internal.*
     
-    pub CachedWidget = {{CachedWidget}} {}
+    mod.widgets.CachedWidget = #(CachedWidget::register_widget(vm))
 }
 
 /// A Singleton wrapper widget that caches and reuses its child widget across multiple instances.
@@ -24,13 +24,13 @@ live_design! {
 /// In the DSL, you can use `CachedWidget` as follows:
 ///
 /// ```
-/// <CachedWidget> {
-///     my_widget = <MyWidget> {}
+/// CachedWidget {
+///     my_widget = MyWidget {}
 /// }
 /// ```
 ///
 /// The child widget will be created once and cached.
-/// Subsequent uses of this `CachedWidget` with the same child id (`mid_widget`) will reuse the cached instance.
+/// Subsequent uses of this `CachedWidget` with the same child id (`my_widget`) will reuse the cached instance.
 /// Note that only one child is supported per `CachedWidget`.
 /// 
 /// CachedWidget supports Makepad's widget finding mechanism, allowing child widgets to be located as expected.
@@ -38,101 +38,84 @@ live_design! {
 /// # Implementation Details
 ///
 /// - Uses a global `WidgetWrapperCache` to store cached widgets
-/// - Handles widget creation and caching in the `after_apply` hook
+/// - Handles widget creation and caching in the `on_after_apply` hook
 /// - Delegates most widget operations (like event handling and drawing) to the cached child widget
 ///
 /// # Note
 ///
 /// While `CachedWidget` can significantly improve performance for complex, frequently used widgets,
 /// it should be used judiciously. Overuse of caching can lead to unexpected behavior if not managed properly.
-#[derive(Live, LiveRegisterWidget, WidgetRef)]
+#[derive(Script, WidgetRef, WidgetRegister)]
 pub struct CachedWidget {
-    #[walk]
-    walk: Walk,
+    #[source] source: ScriptObjectRef,
+    #[walk] walk: Walk,
+    #[rust] area: Area,
 
     /// The ID of the child widget template
-    #[rust]
-    template_id: LiveId,
+    #[rust] template_id: LiveId,
 
-    /// The cached child widget template
-    #[rust]
-    template: Option<LivePtr>,
+    /// The cached child widget template value
+    #[rust] template_value: Option<ScriptValue>,
 
     /// The cached child widget instance
-    #[rust]
-    widget: Option<WidgetRef>,
+    #[rust] widget: Option<WidgetRef>,
 }
 
-impl LiveHook for CachedWidget {
-    fn before_apply(
-        &mut self,
-        _cx: &mut Cx,
-        apply: &Apply,
-        _index: usize,
-        _nodes: &[LiveNode],
-    ) {
-        if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
-            self.template = None;
+impl ScriptHook for CachedWidget {
+    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        if apply.is_update() {
+            self.template_value = None;
         }
     }
 
-    /// Handles the application of instance properties to this CachedWidget.
-    ///
-    /// In the case of `CachedWidget` This method is responsible for setting up the template 
-    /// for the child widget, and applying any changes to an existing widget instance.
-    fn apply_value_instance(
-        &mut self,
-        cx: &mut Cx,
-        apply: &Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> usize {
-        if nodes[index].is_instance_prop() {
-            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index) {
-                if self.template.is_some() {
-                    nodes.skip_node(index);
-                    error!("CachedWidget only supports one child widget, skipping additional instances");
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        // Handle children from the object's vec - get the first prefixed child
+        if let Some(obj) = value.as_object() {
+            vm.vec_with(obj, |_vm, vec| {
+                for kv in vec {
+                    if let Some(id) = kv.key.as_id() {
+                        if kv.key.is_prefixed_id() {
+                            if self.template_value.is_some() {
+                                error!("CachedWidget only supports one child widget, skipping additional instances");
+                                continue;
+                            }
+                            self.template_id = id;
+                            self.template_value = Some(kv.value);
+                        }
+                    }
                 }
-                let id = nodes[index].id;
-                self.template_id = id;
-                self.template = Some(live_ptr);
-
-                if let Some(widget) = &mut self.widget {
-                    widget.apply(cx, apply, index, nodes);
-                }
+            });
+        }
+        
+        // If widget already exists, apply updates to it
+        if let Some(widget) = &mut self.widget {
+            if let Some(template_value) = self.template_value {
+                widget.script_apply(vm, apply, scope, template_value);
             }
-        } else {
-            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+            return;
         }
-        nodes.skip_node(index)
-    }
-
-    /// Handles the creation or retrieval of the cached widget after applying changes.
-    ///
-    /// This method is called after all properties have been applied to the widget.
-    /// It ensures that the child widget is properly cached and retrieved from the global cache.
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
+        
         // Ensure the global widget cache exists
+        let cx = vm.cx_mut();
         if !cx.has_global::<WidgetWrapperCache>() {
             cx.set_global(WidgetWrapperCache::default())
         }
-
-        if self.widget.is_none() {
-            // Try to retrieve the widget from the global cache
-            if let Some(widget) = cx
-                .get_global::<WidgetWrapperCache>()
+        
+        // Try to retrieve the widget from the global cache
+        if let Some(widget) = cx
+            .get_global::<WidgetWrapperCache>()
+            .map
+            .get_mut(&self.template_id)
+        {
+            self.widget = Some(widget.clone());
+        } else if let Some(template_value) = self.template_value {
+            // If not in cache, create a new widget and add it to the cache
+            let widget = WidgetRef::script_from_value_scoped(vm, scope, template_value);
+            let cx = vm.cx_mut();
+            cx.get_global::<WidgetWrapperCache>()
                 .map
-                .get_mut(&self.template_id)
-            {
-                self.widget = Some(widget.clone());
-            } else {
-                // If not in cache, create a new widget and add it to the cache
-                let widget = WidgetRef::new_from_ptr(cx, self.template);
-                cx.get_global::<WidgetWrapperCache>()
-                    .map
-                    .insert(self.template_id, widget.clone());
-                self.widget = Some(widget);
-            }
+                .insert(self.template_id, widget.clone());
+            self.widget = Some(widget);
         }
     }
 }
@@ -145,11 +128,12 @@ impl WidgetNode for CachedWidget {
             self.walk
         }
     }
+    
     fn area(&self) -> Area {
         if let Some(widget) = &self.widget {
             widget.area()
         } else {
-            Area::default()
+            self.area
         }
     }
 
@@ -192,7 +176,6 @@ impl Widget for CachedWidget {
         if let Some(widget) = &self.widget {
             return widget.draw_walk(cx, scope, walk);
         }
-
         DrawStep::done()
     }
 }
