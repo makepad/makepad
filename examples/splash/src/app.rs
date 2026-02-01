@@ -554,34 +554,34 @@ script_mod!{
         $root: DockSplitter{
             axis: SplitterAxis.Horizontal
             align: SplitterAlign.FromA(280.0)
-            a: @$left_tabs
-            b: @$split1
+            a: $left_tabs
+            b: $split1
         }
                                 
         $split1: DockSplitter{
             axis: SplitterAxis.Vertical
             align: SplitterAlign.FromB(250.0)
-            a: @$center_tabs
-            b: @$bottom_tabs
+            a: $center_tabs
+            b: $bottom_tabs
         }
                                 
         // Left panel - input widgets
         $left_tabs: DockTabs{
-            tabs: [@$toggles_tab, @$sliders_tab, @$text_tab, @$dropdowns_tab]
+            tabs: [$toggles_tab, $sliders_tab, $text_tab, $dropdowns_tab]
             selected: 0
             closable: false
         }
                                 
         // Center panel - content widgets
         $center_tabs: DockTabs{
-            tabs: [@$buttons_tab, @$markup_tab, @$media_tab, @$modal_tab]
+            tabs: [$buttons_tab, $markup_tab, $media_tab, $modal_tab]
             selected: 0
             closable: true
         }
                                 
         // Bottom panel - containers/lists
         $bottom_tabs: DockTabs{
-            tabs: [@$lists_tab, @$folds_tab, @$expandable_tab, @$filetree_tab]
+            tabs: [$filetree_tab $lists_tab, $folds_tab, $expandable_tab]
             selected: 0
             closable: true
         }
@@ -589,74 +589,74 @@ script_mod!{
         // Individual tabs
         $buttons_tab: DockTab{
             name: "Buttons"
-            template: @$CloseableTab
-            kind: @$TabButtons
+            template: $CloseableTab
+            kind: $TabButtons
         }
                                 
         $toggles_tab: DockTab{
             name: "Toggles"
-            template: @$CloseableTab
-            kind: @$TabToggles
+            template: $CloseableTab
+            kind: $TabToggles
         }
                                 
         $sliders_tab: DockTab{
             name: "Sliders"
-            template: @$CloseableTab
-            kind: @$TabSliders
+            template: $CloseableTab
+            kind: $TabSliders
         }
                                 
         $text_tab: DockTab{
             name: "Text"
-            template: @$CloseableTab
-            kind: @$TabText
+            template: $CloseableTab
+            kind: $TabText
         }
                                 
         $dropdowns_tab: DockTab{
             name: "Selects"
-            template: @$CloseableTab
-            kind: @$TabDropdowns
+            template: $CloseableTab
+            kind: $TabDropdowns
         }
                                 
         $markup_tab: DockTab{
             name: "Markup"
-            template: @$CloseableTab
-            kind: @$TabMarkup
+            template: $CloseableTab
+            kind: $TabMarkup
         }
                                 
         $folds_tab: DockTab{
             name: "Folds"
-            template: @$CloseableTab
-            kind: @$TabFolds
+            template: $CloseableTab
+            kind: $TabFolds
         }
                                 
         $lists_tab: DockTab{
             name: "Lists"
-            template: @$CloseableTab
-            kind: @$TabLists
+            template: $CloseableTab
+            kind: $TabLists
         }
                                 
         $expandable_tab: DockTab{
             name: "Expandable"
-            template: @$CloseableTab
-            kind: @$TabExpandable
+            template: $CloseableTab
+            kind: $TabExpandable
         }
                                 
         $media_tab: DockTab{
             name: "Media"
-            template: @$CloseableTab
-            kind: @$TabMedia
+            template: $CloseableTab
+            kind: $TabMedia
         }
         
         $filetree_tab: DockTab{
             name: "FileTree"
-            template: @$CloseableTab
-            kind: @$TabFileTree
+            template: $CloseableTab
+            kind: $TabFileTree
         }
         
         $modal_tab: DockTab{
             name: "Modal"
-            template: @$CloseableTab
-            kind: @$TabModal
+            template: $CloseableTab
+            kind: $TabModal
         }
                                 
         // Content templates by widget type
