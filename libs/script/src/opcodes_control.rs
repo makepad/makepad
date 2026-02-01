@@ -88,17 +88,20 @@ impl<'a> ScriptVm<'a> {
     }
     
     pub(crate) fn handle_for_2(&mut self, opargs: OpcodeArgs) {
+        // for k v in source: k = key (obj) or index (array/range), v = value
         let source = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let value_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();
-        let index_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();
-        self.begin_for_loop(opargs.to_u32() as _, source, value_id, Some(index_id), None);
+        let value_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();  // second (value)
+        let first_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();  // first (key/index)
+        // Pass first_id as key_id - for objects it gets key, for arrays/ranges it gets index
+        self.begin_for_loop(opargs.to_u32() as _, source, value_id, None, Some(first_id));
     }
     
     pub(crate) fn handle_for_3(&mut self, opargs: OpcodeArgs) {
+        // for i k v in source: i = index, k = key, v = value (objects only)
         let source = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let value_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();
-        let index_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();
-        let key_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();
+        let value_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();  // third (value)
+        let key_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();    // second (key)
+        let index_id = self.bx.threads.cur().pop_stack_value().as_id().unwrap();  // first (index)
         self.begin_for_loop(opargs.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
     }
     
