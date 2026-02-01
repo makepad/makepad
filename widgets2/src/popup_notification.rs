@@ -5,62 +5,60 @@ use crate::{
     widget::*
 };
 
-live_design!{
-    link widgets;
-    use link::widgets::*;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
     
-    pub PopupNotificationBase = {{PopupNotification}} {}
-        
-    pub PopupNotification = <PopupNotificationBase> {
+    mod.widgets.PopupNotificationBase = #(PopupNotification::register_widget(vm))
+    
+    mod.widgets.PopupNotification = mod.widgets.PopupNotificationBase{
         width: Fill
         height: Fill
         flow: Overlay
-        align: {x: 1.0, y: 0.0}
+        align: Align{x: 1.0 y: 0.0}
         
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                return vec4(0., 0., 0., 0.0)
+        draw_bg +: {
+            pixel: fn() {
+                return vec4(0. 0. 0. 0.0)
             }
         }
         
-        content: <View> {
+        $content: View{
             flow: Overlay
             width: Fit
             height: Fit
             
-            cursor: Default
+            cursor: MouseCursor.Default
             capture_overload: true
         }
     }
 }
 
-
-#[derive(Live, Widget)]
+#[derive(Script, Widget)]
 pub struct PopupNotification {
-    #[live]
-    #[find]
-    content: View,
+    #[source] source: ScriptObjectRef,
+    
+    #[deref]
+    view: View,
 
-    #[rust(DrawList2d::new(cx))]
-    draw_list: DrawList2d,
+    #[rust] draw_list: Option<DrawList2d>,
 
-    #[redraw]
-    #[live]
-    draw_bg: DrawQuad,
-    #[layout]
-    layout: Layout,
-    #[walk]
-    walk: Walk,
+    #[live] draw_bg: DrawQuad,
 
-    #[rust]
-    opened: bool,
+    #[rust] opened: bool,
 }
 
-impl LiveHook for PopupNotification {
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
-        self.draw_list.redraw(cx);
+impl ScriptHook for PopupNotification {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+    
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        vm.with_cx_mut(|cx| {
+            if let Some(draw_list) = &self.draw_list {
+                draw_list.redraw(cx);
+            }
+        });
     }
 }
 
@@ -70,24 +68,25 @@ impl Widget for PopupNotification {
             return;
         }
 
-        self.content.handle_event(cx, event, scope);
+        self.view.handle_event(cx, event, scope);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        self.draw_list.begin_overlay_reuse(cx);
+        let draw_list = self.draw_list.as_mut().unwrap();
+        draw_list.begin_overlay_reuse(cx);
         
         let size = cx.current_pass_size();
-        cx.begin_root_turtle(size, self.layout);
-        self.draw_bg.begin(cx, self.walk, self.layout);
+        cx.begin_root_turtle(size, self.view.layout);
+        self.draw_bg.begin(cx, self.view.walk, self.view.layout);
 
         if self.opened {
-            let _ = self.content.draw_all(cx, scope);
+            let _ = self.view.draw_all(cx, scope);
         }
 
         self.draw_bg.end(cx);
 
         cx.end_pass_sized_turtle();
-        self.draw_list.end(cx);
+        self.draw_list.as_mut().unwrap().end(cx);
 
         DrawStep::done()
     }
@@ -106,6 +105,14 @@ impl PopupNotification {
 }
 
 impl PopupNotificationRef {
+    pub fn is_open(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.opened
+        } else {
+            false
+        }
+    }
+
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.open(cx);

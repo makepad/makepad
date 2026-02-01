@@ -1,84 +1,79 @@
-
 use crate::{
     widget::*,
     makepad_derive_widget::*,
     makepad_draw::*,
 };
 
-live_design!{
-    link widgets;
-    pub PageFlipBase = {{PageFlip}} {}
-    pub PageFlip = <PageFlipBase>{
-    }
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
+    
+    mod.widgets.PageFlipBase = #(PageFlip::register_widget(vm))
+    mod.widgets.PageFlip = mod.widgets.PageFlipBase{}
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct PageFlip {
+    #[source] source: ScriptObjectRef,
     #[rust] area: Area,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     #[live(false)] lazy_init: bool,
     #[live] active_page: LiveId,
     #[rust] draw_state: DrawStateWrap<Walk>,
-    #[rust] pointers: ComponentMap<LiveId, LivePtr>,
+    #[rust] templates: ComponentMap<LiveId, ScriptValue>,
     #[rust] pages: ComponentMap<LiveId, WidgetRef>,
 }
 
-impl LiveHook for PageFlip {
-    
-    fn before_apply(&mut self, _cx: &mut Cx, apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
-            self.pointers.clear();
+impl ScriptHook for PageFlip {
+    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        if apply.is_update() {
+            self.templates.clear();
         }
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
-        match apply.from {
-            ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
-                if !self.lazy_init{
-                    for (page_id, ptr) in self.pointers.iter(){
-                        self.pages.get_or_insert(cx, *page_id, | cx | {
-                            WidgetRef::new_from_ptr(cx, Some(*ptr))
-                        });
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        // Handle $prop children from the object's vec (these are our page templates)
+        if let Some(obj) = value.as_object() {
+            vm.vec_with(obj, |vm, vec| {
+                for kv in vec {
+                    if kv.key.is_prefixed_id() {  // $prop children are our page templates
+                        if let Some(id) = kv.key.as_id() {
+                            self.templates.insert(id, kv.value);
+                            
+                            // If we already have this page instantiated, apply updates to it
+                            if let Some(page) = self.pages.get_mut(&id) {
+                                page.script_apply(vm, apply, scope, kv.value);
+                            }
+                        }
                     }
                 }
-            }
-            _=>()
+            });
         }
-    }
         
-    
-    // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        let id = nodes[index].id;
-        match apply.from {
-            ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id,..} => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
-                    let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                    self.pointers.insert(id, live_ptr);
-                    // find if we have the page and apply
-                    if let Some(node) = self.pages.get_mut(&id) {
-                        node.apply(cx, apply, index, nodes);
-                    }
-                }
-                else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+        // If not lazy_init, create all pages upfront
+        if !self.lazy_init && (apply.is_new() || apply.is_update()) {
+            for (page_id, template) in self.templates.iter() {
+                if !self.pages.contains_key(page_id) {
+                    let page = WidgetRef::script_from_value_scoped(vm, scope, *template);
+                    self.pages.insert(*page_id, page);
                 }
             }
-            _ => ()
         }
-        nodes.skip_node(index)
     }
 }
 
 impl PageFlip {
     /// Returns the widget for the given page templated ID, creating it if necessary.
     pub fn page(&mut self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
-        if let Some(ptr) = self.pointers.get(&page_id) {
-            let entry = self.pages.get_or_insert(cx, page_id, |cx| {
-                WidgetRef::new_from_ptr(cx, Some(*ptr))
-            });
-            Some(entry.clone())
+        if let Some(template) = self.templates.get(&page_id).copied() {
+            if !self.pages.contains_key(&page_id) {
+                let page = cx.with_vm(|vm| {
+                    WidgetRef::script_from_value(vm, template)
+                });
+                self.pages.insert(page_id, page);
+            }
+            self.pages.get(&page_id).cloned()
         } else {
             error!("Template not found: {page_id}. Did you add it to the <PageFlip> instance in `live_design!{{}}`?");
             None
@@ -94,22 +89,24 @@ impl PageFlip {
     }
 }
 
-impl WidgetNode for PageFlip{
-    fn walk(&mut self, _cx:&mut Cx) -> Walk{
+impl WidgetNode for PageFlip {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
-    fn area(&self)->Area{self.area}
     
-    fn redraw(&mut self, cx: &mut Cx){
+    fn area(&self) -> Area {
+        self.area
+    }
+    
+    fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx)
     }
         
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         if let Some(page) = self.pages.get(&path[0]) {
-            if path.len() == 1{
+            if path.len() == 1 {
                 results.push(page.clone());
-            }
-            else{
+            } else {
                 page.find_widgets(&path[1..], cached, results);
             }
         }
@@ -118,31 +115,31 @@ impl WidgetNode for PageFlip{
         }
     }
     
-    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
         for page in self.pages.values() {
             let x = page.uid_to_widget(uid);
-            if !x.is_empty(){return x}
+            if !x.is_empty() {
+                return x
+            }
         }
         WidgetRef::empty()
     }
 }        
 
 impl Widget for PageFlip {
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        if event.requires_visibility(){
+        if event.requires_visibility() {
             if let Some(page) = self.pages.get_mut(&self.active_page) {
                 let item_uid = page.widget_uid();
-                cx.group_widget_actions(uid, item_uid, |cx|{
+                cx.group_widget_actions(uid, item_uid, |cx| {
                     page.handle_event(cx, event, scope)
                 });
             }
-        }
-        else{
-            for page in self.pages.values(){
+        } else {
+            for page in self.pages.values() {
                 let item_uid = page.widget_uid();
-                cx.group_widget_actions(uid, item_uid, |cx|{
+                cx.group_widget_actions(uid, item_uid, |cx| {
                     page.handle_event(cx, event, scope)
                 });
             }
@@ -151,17 +148,16 @@ impl Widget for PageFlip {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(page) = self.page(cx, self.active_page) {
-            if self.draw_state.begin_with(cx, &(), | cx, _ | {
+            if self.draw_state.begin_with(cx, &(), |cx, _| {
                 page.walk(cx)
             }) {
                 self.begin(cx, walk);
             }
             if let Some(walk) = self.draw_state.get() {
-                page.draw_walk(cx, scope, walk) ?;
+                page.draw_walk(cx, scope, walk)?;
             }
             self.end(cx);
-        }
-        else {
+        } else {
             self.begin(cx, walk);
             self.end(cx);
         }
