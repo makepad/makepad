@@ -499,6 +499,35 @@ impl NumericValue {
         }
     }
     
+    /// Normalize a vector (returns unit vector in same direction)
+    pub fn normalize(self) -> Self {
+        let len = self.length() as f32;
+        if len == 0.0 {
+            return self;
+        }
+        let inv_len = 1.0 / len;
+        match self {
+            NumericValue::F64(v) => NumericValue::F64(if v >= 0.0 { 1.0 } else { -1.0 }),
+            NumericValue::Vec2(v) => NumericValue::Vec2(Vec2f { x: v.x * inv_len, y: v.y * inv_len }),
+            NumericValue::Vec3(v) => NumericValue::Vec3(Vec3f { x: v.x * inv_len, y: v.y * inv_len, z: v.z * inv_len }),
+            NumericValue::Vec4(v) => NumericValue::Vec4(Vec4f { x: v.x * inv_len, y: v.y * inv_len, z: v.z * inv_len, w: v.w * inv_len }),
+            NumericValue::Color(v) => NumericValue::Color(Vec4f { x: v.x * inv_len, y: v.y * inv_len, z: v.z * inv_len, w: v.w * inv_len }),
+            NumericValue::Mat4(m) => NumericValue::Mat4(m), // undefined for matrices
+        }
+    }
+    
+    /// Cross product (only defined for Vec3)
+    pub fn cross(self, other: Self) -> Self {
+        match (self, other) {
+            (NumericValue::Vec3(a), NumericValue::Vec3(b)) => NumericValue::Vec3(Vec3f {
+                x: a.y * b.z - a.z * b.y,
+                y: a.z * b.x - a.x * b.z,
+                z: a.x * b.y - a.y * b.x,
+            }),
+            _ => self.zero_like(), // Undefined for other types
+        }
+    }
+    
     /// Create a zero value of the same type
     pub fn zero_like(&self) -> Self {
         match self {
