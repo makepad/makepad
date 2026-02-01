@@ -2,7 +2,7 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
-    text_flow::{TextFlow, FlowBlockType},
+    text_flow::TextFlow,
     link_label::LinkLabel,
     WidgetMatchEvent,
 };
