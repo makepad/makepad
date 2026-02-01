@@ -205,6 +205,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     {
         script_mod!{ 
             mod.prelude.widgets_internal = {
+                ..mod.res,
                 ..mod.animator,
                 ..mod.animator.Play,
                 ..mod.animator.Ease,
@@ -215,6 +216,7 @@ pub fn script_mod(vm: &mut ScriptVm){
                 ..mod.turtle,
                 ..mod.turtle.Size,
                 ..mod.turtle.Flow,
+                ..mod.std
                 theme:mod.theme,
                 draw:mod.draw,
                 MouseCursor:mod.draw.MouseCursor
@@ -280,6 +282,8 @@ pub fn script_mod(vm: &mut ScriptVm){
     {
         script_mod!{
             mod.prelude.widgets = {
+                ..mod.res,
+                ..mod.std,
                 ..mod.pod,
                 ..mod.math,
                 ..mod.sdf,

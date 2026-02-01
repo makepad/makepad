@@ -14,7 +14,7 @@ script_mod!{
     
     mod.widgets.CheckBoxBase = #(CheckBox::register_widget(vm))
     
-    mod.widgets.CheckBoxFlat = mod.std.set_type_default() do mod.widgets.CheckBoxBase{
+    mod.widgets.CheckBoxFlat = set_type_default() do mod.widgets.CheckBoxBase{
         width: Fit
         height: Fit
         padding: theme.mspace_2

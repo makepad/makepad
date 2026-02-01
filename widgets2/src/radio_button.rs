@@ -14,7 +14,7 @@ script_mod!{
     
     mod.widgets.RadioButtonBase = #(RadioButton::register_widget(vm))
     
-    mod.widgets.RadioButtonFlat = mod.std.set_type_default() do mod.widgets.RadioButtonBase{
+    mod.widgets.RadioButtonFlat = set_type_default() do mod.widgets.RadioButtonBase{
         width: Fit
         height: Fit
         align: Align{x: 0., y: 0.}

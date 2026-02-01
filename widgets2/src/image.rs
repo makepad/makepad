@@ -13,7 +13,7 @@ script_mod!{
     
     mod.widgets.ImageFit = #(ImageFit::script_api(vm))
     
-    mod.std.set_type_default() do #(DrawImage::script_shader(vm)){
+    set_type_default() do #(DrawImage::script_shader(vm)){
         ..mod.draw.DrawQuad
         image_texture: texture_2d(float)
         opacity: 1.0
@@ -37,7 +37,7 @@ script_mod!{
     
     mod.widgets.ImageBase = #(Image::register_widget(vm))
     
-    mod.widgets.Image = mod.std.set_type_default() do mod.widgets.ImageBase{
+    mod.widgets.Image = set_type_default() do mod.widgets.ImageBase{
         width: 100
         height: 100
     }

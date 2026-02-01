@@ -12,7 +12,7 @@ script_mod! {
     
     mod.widgets.IconBase = #(Icon::register_widget(vm))
     
-    mod.widgets.Icon = mod.std.set_type_default() do mod.widgets.IconBase{
+    mod.widgets.Icon = set_type_default() do mod.widgets.IconBase{
         width: Fit
         height: Fit
         

@@ -14,7 +14,7 @@ script_mod!{
     
     mod.widgets.ButtonBase = #(Button::register_widget(vm))
     
-    mod.widgets.ButtonFlat = mod.std.set_type_default() do mod.widgets.ButtonBase{
+    mod.widgets.ButtonFlat = set_type_default() do mod.widgets.ButtonBase{
         text: "Button"
         width: Fit
         height: Fit

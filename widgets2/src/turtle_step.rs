@@ -3,7 +3,7 @@ use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 script_mod!{
     use mod.prelude.widgets_internal.*
     
-    mod.widgets.TurtleStep = mod.std.set_type_default() do #(TurtleStep::register_widget(vm)){
+    mod.widgets.TurtleStep = set_type_default() do #(TurtleStep::register_widget(vm)){
         width: Fit
         height: Fit
     }

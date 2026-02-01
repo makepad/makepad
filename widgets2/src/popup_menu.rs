@@ -11,7 +11,7 @@ script_mod!{
     mod.widgets.PopupMenuItemBase = #(PopupMenuItem::script_component(vm))
     mod.widgets.PopupMenuBase = #(PopupMenu::script_component(vm))
         
-    mod.widgets.PopupMenuItem = mod.std.set_type_default() do mod.widgets.PopupMenuItemBase{
+    mod.widgets.PopupMenuItem = set_type_default() do mod.widgets.PopupMenuItemBase{
         width: Fill
         height: Fit
         align: Align{y: 0.5}
@@ -250,7 +250,7 @@ script_mod!{
         }
     }
 
-    mod.widgets.PopupMenuFlat = mod.std.set_type_default() do mod.widgets.PopupMenuBase{
+    mod.widgets.PopupMenuFlat = set_type_default() do mod.widgets.PopupMenuBase{
         width: 150.
         height: Fit
         flow: Flow.Down

@@ -14,7 +14,7 @@ script_mod!{
     
     mod.widgets.TabBarBase = #(TabBar::register_widget(vm))
     
-    mod.widgets.TabBar = mod.std.set_type_default() do mod.widgets.TabBarBase{
+    mod.widgets.TabBar = set_type_default() do mod.widgets.TabBarBase{
         $CloseableTab: mod.widgets.Tab{closeable: true}
         $PermanentTab: mod.widgets.Tab{closeable: false}
 

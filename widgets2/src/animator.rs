@@ -70,7 +70,8 @@ pub fn script_mod(vm:&mut ScriptVm){
     
     script_mod!{
         use mod.animator;
-        animator.Animator = mod.std.set_type_default() do #(Animator::script_ext(vm)){}
+        use mod.std.*;
+        animator.Animator = set_type_default() do #(Animator::script_ext(vm)){}
         animator.AnimatorGroup = #(AnimatorGroup::script_ext(vm)){}
         animator.AnimatorState =  #(AnimatorState::script_api(vm)){}
         animator.Play =  #(Play::script_api(vm))

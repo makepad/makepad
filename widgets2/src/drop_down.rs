@@ -16,10 +16,10 @@ script_mod!{
     
     mod.widgets.DrawLabelTextBase = #(DrawLabelText::script_component(vm))
     mod.widgets.DropDownBase = #(DropDown::register_widget(vm))
-    mod.std.set_type_default() do #(DrawLabelText::script_shader(vm)){
+    set_type_default() do #(DrawLabelText::script_shader(vm)){
         ..mod.draw.DrawText // splat in draw quad
     }
-    mod.widgets.DropDownFlat = mod.std.set_type_default() do mod.widgets.DropDownBase{
+    mod.widgets.DropDownFlat = set_type_default() do mod.widgets.DropDownBase{
         width: Fit
         height: Fit
         align: TopLeft
@@ -301,7 +301,7 @@ script_mod!{
         }
     }
     
-    mod.widgets.DropDown = mod.std.set_type_default() do mod.widgets.DropDownFlat{
+    mod.widgets.DropDown = set_type_default() do mod.widgets.DropDownFlat{
         draw_bg +: {
             color: uniform(theme.color_outset)
             color_hover: uniform(theme.color_outset_hover)

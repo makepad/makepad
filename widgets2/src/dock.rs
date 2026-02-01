@@ -12,7 +12,7 @@ script_mod!{
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    mod.widgets.DrawRoundCorner = mod.std.set_type_default() do #(DrawRoundCorner::script_shader(vm)){
+    mod.widgets.DrawRoundCorner = set_type_default() do #(DrawRoundCorner::script_shader(vm)){
         ..mod.draw.DrawQuad
         border_radius: 20.
         flip: vec2(0.0, 0.0)
@@ -25,7 +25,7 @@ script_mod!{
     
     mod.widgets.DockBase = #(Dock::register_widget(vm))
     
-    mod.widgets.Dock = mod.std.set_type_default() do mod.widgets.DockBase{
+    mod.widgets.Dock = set_type_default() do mod.widgets.DockBase{
         flow: Down
 
         tab_bar: TabBarGradientY{}
