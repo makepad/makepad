@@ -1,4 +1,6 @@
 use makepad_widgets2::*;
+use makepad_widgets2::file_tree::FileTree;
+use makepad_widgets2::animator::Animate;
 use std::path::Path;
 
 app_main!(App);
@@ -89,9 +91,7 @@ script_mod!{
             }
             
             Hr{}
-                        
-            View{width: Fill height: Fit flow: Right spacing: 10}
-            $tooltip_btn1: Button{text: "Show Tooltip 1"}
+            
             Label{text: "Icon Only" draw_text.color: #888 draw_text.text_style.font_size: 10}
             View{width: Fill height: Fit flow: Right spacing: 15}
             $test_icon: Icon{
@@ -110,10 +110,45 @@ script_mod!{
             Label{text: "Tooltip Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
             Label{text: "Click buttons to show tooltips, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
             
+            View{width: Fill height: Fit flow: Right spacing: 10}
+            $tooltip_btn1: Button{text: "Show Tooltip 1"}
+            $tooltip_btn2: Button{text: "Show Tooltip 2"}
+            $tooltip_btn3: ButtonFlat{text: "Show Help Tip"}
+            
+            Hr{}
+            
+            Label{text: "Popup Notification Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "Click to show/hide notification popup" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            
+            View{width: Fill height: Fit flow: Right spacing: 10}
+            $show_popup_btn: Button{text: "Show Notification"}
+            $hide_popup_btn: ButtonFlat{text: "Hide Notification"}
         }
         
         // Tooltip overlay
         $buttons_tooltip: Tooltip{}
+        
+        // Popup notification overlay
+        $popup_notif: PopupNotification{
+            align: Align{x: 1.0 y: 0.0}
+            $content +: {
+                margin: Inset{top: 10 right: 10}
+                
+                RoundedView{
+                    width: 250
+                    height: Fit
+                    padding: 15
+                    draw_bg +: {
+                        color: uniform(#2a5)
+                        radius: uniform(8.0)
+                    }
+                    flow: Down spacing: 8
+                    
+                    Label{text: "Success!" draw_text.color: #fff draw_text.text_style.font_size: 12}
+                    Label{text: "Your changes have been saved successfully." draw_text.color: #dfd draw_text.text_style.font_size: 10}
+                }
+            }
+        }
     }
     
     // Toggles tab - checkboxes, toggles, radio buttons
@@ -353,6 +388,29 @@ script_mod!{
         NewsListTest{}
     }
     
+    // FileTree demo widget
+    let FileTreeDemo = #(FileTreeDemo::register_widget(vm)){
+        width: Fill
+        height: Fill
+        file_tree: FileTree{}
+    }
+    
+    // FileTree tab - file tree demo
+    let TabFileTree = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        flow: Down padding: 10 spacing: 10
+        
+        Label{text: "FileTree Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
+        Label{text: "Displays file system hierarchy" draw_text.color: #888 draw_text.text_style.font_size: 10}
+        View{
+            optimize: ViewOptimize.DrawList
+            FileTreeDemo{
+                width: Fill height: Fill
+            }
+        }
+    }
+    
     // Media tab - images, spinners, custom draws
     let TabMedia = SolidView{
         width: Fill height: Fill
@@ -523,7 +581,7 @@ script_mod!{
                                 
         // Bottom panel - containers/lists
         $bottom_tabs: DockTabs{
-            tabs: [@$lists_tab, @$folds_tab, @$expandable_tab]
+            tabs: [@$lists_tab, @$folds_tab, @$expandable_tab, @$filetree_tab]
             selected: 0
             closable: true
         }
@@ -589,6 +647,12 @@ script_mod!{
             kind: @$TabMedia
         }
         
+        $filetree_tab: DockTab{
+            name: "FileTree"
+            template: @$CloseableTab
+            kind: @$TabFileTree
+        }
+        
         $modal_tab: DockTab{
             name: "Modal"
             template: @$CloseableTab
@@ -607,6 +671,8 @@ script_mod!{
         $TabMedia: TabMedia{}
         $TabExpandable: TabExpandable{}
         $TabModal: TabModal{}
+        $TabFileTree: TabFileTree{
+        }
     }
     
     load_all_resources() do #(App::script_component(vm)){
@@ -667,6 +733,13 @@ impl MatchEvent for App {
                 "This is the standard button. Click it to perform the primary action."
             );
         }
+        
+        // Popup notification demo
+        if self.ui.button(ids!($show_popup_btn)).clicked(actions) {
+            log!("Showing popup notification");
+            self.ui.popup_notification(ids!($popup_notif)).open(cx);
+        }
+
        
         if let Some(value) = self.ui.check_box(ids!($checkbox)).changed(actions) {
             log!("Checkbox changed: {}", value);
@@ -837,5 +910,131 @@ impl Widget for NewsListTest {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
+    }
+}
+
+// FileTreeDemo widget demonstrating FileTree usage
+#[derive(Script, ScriptHook, Widget)]
+pub struct FileTreeDemo {
+    #[redraw] #[live] file_tree: FileTree,
+    #[walk] walk: Walk,
+    #[rust] file_nodes: LiveIdMap<LiveId, FileNode>,
+    #[rust] initialized: bool,
+}
+
+pub struct FileNode {
+    pub name: String,
+    pub child_edges: Option<Vec<FileEdge>>,
+}
+
+pub struct FileEdge {
+    pub name: String,
+    pub file_node_id: LiveId,
+}
+
+impl FileTreeDemo {
+    fn draw_file_node(cx: &mut Cx2d, file_node_id: LiveId, file_tree: &mut FileTree, file_nodes: &LiveIdMap<LiveId, FileNode>) {
+        if let Some(file_node) = file_nodes.get(&file_node_id) {
+            match &file_node.child_edges {
+                Some(child_edges) => {
+                    if file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok() {
+                        for child_edge in child_edges {
+                            Self::draw_file_node(cx, child_edge.file_node_id, file_tree, file_nodes);
+                        }
+                        file_tree.end_folder();
+                    }
+                }
+                None => {
+                    file_tree.file(cx, file_node_id, &file_node.name);
+                }
+            }
+        }
+    }
+    
+    fn initialize_demo_tree(&mut self) {
+        // Create a demo file tree structure
+        let mut id_counter = 1u64;
+        let mut next_id = || {
+            let id = LiveId(id_counter);
+            id_counter += 1;
+            id
+        };
+        
+        // Create some demo files and folders
+        let file1_id = next_id();
+        let file2_id = next_id();
+        let file3_id = next_id();
+        let subdir_id = next_id();
+        let subfile1_id = next_id();
+        let subfile2_id = next_id();
+        let root_id = live_id!(root);
+        
+        // Files in subdirectory
+        self.file_nodes.insert(subfile1_id, FileNode {
+            name: "nested_file.rs".to_string(),
+            child_edges: None,
+        });
+        self.file_nodes.insert(subfile2_id, FileNode {
+            name: "another_file.txt".to_string(),
+            child_edges: None,
+        });
+        
+        // Subdirectory
+        self.file_nodes.insert(subdir_id, FileNode {
+            name: "src".to_string(),
+            child_edges: Some(vec![
+                FileEdge { name: "nested_file.rs".to_string(), file_node_id: subfile1_id },
+                FileEdge { name: "another_file.txt".to_string(), file_node_id: subfile2_id },
+            ]),
+        });
+        
+        // Root level files
+        self.file_nodes.insert(file1_id, FileNode {
+            name: "main.rs".to_string(),
+            child_edges: None,
+        });
+        self.file_nodes.insert(file2_id, FileNode {
+            name: "Cargo.toml".to_string(),
+            child_edges: None,
+        });
+        self.file_nodes.insert(file3_id, FileNode {
+            name: "README.md".to_string(),
+            child_edges: None,
+        });
+        
+        // Root folder
+        self.file_nodes.insert(root_id, FileNode {
+            name: "project".to_string(),
+            child_edges: Some(vec![
+                FileEdge { name: "src".to_string(), file_node_id: subdir_id },
+                FileEdge { name: "main.rs".to_string(), file_node_id: file1_id },
+                FileEdge { name: "Cargo.toml".to_string(), file_node_id: file2_id },
+                FileEdge { name: "README.md".to_string(), file_node_id: file3_id },
+            ]),
+        });
+    }
+}
+
+impl Widget for FileTreeDemo {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.initialized {
+            self.initialize_demo_tree();
+            self.initialized = true;
+        }
+        
+        while self.file_tree.draw_walk(cx, scope, walk).is_step() {
+            self.file_tree.set_folder_is_open(cx, live_id!(root), true, Animate::No);
+            Self::draw_file_node(
+                cx,
+                live_id!(root),
+                &mut self.file_tree,
+                &self.file_nodes
+            );
+        }
+        DrawStep::done()
+    }
+    
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.file_tree.handle_event(cx, event, scope);
     }
 }

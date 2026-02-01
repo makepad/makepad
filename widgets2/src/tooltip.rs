@@ -110,7 +110,7 @@ impl Widget for Tooltip {
             }
             Event::TouchUpdate(TouchUpdateEvent { touches, .. }) => {
                 if touches.iter().any(|tp| matches!(tp.state, event::TouchState::Start)) {
-                   // self.hide(cx);
+                   //self.hide(cx);
                 }
             }
             _ => { }
