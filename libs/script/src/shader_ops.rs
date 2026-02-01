@@ -35,19 +35,59 @@ impl ShaderFnCompiler {
         self.stack.push(self.trap.pass(), ty, s);
     }
 
-    pub(crate) fn handle_logic(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &str) {
-        let (t2, s2) = if opargs.is_u32() {
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
-        } else {
-            self.pop_resolved(vm, output)
-        };
-        let (t1, s1) = self.pop_resolved(vm, output);
-        let mut s = self.stack.new_string();
-        write!(s, "({} {} {})", s1, op, s2).ok();
-        let ty = type_table_logic(&t1, &t2, self.trap.pass(), &vm.bx.code.builtins.pod);
-        self.stack.push(self.trap.pass(), ty, s);
+    /// Handle LOGIC_AND_TEST / LOGIC_OR_TEST for shaders
+    /// These opcodes have short-circuit semantics in the interpreter, but in shaders
+    /// we evaluate both operands and combine them with the operator.
+    pub(crate) fn handle_logic_test(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &'static str) {
+        // Pop the first operand (already evaluated and on the stack)
+        let (first_type, first_operand) = self.pop_resolved(vm, output);
+        
+        // Calculate the target IP (where the jump would land in the interpreter)
+        let target_ip = self.trap.ip.index + opargs.to_u32();
+        
+        // Push a LogicOp marker - we'll combine when we reach target_ip
+        self.mes.push(ShaderMe::LogicOp {
+            target_ip,
+            op,
+            first_operand,
+            first_type,
+        });
+    }
+
+    /// Check if we've reached a logic operation's target IP and combine the operands
+    pub(crate) fn handle_logic_phi(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
+        // Loop to handle nested logic ops that may complete at the same IP
+        loop {
+            let should_handle = if let Some(ShaderMe::LogicOp { target_ip, .. }) = self.mes.last() {
+                self.trap.ip.index >= *target_ip
+            } else {
+                false
+            };
+            
+            if !should_handle {
+                break;
+            }
+            
+            // Pop the LogicOp and combine with the second operand on the stack
+            if let Some(ShaderMe::LogicOp { op, first_operand, first_type, .. }) = self.mes.pop() {
+                // Pop the second operand (result of evaluating the RHS) - must resolve Id types
+                let (second_type, second_operand) = self.pop_resolved(vm, output);
+                
+                // Combine them
+                let mut s = self.stack.new_string();
+                write!(s, "({} {} {})", first_operand, op, second_operand).ok();
+                
+                // Determine result type
+                let ty = type_table_logic(&first_type, &second_type, self.trap.pass(), &vm.bx.code.builtins.pod);
+                
+                // Push the combined result
+                self.stack.push(self.trap.pass(), ty, s);
+                
+                // Free the operand strings
+                self.stack.free_string(first_operand);
+                self.stack.free_string(second_operand);
+            }
+        }
     }
 
     pub(crate) fn handle_arithmetic(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &str, is_int: bool) {
