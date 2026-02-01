@@ -415,6 +415,16 @@ impl Animator{
         }
         
         false
+    }
+    
+    /// Check if any animation tracks are currently active
+    pub fn is_animating(&self) -> bool {
+        !self.tracks.is_empty()
+    }
+    
+    /// Check if a specific track (state group) is currently animating
+    pub fn is_track_animating(&self, track_id: LiveId) -> bool {
+        self.tracks.iter().any(|t| t.group_id == track_id)
     }   
     
     /// Handle animation events (NextFrame)
