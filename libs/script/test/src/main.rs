@@ -36,6 +36,19 @@ pub fn main(){
         Test2 = 2,
         Test3 = make_val(3)    
     }
+    
+    // Test enum with Vec<LiveId> field - reproducing the MenuItem issue
+    #[derive(Clone, Debug, Script, ScriptHook)]
+    pub enum MenuTest {
+        #[live { items: Vec::new() }]
+        Main { items: Vec<LiveId> },
+        
+        #[live { name: String::new(), items: Vec::new() }]
+        Sub { name: String, items: Vec<LiveId> },
+        
+        #[pick]
+        Line,
+    }
         
     #[derive(Script, ScriptHook)]
     #[repr(C)]
@@ -324,6 +337,18 @@ pub fn main(){
         try{EnumTest.Named{named_field:"true"}} assert(true) ok assert(false)
                         
         //assert(s.enm == EnumTest.Bare)
+        
+        // Test MenuTest enum with Vec<LiveId> field
+        println("Testing MenuTest enum with Vec<LiveId>...")
+        let MenuTest = #(MenuTest::script_api(vm));
+        println("MenuTest registered, trying to create Main variant...")
+        let m = MenuTest.Main{items: []}
+        println("Created Main with empty items")
+        let m2 = MenuTest.Sub{name: "File", items: []}
+        println("Created Sub with name and empty items")
+        let m3 = MenuTest.Line
+        println("Created Line")
+        println("MenuTest tests passed!")
         try{s{enm: EnumTest.Bare}} assert(false) ok assert(true)
         try{s{enm: 1.0}} assert(true) ok assert(false)
         try{s{enm: EnumTest.Named{named_field:1.0}}} assert(false) ok assert(true)

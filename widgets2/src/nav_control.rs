@@ -1,29 +1,27 @@
 use crate::makepad_draw::*;
 
 
-live_design!{
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
         
-    pub NavControlBase = {{NavControl}} {}
-    pub NavControl = <NavControlBase> {
-        draw_focus: {
-            fn pixel(self) -> vec4 {
+    mod.widgets.NavControlBase = #(NavControl::script_component(vm))
+    mod.widgets.NavControl = set_type_default() do mod.widgets.NavControlBase{
+        draw_focus +: {
+            pixel: fn() {
                 return #000f
             }
         }
-        draw_text: {
-            text_style: {
+        draw_text +: {
+            text_style +: {
                 font_size: 6
-            },
-            color: (THEME_COLOR_LABEL_INNER)
+            }
+            color: theme.color_label_inner
         }
     }
     
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 pub struct NavControl {
     #[live] draw_list: DrawList2d,
     #[live] draw_focus: DrawQuad,

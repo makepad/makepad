@@ -41,6 +41,9 @@ pub mod icon;
 
 pub mod adaptive_view;
 pub mod desktop_button;
+pub mod keyboard_view;
+pub mod window_menu;
+pub mod nav_control;
 pub mod window;
 
 pub mod popup_menu;
@@ -79,9 +82,7 @@ pub mod markdown;
 // pub mod multi_window;
 // pub mod stack_navigation;
 // pub mod expandable_panel;
-// pub mod desktop_button;
 // pub mod scroll_shadow;
-// pub mod window_menu;
 // pub mod multi_image;
 // pub mod modal;
 // pub mod tooltip;
@@ -91,14 +92,12 @@ pub mod markdown;
 // pub mod rotated_image;
 // pub mod slide_panel;
 // pub mod page_flip;
-// pub mod keyboard_view;
 // pub mod flat_list;
 // pub mod file_tree;
 // pub mod slides_view;
 // pub mod color_picker;
 // pub mod debug_view;
 // pub mod performance_view;
-// pub mod nav_control;
 // pub mod toggle_panel;
 // pub mod command_text_input;
 // pub mod touch_gesture;
@@ -132,6 +131,9 @@ pub use crate::{
     
     adaptive_view::*,
     desktop_button::*,
+    keyboard_view::*,
+    window_menu::*,
+    nav_control::*,
     window::*,
     
     popup_menu::*,
@@ -243,6 +245,9 @@ pub fn script_mod(vm: &mut ScriptVm){
             
     crate::adaptive_view::script_mod(vm);
     crate::desktop_button::script_mod(vm);
+    crate::keyboard_view::script_mod(vm);
+    crate::window_menu::script_mod(vm);
+    crate::nav_control::script_mod(vm);
     crate::window::script_mod(vm);
     
     crate::popup_menu::script_mod(vm);
