@@ -592,7 +592,29 @@ pub fn main(){
         let vmax = math.max(v, pod.vec3f(0, 0, 0))
         assert(vmax.x == 5f && vmax.y == 0f && vmax.z == 10f)
         
-                
+        // atan2 - computes atan(y/x) with correct quadrant
+        let at = math.atan2(1.0, 1.0)
+        assert(at > 0.78 && at < 0.79) // should be ~PI/4 = 0.785
+        let at2 = math.atan2(-1.0, -1.0)
+        assert(at2 < -2.35 && at2 > -2.36) // should be ~-3*PI/4
+        
+        // normalize - returns unit vector
+        let v = pod.vec3f(3, 0, 4)
+        let n = math.normalize(v)
+        assert(n.x > 0.59 && n.x < 0.61) // 3/5 = 0.6
+        assert(n.y == 0f)
+        assert(n.z > 0.79 && n.z < 0.81) // 4/5 = 0.8
+        let len_n = math.length(n)
+        assert(len_n > 0.99 && len_n < 1.01) // normalized vector has length 1
+        
+        // cross product - only for vec3
+        let x_axis = pod.vec3f(1, 0, 0)
+        let y_axis = pod.vec3f(0, 1, 0)
+        let z = math.cross(x_axis, y_axis)
+        assert(z.x == 0f && z.y == 0f && z.z == 1f) // x cross y = z
+        let neg_z = math.cross(y_axis, x_axis)
+        assert(neg_z.x == 0f && neg_z.y == 0f && neg_z.z == -1f) // y cross x = -z
+        
         // test wildcard use
         let m = {a_wild:1, b_wild:2}
         use m.*
@@ -1050,8 +1072,7 @@ pub fn main(){
                 let r = max(a, b)
                 let r = pow(a, b)
                 let r = step(a, b)
-                // TODO: atan2 not yet supported (atan with 2 args)
-                //let r = atan(a, b)
+                let r = atan2(a, b)
                 // 3-arg builtins
                 let r = clamp(a, 0f, b)
                 let r = mix(a, b, t)
@@ -1059,11 +1080,9 @@ pub fn main(){
                 // vec builtins
                 let v = vec3(1f, 2f, 3f)
                 let len = length(v)
-                // TODO: normalize not yet a shader builtin
-                //let n = normalize(v)
+                let n = normalize(v)
                 let d = dot(v, v)
-                // TODO: cross not yet a shader builtin
-                //let c = cross(v, vec3(0f, 1f, 0f))
+                let c = cross(v, vec3(0f, 1f, 0f))
                 let dist = distance(v, vec3(0f))
                 // vec versions of scalar builtins
                 let va = vec3(-1f, 0.5f, 2f)
@@ -1132,13 +1151,13 @@ pub fn main(){
                 let v2 = vec2(1f, 2f)
                 let v3 = vec3(1f, 2f, 3f)
                 let v4 = vec4(1f, 2f, 3f, 4f)
-                // TODO: vec2i/vec3i/vec4i/vec2u/vec3u/vec4u need wgsl conversion
-                //let v2i = vec2i(1i, 2i)
-                //let v3i = vec3i(1i, 2i, 3i)
-                //let v4i = vec4i(1i, 2i, 3i, 4i)
-                //let v2u = vec2u(1u, 2u)
-                //let v3u = vec3u(1u, 2u, 3u)
-                //let v4u = vec4u(1u, 2u, 3u, 4u)
+                // Integer vectors
+                let v2i = vec2i(1i, 2i)
+                let v3i = vec3i(1i, 2i, 3i)
+                let v4i = vec4i(1i, 2i, 3i, 4i)
+                let v2u = vec2u(1u, 2u)
+                let v3u = vec3u(1u, 2u, 3u)
+                let v4u = vec4u(1u, 2u, 3u, 4u)
                 let col = #f00
                 // var bindings (mutable)
                 var vf = 1f
