@@ -90,7 +90,7 @@ pub mod expandable_panel;
 // pub mod multi_window;
 // pub mod multi_image;
 
-// pub mod modal;
+pub mod modal;
 // pub mod tooltip;
 // pub mod popup_notification;
 // pub mod video;
@@ -174,6 +174,7 @@ pub use crate::{
     scroll_shadow::*,
     stack_navigation::*,
     expandable_panel::*,
+    modal::*,
     
     widget_match_event::WidgetMatchEvent,
 
@@ -292,6 +293,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::scroll_shadow::script_mod(vm);
     crate::stack_navigation::script_mod(vm);
     crate::expandable_panel::script_mod(vm);
+    crate::modal::script_mod(vm);
     
     #[cfg(feature = "html")]
     crate::html::script_mod(vm);
