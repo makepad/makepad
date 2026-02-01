@@ -362,6 +362,120 @@ script_mod!{
         }
     }
     
+    // Modal tab - modal dialog demos
+    let TabModal = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        flow: Overlay
+        
+        // Main content with buttons to trigger modals
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+            
+            Label{text: "Modal Dialogs" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "Click the buttons below to open different modal dialogs" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            
+            Hr{}
+            
+            Label{text: "Basic Modal" draw_text.color: #fff draw_text.text_style.font_size: 11}
+            $open_modal_btn: Button{text: "Open Modal"}
+            
+            Hr{}
+            
+            Label{text: "Confirmation Modal" draw_text.color: #fff draw_text.text_style.font_size: 11}
+            $open_confirm_modal_btn: Button{text: "Open Confirmation Dialog"}
+            
+            Hr{}
+            
+            Label{text: "Non-dismissable Modal" draw_text.color: #fff draw_text.text_style.font_size: 11}
+            Label{text: "This modal cannot be dismissed by clicking outside" draw_text.color: #888 draw_text.text_style.font_size: 9}
+            $open_nodismiss_modal_btn: Button{text: "Open Non-dismissable Modal"}
+            
+            Hr{}
+            
+            $modal_status: Label{text: "Modal status: Closed" draw_text.color: #8f8 draw_text.text_style.font_size: 10}
+        }
+        
+        // Basic Modal
+        $test_modal: Modal{
+            $content +: {
+                width: 300
+                height: Fit
+                padding: 20
+                spacing: 15
+                align: Center
+                
+                RoundedView{
+                    width: Fill height: Fit
+                    draw_bg.color: #445
+                    draw_bg.radius: 8.0
+                    padding: 20 spacing: 12
+                    flow: Down align: Center
+                    
+                    Label{text: "Basic Modal" draw_text.color: #fff draw_text.text_style.font_size: 14}
+                    Label{text: "This is a basic modal dialog. Click outside or press Escape to close." draw_text.color: #aaa draw_text.text_style.font_size: 10}
+                    
+                    View{height: 10}
+                    
+                    $close_modal_btn: Button{text: "Close Modal"}
+                }
+            }
+        }
+        
+        // Confirmation Modal
+        $confirm_modal: Modal{
+            $content +: {
+                width: 350
+                height: Fit
+                
+                RoundedView{
+                    width: Fill height: Fit
+                    draw_bg.color: #445
+                    draw_bg.radius: 8.0
+                    padding: 25 spacing: 15
+                    flow: Down
+                    
+                    Label{text: "Confirm Action" draw_text.color: #fff draw_text.text_style.font_size: 14}
+                    Label{text: "Are you sure you want to perform this action? This cannot be undone." draw_text.color: #aaa draw_text.text_style.font_size: 10}
+                    
+                    View{height: 10}
+                    
+                    View{
+                        width: Fill height: Fit
+                        flow: Right spacing: 10 align: Align{x: 1.0 y: 0.5}
+                        
+                        $cancel_confirm_btn: ButtonFlat{text: "Cancel"}
+                        $confirm_btn: Button{text: "Confirm"}
+                    }
+                }
+            }
+        }
+        
+        // Non-dismissable Modal
+        $nodismiss_modal: Modal{
+            can_dismiss: false
+            $content +: {
+                width: 320
+                height: Fit
+                
+                RoundedView{
+                    width: Fill height: Fit
+                    draw_bg.color: #544
+                    draw_bg.radius: 8.0
+                    padding: 25 spacing: 15
+                    flow: Down align: Center
+                    
+                    Label{text: "Non-dismissable Modal" draw_text.color: #fff draw_text.text_style.font_size: 14}
+                    Label{text: "This modal can only be closed by clicking the button below. Clicking outside or pressing Escape won't work." draw_text.color: #daa draw_text.text_style.font_size: 10}
+                    
+                    View{height: 10}
+                    
+                    $close_nodismiss_btn: Button{text: "I Understand, Close Modal"}
+                }
+            }
+        }
+    }
+    
     let AppDock = Dock{
         width: Fill height: Fill
                                 
@@ -389,7 +503,7 @@ script_mod!{
                                 
         // Center panel - content widgets
         $center_tabs: DockTabs{
-            tabs: [@$buttons_tab, @$markup_tab, @$media_tab]
+            tabs: [@$buttons_tab, @$markup_tab, @$media_tab, @$modal_tab]
             selected: 0
             closable: true
         }
@@ -461,6 +575,12 @@ script_mod!{
             template: @$CloseableTab
             kind: @$TabMedia
         }
+        
+        $modal_tab: DockTab{
+            name: "Modal"
+            template: @$CloseableTab
+            kind: @$TabModal
+        }
                                 
         // Content templates by widget type
         $TabButtons: TabButtons{}
@@ -473,6 +593,7 @@ script_mod!{
         $TabLists: TabLists{}
         $TabMedia: TabMedia{}
         $TabExpandable: TabExpandable{}
+        $TabModal: TabModal{}
     }
     
     load_all_resources() do #(App::script_component(vm)){
@@ -541,6 +662,68 @@ impl MatchEvent for App {
         
         if let Some(offset) = self.ui.expandable_panel(ids!($expandable)).scrolled_at(actions) {
             log!("ExpandablePanel scrolled to: {}", offset);
+        }
+        
+        // Modal tests
+        // Open basic modal
+        if self.ui.button(ids!($open_modal_btn)).clicked(actions) {
+            log!("Opening basic modal");
+            self.ui.modal(ids!($test_modal)).open(cx);
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Basic Modal Open");
+        }
+        
+        // Close basic modal
+        if self.ui.button(ids!($close_modal_btn)).clicked(actions) {
+            log!("Closing basic modal via button");
+            self.ui.modal(ids!($test_modal)).close(cx);
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Closed via button");
+        }
+        
+        // Check if basic modal was dismissed (clicked outside or pressed Escape)
+        if self.ui.modal(ids!($test_modal)).dismissed(actions) {
+            log!("Basic modal was dismissed");
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Dismissed (clicked outside or Escape)");
+        }
+        
+        // Open confirmation modal
+        if self.ui.button(ids!($open_confirm_modal_btn)).clicked(actions) {
+            log!("Opening confirmation modal");
+            self.ui.modal(ids!($confirm_modal)).open(cx);
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Confirmation Modal Open");
+        }
+        
+        // Cancel confirmation
+        if self.ui.button(ids!($cancel_confirm_btn)).clicked(actions) {
+            log!("Confirmation cancelled");
+            self.ui.modal(ids!($confirm_modal)).close(cx);
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Confirmation Cancelled");
+        }
+        
+        // Confirm action
+        if self.ui.button(ids!($confirm_btn)).clicked(actions) {
+            log!("Action confirmed!");
+            self.ui.modal(ids!($confirm_modal)).close(cx);
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Action Confirmed!");
+        }
+        
+        // Check if confirmation modal was dismissed
+        if self.ui.modal(ids!($confirm_modal)).dismissed(actions) {
+            log!("Confirmation modal was dismissed");
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Confirmation dismissed");
+        }
+        
+        // Open non-dismissable modal
+        if self.ui.button(ids!($open_nodismiss_modal_btn)).clicked(actions) {
+            log!("Opening non-dismissable modal");
+            self.ui.modal(ids!($nodismiss_modal)).open(cx);
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Non-dismissable Modal Open");
+        }
+        
+        // Close non-dismissable modal
+        if self.ui.button(ids!($close_nodismiss_btn)).clicked(actions) {
+            log!("Closing non-dismissable modal via button");
+            self.ui.modal(ids!($nodismiss_modal)).close(cx);
+            self.ui.label(ids!($modal_status)).set_text(cx, "Modal status: Non-dismissable closed via button");
         }
     }
 }
