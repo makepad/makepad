@@ -77,21 +77,28 @@ pub mod html;
 #[cfg(feature = "markdown")]
 pub mod markdown;
 
+// Touch gesture support (used by expandable_panel)
+pub mod touch_gesture;
+
+// Navigation and panels
+pub mod scroll_shadow;
+pub mod stack_navigation;
+pub mod expandable_panel;
+
 // Commented out modules (not yet converted)
 // pub mod vectorline;
 // pub mod multi_window;
-// pub mod stack_navigation;
-// pub mod expandable_panel;
-// pub mod scroll_shadow;
 // pub mod multi_image;
+
 // pub mod modal;
 // pub mod tooltip;
 // pub mod popup_notification;
-// pub mod web_view;
 // pub mod video;
+// pub mod page_flip;
+
+// pub mod web_view;
 // pub mod rotated_image;
 // pub mod slide_panel;
-// pub mod page_flip;
 // pub mod flat_list;
 // pub mod file_tree;
 // pub mod slides_view;
@@ -100,7 +107,6 @@ pub mod markdown;
 // pub mod performance_view;
 // pub mod toggle_panel;
 // pub mod command_text_input;
-// pub mod touch_gesture;
 // pub mod data_binding;
 // pub mod designer;
 // pub mod designer_dummy;
@@ -162,6 +168,12 @@ pub use crate::{
     tab::*,
     tab_bar::*,
     dock::*,
+    
+    // Navigation and panels
+    touch_gesture::*,
+    scroll_shadow::*,
+    stack_navigation::*,
+    expandable_panel::*,
     
     widget_match_event::WidgetMatchEvent,
 
@@ -275,6 +287,11 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::tab::script_mod(vm);
     crate::tab_bar::script_mod(vm);
     crate::dock::script_mod(vm);
+    
+    // Navigation and panels
+    crate::scroll_shadow::script_mod(vm);
+    crate::stack_navigation::script_mod(vm);
+    crate::expandable_panel::script_mod(vm);
     
     #[cfg(feature = "html")]
     crate::html::script_mod(vm);

@@ -1,38 +1,36 @@
 use crate::makepad_draw::*;
 
-live_design!{
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
     
-    DrawScrollShadowBase = {{DrawScrollShadow}} {}
+    set_type_default() do #(DrawScrollShadow::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
     
-    DrawScrollShadow = <DrawScrollShadowBase> {
+    mod.widgets.DrawScrollShadow = {
+        shadow_size: 4.0
         
-        shadow_size: 4.0,
-        
-        fn pixel(self) -> vec4 { // TODO: make the corner overlap properly with a distance field eq.
-            let is_viz = clamp(self.scroll * 0.1, 0., 1.);
-            let pos = self.pos;
-            let base = THEME_COLOR_BG_CONTAINER.xyz;
-            let alpha = 0.0;
+        pixel: fn() {
+            let is_viz = clamp(self.scroll * 0.1, 0., 1.)
+            let pos = self.pos
+            let base = theme.color_bg_container.xyz
+            let mut alpha = 0.0
             if self.shadow_is_top > 0.5 {
-                alpha = pow(pos.y, 0.5);
+                alpha = pow(pos.y, 0.5)
             }
             else {
-                alpha = pow(pos.x, 0.5);
+                alpha = pow(pos.x, 0.5)
             }
-            //turn vec4(base,is_viz);
-            return Pal::premul(mix(vec4(#000.xyz, is_viz), vec4(base, 0.), alpha));
+            return Pal.premul(mix(vec4(#000.xyz, is_viz), vec4(base, 0.), alpha))
         }
     }
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawScrollShadow {
-    #[live] shadow_size: f32,
     #[deref] draw_super: DrawQuad,
+    #[live] shadow_size: f32,
     #[live] shadow_is_top: f32,
     #[live] scroll: f32,
 }
@@ -51,7 +49,7 @@ impl DrawScrollShadow {
         });
         
         self.shadow_is_top = 1.0;
-        self.scroll = scroll.y  as f32;
+        self.scroll = scroll.y as f32;
         self.draw_abs(cx, Rect {
             pos: rect.pos + dvec2(0., offset.y) + scroll,
             size: dvec2(rect.size.x, shadow_size)
