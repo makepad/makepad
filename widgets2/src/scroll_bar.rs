@@ -295,7 +295,6 @@ impl ScrollBar {
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
         script_apply_eval!(cx, self.draw_bg, {
-            ~@HI
             norm_scroll:#(norm_scroll)
         });
     }
