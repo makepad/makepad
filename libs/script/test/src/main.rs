@@ -173,8 +173,91 @@ pub fn main(){
         use mod.std.println
         use mod.pod
                 
-        // array operations
+        // arithmetic operations
         let x = 1+2 assert(x == 3)
+        assert(10 - 3 == 7)
+        assert(10 / 2 == 5)
+        assert(10 % 3 == 1)
+        assert((!true) == false)
+        assert((!false) == true)
+        assert((3 << 2) == 12)
+        assert((12 >> 2) == 3)
+        assert((5 & 3) == 1)
+        assert((5 | 3) == 7)
+        assert((5 ^ 3) == 6)
+        let x = -5 assert(x == 0-5)
+        assert(-5 == 0-5) assert(-5 != 0) assert(-(-5) == 5)
+        
+        // operator precedence tests
+        assert(-5 + 3 == -2) assert(!true == false) assert(!false == true)
+        assert(2 + 3 * 4 == 14) assert((2 + 3) * 4 == 20)
+        assert(10 - 2 - 3 == 5) assert(10 - (2 - 3) == 11)
+        assert(8 / 2 / 2 == 2) assert(8 / (2 / 2) == 8)
+        assert(1 + 2 < 4) assert(!(1 + 2 < 2))
+        assert(1 < 2 && 3 < 4) assert(!(1 > 2 && 3 < 4))
+        assert(1 > 2 || 3 < 4) assert(!(1 > 2 || 3 > 4))
+        assert((1 & 3) == 1) assert((1 | 2) == 3) assert((3 ^ 1) == 2)
+        assert(1 << 2 == 4) assert(8 >> 2 == 2)
+        
+        // is type checks
+        assert(5 is number) assert(5.0 is number) assert(!(5 is string))
+        assert("hi" is string) assert(!("hi" is number))
+        assert(true is bool) assert(false is bool) assert(!(true is number))
+        assert(nil is nil) assert(!(5 is nil))
+        assert({x:1} is object) assert(#f00 is color) assert([1 2] is array)
+        
+        // comparison operations
+        assert(3 < 5) assert(!(5 < 3))
+        assert(5 > 3) assert(!(3 > 5))
+        assert(3 <= 3) assert(3 <= 5)
+        assert(5 >= 5) assert(5 >= 3)
+        assert(true && true) assert(!(true && false))
+        assert(true || false) assert(!(false || false))
+        // Short-circuit evaluation tests for ||, &&, |?
+        // Basic behavior tests
+        assert(true || false)
+        assert(!(false || false))
+        assert(true && true)
+        assert(!(true && false))
+        let x = nil let y = x |? 5 assert(y == 5)
+        let x = 3 let y = x |? 5 assert(y == 3)
+        
+        // Short-circuit tests using side effects
+        // || should not evaluate second operand if first is truthy
+        let counter = {v:0}
+        let inc = || { counter.v += 1; false }
+        let result = true || inc()
+        assert(result == true)
+        assert(counter.v == 0) // inc() should NOT have been called
+        
+        let result = false || inc()
+        assert(result == false)
+        assert(counter.v == 1) // inc() SHOULD have been called
+        
+        // && should not evaluate second operand if first is falsy
+        counter.v = 0
+        let result = false && inc()
+        assert(result == false)
+        assert(counter.v == 0) // inc() should NOT have been called
+        
+        let result = true && inc()
+        assert(result == false)
+        assert(counter.v == 1) // inc() SHOULD have been called
+        
+        // |? should not evaluate second operand if first is not nil
+        counter.v = 0
+        let inc_ret = || { counter.v += 1; 99 }
+        let x = 5
+        let result = x |? inc_ret()
+        assert(result == 5)
+        assert(counter.v == 0) // inc_ret() should NOT have been called
+        
+        let x = nil
+        let result = x |? inc_ret()
+        assert(result == 99)
+        assert(counter.v == 1) // inc_ret() SHOULD have been called
+        
+        // array operations
         let iv = [1 2 3 4] let ov = []
                         
         for v in iv ov.push(v) assert(iv == ov)
@@ -209,13 +292,46 @@ pub fn main(){
         assert("123456" == "123456")
         assert("123456" != "123")
                         
-        // test arrays        
+        // compound assignment ops        
         let x = 1 x += 2 assert(x == 3)
+        let x = 5 x -= 2 assert(x == 3)
+        let x = 3 x *= 4 assert(x == 12)
+        let x = 12 x /= 3 assert(x == 4)
+        let x = 10 x %= 3 assert(x == 1)
+        let x = 7 x &= 3 assert(x == 3)
+        let x = 5 x |= 2 assert(x == 7)
+        let x = 7 x ^= 3 assert(x == 4)
+        let x = 3 x <<= 2 assert(x == 12)
+        let x = 12 x >>= 2 assert(x == 3)
         let t = 3 t ?= 2 assert(t == 3)
         let t t ?= 2 assert(t == 2)
         let t = 0 t = 2 t += 1 assert(t==3)
+        // field compound assignments
         let x = {f:2} x.f+=2 assert(x.f == 4)
+        let x = {f:5} x.f-=2 assert(x.f == 3)
+        let x = {f:3} x.f*=4 assert(x.f == 12)
+        let x = {f:12} x.f/=3 assert(x.f == 4)
+        let x = {f:10} x.f%=3 assert(x.f == 1)
+        let x = {f:7} x.f&=3 assert(x.f == 3)
+        let x = {f:5} x.f|=2 assert(x.f == 7)
+        let x = {f:7} x.f^=3 assert(x.f == 4)
+        let x = {f:3} x.f<<=2 assert(x.f == 12)
+        let x = {f:12} x.f>>=2 assert(x.f == 3)
+        let x = {f:3} x.f?=5 assert(x.f == 3)
+        let x = {f:nil} x.f?=5 assert(x.f == 5)
+        // index compound assignments
         let x = [1,2] x[1]+=2 assert(x == [1 4])
+        let x = [1,5] x[1]-=2 assert(x[1] == 3)
+        let x = [1,3] x[1]*=4 assert(x[1] == 12)
+        let x = [1,12] x[1]/=3 assert(x[1] == 4)
+        let x = [1,10] x[1]%=3 assert(x[1] == 1)
+        let x = [1,7] x[1]&=3 assert(x[1] == 3)
+        let x = [1,5] x[1]|=2 assert(x[1] == 7)
+        let x = [1,7] x[1]^=3 assert(x[1] == 4)
+        let x = [1,3] x[1]<<=2 assert(x[1] == 12)
+        let x = [1,12] x[1]>>=2 assert(x[1] == 3)
+        let x = [1,3] x[1]?=5 assert(x[1] == 3)
+        let x = [1,nil] x[1]?=5 assert(x[1] == 5)
         // test loops
         let c = 0 for x in 4{ if c == 3 break; c += 1} assert(c==3)
         let c = 0 for x in 5{ if c == 4{break;}c += 1} assert(c==4);

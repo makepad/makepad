@@ -158,14 +158,17 @@ impl<'a> ScriptVm<'a> {
         let rhs = self.bx.threads.cur().pop_stack_value();
         let lhs = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let cmp = if let Some(id) = rhs.as_id(){
-            match lhs.value_type().to_redux(){
-                ScriptValueType::REDUX_NUMBER => id == id!(number).into(),
-                ScriptValueType::REDUX_NAN => id == id!(number).into() || id == id!(nan).into(),
-                ScriptValueType::REDUX_BOOL => id == id!(bool).into(),
-                ScriptValueType::REDUX_NIL => id == id!(nan).into(),
-                ScriptValueType::REDUX_COLOR => id == id!(color).into(),
-                ScriptValueType::REDUX_STRING => id == id!(string).into(),
-                ScriptValueType::REDUX_OBJECT => {
+            let ty = lhs.value_type();
+            let is_number = id == id!(number).into();
+            match ty {
+                // All numeric types match "is number"
+                ScriptValueType::F64 | ScriptValueType::F32 | ScriptValueType::F16 |
+                ScriptValueType::U32 | ScriptValueType::I32 | ScriptValueType::U40 => is_number,
+                ScriptValueType::NAN => is_number || id == id!(nan).into(),
+                ScriptValueType::BOOL => id == id!(bool).into(),
+                ScriptValueType::NIL => id == id!(nil).into(),
+                ScriptValueType::COLOR => id == id!(color).into(),
+                ScriptValueType::OBJECT => {
                     id == id!(object).into() || {
                         if let Some(rhs) = self.bx.threads.cur().scope_value(&self.bx.heap, id).as_object(){
                             if let Some(obj) = lhs.as_object(){
@@ -180,9 +183,15 @@ impl<'a> ScriptVm<'a> {
                         }
                     }
                 },
-                ScriptValueType::REDUX_ID => id == id!(id).into(),
+                ScriptValueType::ARRAY => id == id!(array).into(),
+                _ if ty.to_redux() == ScriptValueType::REDUX_STRING => id == id!(string).into(),
+                _ if ty.to_redux() == ScriptValueType::REDUX_ID => id == id!(id).into(),
                 _ => false
             }
+        }
+        else if rhs.is_nil(){
+            // `x is nil` where nil is the actual value
+            lhs.is_nil()
         }
         else if let Some(obj) = lhs.as_object(){
             self.bx.heap.has_proto(obj, rhs)
@@ -192,6 +201,49 @@ impl<'a> ScriptVm<'a> {
         };
         self.bx.threads.cur().push_stack_unchecked(cmp.into());
         self.bx.threads.cur().trap.goto_next();
+    }
+
+    // Short-circuit evaluation handlers
+    
+    /// || short-circuit: if first operand is truthy, skip second operand and keep value
+    pub(crate) fn handle_logic_or_test(&mut self, opargs: OpcodeArgs) {
+        let value = self.bx.threads.cur().peek_stack_resolved(&self.bx.heap);
+        let test = self.bx.heap.cast_to_bool(value);
+        if test {
+            // First operand is truthy - skip second operand, keep value on stack
+            self.bx.threads.cur().trap.goto_rel(opargs.to_u32());
+        } else {
+            // First operand is falsy - pop it and evaluate second operand
+            self.bx.threads.cur().pop_stack_value();
+            self.bx.threads.cur().trap.goto_next();
+        }
+    }
+    
+    /// && short-circuit: if first operand is falsy, skip second operand and keep value
+    pub(crate) fn handle_logic_and_test(&mut self, opargs: OpcodeArgs) {
+        let value = self.bx.threads.cur().peek_stack_resolved(&self.bx.heap);
+        let test = self.bx.heap.cast_to_bool(value);
+        if !test {
+            // First operand is falsy - skip second operand, keep value on stack
+            self.bx.threads.cur().trap.goto_rel(opargs.to_u32());
+        } else {
+            // First operand is truthy - pop it and evaluate second operand
+            self.bx.threads.cur().pop_stack_value();
+            self.bx.threads.cur().trap.goto_next();
+        }
+    }
+    
+    /// |? short-circuit: if first operand is not nil, skip second operand and keep value
+    pub(crate) fn handle_nil_or_test(&mut self, opargs: OpcodeArgs) {
+        let value = self.bx.threads.cur().peek_stack_resolved(&self.bx.heap);
+        if !value.is_nil() {
+            // First operand is not nil - skip second operand, keep value on stack
+            self.bx.threads.cur().trap.goto_rel(opargs.to_u32());
+        } else {
+            // First operand is nil - pop it and evaluate second operand
+            self.bx.threads.cur().pop_stack_value();
+            self.bx.threads.cur().trap.goto_next();
+        }
     }
 
     // Try / OK handlers
