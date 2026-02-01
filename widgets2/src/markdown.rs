@@ -100,7 +100,6 @@ script_mod!{
             color_hover: uniform(theme.color_label_inner_hover)
             color_pressed: uniform(theme.color_label_inner_down)
 
-            wrap: Wrapping.Word
             color: theme.color_label_inner
             text_style: theme.font_regular{
                 font_size: theme.font_size_p
@@ -121,7 +120,7 @@ script_mod!{
     
     mod.widgets.Markdown = mod.std.set_type_default() do mod.widgets.MarkdownBase{
         width: Fill height: Fit
-        flow: Flow.right_wrap()
+        flow: Flow.Right{wrap: true}
         padding: theme.mspace_1
                 
         font_size: theme.font_size_p
@@ -170,19 +169,19 @@ script_mod!{
         }
         
         code_layout: Layout{
-            flow: Flow.right_wrap()
+            flow: Flow.Right{wrap: true}
             padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: 10}
         }
         code_walk: Walk{width: Fill height: Fit}
         
         quote_layout: Layout{
-            flow: Flow.right_wrap()
+            flow: Flow.Right{wrap: true}
             padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
         quote_walk: Walk{width: Fill height: Fit}
         
         list_item_layout: Layout{
-            flow: Flow.right_wrap()
+            flow: Flow.Right{wrap: true}
             padding: theme.mspace_1
         }
         list_item_walk: Walk{
@@ -200,6 +199,8 @@ script_mod!{
             quote_bg_color: theme.color_bg_highlight
             quote_fg_color: theme.color_label_inner
             code_color: theme.color_bg_highlight
+            space_1: uniform(theme.space_1)
+            space_2: uniform(theme.space_2)
             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -207,7 +208,7 @@ script_mod!{
                     FlowBlockType.Quote => {
                         sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
                         sdf.fill(self.quote_bg_color)
-                        sdf.box(theme.space_1 theme.space_1 theme.space_1 (self.rect_size.y - theme.space_2) 1.5)
+                        sdf.box(self.space_1 self.space_1 self.space_1 (self.rect_size.y - self.space_2) 1.5)
                         sdf.fill(self.quote_fg_color)
                         return sdf.result
                     }
@@ -222,7 +223,7 @@ script_mod!{
                         return sdf.result
                     }
                     FlowBlockType.InlineCode => {
-                        sdf.box(1. 1. self.rect_size.x (self.rect_size.y - 2.) 2.)
+                        sdf.box(1. 1. (self.rect_size.x - 2.) (self.rect_size.y - 2.) 2.)
                         sdf.fill(self.code_color)
                         return sdf.result
                     }
@@ -241,7 +242,7 @@ script_mod!{
             }
         }
         
-        link: mod.widgets.MarkdownLink{}
+        $link: mod.widgets.MarkdownLink{}
     }
 }
 
@@ -621,8 +622,9 @@ impl MarkdownLinkRef {
     }
 }
 
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum MarkdownAction {
+    #[default]
     None,
     LinkNavigated(String),
 }

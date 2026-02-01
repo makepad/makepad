@@ -25,6 +25,17 @@ pub fn main(){
         #[live{named_field:1.0}]
         Named{named_field:f64}
     }
+    
+    const fn make_val(x: u32) -> u32 { x * 10 }
+    
+    #[derive(Script, ScriptHook)]
+    #[repr(u32)]
+    pub enum ShaderEnum{
+        #[pick]
+        Test1 = 1,
+        Test2 = 2,
+        Test3 = make_val(3)    
+    }
         
     #[derive(Script, ScriptHook)]
     #[repr(C)]
@@ -62,12 +73,19 @@ pub fn main(){
             });
         }
     }
-        
-    let code = script!{
+    
+    let _code = script!{
+        use mod.std.assert
+        ~"ShaderEnum values OK"
+    };
+    
+    let _code = script!{
         use mod.std.*
         use mod.shader
         use mod.pod.*
         use mod.math.*
+        
+        let ShaderEnum = #(ShaderEnum::script_api(vm))
                 
         let sdf = struct{
             field: f32,
@@ -119,10 +137,10 @@ pub fn main(){
                 let p = test_col
                 let q = theme.TEST_COL
                 let o = test_tex.sample(vec2(2.0))
-                let s = 1.0
+                let s = 1u
                 let k = match s{
-                    1=>1
-                    2=>2
+                    ShaderEnum.Test1 => 1u
+                    ShaderEnum.Test2 => 2u
                 }
                 return s
             }
@@ -150,7 +168,7 @@ pub fn main(){
         
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
@@ -429,6 +447,12 @@ pub fn main(){
         }
         assert(result3 == "other")
         
+        // repr(u32) test
+        let p = #(ShaderEnum::script_api(vm))
+        assert(p.Test1._repr_u32_enum_value == 1)
+        assert(p.Test2._repr_u32_enum_value == 2)
+        assert(p.Test3._repr_u32_enum_value == 30)  // make_val(3) = 3 * 10 = 30
+
         println("Test done")
         
         // Match desugars to: let temp = expr; if temp == pattern1 body1 else if temp == pattern2 body2...

@@ -232,7 +232,8 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         struct EnumItem {
             name: String,
             attributes: Vec<Attribute>,
-            kind: EnumKind
+            kind: EnumKind,
+            discriminant: Option<TokenStream>, // For repr(u32) enums - can be any expression
         }
         
         enum EnumKind {
@@ -277,16 +278,29 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     pick = Some(items.len())
                 }
                 if let Some(types) = parser.eat_all_types() {
-                    items.push(EnumItem {name, attributes, kind: EnumKind::Tuple(types)})
+                    items.push(EnumItem {name, attributes, kind: EnumKind::Tuple(types), discriminant: None});
+                    parser.eat_level_or_punct(',');
                 }
                 else if let Some(fields) = parser.eat_all_struct_fields() { // named variant
-                    items.push(EnumItem {name, attributes, kind: EnumKind::Named(fields)})
+                    items.push(EnumItem {name, attributes, kind: EnumKind::Named(fields), discriminant: None});
+                    parser.eat_level_or_punct(',');
                 }
                 else {
-                    items.push(EnumItem {name, attributes, kind: EnumKind::Bare})
+                    // Check for discriminant value (= expr) for bare variants
+                    let discriminant = if parser.eat_punct_alone('=') {
+                        // Capture everything until comma as the discriminant expression
+                        // Note: eat_level_or_punct already consumes the comma
+                        Some(parser.eat_level_or_punct(','))
+                    } else {
+                        parser.eat_level_or_punct(',');
+                        None
+                    };
+                    items.push(EnumItem {name, attributes, kind: EnumKind::Bare, discriminant})
                 }
             }
-            parser.eat_level_or_punct(',');
+            else {
+                parser.eat_level_or_punct(',');
+            }
         }
         
         if pick.is_none() {
@@ -352,6 +366,10 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             match &item.kind {
                 EnumKind::Bare => {
                     tb.add("let bare = vm.bx.heap.new_with_proto(id_lut!(").ident(&item.name).add(").into());");
+                    // If this is a repr(u32) enum, store the discriminant value as f64
+                    if let Some(disc) = &item.discriminant {
+                        tb.add("vm.bx.heap.set_value(bare, id!(_repr_u32_enum_value).into(), ScriptValue::from((").stream(Some(disc.clone())).add(") as f64), vm.bx.threads.cur().trap.pass());");
+                    }
                     tb.add("vm.bx.heap.set_value(enum_object, id!(").ident(&item.name).add(").into(), bare.into(), vm.bx.threads.cur().trap.pass());");
                     tb.add("vm.bx.heap.freeze(bare);");
                 },
