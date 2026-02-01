@@ -56,6 +56,7 @@ pub enum ShaderMe{
         has_return: bool,         // true if current branch has a return
         if_branch_returned: bool, // remembers if the if-branch returned (used when in else)
         phi_assigned_by_inner: bool, // true if an inner if assigned to this phi (for match/else-if chains)
+        created_unreachable: bool, // true if this IfBody was created while in unreachable code (no code emitted)
     },
     /// Logic operation (&&, ||) - for short-circuit bytecode handling in shaders
     /// Shaders evaluate both operands and combine with the operator

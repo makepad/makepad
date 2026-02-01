@@ -15,57 +15,78 @@ pub use makepad_zune_jpeg;
 #[cfg(feature = "png")]
 pub use makepad_zune_png;
 
+// Core modules (used internally first)
+pub mod widget;
+pub mod widget_match_event;
 pub mod animator;
-pub mod button;
-// pub mod cached_widget;
-pub mod label;
-pub mod image_cache;
-pub mod image;
-// pub mod image_blend;
-pub mod icon;
-pub mod link_label;
-pub mod drop_down;
-pub mod popup_menu;
-pub mod check_box;
-pub mod radio_button;
-pub mod text_input;
-pub mod slider;
+pub mod theme_desktop_skeleton;
+pub mod theme_desktop_dark;
+pub mod theme_desktop_light;
+
+// Modules ordered to match script_mod calls
 pub mod scroll_bar;
 pub mod scroll_bars;
+pub mod view;
+pub mod view_ui;
+
+pub mod label;
+pub mod link_label;
+pub mod button;
+pub mod check_box;
+pub mod radio_button;
+pub mod image_cache;
+pub mod image;
+pub mod image_blend;
+pub mod icon;
+
+pub mod adaptive_view;
+pub mod window;
+
+pub mod popup_menu;
+pub mod drop_down;
+pub mod text_input;
+pub mod slider;
+
 pub mod splitter;
-// pub mod vectorline;
+
 pub mod fold_button;
-pub mod portal_list;
 pub mod fold_header;
+
+pub mod loading_spinner;
+
 pub mod bare_step;
 pub mod turtle_step;
-// pub mod multi_window;
-// pub mod dock;
-// pub mod tab;
-// pub mod tab_bar;
-// pub mod tab_close_button;
-// pub mod portal_list;
-// pub mod portal_list2;
-// pub mod stack_navigation;
-// pub mod expandable_panel;
-// pub mod desktop_button;
-pub mod window;
-// pub mod scroll_shadow;
-// pub mod window_menu;
+
+pub mod portal_list;
+pub mod text_flow;
+
+pub mod cached_widget;
+pub mod root;
+
+pub mod tab_close_button;
+pub mod tab;
+pub mod tab_bar;
+pub mod dock;
+
 #[cfg(feature = "html")]
 pub mod html;
 #[cfg(feature = "markdown")]
 pub mod markdown;
-pub mod text_flow;
+
+// Commented out modules (not yet converted)
+// pub mod vectorline;
+// pub mod multi_window;
+// pub mod portal_list2;
+// pub mod stack_navigation;
+// pub mod expandable_panel;
+// pub mod desktop_button;
+// pub mod scroll_shadow;
+// pub mod window_menu;
 // pub mod multi_image;
 // pub mod modal;
 // pub mod tooltip;
 // pub mod popup_notification;
-pub mod loading_spinner;
 // pub mod web_view;
-
-// Only available on Android at the moment
-// #[cfg(target_os="android")]
 // pub mod video;
 // pub mod rotated_image;
 // pub mod slide_panel;
@@ -75,102 +96,71 @@ pub mod loading_spinner;
 // pub mod file_tree;
 // pub mod slides_view;
 // pub mod color_picker;
-// pub mod root;
-
 // pub mod debug_view;
 // pub mod performance_view;
 // pub mod nav_control;
-
-pub mod view;
-pub mod adaptive_view;
-pub mod view_ui;
-
 // pub mod toggle_panel;
 // pub mod command_text_input;
-
-pub mod widget;
-pub mod widget_match_event;
-
 // pub mod touch_gesture;
-// #[macro_use]
 // pub mod data_binding;
-
-pub mod theme_desktop_skeleton;
-pub mod theme_desktop_dark;
-pub mod theme_desktop_light;
-
-// pub mod bare_step;
-// pub mod turtle_step;
-/*
-pub mod designer;
-pub mod designer_dummy;
-pub mod designer_theme;
-pub mod designer_outline_tree;
-pub mod designer_view;
-pub mod designer_outline;
-pub mod designer_data;
-pub mod designer_toolbox;
-*/
-//pub mod defer_with_redraw;
+// pub mod designer;
+// pub mod designer_dummy;
+// pub mod designer_theme;
+// pub mod designer_outline_tree;
+// pub mod designer_view;
+// pub mod designer_outline;
+// pub mod designer_data;
+// pub mod designer_toolbox;
+// pub mod defer_with_redraw;
 
 
 pub use crate::{
-    
-//    data_binding::{DataBindingStore, DataBindingMap},
-    button::*,
-//    cached_widget::*,
-    label::*,
+    // Ordered to match script_mod calls
+    scroll_bar::{ScrollBar},
+    scroll_bars::{ScrollBars},
     view::*,
-    adaptive_view::*,
-    image::*,
-    image_cache::*,
-//    image_blend::*,
-    icon::*,
-//    label::*,
-    popup_menu::*,
-    drop_down::*,
-    slider::*,
-    text_input::*,
-//    root::*,
-    text_flow::*,
-//    html::*,
+    // view_ui - no public exports
+    
+    label::*,
+    link_label::*,
+    button::*,
     check_box::*,
     radio_button::*,
-//    bare_step::*,
-//    turtle_step::*,
-//    modal::*,
-//    tooltip::*,
-//    popup_notification::*,
-//    video::*,
-//    text_input::*,
-//    link_label::*,
-//    portal_list::*,
-//    portal_list2::*,
-//    flat_list::*,
-//    page_flip::*,
-//    slide_panel::*,
-//    fold_button::*,
-//    dock::*,
-//    stack_navigation::*,
-//    expandable_panel::*,
-//    command_text_input::*,
+    image::*,
+    image_cache::*,
+    icon::*,
+    
+    adaptive_view::*,
     window::*,
-//    multi_window::*,
-//    web_view::*,
-    scroll_bars::{ScrollBars},
-//    scroll_shadow::{DrawScrollShadow},
-scroll_bar::{ScrollBar},
+    
+    popup_menu::*,
+    drop_down::*,
+    text_input::*,
+    slider::*,
+    
     splitter::*,
-    link_label::*,
+    
     fold_button::*,
     fold_header::*,
+    
+    // loading_spinner - no public exports
+    
     bare_step::*,
     turtle_step::*,
+    
     portal_list::*,
-//    slides_view::{SlidesView},
+    text_flow::*,
+    
+    cached_widget::*,
+    image_blend::*,
+    root::*,
+    
+    tab_close_button::*,
+    tab::*,
+    tab_bar::*,
+    dock::*,
+    
     widget_match_event::WidgetMatchEvent,
-//    toggle_panel::*,
-//    defer_with_redraw::*,
 
     widget::{
         WidgetSet,
@@ -199,6 +189,7 @@ scroll_bar::{ScrollBar},
 
 #[cfg(feature = "html")]
 pub use crate::html::*;
+
 #[cfg(feature = "markdown")]
 pub use crate::markdown::*;
 
@@ -209,6 +200,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     vm.bx.heap.new_module(id!(themes));
     crate::theme_desktop_dark::script_mod(vm);
     crate::animator::script_mod(vm);
+    // make the prelude for our own widgets
     {
         script_mod!{ 
             mod.prelude.widgets_internal = {
@@ -231,38 +223,58 @@ pub fn script_mod(vm: &mut ScriptVm){
     }
             
     vm.bx.heap.new_module(id!(widgets));
+    
     crate::scroll_bar::script_mod(vm);
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
-    crate::adaptive_view::script_mod(vm);
     crate::view_ui::script_mod(vm);
-    crate::window::script_mod(vm);
+    
     crate::label::script_mod(vm);
+    crate::link_label::script_mod(vm);
     crate::button::script_mod(vm);
+    crate::check_box::script_mod(vm);
+    crate::radio_button::script_mod(vm);
     crate::image::script_mod(vm);
+    crate::image_blend::script_mod(vm);
     crate::icon::script_mod(vm);
+            
+    crate::adaptive_view::script_mod(vm);
+    crate::window::script_mod(vm);
+    
     crate::popup_menu::script_mod(vm);
     crate::drop_down::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
-    crate::loading_spinner::script_mod(vm);
-    crate::check_box::script_mod(vm);
-    crate::radio_button::script_mod(vm);
+    
     crate::splitter::script_mod(vm);
-    crate::link_label::script_mod(vm);
+    
     crate::fold_button::script_mod(vm);
     crate::fold_header::script_mod(vm);
+            
+    crate::loading_spinner::script_mod(vm);
+    
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
+    
     crate::portal_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
+    
+    crate::cached_widget::script_mod(vm);
+    crate::root::script_mod(vm);
+    
+    crate::tab_close_button::script_mod(vm);
+    crate::tab::script_mod(vm);
+    crate::tab_bar::script_mod(vm);
+    crate::dock::script_mod(vm);
+    
     #[cfg(feature = "html")]
     crate::html::script_mod(vm);
     #[cfg(feature = "markdown")]
     crate::markdown::script_mod(vm);
-    //crate::bare_step::script_mod(vm);
-    //crate::turtle_step::script_mod(vm);
         
+        
+    // make the prelude.widgetst with all our components
+    
     {
         script_mod!{
             mod.prelude.widgets = {
@@ -291,96 +303,3 @@ pub fn script_mod(vm: &mut ScriptVm){
     //makepad_fonts_chinese_bold2_2::script_mod(vm);
     
 }
-
-/*
-pub fn live_design(cx: &mut Cx) {
-    cx.link(live_id!(theme), live_id!(theme_desktop_dark));
-    if cx.in_makepad_studio() {
-        cx.link(live_id!(designer), live_id!(designer_real));
-    }
-    else{
-        cx.link(live_id!(designer), live_id!(designer_dummy));
-    }
-    //makepad_fonts_emoji::live_design(cx);
-    //makepad_fonts_chinese_regular::live_design(cx);
-    //makepad_fonts_chinese_regular_2::live_design(cx);
-    //makepad_fonts_chinese_bold::live_design(cx);
-    //makepad_fonts_chinese_bold_2::live_design(cx);
-    
-    makepad_draw::live_design(cx);
-    crate::page_flip::live_design(cx);
-    crate::debug_view::live_design(cx);
-    crate::performance_view::live_design(cx);
-    crate::fold_header::live_design(cx);
-    crate::splitter::live_design(cx);
-    crate::theme_desktop_skeleton::live_design(cx);
-    crate::theme_desktop_dark::live_design(cx);
-    crate::theme_desktop_light::live_design(cx);
-    crate::theme_mobile_dark::live_design(cx);
-    crate::theme_mobile_light::live_design(cx);
-    crate::slider::live_design(cx);
-    crate::label::live_design(cx);
-    crate::nav_control::live_design(cx);
-    crate::image::live_design(cx);
-    crate::multi_image::live_design(cx);
-    crate::image_blend::live_design(cx);
-    crate::icon::live_design(cx);
-    crate::rotated_image::live_design(cx);
-    crate::modal::live_design(cx);
-    crate::tooltip::live_design(cx);
-    crate::popup_notification::live_design(cx);
-    crate::video::live_design(cx);
-    crate::view::live_design(cx);
-    crate::adaptive_view::live_design(cx);
-    crate::view_ui::live_design(cx);
-    crate::fold_button::live_design(cx);
-    crate::text_input::live_design(cx);
-    crate::link_label::live_design(cx);
-    crate::scroll_shadow::live_design(cx);
-    crate::button::live_design(cx);
-    crate::desktop_button::live_design(cx);
-    crate::window::live_design(cx);
-    crate::window_menu::live_design(cx);
-    crate::scroll_bar::live_design(cx);
-    crate::scroll_bars::live_design(cx);
-    crate::check_box::live_design(cx);
-    crate::radio_button::live_design(cx);
-    crate::popup_menu::live_design(cx);
-    crate::drop_down::live_design(cx);
-    crate::multi_window::live_design(cx);
-    crate::portal_list::live_design(cx);
-    crate::portal_list2::live_design(cx);
-    crate::flat_list::live_design(cx);
-    crate::slide_panel::live_design(cx);
-    crate::tab::live_design(cx);
-    crate::tab_bar::live_design(cx);
-    crate::dock::live_design(cx);
-    crate::color_picker::live_design(cx);
-    crate::file_tree::live_design(cx);
-    crate::slides_view::live_design(cx);
-    crate::tab_close_button::live_design(cx);
-    crate::keyboard_view::live_design(cx);
-    crate::vectorline::live_design(cx);
-    crate::stack_navigation::live_design(cx);
-    crate::expandable_panel::live_design(cx);
-    crate::text_flow::live_design(cx);
-    crate::markdown::live_design(cx);
-    crate::html::live_design(cx);
-    crate::root::live_design(cx);
-    crate::bare_step::live_design(cx);
-    crate::turtle_step::live_design(cx);
-    crate::toggle_panel::live_design(cx);
-    crate::cached_widget::live_design(cx);
-    crate::command_text_input::live_design(cx);
-    crate::loading_spinner::live_design(cx);
-    crate::web_view::live_design(cx);
-        
-    crate::designer_theme::live_design(cx);
-    crate::designer::live_design(cx);
-    crate::designer_dummy::live_design(cx);
-    crate::designer_view::live_design(cx);
-    crate::designer_outline::live_design(cx);
-    crate::designer_outline_tree::live_design(cx);
-    crate::designer_toolbox::live_design(cx);
-}
-*/

@@ -23,8 +23,8 @@ script_mod! {
         
         draw_bg +: {
             color_dither: uniform(1.0)
-            color: #0000
-            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            color: instance(#0000)
+            color_2: instance(vec4(-1.0, -1.0, -1.0, -1.0))
             gradient_fill_horizontal: uniform(0.0)
 
             pixel: fn() {

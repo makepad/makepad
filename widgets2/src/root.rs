@@ -1,4 +1,3 @@
-
 use {
     crate::{
         widget::*,
@@ -7,23 +6,25 @@ use {
     }
 };
 
-live_design!{
-    link widgets;
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
     
-    use link::widgets::*;
-    use link::designer::Designer;
+    mod.widgets.RootBase = #(Root::register_widget(vm))
     
-    pub RootBase = {{Root}} {}
-    pub Root = <RootBase> {
-        design_window = <Designer> {}
+    mod.widgets.Root = mod.std.set_type_default() do mod.widgets.RootBase{
+        // Designer window commented out for now
+        // design_window = Designer{}
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef)]
+#[derive(Script, WidgetRef, WidgetRegister)]
 pub struct Root {
+    #[source] source: ScriptObjectRef,
+    #[rust] area: Area,
     #[rust] components: ComponentMap<LiveId, WidgetRef>,
-    #[rust(DrawList::new(cx))] xr_draw_list: DrawList,
-    #[live] xr_pass: Pass,
+    #[new] xr_draw_list: DrawList,
+    #[live] xr_pass: ScriptDrawPass,
     #[rust] draw_state: DrawStateWrap<DrawState>,
 }
 
@@ -32,51 +33,63 @@ enum DrawState {
     Component(usize),
 }
 
-impl LiveHook for Root {
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        let id = nodes[index].id;
-        match apply.from {
-            ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
-                    // only open the design window 
-                    if id == live_id!(design_window) && !cx.in_makepad_studio(){
-                        return nodes.skip_node(index);
+impl ScriptHook for Root {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        // Handle children from the object's vec
+        if let Some(obj) = value.as_object() {
+            vm.vec_with(obj, |vm, vec| {
+                for kv in vec {
+                    if let Some(id) = kv.key.as_id() {
+                        if kv.key.is_prefixed_id() {
+                            // Check for special cases
+                            {
+                                let cx = vm.cx_mut();
+                                // Only open design window in makepad studio
+                                if id == live_id!(design_window) && !cx.in_makepad_studio() {
+                                    continue;
+                                }
+                                // Only show xr_hands if XR mode is available
+                                if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode() {
+                                    continue;
+                                }
+                            }
+                            
+                            // Get or create widget
+                            if let Some(widget) = self.components.get_mut(&id) {
+                                widget.script_apply(vm, apply, scope, kv.value);
+                            } else {
+                                let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                                self.components.insert(id, widget);
+                            }
+                        }
                     }
-                    if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode(){
-                        return nodes.skip_node(index);
-                    }
-                    return self.components.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
-                        .apply(cx, apply, index, nodes);
                 }
-                else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                }
-            }
-            _ => ()
+            });
         }
-        nodes.skip_node(index)
     }
 }
 
-
-impl WidgetNode for Root{
+impl WidgetNode for Root {
     fn redraw(&mut self, cx: &mut Cx) {
         for component in self.components.values_mut() {
             component.redraw(cx);
         }
     }
     
-    fn area(&self)->Area{Area::Empty}
+    fn area(&self) -> Area {
+        self.area
+    }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        Walk::default()
+    }
         
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
-        if path.len() != 0{
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        if path.len() != 0 {
             if let Some(component) = self.components.get(&path[0]) {
-                if path.len() == 1{
+                if path.len() == 1 {
                     results.push(component.clone());
-                }
-                else{
+                } else {
                     component.find_widgets(&path[1..], cached, results);
                 }
             }
@@ -86,36 +99,34 @@ impl WidgetNode for Root{
         }
     }
     
-    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
         for component in self.components.values() {
             let x = component.uid_to_widget(uid);
-            if !x.is_empty(){return x}
+            if !x.is_empty() { return x }
         }
         WidgetRef::empty()
     }
-        
 }
 
 impl Widget for Root {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Draw(e) = event {
-            if cx.in_xr_mode(){
-                if  !e.xr_state.is_some(){
+            if cx.in_xr_mode() {
+                if !e.xr_state.is_some() {
                     return
                 }
                 let mut cx_draw = CxDraw::new(cx, e);
                 let cx = &mut Cx3d::new(&mut cx_draw);
                 // lets begin a 3D drawlist in the global context
-                self.xr_pass.set_as_xr_pass(cx);
-                cx.begin_pass(&self.xr_pass, Some(4.0));
+                self.xr_pass.handle.set_as_xr_pass(cx);
+                cx.begin_pass(&self.xr_pass.handle, Some(4.0));
                 self.xr_draw_list.begin_always(cx);
                 self.draw_3d_all(cx, scope);
                 self.xr_draw_list.end(cx);
-                cx.end_pass(&self.xr_pass);
+                cx.end_pass(&self.xr_pass.handle);
                 return
-            }
-            else{
+            } else {
                 let mut cx_draw = CxDraw::new(cx, e);
                 let cx = &mut Cx2d::new(&mut cx_draw);
                 self.draw_all(cx, scope);
@@ -128,8 +139,8 @@ impl Widget for Root {
         }
     }
     
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope:&mut Scope)->DrawStep{
-        for component in self.components.values(){
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        for component in self.components.values() {
             component.draw_3d_all(cx, scope);
         }
         DrawStep::done()
@@ -139,13 +150,11 @@ impl Widget for Root {
         self.draw_state.begin(cx, DrawState::Component(0));
                 
         while let Some(DrawState::Component(step)) = self.draw_state.get() {
-                        
-            if let Some(component) = self.components.values_mut().nth(step){
+            if let Some(component) = self.components.values_mut().nth(step) {
                 let walk = component.walk(cx);
                 component.draw_walk(cx, scope, walk)?; 
-                self.draw_state.set(DrawState::Component(step+1));
-            }
-            else{
+                self.draw_state.set(DrawState::Component(step + 1));
+            } else {
                 self.draw_state.end();
             }
         }
