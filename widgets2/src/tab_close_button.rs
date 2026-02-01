@@ -1,59 +1,62 @@
-use crate::makepad_draw::*;
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    animator::{Animator, AnimatorImpl, AnimatorAction},
+};
 
-live_design!{
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
     
-    pub TabCloseButtonBase = {{TabCloseButton}} {}
+    mod.widgets.TabCloseButtonBase = #(TabCloseButton::script_component(vm))
     
-    pub TabCloseButton = <TabCloseButtonBase> {
-        height: 10.0, width: 10.0,
-        margin: { right: (THEME_SPACE_2), left: -3.5 },
-        draw_button: {
-            instance hover: float;
-            instance active: float;
+    mod.widgets.TabCloseButton = mod.std.set_type_default() do mod.widgets.TabCloseButtonBase{
+        height: 10.0
+        width: 10.0
+        margin: Inset{right: theme.space_2, left: -3.5}
+        draw_button +: {
+            hover: instance(0.0)
+            active: instance(0.0)
 
-            uniform size: 1.0
+            size: uniform(1.0)
 
-            uniform color: (#8)
-            uniform color_hover: (#C)
-            uniform color_active: (#A)
+            color: uniform(#8)
+            color_hover: uniform(#C)
+            color_active: uniform(#A)
             
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
-                let mid = self.rect_size / 2.0;
-                let size = (self.hover * 0.25 + 0.5) * 0.25 * length(self.rect_size) * self.size;
-                let min = mid - vec2(size);
-                let max = mid + vec2(size);
-                sdf.move_to(min.x, min.y);
-                sdf.line_to(max.x, max.y);
-                sdf.move_to(min.x, max.y);
-                sdf.line_to(max.x, min.y);
+                let mid = self.rect_size / 2.0
+                let size = (self.hover * 0.25 + 0.5) * 0.25 * length(self.rect_size) * self.size
+                let min = mid - vec2(size size)
+                let max = mid + vec2(size size)
+                sdf.move_to(min.x, min.y)
+                sdf.line_to(max.x, max.y)
+                sdf.move_to(min.x, max.y)
+                sdf.line_to(max.x, min.y)
 
                 return sdf.stroke(
                     mix(
-                        mix(self.color, self.color_hover, self.hover),
-                        mix(self.color_active, self.color_hover, self.hover),
+                        mix(self.color, self.color_hover, self.hover)
+                        mix(self.color_active, self.color_hover, self.hover)
                         self.active
-                    ), 1.0
+                    ) 1.0
                 )
             }
         }
         
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward{duration: 0.1}}
                     apply: {
                         draw_button: {hover: 0.0}
                     }
                 }
                 
-                on = {
-                    cursor: Hand,
+                on: AnimatorState{
+                    cursor: MouseCursor.Hand
                     from: {all: Snap}
                     apply: {
                         draw_button: {hover: 1.0}
@@ -64,11 +67,11 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook, Animator)]
 pub struct TabCloseButton {
+    #[source] source: ScriptObjectRef,
     #[live] draw_button: DrawQuad,
-    #[animator] animator: Animator,
-
+    #[apply_default] animator: Animator,
     #[walk] walk: Walk
 }
 

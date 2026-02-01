@@ -98,7 +98,7 @@ impl ShaderFnCompiler {
             }
             
             // Now extract the fields we need (we know it's an IfBody that needs handling)
-            if let Some(ShaderMe::IfBody { target_ip: _, phi, start_pos, stack_depth, phi_type, has_return, if_branch_returned, phi_assigned_by_inner }) = self.mes.last() {
+            if let Some(ShaderMe::IfBody { target_ip: _, phi, start_pos, stack_depth, phi_type, has_return, if_branch_returned, phi_assigned_by_inner, created_unreachable: _ }) = self.mes.last() {
                 // Check if both branches returned (escape analysis)
                 let both_returned = *if_branch_returned && *has_return;
                 
@@ -138,9 +138,9 @@ impl ShaderFnCompiler {
                                 } else {
                                     id!(unknown)
                                 };
-                                // Generate backend-appropriate variable declaration
+                                // Generate backend-appropriate variable declaration with zero init
                                 let mut s = self.stack.new_string();
-                                output.backend.write_var_decl(&mut s, ty_name, phi);
+                                output.backend.write_var_decl_zero_init(&mut s, ty_name, phi);
                                 self.out.insert_str(start_pos, &s);
                                 self.stack.free_string(s);
                                 let mut s = self.stack.new_string();
@@ -175,9 +175,9 @@ impl ShaderFnCompiler {
                             } else {
                                 id!(unknown)
                             };
-                            // Generate backend-appropriate variable declaration
+                            // Generate backend-appropriate variable declaration with zero init
                             let mut s = self.stack.new_string();
-                            output.backend.write_var_decl(&mut s, ty_name, phi);
+                            output.backend.write_var_decl_zero_init(&mut s, ty_name, phi);
                             self.out.insert_str(start_pos, &s);
                             self.stack.free_string(s);
                             
@@ -239,6 +239,7 @@ impl ShaderFnCompiler {
             has_return: false,
             if_branch_returned: false,
             phi_assigned_by_inner: false,
+            created_unreachable: false,
         });
     }
 
@@ -247,6 +248,7 @@ impl ShaderFnCompiler {
     pub(crate) fn handle_if_test_unreachable(&mut self, opargs: OpcodeArgs) {
         // Don't pop from stack or generate code - just track the structure
         // Mark has_return: true since we're already in unreachable code
+        // Mark created_unreachable: true so we don't emit closing } later
         self.mes.push(ShaderMe::IfBody {
             target_ip: self.trap.ip.index + opargs.to_u32(),
             start_pos: self.out.len(),
@@ -256,6 +258,7 @@ impl ShaderFnCompiler {
             has_return: true, // Already unreachable, so this branch is "returned"
             if_branch_returned: false,
             phi_assigned_by_inner: false,
+            created_unreachable: true, // No code emitted for this if block
         });
     }
 
@@ -269,6 +272,7 @@ impl ShaderFnCompiler {
             has_return,
             if_branch_returned,
             phi_assigned_by_inner: _,
+            created_unreachable: _,
         }) = self.mes.last_mut()
         {
             if self.stack.types.len() > *stack_depth {
@@ -327,13 +331,17 @@ impl ShaderFnCompiler {
 
     /// Handle if/else phi when in unreachable code - close the structure properly
     pub(crate) fn handle_if_else_phi_unreachable(&mut self) {
-        if let Some(ShaderMe::IfBody { target_ip, has_return, if_branch_returned, .. }) = self.mes.last() {
+        if let Some(ShaderMe::IfBody { target_ip, has_return, if_branch_returned, created_unreachable, .. }) = self.mes.last() {
             if self.trap.ip.index >= *target_ip {
                 let both_returned = *if_branch_returned && *has_return;
+                let was_created_unreachable = *created_unreachable;
                 
-                // Still need to close the if block in generated code and exit scope
-                self.out.push_str("}\n");
-                self.shader_scope.exit_scope();
+                // Only emit closing brace if code was actually generated for this if block
+                // If created_unreachable is true, no `if(...){` was emitted, so no `}` needed
+                if !was_created_unreachable {
+                    self.out.push_str("}\n");
+                    self.shader_scope.exit_scope();
+                }
                 self.mes.pop();
 
                 // If both branches returned, propagate up

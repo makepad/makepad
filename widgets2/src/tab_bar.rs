@@ -1,146 +1,140 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*,
-        scroll_bars::ScrollBars,
-        tab::{TabAction, Tab},
-    },
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
+    scroll_bars::ScrollBars,
+    tab::{TabAction, Tab},
+    animator::Animate,
 };
+use std::collections::HashMap;
 
-live_design!{
-    link widgets;
-    use link::theme::*;
-    use link::widgets::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
     
-    pub TabBarBase = {{TabBar}} {}
-    pub TabBar = <TabBarBase> {
-        CloseableTab = <Tab> {closeable: true}
-        PermanentTab = <Tab> {closeable: false}
+    mod.widgets.TabBarBase = #(TabBar::register_widget(vm))
+    
+    mod.widgets.TabBar = mod.std.set_type_default() do mod.widgets.TabBarBase{
+        $CloseableTab: mod.widgets.Tab{closeable: true}
+        $PermanentTab: mod.widgets.Tab{closeable: false}
 
-        width: Fill,
-        height: (max(THEME_TAB_HEIGHT, 25.))
+        width: Fill
+        height: max(theme.tab_height, 25.)
         margin: 0.
 
-        draw_drag: {
+        draw_drag +: {
             draw_depth: 10
-            color: (THEME_COLOR_BG_CONTAINER)
+            color: theme.color_bg_container
         }
 
-        draw_fill: {
-            uniform color_dither: 0.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform border_size: (THEME_BEVELING)
-            uniform gradient_fill_horizontal: 0.0
-            uniform gradient_border_horizontal: 0.0
-            uniform color_2: #0000
-            uniform border_color: #fff0
-            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            
+        draw_fill +: {
+            color_dither: uniform(0.0)
+            border_radius: uniform(theme.corner_radius)
+            border_size: uniform(theme.beveling)
+            gradient_fill_horizontal: uniform(0.0)
+            gradient_border_horizontal: uniform(0.0)
+            color_2: uniform(#0000)
+            border_color: uniform(#fff0)
+            border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
 
-            fn pixel(self) -> vec4 {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                let color_2 = self.color;
-                let border_color_2 = self.border_color;
-                let gradient_squeeze = 20.
+                let mut color_fill = self.color
+                let mut color_stroke = self.border_color
 
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2;
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_squeeze = 20.
+                    let dir = if self.gradient_fill_horizontal > 0.5 
+                        pow(self.pos.x, gradient_squeeze) + dither 
+                    else 
+                        pow(self.pos.y, gradient_squeeze) + dither
+                    color_fill = mix(self.color, self.color_2, dir)
                 }
 
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2;
-                }
-
-                let gradient_border_dir = pow(self.pos.y, gradient_squeeze) + dither;
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = pow(self.pos.x, gradient_squeeze) + dither;
-                }
-
-                let gradient_fill_dir = pow(self.pos.y, gradient_squeeze) + dither;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = pow(self.pos.x, gradient_squeeze) + dither;
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_squeeze = 20.
+                    let dir = if self.gradient_border_horizontal > 0.5 
+                        pow(self.pos.x, gradient_squeeze) + dither 
+                    else 
+                        pow(self.pos.y, gradient_squeeze) + dither
+                    color_stroke = mix(self.border_color, self.border_color_2, dir)
                 }
 
                 sdf.box_all(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.,
-                    self.rect_size.y - 2.,
-                    0.5,
-                    self.border_radius,
-                    0.5,
+                    1.
+                    1.
+                    self.rect_size.x - 2.
+                    self.rect_size.y - 2.
+                    0.5
+                    self.border_radius
+                    0.5
                     0.5
                 )
 
-                sdf.fill(mix(self.color, color_2, gradient_fill_dir));
-                sdf.stroke(mix(self.border_color, border_color_2, gradient_border_dir), self.border_size);
+                sdf.fill(color_fill)
+                sdf.stroke(color_stroke, self.border_size)
 
                 return sdf.result
             }
         }
         
-        draw_bg: {
-            uniform color_dither: 1.0
-            uniform border_radius: 0.
-            uniform border_size: (THEME_BEVELING)
-            color: (THEME_COLOR_BG_APP * 0.875);
-            uniform gradient_fill_horizontal: 0.0
-            uniform gradient_border_horizontal: 0.0
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color: #fff0
-            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+        draw_bg +: {
+            color_dither: uniform(1.0)
+            border_radius: uniform(0.)
+            border_size: uniform(theme.beveling)
+            color: theme.color_bg_app * 0.875
+            gradient_fill_horizontal: uniform(0.0)
+            gradient_border_horizontal: uniform(0.0)
+            color_2: instance(#f00);//vec4(-1.0, -1.0, -1.0, -1.0);//vec4(-1.0, -1.0, -1.0, -1.0)
+            border_color: uniform(#fff0)
+            border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            pixel: fn() {
+               let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                
+                let mut color_fill = self.color
+                let mut color_stroke = self.border_color
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let gradient_squeeze = 20.;
-                let color_2 = self.color;
-                let border_color_2 = self.border_color;
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2;
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_squeeze = 20.
+                    let dir = if self.gradient_fill_horizontal > 0.5 
+                        pow(self.pos.x, gradient_squeeze) 
+                    else 
+                        pow(self.pos.y, gradient_squeeze)
+                    color_fill = mix(self.color, self.color_2, dir)
                 }
 
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2;
-                }
-
-                let gradient_border_dir = pow(self.pos.y, gradient_squeeze) + dither;
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = pow(self.pos.x, gradient_squeeze) + dither;
-                }
-
-                let gradient_fill_dir = pow(self.pos.y, gradient_squeeze) + dither;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = pow(self.pos.x, gradient_squeeze) + dither;
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_squeeze = 20.
+                    let dir = if self.gradient_border_horizontal > 0.5 
+                        pow(self.pos.x, gradient_squeeze) + dither 
+                    else 
+                        pow(self.pos.y, gradient_squeeze) + dither
+                    color_stroke = mix(self.border_color, self.border_color_2, dir)
                 }
 
                 sdf.rect(
-                    1.,
-                    1.,
-                    self.rect_size.x - 1.5,
+                    1.
+                    1.
+                    self.rect_size.x - 1.5
                     self.rect_size.y - 1.5
                 )
 
-                sdf.fill_keep(mix(self.color, color_2, gradient_fill_dir));
-
-                sdf.stroke(
-                    mix(self.border_color, border_color_2, gradient_border_dir), self.border_size
-                )
+                sdf.fill_keep(color_fill)
+                sdf.stroke(color_stroke, self.border_size)
                 return sdf.result
             }
         }
 
-        scroll_bars: <ScrollBarsTabs> {
+        scroll_bars: ScrollBarsTabs{
             show_scroll_x: true
             show_scroll_y: false
-            scroll_bar_x: {
-                draw_bg: {
+            scroll_bar_x +: {
+                draw_bg +: {
                     color_hover: #fff6
                     size: 5.0
                 }
@@ -150,52 +144,52 @@ live_design!{
         }
     }
     
-    pub TabBarFlat = <TabBar> {
-        height: (max(THEME_TAB_FLAT_HEIGHT, 25.))
+    mod.widgets.TabBarFlat = mod.widgets.TabBar{
+        height: max(theme.tab_flat_height, 25.)
 
-        CloseableTab = <TabFlat> {closeable: true}
-        PermanentTab = <TabFlat> {closeable: false}
+        $CloseableTab: mod.widgets.TabFlat{closeable: true}
+        $PermanentTab: mod.widgets.TabFlat{closeable: false}
     }
 
-    pub TabBarGradientX = <TabBar> {
-        CloseableTab = <TabGradientX> {closeable: true}
-        PermanentTab = <TabGradientX> {closeable: false}
+    mod.widgets.TabBarGradientX = mod.widgets.TabBar{
+        $CloseableTab: mod.widgets.TabGradientX{closeable: true}
+        $PermanentTab: mod.widgets.TabGradientX{closeable: false}
 
-        draw_bg: {
+        draw_bg +: {
             gradient_fill_horizontal: 1.0
             gradient_border_horizontal: 1.0
             color_dither: 1.0
-            border_radius: (THEME_CORNER_RADIUS)
-            color: (THEME_COLOR_BG_APP * 0.8)
-            color_2: (THEME_COLOR_BG_APP * 1.2)
+            border_radius: theme.corner_radius
+            color: theme.color_bg_app * 0.8
+            color_2: theme.color_bg_app * 1.2
         }
     }
 
-    pub TabBarGradientY = <TabBar> {
-        CloseableTab = <TabGradientY> {closeable: true}
-        PermanentTab = <TabGradientY> {closeable: false}
-        draw_bg: {
+    mod.widgets.TabBarGradientY = mod.widgets.TabBar{
+        $CloseableTab: mod.widgets.TabGradientY{closeable: true}
+        $PermanentTab: mod.widgets.TabGradientY{closeable: false}
+        draw_bg +: {
             gradient_fill_horizontal: 0.0
             gradient_border_horizontal: 0.0
             color_dither: 1.0
             border_radius: 0.
-            border_size: (THEME_BEVELING)
-            color: (THEME_COLOR_BG_APP * 0.875)
-            color_2: (THEME_COLOR_SHADOW)
+            border_size: theme.beveling
+            color: theme.color_bg_app * 0.875
+            color_2: theme.color_shadow
         }
 
-        draw_fill: {
+        draw_fill +: {
             color_dither: 1.0
-            border_radius: (THEME_CORNER_RADIUS)
-            color: (THEME_COLOR_BG_APP * 0.9);
-            color_2: #282828;
+            border_radius: theme.corner_radius
+            color: theme.color_bg_app * 0.9
+            color_2: #282828
         }
     }
-
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, Widget)]
 pub struct TabBar {
+    #[source] source: ScriptObjectRef,
     
     #[redraw] #[live] scroll_bars: ScrollBars,
     #[live] draw_drag: DrawColor,
@@ -211,7 +205,8 @@ pub struct TabBar {
     
     #[rust] is_dragged: bool,
     
-    #[rust] templates: ComponentMap<LiveId, LivePtr>,
+    // Templates stored as ScriptValue references - populated in on_after_apply
+    #[rust] templates: HashMap<LiveId, ScriptValue>,
     #[rust] tabs: ComponentMap<LiveId, (Tab, LiveId)>,
     
     #[rust] active_tab: Option<usize>,
@@ -220,33 +215,34 @@ pub struct TabBar {
     #[rust] next_active_tab_id: Option<LiveId>,
 }
 
-impl LiveHook for TabBar {
-    /*fn after_apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, live_id!(tab).as_field()) {
-            for (tab, templl) in self.tabs.values_mut() {
-                tab.apply(cx, apply, index, nodes);
-            }
+impl ScriptHook for TabBar {
+    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        if apply.is_update() {
+            self.templates.clear();
         }
-        self.view_area.redraw(cx);
-    }*/
+    }
     
-    // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        if nodes[index].is_instance_prop() {
-            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index){
-                let id = nodes[index].id;
-                self.templates.insert(id, live_ptr);
-                for (_, (node, templ_id)) in self.tabs.iter_mut() {
-                    if *templ_id == id {
-                        node.apply(cx, apply, index, nodes);
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        // Collect templates from the object's vec - templates use prefixed ids (CloseableTab, PermanentTab)
+        if let Some(obj) = value.as_object() {
+            vm.vec_with(obj, |_vm, vec| {
+                for kv in vec {
+                    // Templates defined in the DSL end up in the vec
+                    if let Some(id) = kv.key.as_id() {
+                        self.templates.insert(id, kv.value);
                     }
+                }
+            });
+        }
+        
+        // Update existing tabs if templates changed
+        if apply.is_update() {
+            for (_, (tab, templ_id)) in self.tabs.iter_mut() {
+                if let Some(template_value) = self.templates.get(templ_id) {
+                    tab.script_apply(vm, apply, scope, *template_value);
                 }
             }
         }
-        else {
-            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-        }
-        nodes.skip_node(index)
     }
 }
 
@@ -278,43 +274,9 @@ impl Widget for TabBar{
                     cx.widget_action(uid, &scope.path, TabBarAction::ShouldTabStartDrag(*tab_id));
                 }
                 TabAction::ShouldTabStopDrag=>{
-                }/*
-                TabAction::DragHit(hit)=>{
-                    dispatch_action(cx, TabBarAction::DragHitTab(hit, *tab_id));
-                }*/
+                }
             });
         }
-        /*
-        match event.drag_hits(cx, self.scroll_bars.area()) {
-            DragHit::NoHit=>(),
-            hit=>dispatch_action(cx, TabBarAction::DragHitTabBar(hit))
-        }*/
-        /*
-        match event.drag_hits(cx, self.scroll_view.area()) {
-            DragHit::Drag(f) => match f.state {
-                DragState::In => {
-                    self.is_dragged = true;
-                    self.redraw(cx);
-                    f.action.set(DragAction::Copy);
-                }
-                DragState::Out => {
-                    self.is_dragged = false;
-                    self.redraw(cx);
-                }
-                DragState::Over => match event {
-                    Event::Drag(event) => {
-                        event.action.set(DragAction::Copy);
-                    }
-                    _ => panic!(),
-                },
-            },
-            DragHit::Drop(f) => {
-                self.is_dragged = false;
-                self.redraw(cx);
-                dispatch_action(cx, TabBarAction::ReceivedDraggedItem(f.dragged_item.clone()))
-            }
-            _ => {}
-        }*/
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
@@ -332,9 +294,6 @@ impl Widget for TabBar{
 impl TabBar {
     pub fn begin(&mut self, cx: &mut Cx2d, active_tab: Option<usize>, walk:Walk) {
         self.active_tab = active_tab;
-        //if active_tab.is_some(){
-        //    self.active_tab_id = None
-        // }
         self.scroll_bars.begin(cx, walk, Layout::flow_right());
         self.draw_bg.draw_abs(cx, cx.turtle().rect_unscrolled());
         self.tab_order.clear();
@@ -379,10 +338,15 @@ impl TabBar {
         }
     }
     
-    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: LiveId, template:LiveId) -> &mut Tab {
-        let ptr = self.templates.get(&template).cloned();
-        let (tab,_) = self.tabs.get_or_insert(cx, tab_id, | cx | {
-            (Tab::new_from_ptr(cx, ptr),template)
+    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: LiveId, template: LiveId) -> &mut Tab {
+        let template_value = self.templates.get(&template).copied();
+        let (tab, _) = self.tabs.get_or_insert(cx, tab_id, |cx| {
+            let tab = if let Some(value) = template_value {
+                cx.with_vm(|vm| Tab::script_from_value(vm, value))
+            } else {
+                cx.with_vm(|vm| Tab::script_new(vm))
+            };
+            (tab, template)
         });
         tab
     }
@@ -449,16 +413,13 @@ impl TabBar {
         }
         None
     }
-    
-
 }
 
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum TabBarAction {
     TabWasPressed(LiveId),
     ShouldTabStartDrag(LiveId),
     TabCloseWasPressed(LiveId),
+    #[default]
     None
-    //DragHitTab(DragHit, LiveId),
-    //DragHitTabBar(DragHit)
 }
