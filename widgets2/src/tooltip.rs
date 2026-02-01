@@ -8,77 +8,83 @@ use crate::{
     widget::*
 };
 
-live_design!{
-    link widgets;
-    use link::widgets::*;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
     
-    pub TooltipBase = {{Tooltip}} {}
-    pub Tooltip = <TooltipBase> {
-        width: Fill,
-        height: Fill,
+    mod.widgets.TooltipBase = #(Tooltip::register_widget(vm))
+    
+    mod.widgets.Tooltip = mod.widgets.TooltipBase{
+        width: Fill
+        height: Fill
         
         flow: Overlay
-        align: {x: 0.0, y: 0.0}
+        align: Align{x: 0.0 y: 0.0}
         
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                return vec4(0., 0., 0., 0.0)
+        draw_bg +: {
+            pixel: fn() {
+                return vec4(0. 0. 0. 0.0)
             }
         }
         
-        content: <View> {
-            flow: Overlay
+        flow: Overlay
+        width: Fit
+        height: Fit
+            
+        RoundedView{
             width: Fit
             height: Fit
-            
-            <RoundedView> {
-                width: Fit,
-                height: Fit,
                 
-                padding: 16,
+            padding: 16
                 
-                draw_bg: {
-                    color: #fff,
-                    border_size: 1.0,
-                    border_color: #D0D5DD,
-                    radius: 2.
-                }
+            draw_bg +: {
+                color: #fff
+                border_size: 1.0
+                border_color: #D0D5DD
+                radius: 2.
+            }
                 
-                tooltip_label = <Label> {
-                    width: 270,
-                    draw_text: {
-                        text_style: <THEME_FONT_REGULAR>{font_size: 9},
-                        text_wrap: Word,
-                        color: #000
-                    }
+            $tooltip_label: Label{
+                width: 270
+                draw_text +: {
+                    text_style: theme.font_regular{font_size: 9}
+                    //text_wrap: TextWrap.Word
+                    color: #000
                 }
             }
         }
     }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, Widget)]
 pub struct Tooltip {
-    #[rust]
-    opened: bool,
+    #[source] source: ScriptObjectRef,
+    
+    #[deref]
+    view: View,
 
-    #[live]
-    #[find]
-    content: View,
+    #[rust] draw_list: Option<DrawList2d>,
 
-    #[rust(DrawList2d::new(cx))]
-    draw_list: DrawList2d,
+    #[live] draw_bg: DrawQuad,
 
-    #[redraw]
-    #[area]
-    #[live]
-    draw_bg: DrawQuad,
-    #[layout]
-    layout: Layout,
-    #[walk]
-    walk: Walk,
+    #[rust] opened: bool,
+    
+    /// The position where the tooltip should be displayed
+    #[rust] tooltip_pos: Vec2d,
+}
+
+impl ScriptHook for Tooltip {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+    
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        vm.with_cx_mut(|cx| {
+            if let Some(draw_list) = &self.draw_list {
+                draw_list.redraw(cx);
+            }
+        });
+    }
 }
 
 impl Widget for Tooltip {
@@ -87,7 +93,8 @@ impl Widget for Tooltip {
             return;
         }
 
-        self.content.handle_event(cx, event, scope);
+        let content = self.view.widget(ids!($content));
+        content.handle_event(cx, event, scope);
 
         // Hide the tooltip if any kind of user interaction occurs (taps/clicks, drags, scrolls, etc).
         //
@@ -99,11 +106,11 @@ impl Widget for Tooltip {
             | Event::MouseDown(_)
             | Event::MouseUp(_)
             | Event::Scroll(_) => {
-                self.hide(cx);
+               // self.hide(cx);
             }
             Event::TouchUpdate(TouchUpdateEvent { touches, .. }) => {
                 if touches.iter().any(|tp| matches!(tp.state, event::TouchState::Start)) {
-                    self.hide(cx);
+                   // self.hide(cx);
                 }
             }
             _ => { }
@@ -111,37 +118,34 @@ impl Widget for Tooltip {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        self.draw_list.begin_overlay_reuse(cx);
+        let draw_list = self.draw_list.as_mut().unwrap();
+        draw_list.begin_overlay_reuse(cx);
         
         let size = cx.current_pass_size();
-        cx.begin_root_turtle(size, self.layout);
-        self.draw_bg.begin(cx, self.walk, self.layout);
+        cx.begin_root_turtle(size, self.view.layout);
+        self.draw_bg.begin(cx, self.view.walk, self.view.layout);
 
         if self.opened {
-            let _ = self.content.draw_all(cx, scope);
+            let content_walk = self.view.walk(cx).with_abs_pos(self.tooltip_pos);
+            self.view.draw_walk_all(cx, scope, content_walk);
         }
 
         self.draw_bg.end(cx);
 
         cx.end_pass_sized_turtle();
-        self.draw_list.end(cx);
+        self.draw_list.as_mut().unwrap().end(cx);
 
         DrawStep::done()
     }
 
-    fn set_text(&mut self, cx:&mut Cx, text: &str) {
-        self.label(ids!(tooltip_label)).set_text(cx, text);
+    fn set_text(&mut self, cx: &mut Cx, text: &str) {
+        self.label(ids!($tooltip_label)).set_text(cx, text);
     }
 }
 
 impl Tooltip {
-    pub fn set_pos(&mut self, cx: &mut Cx, pos: Vec2d) {
-        self.apply_over(
-            cx,
-            live! {
-                content: { margin: { left: (pos.x), top: (pos.y) } }
-            },
-        );
+    pub fn set_pos(&mut self, _cx: &mut Cx, pos: Vec2d) {
+        self.tooltip_pos = pos;
     }
 
     pub fn show(&mut self, cx: &mut Cx) {
@@ -162,7 +166,7 @@ impl Tooltip {
 }
 
 impl TooltipRef {
-    pub fn set_text(&mut self, cx:&mut Cx, text: &str) {
+    pub fn set_text(&mut self, cx: &mut Cx, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, text);
         }
