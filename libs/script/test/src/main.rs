@@ -573,8 +573,6 @@ pub fn main(){
             }
             assert(indices7 == [0 1 2])
             assert(values7 == [0 1 2])
-            
-            println("for loop destructuring tests passed")
         }
         test_for_destructuring()
         
@@ -800,6 +798,88 @@ pub fn main(){
         assert(p.Test1._repr_u32_enum_value == 1)
         assert(p.Test2._repr_u32_enum_value == 2)
         assert(p.Test3._repr_u32_enum_value == 30)  // make_val(3) = 3 * 10 = 30
+
+        // ============================================================
+        // DESTRUCTURING TESTS
+        // ============================================================
+        
+        // lazy ?= - should NOT run RHS when value exists
+        fn destruct_dont_call(){assert(false)}
+        let destruct_a = 1
+        destruct_a ?= destruct_dont_call()
+        assert(destruct_a == 1)
+        
+        // lazy ?= - SHOULD run RHS when value is nil
+        let destruct_counter = {v:0}
+        fn destruct_do_call(){destruct_counter.v = 1; 42}
+        let destruct_b = nil
+        destruct_b ?= destruct_do_call()
+        assert(destruct_counter.v == 1)
+        assert(destruct_b == 42)
+        
+        // Basic array destructuring
+        let [destruct_c, destruct_d] = [1, 2]
+        assert(destruct_c == 1 && destruct_d == 2)
+        
+        // Basic object destructuring
+        let {destruct_e, destruct_f} = {destruct_e:3, destruct_f:4}
+        assert(destruct_e == 3 && destruct_f == 4)
+        
+        // Object with lazy default - property exists, skip default
+        let destruct_counter2 = {v:0}
+        fn destruct_skip_default(){destruct_counter2.v = 1; 999}
+        let {destruct_g, destruct_h=destruct_skip_default()} = {destruct_g:1, destruct_h:2}
+        assert(destruct_g == 1 && destruct_h == 2)
+        assert(destruct_counter2.v == 0)
+        
+        // Object with lazy default - property missing, use default
+        let destruct_counter3 = {v:0}
+        fn destruct_use_default(){destruct_counter3.v = 1; 100}
+        let {destruct_i, destruct_j=destruct_use_default()} = {destruct_i:1}
+        assert(destruct_i == 1 && destruct_j == 100)
+        assert(destruct_counter3.v == 1)
+        
+        // Object with all defaults - values exist
+        let {destruct_k=999, destruct_l=888} = {destruct_k:10, destruct_l:20}
+        assert(destruct_k == 10 && destruct_l == 20)
+        
+        // Object with default, missing value
+        let {destruct_m, destruct_n=42} = {destruct_m:1}
+        assert(destruct_m == 1 && destruct_n == 42)
+        
+        // Array with lazy default - value missing
+        let destruct_counter4 = {v:0}
+        fn destruct_arr_use_def(){destruct_counter4.v = 1; 50}
+        let [destruct_o, destruct_p=destruct_arr_use_def()] = [100]
+        assert(destruct_o == 100 && destruct_p == 50)
+        assert(destruct_counter4.v == 1)
+        
+        // Array with lazy default - value exists
+        let destruct_counter5 = {v:0}
+        fn destruct_arr_skip_def(){destruct_counter5.v = 1; 999}
+        let [destruct_q, destruct_r=destruct_arr_skip_def()] = [100, 200]
+        assert(destruct_q == 100 && destruct_r == 200)
+        assert(destruct_counter5.v == 0)
+        
+        // Nested object inside array
+        let [{destruct_x}] = [{destruct_x:1}]
+        assert(destruct_x == 1)
+        
+        // Nested object inside array with multiple bindings
+        let [{destruct_aa, destruct_ab}] = [{destruct_aa:10, destruct_ab:20}]
+        assert(destruct_aa == 10 && destruct_ab == 20)
+        
+        // Multiple elements with nested pattern
+        let [destruct_s, {destruct_t}] = [100, {destruct_t:200}]
+        assert(destruct_s == 100 && destruct_t == 200)
+        
+        // Nested array inside array
+        let [[destruct_u, destruct_v]] = [[1, 2]]
+        assert(destruct_u == 1 && destruct_v == 2)
+        
+        // Multiple nested patterns
+        let [{destruct_w}, [destruct_y, destruct_z]] = [{destruct_w:5}, [6, 7]]
+        assert(destruct_w == 5 && destruct_y == 6 && destruct_z == 7)
 
         // ============================================================
         // SHADER COMPILER TESTS
@@ -1385,82 +1465,6 @@ pub fn main(){
         shader.test_compile_draw(shader_all_features)
 
         println("Test done")
-        
-    };
-    
-    let code = script!{
-        use mod.std.assert
-        use mod.std.println
-        
-        // Test 1: lazy ?= - should NOT run RHS when value exists
-        fn dont_call(){assert(false)}
-        let a = 1
-        a ?= dont_call()
-        assert(a == 1)
-        println("Test 1 passed")
-        
-        // Test 2: lazy ?= - SHOULD run RHS when value is nil
-        let counter = {v:0}
-        fn do_call(){counter.v = 1; 42}
-        let b = nil
-        b ?= do_call()
-        assert(counter.v == 1)
-        assert(b == 42)
-        println("Test 2 passed")
-        
-        // Test 3: Array destructuring
-        let [c,d] = [1,2]
-        assert(c == 1 && d == 2)
-        println("Test 3 passed")
-        
-        // Test 4: Object destructuring
-        let {e,f} = {e:3, f:4}
-        assert(e == 3 && f == 4)
-        println("Test 4 passed")
-        
-        // Test 5: Object with lazy default - property exists, skip default
-        let counter2 = {v:0}
-        fn skip_default(){counter2.v = 1; 999}
-        let {g, h=skip_default()} = {g:1, h:2}
-        assert(g == 1 && h == 2)
-        assert(counter2.v == 0)
-        println("Test 5 passed")
-        
-        // Test 6: Object with lazy default - property missing, use default
-        let counter3 = {v:0}
-        fn use_default(){counter3.v = 1; 100}
-        let {i, j=use_default()} = {i:1}
-        assert(i == 1 && j == 100)
-        assert(counter3.v == 1)
-        println("Test 6 passed")
-        
-        // Test 7: Object with all defaults
-        let {k=999, l=888} = {k:10, l:20}
-        assert(k == 10 && l == 20)
-        println("Test 7 passed")
-        
-        // Test 8: Object with default, missing value
-        let {m, n=42} = {m:1}
-        assert(m == 1 && n == 42)
-        println("Test 8 passed")
-        
-        // Test 9: Array with lazy default - value missing
-        let counter4 = {v:0}
-        fn arr_use_def(){counter4.v = 1; 50}
-        let [o, p=arr_use_def()] = [100]
-        assert(o == 100 && p == 50)
-        assert(counter4.v == 1)
-        println("Test 9 passed")
-        
-        // Test 10: Array with lazy default - value exists
-        let counter5 = {v:0}
-        fn arr_skip_def(){counter5.v = 1; 999}
-        let [q, r=arr_skip_def()] = [100, 200]
-        assert(q == 100 && r == 200)
-        assert(counter5.v == 0)
-        println("Test 10 passed")
-        
-        println("ALL DONE")
         
     };
           

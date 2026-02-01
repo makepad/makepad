@@ -108,11 +108,27 @@ enum State{
     LetArrayDestructRhs{index:u32, count:u32, ids_start:u32, defaults_start:u32},   // after ], before =
     EmitLetArrayDestruct{index:u32, count:u32, ids_start:u32, defaults_start:u32},  // after RHS, emit opcodes
     
+    // Nested object pattern inside array: let [{x}] = ...
+    LetArrayDestructNestedObject{index:u32, outer_count:u32, outer_ids_start:u32, nested_count:u32},
+    LetArrayDestructNestedObjectEl{index:u32, outer_count:u32, outer_ids_start:u32, nested_count:u32, binding_id:LiveId},
+    
+    // Nested array pattern inside array: let [[x]] = ...
+    LetArrayDestructNestedArray{index:u32, outer_count:u32, outer_ids_start:u32, nested_count:u32},
+    LetArrayDestructNestedArrayEl{index:u32, outer_count:u32, outer_ids_start:u32, nested_count:u32, binding_id:LiveId},
+    
     LetObjectDestruct{index:u32, count:u32, ids_start:u32},     // parsing {x, y, ...} pattern
     LetObjectDestructEl{index:u32, count:u32, binding_id:LiveId, ids_start:u32},   // after identifier, maybe = default
     LetObjectDestructDefault{index:u32, count:u32, binding_id:LiveId, ids_start:u32, default_start:u32},  // parsing default expr
     LetObjectDestructRhs{index:u32, count:u32, ids_start:u32, defaults_start:u32},  // after }, before =
     EmitLetObjectDestruct{index:u32, count:u32, ids_start:u32, defaults_start:u32}, // after RHS, emit opcodes
+    
+    // Nested array pattern inside object: let {a: [x]} = ...
+    LetObjectDestructNestedArray{index:u32, outer_count:u32, outer_ids_start:u32, key:LiveId, nested_count:u32},
+    LetObjectDestructNestedArrayEl{index:u32, outer_count:u32, outer_ids_start:u32, key:LiveId, nested_count:u32, binding_id:LiveId},
+    
+    // Nested object pattern inside object: let {a: {x}} = ...
+    LetObjectDestructNestedObject{index:u32, outer_count:u32, outer_ids_start:u32, key:LiveId, nested_count:u32},
+    LetObjectDestructNestedObjectEl{index:u32, outer_count:u32, outer_ids_start:u32, key:LiveId, nested_count:u32, binding_id:LiveId},
     Var{index:u32},
     VarDynOrTyped{index:u32},
     VarType{index:u32},
@@ -341,6 +357,15 @@ impl State{
 
 
 
+/// Represents a nested destructuring pattern (one level deep for now)
+#[derive(Clone, Debug)]
+pub enum NestedPattern {
+    /// Nested object pattern like {x, y} - stores binding ids
+    Object(Vec<LiveId>),
+    /// Nested array pattern like [x, y] - stores binding ids
+    Array(Vec<LiveId>),
+}
+
 pub struct ScriptParser{
     pub index: u32,
     pub opcodes: Vec<ScriptValue>,
@@ -353,6 +378,10 @@ pub struct ScriptParser{
     
     // Temporary storage for destructuring defaults (binding_id, value_code, value_map)
     destruct_defaults: Vec<(LiveId, Vec<ScriptValue>, Vec<Option<u32>>)>,
+    
+    // Storage for nested patterns during parsing
+    // Each entry is (pattern_info). The index into this vec is encoded in the ids list.
+    nested_patterns: Vec<NestedPattern>,
 }
 
 impl Default for ScriptParser{
@@ -366,6 +395,7 @@ impl Default for ScriptParser{
             line_offset: 0,
             col_offset: 0,
             destruct_defaults: Default::default(),
+            nested_patterns: Default::default(),
         }
     }
 }
@@ -812,10 +842,17 @@ impl ScriptParser{
                     return 1
                 }
                 else if tok.is_open_curly() {
-                    error!(self, tokenizer, "Nested destructuring not yet supported");
+                    // Nested object pattern: let [{x, y}] = ...
+                    // Push a marker that will be replaced with the nested pattern index
+                    self.push_code(Opcode::NOP.into(), self.index); // placeholder
+                    self.state.push(State::LetArrayDestructNestedObject{index, outer_count: count + 1, outer_ids_start: ids_start, nested_count: 0});
+                    return 1
                 }
                 else if tok.is_open_square() {
-                    error!(self, tokenizer, "Nested destructuring not yet supported");
+                    // Nested array pattern: let [[x, y]] = ...
+                    self.push_code(Opcode::NOP.into(), self.index); // placeholder
+                    self.state.push(State::LetArrayDestructNestedArray{index, outer_count: count + 1, outer_ids_start: ids_start, nested_count: 0});
+                    return 1
                 }
                 else if tok.is_close_square() {
                     let defaults_start = self.code_len();
@@ -883,6 +920,125 @@ impl ScriptParser{
                     return 0
                 }
             }
+            // Nested object pattern inside array: let [{x, y}] = ...
+            State::LetArrayDestructNestedObject{index, outer_count, outer_ids_start, nested_count}=>{
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetArrayDestructNestedObject{index, outer_count, outer_ids_start, nested_count});
+                    return 1
+                }
+                if id.not_empty() {
+                    self.state.push(State::LetArrayDestructNestedObjectEl{index, outer_count, outer_ids_start, nested_count: nested_count + 1, binding_id: id});
+                    return 1
+                }
+                else if tok.is_close_curly() {
+                    // Nested pattern complete - bindings were collected in NestedObjectEl
+                    if let Some(NestedPattern::Object(ref bindings)) = self.nested_patterns.last() {
+                        if bindings.len() == nested_count as usize {
+                            // Pattern is complete, update the placeholder with the pattern index
+                            let pattern_idx = self.nested_patterns.len() - 1;
+                            let placeholder_pos = outer_ids_start as usize + outer_count as usize - 1;
+                            // Encode the nested pattern as a special marker: NOP with args = pattern_index + 1 (so 0 means "not nested")
+                            self.opcodes[placeholder_pos] = ScriptValue::from_opcode_args(Opcode::NOP, OpcodeArgs::from_u32((pattern_idx + 1) as u32));
+                        }
+                    }
+                    self.state.push(State::LetArrayDestruct{index, count: outer_count, ids_start: outer_ids_start});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected identifier in nested object pattern");
+                }
+            }
+            State::LetArrayDestructNestedObjectEl{index, outer_count, outer_ids_start, nested_count, binding_id}=>{
+                // Store the binding in the nested pattern
+                if nested_count == 1 {
+                    // First binding - create new pattern
+                    self.nested_patterns.push(NestedPattern::Object(vec![binding_id]));
+                } else {
+                    // Add to existing pattern
+                    if let Some(NestedPattern::Object(ref mut bindings)) = self.nested_patterns.last_mut() {
+                        bindings.push(binding_id);
+                    }
+                }
+                
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetArrayDestructNestedObject{index, outer_count, outer_ids_start, nested_count});
+                    return 1
+                }
+                else if id.not_empty() {
+                    self.state.push(State::LetArrayDestructNestedObjectEl{index, outer_count, outer_ids_start, nested_count: nested_count + 1, binding_id: id});
+                    return 1
+                }
+                else if tok.is_close_curly() {
+                    // Pattern complete - update placeholder
+                    let pattern_idx = self.nested_patterns.len() - 1;
+                    let placeholder_pos = outer_ids_start as usize + outer_count as usize - 1;
+                    self.opcodes[placeholder_pos] = ScriptValue::from_opcode_args(Opcode::NOP, OpcodeArgs::from_u32((pattern_idx + 1) as u32));
+                    self.state.push(State::LetArrayDestruct{index, count: outer_count, ids_start: outer_ids_start});
+                    return 1
+                }
+                else {
+                    self.state.push(State::LetArrayDestructNestedObject{index, outer_count, outer_ids_start, nested_count});
+                    return 0
+                }
+            }
+            
+            // Nested array pattern inside array: let [[x, y]] = ...
+            State::LetArrayDestructNestedArray{index, outer_count, outer_ids_start, nested_count}=>{
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetArrayDestructNestedArray{index, outer_count, outer_ids_start, nested_count});
+                    return 1
+                }
+                if id.not_empty() {
+                    self.state.push(State::LetArrayDestructNestedArrayEl{index, outer_count, outer_ids_start, nested_count: nested_count + 1, binding_id: id});
+                    return 1
+                }
+                else if tok.is_close_square() {
+                    // Nested pattern complete
+                    if let Some(NestedPattern::Array(ref bindings)) = self.nested_patterns.last() {
+                        if bindings.len() == nested_count as usize {
+                            let pattern_idx = self.nested_patterns.len() - 1;
+                            let placeholder_pos = outer_ids_start as usize + outer_count as usize - 1;
+                            self.opcodes[placeholder_pos] = ScriptValue::from_opcode_args(Opcode::NOP, OpcodeArgs::from_u32((pattern_idx + 1) as u32));
+                        }
+                    }
+                    self.state.push(State::LetArrayDestruct{index, count: outer_count, ids_start: outer_ids_start});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected identifier in nested array pattern");
+                }
+            }
+            State::LetArrayDestructNestedArrayEl{index, outer_count, outer_ids_start, nested_count, binding_id}=>{
+                // Store the binding
+                if nested_count == 1 {
+                    self.nested_patterns.push(NestedPattern::Array(vec![binding_id]));
+                } else {
+                    if let Some(NestedPattern::Array(ref mut bindings)) = self.nested_patterns.last_mut() {
+                        bindings.push(binding_id);
+                    }
+                }
+                
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetArrayDestructNestedArray{index, outer_count, outer_ids_start, nested_count});
+                    return 1
+                }
+                else if id.not_empty() {
+                    self.state.push(State::LetArrayDestructNestedArrayEl{index, outer_count, outer_ids_start, nested_count: nested_count + 1, binding_id: id});
+                    return 1
+                }
+                else if tok.is_close_square() {
+                    let pattern_idx = self.nested_patterns.len() - 1;
+                    let placeholder_pos = outer_ids_start as usize + outer_count as usize - 1;
+                    self.opcodes[placeholder_pos] = ScriptValue::from_opcode_args(Opcode::NOP, OpcodeArgs::from_u32((pattern_idx + 1) as u32));
+                    self.state.push(State::LetArrayDestruct{index, count: outer_count, ids_start: outer_ids_start});
+                    return 1
+                }
+                else {
+                    self.state.push(State::LetArrayDestructNestedArray{index, outer_count, outer_ids_start, nested_count});
+                    return 0
+                }
+            }
+            
             State::LetArrayDestructRhs{index, count, ids_start, defaults_start}=>{
                 if op == id!(=) {
                     self.state.push(State::EmitLetArrayDestruct{index, count, ids_start, defaults_start});
@@ -896,6 +1052,7 @@ impl ScriptParser{
             State::EmitLetArrayDestruct{index, count, ids_start, defaults_start}=>{
                 // Layout: [ids..., rhs_code], defaults stored in destruct_defaults
                 // Generate: [rhs, id_0, EXTRACT(0), ..., DROP, defaults_code...]
+                // For nested patterns: [rhs, DUP, idx, ARRAY_INDEX_NIL, nested_bindings..., DROP, ...]
                 
                 let ids_start = ids_start as usize;
                 let defaults_start = defaults_start as usize;
@@ -913,14 +1070,50 @@ impl ScriptParser{
                 self.opcodes.extend(rhs);
                 self.source_map.extend(rhs_map);
                 
-                // id, EXTRACT for each
+                // Process each element - check for nested patterns
                 for (i, (id_code, id_map)) in ids.into_iter().zip(ids_map).enumerate() {
+                    // Check if this is a nested pattern marker (NOP with non-zero args)
+                    if let Some((opcode, args)) = id_code.as_opcode() {
+                        if opcode == Opcode::NOP && args.to_u32() > 0 {
+                            // This is a nested pattern
+                            let pattern_idx = (args.to_u32() - 1) as usize;
+                            if let Some(pattern) = self.nested_patterns.get(pattern_idx).cloned() {
+                                // Emit: DUP, index, ARRAY_INDEX_NIL, nested extraction, DROP
+                                self.push_code(Opcode::DUP.into(), index);
+                                self.push_code(i.into(), index);
+                                self.push_code(Opcode::ARRAY_INDEX_NIL.into(), index);
+                                
+                                match pattern {
+                                    NestedPattern::Object(bindings) => {
+                                        // For nested object: id, LET_DESTRUCT_OBJECT_EL for each binding
+                                        for binding_id in bindings {
+                                            self.push_code(binding_id.into(), index);
+                                            self.push_code(Opcode::LET_DESTRUCT_OBJECT_EL.into(), index);
+                                        }
+                                    }
+                                    NestedPattern::Array(bindings) => {
+                                        // For nested array: id, LET_DESTRUCT_ARRAY_EL(j) for each binding
+                                        for (j, binding_id) in bindings.into_iter().enumerate() {
+                                            self.push_code(binding_id.into(), index);
+                                            self.push_code(ScriptValue::from_opcode_args(Opcode::LET_DESTRUCT_ARRAY_EL, OpcodeArgs::from_u32(j as u32)), index);
+                                        }
+                                    }
+                                }
+                                
+                                // DROP the nested source
+                                self.push_code(Opcode::DROP.into(), index);
+                                continue;
+                            }
+                        }
+                    }
+                    
+                    // Simple identifier - emit normally
                     self.opcodes.push(id_code);
                     self.source_map.push(id_map);
                     self.push_code(ScriptValue::from_opcode_args(Opcode::LET_DESTRUCT_ARRAY_EL, OpcodeArgs::from_u32(i as u32)), index);
                 }
                 
-                // DROP source
+                // DROP outer source
                 self.push_code(Opcode::DROP.into(), index);
                 
                 // Emit stored defaults with lazy evaluation: [id, ASSIGN_IFNIL(jump), value, ASSIGN]
@@ -934,6 +1127,9 @@ impl ScriptParser{
                     self.source_map.extend(value_map);
                     self.push_code(Opcode::ASSIGN.into(), index);
                 }
+                
+                // Clear nested patterns for next destructuring
+                self.nested_patterns.clear();
                 
                 // This is a let statement, go directly to BeginStmt to avoid pop_to_me being set on DROP
                 self.state.push(State::BeginStmt{last_was_sep:false});
@@ -1016,6 +1212,118 @@ impl ScriptParser{
                     return 0
                 }
             }
+            // Nested array pattern inside object: let {a: [x, y]} = ...
+            State::LetObjectDestructNestedArray{index, outer_count, outer_ids_start, key, nested_count}=>{
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetObjectDestructNestedArray{index, outer_count, outer_ids_start, key, nested_count});
+                    return 1
+                }
+                if id.not_empty() {
+                    self.state.push(State::LetObjectDestructNestedArrayEl{index, outer_count, outer_ids_start, key, nested_count: nested_count + 1, binding_id: id});
+                    return 1
+                }
+                else if tok.is_close_square() {
+                    // Pattern complete
+                    if let Some(NestedPattern::Array(ref bindings)) = self.nested_patterns.last() {
+                        if bindings.len() == nested_count as usize {
+                            let pattern_idx = self.nested_patterns.len() - 1;
+                            let placeholder_pos = outer_ids_start as usize + outer_count as usize - 1;
+                            self.opcodes[placeholder_pos] = ScriptValue::from_opcode_args(Opcode::NOP, OpcodeArgs::from_u32((pattern_idx + 1) as u32));
+                        }
+                    }
+                    self.state.push(State::LetObjectDestruct{index, count: outer_count, ids_start: outer_ids_start});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected identifier in nested array pattern");
+                }
+            }
+            State::LetObjectDestructNestedArrayEl{index, outer_count, outer_ids_start, key: _, nested_count, binding_id}=>{
+                if nested_count == 1 {
+                    self.nested_patterns.push(NestedPattern::Array(vec![binding_id]));
+                } else {
+                    if let Some(NestedPattern::Array(ref mut bindings)) = self.nested_patterns.last_mut() {
+                        bindings.push(binding_id);
+                    }
+                }
+                
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetObjectDestructNestedArray{index, outer_count, outer_ids_start, key: LiveId::empty(), nested_count});
+                    return 1
+                }
+                else if id.not_empty() {
+                    self.state.push(State::LetObjectDestructNestedArrayEl{index, outer_count, outer_ids_start, key: LiveId::empty(), nested_count: nested_count + 1, binding_id: id});
+                    return 1
+                }
+                else if tok.is_close_square() {
+                    let pattern_idx = self.nested_patterns.len() - 1;
+                    let placeholder_pos = outer_ids_start as usize + outer_count as usize - 1;
+                    self.opcodes[placeholder_pos] = ScriptValue::from_opcode_args(Opcode::NOP, OpcodeArgs::from_u32((pattern_idx + 1) as u32));
+                    self.state.push(State::LetObjectDestruct{index, count: outer_count, ids_start: outer_ids_start});
+                    return 1
+                }
+                else {
+                    self.state.push(State::LetObjectDestructNestedArray{index, outer_count, outer_ids_start, key: LiveId::empty(), nested_count});
+                    return 0
+                }
+            }
+            
+            // Nested object pattern inside object: let {a: {x, y}} = ...
+            State::LetObjectDestructNestedObject{index, outer_count, outer_ids_start, key, nested_count}=>{
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetObjectDestructNestedObject{index, outer_count, outer_ids_start, key, nested_count});
+                    return 1
+                }
+                if id.not_empty() {
+                    self.state.push(State::LetObjectDestructNestedObjectEl{index, outer_count, outer_ids_start, key, nested_count: nested_count + 1, binding_id: id});
+                    return 1
+                }
+                else if tok.is_close_curly() {
+                    // Pattern complete
+                    if let Some(NestedPattern::Object(ref bindings)) = self.nested_patterns.last() {
+                        if bindings.len() == nested_count as usize {
+                            let pattern_idx = self.nested_patterns.len() - 1;
+                            let placeholder_pos = outer_ids_start as usize + outer_count as usize - 1;
+                            self.opcodes[placeholder_pos] = ScriptValue::from_opcode_args(Opcode::NOP, OpcodeArgs::from_u32((pattern_idx + 1) as u32));
+                        }
+                    }
+                    self.state.push(State::LetObjectDestruct{index, count: outer_count, ids_start: outer_ids_start});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected identifier in nested object pattern");
+                }
+            }
+            State::LetObjectDestructNestedObjectEl{index, outer_count, outer_ids_start, key: _, nested_count, binding_id}=>{
+                if nested_count == 1 {
+                    self.nested_patterns.push(NestedPattern::Object(vec![binding_id]));
+                } else {
+                    if let Some(NestedPattern::Object(ref mut bindings)) = self.nested_patterns.last_mut() {
+                        bindings.push(binding_id);
+                    }
+                }
+                
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetObjectDestructNestedObject{index, outer_count, outer_ids_start, key: LiveId::empty(), nested_count});
+                    return 1
+                }
+                else if id.not_empty() {
+                    self.state.push(State::LetObjectDestructNestedObjectEl{index, outer_count, outer_ids_start, key: LiveId::empty(), nested_count: nested_count + 1, binding_id: id});
+                    return 1
+                }
+                else if tok.is_close_curly() {
+                    let pattern_idx = self.nested_patterns.len() - 1;
+                    let placeholder_pos = outer_ids_start as usize + outer_count as usize - 1;
+                    self.opcodes[placeholder_pos] = ScriptValue::from_opcode_args(Opcode::NOP, OpcodeArgs::from_u32((pattern_idx + 1) as u32));
+                    self.state.push(State::LetObjectDestruct{index, count: outer_count, ids_start: outer_ids_start});
+                    return 1
+                }
+                else {
+                    self.state.push(State::LetObjectDestructNestedObject{index, outer_count, outer_ids_start, key: LiveId::empty(), nested_count});
+                    return 0
+                }
+            }
+            
             State::LetObjectDestructRhs{index, count, ids_start, defaults_start}=>{
                 if op == id!(=) {
                     self.state.push(State::EmitLetObjectDestruct{index, count, ids_start, defaults_start});
@@ -2076,26 +2384,36 @@ impl ScriptParser{
                     return 1
                 }
                 
-                // Handle ?= with lazy evaluation - only evaluate RHS if variable IS nil
+                // Handle ?= with lazy evaluation for SIMPLE variable assignments only
+                // Field/index assignments (x.f?=, x[i]?=) use their own opcodes with eager evaluation
                 // Emits: [id, ASSIGN_IFNIL(jump), rhs_code, ASSIGN]
                 if op == id!(?=) {
-                    // Emit any pending unary operators first
-                    loop {
-                        if let Some(State::EmitUnary{what_op, index}) = self.state.last() {
-                            let (what_op, index) = (*what_op, *index);
-                            self.state.pop();
-                            self.push_code(State::operator_to_unary(what_op), index);
-                        } else { break; }
+                    // Only use lazy eval for simple variable assignment (last code is an identifier)
+                    // For field/index assignments, fall through to normal operator handling
+                    let is_simple_var_assign = self.code_last().map(|c| c.is_id()).unwrap_or(false)
+                        && self.state.last().map(|s| !matches!(s, State::EmitOp{what_op: id!(.) | id!(.?), ..})).unwrap_or(true)
+                        && self.code_last() != Some(&Opcode::ARRAY_INDEX.into());
+                    
+                    if is_simple_var_assign {
+                        // Emit any pending unary operators first
+                        loop {
+                            if let Some(State::EmitUnary{what_op, index}) = self.state.last() {
+                                let (what_op, index) = (*what_op, *index);
+                                self.state.pop();
+                                self.push_code(State::operator_to_unary(what_op), index);
+                            } else { break; }
+                        }
+                        
+                        // Emit ASSIGN_IFNIL with placeholder jump
+                        let test_slot = self.code_len();
+                        self.push_code(Opcode::ASSIGN_IFNIL.into(), self.index);
+                        
+                        // Push state to emit ASSIGN and patch jump after RHS is parsed
+                        self.state.push(State::ShortCircuitAssignEnd{test_slot, index: self.index});
+                        self.state.push(State::BeginExpr{required:true});
+                        return 1
                     }
-                    
-                    // Emit ASSIGN_IFNIL with placeholder jump
-                    let test_slot = self.code_len();
-                    self.push_code(Opcode::ASSIGN_IFNIL.into(), self.index);
-                    
-                    // Push state to emit ASSIGN and patch jump after RHS is parsed
-                    self.state.push(State::ShortCircuitAssignEnd{test_slot, index: self.index});
-                    self.state.push(State::BeginExpr{required:true});
-                    return 1
+                    // else: fall through to normal operator handling for field/index ?=
                 }
                 
                 if State::operator_order(op) != 0{
