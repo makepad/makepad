@@ -449,6 +449,11 @@ pub fn main(){
         let x = {t:3}
         assert( ok{x.y.z} == nil)
         assert( ok{x.t} == 3)
+        
+        // nil-safe field access with .?
+        let x = {a:{b:5}, c:nil}
+        assert(x.a.?b == 5)
+        assert(x.c.?d == nil)
                         
         // string concats
         let x = {t:"a"}
@@ -500,6 +505,79 @@ pub fn main(){
         let s2 = pod.struct{x:pod.f16, y:s1}
         let v = s2(3,s1(1,2))
         assert(v.y.b == 2h)
+        
+        // math module tests
+        use mod.math
+        // constants
+        assert(math.PI > 3.14 && math.PI < 3.15)
+        assert(math.E > 2.71 && math.E < 2.72)
+        
+        // 1-arg scalar functions
+        assert(math.abs(-5.0) == 5.0) assert(math.abs(5.0) == 5.0)
+        assert(math.floor(3.7) == 3.0) assert(math.ceil(3.2) == 4.0)
+        assert(math.round(3.5) == 4.0) assert(math.round(3.4) == 3.0)
+        assert(math.sign(-5.0) == -1.0) assert(math.sign(5.0) == 1.0)
+        assert(math.sqrt(4.0) == 2.0) assert(math.sqrt(9.0) == 3.0)
+        assert(math.fract(3.75) == 0.75)
+        assert(math.trunc(3.9) == 3.0) assert(math.trunc(-3.9) == -3.0)
+        
+        // 2-arg scalar functions
+        assert(math.min(3.0, 5.0) == 3.0) assert(math.max(3.0, 5.0) == 5.0)
+        assert(math.pow(2.0, 3.0) == 8.0)
+        assert(math.modf(10.0, 3.0) == 1.0)
+        assert(math.step(0.5, 0.3) == 0.0) assert(math.step(0.5, 0.7) == 1.0)
+        
+        // 3-arg scalar functions  
+        assert(math.clamp(5.0, 0.0, 3.0) == 3.0)
+        assert(math.clamp(-1.0, 0.0, 3.0) == 0.0)
+        assert(math.clamp(1.5, 0.0, 3.0) == 1.5)
+        assert(math.mix(0.0, 10.0, 0.5) == 5.0)
+        assert(math.smoothstep(0.0, 1.0, 0.5) == 0.5)
+        
+        // vector operations
+        let v1 = pod.vec2f(3, 4)
+        assert(math.length(v1) == 5.0) // 3-4-5 triangle
+        
+        let v2 = pod.vec2f(1, 0)
+        let v3 = pod.vec2f(0, 1)
+        assert(math.dot(v2, v3) == 0.0) // perpendicular
+        assert(math.dot(v2, v2) == 1.0) // unit vec dot itself
+        
+        // vector math functions
+        let v = pod.vec3f(-1, 2, -3)
+        let va = math.abs(v)
+        assert(va.x == 1f && va.y == 2f && va.z == 3f)
+        
+        // mix with vectors
+        let a = pod.vec2f(0, 0)
+        let b = pod.vec2f(10, 20)
+        let m = math.mix(a, b, 0.5)
+        assert(m.x == 5f && m.y == 10f)
+        
+        // trig functions (basic sanity checks)
+        assert(math.sin(0.0) == 0.0)
+        assert(math.cos(0.0) == 1.0)
+        let sinpi2 = math.sin(math.PI / 2.0)
+        assert(sinpi2 > 0.99 && sinpi2 < 1.01)
+        
+        // exp/log
+        assert(math.exp(0.0) == 1.0)
+        assert(math.log(1.0) == 0.0)
+        assert(math.exp2(3.0) == 8.0)
+        assert(math.log2(8.0) == 3.0)
+        
+        // distance
+        let p1 = pod.vec2f(0, 0)
+        let p2 = pod.vec2f(3, 4)
+        assert(math.distance(p1, p2) == 5.0)
+        
+        // clamp/min/max with vectors
+        let v = pod.vec3f(5, -2, 10)
+        let vmin = math.min(v, pod.vec3f(3, 3, 3))
+        assert(vmin.x == 3f && vmin.y == -2f && vmin.z == 3f)
+        let vmax = math.max(v, pod.vec3f(0, 0, 0))
+        assert(vmax.x == 5f && vmax.y == 0f && vmax.z == 10f)
+        
                 
         // test wildcard use
         let m = {a_wild:1, b_wild:2}
