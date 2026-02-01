@@ -57,6 +57,14 @@ pub enum ShaderMe{
         if_branch_returned: bool, // remembers if the if-branch returned (used when in else)
         phi_assigned_by_inner: bool, // true if an inner if assigned to this phi (for match/else-if chains)
     },
+    /// Logic operation (&&, ||) - for short-circuit bytecode handling in shaders
+    /// Shaders evaluate both operands and combine with the operator
+    LogicOp{
+        target_ip: u32,
+        op: &'static str,         // "&&" or "||"
+        first_operand: String,    // The first operand expression
+        first_type: ShaderType,   // The type of the first operand
+    },
     BuiltinCall{name:LiveId, fnptr: NativeId, args:Vec<(ShaderType, String)>},
     /// Pod builtin method call: x.mix(y, a) -> mix(x, y, a)
     PodBuiltinMethod{name:LiveId, self_ty:ScriptPodType, args:Vec<(ShaderType, String)>},
@@ -389,11 +397,13 @@ impl ShaderFnCompiler{
             } else if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(vm, output, opcode, args);
                 self.trap.goto_next();
+                self.handle_logic_phi(vm, output);
                 self.handle_if_else_phi(vm, output);
             }
             else{ // id or immediate value
                 self.push_immediate(opcode, &vm.bx.code.builtins.pod, &output.backend);
                 self.trap.goto_next();
+                self.handle_logic_phi(vm, output);
                 self.handle_if_else_phi(vm, output);
             }
             // alright lets see if we have a trap, ifso we can log it
@@ -873,8 +883,8 @@ impl ShaderFnCompiler{
             Opcode::LEQ=>{self.handle_eq(vm, output, opargs, "<=");},
             Opcode::GEQ=>{self.handle_eq(vm, output, opargs, ">=");},
                         
-            Opcode::LOGIC_AND_TEST =>{self.handle_logic(vm, output, opargs, "&&");},
-            Opcode::LOGIC_OR_TEST =>{self.handle_logic(vm, output, opargs, "||");},
+            Opcode::LOGIC_AND_TEST =>{self.handle_logic_test(vm, output, opargs, "&&");},
+            Opcode::LOGIC_OR_TEST =>{self.handle_logic_test(vm, output, opargs, "||");},
             Opcode::NIL_OR_TEST =>{script_err_shader!(self.trap, "NIL_OR_TEST: null-coalescing `a |? b` not supported in shaders");},
             Opcode::SHALLOW_EQ =>{script_err_shader!(self.trap, "SHALLOW_EQ: shallow equality `===` not supported in shaders");},
             Opcode::SHALLOW_NEQ=>{script_err_shader!(self.trap, "SHALLOW_NEQ: shallow inequality `!==` not supported in shaders");},
@@ -928,7 +938,7 @@ impl ShaderFnCompiler{
                 self.pop_to_me(vm);    
             },
 // Array index            
-            Opcode::ARRAY_INDEX=>{script_err_not_impl!(self.trap, "ARRAY_INDEX: dynamic array indexing `arr[expr]` not yet supported in shaders");},
+            Opcode::ARRAY_INDEX=>self.handle_array_index(vm, output),
 // Let                   
             Opcode::LET_DYN=>self.handle_let_dyn(vm, output, opargs),
             Opcode::LET_TYPED=>{script_err_not_impl!(self.trap, "LET_TYPED: typed let `let x: Type = ...` not yet supported in shaders, use `let x = Type(...)`");},

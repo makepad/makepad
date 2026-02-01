@@ -163,7 +163,7 @@ pub fn main(){
         }
         //~test_shader
         let x = sdf(0,vec4(0),array(1f,2f,3f,4f))
-        ~shader.compile_draw(test_shader)
+        shader.test_compile_draw(test_shader)
     };
         
     // lets define a handle type with some methods on it
@@ -339,6 +339,20 @@ pub fn main(){
         let c = 0 loop{ c+=1; if c>5 break} assert(c==6)
         let c = 0 while c < 9 c+=1 assert(c==9);
         let c = 0 while c < 3{c+=1}assert(c==3);
+        
+        // test && and || in if with braces
+        // IMPORTANT: if the { is parsed as object literal, result would NOT be modified
+        let x = 1 let y = 2
+        var result = 0
+        if x < y && y > 0 { 
+            result = 1 
+        }
+        assert(result == 1) // This would fail if { was parsed as object literal
+        result = 0
+        if x > y || y > 0 { 
+            result = 2 
+        }
+        assert(result == 2) // This would fail if { was parsed as object literal
                         
         // freezing
         let x = {x:1 y:2}.freeze_api();
@@ -646,6 +660,811 @@ pub fn main(){
         assert(p.Test1._repr_u32_enum_value == 1)
         assert(p.Test2._repr_u32_enum_value == 2)
         assert(p.Test3._repr_u32_enum_value == 30)  // make_val(3) = 3 * 10 = 30
+
+        // ============================================================
+        // SHADER COMPILER TESTS
+        // Tests that all supported opcodes compile without errors
+        // for various input types (f32, f16, i32, u32, vec2/3/4, etc.)
+        // ============================================================
+        use mod.shader
+        use mod.pod.*
+        use mod.math.*
+        
+        let ShaderEnum = #(ShaderEnum::script_api(vm))
+        
+        // Define pod structs for testing
+        let test_struct = struct{
+            f: f32,
+            v2: vec2f,
+            v3: vec3f, 
+            v4: vec4f,
+            i: i32,
+            u: u32,
+            arr: array{f32 4},
+        }
+        
+        // Shader for testing arithmetic opcodes with f32
+        let shader_arith_f32 = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // ADD, SUB, MUL, DIV, MOD with f32
+                let a = 1f let b = 2f
+                let c = a + b
+                let c = a - b
+                let c = a * b
+                let c = a / b
+                // NEG
+                let c = -a
+                self.pixel = vec4(c, c, c, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_arith_f32)
+        
+        // Shader for testing arithmetic with i32/u32 and bitwise ops
+        let shader_arith_int = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // Integer arithmetic
+                let a = 10i let b = 3i
+                let c = a + b
+                let c = a - b  
+                let c = a * b
+                let c = a / b
+                let c = a % b
+                // Bitwise ops (SHL, SHR, AND, OR, XOR)
+                let c = a << 2i
+                let c = a >> 1i
+                let c = a & b
+                let c = a | b
+                let c = a ^ b
+                // u32
+                let x = 10u let y = 3u
+                let z = x + y
+                let z = x - y
+                let z = x * y
+                let z = x / y
+                let z = x % y
+                let z = x << 2u
+                let z = x >> 1u
+                let z = x & y
+                let z = x | y
+                let z = x ^ y
+                self.pixel = vec4(1f)
+            }
+        }
+        shader.test_compile_draw(shader_arith_int)
+        
+        // Shader for testing vec2/3/4 arithmetic
+        let shader_arith_vec = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // vec2f
+                let v2a = vec2(1f, 2f) let v2b = vec2(3f, 4f)
+                let v2c = v2a + v2b
+                let v2c = v2a - v2b
+                let v2c = v2a * v2b
+                let v2c = v2a / v2b
+                let v2c = -v2a
+                // vec3f
+                let v3a = vec3(1f, 2f, 3f) let v3b = vec3(4f, 5f, 6f)
+                let v3c = v3a + v3b
+                let v3c = v3a - v3b
+                let v3c = v3a * v3b
+                let v3c = v3a / v3b
+                let v3c = -v3a
+                // vec4f
+                let v4a = vec4(1f, 2f, 3f, 4f) let v4b = vec4(5f, 6f, 7f, 8f)
+                let v4c = v4a + v4b
+                let v4c = v4a - v4b
+                let v4c = v4a * v4b
+                let v4c = v4a / v4b
+                let v4c = -v4a
+                // scalar * vec
+                let v4c = v4a * 2f
+                let v4c = 2f * v4a
+                self.pixel = v4c
+            }
+        }
+        shader.test_compile_draw(shader_arith_vec)
+        
+        // Shader for testing comparison opcodes (EQ, NEQ, LT, GT, LEQ, GEQ)
+        // TODO: bool result type needs wgsl conversion support
+        // Comparisons work in if conditions, just not stored in variables
+        let shader_cmp = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                let a = 1f let b = 2f
+                // comparisons work in conditions
+                var result = 0f
+                if a == b { result = 1f }
+                if a != b { result = 2f }
+                if a < b { result = 3f }
+                if a > b { result = 4f }
+                if a <= b { result = 5f }
+                if a >= b { result = 6f }
+                // i32
+                let x = 1i let y = 2i
+                if x == y { result = 7f }
+                if x != y { result = 8f }
+                if x < y { result = 9f }
+                if x > y { result = 10f }
+                // u32
+                let p = 1u let q = 2u
+                if p == q { result = 11f }
+                if p != q { result = 12f }
+                if p < q { result = 13f }
+                if p > q { result = 14f }
+                self.pixel = vec4(result)
+            }
+        }
+        shader.test_compile_draw(shader_cmp)
+        
+        // Shader for testing logic opcodes (AND, OR)
+        // Test && and || in if conditions
+        let shader_logic = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                let x = 1f 
+                let y = 2f
+                var result = 0f
+                // && test in if condition
+                if x < y && y > 0f {
+                    result = 1f
+                }
+                // || test in if condition
+                if x > y || y > 0f {
+                    result = 2f
+                }
+                // Bool type tests - storing logic results in variables
+                let a = true 
+                let b = false
+                let c = a && b
+                let d = a || b
+                let e = x < y && y > 0f
+                self.pixel = vec4(result)
+            }
+        }
+        shader.test_compile_draw(shader_logic)
+        
+        // Shader for testing assignment opcodes
+        let shader_assign = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // var assignments with compound ops
+                var a = 1f
+                a = 2f
+                a += 1f
+                a -= 1f
+                a *= 2f
+                a /= 2f
+                // i32 compound assigns
+                var b = 10i
+                b += 1i
+                b -= 1i
+                b *= 2i
+                b /= 2i
+                b %= 3i
+                b &= 7i
+                b |= 1i
+                b ^= 2i
+                b <<= 1i
+                b >>= 1i
+                // u32 compound assigns
+                var c = 10u
+                c += 1u
+                c -= 1u
+                c *= 2u
+                c /= 2u
+                c %= 3u
+                c &= 7u
+                c |= 1u
+                c ^= 2u
+                c <<= 1u
+                c >>= 1u
+                self.pixel = vec4(a)
+            }
+        }
+        shader.test_compile_draw(shader_assign)
+        
+        // Shader for testing field assignment opcodes
+        let shader_field_assign = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                var s = test_struct(1f, vec2(0f), vec3(0f), vec4(0f), 0i, 0u, array(0f,0f,0f,0f))
+                // Field assigns
+                s.f = 2f
+                s.f += 1f
+                s.f -= 1f
+                s.f *= 2f
+                s.f /= 2f
+                // int field assigns
+                s.i = 5i
+                s.i += 1i
+                s.i -= 1i
+                s.i *= 2i
+                s.i /= 2i
+                s.i %= 3i
+                s.i &= 7i
+                s.i |= 1i
+                s.i ^= 2i
+                s.i <<= 1i
+                s.i >>= 1i
+                // vec field component assign
+                s.v2.x = 1f
+                s.v3.y = 2f
+                s.v4.z = 3f
+                self.pixel = s.v4
+            }
+        }
+        shader.test_compile_draw(shader_field_assign)
+        
+        // Shader for testing array index access and assignment
+        let shader_index_assign = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // Fixed array indexing
+                var arr = array(1f, 2f, 3f, 4f)
+                // Index read
+                let x = arr[0]
+                let y = arr[1]
+                // Index assigns with literal indices
+                arr[0] = 5f
+                arr[1] = 6f
+                arr[0] += 1f
+                arr[1] -= 1f
+                arr[2] *= 2f
+                arr[3] /= 2f
+                // Dynamic index (using a variable)
+                var idx = 0i
+                let z = arr[idx]
+                arr[idx] = 10f
+                
+                // Vector indexing (vec4 as array of 4 floats)
+                var v = vec4(1f, 2f, 3f, 4f)
+                let vx = v[0]
+                let vy = v[1]
+                v[2] = 10f
+                v[3] += 5f
+                
+                // vec3 indexing
+                var v3 = vec3(1f, 2f, 3f)
+                let v3z = v3[2]
+                v3[0] = 5f
+                
+                self.pixel = vec4(arr[0], arr[1], v[2], v[3])
+            }
+        }
+        shader.test_compile_draw(shader_index_assign)
+        
+        // Shader for testing if/else control flow
+        let shader_if_else = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                let x = 1f
+                // if without else
+                var result = 0f
+                if x > 0f {
+                    result = 1f
+                }
+                // if with else
+                let y = if x > 0f { 1f } else { 0f }
+                // if-else-if chain
+                let z = if x < 0f { -1f }
+                    else if x == 0f { 0f }
+                    else { 1f }
+                // nested if
+                var v = 0f
+                if x > 0f {
+                    if x < 2f {
+                        v = 1f
+                    }
+                }
+                self.pixel = vec4(result, y, z, v)
+            }
+        }
+        shader.test_compile_draw(shader_if_else)
+        
+        // Shader for testing match expressions
+        let shader_match = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                let x = 1u
+                let result = match x {
+                    ShaderEnum.Test1 => 1f
+                    ShaderEnum.Test2 => 2f
+                    _ => 0f
+                }
+                self.pixel = vec4(result)
+            }
+        }
+        shader.test_compile_draw(shader_match)
+        
+        // Shader for testing for loops
+        let shader_for = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                var sum = 0f
+                for i in 0..4 {
+                    sum += 1f
+                }
+                // nested for
+                var sum2 = 0f
+                for i in 0..2 {
+                    for j in 0..3 {
+                        sum2 += 1f
+                    }
+                }
+                self.pixel = vec4(sum, sum2, 0f, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_for)
+        
+        // Shader for testing builtin function calls
+        let shader_builtins = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                let a = 0.5f let b = 1.0f let t = 0.5f
+                // 1-arg builtins
+                let r = abs(a)
+                let r = floor(a)
+                let r = ceil(a)
+                let r = round(a)
+                let r = fract(a)
+                let r = sqrt(a)
+                let r = sin(a)
+                let r = cos(a)
+                let r = tan(a)
+                let r = asin(a)
+                let r = acos(a)
+                let r = atan(a)
+                let r = exp(a)
+                let r = log(a)
+                let r = exp2(a)
+                let r = log2(a)
+                // 2-arg builtins
+                let r = min(a, b)
+                let r = max(a, b)
+                let r = pow(a, b)
+                let r = step(a, b)
+                // TODO: atan2 not yet supported (atan with 2 args)
+                //let r = atan(a, b)
+                // 3-arg builtins
+                let r = clamp(a, 0f, b)
+                let r = mix(a, b, t)
+                let r = smoothstep(0f, b, a)
+                // vec builtins
+                let v = vec3(1f, 2f, 3f)
+                let len = length(v)
+                // TODO: normalize not yet a shader builtin
+                //let n = normalize(v)
+                let d = dot(v, v)
+                // TODO: cross not yet a shader builtin
+                //let c = cross(v, vec3(0f, 1f, 0f))
+                let dist = distance(v, vec3(0f))
+                // vec versions of scalar builtins
+                let va = vec3(-1f, 0.5f, 2f)
+                let vr = abs(va)
+                let vr = floor(va)
+                let vr = ceil(va)
+                let vr = sin(va)
+                let vr = cos(va)
+                let vr = mix(va, vec3(1f), 0.5f)
+                self.pixel = vec4(r, len, d, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_builtins)
+        
+        // Shader for testing script function calls
+        let shader_fn_calls = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            helper: |x| x * 2f
+            helper2: |a, b| a + b
+            helper_vec: |v| v * 2f
+            vertex: fn(){}
+            fragment: fn(){
+                let a = self.helper(1f)
+                let b = self.helper2(1f, 2f)
+                let v = self.helper_vec(vec3(1f, 2f, 3f))
+                self.pixel = vec4(a, b, v.x, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_fn_calls)
+        
+        // Shader for testing return statements
+        let shader_return = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            get_val: || {
+                return 1f
+            }
+            get_val_cond: |x| {
+                if x > 0f {
+                    return 1f
+                }
+                return 0f
+            }
+            vertex: fn(){}
+            fragment: fn(){
+                let a = self.get_val()
+                let b = self.get_val_cond(1f)
+                self.pixel = vec4(a, b, 0f, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_return)
+        
+        // Shader for testing let/var declarations with various types
+        let shader_decls = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // let bindings (immutable)
+                let f = 1f
+                let h = 1h
+                let i = 1i
+                let u = 1u
+                let b = true
+                let v2 = vec2(1f, 2f)
+                let v3 = vec3(1f, 2f, 3f)
+                let v4 = vec4(1f, 2f, 3f, 4f)
+                // TODO: vec2i/vec3i/vec4i/vec2u/vec3u/vec4u need wgsl conversion
+                //let v2i = vec2i(1i, 2i)
+                //let v3i = vec3i(1i, 2i, 3i)
+                //let v4i = vec4i(1i, 2i, 3i, 4i)
+                //let v2u = vec2u(1u, 2u)
+                //let v3u = vec3u(1u, 2u, 3u)
+                //let v4u = vec4u(1u, 2u, 3u, 4u)
+                let col = #f00
+                // var bindings (mutable)
+                var vf = 1f
+                var vi = 1i
+                var vu = 1u
+                var vv4 = vec4(1f)
+                vf = 2f
+                vi = 2i
+                vu = 2u
+                vv4 = vec4(2f)
+                // struct
+                let s = test_struct(1f, vec2(0f), vec3(0f), vec4(0f), 0i, 0u, array(0f,0f,0f,0f))
+                self.pixel = vec4(f, vf, 0f, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_decls)
+        
+        // Shader for testing f16 (half precision)
+        let shader_f16 = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                let a = 1h let b = 2h
+                let c = a + b
+                let c = a - b
+                let c = a * b
+                let c = a / b
+                let c = -a
+                var d = 1h
+                d += 1h
+                d -= 1h
+                d *= 2h
+                d /= 2h
+                self.pixel = vec4(1f)
+            }
+        }
+        shader.test_compile_draw(shader_f16)
+        
+        // Shader for testing swizzles
+        let shader_swizzle = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                let v4 = vec4(1f, 2f, 3f, 4f)
+                let a = v4.x
+                let b = v4.xy
+                let c = v4.xyz
+                let d = v4.xyzw
+                let e = v4.wzyx
+                let f = v4.xxxx
+                let g = v4.rg
+                let h = v4.rgb
+                let v3 = vec3(1f, 2f, 3f)
+                let i = v3.xy
+                let j = v3.zyx
+                self.pixel = vec4(a, b.x, c.x, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_swizzle)
+        
+        // Shader for testing colors (mapped to vec4f)
+        let test_color = #f00
+        let shader_colors = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                let c1 = #ff0000
+                let c2 = #00ff00
+                let c3 = #0000ff
+                let c4 = test_color
+                let mixed = mix(c1, c2, 0.5f)
+                self.pixel = mixed
+            }
+        }
+        shader.test_compile_draw(shader_colors)
+        
+        // ============================================================
+        // SHADER INPUT TYPE TESTS
+        // Tests for varying, instance, uniform, uniform_buffer, 
+        // vertex_buffer, and texture inputs
+        // ============================================================
+        
+        // Define pod structs for shader inputs
+        let vertex_data = struct{
+            pos: vec4f,
+            uv: vec2f,
+            normal: vec3f,
+        }
+        
+        let uniforms_data = struct{
+            mvp: f32,       // simplified - normally mat4
+            time: f32,
+            scale: vec2f,
+        }
+        
+        // Shader for testing varying (vertex to fragment data passing)
+        let shader_varying = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            // Varying - passed from vertex to fragment shader
+            v_uv: shader.varying(vec2f)
+            v_color: shader.varying(vec4f)
+            v_intensity: shader.varying(1.0)
+            vertex: fn(){
+                // Set varyings in vertex shader
+                self.v_uv = vec2(0.5f, 0.5f)
+                self.v_color = vec4(1f, 0f, 0f, 1f)
+                self.v_intensity = 0.8f
+                self.vertex_pos = vec4(0f, 0f, 0f, 1f)
+            }
+            fragment: fn(){
+                // Read varyings in fragment shader (interpolated)
+                let uv = self.v_uv
+                let col = self.v_color
+                let intensity = self.v_intensity
+                self.pixel = col * intensity
+            }
+        }
+        shader.test_compile_draw(shader_varying)
+        
+        // Shader for testing instance data (per-instance attributes)
+        let shader_instance = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            // Instance data - per-instance attributes
+            inst_pos: shader.instance(vec2f)
+            inst_scale: shader.instance(1.0)
+            inst_color: shader.instance(vec4f)
+            inst_id: shader.instance(0u)
+            vertex: fn(){
+                // Use instance data to transform vertex
+                let offset = self.inst_pos
+                let scale = self.inst_scale
+                self.vertex_pos = vec4(offset.x * scale, offset.y * scale, 0f, 1f)
+            }
+            fragment: fn(){
+                // Use instance color
+                self.pixel = self.inst_color
+            }
+        }
+        shader.test_compile_draw(shader_instance)
+        
+        // Shader for testing uniform (single values)
+        let shader_uniform = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            // Single uniforms of various types
+            u_time: shader.uniform(0.0)
+            u_scale: shader.uniform(vec2f)
+            u_color: shader.uniform(#fff)
+            u_enabled: shader.uniform(true)
+            u_count: shader.uniform(0i)
+            u_flags: shader.uniform(0u)
+            vertex: fn(){
+                let t = self.u_time
+                let s = self.u_scale
+                self.vertex_pos = vec4(s.x * t, s.y * t, 0f, 1f)
+            }
+            fragment: fn(){
+                let col = self.u_color
+                let enabled = self.u_enabled
+                let count = self.u_count
+                let flags = self.u_flags
+                self.pixel = col
+            }
+        }
+        shader.test_compile_draw(shader_uniform)
+        
+        // Shader for testing uniform_buffer (struct uniform blocks)
+        let shader_uniform_buffer = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            // Uniform buffer - grouped uniforms
+            uniforms: shader.uniform_buffer(uniforms_data)
+            vertex: fn(){
+                let mvp = self.uniforms.mvp
+                let scale = self.uniforms.scale
+                self.vertex_pos = vec4(scale.x * mvp, scale.y * mvp, 0f, 1f)
+            }
+            fragment: fn(){
+                let time = self.uniforms.time
+                self.pixel = vec4(time, time, time, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_uniform_buffer)
+        
+        // Shader for testing vertex_buffer (vertex attributes)
+        let shader_vertex_buffer = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            // Vertex buffer - per-vertex data
+            vtx: shader.vertex_buffer(vertex_data)
+            v_uv: shader.varying(vec2f)
+            v_normal: shader.varying(vec3f)
+            vertex: fn(){
+                // Read vertex attributes
+                let pos = self.vtx.pos
+                let uv = self.vtx.uv
+                let normal = self.vtx.normal
+                // Pass to fragment via varyings
+                self.v_uv = uv
+                self.v_normal = normal
+                self.vertex_pos = pos
+            }
+            fragment: fn(){
+                let uv = self.v_uv
+                let normal = self.v_normal
+                // Simple lighting based on normal
+                let light = dot(normal, vec3(0f, 1f, 0f))
+                self.pixel = vec4(uv.x, uv.y, light, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_vertex_buffer)
+        
+        // Shader for testing texture_2d (texture sampling)
+        let shader_texture = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            // Texture inputs
+            tex_diffuse: shader.texture_2d(float)
+            tex_normal: shader.texture_2d(float)
+            v_uv: shader.varying(vec2f)
+            vertex: fn(){
+                self.v_uv = vec2(0.5f, 0.5f)
+                self.vertex_pos = vec4(0f, 0f, 0f, 1f)
+            }
+            fragment: fn(){
+                let uv = self.v_uv
+                // Sample textures
+                let diffuse = self.tex_diffuse.sample(uv)
+                let normal = self.tex_normal.sample(uv)
+                self.pixel = diffuse * normal.x
+            }
+        }
+        shader.test_compile_draw(shader_texture)
+        
+        // Shader for testing scope uniforms (uniforms from script scope)
+        let scope_time = 1.5
+        let scope_color = #0ff
+        let scope_vec = vec2f(2.0, 3.0)
+        let shader_scope_uniforms = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // Access values from script scope as uniforms
+                let t = scope_time
+                let c = scope_color
+                let v = scope_vec
+                self.pixel = c * t
+            }
+        }
+        shader.test_compile_draw(shader_scope_uniforms)
+        
+        // Shader for testing scope uniform_buffer (uniform buffer from script scope)
+        let scope_uniforms = struct{time:f32, scale:f32}
+        let scope_buf = shader.uniform_buffer(scope_uniforms)
+        let shader_scope_uniform_buffer = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // Access uniform buffer from script scope
+                let t = scope_buf.time
+                let s = scope_buf.scale
+                self.pixel = vec4(t * s, t, s, 1f)
+            }
+        }
+        shader.test_compile_draw(shader_scope_uniform_buffer)
+        
+        // Shader for testing scope texture (texture from script scope)
+        let scope_tex = shader.texture_2d(float)
+        let shader_scope_texture = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            vertex: fn(){}
+            fragment: fn(){
+                // Sample texture from script scope
+                let col = scope_tex.sample(vec2(0.5f, 0.5f))
+                self.pixel = col
+            }
+        }
+        shader.test_compile_draw(shader_scope_texture)
+        
+        // Shader for testing combined input types (realistic scenario)
+        let shader_combined = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            // Vertex buffer
+            vtx: shader.vertex_buffer(vertex_data)
+            // Instance data
+            inst_transform: shader.instance(vec4f)
+            inst_color: shader.instance(vec4f)
+            // Uniforms
+            u_time: shader.uniform(0.0)
+            uniforms: shader.uniform_buffer(uniforms_data)
+            // Texture
+            tex: shader.texture_2d(float)
+            // Varyings
+            v_uv: shader.varying(vec2f)
+            v_world_pos: shader.varying(vec3f)
+            vertex: fn(){
+                let pos = self.vtx.pos
+                let transform = self.inst_transform
+                let mvp = self.uniforms.mvp
+                // Transform vertex
+                let world_pos = pos.xyz + transform.xyz
+                self.v_world_pos = world_pos
+                self.v_uv = self.vtx.uv
+                self.vertex_pos = vec4(world_pos * mvp, 1f)
+            }
+            fragment: fn(){
+                let uv = self.v_uv
+                let world_pos = self.v_world_pos
+                let time = self.u_time
+                let inst_col = self.inst_color
+                // Sample texture and combine with instance color
+                let tex_col = self.tex.sample(uv)
+                let final_col = tex_col * inst_col
+                self.pixel = final_col
+            }
+        }
+        shader.test_compile_draw(shader_combined)
 
         println("Test done")
         
