@@ -331,6 +331,14 @@ impl ShaderFnCompiler {
         if value.is_color() {
             return ShaderType::Pod(vm.bx.code.builtins.pod.pod_vec4f);
         }
+        // Check if it's a repr(u32) enum variant - these have _repr_u32_enum_value set
+        if let Some(obj) = value.as_object() {
+            let enum_val = vm.bx.heap.value(obj, id!(_repr_u32_enum_value).into(), NoTrap);
+            if enum_val.is_f64() {
+                // repr(u32) enum variants map to u32 in shaders (matches enum constant emission)
+                return ShaderType::Pod(vm.bx.code.builtins.pod.pod_u32);
+            }
+        }
         if let Some(pod_ty) = vm.bx.heap.pod_type(value) {
             return ShaderType::PodType(pod_ty);
         }

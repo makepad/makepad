@@ -40,6 +40,7 @@ pub mod image_blend;
 pub mod icon;
 
 pub mod adaptive_view;
+pub mod desktop_button;
 pub mod window;
 
 pub mod popup_menu;
@@ -76,7 +77,6 @@ pub mod markdown;
 // Commented out modules (not yet converted)
 // pub mod vectorline;
 // pub mod multi_window;
-// pub mod portal_list2;
 // pub mod stack_navigation;
 // pub mod expandable_panel;
 // pub mod desktop_button;
@@ -131,6 +131,7 @@ pub use crate::{
     icon::*,
     
     adaptive_view::*,
+    desktop_button::*,
     window::*,
     
     popup_menu::*,
@@ -239,6 +240,7 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::icon::script_mod(vm);
             
     crate::adaptive_view::script_mod(vm);
+    crate::desktop_button::script_mod(vm);
     crate::window::script_mod(vm);
     
     crate::popup_menu::script_mod(vm);
