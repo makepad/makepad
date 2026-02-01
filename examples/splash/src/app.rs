@@ -526,8 +526,8 @@ impl Widget for NewsListTest {
                 while let Some(item_id) = list.next_visible_item(cx) {
                     // Determine which template to use based on item_id
                     let template = match item_id {
-                        0 => id!($Header),
-                        51 => id!($Footer),
+                        //0 => id!($Header),
+                        //51 => id!($Footer),
                         _ => id!($Item),
                     };
                     
