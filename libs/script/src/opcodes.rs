@@ -44,7 +44,7 @@ impl<'a> ScriptVm<'a> {
             Opcode::ASSIGN_XOR => self.handle_fu64_scope_assign_op(|a,b| a^b),
             Opcode::ASSIGN_SHL => self.handle_fu64_scope_assign_op(|a,b| a<<b),
             Opcode::ASSIGN_SHR => self.handle_fu64_scope_assign_op(|a,b| a>>b),
-            Opcode::ASSIGN_IFNIL => self.handle_assign_ifnil(),
+            Opcode::ASSIGN_IFNIL => self.handle_assign_ifnil(opargs),
 
 // ASSIGN FIELD                       
             Opcode::ASSIGN_FIELD => self.handle_assign_field(),
@@ -213,6 +213,13 @@ impl<'a> ScriptVm<'a> {
             Opcode::TRY_TEST => self.handle_try_test(opargs),
             Opcode::TRY_ERR => self.handle_try_err(opargs),
             Opcode::TRY_OK => self.handle_try_ok(opargs),
+
+// Destructuring
+            Opcode::DUP => self.handle_dup(),
+            Opcode::DROP => self.handle_drop(),
+            Opcode::ARRAY_INDEX_NIL => self.handle_array_index_nil(),
+            Opcode::LET_DESTRUCT_ARRAY_EL => self.handle_let_destruct_array_el(opargs),
+            Opcode::LET_DESTRUCT_OBJECT_EL => self.handle_let_destruct_object_el(),
 
             opcode => {
                 println!("UNDEFINED OPCODE {}", opcode);

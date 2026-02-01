@@ -546,4 +546,120 @@ impl<'a> ScriptVm<'a> {
             }
         }
     }
+
+    // Destructuring handlers
+    
+    /// DUP - duplicate top of stack
+    pub(crate) fn handle_dup(&mut self) {
+        let value = self.bx.threads.cur().peek_stack_resolved(&self.bx.heap);
+        self.bx.threads.cur().push_stack_unchecked(value);
+        self.bx.threads.cur().trap.goto_next();
+    }
+    
+    /// DROP - discard top of stack
+    pub(crate) fn handle_drop(&mut self) {
+        self.bx.threads.cur().pop_stack_value();
+        self.bx.threads.cur().trap.goto_next();
+    }
+    
+    /// ARRAY_INDEX_NIL - like ARRAY_INDEX but returns nil instead of error
+    /// Stack: [source, index] -> [value_or_nil]
+    pub(crate) fn handle_array_index_nil(&mut self) {
+        let index = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let source = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        
+        let value = if let Some(arr) = source.as_array() {
+            let idx = index.as_index();
+            // Try to get, return NIL if out of bounds or error
+            let result = self.bx.heap.array_index(arr, idx, self.bx.threads.cur().trap.pass());
+            if result.is_err() {
+                self.bx.threads.cur().trap.err.take(); // Clear the error
+                NIL
+            } else {
+                result
+            }
+        } else if let Some(obj) = source.as_object() {
+            let result = self.bx.heap.value(obj, index, self.bx.threads.cur().trap.pass());
+            if result.is_err() {
+                self.bx.threads.cur().trap.err.take();
+                NIL
+            } else {
+                result
+            }
+        } else {
+            NIL
+        };
+        
+        self.bx.threads.cur().push_stack_unchecked(value);
+        self.bx.threads.cur().trap.goto_next();
+    }
+    
+    /// LET_DESTRUCT_ARRAY_EL(index) - destructure array element
+    /// Stack: [source, id] -> [source]
+    /// Binds: id = source[index] (nil-safe extraction)
+    pub(crate) fn handle_let_destruct_array_el(&mut self, opargs: OpcodeArgs) {
+        let index = opargs.to_u32() as usize;
+        let id = self.bx.threads.cur().pop_stack_value();
+        let source = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        
+        // Extract value from source array at index (nil-safe)
+        let value = if let Some(arr) = source.as_array() {
+            let result = self.bx.heap.array_index(arr, index, self.bx.threads.cur().trap.pass());
+            if result.is_err() {
+                self.bx.threads.cur().trap.err.take();
+                NIL
+            } else {
+                result
+            }
+        } else if let Some(obj) = source.as_object() {
+            let result = self.bx.heap.value(obj, ScriptValue::from_u32(index as u32), self.bx.threads.cur().trap.pass());
+            if result.is_err() {
+                self.bx.threads.cur().trap.err.take();
+                NIL
+            } else {
+                result
+            }
+        } else {
+            NIL
+        };
+        
+        // Bind the value to the identifier
+        if let Some(id) = id.as_id() {
+            self.bx.threads.cur().def_scope_value(&mut self.bx.heap, id, value);
+        }
+        
+        // Push source back on stack for next element
+        self.bx.threads.cur().push_stack_unchecked(source);
+        self.bx.threads.cur().trap.goto_next();
+    }
+    
+    /// LET_DESTRUCT_OBJECT_EL - destructure object element  
+    /// Stack: [source, id] -> [source]
+    /// Binds: id = source[id] (nil-safe extraction)
+    pub(crate) fn handle_let_destruct_object_el(&mut self) {
+        let id = self.bx.threads.cur().pop_stack_value();
+        let source = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        
+        // Extract value from source object using id as key (nil-safe)
+        let value = if let Some(obj) = source.as_object() {
+            let result = self.bx.heap.value(obj, id, self.bx.threads.cur().trap.pass());
+            if result.is_err() {
+                self.bx.threads.cur().trap.err.take();
+                NIL
+            } else {
+                result
+            }
+        } else {
+            NIL
+        };
+        
+        // Bind the value to the identifier
+        if let Some(id) = id.as_id() {
+            self.bx.threads.cur().def_scope_value(&mut self.bx.heap, id, value);
+        }
+        
+        // Push source back on stack for next element
+        self.bx.threads.cur().push_stack_unchecked(source);
+        self.bx.threads.cur().trap.goto_next();
+    }
 }

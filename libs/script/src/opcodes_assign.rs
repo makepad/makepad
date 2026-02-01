@@ -57,24 +57,33 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().trap.goto_next();
     }
     
-    pub(crate) fn handle_assign_ifnil(&mut self) {
-        let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let id = self.bx.threads.cur().pop_stack_value();
-        if let Some(id) = id.as_id(){
-            let va = self.bx.threads.cur().scope_value(&self.bx.heap, id);
-            if va.is_err() || va.is_nil(){
-                let value = self.bx.threads.cur().set_scope_value(&mut self.bx.heap, id, value);
-                self.bx.threads.cur().push_stack_unchecked(value);
-            }
-            else{
+    /// ASSIGN_IFNIL - lazy evaluation: checks if scope var is nil
+    /// Stack: [id] -> [id] (continue) or [] (jump)
+    /// If scope[id] is NOT nil: pop id, push nil, jump to skip RHS
+    /// If scope[id] IS nil: leave id on stack, continue to evaluate RHS then ASSIGN
+    pub(crate) fn handle_assign_ifnil(&mut self, opargs: OpcodeArgs) {
+        let id = self.bx.threads.cur().peek_stack_value();
+        if let Some(id_val) = id.as_id() {
+            let va = self.bx.threads.cur().scope_value(&self.bx.heap, id_val);
+            if !va.is_err() && !va.is_nil() {
+                // Value is NOT nil - skip the RHS evaluation
+                // Pop the id from stack and push nil as result
+                self.bx.threads.cur().pop_stack_value();
                 self.bx.threads.cur().push_stack_unchecked(NIL);
+                // Jump past the RHS and ASSIGN
+                self.bx.threads.cur().trap.goto_rel(opargs.to_u32());
+            } else {
+                // Value IS nil - continue to evaluate RHS
+                // Leave id on stack for ASSIGN to use later
+                self.bx.threads.cur().trap.goto_next();
             }
-        }
-        else{
+        } else {
+            // Not an identifier - error
+            self.bx.threads.cur().pop_stack_value();
             let value = script_err_immutable!(self.bx.threads.cur_ref().trap, "?= target is not an identifier, got {:?}", id.value_type());
             self.bx.threads.cur().push_stack_unchecked(value);
+            self.bx.threads.cur().trap.goto_next();
         }
-        self.bx.threads.cur().trap.goto_next();
     }
 
     // ASSIGN FIELD handlers
