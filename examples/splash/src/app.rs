@@ -69,6 +69,8 @@ script_mod!{
     let TabButtons = SolidView{
         width: Fill height: Fill
         draw_bg.color: #333
+        flow: Overlay
+        
         ScrollYView{
             width: Fill height: Fill flow: Down padding: 15 spacing: 12
             
@@ -87,7 +89,9 @@ script_mod!{
             }
             
             Hr{}
-            
+                        
+            View{width: Fill height: Fit flow: Right spacing: 10}
+            $tooltip_btn1: Button{text: "Show Tooltip 1"}
             Label{text: "Icon Only" draw_text.color: #888 draw_text.text_style.font_size: 10}
             View{width: Fill height: Fit flow: Right spacing: 15}
             $test_icon: Icon{
@@ -100,7 +104,16 @@ script_mod!{
                 draw_icon.color: #f80
                 icon_walk: Walk{width: 32 height: 32}
             }
+            
+            Hr{}
+            
+            Label{text: "Tooltip Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "Click buttons to show tooltips, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            
         }
+        
+        // Tooltip overlay
+        $buttons_tooltip: Tooltip{}
     }
     
     // Toggles tab - checkboxes, toggles, radio buttons
@@ -644,6 +657,17 @@ impl MatchEvent for App {
         if self.ui.button(ids!($icon_button)).clicked(actions) {
             log!("Icon button clicked!");
         }
+        
+        // Tooltip demo - show tooltips on button click
+        if self.ui.button(ids!($tooltip_btn1)).clicked(actions) {
+            log!("Showing tooltip 1");
+            self.ui.tooltip(ids!($buttons_tooltip)).show_with_options(
+                cx,
+                dvec2(350.0, 280.0),
+                "This is the standard button. Click it to perform the primary action."
+            );
+        }
+       
         if let Some(value) = self.ui.check_box(ids!($checkbox)).changed(actions) {
             log!("Checkbox changed: {}", value);
         }
