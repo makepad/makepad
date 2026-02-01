@@ -1392,20 +1392,75 @@ pub fn main(){
         use mod.std.assert
         use mod.std.println
         
-        // we're implementing destructuring assignment patterns.
-        // array destructuring
-        let [x,y] = [1,2]
-        assert(x == 1 && y == 2)
-                
-        // object destructuring
-        let {x,y} = {x:3, y:4}
-        assert(x == 3 && y == 4)
-                
-        // Also these things need to work recursively
-        let [{x}] = [{x:5}]
-        assert(x == 5)
+        // Test 1: lazy ?= - should NOT run RHS when value exists
+        fn dont_call(){assert(false)}
+        let a = 1
+        a ?= dont_call()
+        assert(a == 1)
+        println("Test 1 passed")
         
-        println("DONE")
+        // Test 2: lazy ?= - SHOULD run RHS when value is nil
+        let counter = {v:0}
+        fn do_call(){counter.v = 1; 42}
+        let b = nil
+        b ?= do_call()
+        assert(counter.v == 1)
+        assert(b == 42)
+        println("Test 2 passed")
+        
+        // Test 3: Array destructuring
+        let [c,d] = [1,2]
+        assert(c == 1 && d == 2)
+        println("Test 3 passed")
+        
+        // Test 4: Object destructuring
+        let {e,f} = {e:3, f:4}
+        assert(e == 3 && f == 4)
+        println("Test 4 passed")
+        
+        // Test 5: Object with lazy default - property exists, skip default
+        let counter2 = {v:0}
+        fn skip_default(){counter2.v = 1; 999}
+        let {g, h=skip_default()} = {g:1, h:2}
+        assert(g == 1 && h == 2)
+        assert(counter2.v == 0)
+        println("Test 5 passed")
+        
+        // Test 6: Object with lazy default - property missing, use default
+        let counter3 = {v:0}
+        fn use_default(){counter3.v = 1; 100}
+        let {i, j=use_default()} = {i:1}
+        assert(i == 1 && j == 100)
+        assert(counter3.v == 1)
+        println("Test 6 passed")
+        
+        // Test 7: Object with all defaults
+        let {k=999, l=888} = {k:10, l:20}
+        assert(k == 10 && l == 20)
+        println("Test 7 passed")
+        
+        // Test 8: Object with default, missing value
+        let {m, n=42} = {m:1}
+        assert(m == 1 && n == 42)
+        println("Test 8 passed")
+        
+        // Test 9: Array with lazy default - value missing
+        let counter4 = {v:0}
+        fn arr_use_def(){counter4.v = 1; 50}
+        let [o, p=arr_use_def()] = [100]
+        assert(o == 100 && p == 50)
+        assert(counter4.v == 1)
+        println("Test 9 passed")
+        
+        // Test 10: Array with lazy default - value exists
+        let counter5 = {v:0}
+        fn arr_skip_def(){counter5.v = 1; 999}
+        let [q, r=arr_skip_def()] = [100, 200]
+        assert(q == 100 && r == 200)
+        assert(counter5.v == 0)
+        println("Test 10 passed")
+        
+        println("ALL DONE")
         
     };
           
