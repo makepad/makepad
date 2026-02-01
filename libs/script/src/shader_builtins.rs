@@ -68,6 +68,14 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
         let x_val = vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.atan()).to_script_value_vm(vm)
     });
+    native.add_method(heap, math, id_lut!(atan2), script_args!(y=0.0, x=0.0), |vm, args|{ 
+        let y_val = vm.bx.heap.value(args, id!(y).into(), vm.bx.threads.cur_ref().trap.pass());
+        let x_val = vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+        let y_nv = NumericValue::from_script_value_vm(vm, y_val);
+        let x_nv = NumericValue::from_script_value_vm(vm, x_val);
+        // atan2 computes atan(y/x) with correct quadrant
+        y_nv.zip_f32(x_nv, |y, x| y.atan2(x)).to_script_value_vm(vm)
+    });
     native.add_method(heap, math, id_lut!(atanh), script_args!(x=0.0), |vm, args|{ 
         let x_val = vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
         NumericValue::from_script_value_vm(vm, x_val).map_f32(|v| v.atanh()).to_script_value_vm(vm)
@@ -200,6 +208,20 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
         let y_nv = NumericValue::from_script_value_vm(vm, y_val);
         // dot returns a scalar (sum of component-wise products)
         ScriptValue::from_f64(x_nv.dot(y_nv))
+    });
+    native.add_method(heap, math, id_lut!(normalize), script_args!(x=0.0), |vm, args|{ 
+        let x_val = vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+        let nv = NumericValue::from_script_value_vm(vm, x_val);
+        // normalize returns a unit vector in the same direction
+        nv.normalize().to_script_value_vm(vm)
+    });
+    native.add_method(heap, math, id_lut!(cross), script_args!(x=0.0, y=0.0), |vm, args|{ 
+        let x_val = vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+        let y_val = vm.bx.heap.value(args, id!(y).into(), vm.bx.threads.cur_ref().trap.pass());
+        let x_nv = NumericValue::from_script_value_vm(vm, x_val);
+        let y_nv = NumericValue::from_script_value_vm(vm, y_val);
+        // cross product (only defined for vec3)
+        x_nv.cross(y_nv).to_script_value_vm(vm)
     });
     native.add_method(heap, math, id_lut!(max), script_args!(x=0.0, y=0.0), |vm, args|{ 
         let x_val = vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
@@ -465,6 +487,19 @@ pub fn type_table_builtin(
             script_err_type_mismatch!(trap, "shader builtin 'length' requires float/vec-float arg, got {}", fmt_ty(t));
             return builtins.pod_void;
        }
+        // normalize: returns unit vector in same direction
+        id!(normalize) => {
+            if args.len() != 1 {
+                script_err_invalid_args!(trap, "shader builtin 'normalize' requires 1 arg, got {}", args.len());
+                return builtins.pod_void;
+            }
+            let t = args[0];
+            if is_vec_float(t) {
+                return t;
+            }
+            script_err_type_mismatch!(trap, "shader builtin 'normalize' requires vec-float arg, got {}", fmt_ty(t));
+            return builtins.pod_void;
+       }
         // Float or Int 1 argument
         id!(abs) | id!(sign) => {
             if args.len() != 1 {
@@ -520,6 +555,20 @@ pub fn type_table_builtin(
                  return t1;
              }
              script_err_type_mismatch!(trap, "shader builtin {:?} requires matching float types, got {} and {}", name, fmt_ty(t1), fmt_ty(t2));
+             return builtins.pod_void;
+        }
+        // cross product: only works on vec3
+        id!(cross) => {
+             if args.len() != 2 {
+                 script_err_invalid_args!(trap, "shader builtin 'cross' requires 2 args, got {}", args.len());
+                 return builtins.pod_void;
+             }
+             let (t1, t2) = (args[0], args[1]);
+             if t1 == t2 {
+                 if t1 == vec3f_t { return vec3f_t; }
+                 if t1 == vec3h_t { return vec3h_t; }
+             }
+             script_err_type_mismatch!(trap, "shader builtin 'cross' requires two vec3 args, got {} and {}", fmt_ty(t1), fmt_ty(t2));
              return builtins.pod_void;
         }
         // Float or Int 2 arguments
