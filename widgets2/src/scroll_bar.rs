@@ -291,12 +291,13 @@ impl ScrollBar {
         changed
     }
     
-    // writes the norm_scroll value into the shader
-    pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
-        let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        script_apply_eval!(cx, self.draw_bg, {
-            norm_scroll:#(norm_scroll)
-        });
+    // writes the norm_scroll value into the shader.. why did we do this again
+    // doesnt seem to be needed. also apply eval is broken
+    pub fn update_shader_scroll_pos(&mut self, _cx: &mut Cx) {
+        //let (norm_scroll, _) = self.get_normalized_scroll_pos();
+        //script_apply_eval!(cx, self.draw_bg, {
+        //    norm_scroll:#(norm_scroll)
+        //});
     }
     
     // turns scroll_pos into an event on this.event
