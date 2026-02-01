@@ -83,8 +83,8 @@ script_mod!{
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let offset_y = 1.0
-                sdf.move_to(0. (self.rect_size.y - offset_y))
-                sdf.line_to(self.rect_size.x (self.rect_size.y - offset_y))
+                sdf.move_to(0. self.rect_size.y-offset_y)
+                sdf.line_to(self.rect_size.x self.rect_size.y-offset_y)
                 return sdf.stroke(mix(
                     theme.color_label_inner,
                     theme.color_label_inner_down,
@@ -208,12 +208,12 @@ script_mod!{
                     FlowBlockType.Quote => {
                         sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
                         sdf.fill(self.quote_bg_color)
-                        sdf.box(self.space_1 self.space_1 self.space_1 (self.rect_size.y - self.space_2) 1.5)
+                        sdf.box(self.space_1 self.space_1 self.space_1 self.rect_size.y-self.space_2 1.5)
                         sdf.fill(self.quote_fg_color)
                         return sdf.result
                     }
                     FlowBlockType.Sep => {
-                        sdf.box(0. 1. (self.rect_size.x - 1.) (self.rect_size.y - 2.) 2.)
+                        sdf.box(0. 1. self.rect_size.x-1. self.rect_size.y-2. 2.)
                         sdf.fill(self.sep_color)
                         return sdf.result
                     }
@@ -223,17 +223,17 @@ script_mod!{
                         return sdf.result
                     }
                     FlowBlockType.InlineCode => {
-                        sdf.box(1. 1. (self.rect_size.x - 2.) (self.rect_size.y - 2.) 2.)
+                        sdf.box(1. 1. self.rect_size.x-2. self.rect_size.y-2. 2.)
                         sdf.fill(self.code_color)
                         return sdf.result
                     }
                     FlowBlockType.Underline => {
-                        sdf.box(0. (self.rect_size.y - 2.) self.rect_size.x 2.0 0.5)
+                        sdf.box(0. self.rect_size.y-2. self.rect_size.x 2.0 0.5)
                         sdf.fill(self.line_color)
                         return sdf.result
                     }
                     FlowBlockType.Strikethrough => {
-                        sdf.box(0. (self.rect_size.y * 0.45) self.rect_size.x 2.0 0.5)
+                        sdf.box(0. self.rect_size.y * 0.45 self.rect_size.x 2.0 0.5)
                         sdf.fill(self.line_color)
                         return sdf.result
                     }

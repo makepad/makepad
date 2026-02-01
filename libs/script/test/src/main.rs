@@ -50,7 +50,8 @@ pub fn main(){
         #[deref] parent: ShaderTest,
         #[live] color: Vec4f,
         #[live] child_field: f32, 
-        #[live] unused_field2: f32
+        #[live] unused_field2: f32,
+        #[live] enum_test:ShaderEnum
     }
         
     use crate::vm::*;
@@ -1297,7 +1298,7 @@ pub fn main(){
                 if xif > 0f { if xif < 2f { vif = 1f } }
                 
                 // ---- Match ----
-                let xm = 1u
+                let xm = self.enum_test
                 let result_m = match xm {
                     ShaderEnum.Test1 => 1f
                     ShaderEnum.Test2 => 2f

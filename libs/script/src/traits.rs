@@ -131,6 +131,8 @@ pub struct ScriptTypeObject{
 pub struct ScriptTypeCheck{
     pub props: ScriptTypeProps,
     pub object: Option<ScriptTypeObject>,
+    /// If true, this type is a `repr(u32)` enum and should be treated as `u32` in shaders.
+    pub is_repr_u32_enum: bool,
 }
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
@@ -146,6 +148,7 @@ fn register_type_inner(
     props: ScriptTypeProps,
     check: fn(&ScriptHeap, ScriptValue) -> bool,
     name: Option<LiveId>,
+    is_repr_u32_enum: bool,
 ) -> ScriptValue {
     let ty_check = ScriptTypeCheck {
         object: Some(ScriptTypeObject {
@@ -155,6 +158,7 @@ fn register_type_inner(
             name,
         }),
         props,
+        is_repr_u32_enum,
     };
     let ty_index = vm.bx.heap.register_type(Some(type_id), ty_check);
     if let Some(obj) = proto.as_object() {
@@ -169,6 +173,11 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     /// Returns the LiveId name of this type for error messages.
     /// Override this in derive macro to provide meaningful type names.
     fn script_type_name() -> Option<LiveId> { None }
+    
+    /// Returns true if this type is a `repr(u32)` enum.
+    /// Override in derive macro for enums with discriminants.
+    /// Used by shader compiler to treat the enum as `u32`.
+    fn is_repr_u32_enum() -> bool { false }
     
     fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
         if  <Self as ScriptHook>::on_type_check(heap, value){
@@ -287,7 +296,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         let mut props = ScriptTypeProps::default();
         let proto = Self::script_proto_build(vm, &mut props);
         // Use non-generic helper for registration to reduce monomorphization
-        register_type_inner(vm, type_id, proto, props, Self::script_type_check, Self::script_type_name())
+        register_type_inner(vm, type_id, proto, props, Self::script_type_check, Self::script_type_name(), Self::is_repr_u32_enum())
     }
     
     fn script_proto_build(vm:&mut ScriptVm, props:&mut ScriptTypeProps)->ScriptValue{
