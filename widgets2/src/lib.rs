@@ -85,28 +85,30 @@ pub mod scroll_shadow;
 pub mod stack_navigation;
 pub mod expandable_panel;
 
-// Commented out modules (not yet converted)
-// pub mod vectorline;
-// pub mod multi_window;
-// pub mod multi_image;
 
 pub mod modal;
 pub mod tooltip;
-// pub mod popup_notification;
-// pub mod video;
-// pub mod page_flip;
+pub mod popup_notification;
+#[cfg(target_os = "android")]
+pub mod video;
+pub mod page_flip;
+pub mod file_tree;
+// pub mod slides_view;
+// pub mod toggle_panel;
+pub mod defer_with_redraw;
 
-// pub mod web_view;
-// pub mod rotated_image;
 // pub mod slide_panel;
 // pub mod flat_list;
-// pub mod file_tree;
-// pub mod slides_view;
+// pub mod command_text_input;
+
+// Commented out modules (not yet converted)
+// going to skip for now
+// pub mod vectorline;
+// pub mod web_view;
+// pub mod rotated_image;
 // pub mod color_picker;
 // pub mod debug_view;
 // pub mod performance_view;
-// pub mod toggle_panel;
-// pub mod command_text_input;
 // pub mod data_binding;
 // pub mod designer;
 // pub mod designer_dummy;
@@ -116,8 +118,6 @@ pub mod tooltip;
 // pub mod designer_outline;
 // pub mod designer_data;
 // pub mod designer_toolbox;
-// pub mod defer_with_redraw;
-
 
 pub use crate::{
     // Ordered to match script_mod calls
@@ -176,6 +176,9 @@ pub use crate::{
     expandable_panel::*,
     modal::*,
     tooltip::*,
+    popup_notification::*,
+    page_flip::*,
+    file_tree::*,
     
     widget_match_event::WidgetMatchEvent,
 
@@ -209,6 +212,9 @@ pub use crate::html::*;
 
 #[cfg(feature = "markdown")]
 pub use crate::markdown::*;
+
+#[cfg(target_os = "android")]
+pub use crate::video::*;
 
 pub fn script_mod(vm: &mut ScriptVm){
     makepad_draw2::script_mod(vm);
@@ -296,6 +302,11 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::expandable_panel::script_mod(vm);
     crate::modal::script_mod(vm);
     crate::tooltip::script_mod(vm);
+    crate::popup_notification::script_mod(vm);
+    #[cfg(target_os = "android")]
+    crate::video::script_mod(vm);
+    crate::page_flip::script_mod(vm);
+    crate::file_tree::script_mod(vm);
     
     #[cfg(feature = "html")]
     crate::html::script_mod(vm);
