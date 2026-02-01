@@ -409,6 +409,8 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("} = def{");
                     for (i, field) in fields.iter().enumerate(){
                         tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
+                        // Register the field type first (like structs do) so type checking works
+                        tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto(vm);");
                         tb.add("props.insert(id_lut!(").ident(&field.name).add("), <").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
                         tb.add(" vm.bx.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, vm.bx.threads.cur().trap.pass());");
                     }
