@@ -3,7 +3,8 @@ use crate::{
     makepad_draw::*,
     view::*,
     widget::*,
-    //animator::*,
+    nav_control::NavControl,
+    desktop_button::DesktopButtonWidgetExt,
 };
 
 script_mod!{
@@ -13,16 +14,18 @@ script_mod!{
     use mod.widgets.Label
     use mod.widgets.DesktopButton
     use mod.widgets.DesktopButtonType
-    //use mod.widgets.KeyboardView
-    //use mod.widgets.WindowMenu
-    // use mod.widgets.NavControl
+    use mod.widgets.KeyboardView
+    use mod.widgets.WindowMenu
+    use mod.widgets.NavControl
+    use mod.widgets.MenuItem
+    use mod.draw.KeyCode
     
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
         pass +: { clear_color: theme.color_bg_app }
         flow: Down
-        //nav_control: NavControl {}
+        nav_control: NavControl {}
         $caption_bar: SolidView {
             visible: false
             
@@ -53,24 +56,71 @@ script_mod!{
                 $xr_on: DesktopButton {draw_bg.button_type: DesktopButtonType.XRMode width: 50 height: 36}
             }
         }
-        $body: View{
-            
-        }
-        /*
         $window_menu: WindowMenu {
-            main: Main{items:[app]}
-            app: Sub { name:"Makepad" items:[quit] }
-            quit: Item {
-                name:"Quit"
-                shift: false
-                key: Key.Q
-                enabled: true
-            }
+            $main: MenuItem.Main{items:[@$app_menu, @$file_menu, @$edit_menu, @$selection_menu, @$view_menu, @$window_menu, @$help_menu]}
+            
+            // App menu
+            $app_menu: MenuItem.Sub { name:"Makepad" items:[@$about, @$line1, @$settings, @$line2, @$quit] }
+            $about: MenuItem.Item { name:"About Makepad" key: KeyCode.Escape enabled: true }
+            $line1: MenuItem.Line {}
+            $settings: MenuItem.Item { name:"Settings..." key: KeyCode.Comma enabled: true }
+            $line2: MenuItem.Line {}
+            $quit: MenuItem.Item { name:"Quit Makepad" key: KeyCode.KeyQ enabled: true }
+            
+            // File menu
+            $file_menu: MenuItem.Sub { name:"File" items:[@$new_file, @$new_window, @$line3, @$open, @$line4, @$save, @$save_as, @$line5, @$close_editor, @$close_window] }
+            $new_file: MenuItem.Item { name:"New File" key: KeyCode.KeyN enabled: true }
+            $new_window: MenuItem.Item { name:"New Window" shift: true key: KeyCode.KeyN enabled: true }
+            $line3: MenuItem.Line {}
+            $open: MenuItem.Item { name:"Open..." key: KeyCode.KeyO enabled: true }
+            $line4: MenuItem.Line {}
+            $save: MenuItem.Item { name:"Save" key: KeyCode.KeyS enabled: true }
+            $save_as: MenuItem.Item { name:"Save As..." shift: true key: KeyCode.KeyS enabled: true }
+            $line5: MenuItem.Line {}
+            $close_editor: MenuItem.Item { name:"Close Editor" key: KeyCode.KeyW enabled: true }
+            $close_window: MenuItem.Item { name:"Close Window" shift: true key: KeyCode.KeyW enabled: true }
+            
+            // Edit menu
+            $edit_menu: MenuItem.Sub { name:"Edit" items:[@$undo, @$redo, @$line6, @$cut, @$copy, @$paste, @$line7, @$find, @$replace, @$line8, @$find_in_files, @$replace_in_files] }
+            $undo: MenuItem.Item { name:"Undo" key: KeyCode.KeyZ enabled: true }
+            $redo: MenuItem.Item { name:"Redo" shift: true key: KeyCode.KeyZ enabled: true }
+            $line6: MenuItem.Line {}
+            $cut: MenuItem.Item { name:"Cut" key: KeyCode.KeyX enabled: true }
+            $copy: MenuItem.Item { name:"Copy" key: KeyCode.KeyC enabled: true }
+            $paste: MenuItem.Item { name:"Paste" key: KeyCode.KeyV enabled: true }
+            $line7: MenuItem.Line {}
+            $find: MenuItem.Item { name:"Find" key: KeyCode.KeyF enabled: true }
+            $replace: MenuItem.Item { name:"Replace" key: KeyCode.KeyH enabled: true }
+            $line8: MenuItem.Line {}
+            $find_in_files: MenuItem.Item { name:"Find in Files" shift: true key: KeyCode.KeyF enabled: true }
+            $replace_in_files: MenuItem.Item { name:"Replace in Files" shift: true key: KeyCode.KeyH enabled: true }
+            
+            // Selection menu
+            $selection_menu: MenuItem.Sub { name:"Selection" items:[@$select_all] }
+            $select_all: MenuItem.Item { name:"Select All" key: KeyCode.KeyA enabled: true }
+            
+            // View menu  
+            $view_menu: MenuItem.Sub { name:"View" items:[@$zoom_in, @$zoom_out, @$line9, @$fullscreen] }
+            $zoom_in: MenuItem.Item { name:"Zoom In" key: KeyCode.Equals enabled: true }
+            $zoom_out: MenuItem.Item { name:"Zoom Out" key: KeyCode.Minus enabled: true }
+            $line9: MenuItem.Line {}
+            $fullscreen: MenuItem.Item { name:"Enter Full Screen" key: KeyCode.ReturnKey enabled: true }
+            
+            // Window menu
+            $window_menu: MenuItem.Sub { name:"Window" items:[@$minimize, @$zoom, @$line10, @$all_to_front] }
+            $minimize: MenuItem.Item { name:"Minimize" key: KeyCode.KeyM enabled: true }
+            $zoom: MenuItem.Item { name:"Zoom" key: KeyCode.Escape enabled: true }
+            $line10: MenuItem.Line {}
+            $all_to_front: MenuItem.Item { name:"Bring All to Front" key: KeyCode.Escape enabled: true }
+            
+            // Help menu
+            $help_menu: MenuItem.Sub { name:"Help" items:[@$help_about] }
+            $help_about: MenuItem.Item { name:"Makepad Help" key: KeyCode.Escape enabled: true }
         }
         $body: KeyboardView {
-            width: Size.Fill height: Size.Fill
+            width: Fill height: Fill
             keyboard_min_shift: 30
-        }*/
+        }
         
         cursor: MouseCursor.Default
         mouse_cursor_size: vec2(20 20)
@@ -118,7 +168,7 @@ pub struct Window {
     #[live] draw_cursor: DrawQuad,
     //#[live] debug_view: DebugView,
     //#[live] performance_view: PerformanceView,
-    //#[live] nav_control: NavControl,
+    #[live] nav_control: NavControl,
     #[live] window: ScriptWindowHandle,
     #[live] stdin_size: DrawColor,
     #[rust] last_known_area: Area,
@@ -353,7 +403,7 @@ impl Widget for Window {
         //    self.performance_view.handle_widget(cx, event);
         //}
         
-        //self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
+        self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
         self.overlay.handle_event(cx, event);
         if self.demo_next_frame.is_event(event).is_some(){
             if self.demo{
@@ -457,11 +507,11 @@ impl Widget for Window {
             }
         }
         
-        if let Event::Actions(_actions) = event{
-            // if self.desktop_button(ids!(windows_buttons.min)).clicked(&actions) {
-            //    self.window.handle.minimize(cx);
-            //}
-            /*if self.desktop_button(ids!(windows_buttons.max)).clicked(&actions) {
+        if let Event::Actions(actions) = event{
+            if self.desktop_button(ids!(windows_buttons.min)).clicked(&actions) {
+                self.window.handle.minimize(cx);
+            }
+            if self.desktop_button(ids!(windows_buttons.max)).clicked(&actions) {
                 if self.window.handle.is_fullscreen(cx) {
                     self.window.handle.restore(cx);
                 }
@@ -474,7 +524,7 @@ impl Widget for Window {
             }
             if self.desktop_button(ids!(web_xr.xr_on)).clicked(&actions) {
                 cx.xr_start_presenting();
-            }*/
+            }
         }
                 
         //if let Event::ClearAtlasses = event {
