@@ -953,7 +953,7 @@ impl ShaderFnCompiler{
                         
             Opcode::SCOPE=>{script_err_shader!(self.trap, "SCOPE: `scope` keyword not supported in shaders");},
 // For            
-            Opcode::FOR_1 =>self.handle_for_1(),
+            Opcode::FOR_1 =>self.handle_for_1(vm),
             Opcode::FOR_2 =>{script_err_shader!(self.trap, "FOR_2: `for k, v in obj` iteration not supported in shaders, use `for i in 0..n`");},
             Opcode::FOR_3=>{script_err_shader!(self.trap, "FOR_3: `for i, k, v in obj` iteration not supported in shaders, use `for i in 0..n`");},
             Opcode::LOOP=>{script_err_not_impl!(self.trap, "LOOP: infinite `loop {{}}` not supported in shaders, use `for i in 0..n`");},
