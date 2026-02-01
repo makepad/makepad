@@ -18,7 +18,7 @@ script_mod!{
     // use mod.widgets.NavControl
     
     mod.widgets.WindowBase = #(Window::register_widget(vm))
-    mod.widgets.Window = mod.std.set_type_default() do mod.widgets.WindowBase{
+    mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
         pass +: { clear_color: theme.color_bg_app }
         flow: Down

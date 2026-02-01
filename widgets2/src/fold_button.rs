@@ -11,7 +11,7 @@ script_mod!{
     
     mod.widgets.FoldButtonBase = #(FoldButton::register_widget(vm))
     
-    mod.widgets.FoldButton = mod.std.set_type_default() do mod.widgets.FoldButtonBase{
+    mod.widgets.FoldButton = set_type_default() do mod.widgets.FoldButtonBase{
         height: 20
         width: 15
         margin: Inset{left: 0.}

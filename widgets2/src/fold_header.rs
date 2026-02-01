@@ -12,7 +12,7 @@ script_mod!{
     
     mod.widgets.FoldHeaderBase = #(FoldHeader::register_widget(vm))
     
-    mod.widgets.FoldHeader = mod.std.set_type_default() do mod.widgets.FoldHeaderBase{
+    mod.widgets.FoldHeader = set_type_default() do mod.widgets.FoldHeaderBase{
         width: Fill
         height: Fit
         body_walk: Walk{width: Fill, height: Fit}

@@ -31,7 +31,7 @@ script_mod!{
 
     mod.widgets.TextInputBase = #(TextInput::register_widget(vm))
     
-    mod.widgets.TextInputFlat = mod.std.set_type_default() do mod.widgets.TextInputBase{
+    mod.widgets.TextInputFlat = set_type_default() do mod.widgets.TextInputBase{
         width: Fill
         height: Fit
         padding: theme.mspace_1{left: theme.space_2, right: theme.space_2}

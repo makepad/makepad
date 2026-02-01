@@ -18,7 +18,7 @@ script_mod!{
     
     mod.widgets.MarkdownBase = #(Markdown::register_widget(vm))
     
-    mod.widgets.MarkdownLink = mod.std.set_type_default() do mod.widgets.MarkdownLinkBase{
+    mod.widgets.MarkdownLink = set_type_default() do mod.widgets.MarkdownLinkBase{
         width: Fit height: Fit
         align: Align{x: 0. y: 0.}
         
@@ -118,7 +118,7 @@ script_mod!{
         }
     }
     
-    mod.widgets.Markdown = mod.std.set_type_default() do mod.widgets.MarkdownBase{
+    mod.widgets.Markdown = set_type_default() do mod.widgets.MarkdownBase{
         width: Fill height: Fit
         flow: Flow.Right{wrap: true}
         padding: theme.mspace_1

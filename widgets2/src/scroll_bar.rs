@@ -3,40 +3,33 @@ use crate::makepad_derive_widget::*;
 use crate::animator::*;
 
 script_mod!{
-    use mod.pod.*
-    use mod.math.*
-    use mod.sdf.*
-    use mod.theme
-    use mod.draw
-    use mod.shader
-    use mod.animator.*
-    use mod.draw.MouseCursor
+    use mod.prelude.widgets_internal.*
     
     //use mod.animator.*
-    mod.std.set_type_default() do #(DrawScrollBar::script_shader(vm)){
+    set_type_default() do #(DrawScrollBar::script_shader(vm)){
         ..mod.draw.DrawQuad // splat in draw quad
     }
     
     mod.widgets.ScrollBarBase = #(ScrollBar::script_component(vm))
-    mod.widgets.ScrollBar = mod.std.set_type_default() do mod.widgets.ScrollBarBase{
+    mod.widgets.ScrollBar = set_type_default() do mod.widgets.ScrollBarBase{
         bar_size: 10.0
         bar_side_margin: 3.0
         min_handle_size: 30.0
         draw_bg +: {
-            drag: shader.instance(0.0)
-            hover: shader.instance(0.0)
+            drag: instance(0.0)
+            hover: instance(0.0)
                     
-            size: shader.uniform(6.0)
-            border_size: shader.uniform(theme.beveling)
-            border_radius: shader.uniform(1.5)
+            size: uniform(6.0)
+            border_size: uniform(theme.beveling)
+            border_radius: uniform(1.5)
             
-            color: shader.uniform(theme.color_outset)
-            color_hover: shader.uniform(theme.color_outset_hover)
-            color_drag:  shader.uniform(theme.color_outset_drag)
+            color: uniform(theme.color_outset)
+            color_hover: uniform(theme.color_outset_hover)
+            color_drag:  uniform(theme.color_outset_drag)
                     
-            border_color: shader.uniform(theme.color_u_hidden)
-            border_color_hover: shader.uniform(theme.color_u_hidden)
-            border_color_drag: shader.uniform(theme.color_u_hidden)
+            border_color: uniform(theme.color_u_hidden)
+            border_color_hover: uniform(theme.color_u_hidden)
+            border_color_drag: uniform(theme.color_u_hidden)
             
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -120,20 +113,20 @@ script_mod!{
 
     mod.widgets.ScrollBarTabs = mod.widgets.ScrollBar {
         draw_bg +: {
-            drag: shader.instance(0.0)
-            hover: shader.instance(0.0)
+            drag: instance(0.0)
+            hover: instance(0.0)
 
-            size: shader.uniform(6.0)
-            border_size: shader.uniform(1.0)
-            border_radius: shader.uniform(1.5)
+            size: uniform(6.0)
+            border_size: uniform(1.0)
+            border_radius: uniform(1.5)
 
-            color: shader.uniform(theme.color_u_hidden)
-            color_hover: shader.uniform(theme.color_outset_hover)
-            color_drag: shader.uniform(theme.color_outset_drag)
+            color: uniform(theme.color_u_hidden)
+            color_hover: uniform(theme.color_outset_hover)
+            color_drag: uniform(theme.color_outset_drag)
 
-            border_color: shader.uniform(theme.color_u_hidden)
-            border_color_hover: shader.uniform(theme.color_u_hidden)
-            border_color_drag: shader.uniform(theme.color_u_hidden)
+            border_color: uniform(theme.color_u_hidden)
+            border_color_hover: uniform(theme.color_u_hidden)
+            border_color_drag: uniform(theme.color_u_hidden)
 
             pixel: fn() -> vec4 {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)

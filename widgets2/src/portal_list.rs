@@ -15,7 +15,7 @@ script_mod! {
     
     mod.widgets.PortalListBase = #(PortalList::register_widget(vm))
     
-    mod.widgets.PortalList = mod.std.set_type_default() do mod.widgets.PortalListBase {
+    mod.widgets.PortalList = set_type_default() do mod.widgets.PortalListBase {
         width: Fill
         height: Fill
         capture_overload: true

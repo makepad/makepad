@@ -12,12 +12,12 @@ script_mod!{
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
     
-    let DesktopButtonType = mod.std.set_type_default() do #(DesktopButtonType::script_api(vm))
+    let DesktopButtonType = set_type_default() do #(DesktopButtonType::script_api(vm))
     mod.widgets.DesktopButtonType = DesktopButtonType
     
     mod.widgets.DesktopButtonBase = #(DesktopButton::register_widget(vm))
     
-    mod.widgets.DesktopButton = mod.std.set_type_default() do mod.widgets.DesktopButtonBase{
+    mod.widgets.DesktopButton = set_type_default() do mod.widgets.DesktopButtonBase{
         width: 46 height: 29
         draw_bg +: {
             button_type: instance(DesktopButtonType.Fullscreen)

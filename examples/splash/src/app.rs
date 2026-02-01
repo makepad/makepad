@@ -27,7 +27,7 @@ script_mod!{
         padding: Inset{top: 10 bottom: 10 left: 15 right: 15}
         draw_bg.color: #445
         draw_bg.radius: 5.0
-        flow: Right align: Align{y: 0.5} spacing: 10
+        flow: Right align: HCenter spacing: 10
         
         View{
             width: Fill height: Fit flow: Down spacing: 4
@@ -83,7 +83,7 @@ script_mod!{
                 text: "With Icon"
                 icon_walk: Walk{width: 16 height: 16}
                 draw_icon.color: #fff
-                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_file.svg")
             }
             
             Hr{}
@@ -91,12 +91,12 @@ script_mod!{
             Label{text: "Icon Only" draw_text.color: #888 draw_text.text_style.font_size: 10}
             View{width: Fill height: Fit flow: Right spacing: 15}
             $test_icon: Icon{
-                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_file.svg")
+                draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_file.svg")
                 draw_icon.color: #0ff
                 icon_walk: Walk{width: 32 height: 32}
             }
             Icon{
-                draw_icon.svg: mod.res.crate("self:../../widgets2/resources/icons/icon_search.svg")
+                draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_search.svg")
                 draw_icon.color: #f80
                 icon_walk: Walk{width: 32 height: 32}
             }
@@ -413,7 +413,7 @@ script_mod!{
         $TabMedia: TabMedia{}
     }
     
-    mod.res.load_all() do #(App::script_component(vm)){
+    load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             $main_window: Window{
                 pass.clear_color: vec4(0.3 0.3 0.3 1.0)

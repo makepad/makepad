@@ -14,7 +14,7 @@ script_mod!{
     
     mod.widgets.TabBase = #(Tab::script_component(vm))
     
-    mod.widgets.Tab = mod.std.set_type_default() do mod.widgets.TabBase{
+    mod.widgets.Tab = set_type_default() do mod.widgets.TabBase{
         width: Fit
         height: max(theme.tab_height, 23.)
         

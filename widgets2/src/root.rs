@@ -12,7 +12,7 @@ script_mod!{
     
     mod.widgets.RootBase = #(Root::register_widget(vm))
     
-    mod.widgets.Root = mod.std.set_type_default() do mod.widgets.RootBase{
+    mod.widgets.Root = set_type_default() do mod.widgets.RootBase{
         // Designer window commented out for now
         // design_window = Designer{}
     }

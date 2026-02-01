@@ -10,7 +10,7 @@ script_mod! {
     
     mod.widgets.AdaptiveViewBase = #(AdaptiveView::register_widget(vm))
     
-    mod.widgets.AdaptiveView = mod.std.set_type_default() do mod.widgets.AdaptiveViewBase{
+    mod.widgets.AdaptiveView = set_type_default() do mod.widgets.AdaptiveViewBase{
         width: Fill
         height: Fill
     
