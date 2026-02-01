@@ -32,25 +32,25 @@ script_mod!{
             height: 27
             $caption_label: View {
                 width: Fill height: Fill
-                align: Align{x: 0.5 y: 0.5}
+                align: Center
                 $label: Label {text: "Makepad" margin: Inset{left: 100}}
             }
             $windows_buttons: View {
                 visible: false
-                width: Size.Fit height: Size.Fit
-                $min: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsMin} width: 46 height: 29}
-                $max: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsMax} width: 46 height: 29}
-                $close: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsClose} width: 46 height: 29}
+                width: Fit height: Fit
+                $min: DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMin width: 46 height: 29}
+                $max: DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMax width: 46 height: 29}
+                $close: DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsClose width: 46 height: 29}
             }
             $web_fullscreen: View {
                 visible: false
-                width: Size.Fit height: Size.Fit
-                $fullscreen: DesktopButton {draw_bg +: {button_type: DesktopButtonType.Fullscreen} width: 50 height: 36}
+                width: Fit height: Fit
+                $fullscreen: DesktopButton {draw_bg.button_type: DesktopButtonType.Fullscreen width: 50 height: 36}
             }
             $web_xr: View {
                 visible: false
-                width: Size.Fit height: Size.Fit
-                $xr_on: DesktopButton {draw_bg +: {button_type: DesktopButtonType.XRMode} width: 50 height: 36}
+                width: Fit height: Fit
+                $xr_on: DesktopButton {draw_bg.button_type: DesktopButtonType.XRMode width: 50 height: 36}
             }
         }
         $body: View{
@@ -185,7 +185,9 @@ impl Window {
                 }
             }
             OsType::Macos => {
-                //self.view(ids!(caption_bar)).set_visible(true);
+                if !cx.in_makepad_studio(){
+                    self.view(ids!($caption_bar)).set_visible(cx, true);
+                }
                 //self.view(ids!(windows_buttons)).set_visible(true);
             }
             OsType::LinuxWindow(_) |
