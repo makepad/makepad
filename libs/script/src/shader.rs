@@ -873,9 +873,9 @@ impl ShaderFnCompiler{
             Opcode::LEQ=>{self.handle_eq(vm, output, opargs, "<=");},
             Opcode::GEQ=>{self.handle_eq(vm, output, opargs, ">=");},
                         
-            Opcode::LOGIC_AND =>{self.handle_logic(vm, output, opargs, "&&");},
-            Opcode::LOGIC_OR =>{self.handle_logic(vm, output, opargs, "||");},
-            Opcode::NIL_OR =>{script_err_shader!(self.trap, "NIL_OR: null-coalescing `a ?? b` not supported in shaders");},
+            Opcode::LOGIC_AND_TEST =>{self.handle_logic(vm, output, opargs, "&&");},
+            Opcode::LOGIC_OR_TEST =>{self.handle_logic(vm, output, opargs, "||");},
+            Opcode::NIL_OR_TEST =>{script_err_shader!(self.trap, "NIL_OR_TEST: null-coalescing `a |? b` not supported in shaders");},
             Opcode::SHALLOW_EQ =>{script_err_shader!(self.trap, "SHALLOW_EQ: shallow equality `===` not supported in shaders");},
             Opcode::SHALLOW_NEQ=>{script_err_shader!(self.trap, "SHALLOW_NEQ: shallow inequality `!==` not supported in shaders");},
             // Object/Array begin

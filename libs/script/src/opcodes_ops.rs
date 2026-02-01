@@ -20,6 +20,7 @@ impl<'a> ScriptVm<'a> {
         else{
             let v = self.bx.heap.cast_to_bool(value);
             self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_bool(!v));
+            self.bx.threads.cur().trap.goto_next();
         }
     }
     
@@ -100,17 +101,6 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().trap.goto_next();
     }
     
-    pub(crate) fn handle_nil_or(&mut self) {
-        let op1 = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let op2 = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        if op1.is_nil(){
-            self.bx.threads.cur().push_stack_unchecked(op2);
-        }
-        else{
-            self.bx.threads.cur().push_stack_unchecked(op1);
-        }
-        self.bx.threads.cur().trap.goto_next();
-    }
     
     pub(crate) fn handle_shallow_eq(&mut self) {
         let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
@@ -174,17 +164,6 @@ impl<'a> ScriptVm<'a> {
         let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let fa = self.bx.heap.cast_to_f64(a, ip);
         self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_bool(f(fa, fb)));
-        self.bx.threads.cur().trap.goto_next();
-    }
-
-    pub fn handle_bool_op<F>(&mut self, f: F)
-    where F: FnOnce(bool, bool) -> bool
-    {
-        let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let ba = self.bx.heap.cast_to_bool(a);
-        let bb = self.bx.heap.cast_to_bool(b);
-        self.bx.threads.cur().push_stack_unchecked(ScriptValue::from_bool(f(ba, bb)));
         self.bx.threads.cur().trap.goto_next();
     }
 

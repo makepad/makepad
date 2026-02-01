@@ -87,9 +87,10 @@ impl Opcode{
     pub const GT:Self = Self(17);
     pub const LEQ:Self = Self(18);
     pub const GEQ:Self = Self(19);
-    pub const LOGIC_AND:Self = Self(20);
-    pub const LOGIC_OR:Self = Self(21);
-    pub const NIL_OR:Self = Self(22);
+    // Short-circuit evaluation opcodes (these replace simple binary ops)
+    pub const LOGIC_AND_TEST:Self = Self(20);  // If falsy, skip and keep value; else pop and continue
+    pub const LOGIC_OR_TEST:Self = Self(21);   // If truthy, skip and keep value; else pop and continue
+    pub const NIL_OR_TEST:Self = Self(22);     // If not nil, skip and keep value; else pop and continue
     pub const SHALLOW_EQ:Self = Self(23);
     pub const SHALLOW_NEQ:Self = Self(24);
          
@@ -262,9 +263,9 @@ impl fmt::Display for Opcode {
             Self::GT => return write!(f, ">"),
             Self::LEQ => return write!(f, "<="),
             Self::GEQ => return write!(f, ">="),
-            Self::LOGIC_AND => return write!(f, "&&"),
-            Self::LOGIC_OR => return write!(f, "||"),
-            Self::NIL_OR => return write!(f, "|?"),
+            Self::LOGIC_AND_TEST => return write!(f, "&&?"),
+            Self::LOGIC_OR_TEST => return write!(f, "||?"),
+            Self::NIL_OR_TEST => return write!(f, "|??"),
             Self::SHALLOW_EQ => return write!(f, "==="),
             Self::SHALLOW_NEQ => return write!(f, "!=="),
                                                     

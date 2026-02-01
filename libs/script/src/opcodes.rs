@@ -26,8 +26,8 @@ impl<'a> ScriptVm<'a> {
             Opcode::MOD => self.handle_f64_op(opargs, |a,b| a%b),
             Opcode::ADD => self.handle_add(opargs),
             Opcode::SUB => self.handle_sub(opargs),
-            Opcode::SHL => self.handle_fu64_op(opargs, |a,b| a>>b),
-            Opcode::SHR => self.handle_fu64_op(opargs, |a,b| a<<b),
+            Opcode::SHL => self.handle_fu64_op(opargs, |a,b| a<<b),
+            Opcode::SHR => self.handle_fu64_op(opargs, |a,b| a>>b),
             Opcode::AND => self.handle_fu64_op(opargs, |a,b| a&b),
             Opcode::OR => self.handle_fu64_op(opargs, |a,b| a|b),
             Opcode::XOR => self.handle_fu64_op(opargs, |a,b| a^b),
@@ -89,9 +89,9 @@ impl<'a> ScriptVm<'a> {
             Opcode::LEQ => self.handle_f64_cmp_op(opargs, |a,b| a<=b),
             Opcode::GEQ => self.handle_f64_cmp_op(opargs, |a,b| a>=b),
             
-            Opcode::LOGIC_AND => self.handle_bool_op(|a,b| a&&b),
-            Opcode::LOGIC_OR => self.handle_bool_op(|a,b| a||b),
-            Opcode::NIL_OR => self.handle_nil_or(),
+            Opcode::LOGIC_AND_TEST => self.handle_logic_and_test(opargs),
+            Opcode::LOGIC_OR_TEST => self.handle_logic_or_test(opargs),
+            Opcode::NIL_OR_TEST => self.handle_nil_or_test(opargs),
             Opcode::SHALLOW_EQ => self.handle_shallow_eq(),
             Opcode::SHALLOW_NEQ => self.handle_shallow_neq(),
 

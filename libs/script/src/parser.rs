@@ -116,6 +116,24 @@ enum State{
     MatchWildcardBlock{prev_else_start:u32, last_was_sep:bool, index:u32},
     MatchMaybeArm{temp_id:LiveId, if_start:u32, prev_else_start:u32, index:u32},
     MatchWildcardEnd{prev_else_start:u32, index:u32},
+    
+    // Short-circuit evaluation - patches TEST opcode jump after second operand
+    ShortCircuitEnd{test_slot:u32},
+}
+
+impl State {
+    fn is_short_circuit_op(op: LiveId) -> bool {
+        op == id!(&&) || op == id!(||) || op == id!(|?)
+    }
+    
+    fn short_circuit_opcode(op: LiveId) -> Opcode {
+        match op {
+            id!(&&) => Opcode::LOGIC_AND_TEST,
+            id!(||) => Opcode::LOGIC_OR_TEST,
+            id!(|?) => Opcode::NIL_OR_TEST,
+            _ => Opcode::NOP,
+        }
+    }
 }
 
 // we have a stack, and we have operations
@@ -257,9 +275,10 @@ impl State{
             id!(===) => Opcode::SHALLOW_EQ,
             id!(!==) => Opcode::SHALLOW_NEQ,
                         
-            id!(&&) => Opcode::LOGIC_AND,
-            id!(||)  => Opcode::LOGIC_OR,
-            id!(|?) => Opcode::NIL_OR,
+            // &&, ||, |? are handled specially for short-circuit evaluation
+            id!(&&) => Opcode::LOGIC_AND_TEST,
+            id!(||)  => Opcode::LOGIC_OR_TEST,
+            id!(|?) => Opcode::NIL_OR_TEST,
             id!(:) => Opcode::ASSIGN_ME,
             id!(<:) => Opcode::ASSIGN_ME_BEFORE,
             id!(>:) => Opcode::ASSIGN_ME_AFTER,
@@ -1031,6 +1050,11 @@ impl ScriptParser{
                 self.push_code(Opcode::ME_SPLAT.into(), index);
                 return 0
             }
+            State::ShortCircuitEnd{test_slot}=>{
+                // Patch the TEST opcode's jump to skip to current position (after second operand)
+                self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                return 0
+            }
             State::EmitReturn{index}=>{
                 self.push_code(Opcode::RETURN.into(), index);
                 return 0
@@ -1690,7 +1714,62 @@ impl ScriptParser{
                 else if id == id!(or){id!(||)} 
                 else{op};
                 
+                // Handle short-circuit operators (&&, ||, |?) specially
+                // These need the TEST opcode emitted BEFORE the second operand
+                if State::is_short_circuit_op(op) {
+                    // Emit any pending unary operators first - they bind tighter than all binary ops
+                    loop {
+                        if let Some(State::EmitUnary{what_op, index}) = self.state.last() {
+                            let (what_op, index) = (*what_op, *index);
+                            self.state.pop();
+                            self.push_code(State::operator_to_unary(what_op), index);
+                        } else { break; }
+                    }
+                    
+                    let op_order = State::operator_order(op);
+                    
+                    // First, process any pending EmitOp with higher or equal precedence
+                    // (this ensures proper operator precedence)
+                    while let Some(last) = self.state.last() {
+                        if let State::EmitOp{what_op, index} = last {
+                            if State::operator_order(*what_op) <= op_order {
+                                let what_op = *what_op;
+                                let index = *index;
+                                self.state.pop();
+                                self.push_code(State::operator_to_opcode(what_op), index);
+                            } else {
+                                break;
+                            }
+                        } else if let State::ShortCircuitEnd{test_slot} = last {
+                            // Patch any higher-precedence short-circuit ops
+                            let test_slot = *test_slot;
+                            self.state.pop();
+                            self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                        } else {
+                            break;
+                        }
+                    }
+                    
+                    // Emit the TEST opcode with placeholder jump
+                    let test_slot = self.code_len();
+                    self.push_code(State::short_circuit_opcode(op).into(), self.index);
+                    
+                    // Push state to patch the jump after second operand is parsed
+                    self.state.push(State::ShortCircuitEnd{test_slot});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                
                 if State::operator_order(op) != 0{
+                    // Emit any pending unary operators first - they bind tighter than all binary ops
+                    loop {
+                        if let Some(State::EmitUnary{what_op, index}) = self.state.last() {
+                            let (what_op, index) = (*what_op, *index);
+                            self.state.pop();
+                            self.push_code(State::operator_to_unary(what_op), index);
+                        } else { break; }
+                    }
+                    
                     let next_state = State::EmitOp{what_op:op, index:self.index};
                     // check if we have a ..[] = 
                     if Some(&Opcode::ARRAY_INDEX.into()) == self.code_last(){
