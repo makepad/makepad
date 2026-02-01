@@ -495,11 +495,21 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 }
             }
         }
-        tb.add("                    _=>{}");
+        tb.add("                    other=>{");
+        tb.add("                        let obj_desc = vm.format_object_for_error(object);");
+        tb.add("                        makepad_script::script_err_unknown_type!(vm.bx.threads.cur().trap,").string(&format!("unknown variant '{{}}' for enum {}, object: {{}}", enum_name)).add(", other, obj_desc);");
+        tb.add("                        return;");
+        tb.add("                    }");
         tb.add("                }");
         tb.add("            }");
+        tb.add("            else{");
+        tb.add("                let obj_desc = vm.format_object_for_error(object);");
+        tb.add("                makepad_script::script_err_unknown_type!(vm.bx.threads.cur().trap,").string(&format!("expected variant id for enum {}, got object: {{}}", enum_name)).add(", obj_desc);");
+        tb.add("                return;");
+        tb.add("            }");
         tb.add("        }");
-        tb.add("        makepad_script::script_err_unknown_type!(vm.bx.threads.cur().trap, \"unknown enum variant\");");
+        tb.add("        let value_desc = vm.format_enum_variant_error(value);");
+        tb.add("        makepad_script::script_err_unknown_type!(vm.bx.threads.cur().trap,").string(&format!("expected variant for enum {}, got {{}}", enum_name)).add(", value_desc);");
         tb.add("    }");
         
                 

@@ -548,6 +548,29 @@ pub fn suggest_scope_var(heap: &ScriptHeap, obj_ptr: ScriptObject, key: LiveId) 
     suggest_property(heap, obj_ptr, key.into())
 }
 
+/// Format an enum variant error with a descriptive message about the received value.
+/// Returns a string like: "expected MyEnum variant, got object with proto 'SomeOther'"
+pub fn format_enum_variant_error(heap: &ScriptHeap, value: ScriptValue) -> String {
+    if value.is_nil() {
+        return "nil".to_string();
+    }
+    
+    if let Some(obj) = value.as_object() {
+        // Get the root proto to identify what type this is
+        let root_proto = heap.root_proto(obj);
+        if let Some(id) = root_proto.as_id() {
+            return id.as_string(|s| format!("object with proto '{}'", s.unwrap_or("?")));
+        }
+        if let Some(proto_obj) = root_proto.as_object() {
+            return format!("object(proto=obj{})", proto_obj.index);
+        }
+        return format!("object(obj{})", obj.index);
+    }
+    
+    // Use the format_value_type for other cases
+    format_value_type(heap, value)
+}
+
 /// Format suggestions for pod struct field lookup
 pub fn suggest_pod_field(heap: &ScriptHeap, pod_ty: ScriptPodType, field: LiveId) -> String {
     let pod_type = &heap.pod_types[pod_ty.index as usize];

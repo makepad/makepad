@@ -147,6 +147,12 @@ script_mod!{
                 width: Fill height: Fit
                 body: "# Markdown Test\n\nThis is a **bold** and *italic* text.\n\n## Features\n\n- List item 1\n- List item 2\n- List item 3\n\n> This is a blockquote\n\nSome `inline code` here.\n\n```\nCode block example\n```"
             }
+            
+            // Html widget test
+            $html: Html{
+                width: Fill height: Fit
+                body: "<h2>HTML Test</h2><p>This is a <b>bold</b> and <i>italic</i> paragraph.</p><ul><li>Item one</li><li>Item two</li><li>Item three</li></ul><blockquote>A quote block</blockquote><p>Here is some <code>inline code</code> and a <a href='https://makepad.dev'>link</a>.</p>"
+            }
         }
     }
     
@@ -205,7 +211,7 @@ script_mod!{
                 }
             }
         }
-    }
+    } 
 }
 
 impl App {
