@@ -10,16 +10,10 @@ use {
 };
 
 script_mod! {
-    use mod.pod.*
-    use mod.math.*
-    use mod.theme
-    use mod.draw
-    use mod.shader.*
-    use mod.animator.*
-    use mod.widgets.*
+    use mod.prelude.widgets_internal.*
     
-    mod.widgets.ViewBase = mod.std.set_type_default() do #(View::register_widget(vm))
-    mod.widgets.ViewOptimize = mod.std.set_type_default() do #(ViewOptimize::script_api(vm))
+    mod.widgets.ViewBase = set_type_default() do #(View::register_widget(vm))
+    mod.widgets.ViewOptimize = set_type_default() do #(ViewOptimize::script_api(vm))
 }
 
 // maybe we should put an enum on the bools like

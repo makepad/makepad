@@ -18,7 +18,7 @@ script_mod!{
     
     mod.widgets.HtmlBase = #(Html::register_widget(vm))
     
-    mod.widgets.HtmlLink = mod.std.set_type_default() do mod.widgets.HtmlLinkBase{
+    mod.widgets.HtmlLink = set_type_default() do mod.widgets.HtmlLinkBase{
         width: Fit height: Fit
         align: Align{x: 0. y: 0.}
         
@@ -62,7 +62,7 @@ script_mod!{
         }
     }
     
-    mod.widgets.Html = mod.std.set_type_default() do mod.widgets.HtmlBase{
+    mod.widgets.Html = set_type_default() do mod.widgets.HtmlBase{
         width: Fill height: Fit
         flow: Flow.Right{wrap: true}
         padding: theme.mspace_1

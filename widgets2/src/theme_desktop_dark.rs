@@ -5,7 +5,7 @@ script_mod!{
     use mod.pod.*
     use mod.text.*
     use mod.turtle.*
-    use mod.res
+    use mod.res.*
 
     mod.themes.dark = {
         mod.theme = me
@@ -348,7 +348,7 @@ script_mod!{
 
         font_label: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                $latin: FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
                 /*$chinese: FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_regular2:resources/LXGWWenKaiRegular.ttf"
                     "makepad_fonts_chinese_regular2_2:resources/LXGWWenKaiRegular.ttf.2"
@@ -359,7 +359,7 @@ script_mod!{
         } 
         font_regular: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                $latin: FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
                 /*$chinese: FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_regular2:resources/LXGWWenKaiRegular.ttf"
                     "makepad_fonts_chinese_regular2_2:resources/LXGWWenKaiRegular.ttf.2"
@@ -370,7 +370,7 @@ script_mod!{
         }
         font_bold: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                $latin: FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
                 /*$chinese: FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_bold2:resources/LXGWWenKaiBold.ttf"
                     "makepad_fonts_chinese_bold2_2:resources/LXGWWenKaiBold.ttf.2"
@@ -381,7 +381,7 @@ script_mod!{
         }
         font_italic: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                $latin: FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
                 /*$chinese: FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_regular2:resources/LXGWWenKaiRegular.ttf"
                     "makepad_fonts_chinese_regular2_2:resources/LXGWWenKaiRegular.ttf.2"
@@ -391,7 +391,7 @@ script_mod!{
         }
         font_bold_italic: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                $latin: FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
                 /*$chinese: FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_bold2:resources/LXGWWenKaiBold.ttf"
                     "makepad_fonts_chinese_bold2_2:resources/LXGWWenKaiBold.ttf.2"
@@ -402,13 +402,13 @@ script_mod!{
         font_code: TextStyle{
             font_size: theme.font_size_code
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                $latin: FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.35
         }
         font_icons: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/fa-solid-900.ttf") asc: 0.0 desc: 0.0}
+                $latin: FontMember{res: crate_resource("self:resources/fa-solid-900.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }

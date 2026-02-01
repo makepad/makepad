@@ -10,16 +10,16 @@ script_mod!{
     use mod.prelude.widgets_internal.*
     
     mod.widgets.SliderBase = #(Slider::register_widget(vm))
-    mod.widgets.DragAxis =  mod.std.set_type_default() do #(DragAxis::script_api(vm))
+    mod.widgets.DragAxis =  set_type_default() do #(DragAxis::script_api(vm))
     mod.widgets.splat(mod.widgets.DragAxis)
     
     use mod.widgets.*
         
-    mod.std.set_type_default() do #(DrawSlider::script_shader(vm)){
+    set_type_default() do #(DrawSlider::script_shader(vm)){
         ..mod.draw.DrawQuad // splat in draw quad
     }
     
-    mod.widgets.SliderMinimal = mod.std.set_type_default() do mod.widgets.SliderBase{
+    mod.widgets.SliderMinimal = set_type_default() do mod.widgets.SliderBase{
         min: 0.0
         max: 1.0
         step: 0.0

@@ -9,7 +9,7 @@ script_mod!{
     
     mod.widgets.TabCloseButtonBase = #(TabCloseButton::script_component(vm))
     
-    mod.widgets.TabCloseButton = mod.std.set_type_default() do mod.widgets.TabCloseButtonBase{
+    mod.widgets.TabCloseButton = set_type_default() do mod.widgets.TabCloseButtonBase{
         height: 10.0
         width: 10.0
         margin: Inset{right: theme.space_2, left: -3.5}

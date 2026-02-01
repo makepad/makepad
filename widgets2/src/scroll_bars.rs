@@ -4,10 +4,7 @@ use crate::{
 };
 
 script_mod!{
-    use mod.pod.*
-    use mod.math.*
-    use mod.theme
-    use mod.widgets.*
+    use mod.prelude.widgets_internal.*
     
     mod.widgets.ScrollBarsBase = #(ScrollBars::script_component(vm))
     
@@ -18,7 +15,7 @@ script_mod!{
         scroll_bar_y: mod.widgets.ScrollBarTabs {}
     }
     
-    mod.widgets.ScrollBars = mod.std.set_type_default() do mod.widgets.ScrollBarsBase {
+    mod.widgets.ScrollBars = set_type_default() do mod.widgets.ScrollBarsBase {
         show_scroll_x: true
         show_scroll_y: true
         scroll_bar_x: mod.widgets.ScrollBar {}

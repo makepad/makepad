@@ -14,7 +14,7 @@ script_mod!{
     
     mod.widgets.ImageBlendBase = #(ImageBlend::register_widget(vm))
     
-    mod.widgets.ImageBlend = mod.std.set_type_default() do mod.widgets.ImageBlendBase{
+    mod.widgets.ImageBlend = set_type_default() do mod.widgets.ImageBlendBase{
         image_a: Image{
             fit: ImageFit.Smallest
             width: Fill

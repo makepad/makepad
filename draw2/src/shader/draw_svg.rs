@@ -98,7 +98,7 @@ impl DrawSvg {
             data
         } else {
             // Resource not loaded yet, trigger load
-            cx.script_data.resources.load_all();
+            cx.script_data.resources.load_all_resources();
             match cx.get_resource(handle) {
                 Some(data) => data,
                 None => return,

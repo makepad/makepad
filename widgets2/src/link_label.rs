@@ -11,7 +11,7 @@ script_mod!{
     
     mod.widgets.LinkLabelBase = #(LinkLabel::register_widget(vm))
     
-    mod.widgets.LinkLabel = mod.std.set_type_default() do mod.widgets.LinkLabelBase{
+    mod.widgets.LinkLabel = set_type_default() do mod.widgets.LinkLabelBase{
         width: Fit
         height: Fit
         spacing: theme.space_2

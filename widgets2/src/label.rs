@@ -11,7 +11,7 @@ script_mod!{
     use mod.widgets.*
     
     mod.widgets.LabelBase = #(Label::register_widget(vm))
-    mod.widgets.Label = mod.std.set_type_default() do mod.widgets.LabelBase{
+    mod.widgets.Label = set_type_default() do mod.widgets.LabelBase{
         width: Fit
         height: Fit
         padding: theme.mspace_1

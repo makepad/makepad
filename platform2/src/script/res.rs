@@ -39,7 +39,7 @@ impl CxScriptResources {
     }
     
     /// Load all resources that haven't been loaded yet
-    pub fn load_all(&self) {
+    pub fn load_all_resources(&self) {
         let mut resources = self.resources.borrow_mut();
         for res in resources.iter_mut() {
             if matches!(res.data, CxScriptResourceData::NotLoaded) {
@@ -137,16 +137,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
     });
     
     // res.load_all() - loads all pending resources from disk
-    vm.add_method(res, id_lut!(load_all), script_args_def!(value=NIL), move |vm, args| {
+    vm.add_method(res, id_lut!(load_all_resources), script_args_def!(value=NIL), move |vm, args| {
         let value = script_value!(vm, args.value);
         let cx = vm.host.cx_mut();
-        cx.script_data.resources.load_all();
+        cx.script_data.resources.load_all_resources();
         value
     });
     
     // res.file("/absolute/path/to/file")
     // Uses an absolute file path directly
-    vm.add_method(res, id_lut!(file), script_args_def!(path = NIL), move |vm, args| {
+    vm.add_method(res, id_lut!(file_resource), script_args_def!(path = NIL), move |vm, args| {
         let path = script_value!(vm, args.path);
         if !path.is_string_like() {
             return script_err_type_mismatch!(vm.trap(), "invalid res arg type")
@@ -176,7 +176,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     
     // res.crate("self:path/to/file") or res.crate("crate_name:path/to/file")
     // Resolves a crate-relative path to an absolute path
-    vm.add_method(res, id_lut!(crate), script_args_def!(path = NIL), move |vm, args| {
+    vm.add_method(res, id_lut!(crate_resource), script_args_def!(path = NIL), move |vm, args| {
         let path = script_value!(vm, args.path);
         if !path.is_string_like() {
             return script_err_type_mismatch!(vm.trap(), "invalid res arg type")

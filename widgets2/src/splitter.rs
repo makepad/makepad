@@ -16,13 +16,13 @@ script_mod!{
     mod.widgets.SplitterAlign = #(SplitterAlign::script_api(vm))
     mod.widgets.splat(mod.widgets.SplitterAlign)
     
-    mod.std.set_type_default() do #(DrawSplitter::script_shader(vm)){
+    set_type_default() do #(DrawSplitter::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
     
     mod.widgets.SplitterBase = #(Splitter::register_widget(vm))
     
-    mod.widgets.Splitter = mod.std.set_type_default() do mod.widgets.SplitterBase{
+    mod.widgets.Splitter = set_type_default() do mod.widgets.SplitterBase{
         width: Fill
         height: Fill
         

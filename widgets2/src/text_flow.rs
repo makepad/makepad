@@ -9,9 +9,9 @@ script_mod!{
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
     
-    let FlowBlockType = mod.std.set_type_default() do #(FlowBlockType::script_api(vm))
+    let FlowBlockType = set_type_default() do #(FlowBlockType::script_api(vm))
     
-    mod.widgets.DrawFlowBlock = mod.std.set_type_default() do #(DrawFlowBlock::script_shader(vm)){
+    mod.widgets.DrawFlowBlock = set_type_default() do #(DrawFlowBlock::script_shader(vm)){
         ..mod.draw.DrawQuad
         
         block_type: instance(FlowBlockType.Quote)
@@ -34,7 +34,7 @@ script_mod!{
     
     mod.widgets.TextFlowLinkBase = #(TextFlowLink::register_widget(vm)){}
     
-    mod.widgets.TextFlowLink = mod.std.set_type_default() do mod.widgets.TextFlowLinkBase{
+    mod.widgets.TextFlowLink = set_type_default() do mod.widgets.TextFlowLinkBase{
         color: #xa
         color_hover: #xf
         color_down: #x3
@@ -76,7 +76,7 @@ script_mod!{
         }
     }
         
-    mod.widgets.TextFlow = mod.std.set_type_default() do mod.widgets.TextFlowBase{
+    mod.widgets.TextFlow = set_type_default() do mod.widgets.TextFlowBase{
         width: Fill height: Fit
         flow: Flow.Right{wrap: true}
         padding: 0
