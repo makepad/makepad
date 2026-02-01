@@ -88,7 +88,7 @@ script_mod!{
             color: theme.color_bg_app * 0.875
             gradient_fill_horizontal: uniform(0.0)
             gradient_border_horizontal: uniform(0.0)
-            color_2: instance(#f00);//vec4(-1.0, -1.0, -1.0, -1.0);//vec4(-1.0, -1.0, -1.0, -1.0)
+            color_2: instance(vec4(-1.0, -1.0, -1.0, -1.0));
             border_color: uniform(#fff0)
             border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             pixel: fn() {
