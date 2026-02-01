@@ -1761,13 +1761,17 @@ impl ScriptParser{
                 }
                 
                 if State::operator_order(op) != 0{
-                    // Emit any pending unary operators first - they bind tighter than all binary ops
-                    loop {
-                        if let Some(State::EmitUnary{what_op, index}) = self.state.last() {
-                            let (what_op, index) = (*what_op, *index);
-                            self.state.pop();
-                            self.push_code(State::operator_to_unary(what_op), index);
-                        } else { break; }
+                    // Emit any pending unary operators, but only if this binary op has lower
+                    // precedence than unary (order >= 6). Field access (order 3) has higher
+                    // precedence than unary, so -x.y should parse as -(x.y), not (-x).y
+                    if State::operator_order(op) >= 6 {
+                        loop {
+                            if let Some(State::EmitUnary{what_op, index}) = self.state.last() {
+                                let (what_op, index) = (*what_op, *index);
+                                self.state.pop();
+                                self.push_code(State::operator_to_unary(what_op), index);
+                            } else { break; }
+                        }
                     }
                     
                     let next_state = State::EmitOp{what_op:op, index:self.index};

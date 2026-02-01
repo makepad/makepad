@@ -9,6 +9,7 @@ use crate::vm::*;
 use crate::opcode::*;
 use crate::shader::*;
 use crate::shader_tables::*;
+use crate::suggest::format_pod_type_name;
 use crate::*;
 
 impl ShaderFnCompiler {
@@ -427,11 +428,20 @@ impl ShaderFnCompiler {
         // when to stop, rather than relying on the Return trap.
     }
 
-    pub(crate) fn handle_for_1(&mut self) {
+    pub(crate) fn handle_for_1(&mut self, vm: &mut ScriptVm) {
         let (source, _) = self.stack.pop(self.trap.pass());
         let (val_id, _) = self.stack.pop(self.trap.pass());
-        if let ShaderType::Range { start, end, ty } = source {
+        if let ShaderType::Range { start, end, mut ty } = source {
             if let ShaderType::Id(id) = val_id {
+                // Shader for loops only support u32 for now.
+                // If the range is abstract int or i32, we cast it to u32.
+                if ty == vm.bx.code.builtins.pod.pod_i32 {
+                     ty = vm.bx.code.builtins.pod.pod_u32;
+                }
+                
+                if ty != vm.bx.code.builtins.pod.pod_u32 {
+                    script_err_type_mismatch!(self.trap, "shader for loop only supports u32 range, got {}", format_pod_type_name(&vm.bx.heap, ty));
+                }
                 self.shader_scope.enter_scope();
                 self.shader_scope.define_var(id, ty);
                 write!(self.out, "for(var {0} = {1}; {0} < {2}; {0}++){{\n", id, start, end).ok();

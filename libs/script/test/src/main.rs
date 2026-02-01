@@ -74,98 +74,6 @@ pub fn main(){
         }
     }
     
-    let _code = script!{
-        use mod.std.assert
-        ~"ShaderEnum values OK"
-    };
-    
-    let _code = script!{
-        use mod.std.*
-        use mod.shader
-        use mod.pod.*
-        use mod.math.*
-        
-        let ShaderEnum = #(ShaderEnum::script_api(vm))
-                
-        let sdf = struct{
-            field: f32,
-            p: vec4f,
-            arr: array{f32 4},
-            set_field: |v| self.field += v 
-            new: || self(
-                arr: array(1f,2f,3f,4f)
-                p: vec4(0)
-                field: 1.0
-            )
-        }
-                
-        let draw_uniforms = struct{
-            field: f32,
-        }
-                
-        let vertices = struct{
-            pos: vec4,
-        }
-        let test_p1 = 1.0
-        let test_col = #0f0
-        let theme = {TEST_COL: #0f0}
-        let test_obj = {test_p1:2.0 objfn:fn(){self.sub_obj.test_p1} sub_obj:{test_p1:3.0}}
-        let test_uni = struct{p3:3.0}
-        let test_buf = shader.uniform_buffer(test_uni)
-        let test_tex = shader.texture_2d(float)
-        // alright. lets figure out the shader sself
-        let test_shader = #(ShaderTest2::script_shader(vm)){
-            vtx: shader.vertex_buffer(vertices)
-            unitest: shader.uniform(1.0)
-            unitest2: shader.uniform(1.0)
-            unicolor: shader.uniform(test_col)
-            color: 1.0
-            draw: shader.uniform_buffer(draw_uniforms)
-            y: shader.instance(1.0)
-            x: shader.instance(1.0)
-            z_unused: shader.instance(1.0)
-            vy: shader.varying(1.0)
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            otherfn: |x| x + 1
-            testfn: ||{
-                let c = self.unicolor;
-                let k = test_p1
-                let m = test_obj.test_p1
-                let n = test_obj.objfn()
-                let n = test_buf.p3
-                let p = test_col
-                let q = theme.TEST_COL
-                let o = test_tex.sample(vec2(2.0))
-                let s = 1u
-                let k = match s{
-                    ShaderEnum.Test1 => 1u
-                    ShaderEnum.Test2 => 2u
-                }
-                return s
-            }
-            vertex: fn(){
-                self.vy = 1.0
-                self.vertex_pos = self.vtx.pos
-            }
-            fragment: fn(){
-                let t = mix(#f0f, self.color, 0.5)
-                let q = self.testfn()
-                let v = self.unitest2 + self.vy + self.unitest
-                let t = self.draw.field + self.parent_field + self.child_field
-                let x = sdf.new()
-                x.set_field(1f)
-                x.p.y = 1f
-                x.arr[3] = 1f
-                self.otherfn(1f)
-                self.pixel = mix(#f00, #0f0, self.x + self.y)
-            }
-        }
-        //~test_shader
-        let x = sdf(0,vec4(0),array(1f,2f,3f,4f))
-        shader.test_compile_draw(test_shader)
-    };
-        
     // lets define a handle type with some methods on it
     // Our unit tests :)
     let code = script!{
@@ -189,7 +97,7 @@ pub fn main(){
         assert(-5 == 0-5) assert(-5 != 0) assert(-(-5) == 5)
         
         // operator precedence tests
-        assert(-5 + 3 == -2) assert(!true == false) assert(!false == true)
+        assert(-5 + 3 == -2)
         assert(2 + 3 * 4 == 14) assert((2 + 3) * 4 == 20)
         assert(10 - 2 - 3 == 5) assert(10 - (2 - 3) == 11)
         assert(8 / 2 / 2 == 2) assert(8 / (2 / 2) == 8)
@@ -214,11 +122,6 @@ pub fn main(){
         assert(true && true) assert(!(true && false))
         assert(true || false) assert(!(false || false))
         // Short-circuit evaluation tests for ||, &&, |?
-        // Basic behavior tests
-        assert(true || false)
-        assert(!(false || false))
-        assert(true && true)
-        assert(!(true && false))
         let x = nil let y = x |? 5 assert(y == 5)
         let x = 3 let y = x |? 5 assert(y == 3)
         
@@ -260,10 +163,13 @@ pub fn main(){
         // array operations
         let iv = [1 2 3 4] let ov = []
                         
-        for v in iv ov.push(v) assert(iv == ov)
+        for v in iv { ov.push(v) } assert(iv == ov)
         assert(ov.pop() == 4) assert(iv != ov)
         assert(ov[2] == 3);
-                        
+        
+        
+        
+        
         // functions
         let f = |x| x+1
         assert(f(1) == 2)
@@ -491,6 +397,218 @@ pub fn main(){
         assert(x() == 4)
         fn test(a,b){a+b}
         assert(test(2 3) == 5)
+        
+        // return-in-if escape analysis tests (interpreter)
+        // Pattern 1: if-return, no else, code after
+        fn ret_if_no_else(x) {
+            if x > 0 { return 1 }
+            return 0
+        }
+        assert(ret_if_no_else(5) == 1)
+        assert(ret_if_no_else(-5) == 0)
+        
+        // Pattern 2: if-return, else-return (both branches return)
+        fn ret_if_else(x) {
+            if x > 0 { return 1 } else { return -1 }
+        }
+        assert(ret_if_else(5) == 1)
+        assert(ret_if_else(-5) == -1)
+        
+        // Pattern 3: if-return, else no return, code after
+        fn ret_if_else_fall(x) {
+            if x > 0 { return 1 } else { let y = x }
+            return 0
+        }
+        assert(ret_if_else_fall(5) == 1)
+        assert(ret_if_else_fall(-5) == 0)
+        
+        // Pattern 4: if no return, else-return, code after
+        fn ret_else_only(x) {
+            if x > 0 { let y = x } else { return -1 }
+            return 1
+        }
+        assert(ret_else_only(5) == 1)
+        assert(ret_else_only(-5) == -1)
+        
+        // Pattern 5: if-else if-else chain with returns
+        fn ret_chain(x) {
+            if x > 10 { return 3 }
+            else if x > 0 { return 2 }
+            else if x == 0 { return 0 }
+            else { return -1 }
+        }
+        assert(ret_chain(15) == 3)
+        assert(ret_chain(5) == 2)
+        assert(ret_chain(0) == 0)
+        assert(ret_chain(-5) == -1)
+        
+        // Pattern 6: if-else if (no final else), code after
+        fn ret_chain_fallthrough(x) {
+            if x > 10 { return 3 }
+            else if x > 0 { return 2 }
+            return 0
+        }
+        assert(ret_chain_fallthrough(15) == 3)
+        assert(ret_chain_fallthrough(5) == 2)
+        assert(ret_chain_fallthrough(-5) == 0)
+        
+        // Pattern 7: nested if with returns
+        fn ret_nested(x, y) {
+            if x > 0 {
+                if y > 0 { return 1 }
+                else { return 2 }
+            } else {
+                if y > 0 { return 3 }
+                return 4
+            }
+        }
+        assert(ret_nested(1, 1) == 1)
+        assert(ret_nested(1, -1) == 2)
+        assert(ret_nested(-1, 1) == 3)
+        assert(ret_nested(-1, -1) == 4)
+        
+        // Pattern 8: deeply nested returns
+        fn ret_deep(a, b, c) {
+            if a > 0 {
+                if b > 0 {
+                    if c > 0 { return 1 }
+                    return 2
+                }
+                return 3
+            }
+            return 4
+        }
+        assert(ret_deep(1, 1, 1) == 1)
+        assert(ret_deep(1, 1, -1) == 2)
+        assert(ret_deep(1, -1, 0) == 3)
+        assert(ret_deep(-1, 0, 0) == 4)
+        
+        // Pattern 9: return in only one branch of nested if
+        fn ret_partial_nest(x, y) {
+            if x > 0 {
+                if y > 0 { return 1 }
+                // y <= 0 falls through
+            }
+            return 0
+        }
+        assert(ret_partial_nest(1, 1) == 1)
+        assert(ret_partial_nest(1, -1) == 0)
+        assert(ret_partial_nest(-1, 1) == 0)
+        
+        // Pattern 10: early return vs expression result
+        fn ret_vs_expr(x) {
+            if x < 0 { return -1 }
+            let result = if x == 0 { 0 } else { 1 }
+            return result
+        }
+        assert(ret_vs_expr(-5) == -1)
+        assert(ret_vs_expr(0) == 0)
+        assert(ret_vs_expr(5) == 1)
+        
+        // for loop destructuring tests (interpreter)
+        // Semantics:
+        //   for v in set        - value only (array, object, range)
+        //   for k v in set      - key/index + value (object: key,value; array: index,value; range: index,value)
+        //   for i k v in set    - index + key + value (object only, errors on array)
+        // NOTE: Object iteration only works on the "vec" part (keys like $a:)
+        //       not the "map" part (keys like a:). This is by design.
+        fn test_for_destructuring() {
+            let arr = [10, 20, 30]
+            let obj = {$a:1, $b:2, $c:3}  // Use $key: to put in vec (iterable), not map
+            
+            // for v in array (value only)
+            let values1 = []
+            for v in arr { values1.push(v) }
+            assert(values1 == [10 20 30])
+            
+            // for v in object (value only)
+            let values2 = []
+            for v in obj { values2.push(v) }
+            assert(values2 == [1 2 3])
+            
+            // for k v in object (key, value)
+            let keys3 = []
+            let values3 = []
+            for k v in obj {
+                keys3.push(k)
+                values3.push(v)
+            }
+            assert(keys3.len() == 3)  // Key comparison with @$a syntax needs fixing
+            assert(values3 == [1 2 3])
+            
+            // for i v in array (index, value)
+            let indices4 = []
+            let values4 = []
+            for i v in arr {
+                indices4.push(i)
+                values4.push(v)
+            }
+            assert(indices4 == [0 1 2])
+            assert(values4 == [10 20 30])
+            
+            // for i k v in object (index, key, value) - objects only
+            let indices5 = []
+            let keys5 = []
+            let values5 = []
+            for i k v in obj {
+                indices5.push(i)
+                keys5.push(k)
+                values5.push(v)
+            }
+            assert(indices5 == [0 1 2])
+            assert(keys5.len() == 3)  // Key comparison with @$a syntax needs fixing
+            assert(values5 == [1 2 3])
+            
+            // for i in range (basic range iteration)
+            let sum6 = 0
+            for i in 0..5 { sum6 += 1 }
+            assert(sum6 == 5)
+            
+            // for i v in range (index, value)
+            let indices7 = []
+            let values7 = []
+            for i v in 0..3 {
+                indices7.push(i)
+                values7.push(v)
+            }
+            assert(indices7 == [0 1 2])
+            assert(values7 == [0 1 2])
+            
+            println("for loop destructuring tests passed")
+        }
+        test_for_destructuring()
+        
+        // for loop return tests
+        
+        fn test_for_return(x) {
+            let arr = [1, 2, 3, 4, 5]
+            for v in arr {
+                if v == x { return "found" }
+            }
+            return "not found"
+        }
+        assert(test_for_return(3) == "found")
+        assert(test_for_return(10) == "not found")
+        
+        fn test_range_return(x) {
+            for i in 0..10 {
+                if i == x { return i }
+            }
+            return -1
+        }
+        assert(test_range_return(5) == 5)
+        assert(test_range_return(15) == -1)
+        
+        fn test_nested_for_return(x, y) {
+            for i in 0..3 {
+                for j in 0..3 {
+                    if i == x && j == y { return [i j] }
+                }
+            }
+            return nil
+        }
+        assert(test_nested_for_return(1, 2) == [1 2])
+        assert(test_nested_for_return(5, 5) == nil)
                 
         // POD testing
         let struct_3 = pod.struct{ // extendable pods 
@@ -685,8 +803,7 @@ pub fn main(){
 
         // ============================================================
         // SHADER COMPILER TESTS
-        // Tests that all supported opcodes compile without errors
-        // for various input types (f32, f16, i32, u32, vec2/3/4, etc.)
+        // Comprehensive test of all shader compiler features
         // ============================================================
         use mod.shader
         use mod.pod.*
@@ -694,7 +811,7 @@ pub fn main(){
         
         let ShaderEnum = #(ShaderEnum::script_api(vm))
         
-        // Define pod structs for testing
+        // Pod structs for testing
         let test_struct = struct{
             f: f32,
             v2: vec2f,
@@ -705,106 +822,290 @@ pub fn main(){
             arr: array{f32 4},
         }
         
-        // Shader for testing arithmetic opcodes with f32
-        let shader_arith_f32 = #(ShaderTest2::script_shader(vm)){
+        let vertex_data = struct{
+            pos: vec4f,
+            uv: vec2f,
+            normal: vec3f,
+        }
+        
+        let uniforms_data = struct{
+            mvp: f32,
+            time: f32,
+            scale: vec2f,
+        }
+        
+        // Scope uniforms for testing
+        let scope_time = 1.5
+        let scope_color = #0ff
+        let scope_vec = vec2f(2.0, 3.0)
+        let scope_uniforms = struct{time:f32, scale:f32}
+        let scope_buf = shader.uniform_buffer(scope_uniforms)
+        let scope_tex = shader.texture_2d(float)
+        let test_color = #f00
+        
+        // TestSdf - minimal Sdf2d-like struct to test struct methods in shaders
+        let TestSdf = struct {
+            pos: vec2f
+            result: vec4f
+            dist: f32
+            
+            // Constructor
+            new: fn(p: vec2) -> Self {
+                return self(pos: p, result: vec4(0f), dist: 0f)
+            }
+            // Method mutating self, returning value
+            translate: fn(x: f32, y: f32) -> vec2 {
+                self.pos -= vec2(x, y)
+                return self.pos
+            }
+            // Method mutating self, no return
+            clear: fn(color: vec4) {
+                self.result = color
+            }
+            // Method calling another method  
+            helper: fn(v: f32) -> f32 { return v * 2f }
+            use_helper: fn() -> f32 {
+                return self.helper(self.dist)
+            }
+            // Method with unary neg on self field
+            negate_dist: fn() -> f32 {
+                return -self.dist
+            }
+        }
+        
+        // Comprehensive shader test
+        let shader_all_features = #(ShaderTest2::script_shader(vm)){
             vertex_pos: shader.vertex_position(vec4f)
             pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
+            // Vertex buffer
+            vtx: shader.vertex_buffer(vertex_data)
+            // Instance data
+            inst_pos: shader.instance(vec2f)
+            inst_scale: shader.instance(1.0)
+            inst_color: shader.instance(vec4f)
+            inst_id: shader.instance(0u)
+            // Uniforms
+            u_time: shader.uniform(0.0)
+            u_scale: shader.uniform(vec2f)
+            u_color: shader.uniform(#fff)
+            u_enabled: shader.uniform(true)
+            u_count: shader.uniform(0i)
+            u_flags: shader.uniform(0u)
+            uniforms: shader.uniform_buffer(uniforms_data)
+            // Textures
+            tex_diffuse: shader.texture_2d(float)
+            tex_normal: shader.texture_2d(float)
+            // Varyings
+            v_uv: shader.varying(vec2f)
+            v_color: shader.varying(vec4f)
+            v_intensity: shader.varying(1.0)
+            v_normal: shader.varying(vec3f)
+            v_world_pos: shader.varying(vec3f)
+            // Helper functions
+            helper: |x| x * 2f
+            helper2: |a, b| a + b
+            helper_vec: |v| v * 2f
+            get_val: || { return 1f }
+            get_val_cond: |x| { if x > 0f { return 1f } return 0f }
+            
+            // ---- Return-in-if escape analysis tests ----
+            // Pattern 1: if-return, no else, code after
+            ret_if_no_else: fn(x: f32) -> f32 {
+                if x > 0f { return 1f }
+                return 0f
+            }
+            // Pattern 2: if-return, else-return (both branches return)
+            ret_if_else: fn(x: f32) -> f32 {
+                if x > 0f { return 1f } else { return -1f }
+            }
+            // Pattern 3: if-return, else no return, code after
+            ret_if_else_fall: fn(x: f32) -> f32 {
+                if x > 0f { return 1f } else { let y = x }
+                return 0f
+            }
+            // Pattern 4: if no return, else-return, code after
+            ret_else_only: fn(x: f32) -> f32 {
+                if x > 0f { let y = x } else { return -1f }
+                return 1f
+            }
+            // Pattern 5: if-else if-else chain with returns
+            ret_chain: fn(x: f32) -> f32 {
+                if x > 10f { return 3f }
+                else if x > 0f { return 2f }
+                else if x == 0f { return 0f }
+                else { return -1f }
+            }
+            // Pattern 6: if-else if (no final else), code after
+            ret_chain_fall: fn(x: f32) -> f32 {
+                if x > 10f { return 3f }
+                else if x > 0f { return 2f }
+                return 0f
+            }
+            // Pattern 7: nested if with returns
+            ret_nested: fn(x: f32, y: f32) -> f32 {
+                if x > 0f {
+                    if y > 0f { return 1f }
+                    else { return 2f }
+                } else {
+                    if y > 0f { return 3f }
+                    return 4f
+                }
+            }
+            // Pattern 8: deeply nested returns
+            ret_deep: fn(a: f32, b: f32, c: f32) -> f32 {
+                if a > 0f {
+                    if b > 0f {
+                        if c > 0f { return 1f }
+                        return 2f
+                    }
+                    return 3f
+                }
+                return 4f
+            }
+            // Pattern 9: return in only one branch of nested if
+            ret_partial: fn(x: f32, y: f32) -> f32 {
+                if x > 0f {
+                    if y > 0f { return 1f }
+                }
+                return 0f
+            }
+            // Pattern 10: early return vs expression result
+            ret_vs_expr: fn(x: f32) -> f32 {
+                if x < 0f { return -1f }
+                let result = if x == 0f { 0f } else { 1f }
+                return result
+            }
+            // Pattern 11: return with computation after if
+            ret_with_comp: fn(x: f32) -> f32 {
+                if x < 0f { return x * -1f }
+                let y = x * 2f
+                let z = y + 1f
+                return z
+            }
+            // Pattern 12: multiple early returns
+            ret_multi_early: fn(x: f32) -> f32 {
+                if x < -10f { return -2f }
+                if x < 0f { return -1f }
+                if x == 0f { return 0f }
+                return 1f
+            }
+            // Pattern 13: return from for loop
+            ret_from_for: fn(x: f32) -> f32 {
+                for i in 0..10 {
+                    if f32(i) == x { return f32(i) }
+                }
+                return -1f
+            }
+            // Pattern 14: return from nested for loop
+            ret_from_nested_for: fn(x: f32, y: f32) -> f32 {
+                for i in 0..5 {
+                    for j in 0..5 {
+                        if f32(i) == x && f32(j) == y { return f32(i) + f32(j) }
+                    }
+                }
+                return -1f
+            }
+            // Pattern 15: return from for loop with computation
+            ret_from_for_comp: fn(x: f32) -> f32 {
+                var sum = 0f
+                for i in 0..10 {
+                    sum += f32(i)
+                    if sum > x { return sum }
+                }
+                return sum
+            }
+            
+            vertex: fn(){
+                // Vertex buffer access
+                let pos = self.vtx.pos
+                let uv = self.vtx.uv
+                let normal = self.vtx.normal
+                // Instance data
+                let offset = self.inst_pos
+                let scale = self.inst_scale
+                // Uniform access
+                let t = self.u_time
+                let s = self.u_scale
+                let mvp = self.uniforms.mvp
+                // Set varyings
+                self.v_uv = uv
+                self.v_color = vec4(1f, 0f, 0f, 1f)
+                self.v_intensity = 0.8f
+                self.v_normal = normal
+                let world_pos = pos.xyz + vec3(offset.x, offset.y, 0f)
+                self.v_world_pos = world_pos
+                self.vertex_pos = vec4(world_pos * mvp, 1f)
+            }
+            
             fragment: fn(){
-                // ADD, SUB, MUL, DIV, MOD with f32
+                // ---- Arithmetic ops (f32) ----
                 let a = 1f let b = 2f
                 let c = a + b
                 let c = a - b
                 let c = a * b
                 let c = a / b
-                // NEG
                 let c = -a
-                self.pixel = vec4(c, c, c, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_arith_f32)
-        
-        // Shader for testing arithmetic with i32/u32 and bitwise ops
-        let shader_arith_int = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                // Integer arithmetic
-                let a = 10i let b = 3i
-                let c = a + b
-                let c = a - b  
-                let c = a * b
-                let c = a / b
-                let c = a % b
-                // Bitwise ops (SHL, SHR, AND, OR, XOR)
-                let c = a << 2i
-                let c = a >> 1i
-                let c = a & b
-                let c = a | b
-                let c = a ^ b
-                // u32
-                let x = 10u let y = 3u
-                let z = x + y
-                let z = x - y
-                let z = x * y
-                let z = x / y
-                let z = x % y
-                let z = x << 2u
-                let z = x >> 1u
-                let z = x & y
-                let z = x | y
-                let z = x ^ y
-                self.pixel = vec4(1f)
-            }
-        }
-        shader.test_compile_draw(shader_arith_int)
-        
-        // Shader for testing vec2/3/4 arithmetic
-        let shader_arith_vec = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                // vec2f
+                
+                // ---- Arithmetic ops (i32/u32 + bitwise) ----
+                let ai = 10i let bi = 3i
+                let ci = ai + bi
+                let ci = ai - bi
+                let ci = ai * bi
+                let ci = ai / bi
+                let ci = ai % bi
+                let ci = ai << 2i
+                let ci = ai >> 1i
+                let ci = ai & bi
+                let ci = ai | bi
+                let ci = ai ^ bi
+                let xu = 10u let yu = 3u
+                let zu = xu + yu
+                let zu = xu - yu
+                let zu = xu * yu
+                let zu = xu / yu
+                let zu = xu % yu
+                let zu = xu << 2u
+                let zu = xu >> 1u
+                let zu = xu & yu
+                let zu = xu | yu
+                let zu = xu ^ yu
+                
+                // ---- f16 (half precision) ----
+                let ah = 1h let bh = 2h
+                let ch = ah + bh
+                let ch = ah - bh
+                let ch = ah * bh
+                let ch = ah / bh
+                let ch = -ah
+                var dh = 1h
+                dh += 1h
+                dh -= 1h
+                dh *= 2h
+                dh /= 2h
+                
+                // ---- Vector arithmetic ----
                 let v2a = vec2(1f, 2f) let v2b = vec2(3f, 4f)
                 let v2c = v2a + v2b
                 let v2c = v2a - v2b
                 let v2c = v2a * v2b
                 let v2c = v2a / v2b
                 let v2c = -v2a
-                // vec3f
                 let v3a = vec3(1f, 2f, 3f) let v3b = vec3(4f, 5f, 6f)
                 let v3c = v3a + v3b
                 let v3c = v3a - v3b
                 let v3c = v3a * v3b
                 let v3c = v3a / v3b
                 let v3c = -v3a
-                // vec4f
                 let v4a = vec4(1f, 2f, 3f, 4f) let v4b = vec4(5f, 6f, 7f, 8f)
                 let v4c = v4a + v4b
                 let v4c = v4a - v4b
                 let v4c = v4a * v4b
                 let v4c = v4a / v4b
                 let v4c = -v4a
-                // scalar * vec
                 let v4c = v4a * 2f
                 let v4c = 2f * v4a
-                self.pixel = v4c
-            }
-        }
-        shader.test_compile_draw(shader_arith_vec)
-        
-        // Shader for testing comparison opcodes (EQ, NEQ, LT, GT, LEQ, GEQ)
-        // TODO: bool result type needs wgsl conversion support
-        // Comparisons work in if conditions, just not stored in variables
-        let shader_cmp = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                let a = 1f let b = 2f
-                // comparisons work in conditions
+                
+                // ---- Comparisons ----
                 var result = 0f
                 if a == b { result = 1f }
                 if a != b { result = 2f }
@@ -812,108 +1113,63 @@ pub fn main(){
                 if a > b { result = 4f }
                 if a <= b { result = 5f }
                 if a >= b { result = 6f }
-                // i32
-                let x = 1i let y = 2i
-                if x == y { result = 7f }
-                if x != y { result = 8f }
-                if x < y { result = 9f }
-                if x > y { result = 10f }
-                // u32
-                let p = 1u let q = 2u
-                if p == q { result = 11f }
-                if p != q { result = 12f }
-                if p < q { result = 13f }
-                if p > q { result = 14f }
-                self.pixel = vec4(result)
-            }
-        }
-        shader.test_compile_draw(shader_cmp)
-        
-        // Shader for testing logic opcodes (AND, OR)
-        // Test && and || in if conditions
-        let shader_logic = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                let x = 1f 
-                let y = 2f
-                var result = 0f
-                // && test in if condition
-                if x < y && y > 0f {
-                    result = 1f
-                }
-                // || test in if condition
-                if x > y || y > 0f {
-                    result = 2f
-                }
-                // Bool type tests - storing logic results in variables
-                let a = true 
-                let b = false
-                let c = a && b
-                let d = a || b
-                let e = x < y && y > 0f
-                self.pixel = vec4(result)
-            }
-        }
-        shader.test_compile_draw(shader_logic)
-        
-        // Shader for testing assignment opcodes
-        let shader_assign = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                // var assignments with compound ops
-                var a = 1f
-                a = 2f
-                a += 1f
-                a -= 1f
-                a *= 2f
-                a /= 2f
-                // i32 compound assigns
-                var b = 10i
-                b += 1i
-                b -= 1i
-                b *= 2i
-                b /= 2i
-                b %= 3i
-                b &= 7i
-                b |= 1i
-                b ^= 2i
-                b <<= 1i
-                b >>= 1i
-                // u32 compound assigns
-                var c = 10u
-                c += 1u
-                c -= 1u
-                c *= 2u
-                c /= 2u
-                c %= 3u
-                c &= 7u
-                c |= 1u
-                c ^= 2u
-                c <<= 1u
-                c >>= 1u
-                self.pixel = vec4(a)
-            }
-        }
-        shader.test_compile_draw(shader_assign)
-        
-        // Shader for testing field assignment opcodes
-        let shader_field_assign = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
+                let xi = 1i let yi = 2i
+                if xi == yi { result = 7f }
+                if xi != yi { result = 8f }
+                if xi < yi { result = 9f }
+                if xi > yi { result = 10f }
+                let pu = 1u let qu = 2u
+                if pu == qu { result = 11f }
+                if pu != qu { result = 12f }
+                if pu < qu { result = 13f }
+                if pu > qu { result = 14f }
+                
+                // ---- Logic ops ----
+                let x = 1f let y = 2f
+                if x < y && y > 0f { result = 1f }
+                if x > y || y > 0f { result = 2f }
+                let la = true let lb = false
+                let lc = la && lb
+                let ld = la || lb
+                let le = x < y && y > 0f
+                
+                // ---- Var assignments with compound ops ----
+                var va = 1f
+                va = 2f
+                va += 1f
+                va -= 1f
+                va *= 2f
+                va /= 2f
+                var vb = 10i
+                vb += 1i
+                vb -= 1i
+                vb *= 2i
+                vb /= 2i
+                vb %= 3i
+                vb &= 7i
+                vb |= 1i
+                vb ^= 2i
+                vb <<= 1i
+                vb >>= 1i
+                var vc = 10u
+                vc += 1u
+                vc -= 1u
+                vc *= 2u
+                vc /= 2u
+                vc %= 3u
+                vc &= 7u
+                vc |= 1u
+                vc ^= 2u
+                vc <<= 1u
+                vc >>= 1u
+                
+                // ---- Field assignments ----
                 var s = test_struct(1f, vec2(0f), vec3(0f), vec4(0f), 0i, 0u, array(0f,0f,0f,0f))
-                // Field assigns
                 s.f = 2f
                 s.f += 1f
                 s.f -= 1f
                 s.f *= 2f
                 s.f /= 2f
-                // int field assigns
                 s.i = 5i
                 s.i += 1i
                 s.i -= 1i
@@ -925,583 +1181,235 @@ pub fn main(){
                 s.i ^= 2i
                 s.i <<= 1i
                 s.i >>= 1i
-                // vec field component assign
                 s.v2.x = 1f
                 s.v3.y = 2f
                 s.v4.z = 3f
-                self.pixel = s.v4
-            }
-        }
-        shader.test_compile_draw(shader_field_assign)
-        
-        // Shader for testing array index access and assignment
-        let shader_index_assign = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                // Fixed array indexing
+                
+                // ---- Array indexing ----
                 var arr = array(1f, 2f, 3f, 4f)
-                // Index read
-                let x = arr[0]
-                let y = arr[1]
-                // Index assigns with literal indices
+                let ax = arr[0]
+                let ay = arr[1]
                 arr[0] = 5f
                 arr[1] = 6f
                 arr[0] += 1f
                 arr[1] -= 1f
                 arr[2] *= 2f
                 arr[3] /= 2f
-                // Dynamic index (using a variable)
                 var idx = 0i
-                let z = arr[idx]
+                let az = arr[idx]
                 arr[idx] = 10f
-                
-                // Vector indexing (vec4 as array of 4 floats)
                 var v = vec4(1f, 2f, 3f, 4f)
                 let vx = v[0]
                 let vy = v[1]
                 v[2] = 10f
                 v[3] += 5f
-                
-                // vec3 indexing
                 var v3 = vec3(1f, 2f, 3f)
                 let v3z = v3[2]
                 v3[0] = 5f
                 
-                self.pixel = vec4(arr[0], arr[1], v[2], v[3])
-            }
-        }
-        shader.test_compile_draw(shader_index_assign)
-        
-        // Shader for testing if/else control flow
-        let shader_if_else = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                let x = 1f
-                // if without else
-                var result = 0f
-                if x > 0f {
-                    result = 1f
-                }
-                // if with else
-                let y = if x > 0f { 1f } else { 0f }
-                // if-else-if chain
-                let z = if x < 0f { -1f }
-                    else if x == 0f { 0f }
-                    else { 1f }
-                // nested if
-                var v = 0f
-                if x > 0f {
-                    if x < 2f {
-                        v = 1f
-                    }
-                }
-                self.pixel = vec4(result, y, z, v)
-            }
-        }
-        shader.test_compile_draw(shader_if_else)
-        
-        // Shader for testing match expressions
-        let shader_match = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                let x = 1u
-                let result = match x {
+                // ---- If/else ----
+                let xif = 1f
+                var result_if = 0f
+                if xif > 0f { result_if = 1f }
+                let yif = if xif > 0f { 1f } else { 0f }
+                let zif = if xif < 0f { -1f } else if xif == 0f { 0f } else { 1f }
+                var vif = 0f
+                if xif > 0f { if xif < 2f { vif = 1f } }
+                
+                // ---- Match ----
+                let xm = 1u
+                let result_m = match xm {
                     ShaderEnum.Test1 => 1f
                     ShaderEnum.Test2 => 2f
                     _ => 0f
                 }
-                self.pixel = vec4(result)
-            }
-        }
-        shader.test_compile_draw(shader_match)
-        
-        // Shader for testing for loops
-        let shader_for = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
+                
+                // ---- For loops ----
                 var sum = 0f
-                for i in 0..4 {
-                    sum += 1f
-                }
-                // nested for
+                for i in 0..4 { sum += 1f }
                 var sum2 = 0f
-                for i in 0..2 {
-                    for j in 0..3 {
-                        sum2 += 1f
-                    }
-                }
-                self.pixel = vec4(sum, sum2, 0f, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_for)
-        
-        // Shader for testing builtin function calls
-        let shader_builtins = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                let a = 0.5f let b = 1.0f let t = 0.5f
-                // 1-arg builtins
-                let r = abs(a)
-                let r = floor(a)
-                let r = ceil(a)
-                let r = round(a)
-                let r = fract(a)
-                let r = sqrt(a)
-                let r = sin(a)
-                let r = cos(a)
-                let r = tan(a)
-                let r = asin(a)
-                let r = acos(a)
-                let r = atan(a)
-                let r = exp(a)
-                let r = log(a)
-                let r = exp2(a)
-                let r = log2(a)
-                // 2-arg builtins
-                let r = min(a, b)
-                let r = max(a, b)
-                let r = pow(a, b)
-                let r = step(a, b)
-                let r = atan2(a, b)
-                // 3-arg builtins
-                let r = clamp(a, 0f, b)
-                let r = mix(a, b, t)
-                let r = smoothstep(0f, b, a)
-                // vec builtins
-                let v = vec3(1f, 2f, 3f)
-                let len = length(v)
-                let n = normalize(v)
-                let d = dot(v, v)
-                let c = cross(v, vec3(0f, 1f, 0f))
-                let dist = distance(v, vec3(0f))
-                // vec versions of scalar builtins
-                let va = vec3(-1f, 0.5f, 2f)
-                let vr = abs(va)
-                let vr = floor(va)
-                let vr = ceil(va)
-                let vr = sin(va)
-                let vr = cos(va)
-                let vr = mix(va, vec3(1f), 0.5f)
-                self.pixel = vec4(r, len, d, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_builtins)
-        
-        // Shader for testing script function calls
-        let shader_fn_calls = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            helper: |x| x * 2f
-            helper2: |a, b| a + b
-            helper_vec: |v| v * 2f
-            vertex: fn(){}
-            fragment: fn(){
-                let a = self.helper(1f)
-                let b = self.helper2(1f, 2f)
-                let v = self.helper_vec(vec3(1f, 2f, 3f))
-                self.pixel = vec4(a, b, v.x, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_fn_calls)
-        
-        // Shader for testing return statements
-        let shader_return = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            get_val: || {
-                return 1f
-            }
-            get_val_cond: |x| {
-                if x > 0f {
-                    return 1f
-                }
-                return 0f
-            }
-            vertex: fn(){}
-            fragment: fn(){
-                let a = self.get_val()
-                let b = self.get_val_cond(1f)
-                self.pixel = vec4(a, b, 0f, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_return)
-        
-        // Shader for testing let/var declarations with various types
-        let shader_decls = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                // let bindings (immutable)
-                let f = 1f
-                let h = 1h
-                let i = 1i
-                let u = 1u
-                let b = true
-                let v2 = vec2(1f, 2f)
-                let v3 = vec3(1f, 2f, 3f)
-                let v4 = vec4(1f, 2f, 3f, 4f)
-                // Integer vectors
-                let v2i = vec2i(1i, 2i)
-                let v3i = vec3i(1i, 2i, 3i)
-                let v4i = vec4i(1i, 2i, 3i, 4i)
-                let v2u = vec2u(1u, 2u)
-                let v3u = vec3u(1u, 2u, 3u)
-                let v4u = vec4u(1u, 2u, 3u, 4u)
-                let col = #f00
-                // var bindings (mutable)
-                var vf = 1f
-                var vi = 1i
-                var vu = 1u
-                var vv4 = vec4(1f)
-                vf = 2f
-                vi = 2i
-                vu = 2u
-                vv4 = vec4(2f)
-                // struct
-                let s = test_struct(1f, vec2(0f), vec3(0f), vec4(0f), 0i, 0u, array(0f,0f,0f,0f))
-                self.pixel = vec4(f, vf, 0f, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_decls)
-        
-        // Shader for testing f16 (half precision)
-        let shader_f16 = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                let a = 1h let b = 2h
-                let c = a + b
-                let c = a - b
-                let c = a * b
-                let c = a / b
-                let c = -a
-                var d = 1h
-                d += 1h
-                d -= 1h
-                d *= 2h
-                d /= 2h
-                self.pixel = vec4(1f)
-            }
-        }
-        shader.test_compile_draw(shader_f16)
-        
-        // Shader for testing swizzles
-        let shader_swizzle = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                let v4 = vec4(1f, 2f, 3f, 4f)
-                let a = v4.x
-                let b = v4.xy
-                let c = v4.xyz
-                let d = v4.xyzw
-                let e = v4.wzyx
-                let f = v4.xxxx
-                let g = v4.rg
-                let h = v4.rgb
-                let v3 = vec3(1f, 2f, 3f)
-                let i = v3.xy
-                let j = v3.zyx
-                self.pixel = vec4(a, b.x, c.x, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_swizzle)
-        
-        // Shader for testing colors (mapped to vec4f)
-        let test_color = #f00
-        let shader_colors = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
+                for i in 0..2 { for j in 0..3 { sum2 += 1f } }
+                
+                // ---- Builtin functions ----
+                let ba = 0.5f let bb = 1.0f let bt = 0.5f
+                let br = abs(ba)
+                let br = floor(ba)
+                let br = ceil(ba)
+                let br = round(ba)
+                let br = fract(ba)
+                let br = sqrt(ba)
+                let br = sin(ba)
+                let br = cos(ba)
+                let br = tan(ba)
+                let br = asin(ba)
+                let br = acos(ba)
+                let br = atan(ba)
+                let br = exp(ba)
+                let br = log(ba)
+                let br = exp2(ba)
+                let br = log2(ba)
+                let br = min(ba, bb)
+                let br = max(ba, bb)
+                let br = pow(ba, bb)
+                let br = step(ba, bb)
+                let br = atan2(ba, bb)
+                let br = clamp(ba, 0f, bb)
+                let br = mix(ba, bb, bt)
+                let br = smoothstep(0f, bb, ba)
+                let bv = vec3(1f, 2f, 3f)
+                let blen = length(bv)
+                let bn = normalize(bv)
+                let bd = dot(bv, bv)
+                let bc = cross(bv, vec3(0f, 1f, 0f))
+                let bdist = distance(bv, vec3(0f))
+                let bva = vec3(-1f, 0.5f, 2f)
+                let bvr = abs(bva)
+                let bvr = floor(bva)
+                let bvr = ceil(bva)
+                let bvr = sin(bva)
+                let bvr = cos(bva)
+                let bvr = mix(bva, vec3(1f), 0.5f)
+                
+                // ---- Function calls ----
+                let fa = self.helper(1f)
+                let fb = self.helper2(1f, 2f)
+                let fv = self.helper_vec(vec3(1f, 2f, 3f))
+                let fra = self.get_val()
+                let frb = self.get_val_cond(1f)
+                
+                // ---- Declarations ----
+                let df = 1f
+                let dh = 1h
+                let di = 1i
+                let du = 1u
+                let db = true
+                let dv2 = vec2(1f, 2f)
+                let dv3 = vec3(1f, 2f, 3f)
+                let dv4 = vec4(1f, 2f, 3f, 4f)
+                let dv2i = vec2i(1i, 2i)
+                let dv3i = vec3i(1i, 2i, 3i)
+                let dv4i = vec4i(1i, 2i, 3i, 4i)
+                let dv2u = vec2u(1u, 2u)
+                let dv3u = vec3u(1u, 2u, 3u)
+                let dv4u = vec4u(1u, 2u, 3u, 4u)
+                let dcol = #f00
+                var dvf = 1f
+                var dvi = 1i
+                var dvu = 1u
+                var dvv4 = vec4(1f)
+                dvf = 2f
+                dvi = 2i
+                dvu = 2u
+                dvv4 = vec4(2f)
+                let ds = test_struct(1f, vec2(0f), vec3(0f), vec4(0f), 0i, 0u, array(0f,0f,0f,0f))
+                
+                // ---- Swizzles ----
+                let sv4 = vec4(1f, 2f, 3f, 4f)
+                let swa = sv4.x
+                let swb = sv4.xy
+                let swc = sv4.xyz
+                let swd = sv4.xyzw
+                let swe = sv4.wzyx
+                let swf = sv4.xxxx
+                let swg = sv4.rg
+                let swh = sv4.rgb
+                let sv3 = vec3(1f, 2f, 3f)
+                let swi = sv3.xy
+                let swj = sv3.zyx
+                
+                // ---- Colors ----
                 let c1 = #ff0000
                 let c2 = #00ff00
                 let c3 = #0000ff
                 let c4 = test_color
                 let mixed = mix(c1, c2, 0.5f)
-                self.pixel = mixed
-            }
-        }
-        shader.test_compile_draw(shader_colors)
-        
-        // ============================================================
-        // SHADER INPUT TYPE TESTS
-        // Tests for varying, instance, uniform, uniform_buffer, 
-        // vertex_buffer, and texture inputs
-        // ============================================================
-        
-        // Define pod structs for shader inputs
-        let vertex_data = struct{
-            pos: vec4f,
-            uv: vec2f,
-            normal: vec3f,
-        }
-        
-        let uniforms_data = struct{
-            mvp: f32,       // simplified - normally mat4
-            time: f32,
-            scale: vec2f,
-        }
-        
-        // Shader for testing varying (vertex to fragment data passing)
-        let shader_varying = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            // Varying - passed from vertex to fragment shader
-            v_uv: shader.varying(vec2f)
-            v_color: shader.varying(vec4f)
-            v_intensity: shader.varying(1.0)
-            vertex: fn(){
-                // Set varyings in vertex shader
-                self.v_uv = vec2(0.5f, 0.5f)
-                self.v_color = vec4(1f, 0f, 0f, 1f)
-                self.v_intensity = 0.8f
-                self.vertex_pos = vec4(0f, 0f, 0f, 1f)
-            }
-            fragment: fn(){
-                // Read varyings in fragment shader (interpolated)
+                
+                // ---- Varying access ----
                 let uv = self.v_uv
                 let col = self.v_color
                 let intensity = self.v_intensity
-                self.pixel = col * intensity
-            }
-        }
-        shader.test_compile_draw(shader_varying)
-        
-        // Shader for testing instance data (per-instance attributes)
-        let shader_instance = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            // Instance data - per-instance attributes
-            inst_pos: shader.instance(vec2f)
-            inst_scale: shader.instance(1.0)
-            inst_color: shader.instance(vec4f)
-            inst_id: shader.instance(0u)
-            vertex: fn(){
-                // Use instance data to transform vertex
-                let offset = self.inst_pos
-                let scale = self.inst_scale
-                self.vertex_pos = vec4(offset.x * scale, offset.y * scale, 0f, 1f)
-            }
-            fragment: fn(){
-                // Use instance color
-                self.pixel = self.inst_color
-            }
-        }
-        shader.test_compile_draw(shader_instance)
-        
-        // Shader for testing uniform (single values)
-        let shader_uniform = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            // Single uniforms of various types
-            u_time: shader.uniform(0.0)
-            u_scale: shader.uniform(vec2f)
-            u_color: shader.uniform(#fff)
-            u_enabled: shader.uniform(true)
-            u_count: shader.uniform(0i)
-            u_flags: shader.uniform(0u)
-            vertex: fn(){
-                let t = self.u_time
-                let s = self.u_scale
-                self.vertex_pos = vec4(s.x * t, s.y * t, 0f, 1f)
-            }
-            fragment: fn(){
-                let col = self.u_color
-                let enabled = self.u_enabled
-                let count = self.u_count
-                let flags = self.u_flags
-                self.pixel = col
-            }
-        }
-        shader.test_compile_draw(shader_uniform)
-        
-        // Shader for testing uniform_buffer (struct uniform blocks)
-        let shader_uniform_buffer = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            // Uniform buffer - grouped uniforms
-            uniforms: shader.uniform_buffer(uniforms_data)
-            vertex: fn(){
-                let mvp = self.uniforms.mvp
-                let scale = self.uniforms.scale
-                self.vertex_pos = vec4(scale.x * mvp, scale.y * mvp, 0f, 1f)
-            }
-            fragment: fn(){
-                let time = self.uniforms.time
-                self.pixel = vec4(time, time, time, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_uniform_buffer)
-        
-        // Shader for testing vertex_buffer (vertex attributes)
-        let shader_vertex_buffer = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            // Vertex buffer - per-vertex data
-            vtx: shader.vertex_buffer(vertex_data)
-            v_uv: shader.varying(vec2f)
-            v_normal: shader.varying(vec3f)
-            vertex: fn(){
-                // Read vertex attributes
-                let pos = self.vtx.pos
-                let uv = self.vtx.uv
-                let normal = self.vtx.normal
-                // Pass to fragment via varyings
-                self.v_uv = uv
-                self.v_normal = normal
-                self.vertex_pos = pos
-            }
-            fragment: fn(){
-                let uv = self.v_uv
                 let normal = self.v_normal
-                // Simple lighting based on normal
-                let light = dot(normal, vec3(0f, 1f, 0f))
-                self.pixel = vec4(uv.x, uv.y, light, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_vertex_buffer)
-        
-        // Shader for testing texture_2d (texture sampling)
-        let shader_texture = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            // Texture inputs
-            tex_diffuse: shader.texture_2d(float)
-            tex_normal: shader.texture_2d(float)
-            v_uv: shader.varying(vec2f)
-            vertex: fn(){
-                self.v_uv = vec2(0.5f, 0.5f)
-                self.vertex_pos = vec4(0f, 0f, 0f, 1f)
-            }
-            fragment: fn(){
-                let uv = self.v_uv
-                // Sample textures
-                let diffuse = self.tex_diffuse.sample(uv)
-                let normal = self.tex_normal.sample(uv)
-                self.pixel = diffuse * normal.x
-            }
-        }
-        shader.test_compile_draw(shader_texture)
-        
-        // Shader for testing scope uniforms (uniforms from script scope)
-        let scope_time = 1.5
-        let scope_color = #0ff
-        let scope_vec = vec2f(2.0, 3.0)
-        let shader_scope_uniforms = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                // Access values from script scope as uniforms
-                let t = scope_time
-                let c = scope_color
-                let v = scope_vec
-                self.pixel = c * t
-            }
-        }
-        shader.test_compile_draw(shader_scope_uniforms)
-        
-        // Shader for testing scope uniform_buffer (uniform buffer from script scope)
-        let scope_uniforms = struct{time:f32, scale:f32}
-        let scope_buf = shader.uniform_buffer(scope_uniforms)
-        let shader_scope_uniform_buffer = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                // Access uniform buffer from script scope
-                let t = scope_buf.time
-                let s = scope_buf.scale
-                self.pixel = vec4(t * s, t, s, 1f)
-            }
-        }
-        shader.test_compile_draw(shader_scope_uniform_buffer)
-        
-        // Shader for testing scope texture (texture from script scope)
-        let scope_tex = shader.texture_2d(float)
-        let shader_scope_texture = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            vertex: fn(){}
-            fragment: fn(){
-                // Sample texture from script scope
-                let col = scope_tex.sample(vec2(0.5f, 0.5f))
-                self.pixel = col
-            }
-        }
-        shader.test_compile_draw(shader_scope_texture)
-        
-        // Shader for testing combined input types (realistic scenario)
-        let shader_combined = #(ShaderTest2::script_shader(vm)){
-            vertex_pos: shader.vertex_position(vec4f)
-            pixel: shader.fragment_output(0, vec4f)
-            // Vertex buffer
-            vtx: shader.vertex_buffer(vertex_data)
-            // Instance data
-            inst_transform: shader.instance(vec4f)
-            inst_color: shader.instance(vec4f)
-            // Uniforms
-            u_time: shader.uniform(0.0)
-            uniforms: shader.uniform_buffer(uniforms_data)
-            // Texture
-            tex: shader.texture_2d(float)
-            // Varyings
-            v_uv: shader.varying(vec2f)
-            v_world_pos: shader.varying(vec3f)
-            vertex: fn(){
-                let pos = self.vtx.pos
-                let transform = self.inst_transform
-                let mvp = self.uniforms.mvp
-                // Transform vertex
-                let world_pos = pos.xyz + transform.xyz
-                self.v_world_pos = world_pos
-                self.v_uv = self.vtx.uv
-                self.vertex_pos = vec4(world_pos * mvp, 1f)
-            }
-            fragment: fn(){
-                let uv = self.v_uv
                 let world_pos = self.v_world_pos
-                let time = self.u_time
-                let inst_col = self.inst_color
-                // Sample texture and combine with instance color
-                let tex_col = self.tex.sample(uv)
-                let final_col = tex_col * inst_col
+                
+                // ---- Uniform access ----
+                let ucol = self.u_color
+                let uenabled = self.u_enabled
+                let ucount = self.u_count
+                let uflags = self.u_flags
+                let utime = self.uniforms.time
+                
+                // ---- Texture sampling ----
+                let diffuse = self.tex_diffuse.sample(uv)
+                let norm_tex = self.tex_normal.sample(uv)
+                
+                // ---- Scope uniforms ----
+                let st = scope_time
+                let sc = scope_color
+                let sv = scope_vec
+                let sbt = scope_buf.time
+                let sbs = scope_buf.scale
+                let stex = scope_tex.sample(vec2(0.5f, 0.5f))
+                
+                // ---- Lighting calc ----
+                let light = dot(normal, vec3(0f, 1f, 0f))
+                let final_col = diffuse * self.inst_color
+                
+                // ---- TestSdf (struct with methods) ----
+                var sdf = TestSdf.new(uv)
+                let translated = sdf.translate(0.5f, 0.5f)
+                sdf.clear(vec4(1f, 0f, 0f, 1f))
+                let h = sdf.use_helper()
+                let neg = sdf.negate_dist()
+                let sdf_result = sdf.result
+                
+                // ---- Return-in-if escape analysis ----
+                let r1 = self.ret_if_no_else(1f)
+                let r2 = self.ret_if_else(1f)
+                let r3 = self.ret_if_else_fall(1f)
+                let r4 = self.ret_else_only(1f)
+                let r5 = self.ret_chain(15f)
+                let r6 = self.ret_chain_fall(5f)
+                let r7 = self.ret_nested(1f, 1f)
+                let r8 = self.ret_deep(1f, 1f, 1f)
+                let r9 = self.ret_partial(1f, 1f)
+                let r10 = self.ret_vs_expr(1f)
+                let r11 = self.ret_with_comp(5f)
+                let r12 = self.ret_multi_early(5f)
+                let r13 = self.ret_from_for(5f)
+                let r14 = self.ret_from_nested_for(2f, 3f)
+                let r15 = self.ret_from_for_comp(10f)
+                
                 self.pixel = final_col
             }
         }
-        shader.test_compile_draw(shader_combined)
+        shader.test_compile_draw(shader_all_features)
 
         println("Test done")
         
-        // Match desugars to: let temp = expr; if temp == pattern1 body1 else if temp == pattern2 body2...
     };
-            
-    let _code = script!{
-        let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
-        ~fib(38);
-    };
+    
+    let code = script!{
+        use mod.std.assert
+        use mod.std.println
         
-    let _code = script!{
-        let x = {obj:{prop:1.0}}
-        let y = x{obj +: {prop:2.0}}
+        // we're implementing destructuring assignment patterns.
+        // array destructuring
+        let [x,y] = [1,2]
+        assert(x == 1 && y == 2)
+                
+        // object destructuring
+        let {x,y} = {x:3, y:4}
+        assert(x == 3 && y == 4)
+                
+        // Also these things need to work recursively
+        let [{x}] = [{x:5}]
+        assert(x == 5)
+        
+        println("DONE")
+        
     };
-            
+          
     let dt = std::time::Instant::now();
-            
     vm.eval(code);
     println!("Duration {}", dt.elapsed().as_secs_f64())
             

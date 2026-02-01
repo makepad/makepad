@@ -7,6 +7,7 @@ use crate::makepad_live_id::*;
 use crate::value::*;
 use crate::vm::ScriptVm;
 use crate::thread::*;
+use crate::*;
 
 impl<'a> ScriptVm<'a> {
     pub fn begin_for_loop_inner(&mut self, jump: u32, source: ScriptValue, value_id: LiveId, index_id: Option<LiveId>, key_id: Option<LiveId>, first_value: ScriptValue, first_index: f64, first_key: ScriptValue) {    
@@ -31,7 +32,12 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().scopes.push(new_scope);
         self.bx.heap.set_value_def(new_scope, value_id.into(), first_value);
         if let Some(key_id) = key_id{
-            self.bx.heap.set_value_def(new_scope, key_id.into(), first_key);
+            // For arrays (first_key is NIL), assign index to key_id (FOR_2 semantics: k=index, v=value)
+            if first_key.is_nil() {
+                self.bx.heap.set_value_def(new_scope, key_id.into(), first_index.into());
+            } else {
+                self.bx.heap.set_value_def(new_scope, key_id.into(), first_key);
+            }
         }
         if let Some(index_id) = index_id{
             self.bx.heap.set_value_def(new_scope, index_id.into(), first_index.into());
@@ -62,9 +68,11 @@ impl<'a> ScriptVm<'a> {
             }
         }
         else if let Some(obj) = source.as_object(){
-            if self.bx.heap.has_proto(obj, self.bx.code.builtins.range.into()){ // range object
-                let start = self.bx.heap.value(obj, id!(start).into(), self.bx.threads.cur().trap.pass()).as_f64().unwrap_or(0.0);
-                let end = self.bx.heap.value(obj, id!(end).into(), self.bx.threads.cur().trap.pass()).as_f64().unwrap_or(0.0);
+            let has_range_proto = self.bx.heap.has_proto(obj, self.bx.code.builtins.range.into());
+            if has_range_proto{ // range object
+                // Use as_number() to handle both f64 and integer types (u40, u32, i32, etc)
+                let start = self.bx.heap.value(obj, id!(start).into(), self.bx.threads.cur().trap.pass()).as_number().unwrap_or(0.0);
+                let end = self.bx.heap.value(obj, id!(end).into(), self.bx.threads.cur().trap.pass()).as_number().unwrap_or(0.0);
                 let v = start.into();
                 if (start - end).abs() >= 1.0{
                     self.begin_for_loop_inner(jump, source, value_id, index_id, key_id, v, start, v);
@@ -80,6 +88,13 @@ impl<'a> ScriptVm<'a> {
             }
         }
         else if let Some(arr) = source.as_array(){
+            // FOR_3 (index_id + key_id) not supported for arrays
+            if index_id.is_some() && key_id.is_some() {
+                let err = script_err_type_mismatch!(self.bx.threads.cur().trap, "for i k v in array is not supported, use for i v in array instead");
+                self.bx.threads.cur().push_stack_unchecked(err);
+                self.bx.threads.cur().trap.goto_rel(jump);
+                return
+            }
             if self.bx.heap.array_len(arr) > 0{
                 let value = self.bx.heap.array_index(arr, 0, self.bx.threads.cur().trap.pass());
                 self.begin_for_loop_inner(jump, source, value_id, index_id, key_id, value, 0.0, NIL);
@@ -114,8 +129,9 @@ impl<'a> ScriptVm<'a> {
             }
             else if let Some(obj) = values.source.as_object(){
                 if self.bx.heap.has_proto(obj, self.bx.code.builtins.range.into()){
-                    let end = self.bx.heap.value(obj, id!(end).into(), self.bx.threads.cur().trap.pass()).as_f64().unwrap_or(0.0);
-                    let step = self.bx.heap.value(obj, id!(step).into(), self.bx.threads.cur().trap.pass()).as_f64().unwrap_or(1.0);
+                    // Use as_number() to handle both f64 and integer types
+                    let end = self.bx.heap.value(obj, id!(end).into(), self.bx.threads.cur().trap.pass()).as_number().unwrap_or(0.0);
+                    let step = self.bx.heap.value(obj, id!(step).into(), self.bx.threads.cur().trap.pass()).as_number().unwrap_or(1.0);
                     let lf = self.bx.threads.cur().loops.last_mut().unwrap();
                     let values = lf.values.as_mut().unwrap();
                     values.index += step;
@@ -126,6 +142,7 @@ impl<'a> ScriptVm<'a> {
                     let start_ip = lf.start_ip;
                     let bases_scope = lf.bases.scope;
                     let value_id = values.value_id;
+                    let key_id = values.key_id;
                     let index = values.index;
                     while self.bx.threads.cur_ref().scopes.len() > bases_scope{
                         let scope = self.bx.threads.cur().scopes.pop().unwrap();
@@ -134,6 +151,10 @@ impl<'a> ScriptVm<'a> {
                     let scope = self.bx.heap.new_with_proto((*self.bx.threads.cur_ref().scopes.last().unwrap()).into());
                     self.bx.threads.cur().scopes.push(scope);
                     self.bx.heap.set_value_def(scope, value_id.into(), index.into());
+                    // For FOR_2 on ranges, key_id gets the index (same as value for simple ranges)
+                    if let Some(key_id) = key_id{
+                        self.bx.heap.set_value_def(scope, key_id.into(), index.into());
+                    }
                     self.bx.threads.cur().trap.goto(start_ip);
                     return
                 }
@@ -192,6 +213,7 @@ impl<'a> ScriptVm<'a> {
                 let bases_scope = lf.bases.scope;
                 let value_id = values.value_id;
                 let index_id = values.index_id;
+                let key_id = values.key_id;
                 let index = values.index;
                 
                 while self.bx.threads.cur_ref().scopes.len() > bases_scope{
@@ -204,6 +226,10 @@ impl<'a> ScriptVm<'a> {
                 self.bx.heap.set_value_def(scope, value_id.into(), value.into());
                 if let Some(index_id) = index_id{
                     self.bx.heap.set_value_def(scope, index_id.into(), index.into());
+                }
+                // For FOR_2 on arrays, key_id gets the index (arrays don't have keys)
+                if let Some(key_id) = key_id{
+                    self.bx.heap.set_value_def(scope, key_id.into(), index.into());
                 }
                                     
                 self.bx.threads.cur().trap.goto(start_ip);
