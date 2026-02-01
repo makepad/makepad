@@ -2258,9 +2258,11 @@ impl ScriptParser{
                     return 1
                 }
                 if id.not_empty(){
-                    self.push_code(ScriptValue::from_id(id), self.index);
                     if starts_with_ds{
-                        self.push_code(Opcode::SEARCH_TREE.into(), self.index);
+                        // $identifier escapes by default - no scope resolution
+                        self.push_code(id.escape(), self.index);
+                    } else {
+                        self.push_code(ScriptValue::from_id(id), self.index);
                     }
                     self.state.push(State::EndExpr);
                     return 1
