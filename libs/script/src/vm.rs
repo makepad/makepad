@@ -137,6 +137,27 @@ impl <'a> ScriptVm<'a>{
         self.bx.threads.cur_ref().trap.pass()
     }
     
+    /// Format an enum variant error with descriptive information about the value.
+    /// Used by generated code from derive macros for better error messages.
+    pub fn format_enum_variant_error(&self, value: ScriptValue) -> String {
+        crate::suggest::format_enum_variant_error(&self.bx.heap, value)
+    }
+    
+    /// Format a ScriptObject for error messages with a brief debug representation.
+    /// Shows the object's proto chain and key properties.
+    pub fn format_object_for_error(&self, obj: ScriptObject) -> String {
+        let mut out = String::new();
+        let mut recur = Vec::new();
+        // Use the heap's debug string but limit depth to keep it concise
+        self.bx.heap.to_debug_string(obj.into(), &mut recur, &mut out, false, 0);
+        // Truncate if too long
+        if out.len() > 200 {
+            out.truncate(197);
+            out.push_str("...");
+        }
+        out
+    }
+    
     pub fn set_thread(&mut self, id: usize) {
         self.bx.threads.set_current(id);
     }

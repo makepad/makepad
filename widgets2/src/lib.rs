@@ -52,7 +52,8 @@ pub mod turtle_step;
 pub mod window;
 // pub mod scroll_shadow;
 // pub mod window_menu;
-// pub mod html;
+#[cfg(feature = "html")]
+pub mod html;
 #[cfg(feature = "markdown")]
 pub mod markdown;
 pub mod text_flow;
@@ -196,6 +197,8 @@ scroll_bar::{ScrollBar},
     }
 };
 
+#[cfg(feature = "html")]
+pub use crate::html::*;
 #[cfg(feature = "markdown")]
 pub use crate::markdown::*;
 
@@ -253,6 +256,8 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::turtle_step::script_mod(vm);
     crate::portal_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
+    #[cfg(feature = "html")]
+    crate::html::script_mod(vm);
     #[cfg(feature = "markdown")]
     crate::markdown::script_mod(vm);
     //crate::bare_step::script_mod(vm);

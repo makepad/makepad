@@ -974,8 +974,8 @@ impl DrawVars{
                 &vm.thread().trap.pass(),
             );
             
-            // Check for debug: true on the shader object
-            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), vm.thread().trap.pass());
+            // Check for debug: true on the shader object (use NoTrap since it's optional)
+            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
             if let Some(true) = debug_value.as_bool() {
                 mapping.flags.debug = true;
             }
