@@ -136,6 +136,12 @@ impl ScriptHeap{
         // Check if this type has a registered ScriptTypeCheck with a pod type
         if let Some(type_index) = self.type_index.get(&type_id) {
             let type_check = &self.type_check[type_index.0 as usize];
+            
+            // Check if this is a repr(u32) enum - treat as u32 in shaders
+            if type_check.is_repr_u32_enum {
+                return Some(builtins.pod_u32);
+            }
+            
             if let Some(ref object) = type_check.object {
                 // Check if the proto object has a pod type
                 if let Some(proto_obj) = object.proto.as_object() {
