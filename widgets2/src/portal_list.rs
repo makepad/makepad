@@ -818,7 +818,9 @@ impl Widget for PortalList {
                     self.detect_tail_in_draw = true;
                     self.was_scrolling = false;
                     self.scroll_state = ScrollState::Stopped;
-                    self.delta_top_scroll(cx, -e.scroll.index(vi), false, true);
+                    // For mouse wheel: clip to top and don't transition to pulldown
+                    // (pulldown/overscroll is only for touch drag/flick)
+                    self.delta_top_scroll(cx, -e.scroll.index(vi), true, false);
                     cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                     self.area.redraw(cx);
                 }
