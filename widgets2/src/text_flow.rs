@@ -1,6 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
+    animator::*,
     widget::*,
 }; 
 
@@ -8,19 +9,32 @@ script_mod!{
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
     
-    mod.widgets.DrawFlowBlock = #(DrawFlowBlock::script_api(vm))
-    mod.widgets.FlowBlockType = #(FlowBlockType::script_api(vm))
+    let FlowBlockType = mod.std.set_type_default() do #(FlowBlockType::script_api(vm))
+    
+    mod.widgets.DrawFlowBlock = mod.std.set_type_default() do #(DrawFlowBlock::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        
+        block_type: instance(FlowBlockType.Quote)
+        line_color: #fff
+        sep_color: #888
+        code_color: #333
+        quote_bg_color: #222
+        quote_fg_color: #aaa
+        
+        space_1: uniform(4.0)
+        space_2: uniform(8.0)
+    }
+    
+    mod.widgets.FlowBlockType = FlowBlockType
     
     mod.widgets.TextFlowBase = #(TextFlow::register_widget(vm)){
         font_size: 8
-        flow: Flow.right_wrap()
+        flow: Flow.Right{wrap: true}
     }
     
-    mod.widgets.TextFlowLinkBase = #(TextFlowLink::register_widget(vm)){
-        link: TextFlowLink{}
-    }
+    mod.widgets.TextFlowLinkBase = #(TextFlowLink::register_widget(vm)){}
     
-    mod.widgets.TextFlowLink = mod.widgets.TextFlowLinkBase{
+    mod.widgets.TextFlowLink = mod.std.set_type_default() do mod.widgets.TextFlowLinkBase{
         color: #xa
         color_hover: #xf
         color_down: #x3
@@ -64,7 +78,7 @@ script_mod!{
         
     mod.widgets.TextFlow = mod.std.set_type_default() do mod.widgets.TextFlowBase{
         width: Fill height: Fit
-        flow: Flow.right_wrap()
+        flow: Flow.Right{wrap: true}
         padding: 0
                 
         font_size: theme.font_size_p
@@ -106,19 +120,19 @@ script_mod!{
         }
                 
         code_layout: Layout{
-            flow: Flow.right_wrap()
+            flow: Flow.Right{wrap: true}
             padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
         code_walk: Walk{width: Fill, height: Fit}
                 
         quote_layout: Layout{
-            flow: Flow.right_wrap()
+            flow: Flow.Right{wrap: true}
             padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
         quote_walk: Walk{width: Fill, height: Fit}
                 
         list_item_layout: Layout{
-            flow: Flow.right_wrap()
+            flow: Flow.Right{wrap: true}
             padding: theme.mspace_1
         }
         list_item_walk: Walk{
@@ -133,7 +147,7 @@ script_mod!{
             margin: theme.mspace_v_1
         }
                 
-        link: mod.widgets.TextFlowLink{}
+        $link: mod.widgets.TextFlowLink{}
                 
         draw_block +: {
             line_color: theme.color_text
@@ -141,13 +155,15 @@ script_mod!{
             quote_bg_color: theme.color_bg_highlight
             quote_fg_color: theme.color_text
             code_color: theme.color_bg_highlight
+            space_1: uniform(theme.space_1)
+            space_2: uniform(theme.space_2)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 match self.block_type {
                     FlowBlockType.Quote => {
                         sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
                         sdf.fill(self.quote_bg_color)
-                        sdf.box(theme.space_1 theme.space_1 theme.space_1 (self.rect_size.y - theme.space_2) 1.5)
+                        sdf.box(self.space_1 self.space_1 self.space_1 (self.rect_size.y - self.space_2) 1.5)
                         sdf.fill(self.quote_fg_color)
                         return sdf.result
                     }
@@ -186,12 +202,12 @@ script_mod!{
 #[derive(Script, ScriptHook)]
 #[repr(u32)]
 pub enum FlowBlockType {
-    #[pick] Quote = shader_enum(1),
-    Sep = shader_enum(2),
-    Code = shader_enum(3),
-    InlineCode = shader_enum(4),
-    Underline = shader_enum(5),
-    Strikethrough = shader_enum(6)
+    #[pick] Quote = 1,
+    Sep = 2,
+    Code = 3,
+    InlineCode = 4,
+    Underline = 5,
+    Strikethrough = 6
 }
 
 #[derive(Script, ScriptHook)]
@@ -226,7 +242,7 @@ impl StackCounter{
 }
       
 // this widget has a retained and an immediate mode api
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct TextFlow {
     #[live] pub draw_normal: DrawText,
     #[live] pub draw_italic: DrawText,
@@ -268,23 +284,23 @@ pub struct TextFlow {
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
     #[live] pub inline_code_padding: Inset,
-    #[live] pub inline_code_margin: Margin,
-    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub heading_margin: Margin,
-    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub paragraph_margin: Margin,
+    #[live] pub inline_code_margin: Inset,
+    #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub heading_margin: Inset,
+    #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub paragraph_margin: Inset,
     
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust(Some(Default::default()))] items: Option<ComponentMap<LiveId,(WidgetRef, LiveId)>>,
-    #[rust] templates: ComponentMap<LiveId, ScriptObjectRef>,
+    #[rust] templates: ComponentMap<LiveId, ScriptValue>,
 }
 
 impl TextFlow {
-    fn apply_template(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, id: LiveId, obj: ScriptObjectRef) {
+    fn apply_template(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, id: LiveId, obj: ScriptValue) {
         self.templates.insert(id, obj);
         // Apply to existing items with matching template
         for (node, templ_id) in self.items.as_mut().unwrap().values_mut() {
             if *templ_id == id {
-                node.script_apply(vm, apply, scope, obj.into());
+                node.script_apply(vm, apply, scope, obj);
             }
         }
     }
@@ -296,8 +312,8 @@ impl ScriptHook for TextFlow {
             vm.vec_with(obj, |vm, vec| {
                 for kv in vec {
                     if let Some(id) = kv.key.as_id() {
-                        if let Some(child_obj) = kv.value.as_object() {
-                            self.apply_template(vm, apply, scope, id, child_obj);
+                        if kv.value.as_object().is_some() {
+                            self.apply_template(vm, apply, scope, id, kv.value);
                         }
                     }
                 }
@@ -515,10 +531,12 @@ impl TextFlow{
     pub fn item_with<F,R:Default>(&mut self, cx: &mut Cx2d, entry_id:LiveId, template: LiveId, f:F)->R
     where F:FnOnce(&mut Cx2d, &WidgetRef, &mut TextFlow)->R{
         let mut items = self.items.take().unwrap();
-        let r = if let Some(ptr) = self.templates.get(&template) {
-            let ptr = *ptr;
+        let r = if let Some(template_value) = self.templates.get(&template).copied() {
             let entry = items.get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::script_from_value(cx, ptr.into()), template)
+                let widget = cx.with_vm(|vm| {
+                    WidgetRef::script_from_value(vm, template_value)
+                });
+                (widget, template)
             });
             f(cx, &entry.0, self)
         }else{
@@ -530,10 +548,12 @@ impl TextFlow{
         
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> WidgetRef {
-        if let Some(ptr) = self.templates.get(&template) {
-            let ptr = *ptr;
+        if let Some(template_value) = self.templates.get(&template).copied() {
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::script_from_value(cx, ptr.into()), template)
+                let widget = cx.with_vm(|vm| {
+                    WidgetRef::script_from_value(vm, template_value)
+                });
+                (widget, template)
             });
             return entry.0.clone()
         }
@@ -543,10 +563,12 @@ impl TextFlow{
     
     pub fn item_counted(&mut self, cx: &mut Cx, template: LiveId) -> WidgetRef {
         let entry_id = self.new_counted_id();
-        if let Some(ptr) = self.templates.get(&template) {
-            let ptr = *ptr;
+        if let Some(template_value) = self.templates.get(&template).copied() {
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::script_from_value(cx, ptr.into()), template)
+                let widget = cx.with_vm(|vm| {
+                    WidgetRef::script_from_value(vm, template_value)
+                });
+                (widget, template)
             });
             return entry.0.clone()
         }
@@ -568,10 +590,12 @@ impl TextFlow{
         
 
     pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
-        if let Some(ptr) = self.templates.get(&template) {
-            let ptr = *ptr;
+        if let Some(template_value) = self.templates.get(&template).copied() {
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::script_from_value_scoped(cx, scope, ptr.into()), template)
+                let widget = cx.with_vm(|vm| {
+                    WidgetRef::script_from_value_scoped(vm, scope, template_value)
+                });
+                (widget, template)
             });
             return Some(entry.0.clone())
         }
@@ -676,24 +700,26 @@ impl TextFlow{
     }
 }
 
-#[derive(Debug, Clone, DefaultNone)]
+#[derive(Debug, Clone, Default)]
 pub enum TextFlowLinkAction {
     Clicked {
         key_modifiers: KeyModifiers,
     },
+    #[default]
     None,
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, ScriptHook, Widget, Animator)]
 struct TextFlowLink {
-    #[animator] animator: Animator,
+    #[source] source: ScriptObjectRef,
+    #[apply_default] animator: Animator,
     
     #[redraw] #[area] area: Area,
     
     #[live(true)] click_on_down: bool,
     #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
-    #[live] margin: Margin,
+    #[live] margin: Inset,
     #[live] hovered: f32,
     #[live] down: f32,
     

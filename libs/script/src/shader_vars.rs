@@ -422,6 +422,22 @@ impl ShaderFnCompiler {
                             return;
                         }
                         
+                        // Check if this is a repr(u32) enum variant (has a 'repr_u32_enum_value' field)
+                        // If so, emit the value directly as a u32 constant
+                        let enum_value = vm.bx.heap.value(value_obj, id!(_repr_u32_enum_value).into(), self.trap.pass());
+                        if !enum_value.is_nil() {
+                            self.trap.err.take(); // Clear any error
+                            if let Some(f) = enum_value.as_f64() {
+                                let mut s = self.stack.new_string();
+                                write!(s, "{}u", f as u32).ok();
+                                self.stack.push(self.trap.pass(), ShaderType::Pod(vm.bx.code.builtins.pod.pod_u32), s);
+                                self.stack.free_string(field_s);
+                                self.stack.free_string(instance_s);
+                                return;
+                            }
+                        }
+                        self.trap.err.take(); // Clear any error from value lookup
+                        
                         // It's a regular sub-object (like test_obj.sub_obj) - return it as ScopeObject
                         // so that further field access can continue (e.g., test_obj.sub_obj.test_p1)
                         let empty_s = self.stack.new_string();
