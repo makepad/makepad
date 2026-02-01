@@ -307,117 +307,120 @@ script_mod!{
         }
     }
     
+    let AppDock = Dock{
+        width: Fill height: Fill
+                                
+        // Dock structure - organized by widget type
+        $root: DockSplitter{
+            axis: SplitterAxis.Horizontal
+            align: SplitterAlign.FromA(280.0)
+            a: @$left_tabs
+            b: @$split1
+        }
+                                
+        $split1: DockSplitter{
+            axis: SplitterAxis.Vertical
+            align: SplitterAlign.FromB(250.0)
+            a: @$center_tabs
+            b: @$bottom_tabs
+        }
+                                
+        // Left panel - input widgets
+        $left_tabs: DockTabs{
+            tabs: [@$toggles_tab, @$sliders_tab, @$text_tab, @$dropdowns_tab]
+            selected: 0
+            closable: false
+        }
+                                
+        // Center panel - content widgets
+        $center_tabs: DockTabs{
+            tabs: [@$buttons_tab, @$markup_tab, @$media_tab]
+            selected: 0
+            closable: true
+        }
+                                
+        // Bottom panel - containers/lists
+        $bottom_tabs: DockTabs{
+            tabs: [@$lists_tab, @$folds_tab]
+            selected: 0
+            closable: true
+        }
+                                
+        // Individual tabs
+        $buttons_tab: DockTab{
+            name: "Buttons"
+            template: @$CloseableTab
+            kind: @$TabButtons
+        }
+                                
+        $toggles_tab: DockTab{
+            name: "Toggles"
+            template: @$CloseableTab
+            kind: @$TabToggles
+        }
+                                
+        $sliders_tab: DockTab{
+            name: "Sliders"
+            template: @$CloseableTab
+            kind: @$TabSliders
+        }
+                                
+        $text_tab: DockTab{
+            name: "Text"
+            template: @$CloseableTab
+            kind: @$TabText
+        }
+                                
+        $dropdowns_tab: DockTab{
+            name: "Selects"
+            template: @$CloseableTab
+            kind: @$TabDropdowns
+        }
+                                
+        $markup_tab: DockTab{
+            name: "Markup"
+            template: @$CloseableTab
+            kind: @$TabMarkup
+        }
+                                
+        $folds_tab: DockTab{
+            name: "Folds"
+            template: @$CloseableTab
+            kind: @$TabFolds
+        }
+                                
+        $lists_tab: DockTab{
+            name: "Lists"
+            template: @$CloseableTab
+            kind: @$TabLists
+        }
+                                
+        $media_tab: DockTab{
+            name: "Media"
+            template: @$CloseableTab
+            kind: @$TabMedia
+        }
+                                
+        // Content templates by widget type
+        $TabButtons: TabButtons{}
+        $TabToggles: TabToggles{}
+        $TabSliders: TabSliders{}
+        $TabText: TabText{}
+        $TabDropdowns: TabDropdowns{}
+        $TabMarkup: TabMarkup{}
+        $TabFolds: TabFolds{}
+        $TabLists: TabLists{}
+        $TabMedia: TabMedia{}
+    }
+    
     mod.res.load_all() do #(App::script_component(vm)){
         ui: Root{
             $main_window: Window{
                 pass.clear_color: vec4(0.3 0.3 0.3 1.0)
                 window.inner_size: vec2(1000 700)
                 $body +: {
-                        $dock: Dock{
-                        width: Fill height: Fill
-                        
-                        // Dock structure - organized by widget type
-                        $root: DockSplitter{
-                            axis: SplitterAxis.Horizontal
-                            align: SplitterAlign.FromA(280.0)
-                            a: @$left_tabs
-                            b: @$split1
-                        }
-                        
-                        $split1: DockSplitter{
-                            axis: SplitterAxis.Vertical
-                            align: SplitterAlign.FromB(250.0)
-                            a: @$center_tabs
-                            b: @$bottom_tabs
-                        }
-                        
-                        // Left panel - input widgets
-                        $left_tabs: DockTabs{
-                            tabs: [@$toggles_tab, @$sliders_tab, @$text_tab, @$dropdowns_tab]
-                            selected: 0
-                            closable: false
-                        }
-                        
-                        // Center panel - content widgets
-                        $center_tabs: DockTabs{
-                            tabs: [@$buttons_tab, @$markup_tab, @$media_tab]
-                            selected: 0
-                            closable: true
-                        }
-                        
-                        // Bottom panel - containers/lists
-                        $bottom_tabs: DockTabs{
-                            tabs: [@$lists_tab, @$folds_tab]
-                            selected: 0
-                            closable: true
-                        }
-                        
-                        // Individual tabs
-                        $buttons_tab: DockTab{
-                            name: "Buttons"
-                            template: @$CloseableTab
-                            kind: @$TabButtons
-                        }
-                        
-                        $toggles_tab: DockTab{
-                            name: "Toggles"
-                            template: @$CloseableTab
-                            kind: @$TabToggles
-                        }
-                        
-                        $sliders_tab: DockTab{
-                            name: "Sliders"
-                            template: @$CloseableTab
-                            kind: @$TabSliders
-                        }
-                        
-                        $text_tab: DockTab{
-                            name: "Text"
-                            template: @$CloseableTab
-                            kind: @$TabText
-                        }
-                        
-                        $dropdowns_tab: DockTab{
-                            name: "Selects"
-                            template: @$CloseableTab
-                            kind: @$TabDropdowns
-                        }
-                        
-                        $markup_tab: DockTab{
-                            name: "Markup"
-                            template: @$CloseableTab
-                            kind: @$TabMarkup
-                        }
-                        
-                        $folds_tab: DockTab{
-                            name: "Folds"
-                            template: @$CloseableTab
-                            kind: @$TabFolds
-                        }
-                        
-                        $lists_tab: DockTab{
-                            name: "Lists"
-                            template: @$CloseableTab
-                            kind: @$TabLists
-                        }
-                        
-                        $media_tab: DockTab{
-                            name: "Media"
-                            template: @$CloseableTab
-                            kind: @$TabMedia
-                        }
-                        
-                        // Content templates by widget type
-                        $TabButtons: TabButtons{}
-                        $TabToggles: TabToggles{}
-                        $TabSliders: TabSliders{}
-                        $TabText: TabText{}
-                        $TabDropdowns: TabDropdowns{}
-                        $TabMarkup: TabMarkup{}
-                        $TabFolds: TabFolds{}
-                        $TabLists: TabLists{}
-                        $TabMedia: TabMedia{}
-                    }
+                    padding: 4
+                    $dock: AppDock{}
                 }
             }
         }
