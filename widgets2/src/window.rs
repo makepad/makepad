@@ -10,10 +10,10 @@ script_mod!{
     use mod.prelude.widgets_internal.*
     use mod.widgets.View
     use mod.widgets.SolidView
+    use mod.widgets.Label
+    use mod.widgets.DesktopButton
+    use mod.widgets.DesktopButtonType
     //use mod.widgets.KeyboardView
-    //use mod.widgets.SolidView
-    //use mod.widgets.Label
-    // use mod.widgets.DesktopButton
     //use mod.widgets.WindowMenu
     // use mod.widgets.NavControl
     
@@ -28,31 +28,30 @@ script_mod!{
             
             flow: Right
             
-            draw_bg +: {color: theme.color_app_caption_bar}
+            draw_bg.color: theme.color_app_caption_bar
             height: 27
             $caption_label: View {
                 width: Fill height: Fill
                 align: Align{x: 0.5 y: 0.5}
-                //$label: Label {text: "Makepad" margin: {left: 100}}
+                $label: Label {text: "Makepad" margin: Inset{left: 100}}
             }
-            /*
             $windows_buttons: View {
                 visible: false
                 width: Size.Fit height: Size.Fit
-                $min: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsMin}}
-                $max: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsMax}}
-                $close: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsClose}}
+                $min: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsMin} width: 46 height: 29}
+                $max: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsMax} width: 46 height: 29}
+                $close: DesktopButton {draw_bg +: {button_type: DesktopButtonType.WindowsClose} width: 46 height: 29}
             }
             $web_fullscreen: View {
                 visible: false
                 width: Size.Fit height: Size.Fit
-                $fullscreen: DesktopButton {draw_bg +: {button_type: DesktopButtonType.Fullscreen}}
+                $fullscreen: DesktopButton {draw_bg +: {button_type: DesktopButtonType.Fullscreen} width: 50 height: 36}
             }
             $web_xr: View {
                 visible: false
                 width: Size.Fit height: Size.Fit
-                $xr_on: DesktopButton {draw_bg +: {button_type: DesktopButtonType.XRMode}}
-            }*/
+                $xr_on: DesktopButton {draw_bg +: {button_type: DesktopButtonType.XRMode} width: 50 height: 36}
+            }
         }
         $body: View{
             
@@ -71,14 +70,14 @@ script_mod!{
         $body: KeyboardView {
             width: Size.Fill height: Size.Fill
             keyboard_min_shift: 30
-        }
+        }*/
         
         cursor: MouseCursor.Default
         mouse_cursor_size: vec2(20 20)
         draw_cursor +: {
-            border_size: shader.uniform(1.5)
-            color: shader.uniform(theme.color_cursor)
-            border_color: shader.uniform(theme.color_cursor_border)
+            border_size: uniform(1.5)
+            color: uniform(theme.color_cursor)
+            border_color: uniform(theme.color_cursor_border)
             
             get_color: fn() {
                 return self.color
@@ -100,7 +99,7 @@ script_mod!{
                 }
                 return sdf.result
             }
-        }*/
+        }
         window +: {
             inner_size: vec2(1024 768)
         }
