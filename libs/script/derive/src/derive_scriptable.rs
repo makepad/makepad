@@ -359,6 +359,12 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("        false");
         tb.add("    }");
         
+        // Check if any variant has a discriminant (indicating repr(u32) enum)
+        let has_discriminant = items.iter().any(|item| item.discriminant.is_some());
+        if has_discriminant {
+            tb.add("    fn is_repr_u32_enum() -> bool { true }");
+        }
+        
         tb.add("    fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{");
         tb.add("        let enum_object = vm.bx.heap.new_object();");
 
@@ -407,7 +413,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                         tb.add(" vm.bx.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, vm.bx.threads.cur().trap.pass());");
                     }
                     tb.add("}");
-                    tb.add("let ty_check = ScriptTypeCheck{props, object: None};");
+                    tb.add("let ty_check = ScriptTypeCheck{props, object: None, is_repr_u32_enum: false};");
                     tb.add("let ty_index = vm.bx.heap.register_type(None, ty_check);");
                     tb.add("vm.bx.heap.set_type(named, ty_index);");
                     tb.add("vm.bx.heap.freeze_component(named);");
@@ -651,7 +657,7 @@ impl ScriptNew for EnumTest{
                             
         }
                     
-        let ty_check = ScriptTypeCheck{props, object: None};
+        let ty_check = ScriptTypeCheck{props, object: None, is_repr_u32_enum: false};
         let ty_index = vm.bx.heap.register_type(None, ty_check);
         vm.bx.heap.freeze_with_type(named, ty_index);
         vm.bx.heap.set_value(enum_object, id!(Named).into(), named.into(), vm.bx.threads.cur().trap.pass());
