@@ -215,6 +215,43 @@ impl ShaderFnCompiler {
         self.stack.free_string(instance_s);
     }
 
+    pub(crate) fn handle_array_index(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
+        let (index_ty, index_s) = self.pop_resolved(vm, output);
+        let (instance_ty, instance_s) = self.pop_resolved(vm, output);
+
+        if let ShaderType::Pod(pod_ty) = instance_ty {
+            let builtins = &vm.bx.code.builtins.pod;
+            let elem_ty = type_table_elem_type(&vm.bx.heap.pod_types[pod_ty.index as usize].ty, self.trap.pass(), builtins);
+
+            if let Some(ret_ty) = elem_ty {
+                // Validate index type - must be integer
+                match index_ty {
+                    ShaderType::AbstractInt => {}
+                    ShaderType::Pod(t) if t == builtins.pod_i32 || t == builtins.pod_u32 => {}
+                    _ => {
+                        let got_type = match index_ty {
+                            ShaderType::Pod(t) => format_pod_type_name(&vm.bx.heap, t),
+                            _ => format!("{:?}", index_ty),
+                        };
+                        script_err_pod!(self.trap, "array index must be integer, got {}", got_type);
+                    }
+                }
+
+                let mut s = self.stack.new_string();
+                write!(s, "{}[{}]", instance_s, index_s).ok();
+                self.stack.push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+            } else {
+                script_err_shader!(self.trap, "type is not indexable");
+                self.stack.push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), String::new());
+            }
+        } else {
+            script_err_shader!(self.trap, "array index requires Pod type, got {:?}", instance_ty);
+            self.stack.push(self.trap.pass(), ShaderType::Pod(vm.bx.code.builtins.pod.pod_void), String::new());
+        }
+        self.stack.free_string(index_s);
+        self.stack.free_string(instance_s);
+    }
+
     pub(crate) fn handle_assign_index(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
         let (value_ty, value_s) = self.pop_resolved(vm, output);
         let (index_ty, index_s) = self.pop_resolved(vm, output);

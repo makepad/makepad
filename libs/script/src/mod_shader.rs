@@ -162,7 +162,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         obj.into()
     });
         
-    native.add_method(heap, shader, id_lut!(compile_draw), script_args!(io_self=NIL), |vm, args|{
+    native.add_method(heap, shader, id_lut!(test_compile_draw), script_args!(io_self=NIL), |vm, args|{
         // lets fetch the code
         let io_self = script_value!(vm, args.io_self);
         
@@ -216,6 +216,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             output.metal_create_io_vertex_struct(vm, &mut out);
             output.metal_create_vertex_fn(vm, &mut out);
             output.metal_create_io_fragment_struct(vm, &mut out);
+            /*
             output.metal_create_fragment_main_fn(vm, &mut out);
             println!("Structs:\n{}", out);
             for fns in &output.functions{
@@ -229,7 +230,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                     println!("  - source_obj: {}, key: {}, shader_name: {}", 
                         su.source_obj.index, su.key, su.shader_name);
                 }
-            }
+            }*/
             
             return NIL
         }

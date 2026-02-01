@@ -1876,6 +1876,7 @@ impl ScriptParser{
                     for state in self.state.iter().rev(){
                         if let State::EmitOp{..} = state{}
                         else if let State::EmitUnary{..} = state{}
+                        else if let State::ShortCircuitEnd{..} = state{}
                         else if let State::IfTest{..} = state{
                             return 0
                         }
