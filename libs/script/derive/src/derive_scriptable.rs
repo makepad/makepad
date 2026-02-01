@@ -380,6 +380,9 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("vm.bx.heap.freeze(bare);");
                 },
                 EnumKind::Tuple(args) => {
+                    for arg in args.iter(){
+                        tb.add("<").stream(Some(arg.clone())).add(" as ScriptNew>::script_proto(vm);");
+                    }
                     tb.add("vm.add_method(enum_object, id_lut!(").ident(&item.name).add("), &[], |vm, args|{");
                     tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
                     tb.add("    if vm.bx.heap.vec_len(args) != ").unsuf_usize(args.len()).add("{");

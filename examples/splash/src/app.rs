@@ -221,6 +221,61 @@ script_mod!{
         }
     }
     
+    // Expandable Panel tab
+    let TabExpandable = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        flow: Down
+        
+        Label{text: "Expandable Panel Demo" draw_text.color: #fff draw_text.text_style.font_size: 13 padding: 15}
+        Label{text: "Drag the panel up/down" draw_text.color: #888 draw_text.text_style.font_size: 10 padding: Inset{left: 15 bottom: 10}}
+        
+        $expandable: ExpandablePanel{
+            width: Fill height: Fill
+            initial_offset: 100.0
+            
+            // Background content (visible when panel is dragged down)
+            SolidView{
+                width: Fill height: Fill
+                draw_bg.color: #224
+                align: Center
+                Label{text: "Background Content" draw_text.color: #88f draw_text.text_style.font_size: 16}
+            }
+            
+            // The draggable panel
+            $panel: RoundedView{
+                width: Fill height: Fill
+                draw_bg.color: #445
+                draw_bg.radius: vec4(15.0 15.0 0.0 0.0)
+                flow: Down padding: 20 spacing: 10
+                
+                // Drag handle indicator
+                View{
+                    width: Fill height: Fit align: Center padding: Inset{bottom: 10}
+                    RoundedView{
+                        width: 40 height: 4
+                        draw_bg.color: #666
+                        draw_bg.radius: 2.0
+                    }
+                }
+                
+                Label{text: "Draggable Panel" draw_text.color: #fff draw_text.text_style.font_size: 14}
+                Label{text: "This panel can be dragged up and down. The initial_offset property controls the starting position." draw_text.color: #aaa draw_text.text_style.font_size: 10}
+                
+                Hr{}
+                
+                Label{text: "Panel Content" draw_text.color: #fff draw_text.text_style.font_size: 12}
+                CheckBox{text: "Option 1"}
+                CheckBox{text: "Option 2"}
+                CheckBox{text: "Option 3"}
+                
+                View{height: Fill}
+                
+                $reset_btn: Button{text: "Reset Panel Position"}
+            }
+        }
+    }
+    
     // Fold Headers tab
     let TabFolds = SolidView{
         width: Fill height: Fill
@@ -341,7 +396,7 @@ script_mod!{
                                 
         // Bottom panel - containers/lists
         $bottom_tabs: DockTabs{
-            tabs: [@$lists_tab, @$folds_tab]
+            tabs: [@$lists_tab, @$folds_tab, @$expandable_tab]
             selected: 0
             closable: true
         }
@@ -395,6 +450,12 @@ script_mod!{
             kind: @$TabLists
         }
                                 
+        $expandable_tab: DockTab{
+            name: "Expandable"
+            template: @$CloseableTab
+            kind: @$TabExpandable
+        }
+                                
         $media_tab: DockTab{
             name: "Media"
             template: @$CloseableTab
@@ -411,6 +472,7 @@ script_mod!{
         $TabFolds: TabFolds{}
         $TabLists: TabLists{}
         $TabMedia: TabMedia{}
+        $TabExpandable: TabExpandable{}
     }
     
     load_all_resources() do #(App::script_component(vm)){
@@ -448,7 +510,7 @@ impl MatchEvent for App {
         }
     }
     
-    fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions) {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(ids!($button)).clicked(actions) {
             log!("Button clicked!");
         }
@@ -467,8 +529,18 @@ impl MatchEvent for App {
         if let Some(value) = self.ui.check_box(ids!($toggle)).changed(actions) {
             log!("Toggle changed: {}", value);
         }
-        if let Some(index) = self.ui.radio_button_set(ids_list!($radio1, $radio2, $radio3)).selected(_cx, actions) {
+        if let Some(index) = self.ui.radio_button_set(ids_list!($radio1, $radio2, $radio3)).selected(cx, actions) {
             log!("Radio button selected: {}", index);
+        }
+        
+        // ExpandablePanel test
+        if self.ui.button(ids!($reset_btn)).clicked(actions) {
+            log!("Resetting expandable panel");
+            self.ui.expandable_panel(ids!($expandable)).reset(cx);
+        }
+        
+        if let Some(offset) = self.ui.expandable_panel(ids!($expandable)).scrolled_at(actions) {
+            log!("ExpandablePanel scrolled to: {}", offset);
         }
     }
 }
