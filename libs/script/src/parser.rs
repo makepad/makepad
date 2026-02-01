@@ -98,6 +98,21 @@ enum State{
     LetTypedAssign{index:u32},
     EmitLetDyn{index:u32},
     EmitLetTyped{index:u32},
+    
+    // Destructuring patterns
+    // We collect binding ids in the code stream, then after RHS we emit extraction opcodes
+    // Defaults are stored separately and ?= is emitted after extraction
+    LetArrayDestruct{index:u32, count:u32, ids_start:u32},      // parsing [x, y, ...] pattern
+    LetArrayDestructEl{index:u32, count:u32, binding_id:LiveId, ids_start:u32},  // after identifier, maybe = default
+    LetArrayDestructDefault{index:u32, count:u32, binding_id:LiveId, ids_start:u32, default_start:u32},  // parsing default expr
+    LetArrayDestructRhs{index:u32, count:u32, ids_start:u32, defaults_start:u32},   // after ], before =
+    EmitLetArrayDestruct{index:u32, count:u32, ids_start:u32, defaults_start:u32},  // after RHS, emit opcodes
+    
+    LetObjectDestruct{index:u32, count:u32, ids_start:u32},     // parsing {x, y, ...} pattern
+    LetObjectDestructEl{index:u32, count:u32, binding_id:LiveId, ids_start:u32},   // after identifier, maybe = default
+    LetObjectDestructDefault{index:u32, count:u32, binding_id:LiveId, ids_start:u32, default_start:u32},  // parsing default expr
+    LetObjectDestructRhs{index:u32, count:u32, ids_start:u32, defaults_start:u32},  // after }, before =
+    EmitLetObjectDestruct{index:u32, count:u32, ids_start:u32, defaults_start:u32}, // after RHS, emit opcodes
     Var{index:u32},
     VarDynOrTyped{index:u32},
     VarType{index:u32},
@@ -119,6 +134,8 @@ enum State{
     
     // Short-circuit evaluation - patches TEST opcode jump after second operand
     ShortCircuitEnd{test_slot:u32},
+    // Short-circuit ?= - emits ASSIGN after RHS, then patches jump
+    ShortCircuitAssignEnd{test_slot:u32, index:u32},
 }
 
 impl State {
@@ -333,6 +350,9 @@ pub struct ScriptParser{
     pub file: String,
     pub line_offset: usize,
     pub col_offset: usize,
+    
+    // Temporary storage for destructuring defaults (binding_id, value_code, value_map)
+    destruct_defaults: Vec<(LiveId, Vec<ScriptValue>, Vec<Option<u32>>)>,
 }
 
 impl Default for ScriptParser{
@@ -344,7 +364,8 @@ impl Default for ScriptParser{
             state: vec![State::BeginStmt{last_was_sep:false}],
             file: String::new(),
             line_offset: 0,
-            col_offset: 0
+            col_offset: 0,
+            destruct_defaults: Default::default(),
         }
     }
 }
@@ -712,6 +733,18 @@ impl ScriptParser{
                     self.state.push(State::Var{index});
                     return 1
                 }
+                else if tok.is_open_square() {
+                    // Array destructuring: let [x, y] = ...
+                    let ids_start = self.code_len();
+                    self.state.push(State::LetArrayDestruct{index, count: 0, ids_start});
+                    return 1
+                }
+                else if tok.is_open_curly() {
+                    // Object destructuring: let {x, y} = ...
+                    let ids_start = self.code_len();
+                    self.state.push(State::LetObjectDestruct{index, count: 0, ids_start});
+                    return 1
+                }
                 else if id.not_empty(){ // lets expect an assignment expression
                     // push the id on to the stack
                     self.push_code(id.into(), self.index);
@@ -763,6 +796,283 @@ impl ScriptParser{
             State::EmitLetTyped{index}=>{
                 self.push_code(Opcode::LET_TYPED.into(), index);
             }
+            
+            // ====== Array Destructuring: let [x, y = default, ...] = expr ======
+            // Layout during parsing: [ids..., defaults_with_ifnil..., rhs]
+            // Final generated code: [rhs, id_0, EXTRACT(0), id_1, EXTRACT(1), ..., DROP, defaults_with_ifnil]
+            State::LetArrayDestruct{index, count, ids_start}=>{
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetArrayDestruct{index, count, ids_start});
+                    return 1
+                }
+                if id.not_empty() {
+                    // Just push the identifier
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::LetArrayDestructEl{index, count: count + 1, binding_id: id, ids_start});
+                    return 1
+                }
+                else if tok.is_open_curly() {
+                    error!(self, tokenizer, "Nested destructuring not yet supported");
+                }
+                else if tok.is_open_square() {
+                    error!(self, tokenizer, "Nested destructuring not yet supported");
+                }
+                else if tok.is_close_square() {
+                    let defaults_start = self.code_len();
+                    self.state.push(State::LetArrayDestructRhs{index, count, ids_start, defaults_start});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected identifier in array destructuring pattern");
+                }
+            }
+            State::LetArrayDestructEl{index, count, binding_id, ids_start}=>{
+                if op == id!(=) {
+                    // Default value follows - parse it
+                    let default_start = self.code_len();
+                    self.state.push(State::LetArrayDestructDefault{index, count, binding_id, ids_start, default_start});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                else if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetArrayDestruct{index, count, ids_start});
+                    return 1
+                }
+                else if id.not_empty() {
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::LetArrayDestructEl{index, count: count + 1, binding_id: id, ids_start});
+                    return 1
+                }
+                else if tok.is_close_square() {
+                    let defaults_start = self.code_len();
+                    self.state.push(State::LetArrayDestructRhs{index, count, ids_start, defaults_start});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected '=' or identifier in array destructuring pattern");
+                }
+            }
+            State::LetArrayDestructDefault{index, count, binding_id, ids_start, default_start}=>{
+                // Default was parsed (value is in code stream at default_start..current)
+                // Store it for later emission, don't emit inline
+                let default_start = default_start as usize;
+                let value_code: Vec<_> = self.opcodes[default_start..].to_vec();
+                let value_map: Vec<_> = self.source_map[default_start..].to_vec();
+                self.opcodes.truncate(default_start);
+                self.source_map.truncate(default_start);
+                
+                // Store the default for later
+                self.destruct_defaults.push((binding_id, value_code, value_map));
+                
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetArrayDestruct{index, count, ids_start});
+                    return 1
+                }
+                else if id.not_empty() {
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::LetArrayDestructEl{index, count: count + 1, binding_id: id, ids_start});
+                    return 1
+                }
+                else if tok.is_close_square() {
+                    let defaults_start = self.code_len();
+                    self.state.push(State::LetArrayDestructRhs{index, count, ids_start, defaults_start});
+                    return 1
+                }
+                else {
+                    self.state.push(State::LetArrayDestruct{index, count, ids_start});
+                    return 0
+                }
+            }
+            State::LetArrayDestructRhs{index, count, ids_start, defaults_start}=>{
+                if op == id!(=) {
+                    self.state.push(State::EmitLetArrayDestruct{index, count, ids_start, defaults_start});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected '=' after destructuring pattern");
+                }
+            }
+            State::EmitLetArrayDestruct{index, count, ids_start, defaults_start}=>{
+                // Layout: [ids..., rhs_code], defaults stored in destruct_defaults
+                // Generate: [rhs, id_0, EXTRACT(0), ..., DROP, defaults_code...]
+                
+                let ids_start = ids_start as usize;
+                let defaults_start = defaults_start as usize;
+                let count = count as usize;
+                
+                let ids: Vec<_> = self.opcodes[ids_start..ids_start + count].to_vec();
+                let ids_map: Vec<_> = self.source_map[ids_start..ids_start + count].to_vec();
+                let rhs: Vec<_> = self.opcodes[defaults_start..].to_vec();
+                let rhs_map: Vec<_> = self.source_map[defaults_start..].to_vec();
+                
+                self.opcodes.truncate(ids_start);
+                self.source_map.truncate(ids_start);
+                
+                // RHS first
+                self.opcodes.extend(rhs);
+                self.source_map.extend(rhs_map);
+                
+                // id, EXTRACT for each
+                for (i, (id_code, id_map)) in ids.into_iter().zip(ids_map).enumerate() {
+                    self.opcodes.push(id_code);
+                    self.source_map.push(id_map);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::LET_DESTRUCT_ARRAY_EL, OpcodeArgs::from_u32(i as u32)), index);
+                }
+                
+                // DROP source
+                self.push_code(Opcode::DROP.into(), index);
+                
+                // Emit stored defaults with lazy evaluation: [id, ASSIGN_IFNIL(jump), value, ASSIGN]
+                // jump_dist = value_code.len() + 2 to skip past value_code AND the ASSIGN opcode
+                let defaults = std::mem::take(&mut self.destruct_defaults);
+                for (binding_id, value_code, value_map) in defaults {
+                    let jump_dist = (value_code.len() + 2) as u32;
+                    self.push_code(binding_id.into(), index);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::ASSIGN_IFNIL, OpcodeArgs::from_u32(jump_dist)), index);
+                    self.opcodes.extend(value_code);
+                    self.source_map.extend(value_map);
+                    self.push_code(Opcode::ASSIGN.into(), index);
+                }
+                
+                // This is a let statement, go directly to BeginStmt to avoid pop_to_me being set on DROP
+                self.state.push(State::BeginStmt{last_was_sep:false});
+                return 0
+            }
+            
+            // ====== Object Destructuring: let {x, y = default, ...} = expr ======
+            State::LetObjectDestruct{index, count, ids_start}=>{
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetObjectDestruct{index, count, ids_start});
+                    return 1
+                }
+                if id.not_empty() {
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::LetObjectDestructEl{index, count: count + 1, binding_id: id, ids_start});
+                    return 1
+                }
+                else if tok.is_close_curly() {
+                    let defaults_start = self.code_len();
+                    self.state.push(State::LetObjectDestructRhs{index, count, ids_start, defaults_start});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected identifier in object destructuring pattern");
+                }
+            }
+            State::LetObjectDestructEl{index, count, binding_id, ids_start}=>{
+                if op == id!(=) {
+                    // Default value follows - parse it
+                    let default_start = self.code_len();
+                    self.state.push(State::LetObjectDestructDefault{index, count, binding_id, ids_start, default_start});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                else if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetObjectDestruct{index, count, ids_start});
+                    return 1
+                }
+                else if id.not_empty() {
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::LetObjectDestructEl{index, count: count + 1, binding_id: id, ids_start});
+                    return 1
+                }
+                else if tok.is_close_curly() {
+                    let defaults_start = self.code_len();
+                    self.state.push(State::LetObjectDestructRhs{index, count, ids_start, defaults_start});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected '=' or identifier in object destructuring pattern");
+                }
+            }
+            State::LetObjectDestructDefault{index, count, binding_id, ids_start, default_start}=>{
+                // Default was parsed - store it for later emission, don't emit inline
+                let default_start = default_start as usize;
+                let value_code: Vec<_> = self.opcodes[default_start..].to_vec();
+                let value_map: Vec<_> = self.source_map[default_start..].to_vec();
+                self.opcodes.truncate(default_start);
+                self.source_map.truncate(default_start);
+                
+                // Store the default for later
+                self.destruct_defaults.push((binding_id, value_code, value_map));
+                
+                if sep == id!(,) || sep == id!(;) {
+                    self.state.push(State::LetObjectDestruct{index, count, ids_start});
+                    return 1
+                }
+                else if id.not_empty() {
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::LetObjectDestructEl{index, count: count + 1, binding_id: id, ids_start});
+                    return 1
+                }
+                else if tok.is_close_curly() {
+                    let defaults_start = self.code_len();
+                    self.state.push(State::LetObjectDestructRhs{index, count, ids_start, defaults_start});
+                    return 1
+                }
+                else {
+                    self.state.push(State::LetObjectDestruct{index, count, ids_start});
+                    return 0
+                }
+            }
+            State::LetObjectDestructRhs{index, count, ids_start, defaults_start}=>{
+                if op == id!(=) {
+                    self.state.push(State::EmitLetObjectDestruct{index, count, ids_start, defaults_start});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected '=' after destructuring pattern");
+                }
+            }
+            State::EmitLetObjectDestruct{index, count, ids_start, defaults_start}=>{
+                // Layout: [ids..., rhs_code], defaults stored in destruct_defaults
+                // Generate: [rhs, id_0, EXTRACT, ..., DROP, defaults_code...]
+                
+                let ids_start = ids_start as usize;
+                let defaults_start = defaults_start as usize;
+                let count = count as usize;
+                
+                let ids: Vec<_> = self.opcodes[ids_start..ids_start + count].to_vec();
+                let ids_map: Vec<_> = self.source_map[ids_start..ids_start + count].to_vec();
+                let rhs: Vec<_> = self.opcodes[defaults_start..].to_vec();
+                let rhs_map: Vec<_> = self.source_map[defaults_start..].to_vec();
+                
+                self.opcodes.truncate(ids_start);
+                self.source_map.truncate(ids_start);
+                
+                // RHS first
+                self.opcodes.extend(rhs);
+                self.source_map.extend(rhs_map);
+                
+                // id, EXTRACT for each
+                for (id_code, id_map) in ids.into_iter().zip(ids_map) {
+                    self.opcodes.push(id_code);
+                    self.source_map.push(id_map);
+                    self.push_code(Opcode::LET_DESTRUCT_OBJECT_EL.into(), index);
+                }
+                
+                // DROP source
+                self.push_code(Opcode::DROP.into(), index);
+                
+                // Emit stored defaults with lazy evaluation: [id, ASSIGN_IFNIL(jump), value, ASSIGN]
+                // jump_dist = value_code.len() + 2 to skip past value_code AND the ASSIGN opcode
+                let defaults = std::mem::take(&mut self.destruct_defaults);
+                for (binding_id, value_code, value_map) in defaults {
+                    let jump_dist = (value_code.len() + 2) as u32;
+                    self.push_code(binding_id.into(), index);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::ASSIGN_IFNIL, OpcodeArgs::from_u32(jump_dist)), index);
+                    self.opcodes.extend(value_code);
+                    self.source_map.extend(value_map);
+                    self.push_code(Opcode::ASSIGN.into(), index);
+                }
+                
+                // This is a let statement, go directly to BeginStmt to avoid pop_to_me being set on DROP
+                self.state.push(State::BeginStmt{last_was_sep:false});
+                return 0
+            }
+            
             State::Var{index}=>{
                 if id.not_empty(){ // lets expect an assignment expression
                     // push the id on to the stack
@@ -1052,6 +1362,12 @@ impl ScriptParser{
             }
             State::ShortCircuitEnd{test_slot}=>{
                 // Patch the TEST opcode's jump to skip to current position (after second operand)
+                self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                return 0
+            }
+            State::ShortCircuitAssignEnd{test_slot, index}=>{
+                // Emit ASSIGN after RHS, then patch the jump
+                self.push_code(Opcode::ASSIGN.into(), index);
                 self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
                 return 0
             }
@@ -1760,6 +2076,28 @@ impl ScriptParser{
                     return 1
                 }
                 
+                // Handle ?= with lazy evaluation - only evaluate RHS if variable IS nil
+                // Emits: [id, ASSIGN_IFNIL(jump), rhs_code, ASSIGN]
+                if op == id!(?=) {
+                    // Emit any pending unary operators first
+                    loop {
+                        if let Some(State::EmitUnary{what_op, index}) = self.state.last() {
+                            let (what_op, index) = (*what_op, *index);
+                            self.state.pop();
+                            self.push_code(State::operator_to_unary(what_op), index);
+                        } else { break; }
+                    }
+                    
+                    // Emit ASSIGN_IFNIL with placeholder jump
+                    let test_slot = self.code_len();
+                    self.push_code(Opcode::ASSIGN_IFNIL.into(), self.index);
+                    
+                    // Push state to emit ASSIGN and patch jump after RHS is parsed
+                    self.state.push(State::ShortCircuitAssignEnd{test_slot, index: self.index});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                
                 if State::operator_order(op) != 0{
                     // Emit any pending unary operators, but only if this binary op has lower
                     // precedence than unary (order >= 6). Field access (order 3) has higher
@@ -2113,5 +2451,13 @@ impl ScriptParser{
         }
         
         //println!("{:?}", self.opcodes)
+    }
+    
+    pub fn dump_opcodes(&self) {
+        println!("=== OPCODES ({} total) ===", self.opcodes.len());
+        for (i, op) in self.opcodes.iter().enumerate() {
+            println!("{:3}: {:?}", i, op);
+        }
+        println!("=== END OPCODES ===");
     }
 }

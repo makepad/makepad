@@ -211,6 +211,13 @@ impl Opcode{
     pub const VAR_TYPED:Self = Self(116);
     pub const VAR_DYN:Self = Self(117);
     pub const ME_SPLAT:Self = Self(125);
+    
+    // Destructuring opcodes
+    pub const DUP:Self = Self(126);
+    pub const DROP:Self = Self(127);
+    pub const LET_DESTRUCT_ARRAY_EL:Self = Self(128);  // arg = index; stack: [source, id] -> [source], binds id = source[index]
+    pub const LET_DESTRUCT_OBJECT_EL:Self = Self(129); // stack: [source, id] -> [source], binds id = source[id]
+    pub const ARRAY_INDEX_NIL:Self = Self(130);        // like ARRAY_INDEX but returns nil instead of error
 }
 
 
@@ -380,6 +387,11 @@ impl fmt::Display for Opcode {
             Self::OK_TEST=>return write!(f, "ok_test"),
             Self::OK_END=>return write!(f, "ok_end"),
             Self::ME_SPLAT=>return write!(f, "..splat"),
+            Self::DUP=>return write!(f, "dup"),
+            Self::DROP=>return write!(f, "drop"),
+            Self::LET_DESTRUCT_ARRAY_EL=>return write!(f, "let_arr_el"),
+            Self::LET_DESTRUCT_OBJECT_EL=>return write!(f, "let_obj_el"),
+            Self::ARRAY_INDEX_NIL=>return write!(f, "?[]"),
             _=>return write!(f, "OP{}",self.0)
         }
     }
