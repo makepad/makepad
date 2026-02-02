@@ -275,7 +275,8 @@ impl ScriptHook for Animator {
                 }
             }
         });
-        self.is_defined = true;
+        // Only mark as defined if we actually have animator groups
+        self.is_defined = !self.groups.is_empty();
         true
     }
 }

@@ -411,6 +411,47 @@ script_mod! {
         }
     }
 
+    // SlidesView tab - slides presentation demo
+    let TabSlides = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        flow: Down padding: 10 spacing: 10
+
+        Label{text: "SlidesView Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
+        Label{text: "Use arrow keys (left/right) to navigate slides" draw_text.color: #888 draw_text.text_style.font_size: 10}
+
+        $slides: SlidesView{
+            width: Fill height: Fill
+
+            $slide1: Slide{
+                $title: H1{text: "Welcome to Makepad"}
+                SlideBody{text: "A modern UI framework for Rust"}
+            }
+
+            $slide2: SlideChapter{
+                $title: H1{text: "Chapter 1: Getting Started"}
+                SlideBody{text: "Learn the basics of Makepad widgets"}
+            }
+
+            $slide3: Slide{
+                $title: H1{text: "Features"}
+                SlideBody{text: "- Fast GPU rendering"}
+                SlideBody{text: "- Cross-platform support"}
+                SlideBody{text: "- Live design system"}
+            }
+
+            $slide4: SlideChapter{
+                $title: H1{text: "Chapter 2: Advanced Topics"}
+                SlideBody{text: "Dive deeper into Makepad"}
+            }
+
+            $slide5: Slide{
+                $title: H1{text: "Thank You!"}
+                SlideBody{text: "Questions?"}
+            }
+        }
+    }
+
     // Media tab - images, spinners, custom draws
     let TabMedia = SolidView{
         width: Fill height: Fill
@@ -581,7 +622,7 @@ script_mod! {
 
         // Bottom panel - containers/lists
         $bottom_tabs: DockTabs{
-            tabs: [$filetree_tab $lists_tab, $folds_tab, $expandable_tab]
+            tabs: [$slides_tab, $filetree_tab $lists_tab, $folds_tab, $expandable_tab]
             selected: 0
             closable: true
         }
@@ -653,6 +694,12 @@ script_mod! {
             kind: $TabFileTree
         }
 
+        $slides_tab: DockTab{
+            name: "Slides"
+            template: $CloseableTab
+            kind: $TabSlides
+        }
+
         $modal_tab: DockTab{
             name: "Modal"
             template: $CloseableTab
@@ -673,6 +720,7 @@ script_mod! {
         $TabModal: TabModal{}
         $TabFileTree: TabFileTree{
         }
+        $TabSlides: TabSlides{}
     }
 
     load_all_resources() do #(App::script_component(vm)){
@@ -900,7 +948,7 @@ impl Widget for TestDraw {
                 pos: rect.pos,
                 size: dvec2(100.0, 100.0),
             },
-);
+        );
 
         // Draw text below the quad
         self.draw_text
@@ -1050,7 +1098,7 @@ impl FileTreeDemo {
                 name: "another_file.txt".to_string(),
                 child_edges: None,
             },
-);
+        );
 
         // Subdirectory
         self.file_nodes.insert(
@@ -1068,7 +1116,7 @@ impl FileTreeDemo {
                     },
                 ]),
             },
-);
+        );
 
         // Root level files
         self.file_nodes.insert(
@@ -1091,7 +1139,7 @@ impl FileTreeDemo {
                 name: "README.md".to_string(),
                 child_edges: None,
             },
-);
+        );
 
         // Root folder
         self.file_nodes.insert(
