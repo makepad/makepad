@@ -494,7 +494,10 @@ impl Into<TextInputEvent> for ToWasmTextInput {
         TextInputEvent {
             was_paste: self.was_paste,
             replace_last: self.replace_last,
-            input: self.input
+            input: self.input,
+            composition: None,
+            full_state_sync: None,
+            replace_range: None,
         }
     }
 }

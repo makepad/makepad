@@ -529,6 +529,9 @@ impl XlibWindow {
             input,
             was_paste: false,
             replace_last,
+            composition: None,
+            full_state_sync: None,
+            replace_range: None,
         }))
     }
     

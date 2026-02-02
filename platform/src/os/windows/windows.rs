@@ -398,7 +398,7 @@ impl Cx {
 
                     //todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
-                CxOsOp::ShowTextIME(area, pos) => {
+                CxOsOp::ShowTextIME(area, pos, _) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     d3d11_windows.iter_mut().for_each(|w| {
                         w.win32_window.set_ime_spot(pos);

@@ -153,7 +153,10 @@ impl XlibApp {
                                 self.do_callback(XlibEvent::TextInput(TextInputEvent {
                                     input: utf8_string,
                                     was_paste: true,
-                                    replace_last: false
+                                    replace_last: false,
+                                    composition: None,
+                                    full_state_sync: None,
+                                    replace_range: None,
                                 }));
                             }
                             x11_sys::XFree(ret as *mut _ as *mut c_void);
@@ -509,7 +512,10 @@ impl XlibApp {
                                     self.do_callback(XlibEvent::TextInput(TextInputEvent {
                                         input: utf8,
                                         was_paste: false,
-                                        replace_last: false
+                                        replace_last: false,
+                                        composition: None,
+                                        full_state_sync: None,
+                                        replace_range: None,
                                     }));
                                 }
                             }

@@ -931,7 +931,10 @@ impl RawInput {
                                 dir_evts.push(DirectEvent::TextInput(TextInputEvent {
                                     input: format!("{}", inp),
                                     was_paste: false,
-                                    replace_last: false
+                                    replace_last: false,
+                                    composition: None,
+                                    full_state_sync: None,
+                                    replace_range: None,
                                 }));
                             }
                         }

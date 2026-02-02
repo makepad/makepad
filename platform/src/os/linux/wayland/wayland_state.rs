@@ -252,7 +252,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandState {
             },
             zwp_text_input_v3::Event::CommitString { text } => {
                 if let Some(text_str) = text {
-                    state.do_callback(XlibEvent::TextInput(TextInputEvent{ input: text_str, replace_last: false, was_paste: false }));
+                    state.do_callback(XlibEvent::TextInput(TextInputEvent{ input: text_str, replace_last: false, was_paste: false, composition: None, full_state_sync: None, replace_range: None }));
                 }
             },
             zwp_text_input_v3::Event::DeleteSurroundingText { before_length, after_length } => {},
@@ -303,7 +303,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                     let text_str = xkb_state.key_get_utf8(key + 8);
 
                                     // todo(drindr): distinguish `block_text`
-                                    state.do_callback(XlibEvent::TextInput(TextInputEvent{ input: text_str, replace_last: false, was_paste: false }));
+                                    state.do_callback(XlibEvent::TextInput(TextInputEvent{ input: text_str, replace_last: false, was_paste: false, composition: None, full_state_sync: None, replace_range: None }));
                                     state.do_callback(XlibEvent::KeyDown(KeyEvent{
                                         key_code: key_code,
                                         is_repeat: false,
