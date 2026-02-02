@@ -16,11 +16,12 @@ use {
         },
         makepad_shell::*,
         makepad_widgets::*,
+        makepad_code_editor::{
+            decoration::{Decoration, DecorationType},
+            text,
+        },        
     },
-    makepad_code_editor::{
-        decoration::{Decoration, DecorationType},
-        text,
-    },
+    
     makepad_http::server::*,
     std::{
         cell::RefCell,
