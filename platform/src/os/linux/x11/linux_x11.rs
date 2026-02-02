@@ -363,7 +363,10 @@ impl X11Cx {
                             window.xlib_window.set_position(size);
                         }
                     },
-                    CxOsOp::ShowClipboardActions { .. } =>{
+                    CxOsOp::ShowClipboardActions { .. } => {},
+                    CxOsOp::HideClipboardActions => {},
+                    CxOsOp::SyncImeState { .. } => {
+                        // Linux X11 IME handled by input method framework
                     },
                     CxOsOp::CopyToClipboard(content) => {
                         if let Some(window) = opengl_windows.get(0) {
@@ -381,7 +384,7 @@ impl X11Cx {
                     CxOsOp::StopTimer(timer_id) => {
                         xlib_app.stop_timer(timer_id);
                     },
-                    CxOsOp::ShowTextIME(area, pos) => {
+                    CxOsOp::ShowTextIME(area, pos, _config) => {
                         let pos = area.clipped_rect(&cx).pos + pos;
                         opengl_windows.iter_mut().for_each(|w| {
                             w.xlib_window.set_ime_spot(pos);

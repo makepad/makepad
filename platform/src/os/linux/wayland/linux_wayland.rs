@@ -319,7 +319,10 @@ impl WaylandCx {
                 },
                 CxOsOp::RepositionWindow(window_id, size) => {
                 },
-                CxOsOp::ShowClipboardActions { .. } =>{
+                CxOsOp::ShowClipboardActions { .. } => {},
+                CxOsOp::HideClipboardActions => {},
+                CxOsOp::SyncImeState { .. } => {
+                    // Linux Wayland IME handled by input method framework
                 },
                 CxOsOp::CopyToClipboard(content) => {
                 }
@@ -335,8 +338,8 @@ impl WaylandCx {
                 CxOsOp::StopTimer(timer_id) => {
                     state.stop_timer(timer_id);
                 },
-                CxOsOp::ShowTextIME(area, pos) => {
-                    if let Some(window) = state.current_window {
+                CxOsOp::ShowTextIME(_area, _pos, _config) => {
+                    if let Some(_window) = state.current_window {
                         if let Some(text_input) = state.text_input.as_ref() {
                             text_input.enable();
 

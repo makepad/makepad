@@ -42,9 +42,16 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
+import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.ExtractedText;
+import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.Selection;
+import android.text.SpannableStringBuilder;
 import android.widget.LinearLayout;
 
 import java.io.BufferedReader;
@@ -71,6 +78,61 @@ class MakepadSurface
         ViewTreeObserver.OnGlobalLayoutListener,
         SurfaceHolder.Callback
 {
+    // IME InputConnection for handling composition text
+    private MakepadInputConnection mInputConnection;
+
+    // Shared Editable buffer for IME - this is the source of truth for Java side
+    private SpannableStringBuilder mEditable = new SpannableStringBuilder();
+
+    // Keyboard configuration constants (must match Rust KeyboardType enum)
+    static final int INPUT_MODE_TEXT = 0;
+    static final int INPUT_MODE_ASCII = 1;
+    static final int INPUT_MODE_URL = 2;
+    static final int INPUT_MODE_NUMERIC = 3;
+    static final int INPUT_MODE_TEL = 4;
+    static final int INPUT_MODE_EMAIL = 5;
+    static final int INPUT_MODE_DECIMAL = 6;
+    static final int INPUT_MODE_SEARCH = 7;
+
+    // Autocapitalize constants (must match Rust Autocapitalize enum)
+    static final int AUTOCAP_NONE = 0;
+    static final int AUTOCAP_WORDS = 1;
+    static final int AUTOCAP_SENTENCES = 2;
+    static final int AUTOCAP_ALL = 3;
+
+    // Autocorrect constants (must match Rust Autocorrect enum)
+    static final int AUTOCORRECT_DEFAULT = 0;
+    static final int AUTOCORRECT_YES = 1;
+    static final int AUTOCORRECT_NO = 2;
+
+    // Return key type constants (must match Rust ReturnKeyType enum)
+    static final int RETURN_KEY_DEFAULT = 0;
+    static final int RETURN_KEY_GO = 1;
+    static final int RETURN_KEY_SEARCH = 2;
+    static final int RETURN_KEY_SEND = 3;
+    static final int RETURN_KEY_NEXT = 4;
+    static final int RETURN_KEY_DONE = 5;
+
+    // Keyboard configuration (set by Rust via configureKeyboard)
+    private int mInputMode = INPUT_MODE_TEXT;
+    private int mAutocapitalize = AUTOCAP_SENTENCES;
+    private int mAutocorrect = AUTOCORRECT_DEFAULT;
+    private int mReturnKeyType = RETURN_KEY_DEFAULT;
+    private boolean mIsMultiline = true;
+    private boolean mIsSecure = false;
+
+    // Package-private getters for MakepadInputConnection to access shared state
+    Editable getEditable() {
+        return mEditable;
+    }
+
+    int getInputMode() {
+        return mInputMode;
+    }
+
+    boolean isMultiline() {
+        return mIsMultiline;
+    }
 
     // The X,Y coordinates and pointer ID of the most recent ACTION_DOWN touch.
     private float latestDownTouchX = Float.NaN;
@@ -92,9 +154,11 @@ class MakepadSurface
         requestFocus();
         setOnTouchListener(this);
         setOnKeyListener(this);
-        setOnLongClickListener(this);        
+        setOnLongClickListener(this);
 
         getViewTreeObserver().addOnGlobalLayoutListener(this);
+
+        Selection.setSelection(mEditable, 0, 0);
     }
 
     @Override
@@ -256,13 +320,236 @@ class MakepadSurface
     // For some reason it only works if placed here and not in the parent layout.
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        InputConnection connection = super.onCreateInputConnection(outAttrs);
-        outAttrs.imeOptions |= EditorInfo.IME_FLAG_NO_FULLSCREEN;
-        return connection;
+        int inputType = InputType.TYPE_CLASS_TEXT;
+
+        switch (mInputMode) {
+            case INPUT_MODE_ASCII:
+                // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD shows ASCII keyboard without masking
+                // This is the closest Android equivalent to iOS's UIKeyboardTypeASCIICapable
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
+                break;
+            case INPUT_MODE_URL:
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
+                break;
+            case INPUT_MODE_NUMERIC:
+                inputType = InputType.TYPE_CLASS_NUMBER;
+                break;
+            case INPUT_MODE_TEL:
+                inputType = InputType.TYPE_CLASS_PHONE;
+                break;
+            case INPUT_MODE_EMAIL:
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS;
+                break;
+            case INPUT_MODE_DECIMAL:
+                inputType = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED;
+                break;
+            case INPUT_MODE_SEARCH:
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT;
+                break;
+            default: // INPUT_MODE_TEXT
+                inputType = InputType.TYPE_CLASS_TEXT;
+                break;
+        }
+
+        if ((inputType & InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT) {
+            // Autocapitalization
+            switch (mAutocapitalize) {
+                case AUTOCAP_NONE:
+                    // No flag needed
+                    break;
+                case AUTOCAP_WORDS:
+                    inputType |= InputType.TYPE_TEXT_FLAG_CAP_WORDS;
+                    break;
+                case AUTOCAP_SENTENCES:
+                    inputType |= InputType.TYPE_TEXT_FLAG_CAP_SENTENCES;
+                    break;
+                case AUTOCAP_ALL:
+                    inputType |= InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS;
+                    break;
+            }
+
+            // Autocorrect
+            switch (mAutocorrect) {
+                case AUTOCORRECT_DEFAULT:
+                case AUTOCORRECT_YES:
+                    inputType |= InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
+                    break;
+                case AUTOCORRECT_NO:
+                    inputType |= InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+                    break;
+            }
+
+            // Multiline - important for SwiftKey vertical cursor control
+            if (mIsMultiline) {
+                inputType |= InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+            }
+
+            // Secure/password
+            if (mIsSecure) {
+                // Clear variation bits and set password variation
+                inputType = (inputType & ~InputType.TYPE_MASK_VARIATION) | InputType.TYPE_TEXT_VARIATION_PASSWORD;
+            }
+        }
+
+        outAttrs.inputType = inputType;
+
+        int imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+
+        // Return key type
+        switch (mReturnKeyType) {
+            case RETURN_KEY_GO:
+                imeOptions |= EditorInfo.IME_ACTION_GO;
+                break;
+            case RETURN_KEY_SEARCH:
+                imeOptions |= EditorInfo.IME_ACTION_SEARCH;
+                break;
+            case RETURN_KEY_SEND:
+                imeOptions |= EditorInfo.IME_ACTION_SEND;
+                break;
+            case RETURN_KEY_NEXT:
+                imeOptions |= EditorInfo.IME_ACTION_NEXT;
+                break;
+            case RETURN_KEY_DONE:
+                imeOptions |= EditorInfo.IME_ACTION_DONE;
+                break;
+            default: // RETURN_KEY_DEFAULT
+                if (!mIsMultiline) {
+                    imeOptions |= EditorInfo.IME_ACTION_DONE;
+                }
+                break;
+        }
+
+        // Prevent personalized learning for secure/password fields
+        if (mIsSecure) {
+            imeOptions |= EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
+        }
+
+        // Add IME_FLAG_FORCE_ASCII for ASCII input mode
+        if (mInputMode == INPUT_MODE_ASCII) {
+            imeOptions |= EditorInfo.IME_FLAG_FORCE_ASCII;
+        }
+
+        outAttrs.imeOptions = imeOptions;
+
+        // Set initial selection from our Editable
+        int selStart = Selection.getSelectionStart(mEditable);
+        int selEnd = Selection.getSelectionEnd(mEditable);
+        outAttrs.initialSelStart = Math.max(0, selStart);
+        outAttrs.initialSelEnd = Math.max(0, selEnd);
+
+        // Create InputConnection with fullEditor=true since we have an Editable
+        mInputConnection = new MakepadInputConnection(this, true);
+
+        return mInputConnection;
+    }
+
+    // Configure keyboard settings - called from Rust before showing keyboard
+    public void configureKeyboard(int inputMode, int autocapitalize, int autocorrect,
+                                  int returnKeyType, boolean isMultiline, boolean isSecure) {
+        boolean changed = (mInputMode != inputMode || mAutocapitalize != autocapitalize ||
+                          mAutocorrect != autocorrect || mReturnKeyType != returnKeyType ||
+                          mIsMultiline != isMultiline || mIsSecure != isSecure);
+
+        mInputMode = inputMode;
+        mAutocapitalize = autocapitalize;
+        mAutocorrect = autocorrect;
+        mReturnKeyType = returnKeyType;
+        mIsMultiline = isMultiline;
+        mIsSecure = isSecure;
+
+        // If config changed and keyboard is already showing, restart input to apply new settings
+        if (changed && mInputConnection != null) {
+            // Finalize any in-progress composition before restart to avoid stale state
+            BaseInputConnection.removeComposingSpans(mEditable);
+            InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.restartInput(this);
+            }
+        }
+    }
+
+    // Called from Rust to update text state (for programmatic changes, not IME input)
+    public void updateImeTextState(String fullText, int selStart, int selEnd) {
+        String currentText = mEditable.toString();
+        boolean textChanged = !currentText.equals(fullText);
+
+        // ECHO PREVENTION: Check if this is Rust echoing back text we recently sent.
+        // This happens because:
+        //   1. Java sends text to Rust via onImeTextStateChanged
+        //   2. Rust widget processes it and updates internal state
+        //   3. Rust may sync state back via SyncImeState -> updateImeTextState
+        //   4. Without this check, we'd overwrite fresh IME state with stale echo
+        if (textChanged && mInputConnection != null) {
+            if (mInputConnection.wasRecentlySentToRust(fullText)) {
+                return;  // Stale echo - ignore to prevent rollback
+            }
+        }
+
+        // Clamp selection
+        int textLen = textChanged ? fullText.length() : currentText.length();
+        selStart = Math.max(0, Math.min(selStart, textLen));
+        selEnd = Math.max(selStart, Math.min(selEnd, textLen));
+
+        if (textChanged) {
+            // Text content changed - update Editable and notify IME
+            BaseInputConnection.removeComposingSpans(mEditable);
+            mEditable.replace(0, mEditable.length(), fullText);
+            Selection.setSelection(mEditable, selStart, selEnd);
+
+            // ECHO PREVENTION: Clear the sent buffer after applying Rust's authoritative
+            // state update. This ensures the next text we send to Rust won't be incorrectly
+            // detected as an echo. Only clear here, NOT in recordSentToRust().
+            if (mInputConnection != null) {
+                mInputConnection.clearRecentSentBuffer();
+            }
+
+            // Notify IME of text change without restarting input
+            // restartInput() destroys composition state and causes IME flicker;
+            // updateExtractedText() + updateSelection() is the lightweight alternative
+            if (mInputConnection != null) {
+                InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    if (mInputConnection.mExtractedTextRequest != null) {
+                        ExtractedText et = new ExtractedText();
+                        et.text = fullText;
+                        et.startOffset = 0;
+                        et.selectionStart = selStart;
+                        et.selectionEnd = selEnd;
+                        imm.updateExtractedText(this, mInputConnection.mExtractedTextToken, et);
+                    }
+                    imm.updateSelection(this, selStart, selEnd, -1, -1);
+                }
+            }
+        } else {
+            // Only selection changed - just update selection, no restart needed
+            int currentSelStart = Selection.getSelectionStart(mEditable);
+            int currentSelEnd = Selection.getSelectionEnd(mEditable);
+            if (currentSelStart != selStart || currentSelEnd != selEnd) {
+                Selection.setSelection(mEditable, selStart, selEnd);
+                // Notify IME of selection change without restart
+                InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
+                    int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
+                    imm.updateSelection(this, selStart, selEnd, compStart, compEnd);
+                }
+            }
+        }
     }
 
     public Surface getNativeSurface() {
         return getHolder().getSurface();
+    }
+
+    // Select all text in the InputConnection's Editable and notify IME
+    // Used by ActionMode's Select All to sync Java-side selection with Rust
+    public void selectAllInEditable() {
+        int len = mEditable.length();
+        Selection.setSelection(mEditable, 0, len);
+        // Notify IME of the selection change
+        if (mInputConnection != null) {
+            mInputConnection.notifyImeOfSelectionUpdate();
+        }
     }
 }
 
@@ -365,22 +652,6 @@ public class MakepadActivity
     @Override
     protected void onStart() {
         super.onStart();
-
-       // this forces a high framerate default 
-           /*
-        Window w = getWindow();
-        WindowManager.LayoutParams p = w.getAttributes();
-        Display.Mode[] modes = getDisplay().getSupportedModes();
-
-        for(Display.Mode mode: modes){    
-            if(mode.getRefreshRate() > 100.0){
-                p.preferredDisplayModeId = mode.getModeId();
-                w.setAttributes(p);
-                Log.w("Makepad", "width"+mode.getRefreshRate()+" id "+mode.getModeId());
-                break;
-            }
-        }
-*/      
         MakepadNative.activityOnStart();
     }
 
@@ -522,6 +793,21 @@ public class MakepadActivity
         finish();
     }
     
+    // Configure keyboard settings before showing - called from Rust
+    public void configureKeyboard(final int keyboardType, final int autocapitalize,
+                                   final int autocorrect, final int returnKeyType,
+                                   final boolean isMultiline, final boolean isSecure) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (view != null) {
+                    view.configureKeyboard(keyboardType, autocapitalize, autocorrect,
+                                          returnKeyType, isMultiline, isSecure);
+                }
+            }
+        });
+    }
+
     public void showKeyboard(final boolean show) {
         runOnUiThread(new Runnable() {
             @Override
@@ -532,6 +818,20 @@ public class MakepadActivity
                 } else {
                     InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
                     imm.hideSoftInputFromWindow(view.getWindowToken(),0);
+                }
+            }
+        });
+    }
+
+    // Update IME text state for programmatic changes - called from Rust
+    // Note: This should only be called for programmatic text changes (e.g., clear button),
+    // NOT during normal IME input (which flows Java→Rust via onImeTextStateChanged)
+    public void updateImeTextState(final String fullText, final int selStart, final int selEnd) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (view != null) {
+                    view.updateImeTextState(fullText, selStart, selEnd);
                 }
             }
         });
@@ -676,7 +976,6 @@ public class MakepadActivity
     }
 
     private boolean onPrepareActionModeInternal(ActionMode mode, Menu menu) {
-        // Enable/disable menu items based on state
         boolean hasSelection = mHasSelection;
         boolean hasClipboard = false;
 
@@ -714,21 +1013,11 @@ public class MakepadActivity
             return true;
         } else if (id == android.R.id.selectAll) {
             MakepadNative.onClipboardAction("select_all");
-
-            // After select all, re-show the menu with Copy/Cut options
-            // Post delayed to give Rust time to update selection
-            final ActionMode currentMode = mode;
-            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    if (currentMode != null) {
-                        mHasSelection = true;
-                        currentMode.invalidate();
-                    }
-                }
-            }, 50); // 50ms delay
-
-            return true; // Don't finish mode - let it update
+            // Sync Java-side selection with Rust so backspace/delete will work
+            // This updates mEditable's selection and notifies the IME
+            view.selectAllInEditable();
+            mode.finish();
+            return true;
         }
         return false;
     }

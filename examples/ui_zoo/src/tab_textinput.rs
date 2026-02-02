@@ -43,7 +43,6 @@ live_design!{
                 flow: Right { wrap: true },
                 is_password: false,
                 is_read_only: false,
-                is_numeric_only: false
                 empty_text: "Your text here",
                 
                 draw_bg: {
@@ -137,7 +136,6 @@ live_design!{
                 flow: Right { wrap: true },
                 is_password: false,
                 is_read_only: false,
-                is_numeric_only: false
 
                 empty_text: "Inline Label"
 

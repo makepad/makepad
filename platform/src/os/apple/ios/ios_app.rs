@@ -6,7 +6,9 @@ use {
         time::Instant,
     },
     crate::{
+        ime::TextInputConfig,
         event::*,
+        event::keyboard::CharOffset,
         os::{
             apple::{
                 apple_sys::*,
@@ -15,6 +17,7 @@ use {
             cx_native::EventFlow,
             ios::{
                 ios_delegates::*,
+                ios_text_input::*,
                 ios_event::*,
             }
         },
@@ -23,6 +26,34 @@ use {
         makepad_math::*,
     }
 };
+
+// UIKeyboardType
+pub const UI_KEYBOARD_TYPE_DEFAULT: i64 = 0;
+pub const UI_KEYBOARD_TYPE_ASCII_CAPABLE: i64 = 1;
+pub const UI_KEYBOARD_TYPE_URL: i64 = 3;
+pub const UI_KEYBOARD_TYPE_NUMBER_PAD: i64 = 4;
+pub const UI_KEYBOARD_TYPE_PHONE_PAD: i64 = 5;
+pub const UI_KEYBOARD_TYPE_EMAIL_ADDRESS: i64 = 7;
+pub const UI_KEYBOARD_TYPE_DECIMAL_PAD: i64 = 8;
+pub const UI_KEYBOARD_TYPE_WEB_SEARCH: i64 = 10;
+
+// UITextAutocapitalizationType
+pub const UI_TEXT_AUTOCAPITALIZATION_NONE: i64 = 0;
+pub const UI_TEXT_AUTOCAPITALIZATION_WORDS: i64 = 1;
+pub const UI_TEXT_AUTOCAPITALIZATION_SENTENCES: i64 = 2;
+pub const UI_TEXT_AUTOCAPITALIZATION_ALL: i64 = 3;
+
+// UITextAutocorrectionType
+pub const UI_TEXT_AUTOCORRECTION_DEFAULT: i64 = 0;
+pub const UI_TEXT_AUTOCORRECTION_NO: i64 = 1;
+pub const UI_TEXT_AUTOCORRECTION_YES: i64 = 2;
+
+// UIReturnKeyType
+pub const UI_RETURN_KEY_DEFAULT: i64 = 0;
+pub const UI_RETURN_KEY_GO: i64 = 1;
+pub const UI_RETURN_KEY_SEARCH: i64 = 6;
+pub const UI_RETURN_KEY_SEND: i64 = 7;
+pub const UI_RETURN_KEY_DONE: i64 = 9;
 
 // this value will be fetched from multiple threads (post signal uses it)
 pub static mut IOS_CLASSES: *const IosClasses = 0 as *const _;
@@ -92,17 +123,24 @@ impl IosClasses {
     }
 }
 
+/// Text input events from iOS UITextInput, queued to avoid re-entrancy
+#[derive(Debug, Clone)]
+pub enum IosTextInputEvent {
+    /// Regular text input (input, replace_last)
+    TextInput(String, bool),
+    /// Range replacement for autocorrect (start, end, text)
+    RangeReplace(usize, usize, String),
+    /// Key event (e.g., Backspace, Return)
+    KeyEvent(KeyCode),
+}
+
 pub struct IosApp {
     pub time_start: Instant,
     pub virtual_keyboard_event:  Option<VirtualKeyboardEvent>,
-    /// Queued text input from UITextInput
-    /// (input, replace_last)
-    pub queued_text_input: Option<(String, bool)>,
-    /// Queued text range replace from UITextInput
-    /// (start, end, text)
-    pub queued_text_range_replace: Option<(usize, usize, String)>,
-    /// Queued key event from UITextInput
-    pub queued_key_event: Option<KeyCode>,
+    /// Queue of text input events from UITextInput
+    /// Using a Vec allows batching multiple events (e.g., replaceRange + insertText)
+    /// to be processed atomically before SyncImeState can interfere
+    pub queued_text_events: Vec<IosTextInputEvent>,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<IosTimer>,
     touches: Vec<TouchPoint>,
@@ -119,27 +157,21 @@ pub struct IosApp {
     pasteboard: ObjcId,
     edit_menu_delegate_instance: ObjcId,
     edit_menu_interaction: Option<ObjcId>,
+    /// Cached keyboard config to avoid redundant reloadInputViews calls
+    pub(crate) last_keyboard_config: Option<TextInputConfig>,
+    /// Keyboard notification observer delegate - stored for cleanup
+    keyboard_observer_delegate: Option<ObjcId>,
 }
 
 impl IosApp {
     pub fn new(metal_device: ObjcId, event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>) -> IosApp {
         unsafe {
 
-            // Construct the bits that are shared between windows
-            //let ns_app: ObjcId = msg_send![class!(UIApplication), sharedApplication];
-            //let app_delegate_instance: ObjcId = msg_send![get_ios_class_global().app_delegate, new];
-            //if ns_app == nil{
-            //   panic!();
-            //}
-            //let () = msg_send![ns_app, setDelegate: app_delegate_instance];
-
             let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
             let edit_menu_delegate_instance: ObjcId = msg_send![get_ios_class_global().edit_menu_delegate, new];
             IosApp {
                 virtual_keyboard_event: None,
-                queued_text_input: None,
-                queued_text_range_replace: None,
-                queued_key_event: None,
+                queued_text_events: Vec::new(),
                 touches: Vec::new(),
                 last_window_geom: WindowGeom::default(),
                 metal_device,
@@ -155,6 +187,8 @@ impl IosApp {
                 pasteboard,
                 edit_menu_delegate_instance,
                 edit_menu_interaction: None,
+                last_keyboard_config: None,
+                keyboard_observer_delegate: None,
             }
         }
     }
@@ -200,15 +234,13 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, setAutoResizeDrawable: YES];
             let () = msg_send![mtk_view_obj, setMultipleTouchEnabled: YES];
-            
-            // Create UITextInput view for proper IME support
+
             let text_input_view: ObjcId = msg_send![get_ios_class_global().text_input_view, alloc];
             let text_input_view: ObjcId = msg_send![text_input_view, initWithFrame: NSRect {
                 origin: NSPoint { x: 0.0, y: 0.0 },
                 size: NSSize { width: 1.0, height: 1.0 }
             }];
 
-            // Initialize ivars
             let marked_text: ObjcId = msg_send![class!(NSMutableAttributedString), alloc];
             let marked_text: ObjcId = msg_send![marked_text, init];
             (*text_input_view).set_ivar::<ObjcId>("markedText", marked_text);
@@ -219,6 +251,16 @@ impl IosApp {
             (*text_input_view).set_ivar::<ObjcId>("_tokenizer", nil);
             (*text_input_view).set_ivar::<f64>("ime_pos_x", 0.0);
             (*text_input_view).set_ivar::<f64>("ime_pos_y", 0.0);
+            // Initialize keyboard config ivars with defaults
+            (*text_input_view).set_ivar::<i64>("_keyboard_type", UI_KEYBOARD_TYPE_DEFAULT);
+            (*text_input_view).set_ivar::<i64>("_autocapitalization_type", UI_TEXT_AUTOCAPITALIZATION_SENTENCES);
+            (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1);  // Use CJK detection logic
+            (*text_input_view).set_ivar::<i64>("_return_key_type", UI_RETURN_KEY_DEFAULT);
+            (*text_input_view).set_ivar::<bool>("_secure_text_entry", false);
+            // Floating cursor (keyboard trackpad) state
+            (*text_input_view).set_ivar::<BOOL>("floating_cursor_active", NO);
+            (*text_input_view).set_ivar::<f64>("floating_cursor_last_x", 0.0);
+            (*text_input_view).set_ivar::<f64>("floating_cursor_last_y", 0.0);
 
             let () = msg_send![text_input_view, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, addSubview: text_input_view];
@@ -226,7 +268,7 @@ impl IosApp {
             // Set up textfield delegate for keyboard notifications only
             let textfield_dlg: ObjcId = msg_send![get_ios_class_global().textfield_delegate, alloc];
             let textfield_dlg: ObjcId = msg_send![textfield_dlg, init];
-            
+
             let notification_center: ObjcId = msg_send![class!(NSNotificationCenter), defaultCenter];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidChangeFrame:) name: UIKeyboardDidChangeFrameNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillChangeFrame:) name: UIKeyboardWillChangeFrameNotification object: nil];
@@ -234,14 +276,14 @@ impl IosApp {
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillShow:) name: UIKeyboardWillShowNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidHide:) name: UIKeyboardDidHideNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillHide:) name: UIKeyboardWillHideNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(inputModeDidChange:) name: UITextInputCurrentInputModeDidChangeNotification object: nil];
+
+            // Store the delegate for cleanup
+            self.keyboard_observer_delegate = Some(textfield_dlg);
             
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
-            
-            //let () = msg_send![view_ctrl_obj, beginAppearanceTransition: true animated: false];
-            //let () = msg_send![view_ctrl_obj, endAppearanceTransition];
-            
             let () = msg_send![window_obj, makeKeyAndVisible];
 
             // Initialize UIEditMenuInteraction for clipboard actions
@@ -406,14 +448,79 @@ impl IosApp {
         });
     }
 
+    /// Configure keyboard settings (UITextInputTraits)
+    /// Uses caching to avoid calling reloadInputViews every frame
+    pub fn configure_keyboard(config: &TextInputConfig) {
+        use crate::ime::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType};
+
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    // Skip if config hasn't changed (prevents flickering from reloadInputViews every frame)
+                    if app.last_keyboard_config.as_ref() == Some(config) {
+                        return;
+                    }
+
+                    if let Some(text_input_view) = app.text_input_view {
+                        unsafe {
+                            let kb_type: i64 = match config.soft_keyboard.input_mode {
+                                InputMode::Text => UI_KEYBOARD_TYPE_DEFAULT,
+                                InputMode::Ascii => UI_KEYBOARD_TYPE_ASCII_CAPABLE,
+                                InputMode::Url => UI_KEYBOARD_TYPE_URL,
+                                InputMode::Numeric => UI_KEYBOARD_TYPE_NUMBER_PAD,
+                                InputMode::Tel => UI_KEYBOARD_TYPE_PHONE_PAD,
+                                InputMode::Email => UI_KEYBOARD_TYPE_EMAIL_ADDRESS,
+                                InputMode::Decimal => UI_KEYBOARD_TYPE_DECIMAL_PAD,
+                                InputMode::Search => UI_KEYBOARD_TYPE_WEB_SEARCH,
+                            };
+
+                            let autocap_type: i64 = match config.soft_keyboard.autocapitalize {
+                                AutoCapitalize::None => UI_TEXT_AUTOCAPITALIZATION_NONE,
+                                AutoCapitalize::Words => UI_TEXT_AUTOCAPITALIZATION_WORDS,
+                                AutoCapitalize::Sentences => UI_TEXT_AUTOCAPITALIZATION_SENTENCES,
+                                AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
+                            };
+
+                            let autocorrect_type: i64 = match config.soft_keyboard.autocorrect {
+                                AutoCorrect::Default => -1, // use CJK detection logic
+                                AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
+                                AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
+                            };
+
+                            let return_type: i64 = match config.soft_keyboard.return_key_type {
+                                ReturnKeyType::Default => UI_RETURN_KEY_DEFAULT,
+                                ReturnKeyType::Go => UI_RETURN_KEY_GO,
+                                ReturnKeyType::Search => UI_RETURN_KEY_SEARCH,
+                                ReturnKeyType::Send => UI_RETURN_KEY_SEND,
+                                ReturnKeyType::Done => UI_RETURN_KEY_DONE,
+                            };
+
+                            (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
+                            (*text_input_view).set_ivar::<i64>("_autocapitalization_type", autocap_type);
+                            (*text_input_view).set_ivar::<i64>("_autocorrection_type", autocorrect_type);
+                            (*text_input_view).set_ivar::<i64>("_return_key_type", return_type);
+                            (*text_input_view).set_ivar::<bool>("_secure_text_entry", config.is_secure);
+
+                            let () = msg_send![text_input_view, reloadInputViews];
+                        }
+                    }
+
+                    app.last_keyboard_config = Some(*config);
+                }
+            }
+        });
+    }
+
     pub fn hide_keyboard() {
         // Use text_input_view for keyboard
         let _ = IOS_APP.try_with(|app| {
-            if let Ok(app_ref) = app.try_borrow_mut() {
-                if let Some(ref app) = *app_ref {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
                     if let Some(text_input_view) = app.text_input_view {
                         let () = unsafe { msg_send![text_input_view, resignFirstResponder] };
                     }
+                    // Clear the keyboard config cache so it reconfigures when shown again
+                    app.last_keyboard_config = None;
                 }
             }
         });
@@ -438,18 +545,25 @@ impl IosApp {
         });
     }
 
-    pub fn set_ime_text(text: String, cursor_byte_pos: usize) {
-        // Convert byte position to UTF-16 code unit position for iOS
-        // cursor_byte_pos is a UTF-8 byte index, iOS NSString uses UTF-16 internally
-        let cursor_char_pos = text[..cursor_byte_pos.min(text.len())]
-            .encode_utf16()
-            .count();
+    pub fn set_ime_text(text: String, cursor: CharOffset) {
+        // Convert CharOffset to UTF-16 index for iOS NSString
+        let cursor_utf16_pos = cursor.to_utf16_index(&text);
 
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
                     if let Some(text_input_view) = app.text_input_view {
                         unsafe {
+                            // Get inputDelegate for notifications - this is critical for iOS
+                            // to know the text/cursor has changed (needed for autocorrect positioning)
+                            let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
+
+                            // Notify BEFORE changes
+                            if input_delegate != nil {
+                                let () = msg_send![input_delegate, textWillChange: text_input_view];
+                                let () = msg_send![input_delegate, selectionWillChange: text_input_view];
+                            }
+
                             // Get or create text buffer
                             let buffer: ObjcId = *(*text_input_view).get_ivar("textBuffer");
                             let buffer = if buffer != nil {
@@ -472,8 +586,16 @@ impl IosApp {
                             let ns_text = str_to_nsstring(&text);
                             let () = msg_send![buffer, appendString: ns_text];
 
-                            // Set cursor position (in characters, not bytes)
-                            (*text_input_view).set_ivar("cursorPosition", cursor_char_pos as i64);
+                            // Set cursor position and selection (UTF-16 index)
+                            (*text_input_view).set_ivar("cursorPosition", cursor_utf16_pos as i64);
+                            (*text_input_view).set_ivar("selectionStart", cursor_utf16_pos as i64);
+                            (*text_input_view).set_ivar("selectionEnd", cursor_utf16_pos as i64);
+
+                            // Notify AFTER changes (CRITICAL for autocorrect positioning)
+                            if input_delegate != nil {
+                                let () = msg_send![input_delegate, selectionDidChange: text_input_view];
+                                let () = msg_send![input_delegate, textDidChange: text_input_view];
+                            }
                         }
                     }
                 }
@@ -541,12 +663,13 @@ impl IosApp {
     }
     
     pub fn send_text_input(input: String, replace_last: bool) {
-        // Always queue - will be processed on next timer tick
-        // This avoids re-entrancy issues from UITextField delegate callbacks
+        // Queue text input - will be processed on next timer tick
+        // Using a Vec queue allows batching multiple events (e.g., autocorrect + space)
+        // This avoids re-entrancy issues from UITextInput delegate callbacks
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_input = Some((input, replace_last));
+                    app.queued_text_events.push(IosTextInputEvent::TextInput(input, replace_last));
                 }
             }
         });
@@ -554,23 +677,24 @@ impl IosApp {
 
     pub fn send_text_range_replace(start: usize, end: usize, text: String) {
         // Queue range replacement for iOS autocorrect
+        // Using a Vec queue allows batching with subsequent insertText calls
         // This avoids re-entrancy issues from UITextInput delegate callbacks
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_range_replace = Some((start, end, text));
+                    app.queued_text_events.push(IosTextInputEvent::RangeReplace(start, end, text));
                 }
             }
         });
     }
 
     pub fn send_backspace() {
-        // Always queue - will be processed on next timer tick
-        // This avoids re-entrancy issues from UITextField delegate callbacks
+        // Queue backspace key event
+        // This avoids re-entrancy issues from UITextInput delegate callbacks
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_key_event = Some(KeyCode::Backspace);
+                    app.queued_text_events.push(IosTextInputEvent::KeyEvent(KeyCode::Backspace));
                 }
             }
         });
@@ -581,7 +705,7 @@ impl IosApp {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_key_event = Some(KeyCode::ReturnKey);
+                    app.queued_text_events.push(IosTextInputEvent::KeyEvent(KeyCode::ReturnKey));
                 }
             }
         });
@@ -742,6 +866,7 @@ impl IosApp {
                 input: content,
                 replace_last: false,
                 was_paste: true,
+                ..Default::default()
             }));
         }
     }

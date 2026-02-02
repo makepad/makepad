@@ -352,7 +352,7 @@ live_design! {
             // select_pad_edges: (SSPACING_1),
             // cursor_size: (SSPACING_1),
             empty_text: "0",
-            is_numeric_only: true,
+            input_mode: Decimal,
             draw_bg: {
                 color: (COLOR_DOWN_0)
             },

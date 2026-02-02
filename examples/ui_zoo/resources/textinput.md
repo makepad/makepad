@@ -6,7 +6,11 @@ The standard text input form element.
 - empty_text (String)
 - is_password (bool)
 - is_read_only (bool)
-- is_numeric_only (bool)
+- is_multiline (bool) - whether the text input supports multiple lines
+- input_mode (InputMode: Text, Ascii, Url, Numeric, Tel, Email, Decimal, Search) - keyboard type for mobile
+- autocapitalize (AutoCapitalize: None, Words, Sentences, AllCharacters) - autocapitalization behavior
+- autocorrect (AutoCorrect: Default, Enabled, Disabled) - autocorrection behavior
+- return_key_type (ReturnKeyType: Default, Go, Search, Send, Done) - return key appearance
 - label_align (Align)
 - text (String)
 
