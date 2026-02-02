@@ -15,7 +15,7 @@ use {
                 apple_util::*,
                 ios::{
                     ios_event::IosEvent,
-                    ios_app::{IosApp, init_ios_app_global,with_ios_app}
+                    ios_app::{self, IosApp, init_ios_app_global, with_ios_app}
                 },
                 url_session::{AppleHttpRequests},
             },
@@ -31,8 +31,8 @@ use {
             Event,
             NetworkResponseChannel,
             TextInputEvent,
-            TextRangeReplaceEvent,
             KeyEvent,
+            keyboard::CharOffset,
         },
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         cx::{Cx, OsType, IosParams},
@@ -136,8 +136,6 @@ impl Cx {
         metal_cx: &mut MetalCx,
     ) -> EventFlow {
 
-        self.handle_platform_ops(metal_cx);
-
         // send a mouse up when dragging starts
 
         let mut paint_dirty = false;
@@ -152,41 +150,58 @@ impl Cx {
                     if let Some(vk) = vk{
                         self.call_event_handler(&Event::VirtualKeyboard(vk));
                     }
-                    // Process queued text input from UITextInput callbacks
-                    let queued_text = with_ios_app(|app| app.queued_text_input.take());
-                    if let Some((input, replace_last)) = queued_text {
-                        self.call_event_handler(&Event::TextInput(TextInputEvent {
-                            input,
-                            was_paste: false,
-                            replace_last,
-                        }));
+                    // IMPORTANT: Process ALL queued iOS text events atomically BEFORE handle_platform_ops
+                    // This ensures that if iOS sends multiple events (e.g., replaceRange + insertText
+                    // for autocorrect + space), they're all processed together before SyncImeState
+                    // can interfere. This fixes the "missing space after autocorrect" issue.
+
+                    // Drain the entire event queue at once (atomic batch)
+                    let queued_events = with_ios_app(|app| {
+                        std::mem::replace(&mut app.queued_text_events, Vec::new())
+                    });
+
+                    // Process all queued events in order
+                    let time = with_ios_app(|app| app.time_now());
+                    for event in queued_events {
+                        match event {
+                            ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
+                                self.call_event_handler(&Event::TextInput(TextInputEvent {
+                                    input,
+                                    was_paste: false,
+                                    replace_last,
+                                    ..Default::default()
+                                }));
+                            }
+                            ios_app::IosTextInputEvent::RangeReplace(start, end, replacement_text) => {
+                                // iOS uses character offsets (already in correct format)
+                                self.call_event_handler(&Event::TextInput(TextInputEvent {
+                                    input: replacement_text,
+                                    replace_last: false, // Using replace_range instead
+                                    was_paste: false,
+                                    composition: None, // TODO: Get from UITextInput markedTextRange
+                                    full_state_sync: None, // iOS uses incremental updates
+                                    replace_range: Some((CharOffset(start), CharOffset(end))),
+                                }));
+                            }
+                            ios_app::IosTextInputEvent::KeyEvent(key_code) => {
+                                self.call_event_handler(&Event::KeyDown(KeyEvent {
+                                    key_code,
+                                    is_repeat: false,
+                                    modifiers: Default::default(),
+                                    time,
+                                }));
+                                self.call_event_handler(&Event::KeyUp(KeyEvent {
+                                    key_code,
+                                    is_repeat: false,
+                                    modifiers: Default::default(),
+                                    time,
+                                }));
+                            }
+                        }
                     }
-                    // Process queued text range replacement (iOS autocorrect)
-                    let queued_range_replace = with_ios_app(|app| app.queued_text_range_replace.take());
-                    if let Some((start, end, text)) = queued_range_replace {
-                        self.call_event_handler(&Event::TextRangeReplace(TextRangeReplaceEvent {
-                            start,
-                            end,
-                            text,
-                        }));
-                    }
-                    // Process queued key events from UITextInput callbacks
-                    let queued_key = with_ios_app(|app| app.queued_key_event.take());
-                    if let Some(key_code) = queued_key {
-                        let time = with_ios_app(|app| app.time_now());
-                        self.call_event_handler(&Event::KeyDown(KeyEvent {
-                            key_code,
-                            is_repeat: false,
-                            modifiers: Default::default(),
-                            time,
-                        }));
-                        self.call_event_handler(&Event::KeyUp(KeyEvent {
-                            key_code,
-                            is_repeat: false,
-                            modifiers: Default::default(),
-                            time,
-                        }));
-                    }
+                    // NOW handle platform ops (including SyncImeState) after iOS text events are processed
+                    self.handle_platform_ops(metal_cx);
+
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal(){
                         self.handle_media_signals();
@@ -207,6 +222,11 @@ impl Cx {
                 }
             }
             _ => ()
+        }
+
+        // Handle platform ops for non-timer events
+        if !matches!(event, IosEvent::Timer(_)) {
+            self.handle_platform_ops(metal_cx);
         }
 
         //self.process_desktop_pre_event(&mut event);
@@ -320,15 +340,17 @@ impl Cx {
                     window.window_geom = with_ios_app(|app| app.last_window_geom.clone());
                     window.is_created = true;
                 },
-                CxOsOp::ShowTextIME(_area, pos) => {
+                CxOsOp::ShowTextIME(_area, pos, config) => {
                     IosApp::set_ime_position(pos);
+                    IosApp::configure_keyboard(&config);
                     IosApp::show_keyboard();
                 },
                 CxOsOp::HideTextIME => {
                     IosApp::hide_keyboard();
                 },
-                CxOsOp::SetIMEText(text, cursor_pos) => {
-                    IosApp::set_ime_text(text, cursor_pos);
+                CxOsOp::SyncImeState { text, selection, composition: _ } => {
+                    // Pass CharOffset directly, conversion happens in set_ime_text
+                    IosApp::set_ime_text(text, selection.end);
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
                     with_ios_app(|app| app.start_timer(timer_id, interval, repeats));

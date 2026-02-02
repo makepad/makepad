@@ -11,6 +11,7 @@ mod live_prims;
 #[macro_use]
 mod cx;
 mod cx_api;
+mod ime;
 
 pub mod action;
 
@@ -140,7 +141,8 @@ pub use {
     },
     crate::{
         os::*,
-        cx_api::{CxOsApi,OpenUrlInPlace, CxOsOp},
+        cx_api::{CxOsApi, OpenUrlInPlace, CxOsOp},
+        ime::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType, SoftKeyboardConfig, TextInputConfig},
         media_api::CxMediaApi,
         scope::*,
         draw_list::{
