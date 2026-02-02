@@ -140,7 +140,7 @@ impl Cx {
                 }
 
                 // Uncomment to enable draw call debug output:
-               // Self::_debug_call_info2(
+                // Self::_debug_call_info2(
                 //    sh,
                 //    draw_item.instances.as_ref().unwrap(),
                 //    instances,
@@ -268,6 +268,18 @@ impl Cx {
                         };
                     }
                 }
+
+                // Debug output when shader has debug flag enabled
+                if sh.mapping.flags.debug {
+                    Self::_debug_call_info(
+                        sh,
+                        draw_item.instances.as_ref().unwrap(),
+                        draw_call,
+                        instances,
+                        geometry,
+                    );
+                }
+
                 self.os.draw_calls_done += 1;
                 if let Some(inner) = geometry.os.index_buffer.get().cpu_read().inner.as_ref() {
                     let () = unsafe {
@@ -292,8 +304,7 @@ impl Cx {
         }
     }
 
-    /// Debug helper for printing draw call info. Uncomment the call in render_view to enable.
-    #[allow(dead_code)]
+    /// Debug helper for printing draw call info. Called when shader has `debug: true` flag.
     fn _debug_call_info(
         sh: &CxDrawShader,
         instance_data: &[f32],

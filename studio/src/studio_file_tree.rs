@@ -7,8 +7,6 @@ script_mod! {
     mod.widgets.StudioFileTreeBase = #(StudioFileTree::register_widget(vm))
 
     mod.widgets.StudioFileTree = set_type_default() do mod.widgets.StudioFileTreeBase {
-        width: Fill
-        height: Fill
         file_tree: FileTree {}
     }
 }
