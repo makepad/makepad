@@ -39,29 +39,22 @@ impl ScriptHook for Root {
         if let Some(obj) = value.as_object() {
             vm.vec_with(obj, |vm, vec| {
                 for kv in vec {
-                    if let Some(id) = kv.key.as_id() {
-                        if kv.key.is_prefixed_id() {
-                            // Check for special cases
-                            {
-                                let cx = vm.cx_mut();
-                                // Only open design window in makepad studio
-                                if id == live_id!(design_window) && !cx.in_makepad_studio() {
-                                    continue;
-                                }
-                                // Only show xr_hands if XR mode is available
-                                if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode() {
-                                    continue;
-                                }
-                            }
-                            
-                            // Get or create widget
-                            if let Some(widget) = self.components.get_mut(&id) {
-                                widget.script_apply(vm, apply, scope, kv.value);
-                            } else {
-                                let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
-                                self.components.insert(id, widget);
-                            }
-                        }
+                    let id = kv.key.as_id().unwrap_or(LiveId(0));
+                    let cx = vm.cx_mut();
+                    // Only open design window in makepad studio
+                    if id == live_id!(design_window) && !cx.in_makepad_studio() {
+                        continue;
+                    }
+                    // Only show xr_hands if XR mode is available
+                    if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode() {
+                        continue;
+                    }
+                    // Get or create widget
+                    if let Some(widget) = self.components.get_mut(&id) {
+                        widget.script_apply(vm, apply, scope, kv.value);
+                    } else {
+                        let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                        self.components.insert(id, widget);
                     }
                 }
             });

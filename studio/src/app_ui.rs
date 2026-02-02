@@ -1,655 +1,672 @@
 use crate::makepad_widgets::*;
 
-live_design!{
-    use link::theme::*;
-    use link::widgets::*;
-    use link::shaders::*;
-    use makepad_widgets::designer_theme::*;
-    use makepad_studio::studio_editor::StudioCodeEditor;
-    use makepad_studio::ai_chat::ai_chat_view::AiChatView;
-    use makepad_studio::studio_file_tree::StudioFileTree;
-    use makepad_studio::run_view::RunView;
-    use makepad_studio::log_list::LogList;
-    use makepad_studio::run_list::RunList;
-    use makepad_studio::profiler::Profiler;
-    use makepad_studio::search::Search;
-    use makepad_studio::snapshot::Snapshot;
-    
-    ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
+script_mod! {
+    use mod.prelude.widgets.*
+    use mod.widgets.*  // Import studio widgets registered by other modules
+    use mod.draw.KeyCode  // For menu keyboard shortcuts
 
-    Logo = <Button> {
-        draw_icon: {
-            svg_file: dep("crate://self/resources/logo_makepad.svg"),
-            fn get_color(self) -> vec4 {
-                return (THEME_COLOR_D_1)
-            }
+    let ICO_SEARCH = crate_resource("self://resources/icons/Icon_Search.svg")
+
+    // Local DockToolbar definition (since it's not in widgets2)
+    let DockToolbar = RectShadowView{
+        width: Fill
+        height: 38.
+        flow: Down
+        align: Align{ x: 0. y: 0. }
+        margin: Inset{ top: -1. }
+        padding: theme.mspace_2
+        spacing: 0.
+        draw_bg +: {
+            border_size: 0.0
+            border_color: theme.color_bevel_outset_1
+            shadow_color: theme.color_shadow
+            shadow_radius: 7.5
+            shadow_offset: vec2(0.0, 0.0)
+            color: theme.color_fg_app
         }
-        text:""
-        icon_walk: {width: 250.0, height: Fit}
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+        $content: View {
+            height: Fill
+            width: Fill
+            flow: Right
+            margin: 0.
+            padding: 0.
+            align: Align{ x: 0. y: 0. }
+            spacing: theme.space_3
+        }
+    }
+
+    let Logo = Button{
+        draw_icon +: {
+            svg: crate_resource("self://resources/logo_makepad.svg")
+            color: theme.color_d_1
+        }
+        text: ""
+        icon_walk: Walk{width: 250.0 height: Fit}
+        draw_bg +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 return sdf.result
             }
         }
     }
 
-    IconTab = <TabFlat> {
+    let IconTab = TabFlat{
         closeable: false
-        icon_walk: { width: 15., height: 15. }
+        icon_walk: Walk{width: 15. height: 15.}
     }
 
-    Vr = <View> {
-        width: Fit, height: 27.,
-        flow: Right,
-        spacing: 0.,
-        margin: <THEME_MSPACE_V_2> {}
-        <View> {
-            width: (THEME_BEVELING * 2.0), height: Fill
-            show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_OUTSET_2) }
+    let Vr = View{
+        width: Fit height: 27.
+        flow: Flow.Right
+        spacing: 0.
+        margin: theme.mspace_v_2
+        View{
+            width: theme.beveling * 2.0 height: Fill
+            show_bg: true
+            draw_bg +: {color: theme.color_bevel_outset_2}
         }
-        <View> {
-            width: (THEME_BEVELING), height: Fill,
-            show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_OUTSET_1) }
+        View{
+            width: theme.beveling height: Fill
+            show_bg: true
+            draw_bg +: {color: theme.color_bevel_outset_1}
         }
     }
 
-    DockSettings = <View> {
-        align: { x: 0., y: 0. }
-        spacing: (THEME_SPACE_2)
-        <Filler> {}
-        <P> {
-            width: Fit,
-            text: "",
-            margin: 0.,
-            padding: <THEME_MSPACE_1> {}
+    let DockSettings = View{
+        align: Align{x: 0. y: 0.}
+        spacing: theme.space_2
+        Filler{}
+        P{
+            width: Fit
+            text: ""
+            margin: 0.
+            padding: theme.mspace_1
         }
-        <CheckBoxCustom> {
-            text:""
-            // text:"Apps"
-            draw_bg: { check_type: None }
-            icon_walk: {width: 11., margin: {top: 1.75, right: 3. }}
-            padding: { right: 0, left: 0.}
-            draw_icon: {
-                color: (THEME_COLOR_LABEL_OUTER),
-                color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
-                svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
+        CheckBoxCustom{
+            text: ""
+            icon_walk: Walk{width: 11. margin: Inset{top: 1.75 right: 3.}}
+            padding: Inset{right: 0 left: 0.}
+            draw_icon +: {
+                color: theme.color_label_outer
+                color_active: theme.color_label_outer_active
+                svg: crate_resource("self://resources/icons/icon_tab_app.svg")
             }
         }
-        <CheckBoxCustom> {
-            text:""
-            // text:"Designer"
-            draw_bg: { check_type: None }
-            icon_walk: {width: 12., margin: {top: 1.0 }}
-            padding: { right: 0, left: 0.}
-            draw_icon: {
-                color: (THEME_COLOR_LABEL_OUTER),
-                color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
-                svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
+        CheckBoxCustom{
+            text: ""
+            icon_walk: Walk{width: 12. margin: Inset{top: 1.0}}
+            padding: Inset{right: 0 left: 0.}
+            draw_icon +: {
+                color: theme.color_label_outer
+                color_active: theme.color_label_outer_active
+                svg: crate_resource("self://resources/icons/icon_designer.svg")
             }
         }
-        <CheckBoxCustom> {
-            text:""
-            // text:"Editor"
+        CheckBoxCustom{
+            text: ""
             width: 13.
-            draw_bg: { check_type: None }
-            icon_walk: {width: 6., margin: {top: 0.5, left: 3. }}
-            padding: { right: 0., left: 0.}
-            draw_icon: {
-                color: ((THEME_COLOR_LABEL_OUTER)),
-                color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
-                svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
+            icon_walk: Walk{width: 6. margin: Inset{top: 0.5 left: 3.}}
+            padding: Inset{right: 0. left: 0.}
+            draw_icon +: {
+                color: theme.color_label_outer
+                color_active: theme.color_label_outer_active
+                svg: crate_resource("self://resources/icons/icon_editor.svg")
             }
         }
-        <CheckBoxCustom> {
-            text:""
-            // text:"Scene"
-            draw_bg: { check_type: None }
-            icon_walk: {width: 11.5, margin: {top: 1.5 } }
-            padding: { right: 5., left: 0.}
-            draw_icon: {
-                color: ((THEME_COLOR_LABEL_OUTER)),
-                color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
-                svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
+        CheckBoxCustom{
+            text: ""
+            icon_walk: Walk{width: 11.5 margin: Inset{top: 1.5}}
+            padding: Inset{right: 5. left: 0.}
+            draw_icon +: {
+                color: theme.color_label_outer
+                color_active: theme.color_label_outer_active
+                svg: crate_resource("self://resources/icons/icon_outliner.svg")
             }
         }
     }
 
-    pub AppUI =  <Window> {
-        margin: 5.
-        caption_bar = { margin: {top: 2,left: -190}, visible: true, caption_label = {label = {text: "Makepad"}} 
-       /* <View>{
-            width: Fit,
-            spacing: (THEME_SPACE_2)
-            padding: <THEME_MSPACE_1> { right: (THEME_SPACE_2)  }
-            preset_1 = <ButtonFlatter> { text: "A" }
-            preset_2 = <ButtonFlatter> { text: "C" }
-            preset_3 = <ButtonFlatter> { text: "D" }
-            preset_4 = <ButtonFlatter> { text: "P" }
-            }*/
-        },
-        window: { inner_size: vec2(1600, 900), /*dpi_override:3.0 */},
-        show_bg: true,
-        draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_BG_APP) } }
-        window_menu = {
-            main = Main {items: [app, file, edit, selection, view, run, window, help]}
+    // Studio palette colors
+    let STUDIO_PALETTE_1 = #B2FF64
+    let STUDIO_PALETTE_2 = #80FFBF
+    let STUDIO_PALETTE_3 = #80BFFF
+    let STUDIO_PALETTE_4 = #BF80FF
+    let STUDIO_PALETTE_5 = #FF80BF
+    let STUDIO_PALETTE_6 = #FFB368
+    let STUDIO_PALETTE_7 = #FFD864
 
-            app = Sub {name: "Makepad Studio", items: [about, line, settings, line, quit]}
-            about = Item {name: "About Makepad Studio", enabled: false}
-            settings = Item {name: "Settings", enabled: false}
-            quit = Item {name: "Quit Makepad Studio", key: KeyQ}
-
-            file = Sub {name: "File", items: [new_file, new_window, line, save_as, line, rename, line, close_editor, close_window]}
-            new_file = Item {name: "New File", enabled: false, shift: true, key: KeyN}
-            new_window = Item {name: "New Window", enabled: false, shift: true, key: KeyN}
-            save_as = Item {name: "Save As", enabled: false}
-            rename = Item {name: "Rename", enabled: false}
-            close_editor = Item {name: "Close Editor", enabled: false}
-            close_window = Item {name: "Close Window", enabled: false}
-
-            edit = Sub {name: "Edit", items: [undo, redo, line, cut, copy, paste, line, find, replace, line, find_in_files, replace_in_files]}
-            undo = Item {name: "Undo", enabled: false}
-            redo = Item {name: "Redo", enabled: false}
-            cut = Item {name: "Cut", enabled: false}
-            copy = Item {name: "Copy", enabled: false}
-            paste = Item {name: "Paste", enabled: false}
-            find = Item {name: "Find", enabled: false}
-            replace = Item {name: "Replace", enabled: false}
-            find_in_files = Item {name: "Find in Files", enabled: false}
-            replace_in_files = Item {name: "Replace in Files", enabled: false}
-
-            selection = Sub {name: "Selection", items: [select_all]}
-            select_all = Item {name: "Select All", enabled: false}
-
-            view = Sub {name: "View", items: [select_all]}
-            zoom_in = Item {name: "Zoom In", enabled: false}
-            zoom_out = Item {name: "Zoom Out", enabled: false}
-            select_all = Item {name: "Enter Full Screen", enabled: false}
-
-            run = Sub {name: "Run", items: [run_program]}
-            run_program = Item {name: "Run Program", enabled: false}
-
-            window = Sub {name: "Window", items: [minimize, zoom, line, all_to_front]}
-            minimize = Item {name: "Minimize", enabled: false}
-            zoom = Item {name: "Zoom", enabled: false}
-            all_to_front = Item {name: "Bring All to Front", enabled: false}
-
-            help = Sub {name: "Help", items: [about]}
-
-            line = Line,
+    let OutlineFirstTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 10.
+            margin: Inset{top: 3. left: 5.}
         }
-        body = {
-            padding:5
-            dock = <DockFlat> {
-                width: Fill, height: Fill,
-                tab_bar:{
-                    OutlineFirstTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 10.
-                            margin: { top: 3., left: 5. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_1)
-                            svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
+        draw_icon +: {
+            color: STUDIO_PALETTE_1
+            svg: crate_resource("self://resources/icons/icon_outliner.svg")
+        }
+    }
+
+    let EditFirstTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 5.
+            margin: Inset{top: 3. left: 5.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_6
+            svg: crate_resource("self://resources/icons/icon_editor.svg")
+        }
+    }
+
+    let AiFirstTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 8.
+            margin: Inset{top: 3.5 left: 5.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_6
+            svg: crate_resource("self://resources/icons/icon_auto.svg")
+        }
+    }
+
+    let DesignFirstTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 11.
+            margin: Inset{top: 3. left: 5.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_3
+            svg: crate_resource("self://resources/icons/icon_designer.svg")
+        }
+    }
+
+    let FilesTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 8.5
+            margin: Inset{top: 4.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_2
+            svg: crate_resource("self://resources/icons/icon_file.svg")
+        }
+    }
+
+    let RunFirstTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 11.
+            margin: Inset{top: 6. left: 5.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_4
+            svg: crate_resource("self://resources/icons/icon_tab_app.svg")
+        }
+    }
+
+    let RunListTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 7.
+            margin: Inset{top: 5.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_5
+            svg: crate_resource("self://resources/icons/icon_run.svg")
+        }
+    }
+
+    let SnapshotTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 7.
+            margin: Inset{top: 4.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_5
+            svg: crate_resource("self://resources/icons/icon_run.svg")
+        }
+    }
+
+    let LogTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 9.5
+            margin: Inset{top: 7.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_2
+            svg: crate_resource("self://resources/icons/icon_log.svg")
+        }
+    }
+
+    let ProfilerTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 9.
+            margin: Inset{top: 4.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_7
+            svg: crate_resource("self://resources/icons/icon_profiler.svg")
+        }
+    }
+
+    let SearchTab = IconTab{
+        spacing: theme.space_2
+        icon_walk: Walk{
+            width: 10.5
+            margin: Inset{top: 4.}
+        }
+        draw_icon +: {
+            color: STUDIO_PALETTE_3
+            svg: crate_resource("self://resources/icons/icon_search.svg")
+        }
+    }
+
+    // Content templates for dock
+    let CodeEditorContent = View{
+        flow: Flow.Down
+        DockToolbar{
+            $content +: {
+                height: Fit width: Fill
+                spacing: theme.space_1
+                flow: Flow.Right
+                margin: Inset{left: theme.space_1 right: theme.space_1}
+
+                ButtonFlatter{width: Fit text: "File"}
+                ButtonFlatter{width: Fit text: "Edit"}
+                ButtonFlatter{width: Fit text: "Search"}
+                ButtonFlatter{width: Fit text: "Debug"}
+                Filler{}
+                LinkLabel{width: Fit text: "Docs" url: "https://publish.obsidian.md/makepad-docs"}
+            }
+        }
+        $editor: StudioCodeEditor{}
+    }
+
+    let AiChatContent = AiChatView{
+        flow: Flow.Down
+    }
+
+    let EditFirstContent = RectView{
+        draw_bg +: {color: theme.color_bg_container}
+        View{
+            width: Fill height: Fill
+            align: Align{x: 0. y: 0.}
+            flow: Flow.Down
+            DockToolbar{$content: DockSettings{}}
+            View{
+                width: Fill height: Fill
+                align: Align{x: 0.5 y: 0.5}
+                Logo{}
+            }
+        }
+    }
+
+    let OutlineFirstContent = RectView{
+        draw_bg +: {color: theme.color_bg_container}
+        View{
+            width: Fill height: Fill
+            align: Align{x: 0.5 y: 0.5}
+            flow: Flow.Down
+            DockToolbar{$content: DockSettings{}}
+            View{
+                width: Fill height: Fill
+                align: Align{x: 0.5 y: 0.5}
+                Logo{}
+            }
+        }
+    }
+
+    let DesignFirstContent = RectView{
+        draw_bg +: {color: theme.color_bg_container}
+        View{
+            width: Fill height: Fill
+            flow: Flow.Down
+            DockToolbar{$content: DockSettings{}}
+            View{
+                width: Fill height: Fill
+                align: Align{x: 0.5 y: 0.5}
+                Logo{}
+            }
+        }
+    }
+
+    let AiFirstContent = RectView{
+        draw_bg +: {color: theme.color_bg_container}
+        View{
+            width: Fill height: Fill
+            flow: Flow.Down
+            DockToolbar{$content: DockSettings{}}
+            View{
+                width: Fill height: Fill
+                align: Align{x: 0.5 y: 0.5}
+                Logo{}
+            }
+        }
+    }
+
+    let RunFirstContent = RectView{
+        draw_bg +: {color: theme.color_bg_container}
+        View{
+            width: Fill height: Fill
+            flow: Flow.Down
+            DockToolbar{$content: DockSettings{}}
+            View{
+                width: Fill height: Fill
+                align: Align{x: 0.5 y: 0.5}
+                Logo{}
+            }
+        }
+    }
+
+    let RunListContent = View{
+        flow: Flow.Down
+        margin: 0.
+        padding: 0.
+        DockToolbar{
+            $content +: {
+                Pbold{
+                    width: Fit
+                    text: "Types"
+                    margin: 0.
+                    padding: theme.mspace_1
+                }
+                ToggleFlat{text: "Release"}
+                ToggleFlat{text: "Debug"}
+            }
+        }
+        RunList{}
+    }
+
+    let SnapshotContent = Snapshot{}
+    let SearchContent = Search{}
+    let RunViewContent = RunView{}
+
+    let StudioFileTreeContent = View{
+        flow: Flow.Down
+        DockToolbar{
+            $content +: {
+                TextInputFlat{
+                    width: Fill
+                    empty_text: "Filter"
+                }
+            }
+        }
+        $file_tree: StudioFileTree{}
+    }
+
+    let LogListContent = View{
+        flow: Flow.Down
+        DockToolbar{
+            $content +: {
+                align: Align{x: 0. y: 0.5}
+                View{
+                    width: Fit
+                    flow: Flow.Right
+                    CheckBoxCustom{
+                        text: "Error"
+                        align: Align{y: 0.5}
+
+                        icon_walk: Walk{width: 7.}
+                        draw_icon +: {
+                            color: theme.color_label_outer
+                            color_active: STUDIO_PALETTE_4
+                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
                         }
                     }
-                    EditFirstTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 5.
-                            margin: { top: 3., left: 5. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_6)
-                            svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
-                        }
-                    }
-                    AiFirstTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 8.
-                            margin: { top: 3.5, left: 5. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_6)
-                            svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
+                    CheckBoxCustom{
+                        text: "Warning"
+                        align: Align{y: 0.5}
+
+                        icon_walk: Walk{width: 7.}
+                        draw_icon +: {
+                            color: theme.color_label_outer
+                            color_active: STUDIO_PALETTE_1
+                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
                         }
                     }
-                    DesignFirstTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 11.
-                            margin: { top: 3., left: 5. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_3)
-                            svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
-                        }
-                    }
-                    FilesTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 8.5,
-                            margin: { top: 4. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_2)
-                            svg_file: dep("crate://self/resources/icons/icon_file.svg"),
+                    CheckBoxCustom{
+                        text: "Log"
+                        align: Align{y: 0.5}
+
+                        icon_walk: Walk{width: 7.}
+                        draw_icon +: {
+                            color: theme.color_label_outer
+                            color_active: theme.color_u_5
+                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
                         }
                     }
-                    RunFirstTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 11.,
-                            margin: { top: 6., left: 5. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_4)
-                            svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
-                        }
-                    }
-                    RunListTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 7.
-                            margin: { top: 5. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_5)
-                            svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                    CheckBoxCustom{
+                        text: "Wait"
+                        align: Align{y: 0.5}
+
+                        icon_walk: Walk{width: 7.}
+                        draw_icon +: {
+                            color: theme.color_label_outer
+                            color_active: STUDIO_PALETTE_2
+                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
                         }
                     }
-                    SnapshotTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 7.
-                            margin: { top: 4. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_5)
-                            svg_file: dep("crate://self/resources/icons/icon_run.svg"),
-                        }
-                    }
-                    LogTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk:{
-                            width: 9.5
-                            margin: { top: 7. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_2)
-                            svg_file: dep("crate://self/resources/icons/icon_log.svg"),
-                        }
-                    }
-                    ProfilerTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 9.
-                            margin: { top: 4. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_7)
-                            svg_file: dep("crate://self/resources/icons/icon_profiler.svg"),
-                        }
-                    }
-                    SearchTab = <IconTab> {
-                        spacing: (THEME_SPACE_2)
-                        icon_walk: {
-                            width: 10.5,
-                            margin: { top: 4. }
-                        }
-                        draw_icon: {
-                            color: (STUDIO_PALETTE_3)
-                            svg_file: dep("crate://self/resources/icons/icon_search.svg"),
+                    CheckBoxCustom{
+                        text: "Panic"
+                        align: Align{y: 0.5}
+
+                        icon_walk: Walk{width: 7.}
+                        draw_icon +: {
+                            color: theme.color_label_outer
+                            color_active: STUDIO_PALETTE_5
+                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
                         }
                     }
                 }
-                root = Splitter {
-                    axis: Horizontal,
-                    align: FromA(250.0),
-                    a: file_tree_tabs,
-                    b: split1
+                Filler{}
+                TextInputFlat{
+                    width: 200.
+                    empty_text: "Filter"
                 }
-    
-                split1 = Splitter {
-                    axis: Vertical,
-                    align: FromB(200.0),
-                    a: split2,
-                    b: log_tabs
+            }
+        }
+        $log_list: LogList{}
+    }
+
+    let ProfilerContent = Profiler{
+        flow: Flow.Down
+    }
+
+    mod.widgets.AppUI = Window{
+        margin: 5.
+        $caption_bar +: {
+            margin: Inset{top: 2 left: -190}
+            visible: true
+            $caption_label +: {$label +: {text: "Makepad"}}
+        }
+        window.inner_size: vec2(1600 900)
+        show_bg: true
+        draw_bg +: {
+            pixel: fn() {
+                return theme.color_bg_app
+            }
+        }
+        $window_menu +: {
+            $main: MenuItem.Main{items: [@app @file @edit @selection @view @run @window @help]}
+
+            $app: MenuItem.Sub{name: "Makepad Studio" items: [@about @line @settings @line @quit]}
+            $about: MenuItem.Item{name: "About Makepad Studio" enabled: false}
+            $settings: MenuItem.Item{name: "Settings" enabled: false}
+            $quit: MenuItem.Item{name: "Quit Makepad Studio" key: KeyCode.KeyQ}
+
+            $file: MenuItem.Sub{name: "File" items: [@new_file @new_window @line @save_as @line @rename @line @close_editor @close_window]}
+            $new_file: MenuItem.Item{name: "New File" enabled: false shift: true key: KeyCode.KeyN}
+            $new_window: MenuItem.Item{name: "New Window" enabled: false shift: true key: KeyCode.KeyN}
+            $save_as: MenuItem.Item{name: "Save As" enabled: false}
+            $rename: MenuItem.Item{name: "Rename" enabled: false}
+            $close_editor: MenuItem.Item{name: "Close Editor" enabled: false}
+            $close_window: MenuItem.Item{name: "Close Window" enabled: false}
+
+            $edit: MenuItem.Sub{name: "Edit" items: [@undo @redo @line @cut @copy @paste @line @find @replace @line @find_in_files @replace_in_files]}
+            $undo: MenuItem.Item{name: "Undo" enabled: false}
+            $redo: MenuItem.Item{name: "Redo" enabled: false}
+            $cut: MenuItem.Item{name: "Cut" enabled: false}
+            $copy: MenuItem.Item{name: "Copy" enabled: false}
+            $paste: MenuItem.Item{name: "Paste" enabled: false}
+            $find: MenuItem.Item{name: "Find" enabled: false}
+            $replace: MenuItem.Item{name: "Replace" enabled: false}
+            $find_in_files: MenuItem.Item{name: "Find in Files" enabled: false}
+            $replace_in_files: MenuItem.Item{name: "Replace in Files" enabled: false}
+
+            $selection: MenuItem.Sub{name: "Selection" items: [@select_all]}
+            $select_all: MenuItem.Item{name: "Select All" enabled: false}
+
+            $view: MenuItem.Sub{name: "View" items: [@zoom_in @zoom_out @fullscreen]}
+            $zoom_in: MenuItem.Item{name: "Zoom In" enabled: false}
+            $zoom_out: MenuItem.Item{name: "Zoom Out" enabled: false}
+            $fullscreen: MenuItem.Item{name: "Enter Full Screen" enabled: false}
+
+            $run: MenuItem.Sub{name: "Run" items: [@run_program]}
+            $run_program: MenuItem.Item{name: "Run Program" enabled: false}
+
+            $window: MenuItem.Sub{name: "Window" items: [@minimize @zoom @line @all_to_front]}
+            $minimize: MenuItem.Item{name: "Minimize" enabled: false}
+            $zoom: MenuItem.Item{name: "Zoom" enabled: false}
+            $all_to_front: MenuItem.Item{name: "Bring All to Front" enabled: false}
+
+            $help: MenuItem.Sub{name: "Help" items: [@about]}
+
+            $line: MenuItem.Line
+        }
+        $body +: {
+            padding: 5
+            $dock: DockFlat{
+                width: Fill height: Fill
+
+                tab_bar +: {
+                    $OutlineFirstTab: OutlineFirstTab{}
+                    $EditFirstTab: EditFirstTab{}
+                    $AiFirstTab: AiFirstTab{}
+                    $DesignFirstTab: DesignFirstTab{}
+                    $FilesTab: FilesTab{}
+                    $RunFirstTab: RunFirstTab{}
+                    $RunListTab: RunListTab{}
+                    $SnapshotTab: SnapshotTab{}
+                    $LogTab: LogTab{}
+                    $ProfilerTab: ProfilerTab{}
+                    $SearchTab: SearchTab{}
                 }
-    
-                split2 = Splitter {
-                    axis: Horizontal,
-                    align: Weighted(0.5),
-                    a: edit_tabs,
-                    b: split3
+
+                $root: DockSplitter{
+                    axis: SplitterAxis.Horizontal
+                    align: SplitterAlign.FromA(250.0)
+                    a: $file_tree_tabs
+                    b: $split1
                 }
-                split3 = Splitter {
-                    axis: Horizontal,
-                    align: FromA(20),
-                    a: split4,
-                    b: run_tabs
+
+                $split1: DockSplitter{
+                    axis: SplitterAxis.Vertical
+                    align: SplitterAlign.FromB(200.0)
+                    a: $edit_tabs
+                    b: $log_tabs
                 }
-                split4 = Splitter {
-                    axis: Horizontal,
-                    align: Weighted(0.5),
-                    a: outline_tabs,
-                    b: design_tabs
-                }
-                /*
-                split3 = Splitter {
-                    axis: Horizontal,
-                    align: Weighted(0.5),
-                    a: design_tabs,
-                    b: run_tabs
-                }*/
-    
-                file_tree_tabs = Tabs {
-                    tabs: [file_tree_tab, run_list_tab, search, snapshot_tab],
+
+                $file_tree_tabs: DockTabs{
+                    tabs: [$file_tree_tab]
                     selected: 0
                 }
-    
-                edit_tabs = Tabs {
-                    tabs: [edit_first],
+
+                $edit_tabs: DockTabs{
+                    tabs: [$edit_first]
                     selected: 0
                 }
-                
-                design_tabs = Tabs {
-                    tabs: [design_first],
+
+                $log_tabs: DockTabs{
+                    tabs: []
                     selected: 0
                 }
-                
-                outline_tabs = Tabs {
-                    tabs: [outline_first],
-                    selected: 0
+
+                $file_tree_tab: DockTab{
+                    name: "Files"
+                    template: $FilesTab
+                    kind: $StudioFileTree
                 }
-                
-                log_tabs = Tabs {
-                    tabs: [log_list_tab, profiler],
-                    selected: 0
+
+                $edit_first: DockTab{
+                    name: ""
+                    template: $EditFirstTab
+                    kind: $EditFirst
                 }
-    
-                run_tabs = Tabs {
-                    tabs: [run_first,ai_first],
-                    selected: 0
+
+                $log_list_tab: DockTab{
+                    name: "Log"
+                    template: $LogTab
+                    kind: $LogList
                 }
-                /*
-                design_tabs = Tabs {
-                    tabs: [design_first],
-                    selected: 0
-                }*/
-    
-                file_tree_tab = Tab {
-                    name: "Files",
-                    template: FilesTab,
-                    kind: StudioFileTree
-                }
-    
-                search = Tab {
+
+                $search: DockTab{
                     name: "Search"
-                    template: SearchTab,
-                    kind: Search
+                    template: $SearchTab
+                    kind: $Search
                 }
-    
-                run_first = Tab {
+
+                $run_first: DockTab{
                     name: ""
-                    template: RunFirstTab,
-                    kind: RunFirst
+                    template: $RunFirstTab
+                    kind: $RunFirst
                 }
-    
-                design_first = Tab {
+
+                $design_first: DockTab{
                     name: ""
-                    template: DesignFirstTab,
-                    kind: DesignFirst
+                    template: $DesignFirstTab
+                    kind: $DesignFirst
                 }
-    
-                edit_first = Tab {
+
+                $ai_first: DockTab{
                     name: ""
-                    template: EditFirstTab,
-                    kind: EditFirst
+                    template: $AiFirstTab
+                    kind: $AiFirst
                 }
-                ai_first = Tab {
+
+                $outline_first: DockTab{
                     name: ""
-                    template: AiFirstTab,
-                    kind: AiFirst
+                    template: $OutlineFirstTab
+                    kind: $OutlineFirst
                 }
-                outline_first = Tab {
-                    name: ""
-                    template: OutlineFirstTab,
-                    kind: OutlineFirst
-                }
-    
-                run_list_tab = Tab {
+
+                $run_list_tab: DockTab{
                     name: "Run"
-                    template: RunListTab,
-                    kind: RunList
+                    template: $RunListTab
+                    kind: $RunList
                 }
-                snapshot_tab = Tab {
+
+                $snapshot_tab: DockTab{
                     name: "Snapshot"
-                    template: SnapshotTab,
-                    kind: Snapshot
+                    template: $SnapshotTab
+                    kind: $Snapshot
                 }
-                log_list_tab = Tab {
-                    name: "Log",
-                    template: LogTab,
-                    kind: LogList
+
+                $profiler: DockTab{
+                    name: "Profiler"
+                    template: $ProfilerTab
+                    kind: $Profiler
                 }
-    
-                profiler = Tab {
-                    name: "Profiler",
-                    template: ProfilerTab,
-                    kind: Profiler
-                }
-    
-                CodeEditor = <View> {
-                    flow: Down,
-                    <DockToolbar> {
-                        content = {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_1)
-                            flow: Right,
-                            margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
-    
-                            <ButtonFlatter> { width: Fit, text: "File"}
-                            <ButtonFlatter> { width: Fit, text: "Edit"}
-                            <ButtonFlatter> { width: Fit, text: "Search"}
-                            <ButtonFlatter> { width: Fit, text: "Debug"}
-                            <Filler> {}
-                            <LinkLabel> { width: Fit, text: "Docs", url: "https://publish.obsidian.md/makepad-docs"}
-                        }
-                    }
-                    editor = <StudioCodeEditor> {} 
-                }
-                
-                AiChat = <AiChatView> {
-                    flow: Down,
-                }
-                
-                EditFirst = <RectView> {
-                    draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
-                    <View> {
-                        width: Fill, height: Fill,
-                        align: { x: 0., y: 0. }
-                        flow: Down
-                        <DockToolbar> { content = <DockSettings> {} }
-                        <View> {
-                            width: Fill, height: Fill,
-                            align: { x: 0.5, y: 0.5 }
-                            <Logo> {}
-                        }
-                        
-                        // <H3> {
-                        //     width: Fit,
-                        //     text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
-                        //     margin: {left: 185}
-                        // }
-                    }
-                }
-                OutlineFirst = <RectView> {
-                    draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
-                    <View> {
-                        width: Fill, height: Fill,
-                        align: { x: 0.5, y: 0.5 }
-                        flow: Down
-                        <DockToolbar> { content = <DockSettings> {} }
-                        <View> {
-                            width: Fill, height: Fill,
-                            align: { x: 0.5, y: 0.5 }
-                            <Logo> {}
-                        }
-                    }
-                }
-                DesignFirst = <RectView> {
-                    draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
-                    <View> {
-                        width: Fill, height: Fill
-                        flow: Down
-                        <DockToolbar> { content = <DockSettings> {} }
-                        <View> {
-                            width: Fill, height: Fill,
-                            align: { x: 0.5, y: 0.5 }
-                            <Logo> {}
-                        }
-                    }
-                }
-                AiFirst = <RectView> {
-                    draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
-                    <View> {
-                        width: Fill, height: Fill
-                        flow: Down
-                        <DockToolbar> { content = <DockSettings> {} }
-                        <View> {
-                            width: Fill, height: Fill,
-                            align: { x: 0.5, y: 0.5 }
-                            <Logo> {}
-                        }
-                    }
-                }
-                RunFirst = <RectView> {
-                    draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
-                    <View> {
-                        width: Fill, height: Fill,
-                        flow: Down
-                        <DockToolbar> { content = <DockSettings> {} }
-                        <View> {
-                            width: Fill, height: Fill,
-                            align: { x: 0.5, y: 0.5 }
-                            <Logo> {}
-                        }
-                    }
-                }
-                RunList = <View> {
-                    flow: Down,
-                    margin: 0.,
-                    padding: 0.,
-                    <DockToolbar> {
-                        content = {
-                            <Pbold> {
-                                width: Fit,
-                                text: "Types",
-                                margin: 0.,
-                                padding: <THEME_MSPACE_1> {}
-                            }
-                            <ToggleFlat> { text: "Release", }
-                            <ToggleFlat> { text: "Debug"}
-                        }
-                    }
-                    <RunList> {}
-                }
-                Snapshot = <Snapshot> {}
-                Search = <Search> {}
-                RunView = <RunView> {}
-                StudioFileTree = <View> {
-                    flow: Down,
-                    <DockToolbar> {
-                        content = {
-                            <TextInputFlat> {
-                                width: Fill,
-                                empty_text: "Filter",
-                            }
-                        }
-                    }
-                    file_tree = <StudioFileTree> {}
-                }
-                LogList = <View> {
-                    flow: Down,
-                    <DockToolbar> {
-                        content = {
-                            align: { x: 0., y: 0.5 }
-                            <View> {
-                                width: Fit
-                                flow: Right,
-                                <CheckBoxCustom> {
-                                    text:"Error"
-                                    align: { y: 0.5 }
-                                    draw_bg: { check_type: None }
-                                    icon_walk: {width: 7.}
-                                    draw_icon: {
-                                        color: ((THEME_COLOR_LABEL_OUTER)),
-                                        color_active: (STUDIO_PALETTE_4),
-                                        svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
-                                    }
-                                }
-                                <CheckBoxCustom> {
-                                    text:"Warning"
-                                    align: { y: 0.5 }
-                                    draw_bg: { check_type: None }
-                                    icon_walk: {width: 7.}
-                                    draw_icon: {
-                                        color: ((THEME_COLOR_LABEL_OUTER)),
-                                        color_active: (STUDIO_PALETTE_1),
-                                        svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
-                                    }
-                                }
-                                <CheckBoxCustom> {
-                                    text:"Log"
-                                    align: { y: 0.5 }
-                                    draw_bg: { check_type: None }
-                                    icon_walk: {width: 7.}
-                                    draw_icon: {
-                                        color: ((THEME_COLOR_LABEL_OUTER)),
-                                        color_active: (THEME_COLOR_U_5),
-                                        svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
-                                    }
-                                }
-                                <CheckBoxCustom> {
-                                    text:"Wait"
-                                    align: { y: 0.5 }
-                                    draw_bg: { check_type: None }
-                                    icon_walk: {width: 7.}
-                                    draw_icon: {
-                                        color: ((THEME_COLOR_LABEL_OUTER)),
-                                        color_active: (STUDIO_PALETTE_2),
-                                        svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
-                                    }
-                                }
-                                <CheckBoxCustom> {
-                                    text:"Panic"
-                                    align: { y: 0.5 }
-                                    draw_bg: { check_type: None }
-                                    icon_walk: {width: 7.}
-                                    draw_icon: {
-                                        color: ((THEME_COLOR_LABEL_OUTER)),
-                                        color_active: (STUDIO_PALETTE_5),
-                                        svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
-                                    }
-                                }
-                            }
-                            <Filler> {}
-                            <TextInputFlat> {
-                                width: 200.
-                                empty_text: "Filter",
-                            }
-                        }
-                    }
-                    log_list = <LogList> {}
-                }
-                Profiler = <Profiler> {
-                    flow: Down,
-                }
+
+                // Content templates (kind)
+                $CodeEditor: CodeEditorContent{}
+                $AiChat: AiChatContent{}
+                $EditFirst: EditFirstContent{}
+                $OutlineFirst: OutlineFirstContent{}
+                $DesignFirst: DesignFirstContent{}
+                $AiFirst: AiFirstContent{}
+                $RunFirst: RunFirstContent{}
+                $RunList: RunListContent{}
+                $Snapshot: SnapshotContent{}
+                $Search: SearchContent{}
+                $RunView: RunViewContent{}
+                $StudioFileTree: StudioFileTreeContent{}
+                $LogList: LogListContent{}
+                $Profiler: ProfilerContent{}
             }
         }
     }

@@ -2,18 +2,17 @@ use {
     crate::{
         app::AppAction,
         build_manager::{build_client::BuildClient, build_protocol::*},
-        file_system::file_system::FileSystem,
+        file_system::file_system::{FileSystem, LiveFileChange},
         makepad_file_server::FileSystemRoots,
         makepad_micro_serde::*,
-        makepad_platform::makepad_live_compiler::LiveFileChange,
+        // Using stub LiveFileChange from file_system module
         makepad_platform::os::cx_stdin::{
             HostToStdin, StdinKeyModifiers, StdinMouseDown, StdinMouseMove, StdinMouseUp,
             StdinScroll, StdinToHost,
         },
         makepad_platform::studio::{
-            DesignerComponentPosition,
-            DesignerZoomPan,
-            AppToStudio, AppToStudioVec, EventSample, GPUSample, StudioToApp, StudioToAppVec,
+            AppToStudio, AppToStudioVec, DesignerComponentPosition, DesignerZoomPan, EventSample,
+            GPUSample, StudioToApp, StudioToAppVec,
         },
         makepad_shell::*,
         makepad_widgets::*,
@@ -95,10 +94,10 @@ pub struct ActiveBuilds {
 }
 
 impl ActiveBuilds {
-    pub fn builds_with_root(&self, root:String)->impl Iterator<Item = (&LiveId,&ActiveBuild)>{
-        self.builds.iter().filter(move |(_,b)| b.root == root)
+    pub fn builds_with_root(&self, root: String) -> impl Iterator<Item = (&LiveId, &ActiveBuild)> {
+        self.builds.iter().filter(move |(_, b)| b.root == root)
     }
-    
+
     pub fn item_id_active(&self, item_id: LiveId) -> bool {
         self.builds.get(&item_id).is_some()
     }
@@ -141,62 +140,64 @@ pub struct BuildManager {
 }
 
 #[derive(Default)]
-pub struct ActiveBuildWebSockets{
-    pub sockets: Vec<ActiveBuildSocket>
+pub struct ActiveBuildWebSockets {
+    pub sockets: Vec<ActiveBuildSocket>,
 }
 
-impl ActiveBuildWebSockets{
-    pub fn send_studio_to_app(&mut self, build_id: LiveId, msg:StudioToApp){
-        if let Some(socket) = self.sockets.iter_mut().find(|v| v.build_id == build_id){
+impl ActiveBuildWebSockets {
+    pub fn send_studio_to_app(&mut self, build_id: LiveId, msg: StudioToApp) {
+        if let Some(socket) = self.sockets.iter_mut().find(|v| v.build_id == build_id) {
             let data = StudioToAppVec(vec![msg]).serialize_bin();
             let _ = socket.sender.send(data.clone());
         }
     }
 }
 
-pub struct ActiveBuildSocket{
-    web_socket_id: u64, 
-    build_id: LiveId, 
-    sender: mpsc::Sender<Vec<u8>>
+pub struct ActiveBuildSocket {
+    web_socket_id: u64,
+    build_id: LiveId,
+    sender: mpsc::Sender<Vec<u8>>,
 }
 
 #[derive(Default, SerRon, DeRon)]
-pub struct DesignerState{
-    state: HashMap<LiveId, DesignerStatePerBuildId>
+pub struct DesignerState {
+    state: HashMap<LiveId, DesignerStatePerBuildId>,
 }
 
 #[derive(Default, SerRon, DeRon)]
-pub struct DesignerStatePerBuildId{
+pub struct DesignerStatePerBuildId {
     selected_file: String,
     zoom_pan: DesignerZoomPan,
-    component_positions: Vec<DesignerComponentPosition>
+    component_positions: Vec<DesignerComponentPosition>,
 }
 
-impl DesignerState{
-    fn save_state(&self){
+impl DesignerState {
+    fn save_state(&self) {
         let saved = self.serialize_ron();
         let mut f = File::create("makepad_designer.ron").expect("Unable to create file");
         f.write_all(saved.as_bytes()).expect("Unable to write data");
     }
-        
-    fn load_state(&mut self){
+
+    fn load_state(&mut self) {
         if let Ok(contents) = std::fs::read_to_string("makepad_designer.ron") {
             match DesignerState::deserialize_ron(&contents) {
-                Ok(state)=>{
-                    *self = state
-                }
-                Err(e)=>{
-                    println!("ERR {:?}",e);
+                Ok(state) => *self = state,
+                Err(e) => {
+                    println!("ERR {:?}", e);
                 }
             }
         }
     }
-    
-    fn get_build_storage<F:FnOnce(&mut DesignerStatePerBuildId)>(&mut self, build_id: LiveId, f:F){
+
+    fn get_build_storage<F: FnOnce(&mut DesignerStatePerBuildId)>(
+        &mut self,
+        build_id: LiveId,
+        f: F,
+    ) {
         match self.state.entry(build_id) {
             hash_map::Entry::Occupied(mut v) => {
                 f(v.get_mut());
-            },
+            }
             hash_map::Entry::Vacant(v) => {
                 let mut db = DesignerStatePerBuildId::default();
                 f(&mut db);
@@ -212,9 +213,13 @@ pub struct BuildBinary {
     pub name: String,
 }
 
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum BuildManagerAction {
-    StdinToHost { build_id: LiveId, msg: StdinToHost },
+    StdinToHost {
+        build_id: LiveId,
+        msg: StdinToHost,
+    },
+    #[default]
     None,
 }
 
@@ -224,12 +229,12 @@ pub enum BuildManagerAction {
 // But it requires the ability to access external networks.
 fn get_local_ip() -> String {
     /*let ipv6 = UdpSocket::bind("[::]:0")
-        .and_then(|socket| {
-            socket.connect("[2001:4860:4860::8888]:80")?;
-            socket.local_addr()
-        })
-        .ok();
-*/
+            .and_then(|socket| {
+                socket.connect("[2001:4860:4860::8888]:80")?;
+                socket.local_addr()
+            })
+            .ok();
+    */
     let ipv4 = UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {
             socket.connect("8.8.8.8:80")?;
@@ -255,7 +260,7 @@ impl BuildManager {
         //self.studio_http = format!("http://172.20.10.4:{}/$studio_web_socket", self.http_port);
         // self.studio_http = format!("http://127.0.0.1:{}/$studio_web_socket", self.http_port);
         self.studio_http = format!("http://{}:{}/$studio_web_socket", local_ip, self.http_port);
-        
+
         println!("Studio http : {:?}", self.studio_http);
         self.tick_timer = cx.start_interval(0.008);
         self.roots = roots;
@@ -272,7 +277,7 @@ impl BuildManager {
 
     pub fn update_run_list(&mut self, _cx: &mut Cx) {
         self.binaries.clear();
-        for (root_name, root_path) in &self.roots.roots{
+        for (root_name, root_path) in &self.roots.roots {
             match shell_env_cap(&[], root_path, "cargo", &["run", "--bin"]) {
                 Ok(_) => {}
                 // we expect it on stderr
@@ -357,7 +362,7 @@ impl BuildManager {
             view.recompile_started(cx);
         }*/
     }
-    
+
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
         // lets send this filechange to all our stdin stuff
         /*for item_id in self.active.builds.keys() {
@@ -367,38 +372,36 @@ impl BuildManager {
             }.to_json()));
         }*/
         // alright what do we need to do here.
-        
+
         // so first off we need to find the root this thing belongs to
         // if its 'makepad' we might need to send over 2 file names
         // one local to the repo and one full path
-        
+
         if let Ok(d) = self.active_build_websockets.lock() {
             // ok so. if we have a makepad repo file
             // we send over the full path and the stripped path
             // if not makepad, we have to only send it to the right project
-            
+
             for socket in d.borrow_mut().sockets.iter_mut() {
                 // alright so we have a file_name which includes a 'root'
                 // we also have this build_id which contains a root.
                 // if they are the same, we strip it
                 // if they are not, we send over the full path
-                let file_name = if let Some(build) = self.active.builds.get(&socket.build_id){
-                    let mut parts = live_file_change.file_name.splitn(2,"/");
+                let file_name = if let Some(build) = self.active.builds.get(&socket.build_id) {
+                    let mut parts = live_file_change.file_name.splitn(2, "/");
                     let root = parts.next().unwrap();
                     let file = parts.next().unwrap();
                     // file local to the connection
-                    if root == build.root{ 
+                    if root == build.root {
                         file.to_string()
                     }
                     // nonlocal file, make full path
-                    else if let Ok(root) = self.roots.find_root(root){
+                    else if let Ok(root) = self.roots.find_root(root) {
                         root.join(file).into_os_string().into_string().unwrap()
-                    }
-                    else{
+                    } else {
                         file.to_string()
                     }
-                }
-                else{
+                } else {
                     live_file_change.file_name.clone()
                 };
                 let data = StudioToAppVec(vec![StudioToApp::LiveChange {
@@ -421,17 +424,16 @@ impl BuildManager {
         if let Some(_) = self.tick_timer.is_event(event) {
             self.broadcast_to_stdin(HostToStdin::Tick);
         }
-        
-        if let Some(_) = self.websocket_alive_timer.is_event(event){
+
+        if let Some(_) = self.websocket_alive_timer.is_event(event) {
             if let Ok(d) = self.active_build_websockets.lock() {
                 for socket in d.borrow_mut().sockets.iter_mut() {
-                    let data = StudioToAppVec(vec![StudioToApp::KeepAlive])
-                    .serialize_bin();
+                    let data = StudioToAppVec(vec![StudioToApp::KeepAlive]).serialize_bin();
                     let _ = socket.sender.send(data.clone());
                 }
             }
         }
-        
+
         match event {
             Event::MouseDown(e) => {
                 // we should only send this if it was captured by one of our runviews
@@ -503,13 +505,12 @@ impl BuildManager {
                 for msg in msgs.0 {
                     match msg {
                         AppToStudio::LogItem(item) => {
-                            let file_name = if let Some(build) = active.builds.get(&build_id){
+                            let file_name = if let Some(build) = active.builds.get(&build_id) {
                                 self.roots.map_path(&build.root, &item.file_name)
-                            }
-                            else{
+                            } else {
                                 self.roots.map_path("", &item.file_name)
                             };
-                            
+
                             let start = text::Position {
                                 line_index: item.line_start as usize,
                                 byte_index: item.column_start as usize,
@@ -519,8 +520,7 @@ impl BuildManager {
                                 byte_index: item.column_end as usize,
                             };
                             //log!("{:?} {:?}", pos, pos + loc.length);
-                            if let Some(file_id) = file_system.path_to_file_node_id(&file_name)
-                            {
+                            if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
                                 match item.level {
                                     LogLevel::Warning => {
                                         file_system.add_decoration(
@@ -547,17 +547,24 @@ impl BuildManager {
                                     start,
                                     end,
                                     message: item.message,
-                                    explanation: item.explanation
+                                    explanation: item.explanation,
                                 }),
                             ));
                             cx.action(AppAction::RedrawLog)
                         }
-                        AppToStudio::Screenshot(screenshot)=>{
+                        AppToStudio::Screenshot(screenshot) => {
                             // lets throw the screenshot to disk as jpg
                             // alright lets save it for fun
-                            if let Some(build) = active.builds.get(&build_id){
-                                if let Some(image) = screenshot.image{
-                                    file_system.save_snapshot_image(cx, &build.root,"qtest",screenshot.width as _, screenshot.height as _, image)
+                            if let Some(build) = active.builds.get(&build_id) {
+                                if let Some(image) = screenshot.image {
+                                    file_system.save_snapshot_image(
+                                        cx,
+                                        &build.root,
+                                        "qtest",
+                                        screenshot.width as _,
+                                        screenshot.height as _,
+                                        image,
+                                    )
                                 }
                             }
                         }
@@ -586,49 +593,50 @@ impl BuildManager {
                             // alright now what do we do
                             cx.action(AppAction::SwapSelection(ss));
                         }
-                        AppToStudio::DesignerComponentMoved(mv)=>{
-                            self.designer_state.get_build_storage(build_id, |bs|{
-                                if let Some(v) =  bs.component_positions.iter_mut().find(|v| v.id == mv.id){
+                        AppToStudio::DesignerComponentMoved(mv) => {
+                            self.designer_state.get_build_storage(build_id, |bs| {
+                                if let Some(v) =
+                                    bs.component_positions.iter_mut().find(|v| v.id == mv.id)
+                                {
                                     *v = mv;
-                                }
-                                else{
+                                } else {
                                     bs.component_positions.push(mv);
                                 }
                             });
                             self.designer_state.save_state();
                         }
-                        AppToStudio::DesignerZoomPan(zp)=>{
-                            self.designer_state.get_build_storage(build_id, |bs|{
+                        AppToStudio::DesignerZoomPan(zp) => {
+                            self.designer_state.get_build_storage(build_id, |bs| {
                                 bs.zoom_pan = zp;
                             });
                             self.designer_state.save_state();
                         }
-                        AppToStudio::DesignerStarted=>{
+                        AppToStudio::DesignerStarted => {
                             // send the app the select file init message
                             if let Ok(d) = self.active_build_websockets.lock() {
-                                if let Some(bs) = self.designer_state.state.get(&build_id){
+                                if let Some(bs) = self.designer_state.state.get(&build_id) {
                                     let data = StudioToAppVec(vec![
-                                        StudioToApp::DesignerLoadState{
+                                        StudioToApp::DesignerLoadState {
                                             zoom_pan: bs.zoom_pan.clone(),
-                                            positions: bs.component_positions.clone()
+                                            positions: bs.component_positions.clone(),
                                         },
                                         StudioToApp::DesignerSelectFile {
-                                            file_name: bs.selected_file.clone()
+                                            file_name: bs.selected_file.clone(),
                                         },
-                                    ]).serialize_bin();
-                                    
+                                    ])
+                                    .serialize_bin();
+
                                     for socket in d.borrow_mut().sockets.iter_mut() {
-                                        if socket.build_id == build_id{
+                                        if socket.build_id == build_id {
                                             let _ = socket.sender.send(data.clone());
                                         }
                                     }
                                 }
                             }
-                            
                         }
-                        AppToStudio::DesignerFileSelected{file_name}=>{
-                            // alright now what. lets 
-                            self.designer_state.get_build_storage(build_id, |bs|{
+                        AppToStudio::DesignerFileSelected { file_name } => {
+                            // alright now what. lets
+                            self.designer_state.get_build_storage(build_id, |bs| {
                                 bs.selected_file = file_name;
                             });
                             self.designer_state.save_state();
@@ -640,10 +648,9 @@ impl BuildManager {
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv() {
                 match wrap.message {
                     BuildClientMessage::LogItem(LogItem::Location(mut loc)) => {
-                        loc.file_name = if let Some(build) = active.builds.get(&wrap.cmd_id){
+                        loc.file_name = if let Some(build) = active.builds.get(&wrap.cmd_id) {
                             self.roots.map_path(&build.root, &loc.file_name)
-                        }
-                        else{
+                        } else {
                             self.roots.map_path("", &loc.file_name)
                         };
                         if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
@@ -802,10 +809,11 @@ impl BuildManager {
                                     .lock()
                                     .unwrap()
                                     .borrow_mut()
-                                    .sockets.push(ActiveBuildSocket{
-                                        web_socket_id, 
-                                        build_id: LiveId(id), 
-                                        sender: response_sender
+                                    .sockets
+                                    .push(ActiveBuildSocket {
+                                        web_socket_id,
+                                        build_id: LiveId(id),
+                                        sender: response_sender,
                                     });
                             }
                         }
@@ -816,9 +824,10 @@ impl BuildManager {
                             .lock()
                             .unwrap()
                             .borrow_mut()
-                            .sockets.retain(|v| v.web_socket_id != web_socket_id);
+                            .sockets
+                            .retain(|v| v.web_socket_id != web_socket_id);
                     }
-                    HttpServerRequest::TextMessage {..}=>(),
+                    HttpServerRequest::TextMessage { .. } => (),
                     HttpServerRequest::BinaryMessage {
                         web_socket_id,
                         response_sender: _,
@@ -975,69 +984,75 @@ impl BuildManager {
             }
         });
     }
-    
-            
-    pub fn binary_name_to_id(&self, name:&str)->Option<usize>{
+
+    pub fn binary_name_to_id(&self, name: &str) -> Option<usize> {
         self.binaries.iter().position(|v| v.name == name)
     }
-        
-    pub fn run_app(&mut self, cx:&mut Cx, binary_name:&str){
+
+    pub fn run_app(&mut self, cx: &mut Cx, binary_name: &str) {
         let binary_id = self.binary_name_to_id(binary_name).unwrap();
         self.start_active_build(cx, binary_id, BuildTarget::Release);
     }
-            
-    pub fn start_active_build(&mut self, _cx:&mut Cx, binary_id:usize, target: BuildTarget) {
-        let binary = &self. binaries[binary_id];
+
+    pub fn start_active_build(&mut self, _cx: &mut Cx, binary_id: usize, target: BuildTarget) {
+        let binary = &self.binaries[binary_id];
         let process = BuildProcess {
             root: binary.root.clone(),
             binary: binary.name.clone(),
-            target
+            target,
         };
         let item_id = process.as_id();
-        self.clients[0].send_cmd_with_id(item_id, BuildCmd::Run(process.clone(),self.studio_http.clone()));
+        self.clients[0].send_cmd_with_id(
+            item_id,
+            BuildCmd::Run(process.clone(), self.studio_http.clone()),
+        );
         //let run_view_id = LiveId::unique();
         if self.active.builds.get(&item_id).is_none() {
             let index = self.active.builds.len();
-            self.active.builds.insert(item_id, ActiveBuild {
-                root: binary.root.clone(),
-                log_index: format!("[{}]", index),
-                process: process.clone(),
-                app_area: Default::default(),
-                swapchain: Default::default(),
-                last_swapchain_with_completed_draws: Default::default(),
-                aux_chan_host_endpoint: None,
-            });
+            self.active.builds.insert(
+                item_id,
+                ActiveBuild {
+                    root: binary.root.clone(),
+                    log_index: format!("[{}]", index),
+                    process: process.clone(),
+                    app_area: Default::default(),
+                    swapchain: Default::default(),
+                    last_swapchain_with_completed_draws: Default::default(),
+                    aux_chan_host_endpoint: None,
+                },
+            );
         }
         //if process.target.runs_in_studio(){
-            // create the runview tab
+        // create the runview tab
         //    cx.action(AppA::Create(item_id, process.binary.clone()))
         //}
     }
-    
-    pub fn stop_all_active_builds(&mut self, cx:&mut Cx){
-        while self.active.builds.len()>0{
+
+    pub fn stop_all_active_builds(&mut self, cx: &mut Cx) {
+        while self.active.builds.len() > 0 {
             let build = &self.active.builds.values().next().unwrap();
             let binary_id = self.binary_name_to_id(&build.process.binary).unwrap();
             let target = build.process.target;
             self.stop_active_build(cx, binary_id, target);
         }
     }
-        
-    pub fn stop_active_build(&mut self, cx:&mut Cx, binary_id: usize, target: BuildTarget) {
-        let binary = &self. binaries[binary_id];
-                
+
+    pub fn stop_active_build(&mut self, cx: &mut Cx, binary_id: usize, target: BuildTarget) {
+        let binary = &self.binaries[binary_id];
+
         let process = BuildProcess {
             root: binary.root.clone(),
             binary: binary.name.clone(),
-            target
+            target,
         };
         let build_id = process.as_id().into();
         if let Some(_) = self.active.builds.remove(&build_id) {
             self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
-            if process.target.runs_in_studio(){
-                cx.action(AppAction::DestroyRunViews{run_view_id:build_id})
+            if process.target.runs_in_studio() {
+                cx.action(AppAction::DestroyRunViews {
+                    run_view_id: build_id,
+                })
             }
         }
     }
-    
 }
