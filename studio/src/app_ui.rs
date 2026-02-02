@@ -22,7 +22,7 @@ script_mod! {
             shadow_color: theme.color_shadow
             shadow_radius: 7.5
             shadow_offset: vec2(0.0, 0.0)
-            color: theme.color_fg_app
+            color: #f00
         }
         $content: View {
             height: Fill
@@ -52,7 +52,8 @@ script_mod! {
 
     let IconTab = TabFlat{
         closeable: false
-        icon_walk: Walk{width: 15. height: 15.}
+        spacing: theme.space_1
+        icon_walk: Walk{width: Fit height: 18.}
     }
 
     let Vr = View{
@@ -135,11 +136,6 @@ script_mod! {
     let STUDIO_PALETTE_7 = #FFD864
 
     let OutlineFirstTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 10.
-            margin: Inset{top: 3. left: 5.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_1
             svg: crate_resource("self://resources/icons/icon_outliner.svg")
@@ -147,11 +143,6 @@ script_mod! {
     }
 
     let EditFirstTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 5.
-            margin: Inset{top: 3. left: 5.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_6
             svg: crate_resource("self://resources/icons/icon_editor.svg")
@@ -159,11 +150,6 @@ script_mod! {
     }
 
     let AiFirstTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 8.
-            margin: Inset{top: 3.5 left: 5.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_6
             svg: crate_resource("self://resources/icons/icon_auto.svg")
@@ -171,11 +157,6 @@ script_mod! {
     }
 
     let DesignFirstTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 11.
-            margin: Inset{top: 3. left: 5.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_3
             svg: crate_resource("self://resources/icons/icon_designer.svg")
@@ -183,11 +164,6 @@ script_mod! {
     }
 
     let FilesTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 8.5
-            margin: Inset{top: 4.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_2
             svg: crate_resource("self://resources/icons/icon_file.svg")
@@ -195,11 +171,6 @@ script_mod! {
     }
 
     let RunFirstTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 11.
-            margin: Inset{top: 6. left: 5.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_4
             svg: crate_resource("self://resources/icons/icon_tab_app.svg")
@@ -207,11 +178,6 @@ script_mod! {
     }
 
     let RunListTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 7.
-            margin: Inset{top: 5.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_5
             svg: crate_resource("self://resources/icons/icon_run.svg")
@@ -219,11 +185,6 @@ script_mod! {
     }
 
     let SnapshotTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 7.
-            margin: Inset{top: 4.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_5
             svg: crate_resource("self://resources/icons/icon_run.svg")
@@ -231,11 +192,6 @@ script_mod! {
     }
 
     let LogTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 9.5
-            margin: Inset{top: 7.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_2
             svg: crate_resource("self://resources/icons/icon_log.svg")
@@ -243,11 +199,6 @@ script_mod! {
     }
 
     let ProfilerTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 9.
-            margin: Inset{top: 4.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_7
             svg: crate_resource("self://resources/icons/icon_profiler.svg")
@@ -255,11 +206,6 @@ script_mod! {
     }
 
     let SearchTab = IconTab{
-        spacing: theme.space_2
-        icon_walk: Walk{
-            width: 10.5
-            margin: Inset{top: 4.}
-        }
         draw_icon +: {
             color: STUDIO_PALETTE_3
             svg: crate_resource("self://resources/icons/icon_search.svg")
