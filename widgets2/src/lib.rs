@@ -93,15 +93,16 @@ pub mod slides_view;
 pub mod tooltip;
 #[cfg(target_os = "android")]
 pub mod video;
-// pub mod toggle_panel;
-pub mod defer_with_redraw;
 
-// pub mod slide_panel;
-// pub mod flat_list;
-// pub mod command_text_input;
+pub mod command_text_input;
+pub mod defer_with_redraw;
+pub mod slide_panel;
+
+pub mod flat_list;
 
 // Commented out modules (not yet converted)
-// going to skip for now
+// lets depricate these for now
+// pub mod toggle_panel;
 // pub mod vectorline;
 // pub mod web_view;
 // pub mod rotated_image;
@@ -120,6 +121,7 @@ pub mod defer_with_redraw;
 
 pub use crate::{
     adaptive_view::*,
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
     // loading_spinner - no public exports
     bare_step::*,
     button::*,
@@ -131,6 +133,7 @@ pub use crate::{
     drop_down::*,
     expandable_panel::*,
     file_tree::*,
+    flat_list::*,
 
     fold_button::*,
     fold_header::*,
@@ -157,6 +160,7 @@ pub use crate::{
     scroll_bar::ScrollBar,
     scroll_bars::ScrollBars,
     scroll_shadow::*,
+    slide_panel::*,
     slider::*,
     slides_view::*,
 
@@ -288,7 +292,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::video::script_mod(vm);
     crate::page_flip::script_mod(vm);
     crate::file_tree::script_mod(vm);
+    crate::flat_list::script_mod(vm);
     crate::slides_view::script_mod(vm);
+    crate::slide_panel::script_mod(vm);
 
     #[cfg(feature = "html")]
     crate::html::script_mod(vm);
@@ -305,8 +311,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 ..mod.pod,
                 ..mod.math,
                 ..mod.sdf,
-                mod.theme,
-                mod.draw,
+                theme:mod.theme,
+                draw:mod.draw,
                 ..mod.animator,
                 ..mod.animator.Play,
                 ..mod.animator.Ease,

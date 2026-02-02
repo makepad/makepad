@@ -18,24 +18,24 @@ script_mod!{
             }
                         
             // This approximates the error function, needed for the gaussian integral
-            erf_vec2: fn(x0:vec2)->vec2 {
+            fn erf_vec2(x0:vec2)->vec2 {
                 let s = sign(x0);
                 let a = abs(x0);
-                let x1 = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+                let mut x1 = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
                 x1 *= x1;
                 return s - s / (x1 * x1);
             }
             
-            erf_vec4: fn(x0:vec4)->vec4 {
+            fn erf_vec4(x0:vec4)->vec4 {
                 let s = sign(x0);
                 let a = abs(x0);
-                let x1 = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+                let mut x1 = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
                 x1 *= x1;
                 return s - s / (x1 * x1);
             }
                         
             // Return the blurred mask along the x dimension
-            rounded_box_shadow_x: fn(x:float, y:float, sigma:float, corner:float, half_size:vec2)->float{
+            fn rounded_box_shadow_x(x:float, y:float, sigma:float, corner:float, half_size:vec2)->float{
                 let delta = min(half_size.y - corner - abs(y), 0.0);
                 let curved = half_size.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
                 let integral = 0.5 + 0.5 * erf_vec2((x + vec2(-curved, curved)) * (sqrt(0.5) / sigma));

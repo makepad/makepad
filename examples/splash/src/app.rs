@@ -411,6 +411,96 @@ script_mod! {
         }
     }
 
+    // SlidePanel tab - slide panel demo
+    let TabSlidePanel = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        flow: Overlay
+
+        // Main content area
+        View{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+
+            Label{text: "SlidePanel Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "Click buttons to slide panels in/out from different sides" draw_text.color: #888 draw_text.text_style.font_size: 10}
+
+            Hr{}
+
+            View{width: Fill height: Fit flow: Right spacing: 10}
+            $slide_left_btn: Button{text: "Toggle Left Panel"}
+            $slide_top_btn: Button{text: "Toggle Top Panel"}
+            $slide_right_btn: Button{text: "Toggle Right Panel"}
+
+            // Content area placeholder
+            View{
+                width: Fill height: Fill
+                align: Center
+                Label{text: "Main Content Area" draw_text.color: #666 draw_text.text_style.font_size: 14}
+            }
+        }
+
+        // Left slide panel
+        $left_panel: SlidePanel{
+            side: SlideSide.Left
+            width: 200
+            height: Fill
+
+            RoundedView{
+                width: Fill height: Fill
+                draw_bg.color: #456
+                draw_bg.radius: vec4(0.0 8.0 8.0 0.0)
+                padding: 15 flow: Down spacing: 10
+
+                Label{text: "Left Panel" draw_text.color: #fff draw_text.text_style.font_size: 12}
+                Label{text: "This panel slides in from the left side." draw_text.color: #aaa draw_text.text_style.font_size: 10}
+                Hr{}
+                CheckBox{text: "Option 1"}
+                CheckBox{text: "Option 2"}
+                CheckBox{text: "Option 3"}
+            }
+        }
+
+        // Top slide panel
+        $top_panel: SlidePanel{
+            side: SlideSide.Top
+            width: Fill
+            height: 120
+
+            RoundedView{
+                width: Fill height: Fill
+                draw_bg.color: #546
+                draw_bg.radius: vec4(0.0 0.0 8.0 8.0)
+                padding: 15 flow: Down spacing: 8
+
+                Label{text: "Top Panel" draw_text.color: #fff draw_text.text_style.font_size: 12}
+                Label{text: "This panel slides in from the top." draw_text.color: #aaa draw_text.text_style.font_size: 10}
+                View{width: Fill height: Fit flow: Right spacing: 10}
+                Button{text: "Action 1"}
+                Button{text: "Action 2"}
+            }
+        }
+
+        // Right slide panel
+        $right_panel: SlidePanel{
+            side: SlideSide.Right
+            width: 200
+            height: Fill
+
+            RoundedView{
+                width: Fill height: Fill
+                draw_bg.color: #564
+                draw_bg.radius: vec4(8.0 0.0 0.0 8.0)
+                padding: 15 flow: Down spacing: 10
+
+                Label{text: "Right Panel" draw_text.color: #fff draw_text.text_style.font_size: 12}
+                Label{text: "This panel slides in from the right side." draw_text.color: #aaa draw_text.text_style.font_size: 10}
+                Hr{}
+                Toggle{text: "Setting A"}
+                Toggle{text: "Setting B"}
+            }
+        }
+    }
+
     // SlidesView tab - slides presentation demo
     let TabSlides = SolidView{
         width: Fill height: Fill
@@ -622,7 +712,7 @@ script_mod! {
 
         // Bottom panel - containers/lists
         $bottom_tabs: DockTabs{
-            tabs: [$slides_tab, $filetree_tab $lists_tab, $folds_tab, $expandable_tab]
+            tabs: [$slidepanel_tab, $slides_tab, $filetree_tab $lists_tab, $folds_tab, $expandable_tab]
             selected: 0
             closable: true
         }
@@ -694,6 +784,12 @@ script_mod! {
             kind: $TabFileTree
         }
 
+        $slidepanel_tab: DockTab{
+            name: "SlidePanel"
+            template: $CloseableTab
+            kind: $TabSlidePanel
+        }
+
         $slides_tab: DockTab{
             name: "Slides"
             template: $CloseableTab
@@ -721,6 +817,7 @@ script_mod! {
         $TabFileTree: TabFileTree{
         }
         $TabSlides: TabSlides{}
+        $TabSlidePanel: TabSlidePanel{}
     }
 
     load_all_resources() do #(App::script_component(vm)){
@@ -908,6 +1005,20 @@ impl MatchEvent for App {
             self.ui
                 .label(ids!($modal_status))
                 .set_text(cx, "Modal status: Non-dismissable closed via button");
+        }
+
+        // SlidePanel tests
+        if self.ui.button(ids!($slide_left_btn)).clicked(actions) {
+            log!("Toggling left slide panel");
+            self.ui.slide_panel(ids!($left_panel)).toggle(cx);
+        }
+        if self.ui.button(ids!($slide_top_btn)).clicked(actions) {
+            log!("Toggling top slide panel");
+            self.ui.slide_panel(ids!($top_panel)).toggle(cx);
+        }
+        if self.ui.button(ids!($slide_right_btn)).clicked(actions) {
+            log!("Toggling right slide panel");
+            self.ui.slide_panel(ids!($right_panel)).toggle(cx);
         }
     }
 }
