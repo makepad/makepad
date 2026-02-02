@@ -1,4 +1,3 @@
-
 use {
     crate::{
         cx_2d::Cx2d,
@@ -24,14 +23,14 @@ use {
     std::{cell::RefCell, rc::Rc},
 };
 
-script_mod!{
+script_mod! {
     use mod.pod.*
     use mod.math.*
     use mod.shader.*
     use mod.draw
     use mod.geom
     use mod.res.*
-    
+
     mod.text = {
         let text = me
         FontFamily: mod.std.set_type_default() do #(FontFamily::script_component(vm))
@@ -44,32 +43,32 @@ script_mod!{
             line_spacing: 1.2
         }
     }
-    
+
     use mod.text.*
-    
+
     mod.draw.DrawText = mod.std.set_type_default() do #(DrawText::script_shader(vm)){
-        
+
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
-        
+
         draw_call: uniform_buffer(draw.DrawCallUniforms)
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
-        
+
         geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
-        
+
         color: #fff
-        
+
         pos: varying(vec2f)
         t: varying(vec2f)
         world: varying(vec4f)
-        
+
         radius: uniform(float)
         cutoff: uniform(float)
 
         grayscale_texture: texture_2d(float)
         color_texture: texture_2d(float)
-        
+
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
             let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
@@ -95,11 +94,11 @@ script_mod!{
         get_color: fn() {
             return self.color
         }
-        
+
         fragment: fn() {
             self.fb0 = self.pixel();
         }
-        
+
         pixel: fn() {
             let dxt = length(dFdx(self.t))
             let dyt = length(dFdy(self.t))
@@ -119,25 +118,41 @@ script_mod!{
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawText {
-    #[live] pub text_style: TextStyle,
-    #[live(1.0)] pub font_scale: f32,
-    #[live(1.0)] pub draw_depth: f32,
-    #[live] pub debug: bool,
-    
-    #[live] pub temp_y_shift: f32,
-    
-    #[deref] pub draw_vars: DrawVars,
-    #[live] pub rect_pos: Vec2f,
-    #[live] pub rect_size: Vec2f,
-    #[live] pub draw_clip: Vec4f,
-    #[live(1.0)] pub depth_clip: f32,
-    #[live] pub glyph_depth: f32,
-    #[live(vec4(1.,1.,1.,1.))] pub color: Vec4f,
-    #[live] pub texture_index: f32,
-    #[live] pub t_min: Vec2f,
-    #[live] pub t_max: Vec2f,
-}
+    #[live]
+    pub text_style: TextStyle,
+    #[live(1.0)]
+    pub font_scale: f32,
+    #[live(1.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub debug: bool,
 
+    #[live]
+    pub temp_y_shift: f32,
+
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub rect_pos: Vec2f,
+    #[live]
+    pub rect_size: Vec2f,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live]
+    pub glyph_depth: f32,
+    #[live]
+    pub texture_index: f32,
+    #[live]
+    pub pad1: f32,
+    #[live(vec4(1., 1., 1., 1.))]
+    pub color: Vec4f,
+    #[live]
+    pub t_min: Vec2f,
+    #[live]
+    pub t_max: Vec2f,
+}
 
 impl DrawText {
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2d, text: &str) {
@@ -145,20 +160,18 @@ impl DrawText {
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
     }
 
-    pub fn draw_walk(
-        &mut self,
-        cx: &mut Cx2d,
-        walk: Walk,
-        align: Align,
-        text: &str,
-    ) -> Rect {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
         let turtle_rect = cx.turtle().inner_rect();
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
             None
         };
-        let wrap = cx.turtle().layout().flow == Flow::Right { row_align: RowAlign::Top, wrap: true };
+        let wrap = cx.turtle().layout().flow
+            == Flow::Right {
+                row_align: RowAlign::Top,
+                wrap: true,
+            };
 
         let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         self.draw_walk_laidout(cx, walk, &text)
@@ -191,7 +204,7 @@ impl DrawText {
                 descender: -laidout_text.rows.last().unwrap().descender_in_lpxs as f64,
                 line_gap: 0.0,
                 line_scale: 1.0,
-            }
+            },
         });
 
         if self.debug {
@@ -200,10 +213,7 @@ impl DrawText {
             cx.cx.debug.area(area, vec4(1.0, 1.0, 1.0, 1.0));
         }
 
-        let origin_in_lpxs = Point::new(
-            turtle_rect.pos.x as f32,
-            turtle_rect.pos.y as f32,
-        );
+        let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_rect.pos.y as f32);
         self.draw_text(cx, origin_in_lpxs, &laidout_text);
 
         rect(
@@ -225,7 +235,7 @@ impl DrawText {
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
         let row_height = cx.turtle().next_row_offset();
-        
+
         // lets draw a debug rect
         /*
         if text_str.starts_with("markdownedited"){
@@ -243,13 +253,17 @@ impl DrawText {
             .debug
             .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
         }*/
-        
+
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
             None
         };
-        let wrap = cx.turtle().layout().flow == Flow::Right { row_align: RowAlign::Top, wrap: true };
+        let wrap = cx.turtle().layout().flow
+            == Flow::Right {
+                row_align: RowAlign::Top,
+                wrap: true,
+            };
 
         let text = self.layout(
             cx,
@@ -271,16 +285,17 @@ impl DrawText {
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
         let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
         let turtle = cx.turtle_mut();
-        
+
         turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
         turtle.allocate_width(used_size_in_lpxs.width as f64);
         turtle.allocate_height(used_size_in_lpxs.height as f64);
         turtle.move_to(new_turtle_pos);
 
-        turtle.set_wrap_spacing((
-           last_row.ascender_in_lpxs * last_row.line_spacing_scale - last_row.ascender_in_lpxs
-        )as f64);
-        
+        turtle.set_wrap_spacing(
+            (last_row.ascender_in_lpxs * last_row.line_spacing_scale - last_row.ascender_in_lpxs)
+                as f64,
+        );
+
         cx.emit_turtle_walk(Rect {
             pos: new_turtle_pos,
             size: dvec2(
@@ -288,16 +303,21 @@ impl DrawText {
                 used_size_in_lpxs.height as f64,
             ),
         });
-        
-        let shift = if let Some(row) = text.rows.get(0){
-            if let Some(glyph) = row.glyphs.get(0){
+
+        let shift = if let Some(row) = text.rows.get(0) {
+            if let Some(glyph) = row.glyphs.get(0) {
                 glyph.font_size_in_lpxs * self.temp_y_shift
+            } else {
+                0.0
             }
-            else{0.0}
-        }
-        else{0.0};
-                
-        for SelectionRect { rect_in_lpxs, ascender_in_lpxs, } in text.selection_rects(Selection {
+        } else {
+            0.0
+        };
+
+        for SelectionRect {
+            rect_in_lpxs,
+            ascender_in_lpxs,
+        } in text.selection_rects(Selection {
             anchor: Cursor {
                 index: 0,
                 prefer_next_row: false,
@@ -391,7 +411,6 @@ impl DrawText {
         row: &LaidoutRow,
         out_instances: &mut Vec<f32>,
     ) {
-        
         for glyph in &row.glyphs {
             self.draw_glyph(
                 cx,
@@ -413,9 +432,7 @@ impl DrawText {
                     1.0,
                 ),
             );
-            cx.cx
-                .debug
-                .area(area, vec4(1.0, 0.0, 0.0, 1.0));
+            cx.cx.debug.area(area, vec4(1.0, 0.0, 0.0, 1.0));
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
@@ -426,9 +443,7 @@ impl DrawText {
                     1.0,
                 ),
             );
-            cx.cx
-                .debug
-                .area(area, vec4(0.0, 1.0, 0.0, 1.0));
+            cx.cx.debug.area(area, vec4(0.0, 1.0, 0.0, 1.0));
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
@@ -439,9 +454,7 @@ impl DrawText {
                     1.0,
                 ),
             );
-            cx.cx
-                .debug
-                .area(area, vec4(0.0, 0.0, 1.0, 1.0));
+            cx.cx.debug.area(area, vec4(0.0, 0.0, 1.0, 1.0));
         }
     }
 
@@ -501,14 +514,18 @@ impl DrawText {
                 origin_in_dpxs.x - atlas_image_padding as f32,
                 -origin_in_dpxs.y - atlas_image_size.height as f32 + (atlas_image_padding as f32),
             ),
-            Size::new(atlas_image_size.width as f32, atlas_image_size.height as f32),
+            Size::new(
+                atlas_image_size.width as f32,
+                atlas_image_size.height as f32,
+            ),
         );
         let bounds_in_lpxs = bounds_in_dpxs.apply_transform(
             Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em * self.font_scale)
                 .translate(origin_in_lpxs.x, origin_in_lpxs.y),
         );
 
-        self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y) + vec2(0.0,self.temp_y_shift* font_size_in_lpxs);
+        self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y)
+            + vec2(0.0, self.temp_y_shift * font_size_in_lpxs);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
         if let Some(color) = color {
             self.color = vec4(
@@ -521,7 +538,9 @@ impl DrawText {
         self.texture_index = texture_index;
         self.t_min = vec2(t_min.x, t_min.y);
         self.t_max = vec2(t_max.x, t_max.y);
-        output.extend_from_slice(self.draw_vars.as_slice());
+        let slice = self.draw_vars.as_slice();
+
+        output.extend_from_slice(slice);
         self.glyph_depth += 0.000001;
     }
 }
@@ -559,32 +578,38 @@ impl FontFamily {
 }
 
 impl ScriptHook for FontFamily {
-    fn on_custom_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
+    fn on_custom_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        value: ScriptValue,
+    ) -> bool {
         let Some(obj) = value.as_object() else {
             return false;
         };
-        
+
         let cx = vm.host.cx_mut();
         CxDraw::lazy_construct_fonts(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
-        
+
         // Use the object index as the unique id
         self.id = LiveId(obj.index() as u64);
-        
+
         let font_family_id = self.to_font_family_id();
         if !fonts.is_font_family_known(font_family_id) {
             let mut font_ids = Vec::new();
-            
+
             let len = vm.bx.heap.vec_len(obj);
             for i in 0..len {
                 let kv = vm.bx.heap.vec_key_value(obj, i, NoTrap);
                 let member = FontMember::script_from_value(vm, kv.value);
-                
+
                 if let Some(ref handle_ref) = member.res {
                     let handle = handle_ref.as_handle();
                     let font_id: FontId = (handle.index() as u64).into();
-                    
+
                     if !fonts.is_font_known(font_id) {
                         let cx = vm.host.cx_mut();
                         if let Some(data) = cx.get_resource(handle) {
@@ -602,10 +627,10 @@ impl ScriptHook for FontFamily {
                     font_ids.push(font_id);
                 }
             }
-            
+
             fonts.define_font_family(font_family_id, FontFamilyDefinition { font_ids });
         }
-        
+
         true
     }
 }
