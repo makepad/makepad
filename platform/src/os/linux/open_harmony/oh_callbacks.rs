@@ -40,6 +40,9 @@ pub fn handle_insert_text_event(text: String) -> napi_ohos::Result<()> {
         input: text,
         replace_last: false,
         was_paste: false,
+        composition: None,
+        full_state_sync: None,
+        replace_range: None,
     };
     send_from_ohos_message(FromOhosMessage::TextInput(e));
     Ok(())

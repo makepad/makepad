@@ -580,7 +580,10 @@ impl Win32Window {
                                             Win32Event::TextInput(TextInputEvent {
                                                 input: utf8,
                                                 was_paste: true,
-                                                replace_last: false
+                                                replace_last: false,
+                                                composition: None,
+                                                full_state_sync: None,
+                                                replace_range: None,
                                             })
                                         );
                                     }
@@ -646,7 +649,10 @@ impl Win32Window {
                             Win32Event::TextInput(TextInputEvent {
                                 input: utf8,
                                 was_paste: false,
-                                replace_last: false
+                                replace_last: false,
+                                composition: None,
+                                full_state_sync: None,
+                                replace_range: None,
                             })
                         );
                     }
@@ -1129,7 +1135,10 @@ impl Win32Window {
         self.do_callback(Win32Event::TextInput(TextInputEvent {
             input: input,
             was_paste: false,
-            replace_last: replace_last
+            replace_last: replace_last,
+            composition: None,
+            full_state_sync: None,
+            replace_range: None,
         }))
     }
     
