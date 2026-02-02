@@ -1,10 +1,10 @@
-pub use makepad_draw::makepad_platform;
-pub use makepad_platform::makepad_script;
-pub use makepad_draw2 as makepad_draw;
-pub use makepad_derive_widget2 as makepad_derive_widget;
-pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
+pub use makepad_derive_widget2 as makepad_derive_widget;
+pub use makepad_draw::makepad_platform;
+pub use makepad_draw::*;
+pub use makepad_draw2 as makepad_draw;
 pub use makepad_platform::log;
+pub use makepad_platform::makepad_script;
 
 #[cfg(feature = "html")]
 pub use makepad_html;
@@ -16,12 +16,12 @@ pub use makepad_zune_jpeg;
 pub use makepad_zune_png;
 
 // Core modules (used internally first)
-pub mod widget;
-pub mod widget_match_event;
 pub mod animator;
-pub mod theme_desktop_skeleton;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
+pub mod theme_desktop_skeleton;
+pub mod widget;
+pub mod widget_match_event;
 
 // Modules ordered to match script_mod calls
 pub mod scroll_bar;
@@ -29,27 +29,27 @@ pub mod scroll_bars;
 pub mod view;
 pub mod view_ui;
 
-pub mod label;
-pub mod link_label;
 pub mod button;
 pub mod check_box;
-pub mod radio_button;
-pub mod image_cache;
+pub mod icon;
 pub mod image;
 pub mod image_blend;
-pub mod icon;
+pub mod image_cache;
+pub mod label;
+pub mod link_label;
+pub mod radio_button;
 
 pub mod adaptive_view;
 pub mod desktop_button;
 pub mod keyboard_view;
-pub mod window_menu;
 pub mod nav_control;
 pub mod window;
+pub mod window_menu;
 
-pub mod popup_menu;
 pub mod drop_down;
-pub mod text_input;
+pub mod popup_menu;
 pub mod slider;
+pub mod text_input;
 
 pub mod splitter;
 
@@ -67,10 +67,10 @@ pub mod text_flow;
 pub mod cached_widget;
 pub mod root;
 
-pub mod tab_close_button;
+pub mod dock;
 pub mod tab;
 pub mod tab_bar;
-pub mod dock;
+pub mod tab_close_button;
 
 #[cfg(feature = "html")]
 pub mod html;
@@ -81,19 +81,18 @@ pub mod markdown;
 pub mod touch_gesture;
 
 // Navigation and panels
+pub mod expandable_panel;
 pub mod scroll_shadow;
 pub mod stack_navigation;
-pub mod expandable_panel;
 
-
+pub mod file_tree;
 pub mod modal;
-pub mod tooltip;
+pub mod page_flip;
 pub mod popup_notification;
+pub mod slides_view;
+pub mod tooltip;
 #[cfg(target_os = "android")]
 pub mod video;
-pub mod page_flip;
-pub mod file_tree;
-// pub mod slides_view;
 // pub mod toggle_panel;
 pub mod defer_with_redraw;
 
@@ -120,91 +119,73 @@ pub mod defer_with_redraw;
 // pub mod designer_toolbox;
 
 pub use crate::{
-    // Ordered to match script_mod calls
-    scroll_bar::{ScrollBar},
-    scroll_bars::{ScrollBars},
-    view::*,
-    // view_ui - no public exports
-    
-    label::*,
-    link_label::*,
-    button::*,
-    check_box::*,
-    radio_button::*,
-    image::*,
-    image_cache::*,
-    icon::*,
-    
     adaptive_view::*,
+    // loading_spinner - no public exports
+    bare_step::*,
+    button::*,
+    cached_widget::*,
+    check_box::*,
     desktop_button::*,
-    keyboard_view::*,
-    window_menu::*,
-    nav_control::*,
-    window::*,
-    
-    popup_menu::*,
+    dock::*,
+
     drop_down::*,
-    text_input::*,
-    slider::*,
-    
-    splitter::*,
-    
+    expandable_panel::*,
+    file_tree::*,
+
     fold_button::*,
     fold_header::*,
-    
-    // loading_spinner - no public exports
-    
-    bare_step::*,
-    turtle_step::*,
-    
-    portal_list::*,
-    text_flow::*,
-    
-    cached_widget::*,
+
+    icon::*,
+
+    image::*,
     image_blend::*,
+    image_cache::*,
+    keyboard_view::*,
+    // view_ui - no public exports
+    label::*,
+    link_label::*,
+    modal::*,
+    nav_control::*,
+    page_flip::*,
+    popup_menu::*,
+    popup_notification::*,
+    portal_list::*,
+    radio_button::*,
     root::*,
-    
-    tab_close_button::*,
+
+    // Ordered to match script_mod calls
+    scroll_bar::ScrollBar,
+    scroll_bars::ScrollBars,
+    scroll_shadow::*,
+    slider::*,
+    slides_view::*,
+
+    splitter::*,
+
+    stack_navigation::*,
     tab::*,
     tab_bar::*,
-    dock::*,
-    
+    tab_close_button::*,
+    text_flow::*,
+
+    text_input::*,
+    tooltip::*,
     // Navigation and panels
     touch_gesture::*,
-    scroll_shadow::*,
-    stack_navigation::*,
-    expandable_panel::*,
-    modal::*,
-    tooltip::*,
-    popup_notification::*,
-    page_flip::*,
-    file_tree::*,
-    
+    turtle_step::*,
+
+    view::*,
+    widget::{
+        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
+        WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
+        WidgetActionsApi, WidgetCache, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister,
+        WidgetRegistry, WidgetSet, WidgetSetIterator, WidgetUid,
+    },
     widget_match_event::WidgetMatchEvent,
 
-    widget::{
-        WidgetSet,
-        WidgetUid,
-        DrawStep,
-        DrawStepApi,
-        CreateAt,
-        WidgetCache,
-        WidgetActionCxExt,
-        WidgetActionsApi,
-        WidgetActionTrait,
-        WidgetAction,
-        WidgetActionCast,
-        WidgetActionOptionApi,
-        WidgetRegister,
-        OptionWidgetRefExt,
-        WidgetRef,
-        Widget,
-        WidgetNode,
-        WidgetRegistry,
-        WidgetFactory,
-        WidgetSetIterator,
-        DrawStateWrap,
-    }
+    window::*,
+
+    window_menu::*,
 };
 
 #[cfg(feature = "html")]
@@ -216,16 +197,16 @@ pub use crate::markdown::*;
 #[cfg(target_os = "android")]
 pub use crate::video::*;
 
-pub fn script_mod(vm: &mut ScriptVm){
+pub fn script_mod(vm: &mut ScriptVm) {
     makepad_draw2::script_mod(vm);
-    
+
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));
     crate::theme_desktop_dark::script_mod(vm);
     crate::animator::script_mod(vm);
     // make the prelude for our own widgets
     {
-        script_mod!{ 
+        script_mod! {
             mod.prelude.widgets_internal = {
                 ..mod.res,
                 ..mod.animator,
@@ -242,18 +223,18 @@ pub fn script_mod(vm: &mut ScriptVm){
                 theme:mod.theme,
                 draw:mod.draw,
                 MouseCursor:mod.draw.MouseCursor
-            }                
+            }
         }
-        script_mod(vm);    
+        script_mod(vm);
     }
-            
+
     vm.bx.heap.new_module(id!(widgets));
-    
+
     crate::scroll_bar::script_mod(vm);
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
     crate::view_ui::script_mod(vm);
-    
+
     crate::label::script_mod(vm);
     crate::link_label::script_mod(vm);
     crate::button::script_mod(vm);
@@ -262,40 +243,40 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::image::script_mod(vm);
     crate::image_blend::script_mod(vm);
     crate::icon::script_mod(vm);
-            
+
     crate::adaptive_view::script_mod(vm);
     crate::desktop_button::script_mod(vm);
     crate::keyboard_view::script_mod(vm);
     crate::window_menu::script_mod(vm);
     crate::nav_control::script_mod(vm);
     crate::window::script_mod(vm);
-    
+
     crate::popup_menu::script_mod(vm);
     crate::drop_down::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
-    
+
     crate::splitter::script_mod(vm);
-    
+
     crate::fold_button::script_mod(vm);
     crate::fold_header::script_mod(vm);
-            
+
     crate::loading_spinner::script_mod(vm);
-    
+
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
-    
+
     crate::portal_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
-    
+
     crate::cached_widget::script_mod(vm);
     crate::root::script_mod(vm);
-    
+
     crate::tab_close_button::script_mod(vm);
     crate::tab::script_mod(vm);
     crate::tab_bar::script_mod(vm);
     crate::dock::script_mod(vm);
-    
+
     // Navigation and panels
     crate::scroll_shadow::script_mod(vm);
     crate::stack_navigation::script_mod(vm);
@@ -307,17 +288,17 @@ pub fn script_mod(vm: &mut ScriptVm){
     crate::video::script_mod(vm);
     crate::page_flip::script_mod(vm);
     crate::file_tree::script_mod(vm);
-    
+    crate::slides_view::script_mod(vm);
+
     #[cfg(feature = "html")]
     crate::html::script_mod(vm);
     #[cfg(feature = "markdown")]
     crate::markdown::script_mod(vm);
-        
-        
+
     // make the prelude.widgetst with all our components
-    
+
     {
-        script_mod!{
+        script_mod! {
             mod.prelude.widgets = {
                 ..mod.res,
                 ..mod.std,
@@ -334,7 +315,7 @@ pub fn script_mod(vm: &mut ScriptVm){
                 ..mod.turtle,
                 ..mod.turtle.Size,
                 ..mod.turtle.Flow,
-            }                
+            }
         }
         script_mod(vm);
     }
@@ -344,5 +325,4 @@ pub fn script_mod(vm: &mut ScriptVm){
     //makepad_fonts_chinese_regular2_2::script_mod(vm);
     //makepad_fonts_chinese_bold2::script_mod(vm);
     //makepad_fonts_chinese_bold2_2::script_mod(vm);
-    
 }
