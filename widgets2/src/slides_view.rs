@@ -222,12 +222,11 @@ impl Widget for SlidesView {
                 }
             }
         }
-        match event.hits_with_capture_overload(cx, self.area, true) {
+        match event.hits(cx, self.area) {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 ..
             }) => {
-                log!("SlidesView: ArrowRight pressed");
                 self.next_slide(cx);
                 let uid = self.widget_uid();
                 cx.widget_action(
@@ -240,7 +239,6 @@ impl Widget for SlidesView {
                 key_code: KeyCode::ArrowLeft,
                 ..
             }) => {
-                log!("SlidesView: ArrowLeft pressed");
                 self.prev_slide(cx);
                 let uid = self.widget_uid();
                 cx.widget_action(
@@ -250,7 +248,6 @@ impl Widget for SlidesView {
                 );
             }
             Hit::FingerDown(_fe) => {
-                log!("SlidesView: FingerDown - setting key focus");
                 cx.set_key_focus(self.area);
             }
             _ => (),
@@ -259,11 +256,6 @@ impl Widget for SlidesView {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawFirst) {
-            log!(
-                "SlidesView draw_walk: begin, draw_order len = {}, slides len = {}",
-                self.draw_order.len(),
-                self.slides.len()
-            );
             cx.begin_turtle(walk, Layout::flow_overlay());
             let rect = cx.turtle().rect();
             cx.begin_turtle(
@@ -280,11 +272,8 @@ impl Widget for SlidesView {
         }
         if let Some(DrawState::DrawFirst) = self.draw_state.get() {
             let first = self.current_slide.floor() as usize;
-            log!("SlidesView draw_walk: DrawFirst, first index = {}", first);
             if let Some(first_id) = self.draw_order.get(first) {
-                log!("SlidesView draw_walk: first_id = {:?}", first_id);
                 if let Some(slide) = self.slides.get(&first_id) {
-                    log!("SlidesView draw_walk: drawing first slide");
                     let walk = slide.walk(cx);
                     scope.with_id(*first_id, |scope| slide.draw_walk(cx, scope, walk))?;
                 }
@@ -318,8 +307,7 @@ impl Widget for SlidesView {
             }
         }
         cx.end_turtle();
-        let rect = cx.end_turtle_with_area(&mut self.area);
-        log!("SlidesView draw_walk: done, area rect = {:?}", rect);
+        cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
 }
