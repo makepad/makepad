@@ -639,7 +639,6 @@ impl Widget for View {
         if self.visible && self.cursor.is_some() || self.animator.is_defined {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
                 Hit::FingerDown(e) => {
-                    log!("View::FingerDown - animator.is_defined={}, cursor={:?}, capture_overload={}", self.animator.is_defined, self.cursor, self.capture_overload);
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
