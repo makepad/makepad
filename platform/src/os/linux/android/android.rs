@@ -47,11 +47,14 @@ use {
             WindowGeomChangeEvent,
             //TimerEvent,
             TextInputEvent,
+            ImeAction,
+            ImeActionEvent,
             TextClipboardEvent,
             KeyEvent,
             KeyModifiers,
             KeyCode,
             Event,
+            keyboard::{CharOffset, FullTextState},
             WindowGeom,
             VideoPlaybackPreparedEvent,
             VideoTextureUpdatedEvent,
@@ -115,6 +118,30 @@ impl Cx {
                 },
                 Ok(message) => {
                     self.handle_message(message);
+                    // ================================================================
+                    // IME ECHO PREVENTION - IMMEDIATE PLATFORM OPS PROCESSING
+                    // ================================================================
+                    // Process queued platform ops immediately after handling messages.
+                    // This is critical for IME shadow buffer synchronization.
+                    //
+                    // Without immediate processing, the sequence would be:
+                    //   1. Java InputConnection sends text to Rust (ImeTextStateChanged)
+                    //   2. Rust widget updates state and queues SyncImeState
+                    //   3. ... wait until next frame ...
+                    //   4. Gboard queries Java's stale buffer (before SyncImeState runs)
+                    //   5. Autocorrect/prediction breaks due to stale data
+                    //
+                    // With immediate processing:
+                    //   1. Java InputConnection sends text to Rust
+                    //   2. Rust widget updates and queues SyncImeState
+                    //   3. handle_platform_ops() runs SyncImeState immediately
+                    //   4. Java buffer updated before Gboard's next query
+                    //
+                    // There's three layers of echo preventions, see also:
+                    //   - MakepadInputConnection.java
+                    //   - text_input.rs: update_ime_context() and ime_update_frame
+                    // ================================================================
+                    self.handle_platform_ops();
                 },
                 Err(e) => {
                     crate::error!("Error receiving message: {:?}", e);
@@ -246,6 +273,9 @@ impl Cx {
                             input: character.to_string(),
                             replace_last: false,
                             was_paste: false,
+                            composition: None,
+                            full_state_sync: None,
+                            replace_range: None,
                         }
                     );
                     self.call_event_handler(&e);
@@ -283,6 +313,9 @@ impl Cx {
                                     input: content,
                                     replace_last: false,
                                     was_paste: true,
+                                    composition: None,
+                                    full_state_sync: None,
+                                    replace_range: None,
                                 });
                                 self.call_event_handler(&e);
                             }
@@ -547,7 +580,53 @@ impl Cx {
                     input: content,
                     replace_last: false,
                     was_paste: true,
+                    composition: None,
+                    full_state_sync: None,
+                    replace_range: None,
                 });
+                self.call_event_handler(&e);
+            }
+            // IME unified text state notification (Java→Rust)
+            // Java's InputConnection is now the source of truth for IME operations
+            FromJavaMessage::ImeTextStateChanged {
+                full_text,
+                selection_start,
+                selection_end,
+                composing_start,
+                composing_end,
+            } => {
+                // Convert UTF-16 indices from Java to character offsets
+                let sel_start = CharOffset::from_utf16_index(&full_text, selection_start as usize);
+                let sel_end = CharOffset::from_utf16_index(&full_text, selection_end as usize);
+
+                // Convert composing region from Java's -1 convention to Option<Range>
+                let composition = if composing_start >= 0 && composing_end >= 0 {
+                    let comp_start = CharOffset::from_utf16_index(&full_text, composing_start as usize);
+                    let comp_end = CharOffset::from_utf16_index(&full_text, composing_end as usize);
+                    Some(comp_start..comp_end)
+                } else {
+                    None
+                };
+
+                // Android uses full state sync - Java InputConnection is authoritative
+                let e = Event::TextInput(TextInputEvent {
+                    input: String::new(), // Not used for full state sync
+                    replace_last: false,
+                    was_paste: false,
+                    composition: None, // Composition info is in full_state_sync
+                    full_state_sync: Some(FullTextState {
+                        text: full_text,
+                        selection: sel_start..sel_end,
+                        composition,
+                    }),
+                    replace_range: None, // Android uses full state sync, not incremental replacements
+                });
+                self.call_event_handler(&e);
+            }
+            // IME editor action (Done, Go, Search, etc.) for single-line inputs
+            FromJavaMessage::ImeEditorAction { action_code } => {
+                let action = ImeAction::from_android_action_code(action_code);
+                let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
             FromJavaMessage::Init(_) => {
@@ -963,13 +1042,31 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
                 },
-                CxOsOp::ShowTextIME(_area, _pos) => {
+                CxOsOp::ShowTextIME(_area, _pos, config) => {
                     //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
-                    unsafe {android_jni::to_java_show_keyboard(true);}
+                    unsafe {
+                        android_jni::to_java_configure_keyboard(&config);
+                        android_jni::to_java_show_keyboard(true);
+                    }
                 },
                 CxOsOp::HideTextIME => {
                     //self.os.keyboard_visible = false;
                     unsafe {android_jni::to_java_show_keyboard(false);}
+                },
+                CxOsOp::SyncImeState { text, selection, composition: _ } => {
+                    // ECHO PREVENTION: Sync Rust's authoritative text state to Java.
+                    // This is called from text_input.rs update_ime_context() when:
+                    //   1. Widget text/selection changed programmatically (not from IME)
+                    //   2. State comparison shows actual change from last sent state
+                    //
+                    // The Java side (updateImeTextState) will check wasRecentlySentToRust()
+                    // to avoid applying stale echoes. Only genuine programmatic changes
+                    // (like clearing text via a button) will actually update Java's buffer.
+
+                    // Convert CharOffset to UTF-16 indices for Java
+                    let sel_start_utf16 = selection.start.to_utf16_index(&text) as i32;
+                    let sel_end_utf16 = selection.end.to_utf16_index(&text) as i32;
+                    unsafe {android_jni::to_java_update_ime_text_state(&text, sel_start_utf16, sel_end_utf16);}
                 },
                 CxOsOp::CopyToClipboard(content) => {
                     unsafe {android_jni::to_java_copy_to_clipboard(content);}

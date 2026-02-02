@@ -403,10 +403,10 @@ impl MacosApp {
                                 let string = nsstring_to_string(nsstring);
                                 MacosApp::do_callback(
                                     MacosEvent::TextInput(TextInputEvent {
-                                        input: string,
-                                        was_paste: true,
-                                        replace_last: false
-                                    })
+                                    input: string,
+                                    was_paste: true,
+                                    ..Default::default()
+                                })
                                 );
                             }
                         },

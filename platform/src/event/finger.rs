@@ -922,9 +922,9 @@ impl Event {
                     return Hit::TextInput(ti.clone())
                 }
             },
-            Event::TextRangeReplace(tr) => {
+            Event::ImeAction(ia) => {
                 if cx.keyboard.has_key_focus(area) {
-                    return Hit::TextRangeReplace(tr.clone())
+                    return Hit::ImeAction(ia.clone())
                 }
             },
             Event::TextCopy(tc) => {

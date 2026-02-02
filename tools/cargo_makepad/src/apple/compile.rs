@@ -790,21 +790,27 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
             device_identifier,
             &app_dir
         ])?;
-        //println!("TODO: We need to fish out LONGID from the answer {}", answer);
+        // Parse the bundleID from the installation output and launch the app
+        let mut bundle_id = None;
         for line in answer.split("\n"){
-            if line.contains("installationURL:"){
-                let path = &line[21..line.len()-1];
-                shell_env(&[], &cwd, "xcrun", &[
-                    "devicectl",
-                    "device",
-                    "process",
-                    "launch",
-                    "--device",
-                    device_identifier,
-                    path
-                ])?;
-                continue
+            if let Some(idx) = line.find("bundleID:") {
+                bundle_id = Some(line[idx + "bundleID:".len()..].trim().to_string());
+                break;
             }
+        }
+
+        if let Some(bundle_id) = bundle_id {
+            shell_env(&[], &cwd, "xcrun", &[
+                "devicectl",
+                "device",
+                "process",
+                "launch",
+                "--device",
+                device_identifier,
+                &bundle_id
+            ])?;
+        } else {
+            return Err(format!("Failed to find bundleID in installation output"));
         }
     }
 

@@ -337,7 +337,7 @@ live_design!{
             // select_pad_edges: 3.0
             // cursor_size: 2.0,
             empty_message: "0",
-            is_numeric_only: true,
+            input_mode: Decimal,
             draw_bg: {
                 shape: None
                 color: (COLOR_UP_OFF);

@@ -422,9 +422,9 @@ impl MacosWindow {
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
         self.do_callback(MacosEvent::TextInput(TextInputEvent {
-            input: input,
-            was_paste: false,
-            replace_last: replace_last
+            input,
+            replace_last,
+            ..Default::default()
         }))
     }
     

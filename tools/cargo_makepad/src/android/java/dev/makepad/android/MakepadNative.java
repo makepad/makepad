@@ -41,6 +41,20 @@ public class MakepadNative {
     public native static void onClipboardAction(String action);
     public native static void onClipboardPaste(String content);
 
+    // IME events - unified text state notification (Java→Rust)
+    // Called when IME changes text (composition, commit, delete, selection change)
+    public native static void onImeTextStateChanged(
+        String fullText,
+        int selectionStart,
+        int selectionEnd,
+        int composingStart,
+        int composingEnd
+    );
+
+    // IME editor action (for single-line inputs: Done, Go, Search, etc.)
+    // Called when user presses the action button on the soft keyboard
+    public native static void onImeEditorAction(int actionCode);
+
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
     

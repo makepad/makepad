@@ -1,0 +1,10 @@
+[package]
+name = "makepad-example-text-input"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad TextInput IME configuration example"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "1.0.0" }

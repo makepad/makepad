@@ -86,6 +86,7 @@ extern "C" {
     pub static UIKeyboardWillChangeFrameNotification: ObjcId;
     pub static UIKeyboardAnimationDurationUserInfoKey: ObjcId;
     pub static UIKeyboardAnimationCurveUserInfoKey: ObjcId;
+    pub static UITextInputCurrentInputModeDidChangeNotification: ObjcId;
 }
 
 #[cfg(any(target_os = "ios", target_os = "tvos"))]
