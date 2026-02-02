@@ -1,47 +1,43 @@
 use {
-    std::collections::HashSet,
     crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*,
-        scroll_shadow::DrawScrollShadow,
-        scroll_bars::ScrollBars,
-        animator::*,
-    }
+        animator::*, makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars,
+        scroll_shadow::DrawScrollShadow, widget::*,
+    },
+    std::collections::HashSet,
 };
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     // Register draw shaders
     set_type_default() do #(DrawBgQuad::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
-    
+
     set_type_default() do #(DrawNameText::script_shader(vm)){
         ..mod.draw.DrawText
     }
-    
+
     set_type_default() do #(DrawIconQuad::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
-    
+
     // Register FileTreeNode component
     mod.widgets.FileTreeNodeBase = #(FileTreeNode::script_component(vm))
     mod.widgets.FileTreeBase = #(FileTree::register_widget(vm))
-    
+
     mod.widgets.FileTreeNode = set_type_default() do mod.widgets.FileTreeNodeBase{
         align: Align{y: 0.5}
         padding: Inset{left: theme.space_2}
         is_folder: false
         indent_width: theme.space_2
         min_drag_distance: 10.0
-        
+
         draw_bg +: {
-            color_1: uniform(theme.color_bg_even)
-            color_2: uniform(theme.color_bg_odd)
-            color_active: uniform(theme.color_highlight)
+            color_1: instance(theme.color_bg_even)
+            color_2: instance(theme.color_bg_odd)
+            color_active: instance(theme.color_highlight)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -66,10 +62,10 @@ script_mod!{
                 return sdf.result
             }
         }
-        
+
         draw_icon +: {
-            color: uniform(theme.color_label_inner)
-            color_active: uniform(theme.color_label_inner_active)
+            color: instance(theme.color_label_inner)
+            color_active: instance(theme.color_label_inner_active)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -87,11 +83,11 @@ script_mod!{
                 )
             }
         }
-        
+
         draw_text +: {
             color: theme.color_label_inner
-            color_active: uniform(theme.color_label_inner_active)
-            
+            color_active: theme.color_label_inner_active
+
             get_color: fn() {
                 return mix(
                     self.color * self.scale,
@@ -99,20 +95,20 @@ script_mod!{
                     self.active
                 )
             }
-            
+
             text_style: theme.font_regular{
                 font_size: theme.font_size_p
             }
         }
-        
+
         icon_walk: Walk{
             width: (theme.data_icon_width - 2.0)
             height: theme.data_icon_height
             margin: Inset{right: theme.space_1}
         }
-        
+
         animator: Animator{
-            hover: {
+            hover2: {
                 default: @off
                 off: AnimatorState{
                     from: {all: Play.Forward {duration: 0.2}}
@@ -123,7 +119,7 @@ script_mod!{
                         draw_icon: {hover: 0.0}
                     }
                 }
-                
+
                 on: AnimatorState{
                     cursor: MouseCursor.Hand
                     from: {all: Play.Snap}
@@ -135,20 +131,20 @@ script_mod!{
                     }
                 }
             }
-            
+
             focus: {
                 default: @on
                 on: AnimatorState{
                     from: {all: Play.Snap}
                     apply: {focussed: 1.0}
                 }
-                
+
                 off: AnimatorState{
                     from: {all: Play.Forward {duration: 0.1}}
                     apply: {focussed: 0.0}
                 }
             }
-            
+
             select: {
                 default: @off
                 off: AnimatorState{
@@ -170,7 +166,7 @@ script_mod!{
                     }
                 }
             }
-            
+
             open: {
                 default: @off
                 off: AnimatorState{
@@ -178,13 +174,13 @@ script_mod!{
                     from: {all: Play.Forward {duration: 0.2}}
                     ease: Ease.ExpDecay {d1: 0.80 d2: 0.97}
                     apply: {
-                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        draw_bg: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                        draw_text: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                        draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                        opened: 0.0
+                        draw_bg: {opened: 0.0}
+                        draw_text: {opened: 0.0}
+                        draw_icon: {opened: 0.0}
                     }
                 }
-                
+
                 on: AnimatorState{
                     from: {all: Play.Forward {duration: 0.2}}
                     ease: Ease.ExpDecay {d1: 0.82 d2: 0.95}
@@ -199,27 +195,27 @@ script_mod!{
             }
         }
     }
-     
+
     mod.widgets.FileTree = mod.widgets.FileTreeBase{
         flow: Down
-        
+
         scroll_bars: mod.widgets.ScrollBars{}
         node_height: theme.data_item_height
         clip_x: true
         clip_y: true
-        
-        $file_node: mod.widgets.FileTreeNode{
+
+        file_node: mod.widgets.FileTreeNode{
             is_folder: false
             draw_bg +: {is_folder: 0.0}
             draw_text +: {is_folder: 0.0}
         }
-        
-        $folder_node: mod.widgets.FileTreeNode{
+
+        folder_node: mod.widgets.FileTreeNode{
             is_folder: true
             draw_bg +: {is_folder: 1.0}
             draw_text +: {is_folder: 1.0}
         }
-        
+
         filler +: {
             pixel: fn() {
                 return mix(
@@ -243,124 +239,169 @@ script_mod!{
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 struct DrawBgQuad {
-    #[deref] draw_super: DrawQuad,
-    #[live] is_even: f32,
-    #[live] scale: f32,
-    #[live] is_folder: f32,
-    #[live] focussed: f32,
-    #[live] active: f32,
-    #[live] hover: f32,
-    #[live] opened: f32,
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    is_even: f32,
+    #[live]
+    scale: f32,
+    #[live]
+    is_folder: f32,
+    #[live]
+    focussed: f32,
+    #[live]
+    active: f32,
+    #[live]
+    hover: f32,
+    #[live]
+    opened: f32,
 }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 struct DrawNameText {
-    #[deref] draw_super: DrawText,
-    #[live] is_even: f32,
-    #[live] scale: f32,
-    #[live] is_folder: f32,
-    #[live] focussed: f32,
-    #[live] active: f32,
-    #[live] hover: f32,
-    #[live] opened: f32,
+    #[deref]
+    draw_super: DrawText,
+    #[live]
+    color_active: Vec4,
+    #[live]
+    is_even: f32,
+    #[live]
+    scale: f32,
+    #[live]
+    is_folder: f32,
+    #[live]
+    focussed: f32,
+    #[live]
+    active: f32,
+    #[live]
+    hover: f32,
+    #[live]
+    opened: f32,
 }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 struct DrawIconQuad {
-    #[deref] draw_super: DrawQuad,
-    #[live] is_even: f32,
-    #[live] scale: f32,
-    #[live] is_folder: f32,
-    #[live] focussed: f32,
-    #[live] active: f32,
-    #[live] hover: f32,
-    #[live] opened: f32,
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    is_even: f32,
+    #[live]
+    scale: f32,
+    #[live]
+    is_folder: f32,
+    #[live]
+    focussed: f32,
+    #[live]
+    active: f32,
+    #[live]
+    hover: f32,
+    #[live]
+    opened: f32,
 }
 
 #[derive(Script, ScriptHook, Animator)]
 pub struct FileTreeNode {
-    #[source] source: ScriptObjectRef,
-    #[live] draw_bg: DrawBgQuad,
-    #[live] draw_icon: DrawIconQuad,
-    #[live] draw_text: DrawNameText,
-    #[layout] layout: Layout,
-    
-    #[apply_default] animator: Animator,
-    
-    #[live] indent_width: f64,
-    #[live] indent_shift: f64,
-    
-    #[live] icon_walk: Walk,
-    
-    #[live] is_folder: bool,
-    #[live] min_drag_distance: f64,
-    
-    #[live] opened: f32,
-    #[live] focussed: f32,
-    #[live] hover: f32,
-    #[live] active: f32,
+    #[source]
+    source: ScriptObjectRef,
+    #[live]
+    draw_bg: DrawBgQuad,
+    #[live]
+    draw_icon: DrawIconQuad,
+    #[live]
+    draw_text: DrawNameText,
+    #[layout]
+    layout: Layout,
+
+    #[apply_default]
+    animator: Animator,
+
+    #[live]
+    indent_width: f64,
+    #[live]
+    indent_shift: f64,
+
+    #[live]
+    icon_walk: Walk,
+
+    #[live]
+    is_folder: bool,
+    #[live]
+    min_drag_distance: f64,
+
+    #[live]
+    opened: f32,
+    #[live]
+    focussed: f32,
+    #[live]
+    hover: f32,
+    #[live]
+    active: f32,
 }
 
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct FileTree {
-    #[source] source: ScriptObjectRef,
-    #[live] scroll_bars: ScrollBars,
-    #[rust] file_node_template: ScriptValue,
-    #[rust] folder_node_template: ScriptValue,
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
-    #[live] filler: DrawBgQuad,
-    
-    #[live] node_height: f64,
-    
-    #[live] draw_scroll_shadow: DrawScrollShadow,
-    
-    #[rust] draw_state: DrawStateWrap<()>,
-    
-    #[rust] dragging_node_id: Option<LiveId>,
-    #[rust] selected_node_id: Option<LiveId>,
-    #[rust] open_nodes: HashSet<LiveId>,
-    
-    #[rust] tree_nodes: ComponentMap<LiveId, (FileTreeNode, LiveId)>,
-    
-    #[rust] count: usize,
-    #[rust] stack: Vec<f64>,
+    #[source]
+    source: ScriptObjectRef,
+    #[live]
+    scroll_bars: ScrollBars,
+    #[live]
+    file_node: ScriptObjectRef,
+    #[live]
+    folder_node: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[live]
+    filler: DrawBgQuad,
+
+    #[live]
+    node_height: f64,
+
+    #[live]
+    draw_scroll_shadow: DrawScrollShadow,
+
+    #[rust]
+    draw_state: DrawStateWrap<()>,
+
+    #[rust]
+    dragging_node_id: Option<LiveId>,
+    #[rust]
+    selected_node_id: Option<LiveId>,
+    #[rust]
+    open_nodes: HashSet<LiveId>,
+
+    #[rust]
+    tree_nodes: ComponentMap<LiveId, FileTreeNode>,
+
+    #[rust]
+    count: usize,
+    #[rust]
+    stack: Vec<f64>,
 }
 
 impl ScriptHook for FileTree {
-    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        // Apply updates to existing nodes
         if apply.is_update() {
-            // Clear template references on update
+            for tree_node in self.tree_nodes.values_mut() {
+                let template = if tree_node.is_folder {
+                    self.folder_node.clone()
+                } else {
+                    self.file_node.clone()
+                };
+                tree_node.script_apply(vm, apply, scope, template.into());
+            }
         }
-    }
-    
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
-        // Handle $prop children from the object's vec (these are our node templates)
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |vm, vec| {
-                for kv in vec {
-                    if kv.key.is_prefixed_id() {
-                        if let Some(id) = kv.key.as_id() {
-                            if id == id!($file_node) {
-                                self.file_node_template = kv.value;
-                            } else if id == id!($folder_node) {
-                                self.folder_node_template = kv.value;
-                            }
-                            
-                            // Apply updates to existing nodes of this type
-                            for (_, (tree_node, node_type_id)) in self.tree_nodes.iter_mut() {
-                                if *node_type_id == id {
-                                    tree_node.script_apply(vm, apply, scope, kv.value);
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        
+
         vm.with_cx_mut(|cx| {
             self.scroll_bars.redraw(cx);
         });
@@ -380,7 +421,7 @@ pub enum FileTreeNodeAction {
     WasClicked,
     Opening,
     Closing,
-    ShouldStartDrag
+    ShouldStartDrag,
 }
 
 impl FileTreeNode {
@@ -393,31 +434,57 @@ impl FileTreeNode {
         self.draw_icon.is_even = is_even;
         self.draw_text.font_scale = scale as f32;
     }
-    
-    pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
+
+    pub fn draw_folder(
+        &mut self,
+        cx: &mut Cx2d,
+        name: &str,
+        is_even: f32,
+        node_height: f64,
+        depth: usize,
+        scale: f64,
+    ) {
         self.set_draw_state(is_even, scale);
-        
-        self.draw_bg.begin(cx, Walk::new(Size::fill(), Size::Fixed(scale * node_height)), self.layout);
-        
+
+        self.draw_bg.begin(
+            cx,
+            Walk::new(Size::fill(), Size::Fixed(scale * node_height)),
+            self.layout,
+        );
+
         cx.walk_turtle(self.indent_walk(depth));
-        
+
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        
-        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
+
+        self.draw_text
+            .draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
-    
-    pub fn draw_file(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
+
+    pub fn draw_file(
+        &mut self,
+        cx: &mut Cx2d,
+        name: &str,
+        is_even: f32,
+        node_height: f64,
+        depth: usize,
+        scale: f64,
+    ) {
         self.set_draw_state(is_even, scale);
-        
-        self.draw_bg.begin(cx, Walk::new(Size::fill(), Size::Fixed(scale * node_height)), self.layout);
-        
+
+        self.draw_bg.begin(
+            cx,
+            Walk::new(Size::fill(), Size::Fixed(scale * node_height)),
+            self.layout,
+        );
+
         cx.walk_turtle(self.indent_walk(depth));
-        
-        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
+
+        self.draw_text
+            .draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
-    
+
     fn indent_walk(&self, depth: usize) -> Walk {
         Walk {
             abs_pos: None,
@@ -432,19 +499,19 @@ impl FileTreeNode {
             metrics: Metrics::default(),
         }
     }
-    
+
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
         self.animator_toggle(cx, is, animate, ids!(select.on), ids!(select.off))
     }
-    
+
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
         self.animator_toggle(cx, is, animate, ids!(focus.on), ids!(focus.off))
     }
-    
+
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
         self.animator_toggle(cx, is, animate, ids!(open.on), ids!(open.off));
     }
-    
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -474,8 +541,7 @@ impl FileTreeNode {
                     if self.animator_in_state(cx, ids!(open.on)) {
                         self.animator_play(cx, ids!(open.off));
                         actions.push((node_id, FileTreeNodeAction::Closing));
-                    }
-                    else {
+                    } else {
                         self.animator_play(cx, ids!(open.on));
                         actions.push((node_id, FileTreeNodeAction::Opening));
                     }
@@ -488,12 +554,11 @@ impl FileTreeNode {
 }
 
 impl FileTree {
-    
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.scroll_bars.begin(cx, walk, self.layout);
         self.count = 0;
     }
-    
+
     pub fn end(&mut self, cx: &mut Cx2d) {
         // lets fill the space left with blanks
         let height_left = cx.turtle().unused_inner_height();
@@ -502,116 +567,123 @@ impl FileTree {
             self.count += 1;
             self.filler.is_even = Self::is_even(self.count);
             let height = self.node_height.min(height_left - walk);
-            self.filler.draw_walk(cx, Walk::new(Size::fill(), Size::Fixed(height)));
+            self.filler
+                .draw_walk(cx, Walk::new(Size::fill(), Size::Fixed(height)));
             walk += height.max(1.0);
         }
-        
+
         self.draw_scroll_shadow.draw(cx, dvec2(0., 0.));
         self.scroll_bars.end(cx);
-        
+
         let selected_node_id = self.selected_node_id;
-        self.tree_nodes.retain_visible_and(|node_id, _| Some(*node_id) == selected_node_id);
+        self.tree_nodes
+            .retain_visible_and(|node_id, _| Some(*node_id) == selected_node_id);
     }
-    
+
     pub fn is_even(count: usize) -> f32 {
-        if count % 2 == 1 { 0.0 } else { 1.0 }
+        if count % 2 == 1 {
+            0.0
+        } else {
+            1.0
+        }
     }
-    
+
     pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
         let walk = Walk::new(Size::fill(), Size::Fixed(height));
         if scale > 0.01 && cx.walk_turtle_would_be_visible(walk) {
-            return true
-        }
-        else {
+            return true;
+        } else {
             cx.walk_turtle(walk);
-            return false
+            return false;
         }
     }
-    
-    pub fn begin_folder(
-        &mut self,
-        cx: &mut Cx2d,
-        node_id: LiveId,
-        name: &str,
-    ) -> Result<(), ()> {
+
+    pub fn begin_folder(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
-        
+
         if scale > 0.2 {
             self.count += 1;
         }
-        
+
         let is_open = self.open_nodes.contains(&node_id);
-        
+
         if self.should_node_draw(cx) {
-            let folder_node_template = self.folder_node_template;
-            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, |cx| {
-                let mut tree_node = cx.with_vm(|vm| {
-                    FileTreeNode::script_from_value(vm, folder_node_template)
-                });
+            let folder_node = self.folder_node.clone();
+            let tree_node = self.tree_nodes.get_or_insert(cx, node_id, |cx| {
+                let mut tree_node =
+                    cx.with_vm(|vm| FileTreeNode::script_from_value(vm, folder_node.into()));
                 if is_open {
-                    tree_node.set_folder_is_open(cx, true, Animate::No)
+                    tree_node.set_folder_is_open(cx, true, Animate::No);
                 }
-                (tree_node, id!($folder_node))
+                tree_node
             });
-            tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
+            tree_node.draw_folder(
+                cx,
+                name,
+                Self::is_even(self.count),
+                self.node_height,
+                self.stack.len(),
+                scale,
+            );
             self.stack.push(tree_node.opened as f64 * scale);
             if tree_node.opened <= 0.001 {
                 self.end_folder();
                 return Err(());
             }
-        }
-        else {
+        } else {
             if is_open {
                 self.stack.push(scale * 1.0);
-            }
-            else {
+            } else {
                 return Err(());
             }
         }
         Ok(())
     }
-    
+
     pub fn end_folder(&mut self) {
         self.stack.pop();
     }
-    
+
     pub fn file(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
-        
+
         if scale > 0.2 {
             self.count += 1;
         }
         if self.should_node_draw(cx) {
-            let file_node_template = self.file_node_template;
-            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, |cx| {
-                let tree_node = cx.with_vm(|vm| {
-                    FileTreeNode::script_from_value(vm, file_node_template)
-                });
-                (tree_node, id!($file_node))
+            let file_node = self.file_node.clone();
+            let tree_node = self.tree_nodes.get_or_insert(cx, node_id, |cx| {
+                cx.with_vm(|vm| FileTreeNode::script_from_value(vm, file_node.into()))
             });
-            tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
+            tree_node.draw_file(
+                cx,
+                name,
+                Self::is_even(self.count),
+                self.node_height,
+                self.stack.len(),
+                scale,
+            );
         }
     }
-    
+
     pub fn forget(&mut self) {
         self.tree_nodes.clear();
     }
-    
+
     pub fn forget_node(&mut self, file_node_id: LiveId) {
         self.tree_nodes.remove(&file_node_id);
     }
-    
+
     pub fn is_folder(&mut self, file_node_id: LiveId) -> bool {
-        if let Some((node, _)) = self.tree_nodes.get(&file_node_id) {
+        if let Some(node) = self.tree_nodes.get(&file_node_id) {
             node.is_folder
-        }
-        else {
+        } else {
             false
         }
     }
-    
+
     pub fn set_folder_is_open(
         &mut self,
         cx: &mut Cx,
@@ -621,21 +693,15 @@ impl FileTree {
     ) {
         if is_open {
             self.open_nodes.insert(node_id);
-        }
-        else {
+        } else {
             self.open_nodes.remove(&node_id);
         }
-        if let Some((tree_node, _)) = self.tree_nodes.get_mut(&node_id) {
+        if let Some(tree_node) = self.tree_nodes.get_mut(&node_id) {
             tree_node.set_folder_is_open(cx, is_open, animate);
         }
     }
-    
-    pub fn start_dragging_file_node(
-        &mut self,
-        cx: &mut Cx,
-        node_id: LiveId,
-        items: Vec<DragItem>,
-    ) {
+
+    pub fn start_dragging_file_node(&mut self, cx: &mut Cx, node_id: LiveId, items: Vec<DragItem>) {
         self.dragging_node_id = Some(node_id);
         log!("makepad: start_dragging_file_node");
         cx.start_dragging(items);
@@ -646,43 +712,42 @@ impl WidgetNode for FileTree {
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
-    
+
     fn area(&self) -> Area {
         self.scroll_bars.area()
     }
-    
+
     fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
     }
-    
+
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         // FileTree doesn't have widget children in the traditional sense
         let _ = (path, cached, results);
     }
-    
+
     fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
         WidgetRef::empty()
     }
 }
 
 impl Widget for FileTree {
-
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        
+
         self.scroll_bars.handle_event(cx, event, scope);
-                
+
         match event {
             Event::DragEnd => self.dragging_node_id = None,
-            _ => ()
+            _ => (),
         }
-        
+
         let mut node_actions = Vec::new();
-                
-        for (node_id, (node, _)) in self.tree_nodes.iter_mut() {
+
+        for (node_id, node) in self.tree_nodes.iter_mut() {
             node.handle_event(cx, event, *node_id, scope, &mut node_actions);
         }
-                
+
         for (node_id, node_action) in node_actions {
             match node_action {
                 FileTreeNodeAction::Opening => {
@@ -695,44 +760,58 @@ impl Widget for FileTree {
                     cx.set_key_focus(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
-                            self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, Animate::Yes);
+                            self.tree_nodes
+                                .get_mut(&last_selected)
+                                .unwrap()
+                                .set_is_selected(cx, false, Animate::Yes);
                         }
                     }
                     self.selected_node_id = Some(node_id);
                     if self.is_folder(node_id) {
                         cx.widget_action(uid, &scope.path, FileTreeAction::FolderClicked(node_id));
-                    }
-                    else {
+                    } else {
                         cx.widget_action(uid, &scope.path, FileTreeAction::FileClicked(node_id));
                     }
                 }
                 FileTreeNodeAction::ShouldStartDrag => {
                     if self.dragging_node_id.is_none() {
-                        cx.widget_action(uid, &scope.path, FileTreeAction::ShouldFileStartDrag(node_id));
+                        cx.widget_action(
+                            uid,
+                            &scope.path,
+                            FileTreeAction::ShouldFileStartDrag(node_id),
+                        );
                     }
                 }
             }
         }
-                
+
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocus(_) => {
                 if let Some(node_id) = self.selected_node_id {
-                    self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, true, Animate::Yes);
+                    self.tree_nodes.get_mut(&node_id).unwrap().set_is_focussed(
+                        cx,
+                        true,
+                        Animate::Yes,
+                    );
                 }
             }
             Hit::KeyFocusLost(_) => {
                 if let Some(node_id) = self.selected_node_id {
-                    self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, false, Animate::Yes);
+                    self.tree_nodes.get_mut(&node_id).unwrap().set_is_focussed(
+                        cx,
+                        false,
+                        Animate::Yes,
+                    );
                 }
             }
-            _ => ()
+            _ => (),
         }
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
-            return DrawStep::make_step()
+            return DrawStep::make_step();
         }
         if let Some(()) = self.draw_state.get() {
             self.end(cx);
@@ -746,31 +825,30 @@ impl FileTreeRef {
     pub fn should_file_start_drag(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::ShouldFileStartDrag(file_id) = item.cast() {
-                return Some(file_id)
+                return Some(file_id);
             }
         }
         None
     }
-    
+
     pub fn file_clicked(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::FileClicked(file_id) = item.cast() {
-                return Some(file_id)
+                return Some(file_id);
             }
         }
         None
     }
-    
+
     pub fn folder_clicked(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::FolderClicked(file_id) = item.cast() {
-                return Some(file_id)
+                return Some(file_id);
             }
         }
         None
     }
-    
-        
+
     pub fn set_folder_is_open(
         &self,
         cx: &mut Cx,
@@ -782,7 +860,7 @@ impl FileTreeRef {
             inner.set_folder_is_open(cx, node_id, is_open, animate);
         }
     }
-    
+
     pub fn file_start_drag(&self, cx: &mut Cx, _file_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
     }

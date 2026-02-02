@@ -1,6 +1,6 @@
 use crate::makepad_platform::*;
 
-script_mod!{
+script_mod! {
     use mod.math.*
     use mod.pod.*
     use mod.text.*
@@ -25,7 +25,7 @@ script_mod!{
         space_2: 1.0 * theme.space_factor
         space_3: 1.5 * theme.space_factor
 
-        mspace_1: Inset{top: theme.space_1, right: theme.space_1, bottom: theme.space_1, left: theme.space_1} 
+        mspace_1: Inset{top: theme.space_1, right: theme.space_1, bottom: theme.space_1, left: theme.space_1}
         mspace_h_1: Inset{top: 0., right: theme.space_1, bottom: 0., left: theme.space_1}
         mspace_v_1: Inset{top: theme.space_1, right: 0., bottom: theme.space_1, left: 0.}
         mspace_2: Inset{top: theme.space_2, right: theme.space_2, bottom: theme.space_2, left: theme.space_2}
@@ -64,7 +64,7 @@ script_mod!{
         color_u_3: mix(theme.color_w, theme.color_w_h, pow(0.75, theme.color_contrast))
         color_u_2: mix(theme.color_w, theme.color_w_h, pow(0.85, theme.color_contrast))
         color_u_15: mix(theme.color_w, theme.color_w_h, pow(0.9, theme.color_contrast))
-        
+
         color_u_1: mix(theme.color_w, theme.color_w_h, pow(0.95, theme.color_contrast))
         color_u_hidden: theme.color_w_h
 
@@ -98,7 +98,7 @@ script_mod!{
         color_opaque_d_3: mix(theme.color_fg_app, #0, 0.45)
         color_opaque_d_4: mix(theme.color_fg_app, #0, 0.6)
         color_opaque_d_5: mix(theme.color_fg_app, #0, 0.75)
-        
+
         // BASICS
         color_makepad: #FF5C39FF
 
@@ -295,7 +295,7 @@ script_mod!{
         color_val_1_focus: theme.color_opaque_u_2
         color_val_1_drag: theme.color_opaque_u_2
         color_val_1_disabled: theme.color_u_hidden
-        
+
         color_val_2: theme.color_opaque_u_2
         color_val_2_hover: theme.color_opaque_u_3
         color_val_2_focus: theme.color_opaque_u_3
@@ -356,7 +356,7 @@ script_mod!{
                 $emoji: FontMember{res: res.crate("makepad_fonts_emoji2:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}*/
             }
             line_spacing: 1.2
-        } 
+        }
         font_regular: TextStyle{
             font_family: FontFamily{
                 $latin: FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}

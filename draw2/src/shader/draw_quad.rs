@@ -93,6 +93,8 @@ pub struct DrawQuad {
     #[live] pub draw_clip: Vec4f,
     #[live(1.0)] pub depth_clip: f32,
     #[live(1.0)] pub draw_depth: f32,
+    #[live] pub pad1:f32,
+    #[live] pub pad2:f32,
 }
 
 #[derive(Script, ScriptHook, Debug)]
