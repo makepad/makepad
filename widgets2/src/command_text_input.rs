@@ -2,140 +2,142 @@ use crate::*;
 use makepad_draw::text::selection::Cursor;
 use unicode_segmentation::UnicodeSegmentation;
 
-live_design! {
-    link widgets;
-    use link::widgets::*;
-    use link::theme::*;
-    use link::shaders::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    List = {{List}} {
-        flow: Down,
-        width: Fill,
-        height: Fill,
+    mod.widgets.CommandTextInputListBase = #(List::register_widget(vm))
+
+    mod.widgets.CommandTextInputList = mod.widgets.CommandTextInputListBase{
+        flow: Down
+        width: Fill
+        height: Fill
     }
 
-    pub CommandTextInput = {{CommandTextInput}} {
-        flow: Down,
-        height: Fit,
+    mod.widgets.CommandTextInputBase = #(CommandTextInput::register_widget(vm))
 
-        popup = <RoundedView> {
-            flow: Down,
-            height: Fit,
-            visible: false,
+    mod.widgets.CommandTextInput = mod.widgets.CommandTextInputBase{
+        flow: Down
+        height: Fit
 
-            draw_bg: {
-                color: (THEME_COLOR_FG_APP),
-                border_size: (THEME_BEVELING),
-                border_color: (THEME_COLOR_BEVEL),
-                border_radius: (THEME_CORNER_RADIUS)
+        $popup: RoundedView{
+            flow: Down
+            height: Fit
+            visible: false
 
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            draw_bg +: {
+                color: theme.color_fg_app
+                border_size: theme.beveling
+                border_color: theme.color_bevel
+                border_radius: theme.corner_radius
+
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
                     // External outline (entire component including border)
                     sdf.box_all(
-                        0.0,
-                        0.0,
-                        self.rect_size.x,
-                        self.rect_size.y,
-                        self.border_radius,
-                        self.border_radius,
-                        self.border_radius,
+                        0.0
+                        0.0
+                        self.rect_size.x
+                        self.rect_size.y
                         self.border_radius
-                    );
-                    sdf.fill(self.border_color);  // Fill the entire area with border color
+                        self.border_radius
+                        self.border_radius
+                        self.border_radius
+                    )
+                    sdf.fill(self.border_color)  // Fill the entire area with border color
 
                     // Internal outline (content area)
                     sdf.box_all(
-                        self.border_size,
-                        self.border_size,
-                        self.rect_size.x - self.border_size * 2.0,
-                        self.rect_size.y - self.border_size * 2.0,
-                        self.border_radius - self.border_size,
-                        self.border_radius - self.border_size,
-                        self.border_radius - self.border_size,
+                        self.border_size
+                        self.border_size
+                        self.rect_size.x - self.border_size * 2.0
+                        self.rect_size.y - self.border_size * 2.0
                         self.border_radius - self.border_size
-                    );
-                    sdf.fill(self.color);  // Fill content area with background color
+                        self.border_radius - self.border_size
+                        self.border_radius - self.border_size
+                        self.border_radius - self.border_size
+                    )
+                    sdf.fill(self.color)  // Fill content area with background color
 
-                    return sdf.result;
+                    return sdf.result
                 }
             }
 
-            header_view = <View> {
-                width: Fill,
-                height: Fit,
+            $header_view: View{
+                width: Fill
+                height: Fit
                 padding: {left: 12., right: 12., top: 12., bottom: 12.}
                 show_bg: true
-                visible: true,
-                draw_bg: {
-                    color: (THEME_COLOR_FG_APP),
-                    instance top_radius: (THEME_CORNER_RADIUS),
-                    instance border_color: (THEME_COLOR_BEVEL),
-                    instance border_width: (THEME_BEVELING)
-                    fn pixel(self) -> vec4 {
-                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                visible: true
+                draw_bg +: {
+                    color: theme.color_fg_app
+                    top_radius: instance(theme.corner_radius)
+                    border_color: instance(theme.color_bevel)
+                    border_width: instance(theme.beveling)
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                         sdf.box_all(
-                            0.0,
-                            0.0,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            self.top_radius,
-                            self.top_radius,
-                            1.0,
+                            0.0
+                            0.0
+                            self.rect_size.x
+                            self.rect_size.y
+                            self.top_radius
+                            self.top_radius
                             1.0
-                        );
-                        sdf.fill(self.color);
+                            1.0
+                        )
+                        sdf.fill(self.color)
                         return sdf.result
                     }
                 }
 
-                header_label = <Label> {
-                    draw_text: {
-                        color: (THEME_COLOR_LABEL_INNER)
-                        text_style: {
-                            font_size: (THEME_FONT_SIZE_4)
+                $header_label: Label{
+                    draw_text +: {
+                        color: theme.color_label_inner
+                        text_style: theme.font_regular{
+                            font_size: theme.font_size_4
                         }
                     }
                 }
             }
 
-
             // Wrapper workaround to hide search input when inline search is enabled
             // as we currently can't hide the search input avoiding events.
-            search_input_wrapper = <RoundedView> {
-                height: Fit,
-                search_input = <TextInput> {
-                    width: Fill,
-                    height: Fit,
+            $search_input_wrapper: RoundedView{
+                height: Fit
+                $search_input: TextInput{
+                    width: Fill
+                    height: Fit
                 }
             }
 
-            list = <List> {
+            $list: CommandTextInputList{
                 height: Fit
             }
         }
 
-        persistent = <RoundedView> {
-            flow: Down,
-            height: Fit,
-            top = <View> { height: Fit }
-            center = <RoundedView> {
-                height: Fit,
+        $persistent: RoundedView{
+            flow: Down
+            height: Fit
+            $top: View{ height: Fit }
+            $center: RoundedView{
+                height: Fit
                 // `left` and `right` seems to not work with `height: Fill`.
-                left = <View> { width: Fit, height: Fit }
-                text_input = <TextInput> { width: Fill }
-                right = <View> { width: Fit, height: Fit }
+                $left: View{ width: Fit, height: Fit }
+                $text_input: TextInput{ width: Fill }
+                $right: View{ width: Fit, height: Fit }
             }
-            bottom = <View> { height: Fit }
+            $bottom: View{ height: Fit }
         }
     }
 }
 
-#[derive(Debug, Copy, Clone, DefaultNone)]
+#[derive(Debug, Copy, Clone, Default)]
 enum InternalAction {
     ShouldBuildItems,
     ItemSelected,
+    #[default]
     None,
 }
 
@@ -143,7 +145,7 @@ enum InternalAction {
 /// trigger character is typed.
 ///
 /// Limitation: Selectable items are expected to be `View`s.
-#[derive(Widget, Live)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct CommandTextInput {
     #[deref]
     deref: View,
@@ -238,7 +240,7 @@ impl Widget for CommandTextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if cx.has_key_focus(self.key_controller_text_input_ref().area()) {
             if let Event::KeyDown(key_event) = event {
-                let popup_visible = self.view(ids!(popup)).visible();
+                let popup_visible = self.view(ids!($popup)).visible();
 
                 if popup_visible {
                     let mut eat_the_event = true;
@@ -248,12 +250,12 @@ impl Widget for CommandTextInput {
                             // Clear mouse hover when using up/down keys
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, 1);
-                        },
+                        }
                         KeyCode::ArrowUp => {
                             // Clear mouse hover when using up/down keys
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, -1);
-                        },
+                        }
                         KeyCode::ReturnKey => {
                             self.on_keyboard_controller_input_submit(cx, scope);
                         }
@@ -375,11 +377,12 @@ impl Widget for CommandTextInput {
 impl CommandTextInput {
     // Ensure popup state consistency
     fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
-        if self.view(ids!(popup)).visible() {
+        if self.view(ids!($popup)).visible() {
             if self.inline_search {
-                self.view(ids!(search_input_wrapper)).set_visible(cx, false);
+                self.view(ids!($search_input_wrapper))
+                    .set_visible(cx, false);
             } else {
-                self.view(ids!(search_input_wrapper)).set_visible(cx, true);
+                self.view(ids!($search_input_wrapper)).set_visible(cx, true);
             }
         }
     }
@@ -404,9 +407,10 @@ impl CommandTextInput {
             self.trigger_position = Some(get_head(&self.text_input_ref()));
 
             if self.inline_search {
-                self.view(ids!(search_input_wrapper)).set_visible(cx, false);
+                self.view(ids!($search_input_wrapper))
+                    .set_visible(cx, false);
             } else {
-                self.view(ids!(search_input_wrapper)).set_visible(cx, true);
+                self.view(ids!($search_input_wrapper)).set_visible(cx, true);
                 self.is_search_input_focus_pending = true;
             }
 
@@ -467,11 +471,14 @@ impl CommandTextInput {
         };
 
         // Rebuild the string
-        let new_text = text_graphemes[..start_grapheme_idx].join("") +
-                        &text_graphemes[end_grapheme_idx..].join("");
+        let new_text = text_graphemes[..start_grapheme_idx].join("")
+            + &text_graphemes[end_grapheme_idx..].join("");
 
         // Calculate the new cursor position (grapheme)
-        let new_cursor_pos = text_graphemes[..start_grapheme_idx].join("").graphemes(true).count();
+        let new_cursor_pos = text_graphemes[..start_grapheme_idx]
+            .join("")
+            .graphemes(true)
+            .count();
 
         self.text_input_ref().set_cursor(
             cx,
@@ -479,24 +486,25 @@ impl CommandTextInput {
                 index: new_cursor_pos,
                 prefer_next_row: false,
             },
-            false
+            false,
         );
         self.set_text(cx, &new_text);
     }
 
     fn show_popup(&mut self, cx: &mut Cx) {
         if self.inline_search {
-            self.view(ids!(search_input_wrapper)).set_visible(cx, false);
+            self.view(ids!($search_input_wrapper))
+                .set_visible(cx, false);
         } else {
-            self.view(ids!(search_input_wrapper)).set_visible(cx, true);
+            self.view(ids!($search_input_wrapper)).set_visible(cx, true);
         }
-        self.view(ids!(popup)).set_visible(cx, true);
-        self.view(ids!(popup)).redraw(cx);
+        self.view(ids!($popup)).set_visible(cx, true);
+        self.view(ids!($popup)).redraw(cx);
     }
 
     fn hide_popup(&mut self, cx: &mut Cx) {
         self.clear_popup(cx);
-        self.view(ids!(popup)).set_visible(cx, false);
+        self.view(ids!($popup)).set_visible(cx, false);
     }
 
     /// Clear all text and hide the popup going back to initial state.
@@ -514,7 +522,7 @@ impl CommandTextInput {
                 index: 0,
                 prefer_next_row: false,
             },
-            false
+            false,
         );
         self.clear_items();
     }
@@ -523,7 +531,7 @@ impl CommandTextInput {
     ///
     /// Normally called as response to `should_build_items`.
     pub fn clear_items(&mut self) {
-        self.list(ids!(list)).clear();
+        self.list(ids!($list)).clear();
         self.selectable_widgets.clear();
         self.keyboard_focus_index = None;
         self.pointer_hover_index = None;
@@ -533,7 +541,7 @@ impl CommandTextInput {
     ///
     /// Normally called after clearing the previous items.
     pub fn add_item(&mut self, widget: WidgetRef) {
-        self.list(ids!(list)).add(widget.clone());
+        self.list(ids!($list)).add(widget.clone());
         self.selectable_widgets.push(widget);
         self.keyboard_focus_index = self.keyboard_focus_index.or(Some(0));
     }
@@ -544,7 +552,7 @@ impl CommandTextInput {
     ///
     /// Normally called after clearing the previous items.
     pub fn add_unselectable_item(&mut self, widget: WidgetRef) {
-        self.list(ids!(list)).add(widget);
+        self.list(ids!($list)).add(widget);
     }
 
     /// Get the current search query.
@@ -615,14 +623,19 @@ impl CommandTextInput {
                             // Check length limit
                             let length = h_idx - t_idx;
                             if length > MAX_SEARCH_TEXT_LENGTH {
-                                log!("Warning: Search text length({}) exceeds maximum limit({})", length, MAX_SEARCH_TEXT_LENGTH);
+                                log!(
+                                    "Warning: Search text length({}) exceeds maximum limit({})",
+                                    length,
+                                    MAX_SEARCH_TEXT_LENGTH
+                                );
                                 // Still return text but truncated to the maximum length
-                                return text_graphemes[t_idx..t_idx + MAX_SEARCH_TEXT_LENGTH].join("");
+                                return text_graphemes[t_idx..t_idx + MAX_SEARCH_TEXT_LENGTH]
+                                    .join("");
                             }
 
                             // Optimized string building with pre-allocated capacity
                             let mut result = String::with_capacity(
-                                text_graphemes[t_idx..h_idx].iter().map(|g| g.len()).sum()
+                                text_graphemes[t_idx..h_idx].iter().map(|g| g.len()).sum(),
                             );
                             for g in &text_graphemes[t_idx..h_idx] {
                                 result.push_str(g);
@@ -688,12 +701,12 @@ impl CommandTextInput {
 
     /// Returns a reference to the inner `TextInput` widget.
     pub fn text_input_ref(&self) -> TextInputRef {
-        self.text_input(ids!(text_input))
+        self.text_input(ids!($text_input))
     }
 
     /// Returns a reference to the inner `TextInput` widget used for search.
     pub fn search_input_ref(&self) -> TextInputRef {
-        self.text_input(ids!(search_input))
+        self.text_input(ids!($search_input))
     }
 
     fn trigger_grapheme(&self) -> Option<&str> {
@@ -741,40 +754,34 @@ impl CommandTextInput {
         let has_keyboard_focus = self.keyboard_focus_index.is_some();
 
         for (idx, item) in self.selectable_widgets.iter().enumerate() {
-            item.apply_over(cx, live! { show_bg: true, cursor: Hand });
+            let mut item = item.clone();
+            script_apply_eval!(cx, item, { show_bg: true, cursor: Hand });
 
             // If there is a keyboard focus, prioritize it over mouse hover
             // If there is no keyboard focus, show mouse hover
             if Some(idx) == self.keyboard_focus_index {
                 // Keyboard-selected item is highlighted in blue
-                item.apply_over(
-                    cx,
-                    live! {
-                        draw_bg: {
-                            color: (self.color_focus),
-                        }
-                    },
-                );
+                let color = self.color_focus;
+                script_apply_eval!(cx, item, {
+                    draw_bg : {
+                        color: #(color)
+                    }
+                });
             } else if Some(idx) == self.pointer_hover_index && !has_keyboard_focus {
                 // Mouse-hovered item is highlighted in gray, but only when there is no keyboard focus
-                item.apply_over(
-                    cx,
-                    live! {
-                        draw_bg: {
-                            color: (self.color_hover),
-                        }
-                    },
-                );
+                let color = self.color_hover;
+                script_apply_eval!(cx, item, {
+                    draw_bg : {
+                        color: #(color)
+                    }
+                });
             } else {
                 // Default state
-                item.apply_over(
-                    cx,
-                    live! {
-                        draw_bg: {
-                            color: (Vec4f::all(0.)),
-                        }
-                    },
-                );
+                script_apply_eval!(cx, item, {
+                    draw_bg : {
+                        color: #(Vec4f::all(0.))
+                    }
+                });
             }
         }
     }
@@ -784,8 +791,6 @@ impl CommandTextInput {
         self.is_text_input_focus_pending = true;
     }
 }
-
-impl LiveHook for CommandTextInput {}
 
 impl CommandTextInputRef {
     /// See [`CommandTextInput::should_build_items()`].
@@ -870,15 +875,11 @@ fn is_whitespace(grapheme: &str) -> bool {
 }
 
 /// Reduced and adapted copy of the `List` widget from Moly.
-#[derive(Live, Widget, LiveHook)]
+#[derive(Script, ScriptHook, Widget)]
 struct List {
-    #[walk]
-    walk: Walk,
+    #[deref]
+    deref: View,
 
-    #[layout]
-    layout: Layout,
-
-    #[redraw]
     #[rust]
     area: Area,
 
@@ -894,7 +895,7 @@ impl Widget for List {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        cx.begin_turtle(walk, self.layout);
+        cx.begin_turtle(walk, self.deref.layout);
         self.items.iter().for_each(|item| {
             item.draw_all(cx, scope);
         });
