@@ -35,7 +35,6 @@ script_mod! {
 
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
-            ~@HI
             AppUI{}
             //Window{}
         }
@@ -66,10 +65,10 @@ pub struct App {
 impl App {
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
-            let dock = self.ui.dock(ids!(dock));
+            let dock = self.ui.dock(ids!($dock));
             let tab_id = dock.unique_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
-            let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
+            let (tab_bar, pos) = dock.find_tab_bar_of_tab(id!($edit_first)).unwrap();
             // lets pick the template
             let template = FileSystem::get_editor_template_from_path(path);
             dock.create_and_select_tab(
@@ -78,7 +77,7 @@ impl App {
                 tab_id,
                 template,
                 "".to_string(),
-                live_id!(CloseableTab),
+                id!($CloseableTab),
                 Some(pos),
             );
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
@@ -92,7 +91,7 @@ impl App {
                     // lets kill all running processes
                     self.data.build_manager.stop_all_active_builds(cx);
                     // Now we need to apply the saved state
-                    let dock = self.ui.dock(ids!(dock));
+                    let dock = self.ui.dock(ids!($dock));
                     if let Some(mut dock) = dock.borrow_mut() {
                         dock.load_state(cx, state.dock_items);
 
@@ -132,7 +131,7 @@ impl App {
     }
 
     fn save_state(&self, slot: usize) {
-        let dock = self.ui.dock(ids!(dock));
+        let dock = self.ui.dock(ids!($dock));
         let dock_items = dock.clone_state().unwrap();
 
         // lets store the active build ids so we can fire them up again
@@ -241,13 +240,13 @@ impl MatchEvent for App {
     }
 
     fn handle_action(&mut self, cx: &mut Cx, action: &Action) {
-        let dock = self.ui.dock(ids!(dock));
-        let file_tree = self.ui.studio_file_tree(ids!(file_tree));
-        let log_list = self.ui.log_list(ids!(log_list));
-        let run_list = self.ui.view(ids!(run_list_tab));
-        let profiler = self.ui.view(ids!(profiler));
-        let search = self.ui.view(ids!(search));
-        let snapshot = self.ui.snapshot(ids!(snapshot_tab));
+        let dock = self.ui.dock(ids!($dock));
+        let file_tree = self.ui.studio_file_tree(ids!($file_tree));
+        let log_list = self.ui.log_list(ids!($log_list));
+        let run_list = self.ui.view(ids!($run_list_tab));
+        let profiler = self.ui.view(ids!($profiler));
+        let search = self.ui.view(ids!($search));
+        let snapshot = self.ui.snapshot(ids!($snapshot_tab));
 
         match action.cast() {
             AppAction::SwapSelection(ss) => {
@@ -392,8 +391,7 @@ impl MatchEvent for App {
                         let tab_id = dock.unique_id(file_id.0);
                         self.data.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
-                        let (tab_bar, pos) =
-                            dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
+                        let (tab_bar, pos) = dock.find_tab_bar_of_tab(id!($edit_first)).unwrap();
                         let template = FileSystem::get_editor_template_from_path(&jt.file_name);
                         dock.create_and_select_tab(
                             cx,
@@ -401,7 +399,7 @@ impl MatchEvent for App {
                             tab_id,
                             template,
                             "".to_string(),
-                            live_id!(CloseableTab),
+                            id!($CloseableTab),
                             Some(pos),
                         );
                         // lets scan the entire doc for duplicates
@@ -603,11 +601,11 @@ impl MatchEvent for App {
                         let panel_id = build_id.add(window_id as u64);
                         if let Some(name) = self.data.build_manager.process_name(build_id) {
                             let (tab_bar_id, pos) = if kind_id == 0 {
-                                dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap()
+                                dock.find_tab_bar_of_tab(id!($run_first)).unwrap()
                             } else if kind_id == 1 {
-                                dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap()
+                                dock.find_tab_bar_of_tab(id!($design_first)).unwrap()
                             } else {
-                                dock.find_tab_bar_of_tab(live_id!(outline_first)).unwrap()
+                                dock.find_tab_bar_of_tab(id!($outline_first)).unwrap()
                             };
 
                             // we might already have it
@@ -617,9 +615,9 @@ impl MatchEvent for App {
                                     cx,
                                     tab_bar_id,
                                     panel_id,
-                                    live_id!(RunView),
+                                    id!($RunView),
                                     name.clone(),
-                                    live_id!(CloseableTab),
+                                    id!($CloseableTab),
                                     Some(pos),
                                 )
                                 .unwrap();
@@ -708,7 +706,7 @@ impl MatchEvent for App {
                         .file_system
                         .get_word_under_cursor_for_session(action.path.from_end(1))
                     {
-                        dock.select_tab(cx, live_id!(search));
+                        dock.select_tab(cx, id!($search));
                         let set = vec![SearchItem {
                             needle: word.clone(),
                             prefixes: Some(vec![
@@ -734,7 +732,7 @@ impl MatchEvent for App {
                         .file_system
                         .get_word_under_cursor_for_session(action.path.from_end(1))
                     {
-                        dock.select_tab(cx, live_id!(search));
+                        dock.select_tab(cx, id!($search));
                         let set = vec![SearchItem {
                             needle: word.clone(),
                             prefixes: None,
@@ -795,7 +793,7 @@ impl MatchEvent for App {
                                     drop_event.abs,
                                     *internal_id,
                                     tab_id,
-                                    live_id!(CloseableTab),
+                                    id!($CloseableTab),
                                 );
                             } else {
                                 dock.drop_move(cx, drop_event.abs, *internal_id);
@@ -814,7 +812,7 @@ impl MatchEvent for App {
                                     tab_id,
                                     template,
                                     "".to_string(),
-                                    live_id!(CloseableTab),
+                                    id!($CloseableTab),
                                 );
                                 self.data.file_system.ensure_unique_tab_names(cx, &dock)
                             }
@@ -846,8 +844,8 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let file_tree = self.ui.file_tree(ids!(file_tree));
-        let dock = self.ui.dock(ids!(dock));
+        let file_tree = self.ui.file_tree(ids!($file_tree));
+        let dock = self.ui.dock(ids!($dock));
         for action in actions {
             self.handle_action(cx, action);
         }
@@ -892,7 +890,7 @@ impl MatchEvent for App {
                 self.data.file_system.request_open_file(tab_id, file_id);
                 self.data.file_system.request_open_file(tab_id, file_id);
 
-                // lets add a file tab 'some
+                // lets add a file tab 'somewhere'
                 let path = self.data.file_system.file_node_id_to_path(file_id).unwrap();
                 let tab_after = FileSystem::get_tab_after_from_path(path);
                 let (tab_bar, pos) = dock.find_tab_bar_of_tab(tab_after).unwrap();
@@ -903,7 +901,7 @@ impl MatchEvent for App {
                     tab_id,
                     template,
                     "".to_string(),
-                    live_id!(CloseableTab),
+                    id!($CloseableTab),
                     Some(pos),
                 );
 
@@ -931,7 +929,7 @@ impl AppMain for App {
         self.data
             .ai_chat_manager
             .handle_event(cx, event, &mut self.data.file_system);
-        if self.ui.dock(ids!(dock)).check_and_clear_need_save() {
+        if self.ui.dock(ids!($dock)).check_and_clear_need_save() {
             self.save_state(0);
         }
     }

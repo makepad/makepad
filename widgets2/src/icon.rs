@@ -1,26 +1,22 @@
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 #[cfg(feature = "svg")]
 use crate::makepad_draw::DrawSvg;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
-    
+
     mod.widgets.IconBase = #(Icon::register_widget(vm))
-    
+
     mod.widgets.Icon = set_type_default() do mod.widgets.IconBase{
         width: Fit
         height: Fit
-        
+
         icon_walk: Walk{
             width: 17.5
             height: Fit
         }
-        
+
         draw_bg +: {
             color_dither: uniform(1.0)
             color: instance(#0000)
@@ -43,45 +39,10 @@ script_mod! {
                 return mix(self.color, color_2, gradient_fill_dir)
             }
         }
-
-        draw_icon +: {
-            color_dither: uniform(1.0)
-            color: #f00
-            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            gradient_fill_horizontal: uniform(0.0)
-
-            get_color: fn() {
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
-                let mut color_2 = self.color_2
-
-                let mut gradient_fill_dir = self.pos.y
-                if self.gradient_fill_horizontal > 0.5 {
-                    gradient_fill_dir = self.pos.x + dither
-                }
-
-                if self.color_2.x < -0.5 {
-                    color_2 = self.color
-                }
-
-                return mix(self.color, color_2, gradient_fill_dir)
-            }
-        }
     }
 
-    mod.widgets.IconGradientX = mod.widgets.Icon{
-        draw_icon +: {
-            color: #f00
-            color_2: #00f
-            gradient_fill_horizontal: 1.0
-        }
-    }
-
-    mod.widgets.IconGradientY = mod.widgets.Icon{
-        draw_icon +: {
-            color: #f00
-            color_2: #00f
-        }
-    }
+    mod.widgets.IconGradientX = mod.widgets.Icon{}
+    mod.widgets.IconGradientY = mod.widgets.Icon{}
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -101,8 +62,7 @@ pub struct Icon {
 }
 
 impl Widget for Icon {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
-    }
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);

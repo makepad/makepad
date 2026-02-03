@@ -155,7 +155,6 @@ script_mod! {
 
         show_bg: true
         draw_bg +: {
-            debug: true
             color: instance(#0000)
             color_dither: uniform(1.0)
             border_size: uniform(0.0)

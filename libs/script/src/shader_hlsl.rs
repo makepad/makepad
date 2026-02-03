@@ -1,6 +1,7 @@
-use std::fmt::Write;
+use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
 use crate::vm::ScriptVm;
-use crate::shader::{ShaderOutput, ShaderIoKind, TextureType};
+use makepad_live_id::{id, LiveId};
+use std::fmt::Write;
 
 impl ShaderOutput {
     /// Emit HLSL helper functions that are needed by the shader
@@ -12,7 +13,7 @@ impl ShaderOutput {
 
     pub fn hlsl_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoInstance {{").ok();
-        
+
         // 1. Output Dyn instance fields first (order doesn't matter, just output as encountered)
         for io in &self.io {
             if let ShaderIoKind::DynInstance = io.kind {
@@ -21,7 +22,7 @@ impl ShaderOutput {
                 writeln!(out, " {};", io.name).ok();
             }
         }
-        
+
         // 2. Output Rust instance fields last (already in correct order from pre_collect_rust_instance_io)
         for io in &self.io {
             if let ShaderIoKind::RustInstance = io.kind {
@@ -30,7 +31,7 @@ impl ShaderOutput {
                 writeln!(out, " {};", io.name).ok();
             }
         }
-        
+
         writeln!(out, "}};").ok();
     }
 
@@ -43,7 +44,7 @@ impl ShaderOutput {
                     self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                     writeln!(out, " u_{};", io.name).ok();
                 }
-                _=>()
+                _ => (),
             }
         }
         writeln!(out, "}};").ok();
@@ -53,7 +54,9 @@ impl ShaderOutput {
         // Create cbuffer declarations for each uniform buffer using pre-assigned buffer indices
         for io in &self.io {
             if let ShaderIoKind::UniformBuffer = io.kind {
-                let buf_idx = io.buffer_index.expect("UniformBuffer must have buffer_index assigned");
+                let buf_idx = io
+                    .buffer_index
+                    .expect("UniformBuffer must have buffer_index assigned");
                 write!(out, "cbuffer cb_{} : register(b{}) {{ ", io.name, buf_idx).ok();
                 self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                 writeln!(out, " u_{}; }};", io.name).ok();
@@ -70,7 +73,7 @@ impl ShaderOutput {
                     self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
                     writeln!(out, " {};", io.name).ok();
                 }
-                _=>()
+                _ => (),
             }
         }
         writeln!(out, "    float4 _position : SV_POSITION;").ok();
@@ -92,18 +95,24 @@ impl ShaderOutput {
 
     pub fn hlsl_create_vertex_input_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct VertexInput {{").ok();
-        
+
         // Vertex buffer fields
         let mut semantic_idx = 0;
         for io in &self.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
                 write!(out, "    ").ok();
                 self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " vb_{} : GEOM{};", io.name, index_to_char(semantic_idx)).ok();
+                writeln!(
+                    out,
+                    " vb_{} : GEOM{};",
+                    io.name,
+                    index_to_char(semantic_idx)
+                )
+                .ok();
                 semantic_idx += 1;
             }
         }
-        
+
         // Instance fields
         semantic_idx = 0;
         // Dyn instance fields first
@@ -124,7 +133,7 @@ impl ShaderOutput {
                 semantic_idx += 1;
             }
         }
-        
+
         writeln!(out, "    uint vid : SV_VertexID;").ok();
         writeln!(out, "    uint iid : SV_InstanceID;").ok();
         writeln!(out, "}};").ok();
@@ -138,13 +147,13 @@ impl ShaderOutput {
         writeln!(out, "    uint iid;").ok();
         writeln!(out, "}};").ok();
         writeln!(out).ok();
-        
+
         // IoF for fragment shader
         writeln!(out, "struct IoF {{").ok();
         writeln!(out, "    IoVarying v;").ok();
         writeln!(out, "}};").ok();
         writeln!(out).ok();
-        
+
         // Io for passing to shader functions
         writeln!(out, "struct Io {{").ok();
         writeln!(out, "}};").ok();
@@ -187,7 +196,7 @@ impl ShaderOutput {
                     writeln!(out, "SamplerState {} : register(s{});", io.name, samp_idx).ok();
                     samp_idx += 1;
                 }
-                _=>()
+                _ => (),
             }
         }
     }
@@ -199,15 +208,27 @@ impl ShaderOutput {
         writeln!(out, "    _iov.vid = input.vid;").ok();
         writeln!(out, "    _iov.iid = input.iid;").ok();
         writeln!(out).ok();
-        
+
         // Copy vertex buffer fields to local struct
         for io in &self.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
                 // Vertex buffer fields are accessed directly via input.vb_name
             }
         }
-        
-        writeln!(out, "    io_vertex(_io, _iov);").ok();
+
+        // Check if vertex shader returns Vec4f - if so, assign to _position automatically
+        let vertex_returns_vec4f = self
+            .functions
+            .iter()
+            .find(|f| f.name == id!(vertex))
+            .map(|f| f.ret == _vm.bx.code.builtins.pod.pod_vec4f)
+            .unwrap_or(false);
+
+        if vertex_returns_vec4f {
+            writeln!(out, "    _iov.v._position = io_vertex(_io, _iov);").ok();
+        } else {
+            writeln!(out, "    io_vertex(_io, _iov);").ok();
+        }
         writeln!(out, "    return _iov.v;").ok();
         writeln!(out, "}}").ok();
     }

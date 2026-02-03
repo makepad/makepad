@@ -321,6 +321,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 ..mod.turtle,
                 ..mod.turtle.Size,
                 ..mod.turtle.Flow,
+                ..mod.draw.MouseCursor
             }
         }
         script_mod(vm);
