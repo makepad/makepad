@@ -217,7 +217,7 @@ pub struct TabBar {
 
 impl ScriptHook for TabBar {
     fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.templates.clear();
         }
     }
@@ -236,7 +236,7 @@ impl ScriptHook for TabBar {
         }
         
         // Update existing tabs if templates changed
-        if apply.is_update() {
+        if apply.is_reload() {
             for (_, (tab, templ_id)) in self.tabs.iter_mut() {
                 if let Some(template_value) = self.templates.get(templ_id) {
                     tab.script_apply(vm, apply, scope, *template_value);

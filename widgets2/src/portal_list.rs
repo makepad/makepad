@@ -130,7 +130,7 @@ pub struct PortalList {
 
 impl ScriptHook for PortalList {
     fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.templates.clear();
         }
     }
@@ -149,7 +149,7 @@ impl ScriptHook for PortalList {
         }
         
         // Update existing items if templates changed
-        if apply.is_update() {
+        if apply.is_reload() {
             for (_, item) in self.items.iter_mut() {
                 if let Some(template_value) = self.templates.get(&item.template) {
                     item.widget.script_apply(vm, apply, scope, *template_value);

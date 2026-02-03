@@ -152,7 +152,7 @@ impl WidgetNode for AdaptiveView {
 
 impl ScriptHook for AdaptiveView {
     fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.templates.clear();
         }
     }
@@ -182,7 +182,7 @@ impl ScriptHook for AdaptiveView {
         }
 
         // Do not override the current selector if we are updating from the doc
-        if apply.is_update() {
+        if apply.is_reload() {
             return;
         };
 

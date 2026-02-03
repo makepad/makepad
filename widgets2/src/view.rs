@@ -143,7 +143,7 @@ impl ScriptHook for View {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.live_update_order.clear();
             self.find_cache.get_mut().clear();
         }
@@ -174,7 +174,7 @@ impl ScriptHook for View {
                     };
 
                     if let Some(id) = id {
-                        if apply.is_update() {
+                        if apply.is_reload() {
                             self.live_update_order.push(id);
                         }
 

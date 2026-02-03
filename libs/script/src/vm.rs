@@ -539,6 +539,34 @@ impl<'a> ScriptVm<'a> {
         r
     }
 
+    /// Walk the prototype chain from root (oldest ancestor) to leaf (the object itself),
+    /// calling the closure for each object's map. This is useful for collecting inherited
+    /// properties where child properties should override parent properties.
+    pub fn proto_map_iter_mut_with<F: FnMut(&mut Self, &mut ScriptObjectMap)>(
+        &mut self,
+        object: ScriptObject,
+        f: &mut F,
+    ) {
+        // First recurse to the prototype (if any), so we process from root to leaf
+        if let Some(proto) = self.bx.heap.objects[object.index as usize]
+            .proto
+            .as_object()
+        {
+            self.proto_map_iter_mut_with(proto, f);
+        }
+        // Then process this object's map
+        let mut map = ScriptObjectMap::default();
+        std::mem::swap(
+            &mut map,
+            &mut self.bx.heap.objects[object.index as usize].map,
+        );
+        f(self, &mut map);
+        std::mem::swap(
+            &mut map,
+            &mut self.bx.heap.objects[object.index as usize].map,
+        );
+    }
+
     pub fn vec_with<R, F: FnOnce(&mut Self, &[ScriptVecValue]) -> R>(
         &mut self,
         object: ScriptObject,

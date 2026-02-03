@@ -251,7 +251,7 @@ impl LogList {
                 let mut item = list.item(cx, item_id, id!($LogItem)).as_view();
                 let is_even_f = if is_even { 1.0 } else { 0.0 };
                 script_apply_eval!(cx, item, {
-                    draw_bg: {is_even: #(is_even_f)}
+                    draw_bg +: {is_even: #(is_even_f)}
                 });
                 while let Some(step) = item.draw(cx, &mut Scope::empty()).step() {
                     if let Some(mut tf) = step.as_text_flow().borrow_mut() {
@@ -324,7 +324,7 @@ impl Widget for LogList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let log_list = self.view.portal_list(ids!(list));
+        let log_list = self.view.portal_list(ids!($list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>().unwrap();
         if let Event::Actions(actions) = event {
@@ -354,7 +354,7 @@ impl Widget for LogList {
 impl LogListRef {
     pub fn reset_scroll(&self, cx: &mut Cx) {
         if let Some(inner) = self.borrow_mut() {
-            let log_list = inner.view.portal_list(ids!(list));
+            let log_list = inner.view.portal_list(ids!($list));
             log_list.set_first_id_and_scroll(0, 0.0);
             log_list.redraw(cx);
         }
