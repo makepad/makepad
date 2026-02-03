@@ -63,7 +63,7 @@ pub struct CachedWidget {
 
 impl ScriptHook for CachedWidget {
     fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.template_value = None;
         }
     }

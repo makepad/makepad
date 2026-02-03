@@ -32,11 +32,11 @@ app_main!(App);
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
-    
+
     mod.gc.set_static(mod)
     mod.gc.set_static(AppUI)
     mod.gc.run()
-    
+
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             AppUI{}
@@ -354,7 +354,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!(editor))
+                            .studio_code_editor(ids!($editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -380,7 +380,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!(editor))
+                            .studio_code_editor(ids!($editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -419,7 +419,7 @@ impl MatchEvent for App {
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         //dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(ids!(editor)).borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(ids!($editor)).borrow_mut() {
                             if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do
                                 session.set_selection(
@@ -457,7 +457,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!(editor))
+                            .studio_code_editor(ids!($editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -724,7 +724,7 @@ impl MatchEvent for App {
                             pre_word_boundary: true,
                             post_word_boundary: true,
                         }];
-                        search.text_input(ids!(search_input)).set_text(cx, &word);
+                        search.text_input(ids!($search_input)).set_text(cx, &word);
                         self.data.file_system.search_string(cx, set);
                     }
                 }
@@ -743,7 +743,7 @@ impl MatchEvent for App {
                             pre_word_boundary: ke.modifiers.control,
                             post_word_boundary: ke.modifiers.control,
                         }];
-                        search.text_input(ids!(search_input)).set_text(cx, &word);
+                        search.text_input(ids!($search_input)).set_text(cx, &word);
                         self.data.file_system.search_string(cx, set);
                     }
                 }

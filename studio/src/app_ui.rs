@@ -300,7 +300,16 @@ script_mod! {
         View{
             width: Fill height: Fill
             flow: Flow.Down
-            DockToolbar{$content: DockSettings{}}
+            DockToolbar{
+                $content +: {
+                    Pbold{
+                        width: Fit
+                        text: "Run"
+                        margin: 0.
+                        padding: theme.mspace_1
+                    }
+                }
+            }
             View{
                 width: Fill height: Fill
                 align: Align{x: 0.5 y: 0.5}
@@ -518,7 +527,7 @@ script_mod! {
                 }
 
                 $file_tree_tabs: DockTabs{
-                    tabs: [$file_tree_tab]
+                    tabs: [$run_list_tab $file_tree_tab]
                     selected: 0
                 }
 

@@ -113,7 +113,7 @@ impl ScriptHook for SlidesView {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.templates.clear();
             self.draw_order.clear();
         }
@@ -147,7 +147,7 @@ impl ScriptHook for SlidesView {
         }
 
         // Create all slides upfront (slides need to be available for navigation)
-        if apply.is_new() || apply.is_update() {
+        if apply.is_new() || apply.is_reload() {
             for (slide_id, template) in self.templates.iter() {
                 if !self.slides.contains_key(slide_id) {
                     let slide = WidgetRef::script_from_value_scoped(vm, scope, *template);

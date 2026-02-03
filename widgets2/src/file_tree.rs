@@ -391,7 +391,7 @@ impl ScriptHook for FileTree {
         _value: ScriptValue,
     ) {
         // Apply updates to existing nodes
-        if apply.is_update() {
+        if apply.is_reload() {
             for tree_node in self.tree_nodes.values_mut() {
                 let template = if tree_node.is_folder {
                     self.folder_node.clone()

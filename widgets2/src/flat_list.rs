@@ -79,7 +79,7 @@ impl ScriptHook for FlatList {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.templates.clear();
         }
     }
@@ -104,7 +104,7 @@ impl ScriptHook for FlatList {
         }
 
         // Update existing items if templates changed
-        if apply.is_update() {
+        if apply.is_reload() {
             for (_, item) in self.items.iter_mut() {
                 if let Some(template_value) = self.templates.get(&item.template) {
                     item.widget.script_apply(vm, apply, scope, *template_value);

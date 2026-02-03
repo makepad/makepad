@@ -158,7 +158,7 @@ pub struct Dock {
 
 impl ScriptHook for Dock {
     fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.templates.clear();
         }
         if apply.is_new() {
@@ -197,7 +197,7 @@ impl ScriptHook for Dock {
         }
         
         // Update existing items if templates changed
-        if apply.is_update() {
+        if apply.is_reload() {
             for (kind, widget) in self.items.values_mut() {
                 if let Some(template_value) = self.templates.get(kind) {
                     widget.script_apply(vm, apply, scope, *template_value);
