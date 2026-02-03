@@ -18,7 +18,6 @@ use std::rc::Rc;
 pub struct ScriptHeap {
     pub modules: ScriptObject,
     pub(crate) gc_last: ScriptHeapGcLast,
-    pub(crate) gc_stack: Vec<ScriptValue>,
     pub(crate) mark_vec: Vec<ScriptGcMark>,
 
     pub(crate) root_objects: Rc<RefCell<HashMap<ScriptObject, usize>>>,

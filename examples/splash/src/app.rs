@@ -820,7 +820,12 @@ script_mod! {
         $TabSlidePanel: TabSlidePanel{}
     }
 
-    load_all_resources() do #(App::script_component(vm)){
+    mod.gc.set_static(mod)
+    mod.gc.run()
+    load_all_resources()
+    let x = #(App::script_component(vm));
+    ~x
+    x{
         ui: Root{
             $main_window: Window{
                 pass.clear_color: vec4(0.3 0.3 0.3 1.0)
