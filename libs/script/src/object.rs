@@ -266,7 +266,7 @@ impl ScriptObjectTag {
         self.0 |= Self::STATIC
     }
 
-    pub fn is_static(&mut self) -> bool {
+    pub fn is_static(&self) -> bool {
         self.0 & Self::STATIC != 0
     }
 

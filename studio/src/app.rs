@@ -32,7 +32,11 @@ app_main!(App);
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
-
+    
+    mod.gc.set_static(mod)
+    mod.gc.set_static(AppUI)
+    mod.gc.run()
+    
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             AppUI{}

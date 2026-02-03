@@ -238,16 +238,32 @@ impl ScriptHeap {
         let mut ptr = ptr;
         loop {
             let object = &mut self.objects[ptr.index as usize];
-            if object.tag.is_immutable() {
-                return script_err_immutable!(trap, "cannot modify immutable object");
-            }
+            let is_static = object.tag.is_static();
+            let is_frozen = object.tag.is_frozen();
+            // Check vec for key
             for kv in object.vec.iter_mut().rev() {
                 if kv.key == key {
+                    // Found key - check if we can modify
+                    if is_static {
+                        return script_err_immutable!(trap, "cannot modify static object");
+                    }
+                    if is_frozen {
+                        return script_err_immutable!(trap, "cannot modify frozen object");
+                    }
                     kv.value = value;
                     return NIL;
                 }
             }
-            if object.map_set_if_exist(key, value) {
+            // Check map for key
+            if object.map_get(&key).is_some() {
+                // Found key - check if we can modify
+                if is_static {
+                    return script_err_immutable!(trap, "cannot modify static object");
+                }
+                if is_frozen {
+                    return script_err_immutable!(trap, "cannot modify frozen object");
+                }
+                object.map_set_if_exist(key, value);
                 return NIL;
             }
             if let Some(next_ptr) = object.proto.as_object() {
@@ -279,8 +295,11 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         let object = &self.objects[top_ptr.index as usize];
-        if object.tag.is_immutable() {
-            return script_err_immutable!(trap, "cannot set property on immutable object");
+        if object.tag.is_static() {
+            return script_err_immutable!(trap, "cannot set property on static object");
+        }
+        if object.tag.is_frozen() {
+            return script_err_immutable!(trap, "cannot set property on frozen object");
         }
 
         if let Some(ty) = object.tag.as_type_index() {
