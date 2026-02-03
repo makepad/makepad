@@ -54,6 +54,8 @@ pub struct Cx {
     pub script_data: CxScriptData,
     pub package_root: Option<String>,
     
+    pub debug_trace_active: bool,
+    
     pub (crate) os_type: OsType,
     pub in_makepad_studio: bool,
     pub demo_time_repaint: bool,
@@ -336,6 +338,8 @@ impl Cx {
             event_handler: Some(event_handler),
             
             debug: Default::default(),
+            
+            debug_trace_active: false,
             
             globals: Default::default(),
             

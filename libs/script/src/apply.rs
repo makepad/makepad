@@ -194,6 +194,16 @@ impl Apply {
         }
     }
     
+    /// Returns true if this is a template apply (New or Reload) where
+    /// the #[source] field should be updated. Excludes Eval since eval
+    /// creates temporary objects that would become dangling after GC.
+    pub fn is_template_apply(&self) -> bool {
+        match self {
+            Self::New => true,
+            Self::Reload => true,
+            _ => false
+        }
+    }
 
     pub fn is_new(&self) -> bool {
         match self {

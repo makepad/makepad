@@ -107,9 +107,9 @@ script_mod! {
                     animator +: { active +: { default: @off } }
                     draw_bg +: {
                         size: uniform(3.75)
+                        active: 0.0
 
                         pixel: fn() {
-                            return mix(#0f0, #f00, self.active)
                             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                             let left = 2.0
                             let sz = self.size
@@ -214,8 +214,8 @@ impl RunList {
                     let is_even_f = if is_even { 1.0 } else { 0.0 };
                     let target_name = BuildTarget::from_id(i).name();
                     script_apply_eval!(cx, item, {
-                       height: #(height)
-                       draw_bg +: {is_even: #(is_even_f)}
+                        height: #(height)
+                        draw_bg +: {is_even: #(is_even_f)}
                     });
                     let cb = item.check_box(ids!($check));
                     cb.set_text(target_name);
@@ -236,10 +236,10 @@ impl RunList {
             let mut item = list.item(cx, item_id, id!($Empty)).unwrap().as_view();
             let height = list.space_left(cx).min(20.0);
             let is_even_f = if is_even { 1.0 } else { 0.0 };
-            //script_apply_eval!(cx, item, {
-             //   height: #(height)
-             //   draw_bg +: {is_even: #(is_even_f)}
-            //});
+            script_apply_eval!(cx, item, {
+                height: #(height)
+                draw_bg +: {is_even: #(is_even_f)}
+            });
             item.draw_all(cx, &mut Scope::empty());
             counter += 1;
         }
