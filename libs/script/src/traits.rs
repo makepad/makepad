@@ -33,7 +33,6 @@ pub trait ScriptHook {
     ) {
         match apply {
             Apply::New => self.on_before_new_scoped(vm, scope),
-            Apply::Update => self.on_before_update_scoped(vm, scope),
             Apply::Reload => self.on_before_reload_scoped(vm, scope),
             _ => (),
         }
@@ -57,7 +56,6 @@ pub trait ScriptHook {
     ) {
         match apply {
             Apply::New => self.on_after_new_scoped(vm, scope),
-            Apply::Update => self.on_after_update_scoped(vm, scope),
             Apply::Reload => self.on_after_reload_scoped(vm, scope),
             _ => (),
         }
@@ -85,10 +83,8 @@ pub trait ScriptHook {
     fn on_alive(&self) {} // use this hook to quickly check if your object is alive, useful for debugging
     fn on_before_new(&mut self, _vm: &mut ScriptVm) {}
     fn on_before_reload(&mut self, _vm: &mut ScriptVm) {}
-    fn on_before_update(&mut self, _vm: &mut ScriptVm) {}
     fn on_after_new(&mut self, _vm: &mut ScriptVm) {}
     fn on_after_reload(&mut self, _vm: &mut ScriptVm) {}
-    fn on_after_update(&mut self, _vm: &mut ScriptVm) {}
 
     // simple with scope
     fn on_before_new_scoped(&mut self, vm: &mut ScriptVm, _scope: &mut Scope) {
@@ -97,17 +93,11 @@ pub trait ScriptHook {
     fn on_before_reload_scoped(&mut self, vm: &mut ScriptVm, _scope: &mut Scope) {
         self.on_before_reload(vm)
     }
-    fn on_before_update_scoped(&mut self, vm: &mut ScriptVm, _scope: &mut Scope) {
-        self.on_before_update(vm)
-    }
     fn on_after_new_scoped(&mut self, vm: &mut ScriptVm, _scope: &mut Scope) {
         self.on_after_new(vm)
     }
     fn on_after_reload_scoped(&mut self, vm: &mut ScriptVm, _scope: &mut Scope) {
         self.on_after_reload(vm)
-    }
-    fn on_after_update_scoped(&mut self, vm: &mut ScriptVm, _scope: &mut Scope) {
-        self.on_after_update(vm)
     }
 }
 
@@ -312,17 +302,6 @@ where
         vm.bx.heap.freeze(pod_obj);
 
         Some(pt)
-    }
-
-    fn script_from_apply_value(vm: &mut ScriptVm, object: ScriptValue, id: LiveId) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if let Some(value) = vm.bx.heap.value_for_apply(object, id.into()) {
-            Some(ScriptNew::script_from_value(vm, value))
-        } else {
-            None
-        }
     }
 
     fn script_default(vm: &mut ScriptVm) -> ScriptValue

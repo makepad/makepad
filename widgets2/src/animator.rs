@@ -171,7 +171,7 @@ impl ScriptHook for AnimatorGroup {
     fn on_custom_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
         value: ScriptValue,
     ) -> bool {
@@ -179,7 +179,7 @@ impl ScriptHook for AnimatorGroup {
             return false;
         };
 
-        vm.map_mut_with(obj, |vm, map| {
+        let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
             for (key, map_value) in map.iter() {
                 if let Some(key_id) = key.as_id() {
                     if key_id == id!(default) {
@@ -187,12 +187,25 @@ impl ScriptHook for AnimatorGroup {
                             self.default = default_id;
                         }
                     } else {
-                        let state = AnimatorState::script_from_value(vm, map_value.value);
-                        self.states.insert(key_id, state);
+                        // Reuse existing state if present, otherwise create new
+                        if let Some(existing) = self.states.get_mut(&key_id) {
+                            existing.script_apply(vm, apply, &mut Scope::empty(), map_value.value);
+                        } else {
+                            let state = AnimatorState::script_from_value(vm, map_value.value);
+                            self.states.insert(key_id, state);
+                        }
                     }
                 }
             }
-        });
+        };
+
+        if apply.is_eval() {
+            // For eval, only process the object's own map (no prototype chain)
+            vm.map_mut_with(obj, &mut process_map);
+        } else {
+            // Walk prototype chain from root to leaf, so child properties override parent
+            vm.proto_map_iter_mut_with(obj, &mut process_map);
+        }
 
         true
     }
@@ -259,7 +272,7 @@ impl ScriptHook for Animator {
     fn on_custom_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
         value: ScriptValue,
     ) -> bool {
@@ -267,14 +280,28 @@ impl ScriptHook for Animator {
             return false;
         };
 
-        vm.map_mut_with(obj, |vm, map| {
+        let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
             for (key, map_value) in map.iter() {
                 if let Some(group_id) = key.as_id() {
-                    let group = AnimatorGroup::script_from_value(vm, map_value.value);
-                    self.groups.insert(group_id, group);
+                    // Reuse existing group if present, otherwise create new
+                    if let Some(existing) = self.groups.get_mut(&group_id) {
+                        existing.script_apply(vm, apply, &mut Scope::empty(), map_value.value);
+                    } else {
+                        let group = AnimatorGroup::script_from_value(vm, map_value.value);
+                        self.groups.insert(group_id, group);
+                    }
                 }
             }
-        });
+        };
+
+        if apply.is_eval() {
+            // For eval, only process the object's own map (no prototype chain)
+            vm.map_mut_with(obj, &mut process_map);
+        } else {
+            // Walk prototype chain from root to leaf, so child properties override parent
+            vm.proto_map_iter_mut_with(obj, &mut process_map);
+        }
+
         // Only mark as defined if we actually have animator groups
         self.is_defined = !self.groups.is_empty();
         true
@@ -289,7 +316,7 @@ impl ScriptApplyDefault for Animator {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) -> Option<ScriptValue> {
-        if !apply.is_new() {
+        if !apply.is_new() || apply.is_eval(){
             return None;
         }
         let index = apply.as_default().map_or(0, |x| x + 1);

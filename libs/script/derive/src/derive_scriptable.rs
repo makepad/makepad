@@ -132,7 +132,7 @@ fn derive_script_impl_inner(
             {
                 tb.add("if let Some(v) = vm.bx.heap.value_for_apply(value, id!(")
                     .ident(&field.name)
-                    .add(").into()){");
+                    .add(").into(), apply){");
                 tb.add("<")
                     .stream(Some(field.ty.clone()))
                     .add(" as ScriptApply>::script_apply(&mut self.")
@@ -684,7 +684,7 @@ fn derive_script_impl_inner(
                     }
                     tb.add("} = self{");
                     for (i, field) in fields.iter().enumerate() {
-                        tb.add("if let Some(v) = vm.bx.heap.value_for_apply(value, ScriptValue::from_id(id!(").ident(&field.name).add("))){");
+                        tb.add("if let Some(v) = vm.bx.heap.value_for_apply(value, ScriptValue::from_id(id!(").ident(&field.name).add(")), apply){");
                         tb.add("    <")
                             .stream(Some(field.ty.clone()))
                             .add(" as ScriptApply>::script_apply(")

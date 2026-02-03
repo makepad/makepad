@@ -27,6 +27,7 @@ script_mod!{
             fade: uniform(1.0)
             
             pixel: fn() {
+                return mix(#0f0, #f00, self.active)
                 let sz = 2.5
                 let c = vec2(5.0, self.rect_size.y * 0.4)
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)

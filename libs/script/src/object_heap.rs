@@ -1,3 +1,4 @@
+use crate::apply::Apply;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::mod_shader::ShaderIoType;
@@ -826,12 +827,21 @@ impl ScriptHeap {
         value
     }
 
-    pub fn value_for_apply(&mut self, obj: ScriptValue, key: ScriptValue) -> Option<ScriptValue> {
+    pub fn value_for_apply(
+        &mut self,
+        obj: ScriptValue,
+        key: ScriptValue,
+        apply: &Apply,
+    ) -> Option<ScriptValue> {
         if let Some(ptr) = obj.as_object() {
             // only do top level if dirty
             let object = &mut self.objects[ptr.index as usize];
             if let Some(value) = object.map_get(&key) {
                 return Some(value);
+            }
+            // For eval, only check the object's own map (no prototype chain)
+            if apply.is_eval() {
+                return None;
             }
             // if we havent been applied before apply prototype chain too
             let mut ptr = if let Some(next_ptr) = object.proto.as_object() {

@@ -57,12 +57,15 @@ impl ScriptHook for DrawVars {
         if self.draw_shader_id.is_some() {
             if let Some(io_self) = value.as_object() {
                 let cx = vm.host.cx_mut();
-                self.fill_dyn_instances(cx, &vm.bx.heap, io_self);
-                self.fill_dyn_uniforms(cx, &vm.bx.heap, io_self);
+                // For eval applies, only update values that exist at the top level (shallow)
+                // This avoids re-reading all values from the prototype chain
+                let shallow = apply.is_eval();
+                self.fill_dyn_instances(cx, &vm.bx.heap, io_self, shallow);
+                self.fill_dyn_uniforms(cx, &vm.bx.heap, io_self, shallow);
             }
         }
         // Update areas for animated properties only
-        if apply.is_animate() {
+        if apply.is_animate() || apply.is_eval(){
             if let Some(io_self) = value.as_object() {
                 let cx = vm.host.cx_mut();
                 self.update_instance_areas_when_in_object(cx, &vm.bx.heap, io_self);
@@ -303,14 +306,14 @@ impl DrawVars {
         }
     }
 
-    fn fill_dyn_instances(&mut self, cx: &Cx, heap: &ScriptHeap, io_self: ScriptObject) {
+    fn fill_dyn_instances(&mut self, cx: &Cx, heap: &ScriptHeap, io_self: ScriptObject, shallow: bool) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let mapping = &cx.draw_shaders.shaders[draw_shader_id.index].mapping;
             let base_offset = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
 
             for input in &mapping.dyn_instances.inputs {
                 let value =
-                    Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_INSTANCE);
+                    Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_INSTANCE, shallow);
                 if !value.is_nil() && !value.is_err() {
                     Self::write_value_to_f32_slots(
                         heap,
@@ -324,13 +327,13 @@ impl DrawVars {
         }
     }
 
-    fn fill_dyn_uniforms(&mut self, cx: &Cx, heap: &ScriptHeap, io_self: ScriptObject) {
+    fn fill_dyn_uniforms(&mut self, cx: &Cx, heap: &ScriptHeap, io_self: ScriptObject, shallow: bool) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let mapping = &cx.draw_shaders.shaders[draw_shader_id.index].mapping;
 
             for input in &mapping.dyn_uniforms.inputs {
                 let value =
-                    Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_UNIFORM);
+                    Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_UNIFORM, shallow);
                 if !value.is_nil() && !value.is_err() {
                     Self::write_value_to_f32_slots(
                         heap,
@@ -349,8 +352,14 @@ impl DrawVars {
         io_self: ScriptObject,
         id: LiveId,
         expected_io_type: ShaderIoType,
+        shallow: bool,
     ) -> ScriptValue {
-        let value = heap.value(io_self, id.into(), NoTrap);
+        // For shallow lookups, only check the object's own map (no prototype chain)
+        let value = if shallow {
+            heap.map_ref(io_self).get(&id.into()).map(|v| v.value).unwrap_or(NIL)
+        } else {
+            heap.value(io_self, id.into(), NoTrap)
+        };
 
         // Check if it's a shader IO object with the expected type
         if let Some(value_obj) = value.as_object() {

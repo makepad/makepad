@@ -27,7 +27,7 @@ pub struct PageFlip {
 
 impl ScriptHook for PageFlip {
     fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
-        if apply.is_update() {
+        if apply.is_reload() {
             self.templates.clear();
         }
     }
@@ -52,7 +52,7 @@ impl ScriptHook for PageFlip {
         }
         
         // If not lazy_init, create all pages upfront
-        if !self.lazy_init && (apply.is_new() || apply.is_update()) {
+        if !self.lazy_init && (apply.is_new() || apply.is_reload()) {
             for (page_id, template) in self.templates.iter() {
                 if !self.pages.contains_key(page_id) {
                     let page = WidgetRef::script_from_value_scoped(vm, scope, *template);
