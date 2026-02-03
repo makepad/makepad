@@ -312,9 +312,8 @@ impl ScriptHeap {
         self.mark_vec.clear();
         for i in 0..self.type_check.len() {
             if let Some(object) = &self.type_check[i].object {
-                if let Some(object) = object.proto.as_object() {
-                    self.mark_inner(ScriptGcMark::Object(object));
-                }
+                // Mark the proto value (could be object, string, etc.)
+                mark!(self, object.proto);
             }
         }
         // Mark type_defaults objects
@@ -589,7 +588,8 @@ impl ScriptHeap {
 
     pub fn free_object_if_unreffed(&mut self, ptr: ScriptObject) {
         let obj = &mut self.objects[ptr.index as usize];
-        if !obj.tag.is_reffed() {
+        // Must check is_alloced to avoid double-freeing
+        if obj.tag.is_alloced() && !obj.tag.is_reffed() {
             if let Some(pod_ty) = obj.tag.as_pod_type() {
                 self.pod_types_free.push(pod_ty);
             }
