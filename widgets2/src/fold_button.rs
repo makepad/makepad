@@ -27,7 +27,6 @@ script_mod!{
             fade: uniform(1.0)
             
             pixel: fn() {
-                return mix(#0f0, #f00, self.active)
                 let sz = 2.5
                 let c = vec2(5.0, self.rect_size.y * 0.4)
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -171,10 +170,9 @@ impl Widget for FoldButton {
         let uid = self.widget_uid();
         let res = self.animator_handle_event(cx, event);
         if res.must_redraw() {
-            // Get the current active value and emit animating action
-            let mut value = [0.0];
-            self.draw_bg.get_instance(cx, id!(active), &mut value);
-            cx.widget_action_with_data(&self.action_data, uid, &scope.path, FoldButtonAction::Animating(value[0] as f64));
+            // Use self.active which is updated by the animator's script_apply
+            // (draw_bg.get_instance returns the OLD value from the previous draw)
+            cx.widget_action_with_data(&self.action_data, uid, &scope.path, FoldButtonAction::Animating(self.active));
             self.draw_bg.redraw(cx);
         }
                 

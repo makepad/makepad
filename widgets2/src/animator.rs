@@ -212,7 +212,7 @@ impl ScriptHook for AnimatorGroup {
 }
 
 /// A single animation state (e.g., off, on, drag)
-#[derive(Default, Script, ScriptHook)]
+#[derive(Default, Script)]
 pub struct AnimatorState {
     #[live]
     pub cursor: Option<MouseCursor>,
@@ -225,6 +225,8 @@ pub struct AnimatorState {
     #[live]
     pub redraw: bool,
 }
+
+impl ScriptHook for AnimatorState {}
 
 /// Runtime state for a single animation track
 #[derive(Clone)]
@@ -350,6 +352,7 @@ impl Animator {
         let group_id = state[0];
         let target_state_id = state[1];
 
+
         // Get the state group
         let group = self.groups.get(&group_id)?;
 
@@ -375,6 +378,7 @@ impl Animator {
             .map(|idx| self.tracks[idx].state_id)
             .unwrap_or(current_state_id);
 
+
         // If we're already in this state and not animating, do nothing
         if current_state_id == target_state_id && existing_track_idx.is_none() {
             return None;
@@ -387,6 +391,7 @@ impl Animator {
             .or_else(|| target_state.from.get(&id!(all)))
             .copied()
             .unwrap_or(Play::Forward { duration: 0.3 });
+        
 
         // Get the ease from the target state, default to Linear
         let ease = target_state.ease.unwrap_or(Ease::Linear);
@@ -603,6 +608,7 @@ impl Animator {
                     let elapsed = current_time - track.start_time;
                     let (ended, time) = track.play.get_ended_time(elapsed);
                     let mix = if ended { 1.0 } else { track.ease.map(time) };
+
 
                     if !ended {
                         any_animating = true;
