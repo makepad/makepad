@@ -64,9 +64,9 @@ pub struct FlatList {
     #[rust]
     draw_state: DrawStateWrap<()>,
 
-    // Templates stored as ScriptValue references - populated in on_after_apply
+    // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
     #[rust]
-    templates: HashMap<LiveId, ScriptValue>,
+    templates: HashMap<LiveId, ScriptObjectRef>,
     #[rust]
     items: ComponentMap<LiveId, WidgetItem>,
 }
@@ -92,15 +92,21 @@ impl ScriptHook for FlatList {
         value: ScriptValue,
     ) {
         // Collect templates from the object's vec - only prefixed IDs ($name) end up in the vec
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |_vm, vec| {
-                for kv in vec {
-                    // Templates use prefixed ids ($name) - they end up in the vec
-                    if let Some(id) = kv.key.as_id() {
-                        self.templates.insert(id, kv.value);
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        // Templates use prefixed ids ($name) - they end up in the vec
+                        if let Some(id) = kv.key.as_id() {
+                            if let Some(template_obj) = kv.value.as_object() {
+                                // Root the template object so it survives GC
+                                self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                            }
+                        }
                     }
-                }
-            });
+                });
+            }
         }
 
         // Update existing items if templates changed

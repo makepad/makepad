@@ -759,6 +759,7 @@ pub struct ScriptVmBase {
     pub code: ScriptCode,
     pub heap: ScriptHeap,
     pub threads: ScriptThreads,
+    pub debug_trace: bool,
 }
 
 impl ScriptVmBase {
@@ -768,6 +769,7 @@ impl ScriptVmBase {
             code: ScriptCode::default(),
             threads: ScriptThreads::empty(),
             heap: ScriptHeap::empty(),
+            debug_trace: false,
         }
     }
 
@@ -792,6 +794,7 @@ impl ScriptVmBase {
             },
             threads: ScriptThreads::new(),
             heap: heap,
+            debug_trace: false,
         }
     }
 }

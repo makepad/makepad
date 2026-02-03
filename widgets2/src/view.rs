@@ -157,38 +157,42 @@ impl ScriptHook for View {
         value: ScriptValue,
     ) {
         // Handle children from the object's vec
-        if let Some(obj) = value.as_object() {
-            let mut anon_index = 0usize;
-            vm.vec_with(obj, |vm, vec| {
-                for kv in vec {
-                    // Determine the id: use prefixed id if available, otherwise use numbered id for anonymous children
-                    let id = if kv.key.is_prefixed_id() {
-                        kv.key.as_id()
-                    } else if kv.key.is_nil() {
-                        // Anonymous child widget - use numbered id
-                        let id = LiveId(anon_index as u64);
-                        anon_index += 1;
-                        Some(id)
-                    } else {
-                        None
-                    };
-
-                    if let Some(id) = id {
-                        if apply.is_reload() {
-                            self.live_update_order.push(id);
-                        }
-
-                        if let Some((_, node)) =
-                            self.children.iter_mut().find(|(id2, _)| *id2 == id)
-                        {
-                            node.script_apply(vm, apply, scope, kv.value);
+        // Skip for eval applies - eval should only affect this widget's own properties,
+        // not propagate to children (which would use inherited vec from prototype)
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                let mut anon_index = 0usize;
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        // Determine the id: use prefixed id if available, otherwise use numbered id for anonymous children
+                        let id = if kv.key.is_prefixed_id() {
+                            kv.key.as_id()
+                        } else if kv.key.is_nil() {
+                            // Anonymous child widget - use numbered id
+                            let id = LiveId(anon_index as u64);
+                            anon_index += 1;
+                            Some(id)
                         } else {
-                            let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
-                            self.children.push((id, widget));
+                            None
+                        };
+
+                        if let Some(id) = id {
+                            if apply.is_reload() {
+                                self.live_update_order.push(id);
+                            }
+
+                            if let Some((_, node)) =
+                                self.children.iter_mut().find(|(id2, _)| *id2 == id)
+                            {
+                                node.script_apply(vm, apply, scope, kv.value);
+                            } else {
+                                let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                                self.children.push((id, widget));
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
         }
 
         if apply.is_reload() {

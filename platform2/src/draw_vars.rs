@@ -130,6 +130,10 @@ impl DrawVars {
                 for input in &sh.mapping.instances.inputs {
                     let key: ScriptValue = input.id.into();
                     if obj_map.contains_key(&key) {
+                    // Debug trace for 'active' instance
+                    if cx.debug_trace_active && input.id == live_id!(active) {
+                        crate::log!("DEBUG update_instance_areas: active = {} (from inst_slice)", inst_slice[input.offset]);
+                    }
                         for j in 0..repeat {
                             for i in 0..input.slots {
                                 instances[input.offset + i + j * stride] =
@@ -315,6 +319,15 @@ impl DrawVars {
                 let value =
                     Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_INSTANCE, shallow);
                 if !value.is_nil() && !value.is_err() {
+                    // Debug trace for 'active' instance
+                    if cx.debug_trace_active && input.id == live_id!(active) {
+                        if let Some(v) = value.as_f64() {
+                            // Print all keys in the object's direct map
+                            let map = heap.map_ref(io_self);
+                            let keys: Vec<_> = map.iter().map(|(k, _)| format!("{:?}", k)).collect();
+                            crate::log!("DEBUG fill_dyn_instances: active = {} (shallow={}) obj_keys={:?}", v, shallow, keys);
+                        }
+                    }
                     Self::write_value_to_f32_slots(
                         heap,
                         value,
