@@ -282,6 +282,13 @@ impl ScriptObjectTag {
         self.0 & Self::FROZEN != 0
     }
 
+    /// Check if object is immutable (either frozen or static)
+    /// Static objects are GC-permanent and should not be modified
+    #[inline(always)]
+    pub fn is_immutable(&self) -> bool {
+        self.0 & (Self::FROZEN | Self::STATIC) != 0
+    }
+
     pub fn is_validated(&self) -> bool {
         self.0 & Self::VALIDATED != 0
     }
@@ -376,7 +383,7 @@ impl ScriptObjectTag {
     }
 
     pub fn is_vec_frozen(&self) -> bool {
-        self.0 & (Self::VEC_FROZEN | Self::FROZEN) != 0
+        self.0 & (Self::VEC_FROZEN | Self::FROZEN | Self::STATIC) != 0
     }
 
     // REF
