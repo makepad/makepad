@@ -2,7 +2,9 @@ use crate::makepad_draw::*;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+#[allow(unused)]
 use std::io::prelude::*;
+#[allow(unused)]
 use std::fs::File;
 use std::path::{Path,PathBuf};
 use std::cell::RefCell;

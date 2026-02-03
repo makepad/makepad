@@ -191,15 +191,15 @@ impl Apply {
         match self {
             Self::New => true,
             Self::Reload => true,
-            Self::Update => true,
+            Self::Eval => true,
             _ => false
         }
     }
     
     pub fn is_from_rust(&self) -> bool {
         match self {
+            Self::Update => true,
             Self::Animate => true,
-            Self::Eval => true,
             Self::Over => true,
             _ => false
         }

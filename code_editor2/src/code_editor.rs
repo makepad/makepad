@@ -45,7 +45,7 @@ script_mod! {
     set_type_default() do #(DrawIndentGuide::script_shader(vm)) {
         ..mod.draw.DrawQuad
         pixel: fn() {
-            let thickness = 0.8 + self.dpi_dilate * 0.5
+            let thickness = 0.8 + self.draw_pass.dpi_dilate * 0.5
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             sdf.move_to(1., -1.)
             sdf.line_to(1., self.rect_size.y + 1.)
@@ -70,14 +70,14 @@ script_mod! {
         border_radius: uniform(2.0)
         focus: uniform(1.0)
         vertex: fn() {
-            let clipped: vec2 = clamp(
-                self.geom_pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos - vec2(8., 0.),
+            let clipped = clamp(
+                self.geom.pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos - vec2(8., 0.),
                 self.draw_clip.xy,
                 self.draw_clip.zw
             )
             self.pos = (clipped - self.rect_pos) / self.rect_size
-            return self.camera_projection * (self.camera_view * (
-                self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
+            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * (
+                self.draw_list.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_call.zbias, 1.)
             ))
         }
 

@@ -22,7 +22,7 @@ script_mod! {
             shadow_color: theme.color_shadow
             shadow_radius: 7.5
             shadow_offset: vec2(0.0, 0.0)
-            color: #f00
+            color: theme.color_fg_app
         }
         $content: View {
             height: Fill
@@ -528,7 +528,7 @@ script_mod! {
                 }
 
                 $log_tabs: DockTabs{
-                    tabs: []
+                    tabs: [$log_list_tab]
                     selected: 0
                 }
 
