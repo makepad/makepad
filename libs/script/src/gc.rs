@@ -164,6 +164,13 @@ impl ScriptHeap {
         for obj in self.type_defaults.values() {
             self.mark_vec.push(ScriptGcMark::Object(*obj));
         }
+        // Mark pod_types default values and objects
+        for pod_type in &self.pod_types {
+            mark!(self, pod_type.default);
+            if pod_type.object != ScriptObject::ZERO {
+                self.mark_vec.push(ScriptGcMark::Object(pod_type.object));
+            }
+        }
         let roots = self.root_objects.borrow();
         for item in roots.keys() {
             self.mark_vec.push(ScriptGcMark::Object(*item));
