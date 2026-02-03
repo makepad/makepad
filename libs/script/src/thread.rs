@@ -414,6 +414,23 @@ impl ScriptThreads {
                     values.push(loop_values.source);
                 }
             }
+            // Collect json parser state
+            values.push(thread.json_parser.parser.root);
+            for state in &thread.json_parser.parser.state {
+                match state {
+                    crate::json::State::ObjectKey(obj) => values.push((*obj).into()),
+                    crate::json::State::ObjectColon(obj, key) => {
+                        values.push((*obj).into());
+                        values.push(*key);
+                    }
+                    crate::json::State::ObjectValue(obj, key) => {
+                        values.push((*obj).into());
+                        values.push(*key);
+                    }
+                    crate::json::State::Array(arr) => values.push((*arr).into()),
+                    crate::json::State::Root | crate::json::State::RootMaybeObject => {}
+                }
+            }
         }
     }
 }
