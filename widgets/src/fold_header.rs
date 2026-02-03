@@ -71,7 +71,9 @@ impl Widget for FoldHeader {
         };
         
         self.header.handle_event(cx,  event, scope);
-        
+        if self.body.visible() {
+            self.body.handle_event(cx, event, scope);
+        }
         if let Event::Actions(actions) = event{
             match actions.find_widget_action(self.header.widget(ids!(fold_button)).widget_uid()).cast() {
                 FoldButtonAction::Opening => {
