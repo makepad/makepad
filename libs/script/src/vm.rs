@@ -2,6 +2,7 @@ use crate::function::*;
 use crate::heap::*;
 use crate::makepad_error_log::*;
 use crate::makepad_live_id::*;
+use crate::mod_gc::*;
 use crate::mod_math::*;
 use crate::mod_pod::*;
 use crate::mod_shader::*;
@@ -132,52 +133,9 @@ impl<'a> ScriptVm<'a> {
 
     /// Run garbage collection (mark and sweep).
     pub fn gc(&mut self) {
-        // Reuse the gc_stack buffer to avoid allocations
-        let mut gc_stack = std::mem::take(&mut self.bx.heap.gc_stack);
-
-        // Collect thread stack values (stack, scopes, mes, loops)
-        self.bx.threads.collect_stack_values_into(&mut gc_stack);
-
-        // Collect ScriptBody scope and me objects
-        for body in self.bx.code.bodies.borrow().iter() {
-            gc_stack.push(body.scope.into());
-            gc_stack.push(body.me.into());
-            // Parser opcodes contain ScriptValues
-            for opcode in &body.parser.opcodes {
-                gc_stack.push(*opcode);
-            }
-            // Destructure defaults contain ScriptValues
-            for (_, values, _) in &body.parser.destruct_defaults {
-                for v in values {
-                    gc_stack.push(*v);
-                }
-            }
-        }
-
-        // Collect ScriptNative type_table objects
-        for type_map in self.bx.code.native.borrow().type_table.iter() {
-            for (_, obj) in type_map.iter() {
-                gc_stack.push((*obj).into());
-            }
-        }
-
-        // Collect error values and return values from all thread traps
-        for i in 0..self.bx.threads.len() {
-            if let Some(thread) = self.bx.threads.get(i) {
-                for err in thread.trap.err.borrow().iter() {
-                    gc_stack.push(err.value);
-                }
-                // Also check for pending return values
-                if let Some(ScriptTrapOn::Return(v)) = thread.trap.on.get() {
-                    gc_stack.push(v);
-                }
-            }
-        }
-
-        self.bx.heap.mark(&gc_stack);
-        self.bx.heap.sweep();
-        // Put the buffer back for next GC cycle
-        self.bx.heap.gc_stack = gc_stack;
+        let start = std::time::Instant::now();
+        self.bx.heap.mark(&self.bx.threads, &self.bx.code);
+        self.bx.heap.sweep(start);
     }
 
     pub fn thread(&self) -> &ScriptThread {
@@ -791,6 +749,7 @@ impl ScriptVmBase {
         define_math_module(&mut heap, &mut native);
         define_std_module(&mut heap, &mut native);
         define_shader_module(&mut heap, &mut native);
+        define_gc_module(&mut heap, &mut native);
         let pod_builtins = define_pod_module(&mut heap, &mut native);
 
         let builtins = ScriptBuiltins::new(&mut heap, pod_builtins);

@@ -238,8 +238,8 @@ impl ScriptHeap {
         let mut ptr = ptr;
         loop {
             let object = &mut self.objects[ptr.index as usize];
-            if object.tag.is_frozen() {
-                return script_err_immutable!(trap, "cannot modify frozen object");
+            if object.tag.is_immutable() {
+                return script_err_immutable!(trap, "cannot modify immutable object");
             }
             for kv in object.vec.iter_mut().rev() {
                 if kv.key == key {
@@ -279,8 +279,8 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         let object = &self.objects[top_ptr.index as usize];
-        if object.tag.is_frozen() {
-            return script_err_immutable!(trap, "cannot set property on frozen object");
+        if object.tag.is_immutable() {
+            return script_err_immutable!(trap, "cannot set property on immutable object");
         }
 
         if let Some(ty) = object.tag.as_type_index() {
