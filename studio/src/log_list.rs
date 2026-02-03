@@ -34,9 +34,9 @@ script_mod! {
             selected: instance(0.0)
             hover: instance(0.0)
             pixel: fn() {
-                return self.is_even.mix(
-                    theme.color_bg_even,
-                    theme.color_bg_odd
+                return theme.color_bg_even.mix(
+                    theme.color_bg_odd,
+                    self.is_even
                 ).mix(
                     theme.color_outset_active,
                     self.selected
@@ -230,11 +230,11 @@ impl LogList {
             let is_even = item_id & 1 == 0;
             fn map_level_to_icon(level: LogLevel) -> LiveId {
                 match level {
-                    LogLevel::Warning => live_id!(warning_icon),
-                    LogLevel::Error => live_id!(error_icon),
-                    LogLevel::Log => live_id!(log_icon),
-                    LogLevel::Wait => live_id!(wait_icon),
-                    LogLevel::Panic => live_id!(panic_icon),
+                    LogLevel::Warning => id!($warning_icon),
+                    LogLevel::Error => id!($error_icon),
+                    LogLevel::Log => id!($log_icon),
+                    LogLevel::Wait => id!($wait_icon),
+                    LogLevel::Panic => id!($panic_icon),
                 }
             }
             let mut location = String::new();
@@ -248,7 +248,7 @@ impl LogList {
                 } else {
                     ""
                 };
-                let mut item = list.item(cx, item_id, live_id!(LogItem)).as_view();
+                let mut item = list.item(cx, item_id, id!($LogItem)).as_view();
                 let is_even_f = if is_even { 1.0 } else { 0.0 };
                 script_apply_eval!(cx, item, {
                     draw_bg: {is_even: #(is_even_f)}
@@ -263,7 +263,7 @@ impl LogList {
                             LogItem::Location(msg) => {
                                 tf.draw_item_counted(cx, map_level_to_icon(msg.level));
                                 let fold_button = if msg.explanation.is_some() {
-                                    tf.draw_item_counted_ref(cx, live_id!(fold_button))
+                                    tf.draw_item_counted_ref(cx, id!($fold_button))
                                         .as_fold_button()
                                 } else {
                                     Default::default()
@@ -275,19 +275,14 @@ impl LogList {
                                     msg.start.line_index + 1,
                                     msg.start.byte_index + 1
                                 );
-                                tf.draw_link(
-                                    cx,
-                                    live_id!(link),
-                                    JumpToFileLink { item_id },
-                                    &location,
-                                );
+                                tf.draw_link(cx, id!($link), JumpToFileLink { item_id }, &location);
 
                                 tf.draw_text(cx, &msg.message);
                                 if let Some(explanation) = &msg.explanation {
                                     let open = fold_button.open_float();
                                     if open > 0.0 {
                                         cx.turtle_new_line();
-                                        let code = tf.item_counted(cx, live_id!(code_view));
+                                        let code = tf.item_counted(cx, id!($code_view));
                                         code.set_text(cx, explanation);
                                         code.as_code_view()
                                             .borrow_mut()
@@ -304,10 +299,10 @@ impl LogList {
                 }
                 continue;
             }
-            let mut item = list.item(cx, item_id, live_id!(Empty)).as_view();
+            let mut item = list.item(cx, item_id, id!($Empty)).as_view();
             let is_even_f = if is_even { 1.0 } else { 0.0 };
             script_apply_eval!(cx, item, {
-                draw_bg: {is_even: #(is_even_f)}
+                draw_bg +: {is_even: #(is_even_f)}
             });
             item.draw_all(cx, &mut Scope::empty());
         }

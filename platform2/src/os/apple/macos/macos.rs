@@ -1,23 +1,39 @@
 use {
     crate::{
-        cx::{Cx, OsType}, cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace}, cx_stdin::PollTimers, event::{
-            Event, MouseButton, MouseUpEvent, NetworkResponseChannel, WindowGeom, GameInputEventChannel
-        }, makepad_live_id::*, makepad_math::*, os::{
+        cx::{Cx, OsType},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_stdin::PollTimers,
+        draw_pass::CxDrawPassParent,
+        event::{
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, NetworkResponseChannel,
+            WindowGeom,
+        },
+        makepad_live_id::*,
+        makepad_math::*,
+        os::{
             apple::{
-                apple_classes::init_apple_classes_global, apple_sys::*, macos::{
-                    macos_app::{
-                        init_macos_app_global, with_macos_app, MacosApp
-                    }, macos_event::MacosEvent, macos_window::MacosWindow
-                }, url_session::AppleHttpRequests, apple_game_input::AppleGameInput,
-            }, apple_media::CxAppleMedia, cx_native::EventFlow, metal::{DrawPassMode, MetalCx}, metal_xpc::start_xpc_service
-        }, draw_pass::CxDrawPassParent, permission::{Permission}, thread::SignalToUI, window::{CxWindowPool, WindowId}
-    }, makepad_objc_sys::{
-        msg_send, objc_block, sel, sel_impl
-    }, std::{
-        cell::RefCell, rc::Rc, time::Instant
-    }
+                apple_classes::init_apple_classes_global,
+                apple_game_input::AppleGameInput,
+                apple_sys::*,
+                macos::{
+                    macos_app::{init_macos_app_global, with_macos_app, MacosApp},
+                    macos_event::MacosEvent,
+                    macos_window::MacosWindow,
+                },
+                url_session::AppleHttpRequests,
+            },
+            apple_media::CxAppleMedia,
+            cx_native::EventFlow,
+            metal::{DrawPassMode, MetalCx},
+            metal_xpc::start_xpc_service,
+        },
+        permission::Permission,
+        thread::SignalToUI,
+        window::{CxWindowPool, WindowId},
+    },
+    makepad_objc_sys::{msg_send, objc_block, sel, sel_impl},
+    std::{cell::RefCell, rc::Rc, time::Instant},
 };
-
 
 #[derive(Clone)]
 pub struct MetalWindow {
@@ -26,11 +42,11 @@ pub struct MetalWindow {
     cal_size: Vec2d,
     pub ca_layer: ObjcId,
     pub cocoa_window: Box<MacosWindow>,
-    pub is_resizing: bool
+    pub is_resizing: bool,
 }
 
 impl MetalWindow {
-    pub (crate) fn new(
+    pub(crate) fn new(
         window_id: WindowId,
         metal_cx: &MetalCx,
         inner_size: Vec2d,
@@ -38,11 +54,10 @@ impl MetalWindow {
         title: &str,
         is_fullscreen: bool,
     ) -> MetalWindow {
-        
-        let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
-        
+        let ca_layer: ObjcId = unsafe { msg_send![class!(CAMetalLayer), new] };
+
         let mut cocoa_window = Box::new(MacosWindow::new(window_id));
-        
+
         cocoa_window.init(title, inner_size, position, is_fullscreen);
         unsafe {
             let () = msg_send![ca_layer, setDevice: metal_cx.device];
@@ -55,38 +70,38 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
             let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
             let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
-            
+
             let view = cocoa_window.view;
             let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
             let () = msg_send![view, setWantsLayer: YES];
             let () = msg_send![view, setLayerContentsPlacement: 11];
             let () = msg_send![view, setLayer: ca_layer];
         }
-        
+
         MetalWindow {
             is_resizing: false,
             window_id,
             cal_size: Vec2d::default(),
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
-            cocoa_window
+            cocoa_window,
         }
     }
-    
-    pub (crate) fn start_resize(&mut self) {
+
+    pub(crate) fn start_resize(&mut self) {
         self.is_resizing = true;
-        let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: YES]};
+        let () = unsafe { msg_send![self.ca_layer, setPresentsWithTransaction: YES] };
     }
-    
-    pub (crate) fn stop_resize(&mut self) {
+
+    pub(crate) fn stop_resize(&mut self) {
         self.is_resizing = false;
-        let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: NO]};
+        let () = unsafe { msg_send![self.ca_layer, setPresentsWithTransaction: NO] };
     }
-    
-    pub (crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
+
+    pub(crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
         let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
-            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
+            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor,
         };
         if self.cal_size != cal_size {
             self.cal_size = cal_size;
@@ -95,44 +110,40 @@ impl MetalWindow {
                 let () = msg_send![self.ca_layer, setContentsScale: self.window_geom.dpi_factor];
             }
             true
-        }
-        else {
+        } else {
             false
         }
     }
-    
 }
- 
 
 const KEEP_ALIVE_COUNT: usize = 5;
 
 impl Cx {
-    
-    pub fn event_loop(cx: Rc<RefCell<Cx >>) {
-        
+    pub fn event_loop(cx: Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
-        let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
-        
+        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
+
         // store device object ID for double buffering
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
-        
+
         //let cx = Rc::new(RefCell::new(self));
-        if std::env::args().find( | v | v == "--stdin-loop").is_some() {
+        if std::env::args().find(|v| v == "--stdin-loop").is_some() {
             let mut cx = cx.borrow_mut();
             cx.in_makepad_studio = true;
             let mut metal_cx = metal_cx.borrow_mut();
             return cx.stdin_event_loop(&mut metal_cx);
         }
-        
+
         let metal_windows = Rc::new(RefCell::new(Vec::new()));
         init_macos_app_global(Box::new({
             let cx = cx.clone();
-            move | event | {
+            move |event| {
                 let mut cx_ref = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
                 let mut metal_windows = metal_windows.borrow_mut();
-                let event_flow = cx_ref.cocoa_event_callback(event, &mut metal_cx, &mut metal_windows);
+                let event_flow =
+                    cx_ref.cocoa_event_callback(event, &mut metal_cx, &mut metal_windows);
                 let executor = cx_ref.executor.take().unwrap();
                 drop(cx_ref);
                 executor.run_until_stalled();
@@ -150,8 +161,12 @@ impl Cx {
         }
         MacosApp::event_loop();
     }
-    
-    pub (crate) fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
+
+    pub(crate) fn handle_repaint(
+        &mut self,
+        metal_windows: &mut Vec<MetalWindow>,
+        metal_cx: &mut MetalCx,
+    ) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -160,58 +175,74 @@ impl Cx {
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
-                        let drawable: ObjcId = unsafe {msg_send![metal_window.ca_layer, nextDrawable]};
+                        let drawable: ObjcId =
+                            unsafe { msg_send![metal_window.ca_layer, nextDrawable] };
                         if drawable == nil {
-                            return
+                            return;
                         }
                         self.passes[*draw_pass_id].set_time(time_now);
                         if metal_window.is_resizing {
-                            self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Resizing(drawable));
-                        }
-                        else {
-                            self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Drawable(drawable));
+                            self.draw_pass(
+                                *draw_pass_id,
+                                metal_cx,
+                                DrawPassMode::Resizing(drawable),
+                            );
+                        } else {
+                            self.draw_pass(
+                                *draw_pass_id,
+                                metal_cx,
+                                DrawPassMode::Drawable(drawable),
+                            );
                         }
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.passes[*draw_pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
+                    self.passes[*draw_pass_id]
+                        .set_time(with_macos_app(|app| app.time_now() as f32));
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
-                },
+                }
                 CxDrawPassParent::None => {
-                    self.passes[*draw_pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
+                    self.passes[*draw_pass_id]
+                        .set_time(with_macos_app(|app| app.time_now() as f32));
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }
     }
-    
-    pub (crate) fn handle_networking_events(&mut self) {
+
+    pub(crate) fn handle_networking_events(&mut self) {
         let mut out = Vec::new();
         while let Ok(item) = self.os.network_response.receiver.try_recv() {
             self.os.http_requests.handle_response_item(&item);
             out.push(item);
         }
-        if out.len()>0 {
+        if out.len() > 0 {
             self.handle_script_network_events(&out);
             self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
 
-    pub (crate) fn handle_gamepad_events(&mut self) {
+    pub(crate) fn handle_gamepad_events(&mut self) {
         while let Ok(event) = self.os.game_input_events.receiver.try_recv() {
-            if let Some(game_input) = &mut self.os.apple_game_input{
+            if let Some(game_input) = &mut self.os.apple_game_input {
                 match &event {
-                    crate::event::game_input::GameInputConnectedEvent::Connected(info) => game_input.on_connected(info),
-                    crate::event::game_input::GameInputConnectedEvent::Disconnected(info) => game_input.on_disconnected(info),
+                    crate::event::game_input::GameInputConnectedEvent::Connected(info) => {
+                        game_input.on_connected(info)
+                    }
+                    crate::event::game_input::GameInputConnectedEvent::Disconnected(info) => {
+                        game_input.on_disconnected(info)
+                    }
                 }
             }
             self.call_event_handler(&Event::GameInputConnected(event));
         }
-                
+
         if let Some(game_input) = &mut self.os.apple_game_input {
             game_input.poll();
         }
@@ -237,21 +268,21 @@ impl Cx {
         &mut self,
         event: MacosEvent,
         metal_cx: &mut MetalCx,
-        metal_windows: &mut Vec<MetalWindow>
+        metal_windows: &mut Vec<MetalWindow>,
     ) -> EventFlow {
-        if let  EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx){
+        if let EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx) {
             self.call_event_handler(&Event::Shutdown);
-            return EventFlow::Exit
+            return EventFlow::Exit;
         }
         // send a mouse up when dragging starts
         match &event {
-            MacosEvent::MouseDown(_) |
-            MacosEvent::MouseMove(_) |
-            MacosEvent::MouseUp(_) |
-            MacosEvent::Scroll(_) |
-            MacosEvent::KeyDown(_) |
-            MacosEvent::KeyUp(_) |
-            MacosEvent::TextInput(_) => {
+            MacosEvent::MouseDown(_)
+            | MacosEvent::MouseMove(_)
+            | MacosEvent::MouseUp(_)
+            | MacosEvent::Scroll(_)
+            | MacosEvent::KeyDown(_)
+            | MacosEvent::KeyUp(_)
+            | MacosEvent::TextInput(_) => {
                 self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
                 self.ensure_timer0_started();
             }
@@ -259,11 +290,11 @@ impl Cx {
                 if te.timer_id == 0 {
                     let mut needs_timer = false;
 
-                    if self.screenshot_requests.len()>0{
+                    if self.screenshot_requests.len() > 0 {
                         self.repaint_windows();
                         needs_timer = true;
                     }
-                    if self.os.keep_alive_counter>0 {
+                    if self.os.keep_alive_counter > 0 {
                         self.os.keep_alive_counter -= 1;
                         needs_timer = true;
                     }
@@ -277,7 +308,11 @@ impl Cx {
                     }
 
                     // Check if we still need the timer
-                    if !needs_timer && !self.need_redrawing() && self.new_next_frames.len() == 0 && !self.demo_time_repaint {
+                    if !needs_timer
+                        && !self.need_redrawing()
+                        && self.new_next_frames.len() == 0
+                        && !self.demo_time_repaint
+                    {
                         self.ensure_timer0_stopped();
                     }
                     if SignalToUI::check_and_clear_action_signal() {
@@ -292,15 +327,23 @@ impl Cx {
                     self.handle_gamepad_events();
                     self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
 
+                    // Run garbage collection if needed - safe moment after paint, before waiting
+                    self.with_vm(|vm| {
+                        if vm.heap().needs_gc() {
+                            vm.gc();
+                        }
+                    });
+
                     // block till the next timer
                     return EventFlow::Wait;
                 }
             }
-            _ => ()
+            _ => (),
         }
         //self.process_desktop_pre_event(&mut event);
         match event {
-            MacosEvent::WindowGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+            MacosEvent::WindowGotFocus(window_id) => {
+                // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in metal_windows.iter_mut() {
                     if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
                         self.repaint_pass(main_pass_id);
@@ -312,17 +355,21 @@ impl Cx {
                 self.call_event_handler(&Event::WindowLostFocus(window_id));
             }
             MacosEvent::WindowResizeLoopStart(window_id) => {
-                if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                if let Some(window) = metal_windows.iter_mut().find(|w| w.window_id == window_id) {
                     window.start_resize();
                 }
             }
             MacosEvent::WindowResizeLoopStop(window_id) => {
-                if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                if let Some(window) = metal_windows.iter_mut().find(|w| w.window_id == window_id) {
                     window.stop_resize();
                 }
             }
-            MacosEvent::WindowGeomChange(mut re) => { // do this here because mac
-                if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+            MacosEvent::WindowGeomChange(mut re) => {
+                // do this here because mac
+                if let Some(window) = metal_windows
+                    .iter_mut()
+                    .find(|w| w.window_id == re.window_id)
+                {
                     self.windows[re.window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
                     if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
                         re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
@@ -330,9 +377,11 @@ impl Cx {
                     }
                     window.window_geom = re.new_geom.clone();
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
-                    
+
                     // redraw just this windows root draw list
-                    if re.old_geom.dpi_factor != re.new_geom.dpi_factor || re.old_geom.inner_size != re.new_geom.inner_size {
+                    if re.old_geom.dpi_factor != re.new_geom.dpi_factor
+                        || re.old_geom.inner_size != re.new_geom.inner_size
+                    {
                         if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
                             self.redraw_pass_and_child_passes(main_pass_id);
                         }
@@ -345,13 +394,13 @@ impl Cx {
                 // lets remove the window from the set
                 let window_id = wc.window_id;
                 self.call_event_handler(&Event::WindowClosed(wc));
-                
+
                 self.windows[window_id].is_created = false;
-                if let Some(index) = metal_windows.iter().position( | w | w.window_id == window_id) {
+                if let Some(index) = metal_windows.iter().position(|w| w.window_id == window_id) {
                     metal_windows.remove(index);
                     if metal_windows.len() == 0 {
                         self.call_event_handler(&Event::Shutdown);
-                        return EventFlow::Exit
+                        return EventFlow::Exit;
                     }
                 }
             }
@@ -367,20 +416,21 @@ impl Cx {
                 }
 
                 // Start timer if we have work
-                if has_next_frames || needs_redrawing || self.screenshot_requests.len() > 0 || self.os.keep_alive_counter > 0 || self.demo_time_repaint {
+                if has_next_frames
+                    || needs_redrawing
+                    || self.screenshot_requests.len() > 0
+                    || self.os.keep_alive_counter > 0
+                    || self.demo_time_repaint
+                {
                     self.ensure_timer0_started();
                 }
 
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_windows, metal_cx);
-                
             }
             MacosEvent::MouseDown(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
-                self.fingers.process_tap_count(
-                    e.abs,
-                    e.time
-                );
+                self.fingers.process_tap_count(e.abs, e.time);
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()));
             }
@@ -408,9 +458,7 @@ impl Cx {
             MacosEvent::WindowCloseRequested(e) => {
                 self.call_event_handler(&Event::WindowCloseRequested(e))
             }
-            MacosEvent::TextInput(e) => {
-                self.call_event_handler(&Event::TextInput(e))
-            }
+            MacosEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
             MacosEvent::Drag(e) => {
                 self.call_event_handler(&Event::Drag(e));
                 self.drag_drop.cycle_drag();
@@ -427,7 +475,7 @@ impl Cx {
                     button: MouseButton::PRIMARY,
                     window_id: CxWindowPool::id_zero(),
                     modifiers: Default::default(),
-                    time: 0.0
+                    time: 0.0,
                 }));
                 self.fingers.mouse_up(MouseButton::PRIMARY);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
@@ -443,20 +491,14 @@ impl Cx {
                 self.keyboard.process_key_up(e.clone());
                 self.call_event_handler(&Event::KeyUp(e))
             }
-            MacosEvent::TextCopy(e) => {
-                self.call_event_handler(&Event::TextCopy(e))
-            }
-            MacosEvent::TextCut(e) => {
-                self.call_event_handler(&Event::TextCut(e))
-            }
+            MacosEvent::TextCopy(e) => self.call_event_handler(&Event::TextCopy(e)),
+            MacosEvent::TextCut(e) => self.call_event_handler(&Event::TextCut(e)),
             MacosEvent::Timer(e) => {
                 self.handle_script_timer(&e);
                 self.call_event_handler(&Event::Timer(e));
                 return EventFlow::Wait;
             }
-            MacosEvent::MacosMenuCommand(e) => {
-                self.call_event_handler(&Event::MacosMenuCommand(e))
-            }
+            MacosEvent::MacosMenuCommand(e) => self.call_event_handler(&Event::MacosMenuCommand(e)),
             MacosEvent::PermissionResult(result) => {
                 self.call_event_handler(&Event::PermissionResult(result))
             }
@@ -466,13 +508,14 @@ impl Cx {
         }
 
         // Determine the event flow based on whether we have work to do
-        if self.any_passes_dirty() ||
-           self.need_redrawing() ||
-           self.new_next_frames.len() != 0 ||
-           self.os.keep_alive_counter > 0 ||
-           self.screenshot_requests.len() > 0 ||
-           self.demo_time_repaint ||
-           self.os.timer0_armed {
+        if self.any_passes_dirty()
+            || self.need_redrawing()
+            || self.new_next_frames.len() != 0
+            || self.os.keep_alive_counter > 0
+            || self.screenshot_requests.len() > 0
+            || self.demo_time_repaint
+            || self.os.timer0_armed
+        {
             // We have work to do or timer is running
             EventFlow::Poll
         } else {
@@ -480,12 +523,16 @@ impl Cx {
             EventFlow::Wait
         }
     }
-    
-    fn dpi_override_scale(&self, pos:&mut Vec2d, window_id:WindowId){
+
+    fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
         *pos = self.windows[window_id].remap_dpi_override(*pos)
     }
-    
-    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx)->EventFlow {
+
+    fn handle_platform_ops(
+        &mut self,
+        metal_windows: &mut Vec<MetalWindow>,
+        metal_cx: &MetalCx,
+    ) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -496,77 +543,97 @@ impl Cx {
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
                         &window.create_title,
-                        window.is_fullscreen
+                        window.is_fullscreen,
                     );
                     window.window_geom = metal_window.window_geom.clone();
                     metal_windows.push(metal_window);
                     window.is_created = true;
-                },
+                }
                 CxOsOp::ResizeWindow(window_id, size) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         metal_window.cocoa_window.set_outer_size(size);
                     }
                 }
-                CxOsOp::RepositionWindow(window_id, pos ) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                CxOsOp::RepositionWindow(window_id, pos) => {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         metal_window.cocoa_window.set_position(pos);
                     }
                 }
                 CxOsOp::CloseWindow(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         self.windows[window_id].is_created = false;
                         metal_window.cocoa_window.close_window();
                         break;
                     }
-                },
+                }
                 CxOsOp::Quit => {
                     return EventFlow::Exit;
-                },
+                }
                 CxOsOp::MinimizeWindow(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         metal_window.cocoa_window.minimize();
                     }
-                },
+                }
                 CxOsOp::Deminiaturize(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         metal_window.cocoa_window.deminiaturize();
                     }
-                },
+                }
                 CxOsOp::MaximizeWindow(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         metal_window.cocoa_window.maximize();
                     }
-                },
+                }
                 CxOsOp::RestoreWindow(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         metal_window.cocoa_window.restore();
                     }
-                },
-                CxOsOp::HideWindow(window_id) =>{
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                }
+                CxOsOp::HideWindow(window_id) => {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         metal_window.cocoa_window.hide();
                     }
                 }
                 CxOsOp::ShowTextIME(area, pos) => {
                     let pos = area.clipped_rect(self).pos + pos;
-                    metal_windows.iter_mut().for_each( | w | {
+                    metal_windows.iter_mut().for_each(|w| {
                         w.cocoa_window.set_ime_spot(pos);
                     });
-                },
+                }
                 CxOsOp::HideTextIME => {
-                    metal_windows.iter_mut().for_each( | w | {
-                        w.cocoa_window.set_ime_spot(dvec2(0.0,0.0));
+                    metal_windows.iter_mut().for_each(|w| {
+                        w.cocoa_window.set_ime_spot(dvec2(0.0, 0.0));
                     });
-                },
+                }
                 CxOsOp::SetCursor(cursor) => {
                     with_macos_app(|app| app.set_mouse_cursor(cursor));
-                },
-                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                }
+                CxOsOp::StartTimer {
+                    timer_id,
+                    interval,
+                    repeats,
+                } => {
                     with_macos_app(|app| app.start_timer(timer_id, interval, repeats));
-                },
+                }
                 CxOsOp::StopTimer(timer_id) => {
                     with_macos_app(|app| app.stop_timer(timer_id));
-                },
+                }
                 CxOsOp::StartDragging(items) => {
                     //  lets start dragging on the right window
                     if let Some(metal_window) = metal_windows.iter_mut().next() {
@@ -574,50 +641,57 @@ impl Cx {
                         break;
                     }
                 }
-                CxOsOp::UpdateMacosMenu(menu) => {
-                    with_macos_app(|app| app.update_macos_menu(&menu))
-                },
-                CxOsOp::HttpRequest {request_id, request} => {
-                    self.os.http_requests.make_http_request(request_id, request, self.os.network_response.sender.clone());
-                },
-                CxOsOp::CancelHttpRequest {request_id} => {
+                CxOsOp::UpdateMacosMenu(menu) => with_macos_app(|app| app.update_macos_menu(&menu)),
+                CxOsOp::HttpRequest {
+                    request_id,
+                    request,
+                } => {
+                    self.os.http_requests.make_http_request(
+                        request_id,
+                        request,
+                        self.os.network_response.sender.clone(),
+                    );
+                }
+                CxOsOp::CancelHttpRequest { request_id } => {
                     self.os.http_requests.cancel_http_request(request_id);
-                },
+                }
                 CxOsOp::ShowClipboardActions { .. } => {
                     crate::log!("Show clipboard actions not supported yet");
-                },
+                }
                 CxOsOp::CopyToClipboard(content) => {
                     with_macos_app(|app| app.copy_to_clipboard(&content));
-                },
-                CxOsOp::SaveFileDialog(settings) => 
-                {
+                }
+                CxOsOp::SaveFileDialog(settings) => {
                     with_macos_app(|app| app.open_save_file_dialog(settings));
                 }
-                
-                CxOsOp::SelectFileDialog(settings) => 
-                {
+
+                CxOsOp::SelectFileDialog(settings) => {
                     with_macos_app(|app| app.open_select_file_dialog(settings));
                 }
-                
-                CxOsOp::SaveFolderDialog(settings) => 
-                {
+
+                CxOsOp::SaveFolderDialog(settings) => {
                     with_macos_app(|app| app.open_save_folder_dialog(settings));
                 }
-                
-                CxOsOp::SelectFolderDialog(settings) => 
-                {
+
+                CxOsOp::SelectFolderDialog(settings) => {
                     with_macos_app(|app| app.open_select_folder_dialog(settings));
                 }
                 CxOsOp::ShowInDock(show) => {
                     with_macos_app(|app| app.show_in_dock(show));
-                },
-                CxOsOp::CheckPermission {permission, request_id} => {
+                }
+                CxOsOp::CheckPermission {
+                    permission,
+                    request_id,
+                } => {
                     self.handle_permission_check(permission, request_id);
-                },
-                CxOsOp::RequestPermission {permission, request_id} => {
+                }
+                CxOsOp::RequestPermission {
+                    permission,
+                    request_id,
+                } => {
                     self.handle_permission_request(permission, request_id);
-                },
-                e=>{
+                }
+                e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
             }
@@ -630,8 +704,8 @@ impl Cx {
             let permission_status: i32 = msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: AVMediaTypeAudio];
             match permission_status {
                 3 => crate::permission::PermissionStatus::Granted, // AVAuthorizationStatusAuthorized
-                2 => crate::permission::PermissionStatus::DeniedPermanent,  // AVAuthorizationStatusDenied - macOS doesn't re-prompt
-                1 => crate::permission::PermissionStatus::DeniedPermanent,  // AVAuthorizationStatusRestricted
+                2 => crate::permission::PermissionStatus::DeniedPermanent, // AVAuthorizationStatusDenied - macOS doesn't re-prompt
+                1 => crate::permission::PermissionStatus::DeniedPermanent, // AVAuthorizationStatusRestricted
                 _ => crate::permission::PermissionStatus::NotDetermined, // AVAuthorizationStatusNotDetermined (0) or unknown
             }
         }
@@ -639,14 +713,16 @@ impl Cx {
 
     fn handle_permission_check(&mut self, permission: Permission, request_id: i32) {
         let status = match permission {
-            Permission::AudioInput => self.check_audio_permission_status()
+            Permission::AudioInput => self.check_audio_permission_status(),
         };
-        
-        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
-            permission,
-            request_id,
-            status,
-        }));
+
+        self.call_event_handler(&crate::event::Event::PermissionResult(
+            crate::permission::PermissionResult {
+                permission,
+                request_id,
+                status,
+            },
+        ));
     }
 
     fn handle_permission_request(&mut self, permission: Permission, request_id: i32) {
@@ -656,31 +732,37 @@ impl Cx {
                 match status {
                     crate::permission::PermissionStatus::Granted => {
                         // Already granted, don't re-ask
-                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
-                            permission,
-                            request_id,
-                            status,
-                        }));
-                    },
+                        self.call_event_handler(&crate::event::Event::PermissionResult(
+                            crate::permission::PermissionResult {
+                                permission,
+                                request_id,
+                                status,
+                            },
+                        ));
+                    }
                     crate::permission::PermissionStatus::DeniedPermanent => {
                         // Previously denied, send denied event
-                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
-                            permission,
-                            request_id,
-                            status,
-                        }));
-                    },
+                        self.call_event_handler(&crate::event::Event::PermissionResult(
+                            crate::permission::PermissionResult {
+                                permission,
+                                request_id,
+                                status,
+                            },
+                        ));
+                    }
                     crate::permission::PermissionStatus::NotDetermined => {
                         // Need to request permission
                         self.macos_request_audio_permission(permission, request_id);
                     }
                     _ => {
                         // For other statuses, send the result directly
-                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
-                            permission,
-                            request_id,
-                            status,
-                        }));
+                        self.call_event_handler(&crate::event::Event::PermissionResult(
+                            crate::permission::PermissionResult {
+                                permission,
+                                request_id,
+                                status,
+                            },
+                        ));
                     }
                 }
             }
@@ -693,10 +775,10 @@ impl Cx {
                 let permission_result = crate::permission::PermissionResult {
                     permission,
                     request_id,
-                    status: if granted == YES { 
-                        crate::permission::PermissionStatus::Granted 
-                    } else { 
-                        crate::permission::PermissionStatus::DeniedPermanent 
+                    status: if granted == YES {
+                        crate::permission::PermissionStatus::Granted
+                    } else {
+                        crate::permission::PermissionStatus::DeniedPermanent
                     },
                 };
 
@@ -704,23 +786,26 @@ impl Cx {
                 // AVCaptureDevice completion handlers run on arbitrary background threads
                 Self::dispatch_permission_result_to_main_thread(permission_result);
             });
-            
+
             let () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType:AVMediaTypeAudio completionHandler:&completion_handler];
         }
     }
 
-    fn dispatch_permission_result_to_main_thread(permission_result: crate::permission::PermissionResult) {
+    fn dispatch_permission_result_to_main_thread(
+        permission_result: crate::permission::PermissionResult,
+    ) {
         unsafe {
             let result_clone = permission_result.clone();
-            
+
             // Create a block that will be executed on the main thread
             let main_thread_block = objc_block!(move | | {
                 MacosApp::do_callback(MacosEvent::PermissionResult(result_clone.clone()));
             });
-            
+
             // Use NSOperationQueue.mainQueue to dispatch to main thread
             let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
-            let block_operation: ObjcId = msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
+            let block_operation: ObjcId =
+                msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
             let () = msg_send![main_queue, addOperation: block_operation];
         }
     }
@@ -732,15 +817,15 @@ impl CxOsApi for Cx {
         for arg in std::env::args() {
             if arg == "--metal-xpc" {
                 start_xpc_service();
-                return true
+                return true;
             }
         }
         false
     }
-    
+
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR"){
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
             self.package_root = Some(item.to_string());
         }
         //self.live_expand();
@@ -756,57 +841,61 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
 
         let sender = self.os.game_input_events.sender.clone();
-        self.os.apple_game_input = Some(AppleGameInput::init(move | event | {
+        self.os.apple_game_input = Some(AppleGameInput::init(move |event| {
             let _ = sender.send(event);
             SignalToUI::set_ui_signal();
         }));
     }
-    
-    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
+
+    fn spawn_thread<F>(&mut self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
         std::thread::spawn(f);
     }
-    
+
     fn start_stdin_service(&mut self) {
         self.start_xpc_service()
     }
-    
-    fn seconds_since_app_start(&self)->f64{
-        Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+
+    fn seconds_since_app_start(&self) -> f64 {
+        Instant::now()
+            .duration_since(self.os.start_time.unwrap())
+            .as_secs_f64()
     }
-    
+
     fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
         // Use the macOS `open` command to open URLs
-        let _ = std::process::Command::new("open")
-            .arg(url)
-            .spawn();
+        let _ = std::process::Command::new("open").arg(url).spawn();
     }
-    
-    fn max_texture_width()->usize{16384}
+
+    fn max_texture_width() -> usize {
+        16384
+    }
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()
     }
-    
+
     fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
         todo!()
     }*/
 }
 
-
 #[derive(Default)]
 pub struct CxOs {
     /// For how long to keep the timer alive when the app is idle
-    pub (crate) keep_alive_counter: usize,
+    pub(crate) keep_alive_counter: usize,
     /// Indicates wether the main timer is armed
-    pub (crate) timer0_armed: bool,
-    pub (crate) media: CxAppleMedia,
-    pub (crate) bytes_written: usize,
-    pub (crate) draw_calls_done: usize,
-    pub (crate) network_response: NetworkResponseChannel,
-    pub (crate) stdin_timers: PollTimers,
-    pub (crate) start_time: Option<Instant>,
-    pub (crate) http_requests: AppleHttpRequests,
+    pub(crate) timer0_armed: bool,
+    pub(crate) media: CxAppleMedia,
+    pub(crate) bytes_written: usize,
+    pub(crate) draw_calls_done: usize,
+    pub(crate) network_response: NetworkResponseChannel,
+    pub(crate) stdin_timers: PollTimers,
+    pub(crate) start_time: Option<Instant>,
+    pub(crate) http_requests: AppleHttpRequests,
     pub metal_device: Option<ObjcId>,
-    pub (crate) game_input_events: GameInputEventChannel,
-    pub (crate) apple_game_input: Option<AppleGameInput>,
+    pub(crate) game_input_events: GameInputEventChannel,
+    pub(crate) apple_game_input: Option<AppleGameInput>,
 }

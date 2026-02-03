@@ -1,46 +1,39 @@
 use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*,
-    label::*,
-    button::*,
-    view::*,
-    animator::*,
-    widget_match_event::WidgetMatchEvent,
-    window::WindowAction,
+    animator::*, button::*, label::*, makepad_derive_widget::*, makepad_draw::*, view::*,
+    widget::*, widget_match_event::WidgetMatchEvent, window::WindowAction,
 };
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.StackNavigationViewBase = #(StackNavigationView::register_widget(vm))
     mod.widgets.StackNavigationBase = #(StackNavigation::register_widget(vm))
-    
+
     // StackView DSL
     let HEADER_HEIGHT = 80.0
-    
+
     mod.widgets.StackViewHeader = View{
         width: Fill height: (HEADER_HEIGHT)
         padding: Inset{bottom: 10. top: 50.}
         show_bg: true
         draw_bg.color: theme.color_app_caption_bar
-        
+
         $content: View{
             width: Fill height: Fit
             flow: Overlay
-            
+
             $title_container: View{
                 width: Fill height: Fit
                 align: Align{x: 0.5 y: 0.5}
-                
+
                 $title: H4{
                     width: Fit height: Fit
                     margin: 0
                     text: "Stack View Title"
                 }
             }
-            
+
             $button_container: View{
                 $left_button: Button{
                     width: Fit height: 68
@@ -51,42 +44,37 @@ script_mod!{
                             return sdf.result
                         }
                     }
-                    draw_icon +: {
-                        svg: crate_resource("self:resources/icons/back.svg")
-                        color: theme.color_label_inner
-                        brightness: uniform(0.8)
-                    }
                 }
             }
         }
     }
-    
+
     mod.widgets.StackNavigationView = mod.widgets.StackNavigationViewBase{
         visible: false
         width: Fill height: Fill
         flow: Overlay
-        
+
         show_bg: true
         draw_bg.color: theme.color_white
-        
+
         // Empty slot to place a generic full-screen background
         $background: View{
             width: Fill height: Fill
             visible: false
         }
-        
+
         $body: View{
             width: Fill height: Fill
             flow: Down
-            
+
             // Space between body and header can be adjusted overriding this margin
             margin: Inset{top: (HEADER_HEIGHT)}
         }
-        
+
         $header: mod.widgets.StackViewHeader{}
-        
+
         offset: 4000.0
-        
+
         animator: Animator{
             slide: {
                 default: @hide
@@ -96,7 +84,7 @@ script_mod!{
                     from: {all: Play.Forward{duration: 5.0}}
                     apply: {offset: 4000.0}
                 }
-                
+
                 show: AnimatorState{
                     redraw: true
                     ease: Ease.ExpDecay{d1: 0.82 d2: 0.95}
@@ -106,11 +94,11 @@ script_mod!{
             }
         }
     }
-    
+
     mod.widgets.StackNavigation = mod.widgets.StackNavigationBase{
         width: Fill height: Fill
         flow: Overlay
-        
+
         $root_view: View{}
     }
 }
@@ -129,7 +117,8 @@ pub enum StackNavigationAction {
 
 #[derive(Clone, Default, Eq, Hash, PartialEq, Debug)]
 pub enum StackNavigationViewState {
-    #[default] Inactive,
+    #[default]
+    Inactive,
     Active,
 }
 
@@ -147,8 +136,9 @@ pub enum StackNavigationTransitionAction {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct StackNavigationView {
-    #[source] source: ScriptObjectRef,
-    
+    #[source]
+    source: ScriptObjectRef,
+
     #[deref]
     view: View,
 
@@ -174,7 +164,7 @@ pub struct StackNavigationView {
     /// The UID of the parent navigation.
     #[rust]
     parent_navigation_uid: Option<WidgetUid>,
-    
+
     #[live(true)]
     visible: bool,
 }
@@ -195,7 +185,7 @@ impl Widget for StackNavigationView {
         if !self.visible {
             return DrawStep::done();
         }
-        
+
         let abs_pos = if self.full_screen {
             // In full screen mode, position at the offset.
             Vec2d {
@@ -205,7 +195,7 @@ impl Widget for StackNavigationView {
         } else {
             let parent_rect = cx.peek_walk_turtle(walk);
 
-            // Not in full screen mode, position at the parent ignoring the offset 
+            // Not in full screen mode, position at the parent ignoring the offset
             // (offset ignored since we're not animating the slide-in).
             Vec2d {
                 x: parent_rect.pos.x,
@@ -213,11 +203,7 @@ impl Widget for StackNavigationView {
             }
         };
 
-        self.view.draw_walk(
-            cx,
-            scope,
-            walk.with_abs_pos(abs_pos),
-        )
+        self.view.draw_walk(cx, scope, walk.with_abs_pos(abs_pos))
     }
 }
 
@@ -229,7 +215,7 @@ impl StackNavigationView {
             // Cut straight into the hide state without animating the slide-out.
             self.animator_cut(cx, ids!(slide.hide));
         }
-        
+
         cx.widget_action(
             self.widget_uid(),
             &HeapLiveIdPath::default(),
@@ -237,7 +223,12 @@ impl StackNavigationView {
         );
     }
 
-    fn handle_stack_view_closure_request(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+    fn handle_stack_view_closure_request(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        _scope: &mut Scope,
+    ) {
         // Hide the active stack view if:
         // * the back navigation button/gesture occurred,
         // * the left_button was clicked,
@@ -268,7 +259,10 @@ impl StackNavigationView {
                 let hide_end_action = if let Some(parent_uid) = self.parent_navigation_uid {
                     StackNavigationTransitionAction::HideEnd(parent_uid)
                 } else {
-                    error!("No parent navigation UID found for stack view {:?}", self.widget_uid());
+                    error!(
+                        "No parent navigation UID found for stack view {:?}",
+                        self.widget_uid()
+                    );
                     return;
                 };
 
@@ -285,8 +279,8 @@ impl StackNavigationView {
     }
 
     fn trigger_action_post_opening_if_done(&mut self, cx: &mut Cx) {
-        if self.state == StackNavigationViewState::Inactive &&
-            self.animator.in_state(cx, ids!(slide.show))
+        if self.state == StackNavigationViewState::Inactive
+            && self.animator.in_state(cx, ids!(slide.show))
         {
             const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
             if self.offset < OPENING_OFFSET_THRESHOLD || !self.full_screen {
@@ -299,7 +293,7 @@ impl StackNavigationView {
             }
         }
     }
-    
+
     fn is_animating(&self) -> bool {
         self.animator.is_animating()
     }
@@ -318,8 +312,7 @@ impl StackNavigationViewRef {
 
     pub fn is_showing(&self, cx: &mut Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator.in_state(cx, ids!(slide.show))
-                || inner.is_animating()
+            inner.animator.in_state(cx, ids!(slide.show)) || inner.is_animating()
         } else {
             false
         }
@@ -453,7 +446,7 @@ impl WidgetNode for StackNavigation {
     fn area(&self) -> Area {
         self.view.area()
     }
-    
+
     fn redraw(&mut self, cx: &mut Cx) {
         for widget_ref in self.get_visible_views(cx).iter() {
             widget_ref.redraw(cx);
@@ -463,7 +456,7 @@ impl WidgetNode for StackNavigation {
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.view.find_widgets(path, cached, results);
     }
-    
+
     fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
         self.view.uid_to_widget(uid)
     }
@@ -495,7 +488,9 @@ impl WidgetMatchEvent for StackNavigation {
                         _ => {}
                     }
 
-                    if let StackNavigationTransitionAction::HideEnd(target_parent_uid) = widget_action.cast() {
+                    if let StackNavigationTransitionAction::HideEnd(target_parent_uid) =
+                        widget_action.cast()
+                    {
                         if target_parent_uid == self.widget_uid() {
                             self.navigation_stack.pop();
                         }
@@ -552,7 +547,7 @@ impl StackNavigation {
             None => {
                 // No views in stack, show root view
                 vec![self.view.widget(ids!($root_view))]
-            },
+            }
             Some(current_entry) => {
                 let current_view_ref = self.stack_navigation_view(&[current_entry.view_id]);
                 let mut views = vec![];
@@ -561,7 +556,8 @@ impl StackNavigation {
                 if current_view_ref.is_showing(cx) && current_view_ref.is_animating() {
                     if let Some(previous_entry) = self.navigation_stack.previous() {
                         // Show the previous stack view
-                        let previous_view_ref = self.stack_navigation_view(&[previous_entry.view_id]);
+                        let previous_view_ref =
+                            self.stack_navigation_view(&[previous_entry.view_id]);
                         views.push(previous_view_ref.0.clone());
                     } else {
                         // Show the root view if there's no previous stack view
@@ -579,13 +575,13 @@ impl StackNavigation {
 
 impl StackNavigationRef {
     /// Push a new view onto the navigation stack
-    /// 
+    ///
     /// This is the primary method for navigating to a new view.
     /// The view will slide in with an animation.
-    /// 
+    ///
     /// # Arguments
     /// * `view_id` - The LiveId of the view to push onto the stack
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// navigation.push(cx, live_id!(settings_view));
@@ -597,11 +593,11 @@ impl StackNavigationRef {
     }
 
     /// Pop the current view from the navigation stack
-    /// 
+    ///
     /// This removes the current view and returns to the previous view.
     /// If there's no previous view, it returns to the root view.
     /// The current view will slide out with an animation.
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// navigation.pop(cx);
@@ -613,10 +609,10 @@ impl StackNavigationRef {
     }
 
     /// Pop all views and return to the root view
-    /// 
+    ///
     /// This clears the entire navigation stack and returns to the root view.
     /// The current view will slide out with an animation.
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// navigation.pop_to_root(cx);
@@ -648,7 +644,7 @@ impl StackNavigationRef {
     }
 
     /// Set the title of a specific view in the navigation stack
-    /// 
+    ///
     /// # Arguments
     /// * `view_id` - The LiveId of the view whose title to set
     /// * `title` - The new title text
@@ -660,10 +656,10 @@ impl StackNavigationRef {
     }
 
     /// Get the current depth of the navigation stack
-    /// 
+    ///
     /// Returns 0 if only the root view is showing, 1 if there's one view
     /// pushed onto the stack, etc.
-    /// 
+    ///
     /// # Returns
     /// The number of views currently in the navigation stack
     pub fn depth(&self) -> usize {
@@ -675,9 +671,9 @@ impl StackNavigationRef {
     }
 
     /// Check if navigation back is possible
-    /// 
+    ///
     /// Returns true if there are views in the stack that can be popped.
-    /// 
+    ///
     /// # Returns
     /// true if pop() would do something, false if already at root
     pub fn can_pop(&self) -> bool {
@@ -689,9 +685,9 @@ impl StackNavigationRef {
     }
 
     /// Get the current view ID at the top of the stack
-    /// 
+    ///
     /// Returns None if the root view is currently showing.
-    /// 
+    ///
     /// # Returns
     /// The LiveId of the current view, or None if at root
     pub fn current_view(&self) -> Option<LiveId> {
@@ -703,11 +699,11 @@ impl StackNavigationRef {
     }
 
     /// Get all view IDs in the current navigation stack
-    /// 
+    ///
     /// Returns a vector of LiveIds representing the navigation history,
     /// with the first element being the oldest (bottom of stack) and
     /// the last element being the current view (top of stack).
-    /// 
+    ///
     /// # Returns
     /// Vector of LiveIds in the navigation stack
     pub fn stack_view_ids(&self) -> Vec<LiveId> {
