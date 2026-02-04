@@ -921,6 +921,7 @@ impl CodeEditor {
                 session.delete();
                 keyboard_moved_cursor = true;
                 self.redraw(cx);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
