@@ -871,6 +871,27 @@ impl MatchEvent for App {
             self.ui.view(ids!($run_list)).redraw(cx);
         }
 
+        // Handle Tail checkbox for log list
+        let log_list = self.ui.log_list(ids!($log_list));
+        let tail_checkbox = self.ui.check_box(ids!($tail_checkbox));
+        if let Some(tail) = tail_checkbox.changed(&actions) {
+            log_list.set_tail(tail);
+        }
+        // If user scrolled and is no longer at end, uncheck tail
+        if log_list.scrolled(&actions) && !log_list.is_at_end() {
+            tail_checkbox.set_active(cx, false);
+        }
+
+        // Handle log filter
+        let log_filter = self.ui.text_input(ids!($log_filter));
+        if let Some(filter) = log_filter.changed(&actions) {
+            log_list.set_filter(cx, filter, &self.data.build_manager.log);
+        }
+        if self.ui.button(ids!($clear_filter)).clicked(&actions) {
+            log_filter.set_text(cx, "");
+            log_list.set_filter(cx, String::new(), &self.data.build_manager.log);
+        }
+
         for (i, id) in [
             *ids!(preset_1),
             *ids!(preset_2),
