@@ -324,17 +324,10 @@ script_mod! {
         padding: 0.
         DockToolbar{
             $content +: {
-                Pbold{
-                    width: Fit
-                    text: "Types"
-                    margin: 0.
-                    padding: theme.mspace_1
-                }
-                ToggleFlat{text: "Release"}
-                ToggleFlat{text: "Debug"}
+                $stop_all: ButtonFlat{text: "Stop All"}
             }
         }
-        RunList{}
+        $run_list: RunList{}
     }
 
     let SnapshotContent = Snapshot{}
@@ -502,6 +495,7 @@ script_mod! {
                     $OutlineFirstTab: OutlineFirstTab{}
                     $EditFirstTab: EditFirstTab{}
                     $AiFirstTab: AiFirstTab{}
+                    $AiChatTab: AiFirstTab{}
                     $DesignFirstTab: DesignFirstTab{}
                     $FilesTab: FilesTab{}
                     $RunFirstTab: RunFirstTab{}
@@ -527,12 +521,12 @@ script_mod! {
                 }
 
                 $file_tree_tabs: DockTabs{
-                    tabs: [$run_list_tab $file_tree_tab]
+                    tabs: [$file_tree_tab $run_list_tab]
                     selected: 0
                 }
 
                 $edit_tabs: DockTabs{
-                    tabs: [$run_first $design_first $outline_first $edit_first]
+                    tabs: [$run_first $design_first $outline_first $ai_first $edit_first]
                     selected: 0
                 }
 
@@ -581,6 +575,12 @@ script_mod! {
                     name: ""
                     template: $AiFirstTab
                     kind: $AiFirst
+                }
+
+                $ai_chat_tab: DockTab{
+                    name: "AI Chat"
+                    template: $AiChatTab
+                    kind: $AiChat
                 }
 
                 $outline_first: DockTab{
