@@ -10,33 +10,27 @@ use {
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
-            apple_sys::*,
             cx_stdin::{HostToStdin, PollTimer, PresentableDraw, StdinToHost, Swapchain},
             metal::{DrawPassMode, MetalCx},
-            metal_xpc::{
-                fetch_xpc_service_texture, xpc_service_proxy, xpc_service_proxy_poll_run_loop,
-            },
         },
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         window::CxWindowPool,
     },
-    std::{fs, io, io::prelude::*, io::BufReader, path::Path, process::Command, sync::mpsc},
+    std::{io, io::prelude::*, io::BufReader},
 };
 
 pub(crate) struct StdinWindow {
     swapchain: Option<Swapchain<Option<Texture>>>,
-    tx_fb: mpsc::Sender<RcObjcId>,
-    rx_fb: mpsc::Receiver<RcObjcId>,
+    /// IOSurface IDs for the presentable images (received from host)
+    iosurface_ids: Vec<u32>,
 }
 
 impl StdinWindow {
     fn new() -> Self {
-        let (tx_fb, rx_fb) = mpsc::channel::<RcObjcId>();
         Self {
             swapchain: None,
-            tx_fb,
-            rx_fb,
+            iosurface_ids: Vec::new(),
         }
     }
 }
@@ -108,8 +102,6 @@ impl Cx {
     }
 
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
-        let service_proxy = xpc_service_proxy();
-
         let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
         {
             std::thread::spawn(move || {
@@ -234,6 +226,12 @@ impl Cx {
                     }
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
+                    // Store the IOSurface IDs from the swapchain
+                    stdin_windows[new_swapchain.window_id].iosurface_ids = 
+                        new_swapchain.presentable_images.iter()
+                            .map(|pi| pi.image.iosurface_id)
+                            .collect();
+                    
                     stdin_windows[new_swapchain.window_id].swapchain =
                         Some(new_swapchain.images_map(|_| None));
 
@@ -245,22 +243,10 @@ impl Cx {
                         if stdin_window.swapchain.is_some() {
                             let swapchain = stdin_window.swapchain.as_mut().unwrap();
                             let [presentable_image] = &swapchain.presentable_images;
-                            // lets fetch the framebuffers
-                            if presentable_image.image.is_none() {
-                                let tx_fb = stdin_window.tx_fb.clone();
-                                fetch_xpc_service_texture(
-                                    service_proxy.as_id(),
-                                    presentable_image.id,
-                                    move |objcid| {
-                                        let _ = tx_fb.send(objcid);
-                                    },
-                                );
-                                // this is still pretty bad at 100ms if the service is still starting up
-                                // we should
-                                if let Ok(fb) = stdin_window
-                                    .rx_fb
-                                    .recv_timeout(std::time::Duration::from_millis(100))
-                                {
+                            // Create texture from IOSurface via global ID lookup
+                            if presentable_image.image.is_none() && !stdin_window.iosurface_ids.is_empty() {
+                                let iosurface_id = stdin_window.iosurface_ids[0];
+                                if iosurface_id != 0 {
                                     let format = TextureFormat::SharedBGRAu8 {
                                         id: presentable_image.id,
                                         width: swapchain.alloc_width as usize,
@@ -269,7 +255,7 @@ impl Cx {
                                     };
                                     let texture = Texture::new_with_format(self, format);
                                     if self.textures[texture.texture_id()]
-                                        .update_from_shared_handle(metal_cx, fb.as_id())
+                                        .update_from_shared_handle(metal_cx, iosurface_id)
                                     {
                                         let [presentable_image] = &mut swapchain.presentable_images;
                                         presentable_image.image = Some(texture);
@@ -299,10 +285,7 @@ impl Cx {
                     self.handle_networking_events();
                     self.handle_gamepad_events();
                     self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
-                    // alright a tick.
-
-                    // we should poll our runloop
-                    xpc_service_proxy_poll_run_loop();
+                    
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(self.os.stdin_timers.time_now());
@@ -329,98 +312,6 @@ impl Cx {
         }
         // we should poll our runloop
 
-        //xpc_service_proxy_poll_run_loop();
-    }
-
-    pub(crate) fn start_xpc_service(&mut self) {
-        pub fn mkdir(path: &Path) -> Result<(), String> {
-            match fs::create_dir_all(path) {
-                Err(e) => Err(format!("mkdir {:?} failed {:?}", path, e)),
-                Ok(()) => Ok(()),
-            }
-        }
-
-        pub fn shell(cwd: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
-            let mut cmd_build = Command::new(cmd);
-
-            cmd_build.args(args).current_dir(cwd);
-
-            let mut child = cmd_build
-                .spawn()
-                .map_err(|e| format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e))?;
-
-            let r = child
-                .wait()
-                .map_err(|e| format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e))?;
-            if !r.success() {
-                return Err(format!(
-                    "Process {} in dir {:?} returned error exit code ",
-                    cmd, cwd
-                ));
-            }
-            Ok(())
-        }
-
-        pub fn write_text(path: &Path, data: &str) -> Result<(), String> {
-            mkdir(path.parent().unwrap())?;
-            match fs::File::create(path) {
-                Err(e) => Err(format!("file create {:?} failed {:?}", path, e)),
-                Ok(mut f) => f
-                    .write_all(data.as_bytes())
-                    .map_err(|_e| format!("Cant write file {:?}", path)),
-            }
-        }
-
-        pub fn get_exe_path() -> String {
-            let buf = [0u8; 1024];
-            let mut len = 1024u32;
-            unsafe { _NSGetExecutablePath(buf.as_ptr() as *mut _, &mut len) };
-            let end = buf.iter().position(|v| *v == 0).unwrap();
-            std::str::from_utf8(&buf[0..end]).unwrap().to_string()
-        }
-
-        let exe_path = get_exe_path();
-
-        let plist_body = format!(
-            r#"
-            <?xml version="1.0" encoding="UTF-8"?>
-            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0">
-            <dict>
-                <key>Label</key>
-                <string>dev.makepad.metalxpc</string>
-                <key>Program</key>
-                <string>{exe_path}</string>
-                <key>ProgramArguments</key>
-                <array>
-                    <string>{exe_path}</string>
-                    <string>--metal-xpc</string>
-                </array>
-                <key>MachServices</key>
-                <dict>
-                    <key>dev.makepad.metalxpc</key>
-                    <true/>
-                </dict>
-            </dict>
-            </plist>
-            "#,
-        );
-        // lets write our service
-        let home = std::env::var("HOME").unwrap();
-        let plist_path = format!("{}/Library/LaunchAgents/dev.makepad.xpc.plist", home);
-        let cwd = std::env::current_dir().unwrap();
-
-        if let Ok(old) = fs::read_to_string(Path::new(&plist_path)) {
-            if old == plist_body {
-                return;
-            }
-            if std::env::args().find(|v| v == "--stdin-loop").is_some() {
-                return;
-            }
-        }
-        shell(&cwd, "launchctl", &["unload", &plist_path]).unwrap();
-        write_text(Path::new(&plist_path), &plist_body).unwrap();
-        shell(&cwd, "launchctl", &["load", &plist_path]).unwrap();
     }
 
     fn stdin_handle_platform_ops(
