@@ -22,7 +22,7 @@ use {
         draw_list_2d::DrawList2d,
         text::{loader::FontFamilyDefinition, fonts::Fonts, layouter},
     },
-    makepad_rustybuzz::UnicodeBuffer,
+    rustybuzz::UnicodeBuffer,
 };
 
 pub struct PassStackItem {
