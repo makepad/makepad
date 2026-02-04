@@ -515,17 +515,26 @@ impl FileSystem {
         // Commented out - old live_design system
     }
 
-    // TODO: This function used LiveRegistry::tokenize_from_str_live_design which doesn't exist
-    // in the new script_mod system. Needs reimplementation for script_mod hot-reloading.
+    // Checks if a file change requires recompilation or live reload
     pub fn process_possible_live_reload(
         &mut self,
-        _cx: &mut Cx,
-        _path: &str,
+        cx: &mut Cx,
+        path: &str,
         _old_data: &str,
-        _new_data: &str,
+        new_data: &str,
         _recompile: bool,
     ) {
-        // Commented out - old live_design system
+        // For .rs files, we need a full recompile
+        if path.ends_with(".rs") {
+            cx.action(FileSystemAction::RecompileNeeded);
+        } else {
+            // For other files (live design files, etc.), send a live reload notification
+            // This allows hot-reloading without full recompile for supported file types
+            cx.action(FileSystemAction::LiveReloadNeeded(LiveFileChange {
+                file_name: path.to_string(),
+                content: new_data.to_string(),
+            }));
+        }
     }
 
     pub fn process_save_response(&mut self, cx: &mut Cx, response: SaveFileResponse) {

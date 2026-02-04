@@ -438,10 +438,10 @@ impl Animator {
             let default_state_id = group.default;
             let default_apply = group.states.get(&default_state_id).and_then(|s| s.apply);
 
-            // For each key in target_apply, get the "from" value:
+            // For each key in target_apply (including prototype chain), get the "from" value:
             // 1. First try state_object (current animated values)
             // 2. Fall back to default state's apply if not in state_object
-            vm.map_mut_with(target_apply, |vm, target_map| {
+            vm.proto_map_iter_mut_with(target_apply, &mut |vm: &mut ScriptVm, target_map: &mut ScriptObjectMap| {
                 for (key, _) in target_map.iter() {
                     // Try state_object first, fall back to default_apply
                     let from_val = if let Some(ref state_obj_ref) = self.state_object {
@@ -685,19 +685,23 @@ impl Animator {
         to: ScriptObject,
         mix: f64,
     ) {
-        // Iterate over the 'to' object's properties (read-only)
-        vm.map_mut_with(to, |vm, to_map| {
+        // Iterate over the 'to' object's properties INCLUDING prototype chain
+        // This ensures we don't miss inherited properties
+        vm.proto_map_iter_mut_with(to, &mut |vm: &mut ScriptVm, to_map: &mut ScriptObjectMap| {
             for (key, to_value) in to_map.iter() {
                 let to_val = to_value.value;
 
                 // Read from 'from' snapshot (never mutated)
                 let from_val = vm.bx.heap.value(from, *key, NoTrap);
 
-                // Get existing value at this key in result for reusing nested objects
-                // After first frame, this should always find existing objects
-                let existing = vm.bx.heap.value(result, *key, NoTrap);
-
-                // Interpolate - reuses `existing` nested objects from result
+                // Get existing value at this key in result's OWN map only (not prototype)
+                // This is critical: we must not reuse objects from prototypes as they
+                // might be shared with template objects
+                let existing = vm.map_mut_with(result, |_vm, result_map| {
+                    result_map.get(key).map(|v| v.value).unwrap_or(ScriptValue::NIL)
+                });
+                
+                // Interpolate values (creates new objects for nested structures to avoid aliasing)
                 let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
 
                 // Write to result (state_object)
@@ -708,21 +712,24 @@ impl Animator {
 
     /// Merge source object's values into target object (used for snap/cut operations)
     /// IMPORTANT: This deep-copies objects from source to avoid mutating templates
+    /// Uses proto_map_iter_mut_with to include inherited properties from prototypes
     fn merge_object(vm: &mut ScriptVm, target: ScriptObject, source: ScriptObject) {
-        vm.map_mut_with(source, |vm, source_map| {
+        vm.proto_map_iter_mut_with(source, &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
             for (key, source_value) in source_map.iter() {
                 let source_val = source_value.value;
 
-                // Get existing value at this key in target
-                let existing = vm.bx.heap.value(target, *key, NoTrap);
+                // Get existing value at this key in target's OWN map only
+                let existing = vm.map_mut_with(target, |_vm, target_map| {
+                    target_map.get(key).map(|v| v.value).unwrap_or(ScriptValue::NIL)
+                });
 
                 if let Some(source_obj) = source_val.as_object() {
                     // Source is an object - we need to handle it carefully
                     if let Some(existing_obj) = existing.as_object() {
-                        // Both exist as objects - recursively merge into existing
+                        // Both exist as objects in own map - recursively merge into existing
                         Self::merge_object(vm, existing_obj, source_obj);
                     } else {
-                        // Target doesn't have this as object yet - create a COPY, don't reference
+                        // Target doesn't have this in own map yet - create a COPY, don't reference
                         let new_obj = vm.bx.heap.new_object();
                         Self::deep_copy_object(vm, new_obj, source_obj);
                         vm.bx.heap.set_value_def(target, *key, new_obj.into());
@@ -737,13 +744,15 @@ impl Animator {
 
     /// Deep copy all values from source object to dest object
     /// This ensures we never share object references with templates
+    /// IMPORTANT: Flattens the prototype chain to avoid shared prototype issues
     fn deep_copy_object(vm: &mut ScriptVm, dest: ScriptObject, source: ScriptObject) {
-        vm.map_mut_with(source, |vm, source_map| {
+        // Use proto_map_iter_mut_with to walk the prototype chain and flatten all values
+        vm.proto_map_iter_mut_with(source, &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
             for (key, source_value) in source_map.iter() {
                 let source_val = source_value.value;
 
                 if let Some(source_obj) = source_val.as_object() {
-                    // Recursively copy nested objects
+                    // Recursively copy nested objects (also flattening their prototypes)
                     let new_obj = vm.bx.heap.new_object();
                     Self::deep_copy_object(vm, new_obj, source_obj);
                     vm.bx.heap.set_value_def(dest, *key, new_obj.into());
@@ -756,7 +765,7 @@ impl Animator {
     }
 
     /// Interpolate between two ScriptValues
-    /// `existing` is the current value at this key in the result object (for reusing nested objects)
+    /// `existing` is the current value at this key in the result object's OWN map (for reusing nested objects)
     fn interpolate_value(
         vm: &mut ScriptVm,
         from: ScriptValue,
@@ -764,10 +773,27 @@ impl Animator {
         mix: f64,
         existing: ScriptValue,
     ) -> ScriptValue {
-        // If from is NIL or error (no starting value), just return target value
-        // This happens when state_object doesn't have a value for this key yet
-        // (e.g., hover state exists but opened state hasn't been animated before)
+        // If from is NIL or error (no starting value), we need to handle objects specially
+        // to avoid returning template objects directly (which would cause aliasing bugs)
         if from.is_nil() || from.is_err() {
+            // For objects, we must create a COPY, not return the template directly!
+            if let Some(to_obj) = to.as_object() {
+                // Check if it's an apply_transform (snap/timeline) - handle those specially
+                if vm.bx.heap.has_apply_transform(to) {
+                    let keyframes = vm.bx.heap.value(to_obj, id!(keyframes).into(), NoTrap);
+                    if keyframes.as_object().is_some() {
+                        // Timeline - just return to value for now (the timeline itself, not interpolated)
+                        return to;
+                    }
+                    // Snap - return the stored value
+                    return vm.bx.heap.value(to_obj, id!(value).into(), NoTrap);
+                }
+                // Regular object - create a COPY to avoid aliasing with template
+                let new_obj = vm.bx.heap.new_object();
+                Self::deep_copy_object(vm, new_obj, to_obj);
+                return new_obj.into();
+            }
+            // Primitives are fine to return directly
             return to;
         }
 
@@ -785,9 +811,9 @@ impl Animator {
 
             // If it's an object, recursively interpolate
             if let Some(from_obj) = from.as_object() {
-                // Reuse existing nested object from state_object if available.
+                // Reuse existing nested object from state_object's OWN map if available.
                 // Only creates new object on first frame when state_object structure is empty.
-                // After first frame, `existing` will always be an object and we reuse it.
+                // After first frame, we reuse the same object and just update its keys.
                 let result_obj = existing
                     .as_object()
                     .unwrap_or_else(|| vm.bx.heap.new_object());

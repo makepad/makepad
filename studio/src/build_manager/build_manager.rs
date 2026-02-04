@@ -269,7 +269,8 @@ impl BuildManager {
         self.designer_state.load_state();
         self.update_run_list(cx);
         self.websocket_alive_timer = cx.start_interval(1.0);
-        //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
+        // Set a small debounce timeout for recompilation (300ms)
+        self.recompile_timeout = 0.3;
     }
 
     pub fn send_host_to_stdin(&self, item_id: LiveId, msg: HostToStdin) {
@@ -325,7 +326,6 @@ impl BuildManager {
     }
 
     pub fn start_recompile(&mut self, _cx: &mut Cx) {
-        // alright so. a file was changed. now what.
         for (build_id, active_build) in &mut self.active.builds {
             self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Stop);
             self.clients[0].send_cmd_with_id(
@@ -358,10 +358,6 @@ impl BuildManager {
     pub fn start_recompile_timer(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.recompile_timer);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
-        /*for item_id in self.active.builds.keys() {
-            let view = ui.run_view(&[*item_id]);
-            view.recompile_started(cx);
-        }*/
     }
 
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
