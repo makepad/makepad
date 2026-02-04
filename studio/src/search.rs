@@ -28,9 +28,9 @@ script_mod! {
             selected: instance(0.0)
             hover: instance(0.0)
             pixel: fn() {
-                return self.is_even.mix(
-                    theme.color_bg_even,
-                    theme.color_bg_odd
+                return theme.color_bg_even.mix(
+                    theme.color_bg_odd,
+                    self.is_even
                 ).mix(
                     theme.color_outset_active,
                     self.selected
@@ -81,6 +81,7 @@ script_mod! {
                     word_wrap: false
                     draw_bg +: { color: #0000 }
                     margin: Inset{left: 15}
+                    pad_left_top: vec2(0.0, 0.0)
                 }
             }
 
@@ -166,17 +167,17 @@ impl Search {
             let is_even = item_id & 1 == 0;
             let mut location = String::new();
             if let Some(res) = file_system.search_results.get(item_id as usize) {
-                let mut item = list.item(cx, item_id, live_id!(SearchResult)).as_view();
+                let mut item = list.item(cx, item_id, id!($SearchResult)).as_view();
 
                 let is_even_f = if is_even { 1.0 } else { 0.0 };
                 script_apply_eval!(cx, item, {
-                    draw_bg: {is_even: #(is_even_f)}
+                    draw_bg +: {is_even: #(is_even_f)}
                 });
 
                 while let Some(step) = item.draw(cx, &mut Scope::empty()).step() {
                     if let Some(mut tf) = step.as_text_flow().borrow_mut() {
                         let fold_button = tf
-                            .draw_item_counted_ref(cx, live_id!(fold_button))
+                            .draw_item_counted_ref(cx, id!($fold_button))
                             .as_fold_button();
 
                         fmt_over!(
@@ -187,11 +188,11 @@ impl Search {
                             res.column_byte + 1
                         );
 
-                        tf.draw_link(cx, live_id!(link), JumpToFileLink { item_id }, &location);
+                        tf.draw_link(cx, id!($link), JumpToFileLink { item_id }, &location);
 
                         let open = fold_button.open_float();
                         cx.turtle_new_line();
-                        let code = tf.item_counted(cx, live_id!(code_view));
+                        let code = tf.item_counted(cx, id!($code_view));
                         code.set_text(cx, &res.result_line);
                         if let Some(mut code_view) = code.as_code_view().borrow_mut() {
                             code_view.lazy_init_session();
@@ -210,10 +211,10 @@ impl Search {
                 }
                 continue;
             }
-            let mut item = list.item(cx, item_id, live_id!(Empty)).as_view();
+            let mut item = list.item(cx, item_id, id!($Empty)).as_view();
             let is_even_f = if is_even { 1.0 } else { 0.0 };
             script_apply_eval!(cx, item, {
-                draw_bg: {is_even: #(is_even_f)}
+                draw_bg +: {is_even: #(is_even_f)}
             });
             item.draw_all(cx, &mut Scope::empty());
         }
