@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Iterators which split strings on Grapheme Cluster, Word or Sentence boundaries, according
+//! Iterators which split strings on Grapheme Cluster or Word boundaries, according
 //! to the [Unicode Standard Annex #29](http://www.unicode.org/reports/tr29/) rules.
 //!
 //! ```rust
@@ -58,12 +58,10 @@
 
 pub use grapheme::{GraphemeCursor, GraphemeIncomplete};
 pub use grapheme::{GraphemeIndices, Graphemes};
-pub use sentence::{USentenceBoundIndices, USentenceBounds, UnicodeSentences};
 pub use tables::UNICODE_VERSION;
 pub use word::{UWordBoundIndices, UWordBounds, UnicodeWordIndices, UnicodeWords};
 
 mod grapheme;
-mod sentence;
 #[rustfmt::skip]
 mod tables;
 mod word;
@@ -189,61 +187,6 @@ pub trait UnicodeSegmentation {
     /// assert_eq!(&swi1[..], b);
     /// ```
     fn split_word_bound_indices(&self) -> UWordBoundIndices<'_>;
-
-    /// Returns an iterator over substrings of `self` separated on
-    /// [UAX#29 sentence boundaries](http://www.unicode.org/reports/tr29/#Sentence_Boundaries).
-    ///
-    /// Here, "sentences" are just those substrings which, after splitting on
-    /// UAX#29 sentence boundaries, contain any alphanumeric characters. That is, the
-    /// substring must contain at least one character with the
-    /// [Alphabetic](http://unicode.org/reports/tr44/#Alphabetic)
-    /// property, or with
-    /// [General_Category=Number](http://unicode.org/reports/tr44/#General_Category_Values).
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use self::unicode_segmentation::UnicodeSegmentation;
-    /// let uss = "Mr. Fox jumped. [...] The dog was too lazy.";
-    /// let us1 = uss.unicode_sentences().collect::<Vec<&str>>();
-    /// let b: &[_] = &["Mr. ", "Fox jumped. ", "The dog was too lazy."];
-    ///
-    /// assert_eq!(&us1[..], b);
-    /// ```
-    fn unicode_sentences(&self) -> UnicodeSentences<'_>;
-
-    /// Returns an iterator over substrings of `self` separated on
-    /// [UAX#29 sentence boundaries](http://www.unicode.org/reports/tr29/#Sentence_Boundaries).
-    ///
-    /// The concatenation of the substrings returned by this function is just the original string.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use self::unicode_segmentation::UnicodeSegmentation;
-    /// let ssbs = "Mr. Fox jumped. [...] The dog was too lazy.";
-    /// let ssb1 = ssbs.split_sentence_bounds().collect::<Vec<&str>>();
-    /// let b: &[_] = &["Mr. ", "Fox jumped. ", "[...] ", "The dog was too lazy."];
-    ///
-    /// assert_eq!(&ssb1[..], b);
-    /// ```
-    fn split_sentence_bounds(&self) -> USentenceBounds<'_>;
-
-    /// Returns an iterator over substrings of `self`, split on UAX#29 sentence boundaries,
-    /// and their offsets. See `split_sentence_bounds()` for more information.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use self::unicode_segmentation::UnicodeSegmentation;
-    /// let ssis = "Mr. Fox jumped. [...] The dog was too lazy.";
-    /// let ssi1 = ssis.split_sentence_bound_indices().collect::<Vec<(usize, &str)>>();
-    /// let b: &[_] = &[(0, "Mr. "), (4, "Fox jumped. "), (16, "[...] "),
-    ///                 (22, "The dog was too lazy.")];
-    ///
-    /// assert_eq!(&ssi1[..], b);
-    /// ```
-    fn split_sentence_bound_indices(&self) -> USentenceBoundIndices<'_>;
 }
 
 impl UnicodeSegmentation for str {
@@ -275,20 +218,5 @@ impl UnicodeSegmentation for str {
     #[inline]
     fn split_word_bound_indices(&self) -> UWordBoundIndices<'_> {
         word::new_word_bound_indices(self)
-    }
-
-    #[inline]
-    fn unicode_sentences(&self) -> UnicodeSentences<'_> {
-        sentence::new_unicode_sentences(self)
-    }
-
-    #[inline]
-    fn split_sentence_bounds(&self) -> USentenceBounds<'_> {
-        sentence::new_sentence_bounds(self)
-    }
-
-    #[inline]
-    fn split_sentence_bound_indices(&self) -> USentenceBoundIndices<'_> {
-        sentence::new_sentence_bound_indices(self)
     }
 }
