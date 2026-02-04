@@ -108,7 +108,7 @@ script_mod! {
         }
 
         animator: Animator{
-            hover2: {
+            hover: {
                 default: @off
                 off: AnimatorState{
                     from: {all: Play.Forward {duration: 0.2}}
