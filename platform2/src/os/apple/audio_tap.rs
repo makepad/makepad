@@ -433,7 +433,7 @@ unsafe fn handle_audio_sample(sample_buffer: ObjcId, audio_cb: &Arc<Mutex<Option
     
     // Clean up
     if block_buffer != nil {
-        CFRelease(block_buffer);
+        CFRelease(block_buffer as *const c_void);
     }
     std::alloc::dealloc(abl_ptr as *mut u8, layout);
     
@@ -524,8 +524,4 @@ extern "C" {
     ) -> i32;
 }
 
-#[cfg(target_os = "macos")]
-#[link(name = "CoreFoundation", kind = "framework")]
-extern "C" {
-    fn CFRelease(cf: ObjcId);
-}
+// CFRelease is imported from apple_sys

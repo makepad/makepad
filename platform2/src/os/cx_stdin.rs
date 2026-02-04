@@ -146,15 +146,14 @@ pub type SharedSwapchain = Swapchain<SharedPresentableImageOsHandle>;
 pub type SharedPresentableImageOsHandle =
     crate::os::linux::dma_buf::Image<aux_chan::AuxChannedImageFd>;
 
-// HACK(eddyb) the macOS helper XPC service (in `os/apple/metal_xpc.{m,rs}`)
-// doesn't need/want any form of "handle passing", as the `id` field contains
-// all the disambiguating information it may need (however, long-term it'd
-// probably be better to use something like `IOSurface` + mach ports).
+// macOS uses IOSurface global IDs for cross-process texture sharing.
+// The IOSurface ID is a system-wide identifier that can be looked up
+// from any process using IOSurfaceLookup().
 #[cfg(target_os = "macos")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedPresentableImageOsHandle {
-    // HACK(eddyb) non-`()` field working around deriving limitations.
-    pub _dummy_for_macos: Option<u32>,
+    /// Global IOSurface ID. Use IOSurfaceLookup() to get the IOSurface.
+    pub iosurface_id: u32,
 }
 
 /// DirectX 11 `HANDLE` from `IDXGIResource::GetSharedHandle`.
