@@ -86,7 +86,7 @@ pub fn format_value_brief(heap: &ScriptHeap, value: ScriptValue) -> String {
     
     // Handle heap strings
     if let Some(s) = value.as_string() {
-        if let Some(str_data) = &heap.strings[s.index as usize] {
+        if let Some(str_data) = &heap.strings[s] {
             let s = &str_data.string.0;
             let truncated = if s.len() > 12 { format!("{}...", &s[..12]) } else { s.to_string() };
             return format!("\"{}\"", truncated);
@@ -105,13 +105,13 @@ pub fn format_value_brief(heap: &ScriptHeap, value: ScriptValue) -> String {
     
     // Handle arrays
     if let Some(arr) = value.as_array() {
-        let len = heap.arrays[arr.index as usize].storage.len();
+        let len = heap.arrays[arr].storage.len();
         return format!("[{}]", len);
     }
     
     // Handle pod values
     if let Some(pod) = value.as_pod() {
-        let pod_data = &heap.pods[pod.index as usize];
+        let pod_data = &heap.pods[pod];
         if let Some(name) = heap.pod_type_name(pod_data.ty) {
             return name.as_string(|s| s.unwrap_or("pod").to_string());
         }
@@ -189,7 +189,7 @@ pub fn format_value_type(heap: &ScriptHeap, value: ScriptValue) -> String {
     
     // Handle pod values - show the pod type name
     if let Some(pod) = value.as_pod() {
-        let pod_data = &heap.pods[pod.index as usize];
+        let pod_data = &heap.pods[pod];
         return format_pod_type_name(heap, pod_data.ty);
     }
     
@@ -216,12 +216,12 @@ pub fn format_expected_type(heap: &ScriptHeap, type_object: &ScriptTypeObject) -
     }
     // Check if proto is a pod value (e.g., Vec4f, Mat4f primitives)
     if let Some(pod) = type_object.proto.as_pod() {
-        let pod_data = &heap.pods[pod.index as usize];
+        let pod_data = &heap.pods[pod];
         return format_pod_type_name(heap, pod_data.ty);
     }
     // Check if proto is an object
     if let Some(proto_obj) = type_object.proto.as_object() {
-        let obj_data = &heap.objects[proto_obj.index as usize];
+        let obj_data = &heap.objects[proto_obj];
         // Check if it's a pod type first - this handles Vec4f, etc.
         if let Some(pod_type) = obj_data.tag.as_pod_type() {
             return format_pod_type_name(heap, pod_type);
@@ -434,7 +434,7 @@ fn value_or_nil(heap: &ScriptHeap, obj_ptr: ScriptObject, key: ScriptValue) -> S
         if visited > 100 { break; }
         visited += 1;
         
-        let object = &heap.objects[ptr.index as usize];
+        let object = &heap.objects[ptr];
         if let Some(value) = object.map.get(&key) {
             return value.value;
         }
@@ -465,7 +465,7 @@ pub fn suggest_property(heap: &ScriptHeap, obj_ptr: ScriptObject, key: ScriptVal
     };
     
     // First, check the type_check for registered type properties
-    let object = &heap.objects[obj_ptr.index as usize];
+    let object = &heap.objects[obj_ptr];
     if let Some(ty_index) = object.tag.as_type_index() {
         let type_check = &heap.type_check[ty_index.0 as usize];
         for (prop_id, _prop_ty) in type_check.props.iter_ordered() {
@@ -484,7 +484,7 @@ pub fn suggest_property(heap: &ScriptHeap, obj_ptr: ScriptObject, key: ScriptVal
         if visited > 100 { break; } // Safety limit
         visited += 1;
         
-        let object = &heap.objects[ptr.index as usize];
+        let object = &heap.objects[ptr];
         
         // Also check type_check on prototype objects
         if let Some(ty_index) = object.tag.as_type_index() {
@@ -533,7 +533,7 @@ fn key_to_string_opt(heap: &ScriptHeap, key: ScriptValue) -> Option<String> {
         return id.as_string(|s| s.map(|s| s.to_string()));
     }
     if let Some(s) = key.as_string() {
-        if let Some(s) = &heap.strings[s.index as usize] {
+        if let Some(s) = &heap.strings[s] {
             return Some(s.string.0.to_string());
         }
     }

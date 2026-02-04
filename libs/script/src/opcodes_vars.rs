@@ -256,13 +256,12 @@ impl<'a> ScriptVm<'a> {
         if let Some(obj) = object.as_object() {
             if field.as_id() == Some(id!(*)) {
                 let mut items = Vec::new();
-                if let Some(obj_data) = self.bx.heap.objects.get(obj.index as usize) {
-                    for (k, v) in obj_data.map.iter() {
-                        items.push((*k, v.value));
-                    }
-                    for item in &obj_data.vec {
-                        items.push((item.key, item.value));
-                    }
+                let obj_data = &self.bx.heap.objects[obj];
+                for (k, v) in obj_data.map.iter() {
+                    items.push((*k, v.value));
+                }
+                for item in &obj_data.vec {
+                    items.push((item.key, item.value));
                 }
                 for (k, v) in items {
                     if let Some(id) = k.as_id() {

@@ -190,10 +190,11 @@ impl RunList {
             let mut item = list.item(cx, item_id, id!($Binary)).unwrap().as_view();
             let name = &binary.name;
             let is_even_f = if is_even { 1.0 } else { 0.0 };
+
             script_apply_eval!(cx, item, {
                 draw_bg +: {is_even: #(is_even_f)}
             });
-
+            
             item.fold_button(ids!($fold))
                 .set_action_data(ActionData::FoldBinary { binary_id });
 

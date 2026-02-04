@@ -150,7 +150,7 @@ pub struct Dock {
     #[rust] splitters: ComponentMap<LiveId, Splitter>,
 
     #[rust] dock_items: HashMap<LiveId, DockItem>,
-    #[rust] templates: HashMap<LiveId, ScriptValue>,
+    #[rust] templates: HashMap<LiveId, ScriptObjectRef>,
     #[rust] items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
     #[rust] drop_state: Option<DropPosition>,
     #[rust] dock_item_iter_stack: Vec<(LiveId, usize)>,
@@ -168,39 +168,41 @@ impl ScriptHook for Dock {
     
     fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
         // Collect templates and dock items from the object's vec
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |vm, vec| {
-                for kv in vec {
-                    if let Some(id) = kv.key.as_id() {
-                        // Check type and parse accordingly
-                        if let Some(val_obj) = kv.value.as_object() {
-                            if vm.bx.heap.type_matches_id(val_obj, DockItemSplitter::script_type_id_static()) {
-                                let splitter = DockItemSplitter::script_from_value(vm, kv.value);
-                                self.dock_items.insert(id, splitter.to_dock_item());
-                            } else if vm.bx.heap.type_matches_id(val_obj, DockItemTabs::script_type_id_static()) {
-                                let tabs = DockItemTabs::script_from_value(vm, kv.value);
-                                self.dock_items.insert(id, tabs.to_dock_item());
-                            } else if vm.bx.heap.type_matches_id(val_obj, DockItemTab::script_type_id_static()) {
-                                let tab = DockItemTab::script_from_value(vm, kv.value);
-                                self.dock_items.insert(id, tab.to_dock_item());
-                            } else {
-                                // Not a dock item, treat as content template
-                                self.templates.insert(id, kv.value);
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if let Some(id) = kv.key.as_id() {
+                            // Check type and parse accordingly
+                            if let Some(val_obj) = kv.value.as_object() {
+                                if vm.bx.heap.type_matches_id(val_obj, DockItemSplitter::script_type_id_static()) {
+                                    let splitter = DockItemSplitter::script_from_value(vm, kv.value);
+                                    self.dock_items.insert(id, splitter.to_dock_item());
+                                } else if vm.bx.heap.type_matches_id(val_obj, DockItemTabs::script_type_id_static()) {
+                                    let tabs = DockItemTabs::script_from_value(vm, kv.value);
+                                    self.dock_items.insert(id, tabs.to_dock_item());
+                                } else if vm.bx.heap.type_matches_id(val_obj, DockItemTab::script_type_id_static()) {
+                                    let tab = DockItemTab::script_from_value(vm, kv.value);
+                                    self.dock_items.insert(id, tab.to_dock_item());
+                                } else {
+                                    // Not a dock item, treat as content template - root it
+                                    self.templates.insert(id, vm.bx.heap.new_object_ref(val_obj));
+                                }
                             }
-                        } else {
-                            // Non-object value, treat as template
-                            self.templates.insert(id, kv.value);
+                            // Non-object values can't be rooted, skip them for templates
                         }
                     }
-                }
-            });
+                });
+            }
         }
         
         // Update existing items if templates changed
         if apply.is_reload() {
             for (kind, widget) in self.items.values_mut() {
-                if let Some(template_value) = self.templates.get(kind) {
-                    widget.script_apply(vm, apply, scope, *template_value);
+                if let Some(template_ref) = self.templates.get(kind) {
+                    let template_value: ScriptValue = template_ref.as_object().into();
+                    widget.script_apply(vm, apply, scope, template_value);
                 }
             }
             
@@ -510,7 +512,8 @@ impl Dock {
         }
         
         // Get template and create new item
-        if let Some(template_value) = self.templates.get(&template).copied() {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let widget = WidgetRef::script_from_value(vm, template_value);
             let cx = vm.cx_mut();
             self.items.get_or_insert(cx, entry_id, |_cx| {
@@ -642,7 +645,8 @@ impl Dock {
     }
 
     pub fn item_or_create(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
-        if let Some(template_value) = self.templates.get(&template).copied() {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = self.items.get_or_insert(cx, entry_id, |cx| {
                 cx.with_vm(|vm| (template, WidgetRef::script_from_value(vm, template_value)))
             });
@@ -1000,7 +1004,8 @@ impl Dock {
         let Some(DockItem::Tab { name, kind, .. }) = self.dock_items.get_mut(&tab_item_id) else {
             return None;
         };
-        if let Some(template_value) = self.templates.get(&new_kind).copied() {
+        if let Some(template_ref) = self.templates.get(&new_kind) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let Some((existing_kind, existing_widgetref)) = self.items.get_mut(&tab_item_id) else {
                 return None;
             };
@@ -1221,7 +1226,8 @@ impl Widget for Dock {
                 Some(DrawStackItem::Tab { id }) => {
                     stack.push(DrawStackItem::Tab { id });
                     if let Some(DockItem::Tab { kind, .. }) = self.dock_items.get(&id) {
-                        if let Some(template_value) = self.templates.get(kind).copied() {
+                        if let Some(template_ref) = self.templates.get(kind) {
+                            let template_value: ScriptValue = template_ref.as_object().into();
                             let kind_copy = *kind;
                             let (_, entry) = self.items.get_or_insert(cx, id, |cx| {
                                 cx.with_vm(|vm| (kind_copy, WidgetRef::script_from_value(vm, template_value)))

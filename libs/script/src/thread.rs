@@ -141,7 +141,8 @@ impl ScriptThread {
 
     pub fn free_unreffed_scopes(&mut self, bases: &StackBases, heap: &mut ScriptHeap) {
         while self.scopes.len() > bases.scope {
-            heap.free_object_if_unreffed(self.scopes.pop().unwrap());
+            let scope = self.scopes.pop().unwrap();
+            heap.free_object_if_unreffed(scope); // DISABLED: investigating RootObject already freed
         }
     }
 

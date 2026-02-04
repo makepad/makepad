@@ -1,3 +1,4 @@
+use crate::gen_index::GenRef;
 use crate::makepad_live_id::*;
 use crate::opcode::*;
 use std::fmt;
@@ -5,81 +6,162 @@ use std::fmt;
 #[derive(PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 pub struct ScriptValue(u64);
 
-pub const NIL:ScriptValue = ScriptValue::NIL;
-pub const TRUE:ScriptValue = ScriptValue::TRUE;
-pub const FALSE:ScriptValue = ScriptValue::FALSE;
+pub const NIL: ScriptValue = ScriptValue::NIL;
+pub const TRUE: ScriptValue = ScriptValue::TRUE;
+pub const FALSE: ScriptValue = ScriptValue::FALSE;
 
-impl Default for ScriptValue{
-    fn default()->Self{
+impl Default for ScriptValue {
+    fn default() -> Self {
         Self::NIL
     }
 }
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct ScriptIp{
+pub struct ScriptIp {
     pub body: u16,
     pub index: u32,
 }
 
-impl ScriptIp{
-    pub const fn from_u40(value:u64)->Self{
-        Self{
-            body: ((value >> 28)&0xFFF) as u16,
-            index: ((value) & 0xFFF_FFFF) as u32
+impl ScriptIp {
+    pub const fn from_u40(value: u64) -> Self {
+        Self {
+            body: ((value >> 28) & 0xFFF) as u16,
+            index: ((value) & 0xFFF_FFFF) as u32,
         }
     }
-    pub const fn to_u40(&self)->u64{
-        ((self.body as u64)<<28) | self.index as u64
+    pub const fn to_u40(&self) -> u64 {
+        ((self.body as u64) << 28) | self.index as u64
     }
 }
 
+/// Generation type for use-after-free detection.
+/// 8 bits gives us 256 generations per slot before wraparound.
+pub type Generation = u8;
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ScriptPod{
-    pub(crate) index: u32    
+pub struct ScriptPod {
+    pub(crate) index: u32,
+    pub(crate) generation: Generation,
 }
 
-impl From<ScriptPod> for ScriptValue{
-    fn from(v:ScriptPod) -> Self{
+impl ScriptPod {
+    pub const fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
+impl From<ScriptPod> for ScriptValue {
+    fn from(v: ScriptPod) -> Self {
         ScriptValue::from_pod(v)
     }
 }
 
-
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ScriptPodType{
-    pub(crate) index: u32    
+pub struct ScriptPodType {
+    pub(crate) index: u32,
 }
 
-impl ScriptPodType{
-    pub const VOID:ScriptPodType = ScriptPodType{index:0};
-}
-
-#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ScriptObject{
-    pub(crate) index: u32    
+impl ScriptPodType {
+    pub const VOID: ScriptPodType = ScriptPodType { index: 0 };
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ScriptArray{
-    pub(crate) index: u32    
+pub struct ScriptObject {
+    pub(crate) index: u32,
+    pub(crate) generation: Generation,
 }
 
-impl ScriptObject{
-    pub const ZERO:ScriptObject = ScriptObject{index:0};
-    pub fn index(&self) -> u32 { self.index }
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ScriptArray {
+    pub(crate) index: u32,
+    pub(crate) generation: Generation,
 }
 
-impl ScriptHandle{
-    pub const ZERO:ScriptHandle = ScriptHandle{ty:ScriptHandleType(0),index:0};
-    pub fn index(&self) -> u32 { self.index }
+impl ScriptObject {
+    pub const ZERO: ScriptObject = ScriptObject {
+        index: 0,
+        generation: 0,
+    };
+    pub const fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
+impl ScriptArray {
+    pub const fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
+// GenRef implementations for use with GenVec
+impl GenRef for ScriptObject {
+    #[inline]
+    fn index(&self) -> u32 {
+        self.index
+    }
+    #[inline]
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[inline]
+    fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
+}
+
+impl GenRef for ScriptArray {
+    #[inline]
+    fn index(&self) -> u32 {
+        self.index
+    }
+    #[inline]
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[inline]
+    fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
+}
+
+impl GenRef for ScriptPod {
+    #[inline]
+    fn index(&self) -> u32 {
+        self.index
+    }
+    #[inline]
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[inline]
+    fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptHandleType(pub(crate) u8);
 
-impl ScriptHandleType{
-    pub fn to_redux(&self)->ScriptTypeRedux{
+impl ScriptHandleType {
+    pub fn to_redux(&self) -> ScriptTypeRedux {
         ScriptTypeRedux(ScriptValueType::REDUX_HANDLE_FIRST.0 + self.0)
     }
 }
@@ -87,193 +169,257 @@ impl ScriptHandleType{
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptTypeRedux(u8);
 
-impl ScriptTypeRedux{
-    pub(crate) fn to_index(&self)->usize{self.0 as usize}
+impl ScriptTypeRedux {
+    pub(crate) fn to_index(&self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ScriptHandle{
+pub struct ScriptHandle {
     pub(crate) ty: ScriptHandleType,
-    pub(crate) index: u32    
+    pub(crate) index: u32,
+    pub(crate) generation: Generation,
 }
 
-impl From<ScriptObject> for ScriptValue{
-    fn from(v:ScriptObject) -> Self{
+impl ScriptHandle {
+    pub const ZERO: ScriptHandle = ScriptHandle {
+        ty: ScriptHandleType(0),
+        index: 0,
+        generation: 0,
+    };
+    pub const fn new(ty: ScriptHandleType, index: u32, generation: Generation) -> Self {
+        Self {
+            ty,
+            index,
+            generation,
+        }
+    }
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
+// Note: ScriptHandle has a `ty` field so GenRef needs special handling
+// We implement it but the `new` won't set ty - callers need to handle that
+impl GenRef for ScriptHandle {
+    #[inline]
+    fn index(&self) -> u32 {
+        self.index
+    }
+    #[inline]
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[inline]
+    fn new(index: u32, generation: Generation) -> Self {
+        Self {
+            ty: ScriptHandleType(0),
+            index,
+            generation,
+        }
+    }
+}
+
+impl From<ScriptObject> for ScriptValue {
+    fn from(v: ScriptObject) -> Self {
         ScriptValue::from_object(v)
     }
 }
 
-impl From<ScriptArray> for ScriptValue{
-    fn from(v:ScriptArray) -> Self{
+impl From<ScriptArray> for ScriptValue {
+    fn from(v: ScriptArray) -> Self {
         ScriptValue::from_array(v)
     }
 }
 
-impl From<ScriptValue> for ScriptObject{
-    fn from(v:ScriptValue) -> Self{
-        if let Some(obj) = v.as_object(){
+impl From<ScriptValue> for ScriptObject {
+    fn from(v: ScriptValue) -> Self {
+        if let Some(obj) = v.as_object() {
             obj
-        }
-        else{
-            ScriptObject{index:0}
+        } else {
+            ScriptObject::ZERO
         }
     }
 }
 
-impl From<ScriptHandle> for ScriptValue{
-    fn from(v:ScriptHandle) -> Self{
+impl From<ScriptHandle> for ScriptValue {
+    fn from(v: ScriptHandle) -> Self {
         ScriptValue::from_handle(v)
     }
 }
 
-
-impl From<ScriptPodType> for ScriptValue{
-    fn from(v:ScriptPodType) -> Self{
+impl From<ScriptPodType> for ScriptValue {
+    fn from(v: ScriptPodType) -> Self {
         ScriptValue::from_pod_type(v)
     }
 }
 
-impl From<ScriptValue> for ScriptHandle{
-    fn from(v:ScriptValue) -> Self{
-        if let Some(obj) = v.as_handle(){
+impl From<ScriptValue> for ScriptHandle {
+    fn from(v: ScriptValue) -> Self {
+        if let Some(obj) = v.as_handle() {
             obj
-        }
-        else{
-            ScriptHandle{ty:ScriptHandleType(0), index:0}
+        } else {
+            ScriptHandle::ZERO
         }
     }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct ScriptString{
-    pub index: u32    
+pub struct ScriptString {
+    pub index: u32,
+    pub generation: Generation,
 }
 
-impl From<ScriptString> for ScriptValue{
-    fn from(v:ScriptString) -> Self{
+impl ScriptString {
+    pub const fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
+}
+
+impl GenRef for ScriptString {
+    #[inline]
+    fn index(&self) -> u32 {
+        self.index
+    }
+    #[inline]
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[inline]
+    fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
+}
+
+impl From<ScriptString> for ScriptValue {
+    fn from(v: ScriptString) -> Self {
         ScriptValue::from_string(v)
     }
 }
 
-impl From<f64> for ScriptValue{
-    fn from(v:f64) -> Self{
+impl From<f64> for ScriptValue {
+    fn from(v: f64) -> Self {
         ScriptValue::from_f64(v)
     }
 }
 
-impl From<ScriptValue> for f64{
-    fn from(v:ScriptValue) -> Self{
+impl From<ScriptValue> for f64 {
+    fn from(v: ScriptValue) -> Self {
         v.as_f64().unwrap_or(0.0) as _
     }
 }
 
-impl From<u32> for ScriptValue{
-    fn from(v:u32) -> Self{
+impl From<u32> for ScriptValue {
+    fn from(v: u32) -> Self {
         ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<ScriptValue> for u32{
-    fn from(v:ScriptValue) -> Self{
+impl From<ScriptValue> for u32 {
+    fn from(v: ScriptValue) -> Self {
         v.as_f64().unwrap_or(0.0) as _
     }
 }
 
-impl From<i32> for ScriptValue{
-    fn from(v:i32) -> Self{
+impl From<i32> for ScriptValue {
+    fn from(v: i32) -> Self {
         ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<ScriptValue> for i32{
-    fn from(v:ScriptValue) -> Self{
+impl From<ScriptValue> for i32 {
+    fn from(v: ScriptValue) -> Self {
         v.as_f64().unwrap_or(0.0) as _
     }
 }
 
-impl From<u16> for ScriptValue{
-    fn from(v:u16) -> Self{
+impl From<u16> for ScriptValue {
+    fn from(v: u16) -> Self {
         ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<ScriptValue> for u16{
-    fn from(v:ScriptValue) -> Self{
+impl From<ScriptValue> for u16 {
+    fn from(v: ScriptValue) -> Self {
         v.as_f64().unwrap_or(0.0) as _
     }
 }
 
-impl From<u8> for ScriptValue{
-    fn from(v:u8) -> Self{
+impl From<u8> for ScriptValue {
+    fn from(v: u8) -> Self {
         ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<ScriptValue> for u8{
-    fn from(v:ScriptValue) -> Self{
+impl From<ScriptValue> for u8 {
+    fn from(v: ScriptValue) -> Self {
         v.as_f64().unwrap_or(0.0) as _
     }
 }
 
-impl From<f32> for ScriptValue{
-    fn from(v:f32) -> Self{
+impl From<f32> for ScriptValue {
+    fn from(v: f32) -> Self {
         ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<ScriptValue> for f32{
-    fn from(v:ScriptValue) -> Self{
+impl From<ScriptValue> for f32 {
+    fn from(v: ScriptValue) -> Self {
         v.as_f64().unwrap_or(0.0) as _
     }
 }
 
-impl From<usize> for ScriptValue{
-    fn from(v:usize) -> Self{
+impl From<usize> for ScriptValue {
+    fn from(v: usize) -> Self {
         ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<ScriptValue> for usize{
-    fn from(v:ScriptValue) -> Self{
+impl From<ScriptValue> for usize {
+    fn from(v: ScriptValue) -> Self {
         v.as_f64().unwrap_or(0.0) as _
     }
 }
 
-impl From<bool> for ScriptValue{
-    fn from(v:bool) -> Self{
+impl From<bool> for ScriptValue {
+    fn from(v: bool) -> Self {
         ScriptValue::from_bool(v)
     }
 }
 
-impl From<LiveId> for ScriptValue{
-    fn from(v:LiveId) -> Self{
+impl From<LiveId> for ScriptValue {
+    fn from(v: LiveId) -> Self {
         ScriptValue::from_id(v)
     }
 }
 
-impl From<&LiveId> for ScriptValue{
-    fn from(v:&LiveId) -> Self{
+impl From<&LiveId> for ScriptValue {
+    fn from(v: &LiveId) -> Self {
         ScriptValue::from_id(*v)
     }
 }
 
-impl From<Opcode> for ScriptValue{
-    fn from(v:Opcode) -> Self{
+impl From<Opcode> for ScriptValue {
+    fn from(v: Opcode) -> Self {
         ScriptValue::from_opcode(v)
     }
 }
 // NaN box value
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct ValueError{
+pub struct ValueError {
     pub ty: ScriptValueType,
-    pub ip: ScriptIp
+    pub ip: ScriptIp,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ScriptValueType(u8);
 
-impl ScriptValueType{
+impl ScriptValueType {
     pub const F64: Self = Self(0);
     pub const NAN: Self = Self(1);
     pub const F32: Self = Self(2);
@@ -291,9 +437,9 @@ impl ScriptValueType{
     pub const OPCODE: Self = Self(14);
     pub const STRING: Self = Self(15);
     pub const ERROR: Self = Self(16);
-    
+
     pub const REDUX_MARKER: Self = Self(17);
-    
+
     pub const INLINE_STRING_0: Self = Self(17);
     pub const INLINE_STRING_1: Self = Self(18);
     pub const INLINE_STRING_2: Self = Self(19);
@@ -301,35 +447,35 @@ impl ScriptValueType{
     pub const INLINE_STRING_4: Self = Self(21);
     pub const INLINE_STRING_5: Self = Self(22);
     pub const INLINE_STRING_END: Self = Self(23);
-    
+
     pub const ERR_FIRST: Self = Self(23);
     // Consolidated error types (19 total, down from 56)
-    pub const ERR_NOT_FOUND: Self = Self(Self::ERR_FIRST.0 + 0);      // lookup failures (property, field, variable, name, index)
-    pub const ERR_TYPE_MISMATCH: Self = Self(Self::ERR_FIRST.0 + 1);  // wrong type for operation
-    pub const ERR_WRONG_VALUE: Self = Self(Self::ERR_FIRST.0 + 2);    // expected different kind (not object/fn/array/proto)
-    pub const ERR_OUT_OF_BOUNDS: Self = Self(Self::ERR_FIRST.0 + 3);  // index/bounds errors
-    pub const ERR_IMMUTABLE: Self = Self(Self::ERR_FIRST.0 + 4);      // cannot modify (frozen, not assignable, let)
-    pub const ERR_STACK: Self = Self(Self::ERR_FIRST.0 + 5);          // stack underflow/overflow
-    pub const ERR_INVALID_ARGS: Self = Self(Self::ERR_FIRST.0 + 6);   // argument count/format errors
-    pub const ERR_NOT_ALLOWED: Self = Self(Self::ERR_FIRST.0 + 7);    // operation not allowed in context
-    pub const ERR_INCONSISTENT: Self = Self(Self::ERR_FIRST.0 + 8);   // types/names don't match across branches
-    pub const ERR_NOT_IMPL: Self = Self(Self::ERR_FIRST.0 + 9);       // not implemented
-    pub const ERR_UNEXPECTED: Self = Self(Self::ERR_FIRST.0 + 10);    // catch-all
-    pub const ERR_ASSERT_FAIL: Self = Self(Self::ERR_FIRST.0 + 11);   // assertions
-    pub const ERR_USER: Self = Self(Self::ERR_FIRST.0 + 12);          // user-generated
-    pub const ERR_POD: Self = Self(Self::ERR_FIRST.0 + 13);           // all pod errors
-    pub const ERR_SHADER: Self = Self(Self::ERR_FIRST.0 + 14);        // all shader errors
-    pub const ERR_UNKNOWN_TYPE: Self = Self(Self::ERR_FIRST.0 + 15);  // type not registered, unknown variant
-    pub const ERR_DUPLICATE: Self = Self(Self::ERR_FIRST.0 + 16);     // key already exists
-    pub const ERR_IO: Self = Self(Self::ERR_FIRST.0 + 17);            // file system, child process
-    pub const ERR_LIMIT: Self = Self(Self::ERR_FIRST.0 + 18);         // resource limits
+    pub const ERR_NOT_FOUND: Self = Self(Self::ERR_FIRST.0 + 0); // lookup failures (property, field, variable, name, index)
+    pub const ERR_TYPE_MISMATCH: Self = Self(Self::ERR_FIRST.0 + 1); // wrong type for operation
+    pub const ERR_WRONG_VALUE: Self = Self(Self::ERR_FIRST.0 + 2); // expected different kind (not object/fn/array/proto)
+    pub const ERR_OUT_OF_BOUNDS: Self = Self(Self::ERR_FIRST.0 + 3); // index/bounds errors
+    pub const ERR_IMMUTABLE: Self = Self(Self::ERR_FIRST.0 + 4); // cannot modify (frozen, not assignable, let)
+    pub const ERR_STACK: Self = Self(Self::ERR_FIRST.0 + 5); // stack underflow/overflow
+    pub const ERR_INVALID_ARGS: Self = Self(Self::ERR_FIRST.0 + 6); // argument count/format errors
+    pub const ERR_NOT_ALLOWED: Self = Self(Self::ERR_FIRST.0 + 7); // operation not allowed in context
+    pub const ERR_INCONSISTENT: Self = Self(Self::ERR_FIRST.0 + 8); // types/names don't match across branches
+    pub const ERR_NOT_IMPL: Self = Self(Self::ERR_FIRST.0 + 9); // not implemented
+    pub const ERR_UNEXPECTED: Self = Self(Self::ERR_FIRST.0 + 10); // catch-all
+    pub const ERR_ASSERT_FAIL: Self = Self(Self::ERR_FIRST.0 + 11); // assertions
+    pub const ERR_USER: Self = Self(Self::ERR_FIRST.0 + 12); // user-generated
+    pub const ERR_POD: Self = Self(Self::ERR_FIRST.0 + 13); // all pod errors
+    pub const ERR_SHADER: Self = Self(Self::ERR_FIRST.0 + 14); // all shader errors
+    pub const ERR_UNKNOWN_TYPE: Self = Self(Self::ERR_FIRST.0 + 15); // type not registered, unknown variant
+    pub const ERR_DUPLICATE: Self = Self(Self::ERR_FIRST.0 + 16); // key already exists
+    pub const ERR_IO: Self = Self(Self::ERR_FIRST.0 + 17); // file system, child process
+    pub const ERR_LIMIT: Self = Self(Self::ERR_FIRST.0 + 18); // resource limits
     pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 19);
-    
+
     pub const HANDLE_FIRST: Self = Self(0x50);
     pub const HANDLE_LAST: Self = Self(0x7F);
-    pub const REDUX_HANDLE_MAX: u8  = Self::HANDLE_LAST.0 - Self::HANDLE_FIRST.0;
+    pub const REDUX_HANDLE_MAX: u8 = Self::HANDLE_LAST.0 - Self::HANDLE_FIRST.0;
     pub const ID: Self = Self(0x80);
-        
+
     pub const REDUX_NUMBER: ScriptTypeRedux = ScriptTypeRedux(0);
     pub const REDUX_NAN: ScriptTypeRedux = ScriptTypeRedux(1);
     pub const REDUX_BOOL: ScriptTypeRedux = ScriptTypeRedux(7);
@@ -344,37 +490,34 @@ impl ScriptValueType{
     pub const REDUX_ERR: ScriptTypeRedux = ScriptTypeRedux(16);
     pub const REDUX_ID: ScriptTypeRedux = ScriptTypeRedux(17);
     pub const REDUX_HANDLE_FIRST: ScriptTypeRedux = ScriptTypeRedux(18);
-        
-    pub const fn to_u64(&self)->u64{ ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000 }
-    pub const fn from_u64(val:u64)->Self{
-        let val = ((val>>40)&0xff) as u8;
-        if val > Self::ID.0{
-            return Self::ID
+
+    pub const fn to_u64(&self) -> u64 {
+        ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000
+    }
+    pub const fn from_u64(val: u64) -> Self {
+        let val = ((val >> 40) & 0xff) as u8;
+        if val > Self::ID.0 {
+            return Self::ID;
         }
         Self(val)
     }
-    
-    pub const fn to_redux(&self)->ScriptTypeRedux{
-        if self.0 >= Self::REDUX_MARKER.0{
-            if self.0 >= Self::ID.0{
-                return Self::REDUX_ID
-            }
-            else if self.0 >= Self::HANDLE_FIRST.0{
+
+    pub const fn to_redux(&self) -> ScriptTypeRedux {
+        if self.0 >= Self::REDUX_MARKER.0 {
+            if self.0 >= Self::ID.0 {
+                return Self::REDUX_ID;
+            } else if self.0 >= Self::HANDLE_FIRST.0 {
                 ScriptTypeRedux(Self::REDUX_HANDLE_FIRST.0 + (self.0 - Self::HANDLE_FIRST.0))
-            }
-            else if self.0 >= Self::ERR_FIRST.0{
+            } else if self.0 >= Self::ERR_FIRST.0 {
                 Self::REDUX_ERR
-            }
-            else{
+            } else {
                 Self::REDUX_STRING
             }
-        }
-        else{
-            ScriptTypeRedux(self.0) 
+        } else {
+            ScriptTypeRedux(self.0)
         }
     }
 }
-
 
 impl fmt::Debug for ScriptValueType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -382,91 +525,95 @@ impl fmt::Debug for ScriptValueType {
     }
 }
 
-
 impl fmt::Display for ScriptValueType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self{
+        match *self {
             // Numeric types
-            Self::F64=>write!(f,"f64"),
-            Self::F32=>write!(f,"f32"),
-            Self::U40=>write!(f,"u40"),
-            Self::U32=>write!(f,"u32"),
-            Self::I32=>write!(f,"i32"),
-            Self::F16=>write!(f,"f16"),
-            Self::NAN=>write!(f,"nan"),
+            Self::F64 => write!(f, "f64"),
+            Self::F32 => write!(f, "f32"),
+            Self::U40 => write!(f, "u40"),
+            Self::U32 => write!(f, "u32"),
+            Self::I32 => write!(f, "i32"),
+            Self::F16 => write!(f, "f16"),
+            Self::NAN => write!(f, "nan"),
             // Basic types
-            Self::BOOL=>write!(f,"bool"),
-            Self::NIL=>write!(f,"nil"),
-            Self::COLOR=>write!(f,"color"),
-            Self::STRING=>write!(f,"string"),
-            Self::OBJECT=>write!(f,"object"),
-            Self::ARRAY=>write!(f,"array"),
-            Self::POD=>write!(f,"pod"),
-            Self::POD_TYPE=>write!(f,"type"),
-            Self::OPCODE=>write!(f,"opcode"),
+            Self::BOOL => write!(f, "bool"),
+            Self::NIL => write!(f, "nil"),
+            Self::COLOR => write!(f, "color"),
+            Self::STRING => write!(f, "string"),
+            Self::OBJECT => write!(f, "object"),
+            Self::ARRAY => write!(f, "array"),
+            Self::POD => write!(f, "pod"),
+            Self::POD_TYPE => write!(f, "type"),
+            Self::OPCODE => write!(f, "opcode"),
             // Inline strings all display as "string"
-            Self::INLINE_STRING_0 | Self::INLINE_STRING_1 | Self::INLINE_STRING_2 |
-            Self::INLINE_STRING_3 | Self::INLINE_STRING_4 | Self::INLINE_STRING_5 => write!(f,"string"),
+            Self::INLINE_STRING_0
+            | Self::INLINE_STRING_1
+            | Self::INLINE_STRING_2
+            | Self::INLINE_STRING_3
+            | Self::INLINE_STRING_4
+            | Self::INLINE_STRING_5 => write!(f, "string"),
             // Consolidated error types (19 total)
-            Self::ERR_NOT_FOUND=>write!(f,"NotFound"),
-            Self::ERR_TYPE_MISMATCH=>write!(f,"TypeMismatch"),
-            Self::ERR_WRONG_VALUE=>write!(f,"WrongValue"),
-            Self::ERR_OUT_OF_BOUNDS=>write!(f,"OutOfBounds"),
-            Self::ERR_IMMUTABLE=>write!(f,"Immutable"),
-            Self::ERR_STACK=>write!(f,"StackError"),
-            Self::ERR_INVALID_ARGS=>write!(f,"InvalidArgs"),
-            Self::ERR_NOT_ALLOWED=>write!(f,"NotAllowed"),
-            Self::ERR_INCONSISTENT=>write!(f,"Inconsistent"),
-            Self::ERR_NOT_IMPL=>write!(f,"NotImplemented"),
-            Self::ERR_UNEXPECTED=>write!(f,"Unexpected"),
-            Self::ERR_ASSERT_FAIL=>write!(f,"AssertFailure"),
-            Self::ERR_USER=>write!(f,"UserGenerated"),
-            Self::ERR_POD=>write!(f,"PodError"),
-            Self::ERR_SHADER=>write!(f,"ShaderError"),
-            Self::ERR_UNKNOWN_TYPE=>write!(f,"UnknownType"),
-            Self::ERR_DUPLICATE=>write!(f,"Duplicate"),
-            Self::ERR_IO=>write!(f,"IoError"),
-            Self::ERR_LIMIT=>write!(f,"LimitExceeded"),
-            x if x.0 >= Self::ID.0=>write!(f,"id"),
-            x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
-            _=>write!(f,"ScriptValueType?")
+            Self::ERR_NOT_FOUND => write!(f, "NotFound"),
+            Self::ERR_TYPE_MISMATCH => write!(f, "TypeMismatch"),
+            Self::ERR_WRONG_VALUE => write!(f, "WrongValue"),
+            Self::ERR_OUT_OF_BOUNDS => write!(f, "OutOfBounds"),
+            Self::ERR_IMMUTABLE => write!(f, "Immutable"),
+            Self::ERR_STACK => write!(f, "StackError"),
+            Self::ERR_INVALID_ARGS => write!(f, "InvalidArgs"),
+            Self::ERR_NOT_ALLOWED => write!(f, "NotAllowed"),
+            Self::ERR_INCONSISTENT => write!(f, "Inconsistent"),
+            Self::ERR_NOT_IMPL => write!(f, "NotImplemented"),
+            Self::ERR_UNEXPECTED => write!(f, "Unexpected"),
+            Self::ERR_ASSERT_FAIL => write!(f, "AssertFailure"),
+            Self::ERR_USER => write!(f, "UserGenerated"),
+            Self::ERR_POD => write!(f, "PodError"),
+            Self::ERR_SHADER => write!(f, "ShaderError"),
+            Self::ERR_UNKNOWN_TYPE => write!(f, "UnknownType"),
+            Self::ERR_DUPLICATE => write!(f, "Duplicate"),
+            Self::ERR_IO => write!(f, "IoError"),
+            Self::ERR_LIMIT => write!(f, "LimitExceeded"),
+            x if x.0 >= Self::ID.0 => write!(f, "id"),
+            x if x.0 >= Self::HANDLE_FIRST.0 => write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
+            _ => write!(f, "ScriptValueType?"),
         }
     }
 }
 
-pub trait IdExt{
-    fn escape(&self)->ScriptValue;
+pub trait IdExt {
+    fn escape(&self) -> ScriptValue;
 }
 
-impl IdExt for LiveId{
-    fn escape(&self)->ScriptValue{
+impl IdExt for LiveId {
+    fn escape(&self) -> ScriptValue {
         ScriptValue::from_escaped_id(*self)
     }
 }
 
-macro_rules! err_fn{
-    ($name:ident, $cnst:ident)=>{
-        pub const fn $name(ip:ScriptIp)->Self{Self(ScriptValueType::$cnst.to_u64() | ip.to_u40())}
-    }
-    
+macro_rules! err_fn {
+    ($name:ident, $cnst:ident) => {
+        pub const fn $name(ip: ScriptIp) -> Self {
+            Self(ScriptValueType::$cnst.to_u64() | ip.to_u40())
+        }
+    };
 }
-impl ScriptValue{
+impl ScriptValue {
     pub const TYPE_MASK: u64 = 0xFFFF_FF00_0000_0000;
-    
+
     pub const TYPE_TRACED_NAN_MAX: u64 = ScriptValueType::NAN.to_u64() | 0xFF_FFFF_FFFF;
-    pub const NAN: ScriptValue = ScriptValue( Self::TYPE_NAN);
-            
+    pub const NAN: ScriptValue = ScriptValue(Self::TYPE_NAN);
+
     pub const TYPE_NAN: u64 = ScriptValueType::NAN.to_u64();
     pub const TYPE_F32: u64 = ScriptValueType::F32.to_u64();
     pub const TYPE_F16: u64 = ScriptValueType::F16.to_u64();
     pub const TYPE_U32: u64 = ScriptValueType::U32.to_u64();
     pub const TYPE_I32: u64 = ScriptValueType::I32.to_u64();
     pub const TYPE_U40: u64 = ScriptValueType::U40.to_u64();
-        
+
     pub const TYPE_NUMBER_MAX: u64 = ScriptValueType::U40.to_u64() | 0xFF_FFFF_FFFF;
-    
+
     pub const TYPE_BOOL: u64 = ScriptValueType::BOOL.to_u64();
-    pub const FALSE: ScriptValue = ScriptValue( Self::TYPE_BOOL | 0x0000_0000);
+    pub const FALSE: ScriptValue = ScriptValue(Self::TYPE_BOOL | 0x0000_0000);
     pub const TRUE: ScriptValue = ScriptValue(Self::TYPE_BOOL | 0x0000_0001);
     pub const EMPTY_STRING: ScriptValue = ScriptValue(Self::TYPE_INLINE_STRING_0);
     pub const TYPE_NIL: u64 = ScriptValueType::NIL.to_u64();
@@ -478,7 +625,7 @@ impl ScriptValue{
     pub const TYPE_ARRAY: u64 = ScriptValueType::ARRAY.to_u64();
     pub const TYPE_POD: u64 = ScriptValueType::POD.to_u64();
     pub const TYPE_POD_TYPE: u64 = ScriptValueType::POD_TYPE.to_u64();
-        
+
     pub const TYPE_INLINE_STRING_0: u64 = ScriptValueType::INLINE_STRING_0.to_u64();
     pub const TYPE_INLINE_STRING_1: u64 = ScriptValueType::INLINE_STRING_1.to_u64();
     pub const TYPE_INLINE_STRING_2: u64 = ScriptValueType::INLINE_STRING_2.to_u64();
@@ -486,632 +633,639 @@ impl ScriptValue{
     pub const TYPE_INLINE_STRING_4: u64 = ScriptValueType::INLINE_STRING_4.to_u64();
     pub const TYPE_INLINE_STRING_5: u64 = ScriptValueType::INLINE_STRING_5.to_u64();
     pub const TYPE_INLINE_STRING_END: u64 = ScriptValueType::INLINE_STRING_END.to_u64();
-    
+
     pub const TYPE_HANDLE_FIRST: u64 = ScriptValueType::HANDLE_FIRST.to_u64();
     pub const TYPE_HANDLE_LAST: u64 = ScriptValueType::HANDLE_LAST.to_u64();
-       
+
     pub const TYPE_ID: u64 = ScriptValueType::ID.to_u64();
-    
+
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
-    
-    
-    pub const fn value_type(&self)->ScriptValueType{
-        if self.is_non_nan_number(){
-            return ScriptValueType::F64
+
+    pub const fn value_type(&self) -> ScriptValueType {
+        if self.is_non_nan_number() {
+            return ScriptValueType::F64;
         }
         ScriptValueType::from_u64(self.0 & Self::TYPE_MASK)
     }
-    
-    
-    
-    
-    // Errors
-    
-    
-    
-    
-    // Consolidated error functions (19 total, down from 56)
-    err_fn!(script_err_not_found, ERR_NOT_FOUND);           // lookup failures
-    err_fn!(script_err_type_mismatch, ERR_TYPE_MISMATCH);   // wrong type for operation
-    err_fn!(script_err_wrong_value, ERR_WRONG_VALUE);       // expected different kind
-    err_fn!(script_err_out_of_bounds, ERR_OUT_OF_BOUNDS);   // index/bounds errors
-    err_fn!(script_err_immutable, ERR_IMMUTABLE);           // cannot modify
-    err_fn!(script_err_stack, ERR_STACK);                   // stack errors
-    err_fn!(script_err_invalid_args, ERR_INVALID_ARGS);     // argument errors
-    err_fn!(script_err_not_allowed, ERR_NOT_ALLOWED);       // operation not allowed
-    err_fn!(script_err_inconsistent, ERR_INCONSISTENT);     // types don't match across branches
-    err_fn!(script_err_not_impl, ERR_NOT_IMPL);             // not implemented
-    err_fn!(script_err_unexpected, ERR_UNEXPECTED);         // catch-all
-    err_fn!(script_err_assert_fail, ERR_ASSERT_FAIL);       // assertions
-    err_fn!(script_err_user, ERR_USER);                     // user-generated
-    err_fn!(script_err_pod, ERR_POD);                       // all pod errors
-    err_fn!(script_err_shader, ERR_SHADER);                 // all shader errors
-    err_fn!(script_err_unknown_type, ERR_UNKNOWN_TYPE);     // type not registered
-    err_fn!(script_err_duplicate, ERR_DUPLICATE);           // key already exists
-    err_fn!(script_err_io, ERR_IO);                         // file system, child process
-    err_fn!(script_err_limit, ERR_LIMIT);                   // resource limits
 
-    pub const fn raw(&self)->u64{self.0}
-    
-    pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}
-    
-    pub const fn as_err(&self)->Option<ValueError>{
-        if self.is_err(){
-            Some(ValueError{
+    // Errors
+
+    // Consolidated error functions (19 total, down from 56)
+    err_fn!(script_err_not_found, ERR_NOT_FOUND); // lookup failures
+    err_fn!(script_err_type_mismatch, ERR_TYPE_MISMATCH); // wrong type for operation
+    err_fn!(script_err_wrong_value, ERR_WRONG_VALUE); // expected different kind
+    err_fn!(script_err_out_of_bounds, ERR_OUT_OF_BOUNDS); // index/bounds errors
+    err_fn!(script_err_immutable, ERR_IMMUTABLE); // cannot modify
+    err_fn!(script_err_stack, ERR_STACK); // stack errors
+    err_fn!(script_err_invalid_args, ERR_INVALID_ARGS); // argument errors
+    err_fn!(script_err_not_allowed, ERR_NOT_ALLOWED); // operation not allowed
+    err_fn!(script_err_inconsistent, ERR_INCONSISTENT); // types don't match across branches
+    err_fn!(script_err_not_impl, ERR_NOT_IMPL); // not implemented
+    err_fn!(script_err_unexpected, ERR_UNEXPECTED); // catch-all
+    err_fn!(script_err_assert_fail, ERR_ASSERT_FAIL); // assertions
+    err_fn!(script_err_user, ERR_USER); // user-generated
+    err_fn!(script_err_pod, ERR_POD); // all pod errors
+    err_fn!(script_err_shader, ERR_SHADER); // all shader errors
+    err_fn!(script_err_unknown_type, ERR_UNKNOWN_TYPE); // type not registered
+    err_fn!(script_err_duplicate, ERR_DUPLICATE); // key already exists
+    err_fn!(script_err_io, ERR_IO); // file system, child process
+    err_fn!(script_err_limit, ERR_LIMIT); // resource limits
+
+    pub const fn raw(&self) -> u64 {
+        self.0
+    }
+
+    pub const fn is_err(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) >= ScriptValueType::ERR_FIRST.to_u64()
+            && (self.0 & Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()
+    }
+
+    pub const fn as_err(&self) -> Option<ValueError> {
+        if self.is_err() {
+            Some(ValueError {
                 ty: self.value_type(),
-                ip: ScriptIp::from_u40(self.0)
+                ip: ScriptIp::from_u40(self.0),
             })
-        }
-        else{
+        } else {
             None
         }
     }
-        
-        
-        
+
     // opcodes
-        
-        
-        
+
     pub const TYPE_OPCODE: u64 = ScriptValueType::OPCODE.to_u64();
-        
-    pub const fn from_opcode(op:Opcode)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32)}
-            
+
+    pub const fn from_opcode(op: Opcode) -> Self {
+        Self(Self::TYPE_OPCODE | (op.0 as u64) << 32)
+    }
+
     #[inline]
-    pub const fn is_opcode(&self)->bool{
+    pub const fn is_opcode(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OPCODE
     }
-    
-    pub const fn from_opcode_args(op:Opcode, args:OpcodeArgs)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32 | (args.0 as u64))}
+
+    pub const fn from_opcode_args(op: Opcode, args: OpcodeArgs) -> Self {
+        Self(Self::TYPE_OPCODE | (op.0 as u64) << 32 | (args.0 as u64))
+    }
     #[inline]
-    pub const fn as_opcode(&self)->Option<(Opcode,OpcodeArgs)>{
-        if self.is_opcode(){
-            return Some((Opcode(((self.0>>32) & 0xff) as u8),OpcodeArgs((self.0 & 0xffff_ffff) as u32)))
+    pub const fn as_opcode(&self) -> Option<(Opcode, OpcodeArgs)> {
+        if self.is_opcode() {
+            return Some((
+                Opcode(((self.0 >> 32) & 0xff) as u8),
+                OpcodeArgs((self.0 & 0xffff_ffff) as u32),
+            ));
         }
         None
     }
-            
-    pub const fn set_opcode_args(&mut self, args:OpcodeArgs){
-        if self.is_opcode(){
+
+    pub const fn set_opcode_args(&mut self, args: OpcodeArgs) {
+        if self.is_opcode() {
             self.0 = (self.0 & 0xffff_ffff_0000_0000) | (args.0 as u64);
         }
     }
-            
-    pub const fn set_opcode_args_pop_to_me(&mut self){
-        if self.is_opcode(){
+
+    pub const fn set_opcode_args_pop_to_me(&mut self) {
+        if self.is_opcode() {
             self.0 |= OpcodeArgs::POP_TO_ME_FLAG as u64;
         }
     }
-            
-    pub const fn clear_opcode_args_pop_to_me(&mut self){
-        if self.is_opcode(){
+
+    pub const fn clear_opcode_args_pop_to_me(&mut self) {
+        if self.is_opcode() {
             self.0 &= !(OpcodeArgs::POP_TO_ME_FLAG as u64);
         }
     }
-            
-    pub const fn has_opcode_args_pop_to_me(&self)->bool{
-        if self.is_opcode(){
+
+    pub const fn has_opcode_args_pop_to_me(&self) -> bool {
+        if self.is_opcode() {
             self.0 & (OpcodeArgs::POP_TO_ME_FLAG as u64) != 0
-        }
-        else{
+        } else {
             false
         }
     }
-                
-    pub const fn is_assign_opcode(&self)->bool{
-        if self.is_opcode(){
-            let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code.is_assign()
+
+    pub const fn is_assign_opcode(&self) -> bool {
+        if self.is_opcode() {
+            let code = Opcode(((self.0 >> 32) & 0xff) as u8);
+            return code.is_assign();
         }
         false
     }
-            
-    pub const fn is_let_opcode(&self)->bool{
-        if self.is_opcode(){
-            let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code.0 == Opcode::LET_TYPED.0 || code.0 == Opcode::LET_DYN.0 || code.0 == Opcode::VAR_TYPED.0 || code.0 == Opcode::VAR_DYN.0
+
+    pub const fn is_let_opcode(&self) -> bool {
+        if self.is_opcode() {
+            let code = Opcode(((self.0 >> 32) & 0xff) as u8);
+            return code.0 == Opcode::LET_TYPED.0
+                || code.0 == Opcode::LET_DYN.0
+                || code.0 == Opcode::VAR_TYPED.0
+                || code.0 == Opcode::VAR_DYN.0;
         }
         false
     }
-    
-    
+
     // NIL
-    
-    
-    
-    pub const fn is_nil(&self)->bool{
+
+    pub const fn is_nil(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_NIL
     }
-    
-    
+
     // number
-    
-        
-    pub const fn is_number(&self)->bool{
+
+    pub const fn is_number(&self) -> bool {
         self.0 <= Self::TYPE_NUMBER_MAX
     }
-    
-    pub const fn as_number(&self)->Option<f64>{
-        if let Some(v) = self.as_f64(){
-            return Some(v)
+
+    pub const fn as_number(&self) -> Option<f64> {
+        if let Some(v) = self.as_f64() {
+            return Some(v);
         }
-        if let Some(v) = self.as_u40(){
-            return Some(v as _)
+        if let Some(v) = self.as_u40() {
+            return Some(v as _);
         }
-        if let Some(v) = self.as_f32(){
-            return Some(v as _)
+        if let Some(v) = self.as_f32() {
+            return Some(v as _);
         }
-        if let Some(v) = self.as_u32(){
-            return Some(v as _)
+        if let Some(v) = self.as_u32() {
+            return Some(v as _);
         }
-        if let Some(v) = self.as_i32(){
-            return Some(v as _)
+        if let Some(v) = self.as_i32() {
+            return Some(v as _);
         }
-        if let Some(v) = self.as_f16(){
-            return Some(v as _)
+        if let Some(v) = self.as_f16() {
+            return Some(v as _);
         }
         None
     }
-    
-    
+
     // f32
-    
-    pub const fn from_f32(v: f32)->Self{
+
+    pub const fn from_f32(v: f32) -> Self {
         Self(v.to_bits() as u64 | Self::TYPE_F32)
     }
-        
-    pub const fn is_f32(&self)->bool{
+
+    pub const fn is_f32(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_F32
     }
-        
-    pub const fn as_f32(&self)->Option<f32>{
-        if self.is_f32(){
-            return Some(f32::from_bits(self.0 as u32))
+
+    pub const fn as_f32(&self) -> Option<f32> {
+        if self.is_f32() {
+            return Some(f32::from_bits(self.0 as u32));
         }
         None
     }
-        
+
     // f16
-    
-    pub const fn from_f16(v: f32)->Self{
+
+    pub const fn from_f16(v: f32) -> Self {
         Self(v.to_bits() as u64 | Self::TYPE_F16)
     }
-            
-    pub const fn is_f16(&self)->bool{
+
+    pub const fn is_f16(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_F16
     }
-            
-    pub const fn as_f16(&self)->Option<f32>{
-        if self.is_f16(){
-            return Some(f32::from_bits(self.0 as u32))
+
+    pub const fn as_f16(&self) -> Option<f32> {
+        if self.is_f16() {
+            return Some(f32::from_bits(self.0 as u32));
         }
         None
     }
-    
-            
+
     // ints
-    
-        
-        
+
     // f32
-            
-    pub const fn from_u40(v: u64)->Self{
-        Self((v&0xFF_FFFF_FFFF) as u64 | Self::TYPE_U40)
+
+    pub const fn from_u40(v: u64) -> Self {
+        Self((v & 0xFF_FFFF_FFFF) as u64 | Self::TYPE_U40)
     }
-                    
-    pub const fn is_u40(&self)->bool{
+
+    pub const fn is_u40(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_U40
     }
-                    
-    pub const fn as_u40(&self)->Option<u64>{
-        if self.is_u40(){
-            return Some(self.0&0xFF_FFFF_FFFF)
+
+    pub const fn as_u40(&self) -> Option<u64> {
+        if self.is_u40() {
+            return Some(self.0 & 0xFF_FFFF_FFFF);
         }
         None
     }
-        
-    pub const fn from_u32(v: u32)->Self{
+
+    pub const fn from_u32(v: u32) -> Self {
         Self(v as u64 | Self::TYPE_U32)
     }
-                
-    pub const fn is_u32(&self)->bool{
+
+    pub const fn is_u32(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_U32
     }
-                
-    pub const fn as_u32(&self)->Option<u32>{
-        if self.is_u32(){
-            return Some(self.0 as u32)
+
+    pub const fn as_u32(&self) -> Option<u32> {
+        if self.is_u32() {
+            return Some(self.0 as u32);
         }
         None
     }
-                
-    pub const fn from_i32(v: i32)->Self{
+
+    pub const fn from_i32(v: i32) -> Self {
         Self(v as u64 | Self::TYPE_I32)
     }
-                    
-    pub const fn is_i32(&self)->bool{
+
+    pub const fn is_i32(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_I32
     }
-                    
-    pub const fn as_i32(&self)->Option<i32>{
-        if self.is_i32(){
-            return Some(self.0 as i32)
+
+    pub const fn as_i32(&self) -> Option<i32> {
+        if self.is_i32() {
+            return Some(self.0 as i32);
         }
         None
     }
-    
+
     // f64
-    
-    
-    
-    
+
     #[inline]
-    pub const fn from_f64(val:f64)->Self{
-        if val.is_nan(){
+    pub const fn from_f64(val: f64) -> Self {
+        if val.is_nan() {
             Self::NAN
-        }
-        else{
+        } else {
             Self(val.to_bits())
         }
     }
-        
+
     #[inline]
-    pub const fn as_f64(&self)->Option<f64>{
-        if self.is_f64(){
-            return Some(f64::from_bits(self.0))
+    pub const fn as_f64(&self) -> Option<f64> {
+        if self.is_f64() {
+            return Some(f64::from_bits(self.0));
         }
-        None    
+        None
     }
-    
-    pub const fn as_f64_traced_nan(&self)->Option<ScriptIp>{
-        if self.is_nan(){
+
+    pub const fn as_f64_traced_nan(&self) -> Option<ScriptIp> {
+        if self.is_nan() {
             Some(ScriptIp::from_u40(self.0))
-        }
-        else{
+        } else {
             None
-        }
-    }
-    
-    #[inline]
-    pub fn from_f64_traced_nan(val:f64, ip:ScriptIp)->Self{
-        let bits = val.to_bits();
-        if val.is_nan(){
-            if bits >= Self::TYPE_NAN && bits <= Self::TYPE_TRACED_NAN_MAX{
-                Self(bits)
-            }
-            else{
-                Self(Self::TYPE_NAN | ip.to_u40())
-            }
-        }
-        else{
-            Self(bits)
-        }
-    }
-    
-    #[inline]
-    pub const fn is_f64(&self)->bool{
-        self.0 <= Self::TYPE_TRACED_NAN_MAX
-    }
-        
-    pub const fn is_non_nan_number(&self)->bool{
-        self.0 < Self::TYPE_NAN
-    }
-        
-    pub const fn as_index(&self)->usize{
-        if let Some(f) = self.as_f64(){
-            return f as usize
-        }
-        if let Some(f) = self.as_u40(){
-            return f as usize
-        }
-        if let Some(f) = self.as_u32(){
-            return f as usize
-        }
-        if let Some(f) = self.as_i32(){
-            return f as usize
-        }
-        if let Some(f) = self.as_f32(){
-            return f as usize
-        }
-        if let Some(f) = self.as_f16(){
-            return f as usize
-        }
-        if let Some(b) = self.as_bool(){
-            return if b{1} else{0}
-        }
-        0
-    }
-        
-    pub const fn is_index(&self)->bool{
-        self.0 <= Self::TYPE_NIL
-    }
-        
-    pub const fn is_nan(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_NAN
-    }
-    
-    
-    
-    // Object
-    
-    
-    
-    
-    pub const fn from_object(ptr: ScriptObject)->Self{
-         Self(ptr.index as u64 | Self::TYPE_OBJECT)
-    }
-    
-    pub const fn is_object(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
-    }
-    
-    pub const fn as_object(&self)->Option<ScriptObject>{
-        if self.is_object(){
-            return Some(ScriptObject{
-                index: (self.0 & 0xffff_ffff) as u32
-            })
-        }
-        None
-    }
-            
-            
-            
-    // PodType
-            
-            
-            
-    pub const fn from_pod_type(ptr: ScriptPodType)->Self{
-        Self(ptr.index as u64 | Self::TYPE_POD_TYPE)
-    }
-            
-    pub const fn is_pod_type(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_POD_TYPE
-    }
-            
-    pub const fn as_pod_type(&self)->Option<ScriptPodType>{
-        if self.is_pod_type(){
-            return Some(ScriptPodType{
-                index: (self.0 & 0xffff_ffff) as u32
-            })
-        }
-        None
-    }
-        
-        
-    // Pod
-        
-        
-        
-    pub const fn from_pod(ptr: ScriptPod)->Self{
-        Self(ptr.index as u64 | Self::TYPE_POD)
-    }
-        
-    pub const fn is_pod(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_POD
-    }
-        
-    pub const fn as_pod(&self)->Option<ScriptPod>{
-        if self.is_pod(){
-            return Some(ScriptPod{
-                index: (self.0 & 0xffff_ffff) as u32
-            })
-        }
-        None
-    }
-    
-        
-        
-    // Handle
-        
-        
-        
-        
-    pub const fn from_handle(ptr: ScriptHandle)->Self{
-        Self(ptr.index as u64 | (Self::TYPE_HANDLE_FIRST + ((ptr.ty.0 as u64)<< 40)))
-    }
-        
-    pub const fn is_handle(&self)->bool{
-        let ty = self.0 & Self::TYPE_MASK;
-        ty >= Self::TYPE_HANDLE_FIRST && ty <= Self::TYPE_HANDLE_LAST
-    }
-        
-    pub const fn as_handle(&self)->Option<ScriptHandle>{
-        if self.is_handle(){
-            return Some(ScriptHandle{
-                ty: ScriptHandleType((((self.0 & Self::TYPE_MASK) - Self::TYPE_HANDLE_FIRST) >> 40) as u8),
-                index: (self.0 & 0xffff_ffff) as u32
-            })
-        }
-        None
-    }
-        
-        
-        
-    
-    
-    // bool
-    
-    
-    
-    pub const fn from_bool(val: bool)->Self{
-        if val{Self::TRUE}
-        else{Self::FALSE}
-    }
-        
-    pub const fn as_bool(&self)->Option<bool>{
-        if self.is_bool(){
-            return Some(self.0 == Self::TRUE.0)
-        }
-        None
-    }
-        
-    pub const fn is_bool(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_BOOL
-    }
-    
-    
-    
-    // color
-    
-    
-    
-    pub const fn from_color(val: u32)->Self{
-        Self(val as u64|Self::TYPE_COLOR)
-    }
-        
-    pub const fn as_color(&self)->Option<u32>{
-        if self.is_color(){
-            return Some((self.0&0xffff_ffff) as u32)
-        }
-        None
-    }
-            
-    pub const fn is_color(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_COLOR
-    }
-    
-    
-    
-    
-    // array
-    
-    
-    
-    pub const fn from_array(val: ScriptArray)->Self{
-        Self((val.index as u64)|Self::TYPE_ARRAY)
-    }
-        
-    pub const fn is_array(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_ARRAY
-    }
-    
-    pub const fn as_array(&self)->Option<ScriptArray>{
-        if self.is_array(){
-            Some(ScriptArray{index:(self.0 &0xFFFF_FFFF) as u32})
-        }
-        else{
-            None
-        }
-    }
-    
-    
-    
-    // id
-    
-    
-    pub const fn from_id(val: LiveId)->Self{
-        Self(val.0|Self::TYPE_ID)
-    }
-        
-    pub const fn is_id(&self)->bool{
-        self.0 >= Self::TYPE_ID
-    }
-    
-    pub const fn from_escaped_id(val: LiveId)->Self{
-        Self(val.0|Self::TYPE_ID|Self::ESCAPED_ID)
-    }
-    
-    pub const fn as_id(&self)->Option<LiveId>{
-        if self.is_id(){
-            return Some(LiveId(self.0&0x0000_3fff_ffff_ffff))
-        }
-        None
-    }
-        
-    pub const fn is_escaped_id(&self)->bool{
-        self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
-    }
-        
-    pub const fn is_prefixed_id(&self)->bool{
-        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED != 0
-    }
-        
-    pub const fn is_unprefixed_id(&self)->bool{
-        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED == 0
-    }
-    
-    
-    // string
-    
-    
-    
-    pub const fn from_string(ptr: ScriptString)->Self{
-         Self(ptr.index as u64 | Self::TYPE_STRING)
-    }
-        
-    pub const fn as_string(&self)->Option<ScriptString>{
-        if self.is_string(){
-            return Some(ScriptString{
-                index: (self.0 & 0xffff_ffff) as u32
-            })
-        }
-        None
-    }
-        
-    pub const fn is_string(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_STRING
-    }
-    
-    pub const fn is_string_like(&self)->bool{
-        let ty = self.0 & Self::TYPE_MASK;
-        ty >= Self::TYPE_STRING && ty < Self::TYPE_INLINE_STRING_END
-    }
-    
-    pub const fn from_inline_string(str: &str)->Option<Self>{
-        let bytes = str.as_bytes();
-        if bytes.len()>5{
-            return None
-        }
-        if bytes.len() == 0{
-            Some(Self(Self::TYPE_INLINE_STRING_0))
-        }
-        else if bytes.len() == 1{
-            Some(Self(Self::TYPE_INLINE_STRING_1 | bytes[0] as u64))
-        }
-        else if bytes.len() == 2{
-            Some(Self(Self::TYPE_INLINE_STRING_2 | bytes[0] as u64 | ((bytes[1] as u64)<<8)))
-        }
-        else if bytes.len() == 3{
-            Some(Self(Self::TYPE_INLINE_STRING_3 | bytes[0] as u64 | ((bytes[1] as u64)<<8) | ((bytes[2] as u64)<<16)))
-        }
-        else if bytes.len() == 4{
-            Some(Self(Self::TYPE_INLINE_STRING_4 | bytes[0] as u64 | ((bytes[1] as u64)<<8) | ((bytes[2] as u64)<<16) | ((bytes[3] as u64)<<24)))
-        }
-        else{
-            Some(Self(Self::TYPE_INLINE_STRING_5 | bytes[0] as u64 | ((bytes[1] as u64)<<8) | ((bytes[2] as u64)<<16) | ((bytes[3] as u64)<<24) | ((bytes[4] as u64)<<32)))
-        }
-    }
-    
-    pub fn as_inline_string<R,F:FnOnce(&str)->R>(&self, f:F)->Option<R>{
-        if !self.is_inline_string(){
-            return None
-        }
-        if self.0 < Self::TYPE_INLINE_STRING_1{
-            return Some(f(""))
-        }
-        else if self.0 < Self::TYPE_INLINE_STRING_2{
-            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8])}))
-        }
-        else if self.0 < Self::TYPE_INLINE_STRING_3{
-            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8])}))
-        }
-        else if self.0 < Self::TYPE_INLINE_STRING_4{
-            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8, ((self.0>>16) & 0xff) as u8])}))
-        }
-        else if self.0 < Self::TYPE_INLINE_STRING_5{
-            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8, ((self.0>>16) & 0xff) as u8, ((self.0>>24) & 0xff) as u8])}))
-        }
-        else{
-            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8, ((self.0>>16) & 0xff) as u8, ((self.0>>24) & 0xff) as u8, ((self.0>>32) & 0xff) as u8])}))
         }
     }
 
-    pub const fn inline_string_not_empty(&self)->bool{
-        self.0 >= Self::TYPE_INLINE_STRING_1  && self.0 <= Self::TYPE_INLINE_STRING_END
+    #[inline]
+    pub fn from_f64_traced_nan(val: f64, ip: ScriptIp) -> Self {
+        let bits = val.to_bits();
+        if val.is_nan() {
+            if bits >= Self::TYPE_NAN && bits <= Self::TYPE_TRACED_NAN_MAX {
+                Self(bits)
+            } else {
+                Self(Self::TYPE_NAN | ip.to_u40())
+            }
+        } else {
+            Self(bits)
+        }
     }
-        
-    pub const fn is_inline_string(&self)->bool{
-        self.0 >= Self::TYPE_INLINE_STRING_0  && self.0 < Self::TYPE_INLINE_STRING_END
+
+    #[inline]
+    pub const fn is_f64(&self) -> bool {
+        self.0 <= Self::TYPE_TRACED_NAN_MAX
+    }
+
+    pub const fn is_non_nan_number(&self) -> bool {
+        self.0 < Self::TYPE_NAN
+    }
+
+    pub const fn as_index(&self) -> usize {
+        if let Some(f) = self.as_f64() {
+            return f as usize;
+        }
+        if let Some(f) = self.as_u40() {
+            return f as usize;
+        }
+        if let Some(f) = self.as_u32() {
+            return f as usize;
+        }
+        if let Some(f) = self.as_i32() {
+            return f as usize;
+        }
+        if let Some(f) = self.as_f32() {
+            return f as usize;
+        }
+        if let Some(f) = self.as_f16() {
+            return f as usize;
+        }
+        if let Some(b) = self.as_bool() {
+            return if b { 1 } else { 0 };
+        }
+        0
+    }
+
+    pub const fn is_index(&self) -> bool {
+        self.0 <= Self::TYPE_NIL
+    }
+
+    pub const fn is_nan(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_NAN
+    }
+
+    // Object
+    // Layout: bits 0-31 = index, bits 32-39 = generation
+
+    pub const fn from_object(ptr: ScriptObject) -> Self {
+        Self(ptr.index as u64 | ((ptr.generation as u64) << 32) | Self::TYPE_OBJECT)
+    }
+
+    pub const fn is_object(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
+    }
+
+    pub const fn as_object(&self) -> Option<ScriptObject> {
+        if self.is_object() {
+            return Some(ScriptObject {
+                index: (self.0 & 0xffff_ffff) as u32,
+                generation: ((self.0 >> 32) & 0xff) as Generation,
+            });
+        }
+        None
+    }
+
+    // PodType
+
+    pub const fn from_pod_type(ptr: ScriptPodType) -> Self {
+        Self(ptr.index as u64 | Self::TYPE_POD_TYPE)
+    }
+
+    pub const fn is_pod_type(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_POD_TYPE
+    }
+
+    pub const fn as_pod_type(&self) -> Option<ScriptPodType> {
+        if self.is_pod_type() {
+            return Some(ScriptPodType {
+                index: (self.0 & 0xffff_ffff) as u32,
+            });
+        }
+        None
+    }
+
+    // Pod
+    // Layout: bits 0-31 = index, bits 32-39 = generation
+
+    pub const fn from_pod(ptr: ScriptPod) -> Self {
+        Self(ptr.index as u64 | ((ptr.generation as u64) << 32) | Self::TYPE_POD)
+    }
+
+    pub const fn is_pod(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_POD
+    }
+
+    pub const fn as_pod(&self) -> Option<ScriptPod> {
+        if self.is_pod() {
+            return Some(ScriptPod {
+                index: (self.0 & 0xffff_ffff) as u32,
+                generation: ((self.0 >> 32) & 0xff) as Generation,
+            });
+        }
+        None
+    }
+
+    // Handle
+    // Layout: bits 0-31 = index, bits 32-39 = generation
+    // Handle type is encoded in the TYPE_MASK (different type tags per handle type)
+
+    pub const fn from_handle(ptr: ScriptHandle) -> Self {
+        Self(
+            ptr.index as u64
+                | ((ptr.generation as u64) << 32)
+                | (Self::TYPE_HANDLE_FIRST + ((ptr.ty.0 as u64) << 40)),
+        )
+    }
+
+    pub const fn is_handle(&self) -> bool {
+        let ty = self.0 & Self::TYPE_MASK;
+        ty >= Self::TYPE_HANDLE_FIRST && ty <= Self::TYPE_HANDLE_LAST
+    }
+
+    pub const fn as_handle(&self) -> Option<ScriptHandle> {
+        if self.is_handle() {
+            return Some(ScriptHandle {
+                ty: ScriptHandleType(
+                    (((self.0 & Self::TYPE_MASK) - Self::TYPE_HANDLE_FIRST) >> 40) as u8,
+                ),
+                index: (self.0 & 0xffff_ffff) as u32,
+                generation: ((self.0 >> 32) & 0xff) as Generation,
+            });
+        }
+        None
+    }
+
+    // bool
+
+    pub const fn from_bool(val: bool) -> Self {
+        if val {
+            Self::TRUE
+        } else {
+            Self::FALSE
+        }
+    }
+
+    pub const fn as_bool(&self) -> Option<bool> {
+        if self.is_bool() {
+            return Some(self.0 == Self::TRUE.0);
+        }
+        None
+    }
+
+    pub const fn is_bool(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_BOOL
+    }
+
+    // color
+
+    pub const fn from_color(val: u32) -> Self {
+        Self(val as u64 | Self::TYPE_COLOR)
+    }
+
+    pub const fn as_color(&self) -> Option<u32> {
+        if self.is_color() {
+            return Some((self.0 & 0xffff_ffff) as u32);
+        }
+        None
+    }
+
+    pub const fn is_color(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_COLOR
+    }
+
+    // array
+    // Layout: bits 0-31 = index, bits 32-39 = generation
+
+    pub const fn from_array(val: ScriptArray) -> Self {
+        Self((val.index as u64) | ((val.generation as u64) << 32) | Self::TYPE_ARRAY)
+    }
+
+    pub const fn is_array(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_ARRAY
+    }
+
+    pub const fn as_array(&self) -> Option<ScriptArray> {
+        if self.is_array() {
+            Some(ScriptArray {
+                index: (self.0 & 0xFFFF_FFFF) as u32,
+                generation: ((self.0 >> 32) & 0xff) as Generation,
+            })
+        } else {
+            None
+        }
+    }
+
+    // id
+
+    pub const fn from_id(val: LiveId) -> Self {
+        Self(val.0 | Self::TYPE_ID)
+    }
+
+    pub const fn is_id(&self) -> bool {
+        self.0 >= Self::TYPE_ID
+    }
+
+    pub const fn from_escaped_id(val: LiveId) -> Self {
+        Self(val.0 | Self::TYPE_ID | Self::ESCAPED_ID)
+    }
+
+    pub const fn as_id(&self) -> Option<LiveId> {
+        if self.is_id() {
+            return Some(LiveId(self.0 & 0x0000_3fff_ffff_ffff));
+        }
+        None
+    }
+
+    pub const fn is_escaped_id(&self) -> bool {
+        self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
+    }
+
+    pub const fn is_prefixed_id(&self) -> bool {
+        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED != 0
+    }
+
+    pub const fn is_unprefixed_id(&self) -> bool {
+        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED == 0
+    }
+
+    // string
+    // Layout: bits 0-31 = index, bits 32-39 = generation
+
+    pub const fn from_string(ptr: ScriptString) -> Self {
+        Self(ptr.index as u64 | ((ptr.generation as u64) << 32) | Self::TYPE_STRING)
+    }
+
+    pub const fn as_string(&self) -> Option<ScriptString> {
+        if self.is_string() {
+            return Some(ScriptString {
+                index: (self.0 & 0xffff_ffff) as u32,
+                generation: ((self.0 >> 32) & 0xff) as Generation,
+            });
+        }
+        None
+    }
+
+    pub const fn is_string(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_STRING
+    }
+
+    pub const fn is_string_like(&self) -> bool {
+        let ty = self.0 & Self::TYPE_MASK;
+        ty >= Self::TYPE_STRING && ty < Self::TYPE_INLINE_STRING_END
+    }
+
+    pub const fn from_inline_string(str: &str) -> Option<Self> {
+        let bytes = str.as_bytes();
+        if bytes.len() > 5 {
+            return None;
+        }
+        if bytes.len() == 0 {
+            Some(Self(Self::TYPE_INLINE_STRING_0))
+        } else if bytes.len() == 1 {
+            Some(Self(Self::TYPE_INLINE_STRING_1 | bytes[0] as u64))
+        } else if bytes.len() == 2 {
+            Some(Self(
+                Self::TYPE_INLINE_STRING_2 | bytes[0] as u64 | ((bytes[1] as u64) << 8),
+            ))
+        } else if bytes.len() == 3 {
+            Some(Self(
+                Self::TYPE_INLINE_STRING_3
+                    | bytes[0] as u64
+                    | ((bytes[1] as u64) << 8)
+                    | ((bytes[2] as u64) << 16),
+            ))
+        } else if bytes.len() == 4 {
+            Some(Self(
+                Self::TYPE_INLINE_STRING_4
+                    | bytes[0] as u64
+                    | ((bytes[1] as u64) << 8)
+                    | ((bytes[2] as u64) << 16)
+                    | ((bytes[3] as u64) << 24),
+            ))
+        } else {
+            Some(Self(
+                Self::TYPE_INLINE_STRING_5
+                    | bytes[0] as u64
+                    | ((bytes[1] as u64) << 8)
+                    | ((bytes[2] as u64) << 16)
+                    | ((bytes[3] as u64) << 24)
+                    | ((bytes[4] as u64) << 32),
+            ))
+        }
+    }
+
+    pub fn as_inline_string<R, F: FnOnce(&str) -> R>(&self, f: F) -> Option<R> {
+        if !self.is_inline_string() {
+            return None;
+        }
+        if self.0 < Self::TYPE_INLINE_STRING_1 {
+            return Some(f(""));
+        } else if self.0 < Self::TYPE_INLINE_STRING_2 {
+            return Some(f(unsafe {
+                std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8])
+            }));
+        } else if self.0 < Self::TYPE_INLINE_STRING_3 {
+            return Some(f(unsafe {
+                std::str::from_utf8_unchecked(&[
+                    (self.0 & 0xff) as u8,
+                    ((self.0 >> 8) & 0xff) as u8,
+                ])
+            }));
+        } else if self.0 < Self::TYPE_INLINE_STRING_4 {
+            return Some(f(unsafe {
+                std::str::from_utf8_unchecked(&[
+                    (self.0 & 0xff) as u8,
+                    ((self.0 >> 8) & 0xff) as u8,
+                    ((self.0 >> 16) & 0xff) as u8,
+                ])
+            }));
+        } else if self.0 < Self::TYPE_INLINE_STRING_5 {
+            return Some(f(unsafe {
+                std::str::from_utf8_unchecked(&[
+                    (self.0 & 0xff) as u8,
+                    ((self.0 >> 8) & 0xff) as u8,
+                    ((self.0 >> 16) & 0xff) as u8,
+                    ((self.0 >> 24) & 0xff) as u8,
+                ])
+            }));
+        } else {
+            return Some(f(unsafe {
+                std::str::from_utf8_unchecked(&[
+                    (self.0 & 0xff) as u8,
+                    ((self.0 >> 8) & 0xff) as u8,
+                    ((self.0 >> 16) & 0xff) as u8,
+                    ((self.0 >> 24) & 0xff) as u8,
+                    ((self.0 >> 32) & 0xff) as u8,
+                ])
+            }));
+        }
+    }
+
+    pub const fn inline_string_not_empty(&self) -> bool {
+        self.0 >= Self::TYPE_INLINE_STRING_1 && self.0 <= Self::TYPE_INLINE_STRING_END
+    }
+
+    pub const fn is_inline_string(&self) -> bool {
+        self.0 >= Self::TYPE_INLINE_STRING_0 && self.0 < Self::TYPE_INLINE_STRING_END
     }
 }
 
@@ -1121,67 +1275,64 @@ impl fmt::Debug for ScriptValue {
     }
 }
 
-
 impl fmt::Display for ScriptValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if let Some(v) = self.as_f64(){
-            return write!(f, "{}", v)
+        if let Some(v) = self.as_f64() {
+            return write!(f, "{}", v);
         }
-        if let Some(v) = self.as_u40(){
-            return write!(f, "{}", v)
+        if let Some(v) = self.as_u40() {
+            return write!(f, "{}", v);
         }
-        if let Some(v) = self.as_id(){
-            return write!(f, "{}", v)
+        if let Some(v) = self.as_id() {
+            return write!(f, "{}", v);
         }
-        if let Some(v) = self.as_bool(){
-            return write!(f, "{}", v)
+        if let Some(v) = self.as_bool() {
+            return write!(f, "{}", v);
         }
-        if let Some(_) = self.as_string(){
-            return write!(f, "[String]")
+        if let Some(_) = self.as_string() {
+            return write!(f, "[String]");
         }
-        if let Some(x) = self.as_color(){
-            return write!(f, "[Color:{:8x}]", x)
+        if let Some(x) = self.as_color() {
+            return write!(f, "[Color:{:8x}]", x);
         }
-        if let Some(r) = self.as_inline_string(|s|{
-                write!(f, "{s}")
-            }){
+        if let Some(r) = self.as_inline_string(|s| write!(f, "{s}")) {
             return r;
         }
-        if let Some(v) = self.as_f32(){
-            return write!(f, "{}", v)
+        if let Some(v) = self.as_f32() {
+            return write!(f, "{}", v);
         }
-        if let Some(v) = self.as_i32(){
-            return write!(f, "{}", v)
+        if let Some(v) = self.as_i32() {
+            return write!(f, "{}", v);
         }
-        if let Some(v) = self.as_u32(){
-            return write!(f, "{}", v)
+        if let Some(v) = self.as_u32() {
+            return write!(f, "{}", v);
         }
-        if let Some(v) = self.as_f16(){
-            return write!(f, "{}", v)
+        if let Some(v) = self.as_f16() {
+            return write!(f, "{}", v);
         }
-        if let Some(ptr) = self.as_object(){
-            return write!(f, "[ScriptObject:{}]",ptr.index)
+        if let Some(ptr) = self.as_object() {
+            return write!(f, "[ScriptObject:{}]", ptr.index);
         }
-        if let Some(ptr) = self.as_array(){
-            return write!(f, "[ScriptArray:{}]",ptr.index)
+        if let Some(ptr) = self.as_array() {
+            return write!(f, "[ScriptArray:{}]", ptr.index);
         }
-        if let Some(ptr) = self.as_handle(){
-            return write!(f, "[ScriptHandle:{}]",ptr.index)
+        if let Some(ptr) = self.as_handle() {
+            return write!(f, "[ScriptHandle:{}]", ptr.index);
         }
-        if let Some(ptr) = self.as_pod_type(){
-            return write!(f, "[ScriptPodType:{}]",ptr.index)
+        if let Some(ptr) = self.as_pod_type() {
+            return write!(f, "[ScriptPodType:{}]", ptr.index);
         }
-        if let Some(ptr) = self.as_pod(){
-            return write!(f, "[ScriptPod:{}]",ptr.index)
+        if let Some(ptr) = self.as_pod() {
+            return write!(f, "[ScriptPod:{}]", ptr.index);
         }
-        if let Some(error) = self.as_err(){
-            return write!(f, "{}", error.ty)
+        if let Some(error) = self.as_err() {
+            return write!(f, "{}", error.ty);
         }
-        if self.is_nil(){
-            return write!(f, "nil")
+        if self.is_nil() {
+            return write!(f, "nil");
         }
-        if let Some((opcode, args)) = self.as_opcode(){
-            return write!(f, "{opcode}{args}")
+        if let Some((opcode, args)) = self.as_opcode() {
+            return write!(f, "{opcode}{args}");
         }
         write!(f, "?{:08x}", self.0)
     }

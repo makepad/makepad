@@ -1,5 +1,6 @@
 use crate::array::*;
 use crate::gc::*;
+use crate::gen_index::GenVec;
 use crate::handle::*;
 use crate::makepad_live_id::*;
 use crate::object::*;
@@ -20,52 +21,73 @@ pub struct ScriptHeap {
     pub(crate) gc_last: ScriptHeapGcLast,
     pub(crate) mark_vec: Vec<ScriptGcMark>,
 
+    // GC debugging - tracks context when a dangling reference is found
+    pub(crate) gc_root_source: String, // Describes which root started this marking chain
+    pub(crate) gc_parent_chain: Vec<u32>, // Chain of parent object indices from root to current
+    pub(crate) current_parent: Option<ScriptObject>, // Current parent during marking
+
     pub(crate) root_objects: Rc<RefCell<HashMap<ScriptObject, usize>>>,
     pub(crate) root_arrays: Rc<RefCell<HashMap<ScriptArray, usize>>>,
     pub(crate) root_handles: Rc<RefCell<HashMap<ScriptHandle, usize>>>,
 
     pub(crate) type_defaults: HashMap<ScriptTypeIndex, ScriptObject>,
 
-    pub(crate) objects: Vec<ScriptObjectData>,
-    pub(crate) objects_free: Vec<ScriptObject>,
+    // GenVec provides generation-checked access via Index<ScriptObject> etc.
+    // Use index[obj] for checked access, index[i as usize] for unchecked iteration
+    pub(crate) objects: GenVec<ScriptObjectData>,
+    pub(crate) objects_free: Vec<ScriptObject>, // Stores refs with incremented generation, ready to reuse
 
     pub(crate) string_intern: HashMap<ScriptRcString, ScriptString>,
     pub(crate) strings_reuse: Vec<String>,
-    pub(crate) strings: Vec<Option<ScriptStringData>>,
+    pub(crate) strings: GenVec<Option<ScriptStringData>>,
     pub(crate) strings_free: Vec<ScriptString>,
 
-    pub(crate) arrays: Vec<ScriptArrayData>,
+    pub(crate) arrays: GenVec<ScriptArrayData>,
     pub(crate) arrays_free: Vec<ScriptArray>,
 
     pub(crate) pod_types: Vec<ScriptPodTypeData>,
     pub(crate) pod_types_free: Vec<ScriptPodType>,
-    pub(crate) pods: Vec<ScriptPodData>,
+    pub(crate) pods: GenVec<ScriptPodData>,
     pub(crate) pods_free: Vec<ScriptPod>,
 
     pub(crate) type_check: Vec<ScriptTypeCheck>,
     pub(crate) type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
 
-    pub(crate) handles: Vec<Option<ScriptHandleData>>,
+    pub(crate) handles: GenVec<Option<ScriptHandleData>>,
     pub(crate) handles_free: Vec<ScriptHandle>,
 }
 
 impl ScriptHeap {
     pub fn empty() -> Self {
+        let mut objects = GenVec::new();
+        let mut arrays = GenVec::new();
+        let mut pods = GenVec::new();
+        let mut handles = GenVec::new();
+        let mut strings = GenVec::new();
+
+        // Push slot 0 for each (reserved/null slot)
+        objects.push(Default::default());
+        arrays.push(Default::default());
+        pods.push(Default::default());
+        handles.push(None);
+        strings.push(None); // slot 0 for strings too
+
         let mut v = Self {
             root_objects: Default::default(),
             modules: ScriptObject::ZERO,
-            objects: vec![Default::default()],
-            arrays: vec![Default::default()],
-            pods: vec![Default::default()],
-            handles: vec![None],
+            objects,
+            arrays,
+            pods,
+            handles,
+            strings,
             ..Default::default()
         };
-        // object zero
-        v.objects[0].tag.set_alloced();
-        v.objects[0].tag.set_static();
-        v.objects[0].tag.freeze();
-        v.arrays[0].tag.set_alloced();
-        v.arrays[0].tag.freeze();
+        // Initialize slot 0 (reserved null slot) - use get_at_mut for internal init
+        v.objects.get_at_mut(0).tag.set_alloced();
+        v.objects.get_at_mut(0).tag.set_static();
+        v.objects.get_at_mut(0).tag.freeze();
+        v.arrays.get_at_mut(0).tag.set_alloced();
+        v.arrays.get_at_mut(0).tag.freeze();
 
         v.modules = v.new_with_proto(id!(mod).into());
         v.root_objects.borrow_mut().insert(v.modules, 1);
@@ -95,7 +117,7 @@ impl ScriptHeap {
     }
 
     pub fn type_matches_id(&self, ptr: ScriptObject, type_id: ScriptTypeId) -> bool {
-        let obj = &self.objects[ptr.index as usize];
+        let obj = &self.objects[ptr];
         if let Some(ti) = obj.tag.as_type_index() {
             if let Some(object) = &self.type_check[ti.0 as usize].object {
                 return object.type_id == type_id;
@@ -106,7 +128,7 @@ impl ScriptHeap {
 
     /// Returns the TypeId for an object if it has a registered type.
     pub fn object_type_id(&self, ptr: ScriptObject) -> Option<ScriptTypeId> {
-        let obj = &self.objects[ptr.index as usize];
+        let obj = &self.objects[ptr];
         if let Some(ti) = obj.tag.as_type_index() {
             if let Some(object) = &self.type_check[ti.0 as usize].object {
                 return Some(object.type_id);
@@ -130,7 +152,7 @@ impl ScriptHeap {
     pub fn has_proto(&mut self, ptr: ScriptObject, rhs: ScriptValue) -> bool {
         let mut ptr = ptr;
         loop {
-            let object = &mut self.objects[ptr.index as usize];
+            let object = &mut self.objects[ptr];
             if object.proto == rhs {
                 return true;
             }
@@ -143,13 +165,13 @@ impl ScriptHeap {
     }
 
     pub fn proto(&self, ptr: ScriptObject) -> ScriptValue {
-        self.objects[ptr.index as usize].proto
+        self.objects[ptr].proto
     }
 
     pub fn root_proto(&self, ptr: ScriptObject) -> ScriptValue {
         let mut ptr = ptr;
         loop {
-            let object = &self.objects[ptr.index as usize];
+            let object = &self.objects[ptr];
             if let Some(next_ptr) = object.proto.as_object() {
                 ptr = next_ptr
             } else {
@@ -159,7 +181,7 @@ impl ScriptHeap {
     }
 
     pub fn object_data(&self, ptr: ScriptObject) -> &ScriptObjectData {
-        &self.objects[ptr.index as usize]
+        &self.objects[ptr]
     }
 
     pub fn type_check(&self, index: ScriptTypeIndex) -> &ScriptTypeCheck {
@@ -167,7 +189,7 @@ impl ScriptHeap {
     }
 
     pub fn set_type_default(&mut self, obj: ScriptObject) -> bool {
-        let object = &self.objects[obj.index as usize];
+        let object = &self.objects[obj];
         if let Some(ty_index) = object.tag.as_type_index() {
             // Add to type_defaults mapping (GC will scan this table)
             self.type_defaults.insert(ty_index, obj);
@@ -196,7 +218,7 @@ impl ScriptHeap {
         obj: ScriptObject,
         field_id: LiveId,
     ) -> Option<ScriptTypeId> {
-        let object = &self.objects[obj.index as usize];
+        let object = &self.objects[obj];
         if let Some(ty_index) = object.tag.as_type_index() {
             let type_check = &self.type_check[ty_index.0 as usize];
             if let Some(prop) = type_check.props.props.get(&field_id) {
@@ -316,8 +338,8 @@ impl ScriptHeap {
             loop {
                 if let Some(pa) = aw.as_object() {
                     if let Some(pb) = bw.as_object() {
-                        let oa = &self.objects[pa.index as usize];
-                        let ob = &self.objects[pb.index as usize];
+                        let oa = &self.objects[pa];
+                        let ob = &self.objects[pb];
                         if oa.vec.len() != ob.vec.len() {
                             return false;
                         }
@@ -357,7 +379,7 @@ impl ScriptHeap {
                                 }
                             } else if k.is_string_like() && !ob.tag.is_string_keys() {
                                 let id = if let Some(s) = k.as_string() {
-                                    if let Some(s) = &self.strings[s.index as usize] {
+                                    if let Some(s) = &self.strings[s] {
                                         LiveId::from_str(&s.string.0)
                                     } else {
                                         LiveId(0)
@@ -390,43 +412,34 @@ impl ScriptHeap {
             }
         } else if let Some(arr1) = a.as_array() {
             if let Some(arr2) = b.as_array() {
-                match &self.arrays[arr1.index as usize].storage {
-                    ScriptArrayStorage::ScriptValue(arr1) => {
-                        match &self.arrays[arr2.index as usize].storage {
-                            ScriptArrayStorage::ScriptValue(arr2) => {
-                                if arr1.len() != arr2.len() {
+                match &self.arrays[arr1].storage {
+                    ScriptArrayStorage::ScriptValue(arr1) => match &self.arrays[arr2].storage {
+                        ScriptArrayStorage::ScriptValue(arr2) => {
+                            if arr1.len() != arr2.len() {
+                                return false;
+                            }
+                            for (a, b) in arr1.iter().zip(arr2.iter()) {
+                                if !self.deep_eq(*a, *b) {
                                     return false;
                                 }
-                                for (a, b) in arr1.iter().zip(arr2.iter()) {
-                                    if !self.deep_eq(*a, *b) {
-                                        return false;
-                                    }
-                                }
-                                return true;
                             }
-                            _ => return false,
+                            return true;
                         }
-                    }
-                    ScriptArrayStorage::F32(arr1) => {
-                        match &self.arrays[arr2.index as usize].storage {
-                            ScriptArrayStorage::F32(arr2) => return arr1 == arr2,
-                            _ => return false,
-                        }
-                    }
-                    ScriptArrayStorage::U32(arr1) => {
-                        match &self.arrays[arr2.index as usize].storage {
-                            ScriptArrayStorage::U32(arr2) => return arr1 == arr2,
-                            _ => return false,
-                        }
-                    }
-                    ScriptArrayStorage::U16(arr1) => {
-                        match &self.arrays[arr2.index as usize].storage {
-                            ScriptArrayStorage::U16(arr2) => return arr1 == arr2,
-                            _ => return false,
-                        }
-                    }
-                    ScriptArrayStorage::U8(arr1) => match &self.arrays[arr2.index as usize].storage
-                    {
+                        _ => return false,
+                    },
+                    ScriptArrayStorage::F32(arr1) => match &self.arrays[arr2].storage {
+                        ScriptArrayStorage::F32(arr2) => return arr1 == arr2,
+                        _ => return false,
+                    },
+                    ScriptArrayStorage::U32(arr1) => match &self.arrays[arr2].storage {
+                        ScriptArrayStorage::U32(arr2) => return arr1 == arr2,
+                        _ => return false,
+                    },
+                    ScriptArrayStorage::U16(arr1) => match &self.arrays[arr2].storage {
+                        ScriptArrayStorage::U16(arr2) => return arr1 == arr2,
+                        _ => return false,
+                    },
+                    ScriptArrayStorage::U8(arr1) => match &self.arrays[arr2].storage {
                         ScriptArrayStorage::U8(arr2) => return arr1 == arr2,
                         _ => return false,
                     },
@@ -480,7 +493,7 @@ impl ScriptHeap {
             }
             recur.push(value);
 
-            let object = &self.objects[obj.index as usize];
+            let object = &self.objects[obj];
             if object.tag.is_script_fn() {
                 write!(out, "Fn").ok();
             } else if object.tag.is_native_fn() {
@@ -492,7 +505,7 @@ impl ScriptHeap {
 
             // Check if object has any content (for formatted output)
             let has_content = {
-                let obj_data = &self.objects[obj.index as usize];
+                let obj_data = &self.objects[obj];
                 obj_data.map_len() > 0
                     || !obj_data.vec.is_empty()
                     || obj_data.tag.as_type_index().is_some()
@@ -525,7 +538,7 @@ impl ScriptHeap {
             }
 
             loop {
-                let object = &self.objects[ptr.index as usize];
+                let object = &self.objects[ptr];
 
                 object.map_iter_ordered(|key, value| {
                     write_separator(out, formatted, depth + 1, first);
@@ -575,7 +588,7 @@ impl ScriptHeap {
                 return;
             }
             recur.push(value);
-            let array = &self.arrays[arr.index as usize];
+            let array = &self.arrays[arr];
             let len = array.storage.len();
             write!(out, "[").ok();
 
@@ -610,7 +623,7 @@ impl ScriptHeap {
             write!(out, "]").ok();
             recur.pop();
         } else if let Some(s) = value.as_string() {
-            let s = if let Some(s) = &self.strings[s.index as usize] {
+            let s = if let Some(s) = &self.strings[s] {
                 &s.string.0
             } else {
                 ""
@@ -627,7 +640,7 @@ impl ScriptHeap {
             .is_some()
         {
         } else if let Some(pod) = value.as_pod() {
-            let pod = &self.pods[pod.index as usize];
+            let pod = &self.pods[pod];
             let pod_type = &self.pod_types[pod.ty.index as usize];
             self.pod_debug(out, pod_type, 0, &pod.data);
         } else {
@@ -663,7 +676,7 @@ impl ScriptHeap {
             out.push('{');
             let mut first = true;
             loop {
-                let object = &self.objects[ptr.index as usize];
+                let object = &self.objects[ptr];
                 object.map_iter(|key, value| {
                     if !first {
                         out.push(',')
@@ -690,7 +703,7 @@ impl ScriptHeap {
             }
             out.push('}');
         } else if let Some(arr) = value.as_array() {
-            let array = &self.arrays[arr.index as usize];
+            let array = &self.arrays[arr];
             let len = array.storage.len();
             let mut first = true;
             out.push('[');
@@ -714,7 +727,7 @@ impl ScriptHeap {
             out.push('"');
             // alright. sself is json eh. so.
         } else if let Some(s) = value.as_string() {
-            let s = if let Some(s) = &self.strings[s.index as usize] {
+            let s = if let Some(s) = &self.strings[s] {
                 &s.string.0
             } else {
                 ""
@@ -754,16 +767,10 @@ impl ScriptHeap {
     /// Used by type_check to be permissive when a transform exists.
     pub fn has_apply_transform(&self, value: ScriptValue) -> bool {
         if let Some(obj) = value.as_object() {
-            return self.objects[obj.index as usize]
-                .tag
-                .as_apply_transform()
-                .is_some();
+            return self.objects[obj].tag.as_apply_transform().is_some();
         }
         if let Some(arr) = value.as_array() {
-            return self.arrays[arr.index as usize]
-                .tag
-                .as_apply_transform()
-                .is_some();
+            return self.arrays[arr].tag.as_apply_transform().is_some();
         }
         false
     }

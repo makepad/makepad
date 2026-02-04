@@ -500,7 +500,7 @@ impl ShaderFnCompiler {
             return ShaderType::PodType(pod_ty);
         }
         if let Some(pod) = value.as_pod() {
-            let pod = &vm.bx.heap.pods[pod.index as usize];
+            let pod = &vm.bx.heap.pods[pod];
             return ShaderType::Pod(pod.ty);
         }
         if let Some(pod_ty) = value.as_pod_type() {
