@@ -7,17 +7,19 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    mod.widgets.CodeViewBase = #(CodeView::register_widget(vm))
-
-    mod.widgets.CodeView = set_type_default() do mod.widgets.CodeViewBase {
-        $editor: CodeEditor {
+    mod.widgets.CodeViewBase = set_type_default() do #(CodeView::register_widget(vm)){
+        editor +: {
             pad_left_top: vec2(0.0, -0.0)
             height: Fit
             empty_page_at_end: false
             read_only: true
             show_gutter: false
+            word_wrap: false
+            draw_bg +: { color: #0000 }
         }
     }
+
+    mod.widgets.CodeView = mod.widgets.CodeViewBase {}
 }
 
 #[derive(Script, ScriptHook, Widget)]

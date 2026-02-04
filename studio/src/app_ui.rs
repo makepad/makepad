@@ -53,7 +53,7 @@ script_mod! {
     let IconTab = TabFlat{
         closeable: false
         spacing: theme.space_1
-        icon_walk: Walk{width: Fit height: 18.}
+        icon_walk: Walk{width: Fit height: 16.}
     }
 
     let Vr = View{
@@ -381,7 +381,7 @@ script_mod! {
             visible: true
             $caption_label +: {$label +: {text: "Makepad"}}
         }
-        window.inner_size: vec2(2600 1900)
+        window.inner_size: vec2(1600 900)
         show_bg: true
         draw_bg +: {
             pixel: fn() {
@@ -470,7 +470,7 @@ script_mod! {
                 }
 
                 $file_tree_tabs: DockTabs{
-                    tabs: [$file_tree_tab $run_list_tab]
+                    tabs: [$search $file_tree_tab $run_list_tab]
                     selected: 0
                 }
 
