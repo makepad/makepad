@@ -31,9 +31,6 @@ impl ScriptHeap {
     }
 
     pub fn array_push(&mut self, array: ScriptArray, value: ScriptValue, trap: ScriptTrap) {
-        if let Some(obj) = value.as_object() {
-            self.set_reffed(obj);
-        }
         let array = &mut self.arrays[array];
         if array.tag.is_frozen() {
             script_err_immutable!(trap, "array is frozen");
@@ -98,9 +95,6 @@ impl ScriptHeap {
     }
 
     pub fn array_push_unchecked(&mut self, array: ScriptArray, value: ScriptValue) {
-        if let Some(obj) = value.as_object() {
-            self.set_reffed(obj);
-        }
         let array = &mut self.arrays[array];
         array.tag.set_dirty();
         array.storage.push(value);

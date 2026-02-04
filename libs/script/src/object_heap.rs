@@ -448,9 +448,6 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        if let Some(obj) = value.as_object() {
-            self.set_reffed(obj);
-        }
         if let Some(key_id) = key.as_id() {
             if key_id.is_prefixed() {
                 return self.set_value_prefixed(ptr, key, value, trap);
@@ -1074,20 +1071,12 @@ impl ScriptHeap {
             return script_err_immutable!(trap, "cannot push to frozen vec");
         }
         object.vec.push(ScriptVecValue { key, value });
-        if let Some(obj) = value.as_object() {
-            let object = &mut self.objects[obj];
-            object.tag.set_reffed();
-        }
         NIL
     }
 
     pub fn vec_push_unchecked(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
         let object = &mut self.objects[ptr];
         object.vec.push(ScriptVecValue { key, value });
-        if let Some(obj) = value.as_object() {
-            let object = &mut self.objects[obj];
-            object.tag.set_reffed();
-        }
     }
 
     pub fn vec_remove(
