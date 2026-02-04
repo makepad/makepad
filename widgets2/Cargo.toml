@@ -21,10 +21,10 @@ makepad-zune-png = { version = "0.5.1", path = "../libs/zune-png", optional = tr
 makepad-html = { path = "../libs/html", version = "1.0.0", optional = true }
 
 # Text processing
-unicode-segmentation = "1.11.0"
+unicode-segmentation = { version = "1.12.0", path = "../libs/unicode-segmentation-1.12.0" }
 
 # Markdown parsing - optional via feature
-pulldown-cmark = { version = "0.12.2", default-features = false, features = ["simd"], optional = true }
+pulldown-cmark = { version = "0.12.2", path = "../libs/pulldown-cmark-0.12.2", default-features = false, features = ["simd"], optional = true }
 
 # SVG rendering - optional via feature (currently not in use)
 #resvg = { version = "0.43.0", optional = true }

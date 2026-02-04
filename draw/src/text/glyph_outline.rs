@@ -4,7 +4,7 @@ use {
         image::{SubimageMut, R},
         num::Zero,
     },
-    makepad_rustybuzz as rustybuzz,
+    rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
 };
 

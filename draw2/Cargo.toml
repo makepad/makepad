@@ -14,21 +14,21 @@ makepad-platform2 = { path = "../platform2", version = "2.0.0" }
 makepad-html ={ path = "../libs/html", version = "1.0.0" }
 makepad-live-id = { path = "../libs/live_id", version = "1.0.0" }
 
-# HACK(eddyb) only a git dep until https://github.com/RazrFalcon/rustybuzz/pull/71
-# ends up being published in a release (only affects build times, not behavior).
-makepad-rustybuzz = { version = "0.8.0", path = "../libs/rustybuzz" }
-unicode-bidi = "0.3"
+rustybuzz = { version = "0.18.0", path = "../libs/rustybuzz-0.18.0" }
+unicode-bidi = { version = "0.3", path = "../libs/unicode-bidi-0.3.18" }
 ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer"}
 sdfer = { path = "../libs/sdfer", version = "0.2.1" }
-fxhash = "0.2.1"
-unicode-linebreak = "0.1.5"
-unicode-segmentation = "1.11.0"
+fxhash = { version = "0.2.1", path = "../libs/fxhash-0.2.1" }
+unicode-linebreak = { version = "0.1.5", path = "../libs/unicode-linebreak-0.1.5" }
+unicode-segmentation = { version = "1.12.0", path = "../libs/unicode-segmentation-1.12.0" }
 
 # PNG support for emoji fonts - optional via feature (using fast zune-png decoder)
 makepad-zune-png = { version = "0.5.1", path = "../libs/zune-png", optional = true }
 
 # SVG rendering support - optional via feature
-resvg = { version = "0.43.0", optional = true }
+# Note: default-features=false, system-fonts but NOT memmap-fonts to avoid memmap2/libc dependency
+# raster-images disabled to reduce deps (gif, webp, jpeg decoders) - embedded images in SVGs won't work
+resvg = { version = "0.43.0", path = "../libs/resvg-0.43.0", optional = true, default-features = false, features = ["text", "system-fonts"] }
 
 serde = { version = "1.0", optional = true, features = ["derive"] }
 

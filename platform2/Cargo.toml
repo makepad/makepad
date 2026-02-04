@@ -13,8 +13,8 @@ metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
 makepad-http = { path = "../libs/http", version="1.0.0" }
 makepad-script = { path="../libs/script", version="1.0.0"}
-smallvec = "1.11.2"
-bitflags = "2"
+smallvec = { version = "1.15", path = "../libs/smallvec-1.15.1" }
+bitflags = { version = "2.10", path = "../libs/bitflags-2.10.0" }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }
