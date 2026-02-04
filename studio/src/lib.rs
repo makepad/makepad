@@ -5,6 +5,7 @@ pub mod app;
 pub mod app_ui;
 pub mod build_manager;
 pub mod file_system;
+pub mod file_tree_view;
 pub mod integration;
 pub mod log_list;
 pub mod profiler;
@@ -46,6 +47,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::run_view::script_mod(vm);
     crate::studio_editor::script_mod(vm);
     crate::studio_file_tree::script_mod(vm);
+    crate::file_tree_view::script_mod(vm);
     crate::search::script_mod(vm);
     crate::snapshot::script_mod(vm);
     crate::ai_chat::ai_chat_view::script_mod(vm);

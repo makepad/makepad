@@ -5,6 +5,7 @@ use crate::{
         build_protocol::BuildProcess,
     },
     file_system::file_system::*,
+    file_tree_view::*,
     log_list::*,
     makepad_code_editor::code_editor::*,
     makepad_code_editor::history::NewGroup,
@@ -861,6 +862,42 @@ impl MatchEvent for App {
                     internal_id: None,
                 },
             );
+        }
+
+        // Handle file tree filter
+        let file_tree_filter = self.ui.text_input(ids!($file_tree_filter));
+        let file_tree_view = self.ui.file_tree_view(ids!($file_tree_view));
+        if let Some(filter) = file_tree_filter.changed(&actions) {
+            file_tree_view.set_filter(cx, filter, &self.data.file_system);
+        }
+        
+        // Handle clicks on filtered files in the file tree
+        if let Some(file_id) = file_tree_view.filter_file_clicked(&actions) {
+            // If the tab is already open, focus it
+            if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id) {
+                dock.select_tab(cx, tab_id);
+            } else {
+                let tab_id = dock.unique_id(file_id.0);
+                self.data.file_system.request_open_file(tab_id, file_id);
+
+                // lets add a file tab 'somewhere'
+                let path = self.data.file_system.file_node_id_to_path(file_id).unwrap();
+                let tab_after = FileSystem::get_tab_after_from_path(path);
+                let (tab_bar, pos) = dock.find_tab_bar_of_tab(tab_after).unwrap();
+                let template = FileSystem::get_editor_template_from_path(path);
+                dock.create_and_select_tab(
+                    cx,
+                    tab_bar,
+                    tab_id,
+                    template,
+                    "".to_string(),
+                    id!($CloseableTab),
+                    Some(pos),
+                );
+
+                // lets scan the entire doc for duplicates
+                self.data.file_system.ensure_unique_tab_names(cx, &dock)
+            }
         }
 
         // Handle Stop All button
