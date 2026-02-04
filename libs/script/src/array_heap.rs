@@ -22,7 +22,7 @@ impl ScriptHeap {
             array.tag.set_alloced();
             self.arrays.push(array);
             // New slot starts at generation 0
-            ScriptArray::new(index as _, 0)
+            ScriptArray::new(index as _, crate::value::GENERATION_ZERO)
         }
     }
 

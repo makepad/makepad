@@ -18,31 +18,48 @@ pub trait GenRef: Copy {
 /// Metadata stored per slot in a GenVec
 #[derive(Debug, Clone)]
 pub struct GenSlot<T> {
+    #[cfg(feature = "check_gen")]
     pub generation: Generation,
     pub data: T,
 }
 
 impl<T: Default> Default for GenSlot<T> {
+    #[cfg(feature = "check_gen")]
     fn default() -> Self {
         Self {
             generation: 0,
             data: T::default(),
         }
     }
+    #[cfg(not(feature = "check_gen"))]
+    fn default() -> Self {
+        Self { data: T::default() }
+    }
 }
 
 impl<T> GenSlot<T> {
+    #[cfg(feature = "check_gen")]
     pub fn new(data: T) -> Self {
         Self {
             generation: 0,
             data,
         }
     }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn new(data: T) -> Self {
+        Self { data }
+    }
 
     /// Increment the generation counter (called when freeing a slot)
+    #[cfg(feature = "check_gen")]
     #[inline]
     pub fn increment_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+    #[cfg(not(feature = "check_gen"))]
+    #[inline]
+    pub fn increment_generation(&mut self) {
+        // No-op when check_gen is disabled
     }
 }
 
@@ -74,10 +91,17 @@ impl<T> GenVec<T> {
     }
 
     /// Push a new item and return (index, generation)
+    #[cfg(feature = "check_gen")]
     pub fn push(&mut self, data: T) -> (u32, Generation) {
         let index = self.slots.len() as u32;
         self.slots.push(GenSlot::new(data));
         (index, 0)
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn push(&mut self, data: T) -> (u32, Generation) {
+        let index = self.slots.len() as u32;
+        self.slots.push(GenSlot::new(data));
+        (index, ())
     }
 
     /// Get the length of the underlying vec
@@ -93,12 +117,19 @@ impl<T> GenVec<T> {
     }
 
     /// Get the current generation for a slot by raw index
+    #[cfg(feature = "check_gen")]
     #[inline]
     pub fn generation(&self, index: usize) -> Generation {
         self.slots[index].generation
     }
+    #[cfg(not(feature = "check_gen"))]
+    #[inline]
+    pub fn generation(&self, _index: usize) -> Generation {
+        ()
+    }
 
     /// Check if a reference is still valid (generation matches)
+    #[cfg(feature = "check_gen")]
     #[inline]
     pub fn is_valid<R: GenRef>(&self, r: R) -> bool {
         let index = r.index() as usize;
@@ -106,6 +137,12 @@ impl<T> GenVec<T> {
             return false;
         }
         self.slots[index].generation == r.generation()
+    }
+    #[cfg(not(feature = "check_gen"))]
+    #[inline]
+    pub fn is_valid<R: GenRef>(&self, r: R) -> bool {
+        let index = r.index() as usize;
+        index < self.slots.len()
     }
 
     /// Increment the generation for a slot (call this when freeing)
@@ -157,6 +194,7 @@ impl<T> GenVec<T> {
 impl<T: Default> GenVec<T> {
     /// Allocate a slot, either reusing from free list or growing.
     /// Returns a reference type R with the correct generation.
+    #[cfg(feature = "check_gen")]
     pub fn allocate<R: GenRef>(&mut self, free_list: &mut Vec<u32>) -> R {
         if let Some(index) = free_list.pop() {
             // Reuse freed slot - generation was already incremented when freed
@@ -166,12 +204,23 @@ impl<T: Default> GenVec<T> {
             // Grow the vec
             let index = self.slots.len() as u32;
             self.slots.push(GenSlot::default());
-            R::new(index, 0)
+            R::new(index, crate::value::GENERATION_ZERO)
+        }
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn allocate<R: GenRef>(&mut self, free_list: &mut Vec<u32>) -> R {
+        if let Some(index) = free_list.pop() {
+            R::new(index, ())
+        } else {
+            let index = self.slots.len() as u32;
+            self.slots.push(GenSlot::default());
+            R::new(index, ())
         }
     }
 }
 
 /// Check generation and panic on mismatch
+#[cfg(feature = "check_gen")]
 #[inline]
 fn check_generation<R: GenRef>(
     slots_gen: Generation,
@@ -191,6 +240,7 @@ fn check_generation<R: GenRef>(
 impl<T, R: GenRef> std::ops::Index<R> for GenVec<T> {
     type Output = T;
 
+    #[cfg(feature = "check_gen")]
     #[inline]
     fn index(&self, r: R) -> &Self::Output {
         let slot = &self.slots[r.index() as usize];
@@ -202,10 +252,17 @@ impl<T, R: GenRef> std::ops::Index<R> for GenVec<T> {
         );
         &slot.data
     }
+
+    #[cfg(not(feature = "check_gen"))]
+    #[inline]
+    fn index(&self, r: R) -> &Self::Output {
+        &self.slots[r.index() as usize].data
+    }
 }
 
 /// IndexMut by a GenRef type - checked access
 impl<T, R: GenRef> std::ops::IndexMut<R> for GenVec<T> {
+    #[cfg(feature = "check_gen")]
     #[inline]
     fn index_mut(&mut self, r: R) -> &mut Self::Output {
         let slot = &mut self.slots[r.index() as usize];
@@ -216,6 +273,12 @@ impl<T, R: GenRef> std::ops::IndexMut<R> for GenVec<T> {
             std::any::type_name::<T>(),
         );
         &mut slot.data
+    }
+
+    #[cfg(not(feature = "check_gen"))]
+    #[inline]
+    fn index_mut(&mut self, r: R) -> &mut Self::Output {
+        &mut self.slots[r.index() as usize].data
     }
 }
 

@@ -428,7 +428,7 @@ impl ScriptHeap {
                 ..Default::default()
             });
             // New slot starts at generation 0
-            let ptr = ScriptPod::new(index, 0);
+            let ptr = ScriptPod::new(index, crate::value::GENERATION_ZERO);
             let pod = &mut self.pods[ptr];
             pod.tag.set_alloced();
             pod.data

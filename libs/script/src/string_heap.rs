@@ -108,7 +108,7 @@ impl ScriptHeap {
                 string: out.clone(),
             }));
             // New slot starts at generation 0
-            let ret = ScriptString::new(index as _, 0);
+            let ret = ScriptString::new(index as _, crate::value::GENERATION_ZERO);
             self.string_intern.insert(out, ret);
             ret
         }
