@@ -6,11 +6,6 @@ specialized architecture dependent routines are unavailable.
 */
 
 pub mod memchr;
-pub mod packedpair;
-pub mod rabinkarp;
-#[cfg(feature = "alloc")]
-pub mod shiftor;
-pub mod twoway;
 
 /// Returns true if and only if `needle` is a prefix of `haystack`.
 ///
@@ -24,8 +19,7 @@ pub mod twoway;
 /// another function that is marked as `inline(never)` or just `inline`.
 #[inline(always)]
 pub fn is_prefix(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.len() <= haystack.len()
-        && is_equal(&haystack[..needle.len()], needle)
+    needle.len() <= haystack.len() && is_equal(&haystack[..needle.len()], needle)
 }
 
 /// Returns true if and only if `needle` is a suffix of `haystack`.
@@ -40,8 +34,7 @@ pub fn is_prefix(haystack: &[u8], needle: &[u8]) -> bool {
 /// another function that is marked as `inline(never)` or just `inline`.
 #[inline(always)]
 pub fn is_suffix(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.len() <= haystack.len()
-        && is_equal(&haystack[haystack.len() - needle.len()..], needle)
+    needle.len() <= haystack.len() && is_equal(&haystack[haystack.len() - needle.len()..], needle)
 }
 
 /// Compare corresponding bytes in `x` and `y` for equality.
@@ -105,11 +98,7 @@ pub fn is_equal(x: &[u8], y: &[u8]) -> bool {
 /// * The distance being in bounds must not rely on "wrapping around" the
 /// address space.
 #[inline(always)]
-pub unsafe fn is_equal_raw(
-    mut x: *const u8,
-    mut y: *const u8,
-    mut n: usize,
-) -> bool {
+pub unsafe fn is_equal_raw(mut x: *const u8, mut y: *const u8, mut n: usize) -> bool {
     // When we have 4 or more bytes to compare, then proceed in chunks of 4 at
     // a time using unaligned loads.
     //

@@ -11,4 +11,3 @@ write the code once (usually).
 */
 
 pub(crate) mod memchr;
-pub(crate) mod packedpair;

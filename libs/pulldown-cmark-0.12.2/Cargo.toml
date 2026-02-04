@@ -35,11 +35,6 @@ categories = ["text-processing"]
 license = "MIT"
 repository = "https://github.com/raphlinus/pulldown-cmark"
 
-[[bin]]
-name = "pulldown-cmark"
-doc = false
-required-features = ["getopts"]
-
 [dependencies.bitflags]
 version = "2"
 path = "../bitflags-2.10.0"
