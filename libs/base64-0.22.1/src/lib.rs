@@ -246,8 +246,6 @@ use rstest_reuse;
 mod chunked_encoder;
 pub mod display;
 #[cfg(any(feature = "std", test))]
-pub mod read;
-#[cfg(any(feature = "std", test))]
 pub mod write;
 
 pub mod engine;
