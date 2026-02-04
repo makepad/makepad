@@ -15,6 +15,8 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::wrong_self_convention)]
 
+use makepad_error_log as log;
+
 pub use tiny_skia;
 pub use usvg;
 

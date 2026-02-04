@@ -1,3 +1,4 @@
+use crate::log;
 use alloc::{borrow::ToOwned, ffi::CString, format};
 use core::ffi::CStr;
 use ttf_parser::{GlyphId, Tag};

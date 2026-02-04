@@ -72,6 +72,7 @@ use alloc::{
 pub use ttf_parser::Language;
 pub use ttf_parser::Width as Stretch;
 
+use makepad_error_log as log;
 use slotmap::SlotMap;
 use tinyvec::TinyVec;
 

@@ -10,6 +10,9 @@ extern crate std;
 
 extern crate alloc;
 
+#[cfg(feature = "wasm-shaper")]
+use makepad_error_log as log;
+
 mod hb;
 
 pub use ttf_parser;

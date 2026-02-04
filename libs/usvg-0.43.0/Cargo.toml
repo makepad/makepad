@@ -59,9 +59,9 @@ path = "../imagesize-0.13.0"
 version = "0.11"
 path = "../kurbo-0.11.3"
 
-[dependencies.log]
-version = "0.4"
-path = "../log-0.4.29"
+[dependencies.makepad-error-log]
+version = "1.0.0"
+path = "../error_log"
 
 [dependencies.pico-args]
 version = "0.5"

@@ -1,3 +1,4 @@
+use super::log;
 use crate::parser::OptionLog;
 use rustybuzz::ttf_parser;
 

@@ -4,6 +4,7 @@
 
 //! A collection of SVG filters.
 
+use super::log;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
