@@ -48,6 +48,7 @@ impl Cx {
                 .to_json()
                 .as_bytes(),
         );
+        let _ = io::stdout().flush();
     }
 
     pub(crate) fn stdin_handle_repaint(
