@@ -77,7 +77,7 @@ script_mod! {
             height: Fit
 
             $code_view: CodeView {
-                $editor +: {
+                editor +: {
                     word_wrap: false
                     draw_bg +: { color: #0000 }
                     margin: Inset{left: 15}

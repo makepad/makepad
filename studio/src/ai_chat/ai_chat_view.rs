@@ -84,7 +84,7 @@ script_mod! {
                 flow: Overlay
                 $code_view: CodeView {
                     keep_cursor_at_end: true
-                    $editor +: {
+                    editor +: {
                         height: 200
                         draw_bg +: { color: theme.color_d_hidden }
                     }

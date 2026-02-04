@@ -83,7 +83,7 @@ script_mod! {
             height: Fit
 
             $code_view: CodeView {
-                $editor +: {
+                editor +: {
                     margin: Inset{left: 25.}
                 }
             }
