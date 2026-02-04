@@ -216,6 +216,10 @@ pub enum LogListAction {
 pub struct LogList {
     #[deref]
     view: View,
+    #[rust]
+    filter: String,
+    #[rust]
+    filtered_indices: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -223,10 +227,56 @@ pub struct JumpToFileLink {
     item_id: usize,
 }
 
+fn log_item_matches_filter(log_item: &LogItem, filter: &str) -> bool {
+    let filter_lower = filter.to_lowercase();
+    match log_item {
+        LogItem::Bare(msg) => msg.line.to_lowercase().contains(&filter_lower),
+        LogItem::Location(msg) => {
+            msg.file_name.to_lowercase().contains(&filter_lower)
+                || msg.message.to_lowercase().contains(&filter_lower)
+        }
+        LogItem::StdinToHost(line) => line.to_lowercase().contains(&filter_lower),
+    }
+}
+
 impl LogList {
+    fn rebuild_filtered_indices(&mut self, log: &[(LiveId, LogItem)]) {
+        self.filtered_indices.clear();
+        if self.filter.is_empty() {
+            return;
+        }
+        for (i, (_build_id, log_item)) in log.iter().enumerate() {
+            if log_item_matches_filter(log_item, &self.filter) {
+                self.filtered_indices.push(i);
+            }
+        }
+    }
+
+    fn get_log_index(&self, item_id: usize) -> Option<usize> {
+        if self.filter.is_empty() {
+            Some(item_id)
+        } else {
+            self.filtered_indices.get(item_id).copied()
+        }
+    }
+
+    fn get_item_count(&self, log_len: usize) -> usize {
+        if self.filter.is_empty() {
+            log_len
+        } else {
+            self.filtered_indices.len()
+        }
+    }
+
     fn draw_log(&mut self, cx: &mut Cx2d, list: &mut PortalList, build_manager: &mut BuildManager) {
-        list.set_item_range(cx, 0, build_manager.log.len());
+        // Rebuild filtered indices if filter is active
+        if !self.filter.is_empty() {
+            self.rebuild_filtered_indices(&build_manager.log);
+        }
+        let item_count = self.get_item_count(build_manager.log.len());
+        list.set_item_range(cx, 0, item_count);
         while let Some(item_id) = list.next_visible_item(cx) {
+            let log_index = self.get_log_index(item_id);
             let is_even = item_id & 1 == 0;
             fn map_level_to_icon(level: LogLevel) -> LiveId {
                 match level {
@@ -238,7 +288,7 @@ impl LogList {
                 }
             }
             let mut location = String::new();
-            if let Some((build_id, log_item)) = build_manager.log.get(item_id as usize) {
+            if let Some((build_id, log_item)) = log_index.and_then(|i| build_manager.log.get(i)) {
                 let _binary = if build_manager.active.builds.len() > 1 {
                     if let Some(build) = build_manager.active.builds.get(&build_id) {
                         &build.log_index
@@ -275,7 +325,14 @@ impl LogList {
                                     msg.start.line_index + 1,
                                     msg.start.byte_index + 1
                                 );
-                                tf.draw_link(cx, id!($link), JumpToFileLink { item_id }, &location);
+                                tf.draw_link(
+                                    cx,
+                                    id!($link),
+                                    JumpToFileLink {
+                                        item_id: log_index.unwrap(),
+                                    },
+                                    &location,
+                                );
 
                                 tf.draw_text(cx, &msg.message);
                                 if let Some(explanation) = &msg.explanation {
@@ -357,6 +414,36 @@ impl LogListRef {
             let log_list = inner.view.portal_list(ids!($list));
             log_list.set_first_id_and_scroll(0, 0.0);
             log_list.redraw(cx);
+        }
+    }
+
+    pub fn is_at_end(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.view.portal_list(ids!($list)).is_at_end()
+        } else {
+            false
+        }
+    }
+
+    pub fn set_tail(&self, tail: bool) {
+        if let Some(inner) = self.borrow() {
+            inner.view.portal_list(ids!($list)).set_tail_range(tail);
+        }
+    }
+
+    pub fn scrolled(&self, actions: &Actions) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.view.portal_list(ids!($list)).scrolled(actions)
+        } else {
+            false
+        }
+    }
+
+    pub fn set_filter(&self, cx: &mut Cx, filter: String, log: &[(LiveId, LogItem)]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.filter = filter;
+            inner.rebuild_filtered_indices(log);
+            inner.view.redraw(cx);
         }
     }
 }
