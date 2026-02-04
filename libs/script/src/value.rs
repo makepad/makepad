@@ -35,24 +35,45 @@ impl ScriptIp {
 }
 
 /// Generation type for use-after-free detection.
-/// 8 bits gives us 256 generations per slot before wraparound.
+/// When check_gen feature is enabled: 8 bits gives us 256 generations per slot before wraparound.
+/// When disabled: zero-sized type that compiles away.
+#[cfg(feature = "check_gen")]
 pub type Generation = u8;
+#[cfg(not(feature = "check_gen"))]
+pub type Generation = ();
+
+/// Default generation value for new allocations
+#[cfg(feature = "check_gen")]
+pub const GENERATION_ZERO: Generation = 0;
+#[cfg(not(feature = "check_gen"))]
+pub const GENERATION_ZERO: Generation = ();
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptPod {
     pub(crate) index: u32,
+    #[cfg(feature = "check_gen")]
     pub(crate) generation: Generation,
 }
 
 impl ScriptPod {
+    #[cfg(feature = "check_gen")]
     pub const fn new(index: u32, generation: Generation) -> Self {
         Self { index, generation }
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn new(index: u32, _generation: Generation) -> Self {
+        Self { index }
     }
     pub fn index(&self) -> u32 {
         self.index
     }
+    #[cfg(feature = "check_gen")]
     pub fn generation(&self) -> Generation {
         self.generation
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn generation(&self) -> Generation {
+        ()
     }
 }
 
@@ -74,40 +95,65 @@ impl ScriptPodType {
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptObject {
     pub(crate) index: u32,
+    #[cfg(feature = "check_gen")]
     pub(crate) generation: Generation,
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptArray {
     pub(crate) index: u32,
+    #[cfg(feature = "check_gen")]
     pub(crate) generation: Generation,
 }
 
 impl ScriptObject {
+    #[cfg(feature = "check_gen")]
     pub const ZERO: ScriptObject = ScriptObject {
         index: 0,
         generation: 0,
     };
+    #[cfg(not(feature = "check_gen"))]
+    pub const ZERO: ScriptObject = ScriptObject { index: 0 };
+    #[cfg(feature = "check_gen")]
     pub const fn new(index: u32, generation: Generation) -> Self {
         Self { index, generation }
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn new(index: u32, _generation: Generation) -> Self {
+        Self { index }
     }
     pub fn index(&self) -> u32 {
         self.index
     }
+    #[cfg(feature = "check_gen")]
     pub fn generation(&self) -> Generation {
         self.generation
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn generation(&self) -> Generation {
+        ()
     }
 }
 
 impl ScriptArray {
+    #[cfg(feature = "check_gen")]
     pub const fn new(index: u32, generation: Generation) -> Self {
         Self { index, generation }
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn new(index: u32, _generation: Generation) -> Self {
+        Self { index }
     }
     pub fn index(&self) -> u32 {
         self.index
     }
+    #[cfg(feature = "check_gen")]
     pub fn generation(&self) -> Generation {
         self.generation
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn generation(&self) -> Generation {
+        ()
     }
 }
 
@@ -119,11 +165,11 @@ impl GenRef for ScriptObject {
     }
     #[inline]
     fn generation(&self) -> Generation {
-        self.generation
+        self.generation()
     }
     #[inline]
     fn new(index: u32, generation: Generation) -> Self {
-        Self { index, generation }
+        Self::new(index, generation)
     }
 }
 
@@ -134,11 +180,11 @@ impl GenRef for ScriptArray {
     }
     #[inline]
     fn generation(&self) -> Generation {
-        self.generation
+        self.generation()
     }
     #[inline]
     fn new(index: u32, generation: Generation) -> Self {
-        Self { index, generation }
+        Self::new(index, generation)
     }
 }
 
@@ -149,11 +195,11 @@ impl GenRef for ScriptPod {
     }
     #[inline]
     fn generation(&self) -> Generation {
-        self.generation
+        self.generation()
     }
     #[inline]
     fn new(index: u32, generation: Generation) -> Self {
-        Self { index, generation }
+        Self::new(index, generation)
     }
 }
 
@@ -179,15 +225,23 @@ impl ScriptTypeRedux {
 pub struct ScriptHandle {
     pub(crate) ty: ScriptHandleType,
     pub(crate) index: u32,
+    #[cfg(feature = "check_gen")]
     pub(crate) generation: Generation,
 }
 
 impl ScriptHandle {
+    #[cfg(feature = "check_gen")]
     pub const ZERO: ScriptHandle = ScriptHandle {
         ty: ScriptHandleType(0),
         index: 0,
         generation: 0,
     };
+    #[cfg(not(feature = "check_gen"))]
+    pub const ZERO: ScriptHandle = ScriptHandle {
+        ty: ScriptHandleType(0),
+        index: 0,
+    };
+    #[cfg(feature = "check_gen")]
     pub const fn new(ty: ScriptHandleType, index: u32, generation: Generation) -> Self {
         Self {
             ty,
@@ -195,11 +249,20 @@ impl ScriptHandle {
             generation,
         }
     }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn new(ty: ScriptHandleType, index: u32, _generation: Generation) -> Self {
+        Self { ty, index }
+    }
     pub fn index(&self) -> u32 {
         self.index
     }
+    #[cfg(feature = "check_gen")]
     pub fn generation(&self) -> Generation {
         self.generation
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn generation(&self) -> Generation {
+        ()
     }
 }
 
@@ -212,14 +275,23 @@ impl GenRef for ScriptHandle {
     }
     #[inline]
     fn generation(&self) -> Generation {
-        self.generation
+        self.generation()
     }
+    #[cfg(feature = "check_gen")]
     #[inline]
     fn new(index: u32, generation: Generation) -> Self {
         Self {
             ty: ScriptHandleType(0),
             index,
             generation,
+        }
+    }
+    #[cfg(not(feature = "check_gen"))]
+    #[inline]
+    fn new(index: u32, _generation: Generation) -> Self {
+        Self {
+            ty: ScriptHandleType(0),
+            index,
         }
     }
 }
@@ -271,12 +343,26 @@ impl From<ScriptValue> for ScriptHandle {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ScriptString {
     pub index: u32,
+    #[cfg(feature = "check_gen")]
     pub generation: Generation,
 }
 
 impl ScriptString {
+    #[cfg(feature = "check_gen")]
     pub const fn new(index: u32, generation: Generation) -> Self {
         Self { index, generation }
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn new(index: u32, _generation: Generation) -> Self {
+        Self { index }
+    }
+    #[cfg(feature = "check_gen")]
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn generation(&self) -> Generation {
+        ()
     }
 }
 
@@ -287,11 +373,11 @@ impl GenRef for ScriptString {
     }
     #[inline]
     fn generation(&self) -> Generation {
-        self.generation
+        self.generation()
     }
     #[inline]
     fn new(index: u32, generation: Generation) -> Self {
-        Self { index, generation }
+        Self::new(index, generation)
     }
 }
 
@@ -964,21 +1050,36 @@ impl ScriptValue {
     }
 
     // Object
-    // Layout: bits 0-31 = index, bits 32-39 = generation
+    // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
 
+    #[cfg(feature = "check_gen")]
     pub const fn from_object(ptr: ScriptObject) -> Self {
         Self(ptr.index as u64 | ((ptr.generation as u64) << 32) | Self::TYPE_OBJECT)
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn from_object(ptr: ScriptObject) -> Self {
+        Self(ptr.index as u64 | Self::TYPE_OBJECT)
     }
 
     pub const fn is_object(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
     }
 
+    #[cfg(feature = "check_gen")]
     pub const fn as_object(&self) -> Option<ScriptObject> {
         if self.is_object() {
             return Some(ScriptObject {
                 index: (self.0 & 0xffff_ffff) as u32,
                 generation: ((self.0 >> 32) & 0xff) as Generation,
+            });
+        }
+        None
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn as_object(&self) -> Option<ScriptObject> {
+        if self.is_object() {
+            return Some(ScriptObject {
+                index: (self.0 & 0xffff_ffff) as u32,
             });
         }
         None
@@ -1004,16 +1105,22 @@ impl ScriptValue {
     }
 
     // Pod
-    // Layout: bits 0-31 = index, bits 32-39 = generation
+    // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
 
+    #[cfg(feature = "check_gen")]
     pub const fn from_pod(ptr: ScriptPod) -> Self {
         Self(ptr.index as u64 | ((ptr.generation as u64) << 32) | Self::TYPE_POD)
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn from_pod(ptr: ScriptPod) -> Self {
+        Self(ptr.index as u64 | Self::TYPE_POD)
     }
 
     pub const fn is_pod(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_POD
     }
 
+    #[cfg(feature = "check_gen")]
     pub const fn as_pod(&self) -> Option<ScriptPod> {
         if self.is_pod() {
             return Some(ScriptPod {
@@ -1023,11 +1130,21 @@ impl ScriptValue {
         }
         None
     }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn as_pod(&self) -> Option<ScriptPod> {
+        if self.is_pod() {
+            return Some(ScriptPod {
+                index: (self.0 & 0xffff_ffff) as u32,
+            });
+        }
+        None
+    }
 
     // Handle
-    // Layout: bits 0-31 = index, bits 32-39 = generation
+    // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
     // Handle type is encoded in the TYPE_MASK (different type tags per handle type)
 
+    #[cfg(feature = "check_gen")]
     pub const fn from_handle(ptr: ScriptHandle) -> Self {
         Self(
             ptr.index as u64
@@ -1035,12 +1152,17 @@ impl ScriptValue {
                 | (Self::TYPE_HANDLE_FIRST + ((ptr.ty.0 as u64) << 40)),
         )
     }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn from_handle(ptr: ScriptHandle) -> Self {
+        Self(ptr.index as u64 | (Self::TYPE_HANDLE_FIRST + ((ptr.ty.0 as u64) << 40)))
+    }
 
     pub const fn is_handle(&self) -> bool {
         let ty = self.0 & Self::TYPE_MASK;
         ty >= Self::TYPE_HANDLE_FIRST && ty <= Self::TYPE_HANDLE_LAST
     }
 
+    #[cfg(feature = "check_gen")]
     pub const fn as_handle(&self) -> Option<ScriptHandle> {
         if self.is_handle() {
             return Some(ScriptHandle {
@@ -1049,6 +1171,18 @@ impl ScriptValue {
                 ),
                 index: (self.0 & 0xffff_ffff) as u32,
                 generation: ((self.0 >> 32) & 0xff) as Generation,
+            });
+        }
+        None
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn as_handle(&self) -> Option<ScriptHandle> {
+        if self.is_handle() {
+            return Some(ScriptHandle {
+                ty: ScriptHandleType(
+                    (((self.0 & Self::TYPE_MASK) - Self::TYPE_HANDLE_FIRST) >> 40) as u8,
+                ),
+                index: (self.0 & 0xffff_ffff) as u32,
             });
         }
         None
@@ -1093,21 +1227,37 @@ impl ScriptValue {
     }
 
     // array
-    // Layout: bits 0-31 = index, bits 32-39 = generation
+    // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
 
+    #[cfg(feature = "check_gen")]
     pub const fn from_array(val: ScriptArray) -> Self {
         Self((val.index as u64) | ((val.generation as u64) << 32) | Self::TYPE_ARRAY)
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn from_array(val: ScriptArray) -> Self {
+        Self((val.index as u64) | Self::TYPE_ARRAY)
     }
 
     pub const fn is_array(&self) -> bool {
         (self.0 & Self::TYPE_MASK) == Self::TYPE_ARRAY
     }
 
+    #[cfg(feature = "check_gen")]
     pub const fn as_array(&self) -> Option<ScriptArray> {
         if self.is_array() {
             Some(ScriptArray {
                 index: (self.0 & 0xFFFF_FFFF) as u32,
                 generation: ((self.0 >> 32) & 0xff) as Generation,
+            })
+        } else {
+            None
+        }
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn as_array(&self) -> Option<ScriptArray> {
+        if self.is_array() {
+            Some(ScriptArray {
+                index: (self.0 & 0xFFFF_FFFF) as u32,
             })
         } else {
             None
@@ -1148,17 +1298,32 @@ impl ScriptValue {
     }
 
     // string
-    // Layout: bits 0-31 = index, bits 32-39 = generation
+    // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
 
+    #[cfg(feature = "check_gen")]
     pub const fn from_string(ptr: ScriptString) -> Self {
         Self(ptr.index as u64 | ((ptr.generation as u64) << 32) | Self::TYPE_STRING)
     }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn from_string(ptr: ScriptString) -> Self {
+        Self(ptr.index as u64 | Self::TYPE_STRING)
+    }
 
+    #[cfg(feature = "check_gen")]
     pub const fn as_string(&self) -> Option<ScriptString> {
         if self.is_string() {
             return Some(ScriptString {
                 index: (self.0 & 0xffff_ffff) as u32,
                 generation: ((self.0 >> 32) & 0xff) as Generation,
+            });
+        }
+        None
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn as_string(&self) -> Option<ScriptString> {
+        if self.is_string() {
+            return Some(ScriptString {
+                index: (self.0 & 0xffff_ffff) as u32,
             });
         }
         None

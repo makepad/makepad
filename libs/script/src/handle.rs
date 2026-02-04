@@ -85,7 +85,7 @@ impl ScriptHeap {
         } else {
             let index = self.handles.len();
             // New slot starts at generation 0
-            let handle = ScriptHandle::new(ty, index as _, 0);
+            let handle = ScriptHandle::new(ty, index as _, crate::value::GENERATION_ZERO);
             hgc.set_handle(handle);
             self.handles.push(Some(ScriptHandleData {
                 tag: Default::default(),
