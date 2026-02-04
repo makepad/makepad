@@ -8,7 +8,7 @@ use {
         intern::Intern,
         rasterizer::{RasterizedGlyph, Rasterizer},
     },
-    makepad_rustybuzz as rustybuzz,
+    rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
     std::{
         cell::RefCell,

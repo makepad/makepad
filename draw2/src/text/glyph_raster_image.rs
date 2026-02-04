@@ -3,7 +3,7 @@ use {
         geom::{Point, Rect, Size},
         image::{Bgra, SubimageMut},
     },
-    makepad_rustybuzz as rustybuzz,
+    rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
 };
 

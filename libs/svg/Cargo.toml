@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
-resvg = "0.43.0"
+resvg = { path = "../resvg-0.43.0", version = "0.43.0" }
