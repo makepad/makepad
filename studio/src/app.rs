@@ -675,8 +675,7 @@ impl MatchEvent for App {
         match action.cast() {
             FileSystemAction::TreeLoaded => {
                 file_tree.redraw(cx);
-                // Temporarily disabled to debug default layout
-                // self.load_state(cx, 0);
+                self.load_state(cx, 0);
                 self.data.ai_chat_manager.init(&mut self.data.file_system);
             }
             FileSystemAction::SnapshotImageLoaded => {

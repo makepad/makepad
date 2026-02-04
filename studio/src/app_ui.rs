@@ -378,7 +378,6 @@ script_mod! {
         margin: 5.
         $caption_bar +: {
             margin: Inset{top: 2 left: -190}
-            visible: true
             $caption_label +: {$label +: {text: "Makepad"}}
         }
         window.inner_size: vec2(1600 900)
@@ -470,7 +469,7 @@ script_mod! {
                 }
 
                 $file_tree_tabs: DockTabs{
-                    tabs: [$search $file_tree_tab $run_list_tab]
+                    tabs: [$file_tree_tab $run_list_tab $search]
                     selected: 0
                 }
 
