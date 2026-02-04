@@ -99,7 +99,7 @@ script_mod!{
                     }
                     apply: {
                         draw_bg: {
-                            drag: 0.0
+                            drag: 0.0,
                             hover: snap(1.0)
                         }
                     }
@@ -109,7 +109,7 @@ script_mod!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {
-                            drag: snap(1.0)
+                            drag: snap(1.0),
                             hover: 1.0
                         }
                     }
