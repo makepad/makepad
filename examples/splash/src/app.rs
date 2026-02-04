@@ -2,9 +2,9 @@ use makepad_widgets2::animator::Animate;
 use makepad_widgets2::file_tree::FileTree;
 use makepad_widgets2::*;
 use std::path::Path;
-
+ 
 app_main!(App);
-
+ 
 script_mod! {
     use mod.prelude.widgets.*
 
