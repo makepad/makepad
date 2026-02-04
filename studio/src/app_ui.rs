@@ -338,13 +338,13 @@ script_mod! {
         flow: Flow.Down
         DockToolbar{
             $content +: {
-                TextInputFlat{
+                $file_tree_filter: TextInputFlat{
                     width: Fill
                     empty_text: "Filter"
                 }
             }
         }
-        $file_tree: StudioFileTree{}
+        $file_tree_view: FileTreeView{}
     }
 
     let LogListContent = View{
