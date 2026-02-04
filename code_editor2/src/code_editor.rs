@@ -1360,6 +1360,7 @@ impl CodeEditor {
                     let mut byte_index = 0;
                     let mut row_index = 0;
                     let mut column_index = 0;
+                    let mut row_start_byte_index = 0; // Track where current row started
                     for element in line.wrapped_elements() {
                         match element {
                             WrappedElement::Text {
@@ -1459,9 +1460,9 @@ impl CodeEditor {
                                             (
                                                 Position {
                                                     line_index,
-                                                    byte_index,
+                                                    byte_index: row_start_byte_index,
                                                 },
-                                                Affinity::Before,
+                                                Affinity::After,
                                             ),
                                             false,
                                         )
@@ -1469,6 +1470,7 @@ impl CodeEditor {
                                 }
                                 column_index = line.wrap_indent_column_count();
                                 row_index += 1;
+                                row_start_byte_index = byte_index;
                             }
                         }
                     }
@@ -1476,6 +1478,8 @@ impl CodeEditor {
                     let start_y = origin_y + y;
                     let end_y = start_y + line.scale();
                     if (start_y..=end_y).contains(&position.y) {
+                        // Get x position where text starts on this row (after wrap indent)
+                        let (row_text_start_x, _) = line.grid_to_normalized_position(row_index, line.wrap_indent_column_count());
                         return if position.x < 0.0 {
                             (
                                 (
@@ -1487,7 +1491,20 @@ impl CodeEditor {
                                 ),
                                 true,
                             )
+                        } else if position.x < row_text_start_x {
+                            // Clicked before text starts on this row - go to start of row
+                            (
+                                (
+                                    Position {
+                                        line_index,
+                                        byte_index: row_start_byte_index,
+                                    },
+                                    Affinity::After,
+                                ),
+                                false,
+                            )
                         } else {
+                            // Clicked past end of text - go to end of line
                             (
                                 (
                                     Position {
