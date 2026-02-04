@@ -532,7 +532,7 @@ script_mod! {
                 }
 
                 $edit_tabs: DockTabs{
-                    tabs: [$edit_first]
+                    tabs: [$run_first $design_first $outline_first $edit_first]
                     selected: 0
                 }
 

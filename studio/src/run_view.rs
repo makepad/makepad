@@ -17,12 +17,12 @@ script_mod! {
             tex_scale: instance(vec2(0.0, 0.0))
             tex_size: instance(vec2(0.0, 0.0))
             pixel: fn() {
-                let tp1 = sample2d_rt(self.tex, vec2(0.5/self.tex_size.x,0.5/self.tex_size.y))
-                let tp2 = sample2d_rt(self.tex, vec2(1.5/self.tex_size.x,0.5/self.tex_size.y))
+                let tp1 = self.tex.sample(vec2(0.5/self.tex_size.x,0.5/self.tex_size.y))
+                let tp2 = self.tex.sample(vec2(1.5/self.tex_size.x,0.5/self.tex_size.y))
                 let tp = vec2(tp1.r*65280.0 + tp1.b*255.0,tp2.r*65280.0 + tp2.b*255.0)
-                let counter = (self.rect_size * self.dpi_factor) / tp
+                let counter = (self.rect_size * self.draw_pass.dpi_factor) / tp
                 let tex_scale = tp / self.tex_size
-                let fb = sample2d_rt(self.tex, self.pos * tex_scale * counter)
+                let fb = self.tex.sample(self.pos * tex_scale * counter)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
                 }
