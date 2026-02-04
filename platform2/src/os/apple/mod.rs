@@ -12,9 +12,6 @@ pub mod ios;
 #[cfg(target_os = "tvos")]
 pub mod tvos;
 
-// IOSurface-based texture sharing replaces XPC service
-// #[cfg(target_os = "macos")]
-// pub mod metal_xpc;
 
 #[cfg(any(apple_bundle,target_os="ios",target_os="tvos"))]
 mod apple_resources;
