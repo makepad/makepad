@@ -864,6 +864,13 @@ impl MatchEvent for App {
             );
         }
 
+        // Handle Stop All button
+        if self.ui.button(ids!($stop_all)).clicked(&actions) {
+            self.data.build_manager.stop_all_active_builds(cx);
+            // Redraw the run list to update the play/pause button states
+            self.ui.view(ids!($run_list)).redraw(cx);
+        }
+
         for (i, id) in [
             *ids!(preset_1),
             *ids!(preset_2),
