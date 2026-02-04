@@ -425,9 +425,13 @@ impl LogListRef {
         }
     }
 
-    pub fn set_tail(&self, tail: bool) {
+    pub fn set_tail(&self, cx: &mut Cx, tail: bool) {
         if let Some(inner) = self.borrow() {
-            inner.view.portal_list(ids!($list)).set_tail_range(tail);
+            let list = inner.view.portal_list(ids!($list));
+            list.set_tail_range(tail);
+            if tail {
+                list.scroll_to_end(cx);
+            }
         }
     }
 
