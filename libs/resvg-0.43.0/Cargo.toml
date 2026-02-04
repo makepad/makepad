@@ -33,9 +33,9 @@ required-features = [
     "memmap-fonts",
 ]
 
-[dependencies.log]
-version = "0.4"
-path = "../log-0.4.29"
+[dependencies.makepad-error-log]
+version = "1.0.0"
+path = "../error_log"
 
 [dependencies.pico-args]
 version = "0.5"

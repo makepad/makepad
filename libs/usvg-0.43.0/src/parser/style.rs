@@ -3,6 +3,7 @@
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 use super::converter::{self, SvgColorExt};
+use super::log;
 use super::paint_server;
 use super::svgtree::{AId, FromValue, SvgNode};
 use crate::tree::ContextElement;

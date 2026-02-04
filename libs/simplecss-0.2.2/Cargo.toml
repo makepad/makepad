@@ -41,10 +41,9 @@ repository = "https://github.com/linebender/simplecss"
 name = "simplecss"
 path = "src/lib.rs"
 
-[dependencies.log]
-version = "0.4.22"
-path = "../log-0.4.29"
-default-features = false
+[dependencies.makepad-error-log]
+version = "1.0.0"
+path = "../error_log"
 
 [dev-dependencies.env_logger]
 version = "0.11.6"
@@ -56,7 +55,7 @@ path = "../roxmltree-0.20.0"
 
 [features]
 default = ["std"]
-std = ["log/std"]
+std = []
 
 [lints.clippy]
 allow_attributes = "warn"

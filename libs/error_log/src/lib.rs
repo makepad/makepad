@@ -47,8 +47,86 @@ macro_rules!warning {
     }
 }
 
-fn log_with_level_rustc(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:String, level:LogLevel){
-    println!("{}", level.make_rustc_json(file_name, line_start, column_start, line_end, column_end, &message));
+#[macro_export]
+macro_rules!warn {
+    ( $ ( $ t: tt) *) => {
+        $crate::log_with_level(
+            file!(),
+            line!()-1,
+            column!()-1,
+            line!()-1,
+            column!() + 3,
+            format!( $ ( $ t) *),
+            $ crate::LogLevel::Warning
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!info {
+    ( $ ( $ t: tt) *) => {
+        $crate::log_with_level(
+            file!(),
+            line!()-1,
+            column!()-1,
+            line!()-1,
+            column!() + 3,
+            format!( $ ( $ t) *),
+            $ crate::LogLevel::Log
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!debug {
+    ( $ ( $ t: tt) *) => {
+        $crate::log_with_level(
+            file!(),
+            line!()-1,
+            column!()-1,
+            line!()-1,
+            column!() + 3,
+            format!( $ ( $ t) *),
+            $ crate::LogLevel::Log
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!trace {
+    ( $ ( $ t: tt) *) => {
+        $crate::log_with_level(
+            file!(),
+            line!()-1,
+            column!()-1,
+            line!()-1,
+            column!() + 3,
+            format!( $ ( $ t) *),
+            $ crate::LogLevel::Log
+        )
+    }
+}
+
+fn log_with_level_rustc(
+    file_name: &str,
+    line_start: u32,
+    column_start: u32,
+    line_end: u32,
+    column_end: u32,
+    message: String,
+    level: LogLevel,
+) {
+    println!(
+        "{}",
+        level.make_rustc_json(
+            file_name,
+            line_start,
+            column_start,
+            line_end,
+            column_end,
+            &message
+        )
+    );
 }
 
 pub static LOG_WITH_LEVEL: RwLock<fn(&str, u32, u32, u32, u32, String, LogLevel)> =

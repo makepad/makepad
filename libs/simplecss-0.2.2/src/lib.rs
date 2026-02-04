@@ -59,7 +59,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use log::warn;
+use makepad_error_log::warn;
 
 mod selector;
 mod stream;

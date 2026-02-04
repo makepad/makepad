@@ -44,9 +44,9 @@ features = ["aarch64_simd"]
 version = "1"
 path = "../cfg-if-1.0.4"
 
-[dependencies.log]
-version = "0.4"
-path = "../log-0.4.29"
+[dependencies.makepad-error-log]
+version = "1.0.0"
+path = "../error_log"
 
 [dependencies.png]
 version = "0.17"

@@ -34,6 +34,8 @@ extern crate std;
 
 extern crate alloc;
 
+use makepad_error_log as log;
+
 mod alpha_runs;
 mod blend_mode;
 mod blitter;
