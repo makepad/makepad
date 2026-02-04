@@ -11,7 +11,7 @@ impl ScriptHeap {
     // POD TYPES
 
     pub fn pod_method(&self, ptr: ScriptPod, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
-        let pod = &self.pods[ptr.index as usize];
+        let pod = &self.pods[ptr];
         let pod_ty = &self.pod_types[pod.ty.index as usize];
         self.value(pod_ty.object, key, trap)
     }
@@ -57,7 +57,7 @@ impl ScriptHeap {
 
     pub fn pod_type(&self, ty: ScriptValue) -> Option<ScriptPodType> {
         if let Some(obj) = ty.as_object() {
-            let object = &self.objects[obj.index as usize];
+            let object = &self.objects[obj];
             return object.tag.as_pod_type();
         }
         None
@@ -70,7 +70,7 @@ impl ScriptHeap {
     /// Get pod data for a ScriptPod value.
     /// Returns the pod type and data slice for extracting values.
     pub fn pod_data(&self, pod: ScriptPod) -> (&ScriptPodTypeData, &[u32]) {
-        let pod_data = &self.pods[pod.index as usize];
+        let pod_data = &self.pods[pod];
         let pod_type = &self.pod_types[pod_data.ty.index as usize];
         (pod_type, &pod_data.data)
     }
@@ -154,7 +154,7 @@ impl ScriptHeap {
             if let Some(ref object) = type_check.object {
                 // Check if the proto object has a pod type
                 if let Some(proto_obj) = object.proto.as_object() {
-                    let obj_data = &self.objects[proto_obj.index as usize];
+                    let obj_data = &self.objects[proto_obj];
                     if let Some(pod_type) = obj_data.tag.as_pod_type() {
                         return Some(pod_type);
                     }
@@ -171,7 +171,7 @@ impl ScriptHeap {
         builtins: &ScriptPodBuiltins,
     ) -> Option<ScriptPodTypeInline> {
         if let Some(obj) = val.as_object() {
-            let object = &self.objects[obj.index as usize];
+            let object = &self.objects[obj];
             if let Some(pt) = object.tag.as_pod_type() {
                 return Some(ScriptPodTypeInline {
                     self_ref: pt,
@@ -180,8 +180,9 @@ impl ScriptHeap {
             }
         }
         if let Some(pod_ptr) = val.as_pod() {
-            let pod = &self.pods[pod_ptr.index as usize];
-            let object = &self.objects[pod.ty.index as usize];
+            let pod = &self.pods[pod_ptr];
+            let pod_type_obj = self.pod_types[pod.ty.index as usize].object;
+            let object = &self.objects[pod_type_obj];
             if let Some(pt) = object.tag.as_pod_type() {
                 return Some(ScriptPodTypeInline {
                     self_ref: pt,
@@ -239,13 +240,13 @@ impl ScriptHeap {
         builtins: &ScriptPodBuiltins,
         trap: ScriptTrap,
     ) {
-        let object = &self.objects[ptr.index as usize];
+        let object = &self.objects[ptr];
         if object.tag.is_pod_type() {
             let mut kvs = Vec::new();
             let mut pod_type = id!(pod_unknown);
             let mut walk = ptr;
             loop {
-                let object = &self.objects[walk.index as usize];
+                let object = &self.objects[walk];
                 if object.tag.is_vec2() {
                     for kv in object.vec.iter().rev() {
                         kvs.push(kv);
@@ -414,21 +415,21 @@ impl ScriptHeap {
     pub fn new_pod(&mut self, ty: ScriptPodType) -> ScriptPod {
         let pod_ty = &self.pod_types[ty.index as usize];
         if let Some(ptr) = self.pods_free.pop() {
-            let pod = &mut self.pods[ptr.index as usize];
+            let pod = &mut self.pods[ptr];
             pod.ty = ty;
             pod.tag.set_alloced();
             pod.data
                 .resize(pod_ty.ty.size_of().next_multiple_of(4) >> 2, 0);
             ptr
         } else {
-            let ptr = ScriptPod {
-                index: self.pods.len() as u32,
-            };
+            let index = self.pods.len() as u32;
             self.pods.push(ScriptPodData {
                 ty,
                 ..Default::default()
             });
-            let pod = &mut self.pods[ptr.index as usize];
+            // New slot starts at generation 0
+            let ptr = ScriptPod::new(index, 0);
+            let pod = &mut self.pods[ptr];
             pod.tag.set_alloced();
             pod.data
                 .resize(pod_ty.ty.size_of().next_multiple_of(4) >> 2, 0);
@@ -445,7 +446,7 @@ impl ScriptHeap {
         _value: ScriptValue,
         _trap: ScriptTrap,
     ) -> ScriptValue {
-        let _pod = &self.pods[pod.index as usize];
+        let _pod = &self.pods[pod];
         todo!("WANT TO SET FIELD {}", field);
     }
 
@@ -458,7 +459,7 @@ impl ScriptHeap {
         builtins: &ScriptPodBuiltins,
         trap: ScriptTrap,
     ) {
-        let pod_ty_index = self.pods[pod_ptr.index as usize].ty.index as usize;
+        let pod_ty_index = self.pods[pod_ptr].ty.index as usize;
 
         // if we are constructing an array, set the type here
         if let ScriptPodTy::ArrayBuilder = &self.pod_types[pod_ty_index].ty {
@@ -472,19 +473,17 @@ impl ScriptHeap {
                 );
                 return;
             };
-            if let Some(last_ty) = self.pods[pod_ptr.index as usize].tag.as_array_builder() {
+            if let Some(last_ty) = self.pods[pod_ptr].tag.as_array_builder() {
                 if last_ty != ty.self_ref {
                     script_err_pod!(trap, "pod array element type mismatch: array expects element type index {}, got {}", last_ty.index, ty.self_ref.index);
                     return;
                 }
             } else {
-                self.pods[pod_ptr.index as usize]
-                    .tag
-                    .set_array_builder(ty.self_ref);
+                self.pods[pod_ptr].tag.set_array_builder(ty.self_ref);
             }
         }
 
-        let pod = &mut self.pods[pod_ptr.index as usize];
+        let pod = &mut self.pods[pod_ptr];
         let mut out_data = Vec::new();
         std::mem::swap(&mut out_data, &mut pod.data);
         let pod_ty = pod.ty;
@@ -518,7 +517,7 @@ impl ScriptHeap {
                 }
             }
             ScriptPodTy::ArrayBuilder => {
-                if let Some(ty) = self.pods[pod_ptr.index as usize].tag.as_array_builder() {
+                if let Some(ty) = self.pods[pod_ptr].tag.as_array_builder() {
                     let pod_type = &self.pod_types[ty.index as usize];
                     let align_of = pod_type.ty.align_of();
                     let rem = offset.offset_of % align_of;
@@ -658,7 +657,7 @@ impl ScriptHeap {
                 script_err_unexpected!(trap, "unexpected pod type {:?} in pop_to_me", pod_type.ty);
             }
         }
-        std::mem::swap(&mut out_data, &mut self.pods[pod_ptr.index as usize].data);
+        std::mem::swap(&mut out_data, &mut self.pods[pod_ptr].data);
     }
 
     pub fn pod_check_arg_total(
@@ -667,7 +666,7 @@ impl ScriptHeap {
         offset: ScriptPodOffset,
         trap: ScriptTrap,
     ) {
-        let pod = &mut self.pods[pod.index as usize];
+        let pod = &mut self.pods[pod];
         let pod_type = &self.pod_types[pod.ty.index as usize];
         let size_of = pod_type.ty.size_of();
         if offset.offset_of == 0 {
@@ -793,7 +792,7 @@ impl ScriptHeap {
                 return ot.elem_size();
             }
         } else if let Some(in_pod) = value.as_pod() {
-            let in_pod = &self.pods[in_pod.index as usize];
+            let in_pod = &self.pods[in_pod];
             let in_pod_ty = &self.pod_types[in_pod.ty.index as usize];
             if let ScriptPodTy::Vec(it) = &in_pod_ty.ty {
                 if offset_of + it.dims() * ot.elem_size() > ot.elem_size() * ot.dims() {
@@ -1091,7 +1090,7 @@ impl ScriptHeap {
                 if let Some(value) = value.as_number() {
                     out_data[offset_of >> 2] = (value as f32).to_bits();
                 } else if let Some(other_pod) = value.as_pod() {
-                    let other_pod = &self.pods[other_pod.index as usize];
+                    let other_pod = &self.pods[other_pod];
                     let _other_pod_ty = &self.pod_types[other_pod.ty.index as usize];
                     // we should only allow splatting vecs into vecs
                     // how do we figure out we are a vec
@@ -1105,7 +1104,7 @@ impl ScriptHeap {
             }
             ScriptPodTy::Vec(_vt) => {
                 if let Some(other_pod) = value.as_pod() {
-                    let other_pod = &self.pods[other_pod.index as usize];
+                    let other_pod = &self.pods[other_pod];
                     if other_pod.ty == field_ty.self_ref {
                         let o = offset_of >> 2;
                         for i in 0..other_pod.data.len() {
@@ -1123,7 +1122,7 @@ impl ScriptHeap {
             }
             ScriptPodTy::Mat(_mt) => {
                 if let Some(other_pod) = value.as_pod() {
-                    let other_pod = &self.pods[other_pod.index as usize];
+                    let other_pod = &self.pods[other_pod];
                     if other_pod.ty == field_ty.self_ref {
                         let o = offset_of >> 2;
                         for i in 0..other_pod.data.len() {
@@ -1157,7 +1156,7 @@ impl ScriptHeap {
             }
             ScriptPodTy::Struct { .. } => {
                 if let Some(other_pod) = value.as_pod() {
-                    let other_pod = &self.pods[other_pod.index as usize];
+                    let other_pod = &self.pods[other_pod];
                     if other_pod.ty == field_ty.self_ref {
                         let o = offset_of >> 2;
                         for i in 0..other_pod.data.len() {
@@ -1189,7 +1188,7 @@ impl ScriptHeap {
                 // lets accept an ArrayBuilder, check if the type fits and the length of the array
                 // ifso write it in.
                 if let Some(other_pod_ptr) = value.as_pod() {
-                    let other_pod = &self.pods[other_pod_ptr.index as usize];
+                    let other_pod = &self.pods[other_pod_ptr];
                     let other_pod_ty = &self.pod_types[other_pod.ty.index as usize];
 
                     if let ScriptPodTy::ArrayBuilder = &other_pod_ty.ty {
@@ -1257,7 +1256,7 @@ impl ScriptHeap {
             }
             ScriptPodTy::VariableArray { ty, .. } => {
                 if let Some(other_pod_ptr) = value.as_pod() {
-                    let other_pod = &self.pods[other_pod_ptr.index as usize];
+                    let other_pod = &self.pods[other_pod_ptr];
                     let other_pod_ty = &self.pod_types[other_pod.ty.index as usize];
 
                     if let ScriptPodTy::ArrayBuilder = &other_pod_ty.ty {
@@ -1300,7 +1299,7 @@ impl ScriptHeap {
         builtins: &ScriptPodBuiltins,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        let pod = &mut self.pods[pod_ptr.index as usize];
+        let pod = &mut self.pods[pod_ptr];
         let pod_ty = pod.ty;
         let pod_type = &self.pod_types[pod_ty.index as usize];
 
@@ -1328,7 +1327,7 @@ impl ScriptHeap {
         if let Some(elem_ty) = elem_ty {
             let offset_of = index * align_of;
             // bounds check
-            let pod = &self.pods[pod_ptr.index as usize];
+            let pod = &self.pods[pod_ptr];
             if offset_of + align_of > pod.data.len() * 4 {
                 script_err_out_of_bounds!(
                     trap,
@@ -1371,16 +1370,10 @@ impl ScriptHeap {
                     let pod_type = vt.builtin(builtins);
                     let out_pod_ptr = self.new_pod(pod_type);
                     let mut out_data = Vec::new();
-                    std::mem::swap(
-                        &mut self.pods[out_pod_ptr.index as usize].data,
-                        &mut out_data,
-                    );
+                    std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                     out_data.clear();
-                    out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
-                    std::mem::swap(
-                        &mut self.pods[out_pod_ptr.index as usize].data,
-                        &mut out_data,
-                    );
+                    out_data.extend(&self.pods[pod_ptr].data[range]);
+                    std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                     return out_pod_ptr.into();
                 }
                 ScriptPodTy::Mat(mt) => {
@@ -1388,16 +1381,10 @@ impl ScriptHeap {
                     let pod_type = mt.builtin(builtins);
                     let out_pod_ptr = self.new_pod(pod_type);
                     let mut out_data = Vec::new();
-                    std::mem::swap(
-                        &mut self.pods[out_pod_ptr.index as usize].data,
-                        &mut out_data,
-                    );
+                    std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                     out_data.clear();
-                    out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
-                    std::mem::swap(
-                        &mut self.pods[out_pod_ptr.index as usize].data,
-                        &mut out_data,
-                    );
+                    out_data.extend(&self.pods[pod_ptr].data[range]);
+                    std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                     return out_pod_ptr.into();
                 }
                 ScriptPodTy::FixedArray { size_of, .. } | ScriptPodTy::Struct { size_of, .. } => {
@@ -1405,16 +1392,10 @@ impl ScriptHeap {
                     let pod_type = elem_ty;
                     let out_pod_ptr = self.new_pod(pod_type);
                     let mut out_data = Vec::new();
-                    std::mem::swap(
-                        &mut self.pods[out_pod_ptr.index as usize].data,
-                        &mut out_data,
-                    );
+                    std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                     out_data.clear();
-                    out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
-                    std::mem::swap(
-                        &mut self.pods[out_pod_ptr.index as usize].data,
-                        &mut out_data,
-                    );
+                    out_data.extend(&self.pods[pod_ptr].data[range]);
+                    std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                     return out_pod_ptr.into();
                 }
                 _ => {}
@@ -1464,7 +1445,7 @@ impl ScriptHeap {
                 field.value_type()
             );
         };
-        let pod = &mut self.pods[pod_ptr.index as usize];
+        let pod = &mut self.pods[pod_ptr];
         let pod_ty = pod.ty;
         let pod_type = &self.pod_types[pod_ty.index as usize];
 
@@ -1531,16 +1512,10 @@ impl ScriptHeap {
                                 let pod_type = vt.builtin(builtins);
                                 let out_pod_ptr = self.new_pod(pod_type);
                                 let mut out_data = Vec::new();
-                                std::mem::swap(
-                                    &mut self.pods[out_pod_ptr.index as usize].data,
-                                    &mut out_data,
-                                );
+                                std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                                 out_data.clear();
-                                out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
-                                std::mem::swap(
-                                    &mut self.pods[out_pod_ptr.index as usize].data,
-                                    &mut out_data,
-                                );
+                                out_data.extend(&self.pods[pod_ptr].data[range]);
+                                std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                                 return out_pod_ptr.into();
                             }
                             ScriptPodTy::Mat(mt) => {
@@ -1548,16 +1523,10 @@ impl ScriptHeap {
                                 let pod_type = mt.builtin(builtins);
                                 let out_pod_ptr = self.new_pod(pod_type);
                                 let mut out_data = Vec::new();
-                                std::mem::swap(
-                                    &mut self.pods[out_pod_ptr.index as usize].data,
-                                    &mut out_data,
-                                );
+                                std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                                 out_data.clear();
-                                out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
-                                std::mem::swap(
-                                    &mut self.pods[out_pod_ptr.index as usize].data,
-                                    &mut out_data,
-                                );
+                                out_data.extend(&self.pods[pod_ptr].data[range]);
+                                std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                                 return out_pod_ptr.into();
                             }
                             ScriptPodTy::FixedArray { size_of, .. }
@@ -1566,16 +1535,10 @@ impl ScriptHeap {
                                 let pod_type = field.ty.self_ref;
                                 let out_pod_ptr = self.new_pod(pod_type);
                                 let mut out_data = Vec::new();
-                                std::mem::swap(
-                                    &mut self.pods[out_pod_ptr.index as usize].data,
-                                    &mut out_data,
-                                );
+                                std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                                 out_data.clear();
-                                out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
-                                std::mem::swap(
-                                    &mut self.pods[out_pod_ptr.index as usize].data,
-                                    &mut out_data,
-                                );
+                                out_data.extend(&self.pods[pod_ptr].data[range]);
+                                std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
                                 return out_pod_ptr.into();
                             }
                             ScriptPodTy::Enum { .. } => {
@@ -1710,7 +1673,7 @@ impl ScriptHeap {
         };
         // lets create a pod with type_name
         let pod_ptr = self.new_pod(pod_type);
-        let pod = &mut self.pods[pod_ptr.index as usize];
+        let pod = &mut self.pods[pod_ptr];
         let pod_data = &mut pod.data;
 
         match vec {

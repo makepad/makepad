@@ -182,7 +182,7 @@ impl ScriptObjectTag {
     }
 
     pub fn set_proto_fwd(&mut self, fwd: u64) {
-        self.0 = fwd
+        self.0 = (self.0 & !Self::PROTO_FWD) | (fwd & Self::PROTO_FWD)
     }
 
     // STORAGE
@@ -995,5 +995,7 @@ impl ScriptObjectData {
         self.tag.clear();
         self.map.clear();
         self.vec.clear();
+        // Debug: verify clear worked
+        debug_assert!(self.map.is_empty(), "map.clear() didn't work!");
     }
 }

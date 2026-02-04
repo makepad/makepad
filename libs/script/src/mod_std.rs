@@ -1,82 +1,135 @@
-use crate::makepad_live_id::live_id::*;
 use crate::heap::*;
-use crate::value::*;
+use crate::makepad_live_id::live_id::*;
 use crate::makepad_live_id_macros::*;
 use crate::native::*;
+use crate::value::*;
 use crate::*;
 
-pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
+pub fn define_std_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     let std = heap.new_module(id!(std));
-            
-    native.add_method(heap, std, id_lut!(assert), script_args!(v= NIL), |vm, args|{
-        if let Some(x) = script_value!(vm, args.v).as_bool(){
-            if x == true{
-                return NIL
+
+    native.add_method(
+        heap,
+        std,
+        id_lut!(assert),
+        script_args!(v = NIL),
+        |vm, args| {
+            if let Some(x) = script_value!(vm, args.v).as_bool() {
+                if x == true {
+                    return NIL;
+                }
             }
-        }
-        script_err_assert_fail!(vm.bx.threads.cur_ref().trap, "assertion failed")
-    });
-    
+            script_err_assert_fail!(vm.bx.threads.cur_ref().trap, "assertion failed")
+        },
+    );
+
     //native.add_method(heap, std, id!(err), script_args!(), |vm, _args|{
-     //   return vm.thread.last_err
+    //   return vm.thread.last_err
     //});
-            
+
     let range = heap.new_with_proto(id!(range).into());
     heap.set_value_def(std, id!(Range).into(), range.into());
-            
-    native.add_method(heap, range, id_lut!(step), script_args!(x= 0.0), |vm, args|{
-        if let Some(sself) = script_value!(vm, args.self).as_object(){
-            if let Some(x) = script_value!(vm, args.x).as_f64(){
-                set_script_value!(vm, sself.step = x);
+
+    native.add_method(
+        heap,
+        range,
+        id_lut!(step),
+        script_args!(x = 0.0),
+        |vm, args| {
+            if let Some(sself) = script_value!(vm, args.self).as_object() {
+                if let Some(x) = script_value!(vm, args.x).as_f64() {
+                    set_script_value!(vm, sself.step = x);
+                }
+                return sself.into();
             }
-            return sself.into()
-        }
-        NIL
-    });
-    
-    native.add_method(heap, std, id_lut!(log), script_args_def!(what=NIL), |vm, args|{
-        let what = script_value!(vm, args.what);
-        vm.log(what);
-        NIL
-    });
-    
-    native.add_method(heap, std, id_lut!(print), script_args_def!(what=NIL), |vm, args|{
-        let what = script_value!(vm, args.what);
-        if vm.string_with(what, |_vm, str|{
-            print!("{}", str);
-        }).is_none(){
-            vm.bx.heap.temp_string_with(|heap, temp|{
-                heap.cast_to_string(what, temp);
-                print!("{}", what)
-            });
-        }
-        NIL
-    });
-    
-    native.add_method(heap, std, id_lut!(println), script_args_def!(what=NIL), |vm, args|{
-        let what = script_value!(vm, args.what);
-        if vm.string_with(what, |_vm, str|{
-            println!("{}", str);
-        }).is_none(){
-            vm.bx.heap.temp_string_with(|heap, temp|{
-                heap.cast_to_string(what, temp);
-                println!("{}", what)
-            });
-        }
-        NIL
-    });
-    
+            NIL
+        },
+    );
+
+    native.add_method(
+        heap,
+        std,
+        id_lut!(log),
+        script_args_def!(what = NIL),
+        |vm, args| {
+            let what = script_value!(vm, args.what);
+            vm.log(what);
+            NIL
+        },
+    );
+
+    native.add_method(
+        heap,
+        std,
+        id_lut!(print),
+        script_args_def!(what = NIL),
+        |vm, args| {
+            let what = script_value!(vm, args.what);
+            if vm
+                .string_with(what, |_vm, str| {
+                    print!("{}", str);
+                })
+                .is_none()
+            {
+                vm.bx.heap.temp_string_with(|heap, temp| {
+                    heap.cast_to_string(what, temp);
+                    print!("{}", temp)
+                });
+            }
+            NIL
+        },
+    );
+
+    native.add_method(
+        heap,
+        std,
+        id_lut!(println),
+        script_args_def!(what = NIL),
+        |vm, args| {
+            let what = script_value!(vm, args.what);
+            if vm
+                .string_with(what, |_vm, str| {
+                    println!("{}", str);
+                })
+                .is_none()
+            {
+                let is_empty = vm.bx.heap.temp_string_with(|heap, temp| {
+                    heap.cast_to_string(what, temp);
+                    if temp.is_empty() {
+                        return true;
+                    }
+                    println!("{}", temp);
+                    false
+                });
+                if is_empty {
+                    return script_err_unexpected!(
+                        vm.bx.threads.cur_ref().trap,
+                        "println called with empty converted string, value: {:?}",
+                        what
+                    );
+                }
+            }
+            NIL
+        },
+    );
+
     //native.add_method(heap, std, id!(to_metal_shader), script_args!(entry=NIL), |vm, _args|{
-        
-     //   return vm.thread.last_err
+
+    //   return vm.thread.last_err
     //});
-    
-    native.add_method(heap, std, id_lut!(set_type_default), script_args!(obj=NIL), |vm, args|{
-        if let Some(obj) = script_value!(vm, args.obj).as_object(){
-            if vm.bx.heap.set_type_default(obj){
-                return obj.into()
+
+    native.add_method(
+        heap,
+        std,
+        id_lut!(set_type_default),
+        script_args!(obj = NIL),
+        |vm, args| {
+            if let Some(obj) = script_value!(vm, args.obj).as_object() {
+                if vm.bx.heap.set_type_default(obj) {
+                    return obj.into();
+                }
             }
-        }
-        NIL
-    });
+            NIL
+        },
+    );
 }

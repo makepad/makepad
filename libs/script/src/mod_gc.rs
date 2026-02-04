@@ -29,19 +29,30 @@ pub fn define_gc_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     native.add_method(
         heap,
         gc,
+        id_lut!(run_status),
+        script_args!(),
+        |vm, _args| {
+            vm.gc_with_status();
+            ScriptValue::NIL
+        },
+    );
+
+    native.add_method(
+        heap,
+        gc,
         id_lut!(dump_tag),
         script_args!(value = NIL),
         |vm, args| {
             let value = script_value!(vm, args.value);
             if let Some(obj) = value.as_object() {
-                let object = &vm.bx.heap.objects[obj.index as usize];
+                let object = &vm.bx.heap.objects[obj];
                 let tag = &object.tag;
                 let type_index = tag.as_type_index().map(|t| t.0);
                 let is_static = tag.is_static();
                 let proto = object.proto;
                 let proto_obj_index = proto.as_object().map(|p| p.index);
                 let proto_type_index = if let Some(p) = proto.as_object() {
-                    vm.bx.heap.objects[p.index as usize]
+                    vm.bx.heap.objects[p]
                         .tag
                         .as_type_index()
                         .map(|t| t.0)

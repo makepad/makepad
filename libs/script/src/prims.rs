@@ -384,7 +384,7 @@ script_primitive!(
     fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
         if value.is_number(){return true}
         if let Some(pod) = value.as_pod(){
-            let pod_data = &heap.pods[pod.index as usize];
+            let pod_data = &heap.pods[pod];
             let pod_type = &heap.pod_types[pod_data.ty.index as usize];
             if let ScriptPodTy::Vec(v) = &pod_type.ty{
                  return v.dims() == 2
@@ -399,7 +399,7 @@ script_primitive!(
              return
         }
         if let Some(pod) = value.as_pod(){
-             let pod_data = &vm.bx.heap.pods[pod.index as usize];
+             let pod_data = &vm.bx.heap.pods[pod];
              let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
              if let ScriptPodTy::Vec(v) = &pod_type.ty{
                  if v.dims() == 2 {
@@ -438,7 +438,7 @@ script_primitive!(
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let pod_type = vm.bx.code.builtins.pod.pod_vec2f;
         let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod.index as usize];
+        let pod_data = &mut vm.bx.heap.pods[pod];
         pod_data.data[0] = (self.x as f32).to_bits();
         pod_data.data[1] = (self.y as f32).to_bits();
         pod.into()
@@ -451,7 +451,7 @@ script_primitive!(
     fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
         if value.is_number(){return true}
         if let Some(pod) = value.as_pod(){
-            let pod_data = &heap.pods[pod.index as usize];
+            let pod_data = &heap.pods[pod];
             let pod_type = &heap.pod_types[pod_data.ty.index as usize];
             if let ScriptPodTy::Vec(v) = &pod_type.ty{
                  return v.dims() == 2
@@ -466,7 +466,7 @@ script_primitive!(
              return
         }
         if let Some(pod) = value.as_pod(){
-             let pod_data = &vm.bx.heap.pods[pod.index as usize];
+             let pod_data = &vm.bx.heap.pods[pod];
              let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
              if let ScriptPodTy::Vec(v) = &pod_type.ty{
                  if v.dims() == 2 {
@@ -505,7 +505,7 @@ script_primitive!(
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let pod_type = vm.bx.code.builtins.pod.pod_vec2f;
         let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod.index as usize];
+        let pod_data = &mut vm.bx.heap.pods[pod];
         pod_data.data[0] = (self.x).to_bits();
         pod_data.data[1] = (self.y).to_bits();
         pod.into()
@@ -519,7 +519,7 @@ script_primitive!(
         if value.is_number(){return true}
         if value.is_color(){return true}
         if let Some(pod) = value.as_pod(){
-            let pod_data = &heap.pods[pod.index as usize];
+            let pod_data = &heap.pods[pod];
             let pod_type = &heap.pod_types[pod_data.ty.index as usize];
             if let ScriptPodTy::Vec(v) = &pod_type.ty{
                  return v.dims() == 3
@@ -542,7 +542,7 @@ script_primitive!(
             return
         }
         if let Some(pod) = value.as_pod(){
-             let pod_data = &vm.bx.heap.pods[pod.index as usize];
+             let pod_data = &vm.bx.heap.pods[pod];
              let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
              if let ScriptPodTy::Vec(v) = &pod_type.ty{
                  if v.dims() == 3 {
@@ -586,7 +586,7 @@ script_primitive!(
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let pod_type = vm.bx.code.builtins.pod.pod_vec3f;
         let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod.index as usize];
+        let pod_data = &mut vm.bx.heap.pods[pod];
         pod_data.data[0] = (self.x).to_bits();
         pod_data.data[1] = (self.y).to_bits();
         pod_data.data[2] = (self.z).to_bits();
@@ -601,7 +601,7 @@ script_primitive!(
         if value.is_number(){return true}
         if value.is_color(){return true}
         if let Some(pod) = value.as_pod(){
-            let pod_data = &heap.pods[pod.index as usize];
+            let pod_data = &heap.pods[pod];
             let pod_type = &heap.pod_types[pod_data.ty.index as usize];
             if let ScriptPodTy::Vec(v) = &pod_type.ty{
                  return v.dims() == 4
@@ -623,7 +623,7 @@ script_primitive!(
             return
         }
         if let Some(pod) = value.as_pod(){
-             let pod_data = &vm.bx.heap.pods[pod.index as usize];
+             let pod_data = &vm.bx.heap.pods[pod];
              let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
              if let ScriptPodTy::Vec(v) = &pod_type.ty{
                  if v.dims() == 4 {
@@ -672,7 +672,7 @@ script_primitive!(
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let pod_type = vm.bx.code.builtins.pod.pod_vec4f;
         let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod.index as usize];
+        let pod_data = &mut vm.bx.heap.pods[pod];
         pod_data.data[0] = (self.x).to_bits();
         pod_data.data[1] = (self.y).to_bits();
         pod_data.data[2] = (self.z).to_bits();
@@ -687,7 +687,7 @@ script_primitive!(
     fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
         if value.is_number(){return true}
         if let Some(pod) = value.as_pod(){
-            let pod_data = &heap.pods[pod.index as usize];
+            let pod_data = &heap.pods[pod];
             let pod_type = &heap.pod_types[pod_data.ty.index as usize];
             if let ScriptPodTy::Mat(m) = &pod_type.ty{
                  return m.dims() == (4, 4)
@@ -703,7 +703,7 @@ script_primitive!(
              return
         }
         if let Some(pod) = value.as_pod(){
-             let pod_data = &vm.bx.heap.pods[pod.index as usize];
+             let pod_data = &vm.bx.heap.pods[pod];
              let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
              if let ScriptPodTy::Mat(m) = &pod_type.ty{
                  if m.dims() == (4, 4) {
@@ -727,7 +727,7 @@ script_primitive!(
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let pod_type = vm.bx.code.builtins.pod.pod_mat4x4f;
         let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod.index as usize];
+        let pod_data = &mut vm.bx.heap.pods[pod];
         for i in 0..16 {
             pod_data.data[i] = self.v[i].to_bits();
         }

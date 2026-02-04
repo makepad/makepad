@@ -118,8 +118,8 @@ pub struct PortalList {
     #[rust(true)] not_filling_viewport: bool,
     #[live(false)] reuse_items: bool,
     
-    // Templates stored as ScriptValue references - populated in on_after_apply
-    #[rust] templates: HashMap<LiveId, ScriptValue>,
+    // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
+    #[rust] templates: HashMap<LiveId, ScriptObjectRef>,
     #[rust] items: ComponentMap<usize, WidgetItem>,
     #[rust] reusable_items: Vec<WidgetItem>,
     
@@ -137,22 +137,29 @@ impl ScriptHook for PortalList {
     
     fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
         // Collect templates from the object's vec - only prefixed IDs ($name) end up in the vec
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |_vm, vec| {
-                for kv in vec {
-                    // Templates use prefixed ids ($name) - they end up in the vec
-                    if let Some(id) = kv.key.as_id() {
-                        self.templates.insert(id, kv.value);
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        // Templates use prefixed ids ($name) - they end up in the vec
+                        if let Some(id) = kv.key.as_id() {
+                            if let Some(template_obj) = kv.value.as_object() {
+                                // Root the template object so it survives GC
+                                self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                            }
+                        }
                     }
-                }
-            });
+                });
+            }
         }
         
         // Update existing items if templates changed
         if apply.is_reload() {
             for (_, item) in self.items.iter_mut() {
-                if let Some(template_value) = self.templates.get(&item.template) {
-                    item.widget.script_apply(vm, apply, scope, *template_value);
+                if let Some(template_ref) = self.templates.get(&item.template) {
+                    let template_value: ScriptValue = template_ref.as_object().into();
+                    item.widget.script_apply(vm, apply, scope, template_value);
                 }
             }
         }
@@ -518,7 +525,8 @@ impl PortalList {
     pub fn item_with_existed(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> (WidgetRef, bool) {
         use std::collections::hash_map::Entry;
         
-        if let Some(template_value) = self.templates.get(&template).copied() {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             match self.items.entry(entry_id) {
                 Entry::Occupied(mut occ) => {
                     if occ.get().template == template {

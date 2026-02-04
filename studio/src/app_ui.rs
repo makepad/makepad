@@ -439,7 +439,7 @@ script_mod! {
             visible: true
             $caption_label +: {$label +: {text: "Makepad"}}
         }
-        window.inner_size: vec2(1600 900)
+        window.inner_size: vec2(2600 1900)
         show_bg: true
         draw_bg +: {
             pixel: fn() {

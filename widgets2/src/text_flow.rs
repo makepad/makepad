@@ -291,16 +291,19 @@ pub struct TextFlow {
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust(Some(Default::default()))] items: Option<ComponentMap<LiveId,(WidgetRef, LiveId)>>,
-    #[rust] templates: ComponentMap<LiveId, ScriptValue>,
+    #[rust] templates: ComponentMap<LiveId, ScriptObjectRef>,
 }
 
 impl TextFlow {
-    fn apply_template(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, id: LiveId, obj: ScriptValue) {
-        self.templates.insert(id, obj);
+    fn apply_template(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, id: LiveId, template_obj: ScriptObject) {
+        // Root the template object
+        let template_ref = vm.bx.heap.new_object_ref(template_obj);
+        self.templates.insert(id, template_ref);
         // Apply to existing items with matching template
+        let template_value: ScriptValue = template_obj.into();
         for (node, templ_id) in self.items.as_mut().unwrap().values_mut() {
             if *templ_id == id {
-                node.script_apply(vm, apply, scope, obj);
+                node.script_apply(vm, apply, scope, template_value);
             }
         }
     }
@@ -308,16 +311,19 @@ impl TextFlow {
 
 impl ScriptHook for TextFlow {
     fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |vm, vec| {
-                for kv in vec {
-                    if let Some(id) = kv.key.as_id() {
-                        if kv.value.as_object().is_some() {
-                            self.apply_template(vm, apply, scope, id, kv.value);
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if let Some(id) = kv.key.as_id() {
+                            if let Some(template_obj) = kv.value.as_object() {
+                                self.apply_template(vm, apply, scope, id, template_obj);
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
         }
     }
 }
@@ -531,7 +537,8 @@ impl TextFlow{
     pub fn item_with<F,R:Default>(&mut self, cx: &mut Cx2d, entry_id:LiveId, template: LiveId, f:F)->R
     where F:FnOnce(&mut Cx2d, &WidgetRef, &mut TextFlow)->R{
         let mut items = self.items.take().unwrap();
-        let r = if let Some(template_value) = self.templates.get(&template).copied() {
+        let r = if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = items.get_or_insert(cx, entry_id, | cx | {
                 let widget = cx.with_vm(|vm| {
                     WidgetRef::script_from_value(vm, template_value)
@@ -548,7 +555,8 @@ impl TextFlow{
         
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> WidgetRef {
-        if let Some(template_value) = self.templates.get(&template).copied() {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
                 let widget = cx.with_vm(|vm| {
                     WidgetRef::script_from_value(vm, template_value)
@@ -563,7 +571,8 @@ impl TextFlow{
     
     pub fn item_counted(&mut self, cx: &mut Cx, template: LiveId) -> WidgetRef {
         let entry_id = self.new_counted_id();
-        if let Some(template_value) = self.templates.get(&template).copied() {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
                 let widget = cx.with_vm(|vm| {
                     WidgetRef::script_from_value(vm, template_value)
@@ -590,7 +599,8 @@ impl TextFlow{
         
 
     pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
-        if let Some(template_value) = self.templates.get(&template).copied() {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
                 let widget = cx.with_vm(|vm| {
                     WidgetRef::script_from_value_scoped(vm, scope, template_value)
