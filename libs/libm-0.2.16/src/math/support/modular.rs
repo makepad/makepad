@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT OR Apache-2.0 */
+#![allow(dead_code)]
 
 //! This module provides accelerated modular multiplication by large powers
 //! of two, which is needed for computing floating point remainders in `fmod`

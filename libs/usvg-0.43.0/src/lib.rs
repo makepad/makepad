@@ -52,6 +52,8 @@ and can focus just on the rendering part.
 #![warn(missing_debug_implementations)]
 #![warn(missing_copy_implementations)]
 
+use makepad_error_log as log;
+
 mod parser;
 #[cfg(feature = "text")]
 mod text;

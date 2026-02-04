@@ -4,8 +4,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::log;
 use crate::{BlendMode, Color, LengthU32, Paint, PixmapRef, PremultipliedColorU8, Shader};
 use crate::{ALPHA_U8_OPAQUE, ALPHA_U8_TRANSPARENT};
+use alloc::format;
 
 use crate::alpha_runs::AlphaRun;
 use crate::blitter::{Blitter, Mask};

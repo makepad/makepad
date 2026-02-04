@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT OR Apache-2.0 */
-use crate::support::{CastInto, DInt, HInt, Int, MinInt, u256};
+#![allow(dead_code)]
+use crate::support::{u256, CastInto, DInt, HInt, Int, MinInt};
 
 /// Trait for unsigned division of a double-wide integer
 /// when the quotient doesn't overflow.

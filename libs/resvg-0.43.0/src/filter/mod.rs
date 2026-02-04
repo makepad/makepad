@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use crate::log;
 use rgb::{FromSlice, RGBA8};
 use tiny_skia::IntRect;
 use usvg::{ApproxEqUlps, ApproxZeroUlps};

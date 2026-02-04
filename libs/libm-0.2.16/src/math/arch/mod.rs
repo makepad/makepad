@@ -26,8 +26,6 @@ cfg_if! {
         pub use aarch64::{
             fma,
             fmaf,
-            rint,
-            rintf,
             sqrt,
             sqrtf,
         };
