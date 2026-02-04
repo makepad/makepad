@@ -21,11 +21,6 @@ pub struct ScriptHeap {
     pub(crate) gc_last: ScriptHeapGcLast,
     pub(crate) mark_vec: Vec<ScriptGcMark>,
 
-    // GC debugging - tracks context when a dangling reference is found
-    pub(crate) gc_root_source: String, // Describes which root started this marking chain
-    pub(crate) gc_parent_chain: Vec<u32>, // Chain of parent object indices from root to current
-    pub(crate) current_parent: Option<ScriptObject>, // Current parent during marking
-
     pub(crate) root_objects: Rc<RefCell<HashMap<ScriptObject, usize>>>,
     pub(crate) root_arrays: Rc<RefCell<HashMap<ScriptArray, usize>>>,
     pub(crate) root_handles: Rc<RefCell<HashMap<ScriptHandle, usize>>>,
