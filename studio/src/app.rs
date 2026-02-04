@@ -790,14 +790,18 @@ impl MatchEvent for App {
                         if let Some(internal_id) = internal_id {
                             // from inside the dock
                             if drop_event.modifiers.logo {
-                                let tab_id = dock.unique_id(internal_id.0);
-                                dock.drop_clone(
-                                    cx,
-                                    drop_event.abs,
-                                    *internal_id,
-                                    tab_id,
-                                    id!($CloseableTab),
-                                );
+                                // Cloning a tab - need to register new tab with file system
+                                if let Some(file_id) = self.data.file_system.tab_id_to_file_node_id.get(internal_id).copied() {
+                                    let tab_id = dock.unique_id(internal_id.0);
+                                    self.data.file_system.request_open_file(tab_id, file_id);
+                                    dock.drop_clone(
+                                        cx,
+                                        drop_event.abs,
+                                        *internal_id,
+                                        tab_id,
+                                        id!($CloseableTab),
+                                    );
+                                }
                             } else {
                                 dock.drop_move(cx, drop_event.abs, *internal_id);
                             }
