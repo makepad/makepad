@@ -320,7 +320,7 @@ impl Cx {
                     // Run garbage collection if needed - safe moment after paint
                     self.with_vm(|vm| {
                         if vm.heap().needs_gc() {
-                            vm.gc_with_status();
+                            vm.gc();
                         }
                     });
                 }
