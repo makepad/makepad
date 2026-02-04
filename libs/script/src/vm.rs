@@ -136,11 +136,13 @@ impl<'a> ScriptVm<'a> {
         self.bx.heap.println(value.into());
     }
 
-    /// Run garbage collection (mark and sweep) silently.
+    /// Run garbage collection (mark and sweep), only logs if it takes >1ms.
     pub fn gc(&mut self) {
         let start = std::time::Instant::now();
         self.bx.heap.mark(&self.bx.threads, &self.bx.code);
-        self.bx.heap.sweep(start, false);
+        // Only log if GC takes more than 1ms to avoid spamming logs
+        let log_stats = start.elapsed().as_micros() > 1000;
+        self.bx.heap.sweep(start, log_stats);
     }
 
     /// Run garbage collection with status logging.
@@ -415,10 +417,7 @@ impl<'a> ScriptVm<'a> {
     /// Returns None if no transform exists, Some(transformed) if a transform was applied.
     pub fn call_apply_transform(&mut self, value: ScriptValue) -> Option<ScriptValue> {
         if let Some(obj) = value.as_object() {
-            if let Some(ni) = self.bx.heap.objects[obj]
-                .tag
-                .as_apply_transform()
-            {
+            if let Some(ni) = self.bx.heap.objects[obj].tag.as_apply_transform() {
                 let func_ptr: *const dyn Fn(&mut ScriptVm, ScriptObject) -> ScriptValue = {
                     let native = self.bx.code.native.borrow();
                     &*native.functions[ni.index as usize] as *const _
@@ -436,10 +435,7 @@ impl<'a> ScriptVm<'a> {
                 return Some(result);
             }
         } else if let Some(arr) = value.as_array() {
-            if let Some(ni) = self.bx.heap.arrays[arr]
-                .tag
-                .as_apply_transform()
-            {
+            if let Some(ni) = self.bx.heap.arrays[arr].tag.as_apply_transform() {
                 // For arrays, we need to create a temporary args object
                 let args_obj = self.bx.heap.new_object();
                 self.bx
@@ -542,15 +538,9 @@ impl<'a> ScriptVm<'a> {
         f: F,
     ) -> R {
         let mut map = ScriptObjectMap::default();
-        std::mem::swap(
-            &mut map,
-            &mut self.bx.heap.objects[object].map,
-        );
+        std::mem::swap(&mut map, &mut self.bx.heap.objects[object].map);
         let r = f(self, &mut map);
-        std::mem::swap(
-            &mut map,
-            &mut self.bx.heap.objects[object].map,
-        );
+        std::mem::swap(&mut map, &mut self.bx.heap.objects[object].map);
         r
     }
 
@@ -563,23 +553,14 @@ impl<'a> ScriptVm<'a> {
         f: &mut F,
     ) {
         // First recurse to the prototype (if any), so we process from root to leaf
-        if let Some(proto) = self.bx.heap.objects[object]
-            .proto
-            .as_object()
-        {
+        if let Some(proto) = self.bx.heap.objects[object].proto.as_object() {
             self.proto_map_iter_mut_with(proto, f);
         }
         // Then process this object's map
         let mut map = ScriptObjectMap::default();
-        std::mem::swap(
-            &mut map,
-            &mut self.bx.heap.objects[object].map,
-        );
+        std::mem::swap(&mut map, &mut self.bx.heap.objects[object].map);
         f(self, &mut map);
-        std::mem::swap(
-            &mut map,
-            &mut self.bx.heap.objects[object].map,
-        );
+        std::mem::swap(&mut map, &mut self.bx.heap.objects[object].map);
     }
 
     pub fn vec_with<R, F: FnOnce(&mut Self, &[ScriptVecValue]) -> R>(
@@ -588,15 +569,9 @@ impl<'a> ScriptVm<'a> {
         f: F,
     ) -> R {
         let mut vec = Vec::new();
-        std::mem::swap(
-            &mut vec,
-            &mut self.bx.heap.objects[object].vec,
-        );
+        std::mem::swap(&mut vec, &mut self.bx.heap.objects[object].vec);
         let r = f(self, &vec);
-        std::mem::swap(
-            &mut vec,
-            &mut self.bx.heap.objects[object].vec,
-        );
+        std::mem::swap(&mut vec, &mut self.bx.heap.objects[object].vec);
         r
     }
 
@@ -606,15 +581,9 @@ impl<'a> ScriptVm<'a> {
         f: F,
     ) -> R {
         let mut vec = Vec::new();
-        std::mem::swap(
-            &mut vec,
-            &mut self.bx.heap.objects[object].vec,
-        );
+        std::mem::swap(&mut vec, &mut self.bx.heap.objects[object].vec);
         let r = f(self, &mut vec);
-        std::mem::swap(
-            &mut vec,
-            &mut self.bx.heap.objects[object].vec,
-        );
+        std::mem::swap(&mut vec, &mut self.bx.heap.objects[object].vec);
         r
     }
 

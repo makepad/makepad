@@ -582,9 +582,10 @@ impl ScriptHeap {
         }
 
         // Print compact GC stats: S=static A=alive R=removed
+        let elapsed_us = start.elapsed().as_micros();
         if log_stats {
             log!("GC {}us: obj[S:{} A:{} R:{}] arr[S:{} A:{} R:{}] str[S:{} A:{} R:{}] hdl[S:{} A:{} R:{}] pod[S:{} A:{} R:{}]",
-                start.elapsed().as_micros(),
+                elapsed_us,
                 obj_static, obj_alive, obj_removed,
                 arr_static, arr_alive, arr_removed,
                 str_static, str_alive, str_removed,
