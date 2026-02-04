@@ -80,9 +80,6 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "html")]
-pub mod html;
-
 pub mod utils;
 
 mod entities;
