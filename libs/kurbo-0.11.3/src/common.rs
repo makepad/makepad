@@ -718,56 +718,6 @@ pub fn solve_itp(
     0.5 * (a + b)
 }
 
-/// A variant ITP solver that allows fallible functions.
-///
-/// Another difference: it returns the bracket that contains the root,
-/// which may be important if the function has a discontinuity.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn solve_itp_fallible<E>(
-    mut f: impl FnMut(f64) -> Result<f64, E>,
-    mut a: f64,
-    mut b: f64,
-    epsilon: f64,
-    n0: usize,
-    k1: f64,
-    mut ya: f64,
-    mut yb: f64,
-) -> Result<(f64, f64), E> {
-    let n1_2 = (((b - a) / epsilon).log2().ceil() - 1.0).max(0.0) as usize;
-    let nmax = n0 + n1_2;
-    let mut scaled_epsilon = epsilon * (1u64 << nmax) as f64;
-    while b - a > 2.0 * epsilon {
-        let x1_2 = 0.5 * (a + b);
-        let r = scaled_epsilon - 0.5 * (b - a);
-        let xf = (yb * a - ya * b) / (yb - ya);
-        let sigma = x1_2 - xf;
-        // This has k2 = 2 hardwired for efficiency.
-        let delta = k1 * (b - a).powi(2);
-        let xt = if delta <= (x1_2 - xf).abs() {
-            xf + delta.copysign(sigma)
-        } else {
-            x1_2
-        };
-        let xitp = if (xt - x1_2).abs() <= r {
-            xt
-        } else {
-            x1_2 - r.copysign(sigma)
-        };
-        let yitp = f(xitp)?;
-        if yitp > 0.0 {
-            b = xitp;
-            yb = yitp;
-        } else if yitp < 0.0 {
-            a = xitp;
-            ya = yitp;
-        } else {
-            return Ok((xitp, xitp));
-        }
-        scaled_epsilon *= 0.5;
-    }
-    Ok((a, b))
-}
-
 // Tables of Legendre-Gauss quadrature coefficients, adapted from:
 // <https://pomax.github.io/bezierinfo/legendre-gauss.html>
 

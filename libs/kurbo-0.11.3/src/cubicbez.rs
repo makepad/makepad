@@ -4,7 +4,6 @@
 //! Cubic Bézier segments.
 
 use alloc::vec;
-use alloc::vec::Vec;
 use core::ops::{Mul, Range};
 
 use crate::MAX_EXTREMA;
@@ -42,15 +41,6 @@ struct ToQuads {
     c: CubicBez,
     i: usize,
     n: usize,
-}
-
-/// Classification result for cusp detection.
-#[derive(Debug)]
-pub enum CuspType {
-    /// Cusp is a loop.
-    Loop,
-    /// Cusp has two closely spaced inflection points.
-    DoubleInflection,
 }
 
 impl CubicBez {
@@ -378,100 +368,6 @@ impl CubicBez {
             .filter(|t| *t >= 0.0 && *t <= 1.0)
             .collect()
     }
-
-    /// Preprocess a cubic Bézier to ease numerical robustness.
-    ///
-    /// If the cubic Bézier segment has zero or near-zero derivatives, perturb
-    /// the control points to make it easier to process (especially offset and
-    /// stroke), avoiding numerical robustness problems.
-    pub(crate) fn regularize(&self, dimension: f64) -> CubicBez {
-        let mut c = *self;
-        // First step: if control point is too near the endpoint, nudge it away
-        // along the tangent.
-        let dim2 = dimension * dimension;
-        if c.p0.distance_squared(c.p1) < dim2 {
-            let d02 = c.p0.distance_squared(c.p2);
-            if d02 >= dim2 {
-                // TODO: moderate if this would move closer to p3
-                c.p1 = c.p0.lerp(c.p2, (dim2 / d02).sqrt());
-            } else {
-                c.p1 = c.p0.lerp(c.p3, 1.0 / 3.0);
-                c.p2 = c.p3.lerp(c.p0, 1.0 / 3.0);
-                return c;
-            }
-        }
-        if c.p3.distance_squared(c.p2) < dim2 {
-            let d13 = c.p1.distance_squared(c.p2);
-            if d13 >= dim2 {
-                // TODO: moderate if this would move closer to p0
-                c.p2 = c.p3.lerp(c.p1, (dim2 / d13).sqrt());
-            } else {
-                c.p1 = c.p0.lerp(c.p3, 1.0 / 3.0);
-                c.p2 = c.p3.lerp(c.p0, 1.0 / 3.0);
-                return c;
-            }
-        }
-        if let Some(cusp_type) = self.detect_cusp(dimension) {
-            let d01 = c.p1 - c.p0;
-            let d01h = d01.hypot();
-            let d23 = c.p3 - c.p2;
-            let d23h = d23.hypot();
-            match cusp_type {
-                CuspType::Loop => {
-                    c.p1 += (dimension / d01h) * d01;
-                    c.p2 -= (dimension / d23h) * d23;
-                }
-                CuspType::DoubleInflection => {
-                    // Avoid making control distance smaller than dimension
-                    if d01h > 2.0 * dimension {
-                        c.p1 -= (dimension / d01h) * d01;
-                    }
-                    if d23h > 2.0 * dimension {
-                        c.p2 += (dimension / d23h) * d23;
-                    }
-                }
-            }
-        }
-        c
-    }
-
-    /// Detect whether there is a cusp.
-    ///
-    /// Return a cusp classification if there is a cusp with curvature greater than
-    /// the reciprocal of the given dimension.
-    fn detect_cusp(&self, dimension: f64) -> Option<CuspType> {
-        let d01 = self.p1 - self.p0;
-        let d02 = self.p2 - self.p0;
-        let d03 = self.p3 - self.p0;
-        let d12 = self.p2 - self.p1;
-        let d23 = self.p3 - self.p2;
-        let det_012 = d01.cross(d02);
-        let det_123 = d12.cross(d23);
-        let det_013 = d01.cross(d03);
-        let det_023 = d02.cross(d03);
-        if det_012 * det_123 > 0.0 && det_012 * det_013 < 0.0 && det_012 * det_023 < 0.0 {
-            let q = self.deriv();
-            // accuracy isn't used for quadratic nearest
-            let nearest = q.nearest(Point::ORIGIN, 1e-9);
-            // detect whether curvature at minimum derivative exceeds 1/dimension,
-            // without division.
-            let d = q.eval(nearest.t);
-            let d2 = q.deriv().eval(nearest.t);
-            let cross = d.to_vec2().cross(d2.to_vec2());
-            if nearest.distance_sq.powi(3) <= (cross * dimension).powi(2) {
-                let a = 3. * det_012 + det_023 - 2. * det_013;
-                let b = -3. * det_012 + det_013;
-                let c = det_012;
-                let d = b * b - 4. * a * c;
-                if d > 0.0 {
-                    return Some(CuspType::DoubleInflection);
-                } else {
-                    return Some(CuspType::Loop);
-                }
-            }
-        }
-        None
-    }
 }
 
 /// An iterator for cubic beziers.
@@ -752,39 +648,11 @@ impl Iterator for ToQuads {
         (remaining, Some(remaining))
     }
 }
-
-/// Convert multiple cubic Bézier curves to quadratic splines.
-///
-/// Ensures that the resulting splines have the same number of control points.
-///
-/// Rust port of cu2qu [cubic_approx_quadratic](https://github.com/fonttools/fonttools/blob/3b9a73ff8379ab49d3ce35aaaaf04b3a7d9d1655/Lib/fontTools/cu2qu/cu2qu.py#L322)
-pub fn cubics_to_quadratic_splines(curves: &[CubicBez], accuracy: f64) -> Option<Vec<QuadSpline>> {
-    let mut result = Vec::new();
-    let mut split_order = 0;
-
-    while split_order <= MAX_SPLINE_SPLIT {
-        split_order += 1;
-        result.clear();
-
-        for curve in curves {
-            match curve.approx_spline_n(split_order, accuracy) {
-                Some(spline) => result.push(spline),
-                None => break,
-            }
-        }
-
-        if result.len() == curves.len() {
-            return Some(result);
-        }
-    }
-    None
-}
 #[cfg(test)]
 mod tests {
     use crate::{
-        cubics_to_quadratic_splines, Affine, CubicBez, Nearest, ParamCurve, ParamCurveArclen,
-        ParamCurveArea, ParamCurveDeriv, ParamCurveExtrema, ParamCurveNearest, Point, QuadBez,
-        QuadSpline,
+        Affine, CubicBez, Nearest, ParamCurve, ParamCurveArclen, ParamCurveArea, ParamCurveDeriv,
+        ParamCurveExtrema, ParamCurveNearest, Point, QuadBez, QuadSpline,
     };
 
     #[test]
@@ -1025,40 +893,6 @@ mod tests {
     }
 
     #[test]
-    fn cubicbez_cubics_to_quadratic_splines() {
-        let curves = vec![
-            CubicBez::new(
-                (550.0, 258.0),
-                (1044.0, 482.0),
-                (2029.0, 1841.0),
-                (1934.0, 1554.0),
-            ),
-            CubicBez::new(
-                (859.0, 384.0),
-                (1998.0, 116.0),
-                (1596.0, 1772.0),
-                (8.0, 1824.0),
-            ),
-            CubicBez::new(
-                (1090.0, 937.0),
-                (418.0, 1300.0),
-                (125.0, 91.0),
-                (104.0, 37.0),
-            ),
-        ];
-        let converted = cubics_to_quadratic_splines(&curves, 5.0);
-        assert!(converted.is_some());
-        let converted = converted.unwrap();
-        assert_eq!(converted[0].points().len(), 8);
-        assert_eq!(converted[1].points().len(), 8);
-        assert_eq!(converted[2].points().len(), 8);
-        assert!(converted[0].points()[1].distance(Point::new(673.5, 314.0)) < 0.0001);
-        assert!(
-            converted[0].points()[2].distance(Point::new(88639.0 / 90.0, 52584.0 / 90.0)) < 0.0001
-        );
-    }
-
-    #[test]
     fn cubicbez_approx_spline_div_exact() {
         // Ensure rounding behavior for division matches fonttools
         // cu2qu.
@@ -1098,63 +932,5 @@ mod tests {
         let c = CubicBez::new((0., 0.), (1., 1.), (2., 1.), (3., 0.));
         let inflections = c.inflections();
         assert_eq!(inflections.len(), 0);
-    }
-
-    #[test]
-    fn cubic_to_quadratic_matches_python() {
-        // from https://github.com/googlefonts/fontmake-rs/issues/217
-        let cubic = CubicBez {
-            p0: (796.0, 319.0).into(),
-            p1: (727.0, 314.0).into(),
-            p2: (242.0, 303.0).into(),
-            p3: (106.0, 303.0).into(),
-        };
-
-        // FontTools can approximate this curve successfully in 7 splits, we can too
-        assert!(cubic.approx_spline_n(7, 1.0).is_some());
-
-        // FontTools can solve this with accuracy 0.001, we can too
-        assert!(cubics_to_quadratic_splines(&[cubic], 0.001).is_some());
-    }
-
-    #[test]
-    fn cubics_to_quadratic_splines_matches_python() {
-        // https://github.com/linebender/kurbo/pull/273
-        let light = CubicBez::new((378., 608.), (378., 524.), (355., 455.), (266., 455.));
-        let regular = CubicBez::new((367., 607.), (367., 511.), (338., 472.), (243., 472.));
-        let bold = CubicBez::new(
-            (372.425, 593.05),
-            (372.425, 524.95),
-            (355.05, 485.95),
-            (274., 485.95),
-        );
-        let qsplines = cubics_to_quadratic_splines(&[light, regular, bold], 1.0).unwrap();
-        assert_eq!(
-            qsplines,
-            [
-                QuadSpline::new(vec![
-                    (378.0, 608.0).into(),
-                    (378.0, 566.0).into(),
-                    (359.0833333333333, 496.5).into(),
-                    (310.5, 455.0).into(),
-                    (266.0, 455.0).into(),
-                ]),
-                QuadSpline::new(vec![
-                    (367.0, 607.0).into(),
-                    (367.0, 559.0).into(),
-                    // Previous behavior produced 496.5 for the y coordinate
-                    (344.5833333333333, 499.49999999999994).into(),
-                    (290.5, 472.0).into(),
-                    (243.0, 472.0).into(),
-                ]),
-                QuadSpline::new(vec![
-                    (372.425, 593.05).into(),
-                    (372.425, 559.0).into(),
-                    (356.98333333333335, 511.125).into(),
-                    (314.525, 485.95).into(),
-                    (274.0, 485.95).into(),
-                ]),
-            ]
-        );
     }
 }
