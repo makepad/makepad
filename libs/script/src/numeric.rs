@@ -47,7 +47,7 @@ impl NumericValue {
         
         // Check for Pod (Vec and Mat types)
         if let Some(pod) = value.as_pod() {
-            let pod_data = &heap.pods[pod.index as usize];
+            let pod_data = &heap.pods[pod];
             let pod_type = &heap.pod_types[pod_data.ty.index as usize];
             match &pod_type.ty {
                 ScriptPodTy::Vec(v) => {
@@ -121,14 +121,14 @@ impl NumericValue {
             NumericValue::F64(f) => ScriptValue::from_f64(f),
             NumericValue::Vec2(v) => {
                 let pod = heap.new_pod(code.builtins.pod.pod_vec2f);
-                let pod_data = &mut heap.pods[pod.index as usize];
+                let pod_data = &mut heap.pods[pod];
                 pod_data.data[0] = v.x.to_bits();
                 pod_data.data[1] = v.y.to_bits();
                 pod.into()
             }
             NumericValue::Vec3(v) => {
                 let pod = heap.new_pod(code.builtins.pod.pod_vec3f);
-                let pod_data = &mut heap.pods[pod.index as usize];
+                let pod_data = &mut heap.pods[pod];
                 pod_data.data[0] = v.x.to_bits();
                 pod_data.data[1] = v.y.to_bits();
                 pod_data.data[2] = v.z.to_bits();
@@ -136,7 +136,7 @@ impl NumericValue {
             }
             NumericValue::Vec4(v) => {
                 let pod = heap.new_pod(code.builtins.pod.pod_vec4f);
-                let pod_data = &mut heap.pods[pod.index as usize];
+                let pod_data = &mut heap.pods[pod];
                 pod_data.data[0] = v.x.to_bits();
                 pod_data.data[1] = v.y.to_bits();
                 pod_data.data[2] = v.z.to_bits();
@@ -146,7 +146,7 @@ impl NumericValue {
             NumericValue::Color(v) => ScriptValue::from_color(v.to_u32()),
             NumericValue::Mat4(m) => {
                 let pod = heap.new_pod(code.builtins.pod.pod_mat4x4f);
-                let pod_data = &mut heap.pods[pod.index as usize];
+                let pod_data = &mut heap.pods[pod];
                 for i in 0..16 {
                     pod_data.data[i] = m[i].to_bits();
                 }

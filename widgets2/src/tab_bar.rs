@@ -205,8 +205,8 @@ pub struct TabBar {
     
     #[rust] is_dragged: bool,
     
-    // Templates stored as ScriptValue references - populated in on_after_apply
-    #[rust] templates: HashMap<LiveId, ScriptValue>,
+    // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
+    #[rust] templates: HashMap<LiveId, ScriptObjectRef>,
     #[rust] tabs: ComponentMap<LiveId, (Tab, LiveId)>,
     
     #[rust] active_tab: Option<usize>,
@@ -224,22 +224,28 @@ impl ScriptHook for TabBar {
     
     fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
         // Collect templates from the object's vec - templates use prefixed ids (CloseableTab, PermanentTab)
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |_vm, vec| {
-                for kv in vec {
-                    // Templates defined in the DSL end up in the vec
-                    if let Some(id) = kv.key.as_id() {
-                        self.templates.insert(id, kv.value);
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        // Templates defined in the DSL end up in the vec
+                        if let Some(id) = kv.key.as_id() {
+                            if let Some(template_obj) = kv.value.as_object() {
+                                self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                            }
+                        }
                     }
-                }
-            });
+                });
+            }
         }
         
         // Update existing tabs if templates changed
         if apply.is_reload() {
             for (_, (tab, templ_id)) in self.tabs.iter_mut() {
-                if let Some(template_value) = self.templates.get(templ_id) {
-                    tab.script_apply(vm, apply, scope, *template_value);
+                if let Some(template_ref) = self.templates.get(templ_id) {
+                    let template_value: ScriptValue = template_ref.as_object().into();
+                    tab.script_apply(vm, apply, scope, template_value);
                 }
             }
         }
@@ -339,7 +345,7 @@ impl TabBar {
     }
     
     fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: LiveId, template: LiveId) -> &mut Tab {
-        let template_value = self.templates.get(&template).copied();
+        let template_value: Option<ScriptValue> = self.templates.get(&template).map(|r| r.as_object().into());
         let (tab, _) = self.tabs.get_or_insert(cx, tab_id, |cx| {
             let tab = if let Some(value) = template_value {
                 cx.with_vm(|vm| Tab::script_from_value(vm, value))

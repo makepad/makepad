@@ -40,8 +40,8 @@ pub struct ScriptBody {
     pub source: ScriptSource,
     pub tokenizer: ScriptTokenizer,
     pub parser: ScriptParser,
-    pub scope: ScriptObject,
-    pub me: ScriptObject,
+    pub scope: ScriptObjectRef,
+    pub me: ScriptObjectRef,
 }
 
 #[derive(Default)]
@@ -131,11 +131,23 @@ impl<'a> ScriptVm<'a> {
         &mut self.bx.heap
     }
 
-    /// Run garbage collection (mark and sweep).
+    /// Print a script value to stdout with debug formatting.
+    pub fn println(&self, value: impl Into<ScriptValue>) {
+        self.bx.heap.println(value.into());
+    }
+
+    /// Run garbage collection (mark and sweep) silently.
     pub fn gc(&mut self) {
         let start = std::time::Instant::now();
         self.bx.heap.mark(&self.bx.threads, &self.bx.code);
-        self.bx.heap.sweep(start);
+        self.bx.heap.sweep(start, false);
+    }
+
+    /// Run garbage collection with status logging.
+    pub fn gc_with_status(&mut self) {
+        let start = std::time::Instant::now();
+        self.bx.heap.mark(&self.bx.threads, &self.bx.code);
+        self.bx.heap.sweep(start, true);
     }
 
     pub fn thread(&self) -> &ScriptThread {
@@ -371,7 +383,10 @@ impl<'a> ScriptVm<'a> {
         // Extract values from bodies before modifying thread state
         let (scope, me) = {
             let bodies = self.bx.code.bodies.borrow();
-            (bodies[body_id as usize].scope, bodies[body_id as usize].me)
+            (
+                bodies[body_id as usize].scope.obj,
+                bodies[body_id as usize].me.obj,
+            )
         };
 
         self.bx.threads.cur().calls.push(CallFrame {
@@ -400,7 +415,7 @@ impl<'a> ScriptVm<'a> {
     /// Returns None if no transform exists, Some(transformed) if a transform was applied.
     pub fn call_apply_transform(&mut self, value: ScriptValue) -> Option<ScriptValue> {
         if let Some(obj) = value.as_object() {
-            if let Some(ni) = self.bx.heap.objects[obj.index as usize]
+            if let Some(ni) = self.bx.heap.objects[obj]
                 .tag
                 .as_apply_transform()
             {
@@ -421,7 +436,7 @@ impl<'a> ScriptVm<'a> {
                 return Some(result);
             }
         } else if let Some(arr) = value.as_array() {
-            if let Some(ni) = self.bx.heap.arrays[arr.index as usize]
+            if let Some(ni) = self.bx.heap.arrays[arr]
                 .tag
                 .as_apply_transform()
             {
@@ -529,12 +544,12 @@ impl<'a> ScriptVm<'a> {
         let mut map = ScriptObjectMap::default();
         std::mem::swap(
             &mut map,
-            &mut self.bx.heap.objects[object.index as usize].map,
+            &mut self.bx.heap.objects[object].map,
         );
         let r = f(self, &mut map);
         std::mem::swap(
             &mut map,
-            &mut self.bx.heap.objects[object.index as usize].map,
+            &mut self.bx.heap.objects[object].map,
         );
         r
     }
@@ -548,7 +563,7 @@ impl<'a> ScriptVm<'a> {
         f: &mut F,
     ) {
         // First recurse to the prototype (if any), so we process from root to leaf
-        if let Some(proto) = self.bx.heap.objects[object.index as usize]
+        if let Some(proto) = self.bx.heap.objects[object]
             .proto
             .as_object()
         {
@@ -558,12 +573,12 @@ impl<'a> ScriptVm<'a> {
         let mut map = ScriptObjectMap::default();
         std::mem::swap(
             &mut map,
-            &mut self.bx.heap.objects[object.index as usize].map,
+            &mut self.bx.heap.objects[object].map,
         );
         f(self, &mut map);
         std::mem::swap(
             &mut map,
-            &mut self.bx.heap.objects[object.index as usize].map,
+            &mut self.bx.heap.objects[object].map,
         );
     }
 
@@ -575,12 +590,12 @@ impl<'a> ScriptVm<'a> {
         let mut vec = Vec::new();
         std::mem::swap(
             &mut vec,
-            &mut self.bx.heap.objects[object.index as usize].vec,
+            &mut self.bx.heap.objects[object].vec,
         );
         let r = f(self, &vec);
         std::mem::swap(
             &mut vec,
-            &mut self.bx.heap.objects[object.index as usize].vec,
+            &mut self.bx.heap.objects[object].vec,
         );
         r
     }
@@ -593,12 +608,12 @@ impl<'a> ScriptVm<'a> {
         let mut vec = Vec::new();
         std::mem::swap(
             &mut vec,
-            &mut self.bx.heap.objects[object.index as usize].vec,
+            &mut self.bx.heap.objects[object].vec,
         );
         let r = f(self, &mut vec);
         std::mem::swap(
             &mut vec,
-            &mut self.bx.heap.objects[object.index as usize].vec,
+            &mut self.bx.heap.objects[object].vec,
         );
         r
     }
@@ -609,7 +624,7 @@ impl<'a> ScriptVm<'a> {
         f: F,
     ) -> Option<R> {
         if let Some(s) = value.as_string() {
-            if let Some(s) = &self.bx.heap.strings[s.index as usize] {
+            if let Some(s) = &self.bx.heap.strings[s] {
                 let s = s.string.clone();
                 return Some(f(self, &s.0));
             }
@@ -666,12 +681,14 @@ impl<'a> ScriptVm<'a> {
             );
         }
 
-        let scope = self.bx.heap.new_with_proto(id!(scope).into());
-        self.bx.heap.set_object_deep(scope);
+        let scope_obj = self.bx.heap.new_with_proto(id!(scope).into());
+        self.bx.heap.set_object_deep(scope_obj);
         self.bx
             .heap
-            .set_value_def(scope, id!(mod).into(), self.bx.heap.modules.into());
-        let me = self.bx.heap.new_with_proto(id!(root_me).into());
+            .set_value_def(scope_obj, id!(mod).into(), self.bx.heap.modules.into());
+        let scope = self.bx.heap.new_object_ref(scope_obj);
+        let me_obj = self.bx.heap.new_with_proto(id!(root_me).into());
+        let me = self.bx.heap.new_object_ref(me_obj);
 
         let new_body = ScriptBody {
             source: ScriptSource::Mod(new_mod),
@@ -719,7 +736,7 @@ impl<'a> ScriptVm<'a> {
             } else {
                 source
             };
-            let scope = self.bx.code.bodies.borrow()[body_id as usize].scope;
+            let scope = self.bx.code.bodies.borrow()[body_id as usize].scope.obj;
             self.bx
                 .heap
                 .set_value_def(scope, id!(__script_source__).into(), actual_source.into());

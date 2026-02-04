@@ -229,7 +229,6 @@ pub struct AnimatorState {
 impl ScriptHook for AnimatorState {}
 
 /// Runtime state for a single animation track
-#[derive(Clone)]
 struct AnimatorTrack {
     /// The state group this track belongs to (e.g., "hover")
     group_id: LiveId,
@@ -245,7 +244,8 @@ struct AnimatorTrack {
     target_apply: ScriptObject,
     /// The starting values SNAPSHOT (captured/copied when animation begins)
     /// This is a SEPARATE object from state_object - it must not be mutated during animation
-    from_snapshot: ScriptObject,
+    /// Uses ScriptObjectRef to prevent GC from freeing it
+    from_snapshot: ScriptObjectRef,
     /// Whether this track needs redraw
     redraw: bool,
 }
@@ -266,8 +266,9 @@ pub struct Animator {
     tracks: Vec<AnimatorTrack>,
     /// Runtime: The shared state object containing current values from ALL animation groups
     /// This is the source of truth for "from" values when starting new animations
+    /// Uses ScriptObjectRef to prevent GC from freeing it
     #[rust]
-    state_object: Option<ScriptObject>,
+    state_object: Option<ScriptObjectRef>,
 }
 
 impl ScriptHook for Animator {
@@ -318,7 +319,7 @@ impl ScriptApplyDefault for Animator {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) -> Option<ScriptValue> {
-        if !apply.is_new() || apply.is_eval(){
+        if !apply.is_new() || apply.is_eval() {
             return None;
         }
         let index = apply.as_default().map_or(0, |x| x + 1);
@@ -352,7 +353,6 @@ impl Animator {
         let group_id = state[0];
         let target_state_id = state[1];
 
-
         // Get the state group
         let group = self.groups.get(&group_id)?;
 
@@ -378,7 +378,6 @@ impl Animator {
             .map(|idx| self.tracks[idx].state_id)
             .unwrap_or(current_state_id);
 
-
         // If we're already in this state and not animating, do nothing
         if current_state_id == target_state_id && existing_track_idx.is_none() {
             return None;
@@ -391,7 +390,6 @@ impl Animator {
             .or_else(|| target_state.from.get(&id!(all)))
             .copied()
             .unwrap_or(Play::Forward { duration: 0.3 });
-        
 
         // Get the ease from the target state, default to Linear
         let ease = target_state.ease.unwrap_or(Ease::Linear);
@@ -409,10 +407,15 @@ impl Animator {
             self.current_states.insert(group_id, target_state_id);
             // Merge target values into state_object
             cx.with_vm(|vm| {
-                let state_obj = self
-                    .state_object
-                    .get_or_insert_with(|| vm.bx.heap.new_object());
-                Self::merge_object(vm, *state_obj, target_apply);
+                let state_obj = if let Some(ref obj_ref) = self.state_object {
+                    obj_ref.as_object()
+                } else {
+                    let new_obj = vm.bx.heap.new_object();
+                    let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                    self.state_object = Some(obj_ref);
+                    new_obj
+                };
+                Self::merge_object(vm, state_obj, target_apply);
             });
             // Request next frame so the apply gets processed
             self.next_frame = cx.new_next_frame();
@@ -441,8 +444,8 @@ impl Animator {
             vm.map_mut_with(target_apply, |vm, target_map| {
                 for (key, _) in target_map.iter() {
                     // Try state_object first, fall back to default_apply
-                    let from_val = if let Some(state_obj) = self.state_object {
-                        let v = vm.bx.heap.value(state_obj, *key, NoTrap);
+                    let from_val = if let Some(ref state_obj_ref) = self.state_object {
+                        let v = vm.bx.heap.value(state_obj_ref.as_object(), *key, NoTrap);
                         if !v.is_nil() && !v.is_err() {
                             v
                         } else if let Some(default_obj) = default_apply {
@@ -469,8 +472,12 @@ impl Animator {
                 }
             });
 
-            snapshot
+            // Create a ScriptObjectRef to prevent GC from freeing the snapshot
+            vm.bx.heap.new_object_ref(snapshot)
         });
+
+        // Get the object before moving into track (for return value)
+        let snapshot_obj = from_snapshot.as_object();
 
         // Create new track
         // Use NEG_INFINITY as marker - will be set to actual time on first NextFrame
@@ -491,7 +498,7 @@ impl Animator {
         self.next_frame = cx.new_next_frame();
 
         // Return the snapshot (from values at t=0)
-        Some(from_snapshot.into())
+        Some(snapshot_obj.into())
     }
 
     /// Immediately cut to a state without animation
@@ -521,10 +528,15 @@ impl Animator {
 
         // Merge target values into state_object
         cx.with_vm(|vm| {
-            let state_obj = self
-                .state_object
-                .get_or_insert_with(|| vm.bx.heap.new_object());
-            Self::merge_object(vm, *state_obj, target_apply);
+            let state_obj = if let Some(ref obj_ref) = self.state_object {
+                obj_ref.as_object()
+            } else {
+                let new_obj = vm.bx.heap.new_object();
+                let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                self.state_object = Some(obj_ref);
+                new_obj
+            };
+            Self::merge_object(vm, state_obj, target_apply);
         });
 
         // Return the apply object directly
@@ -599,16 +611,19 @@ impl Animator {
             // The state_object structure is populated on first frame and reused thereafter.
             let result = cx.with_vm(|vm| {
                 // Get or create the shared state object (created once, reused forever)
-                let state_obj = self
-                    .state_object
-                    .get_or_insert_with(|| vm.bx.heap.new_object());
-                let state_obj = *state_obj;
+                let state_obj = if let Some(ref obj_ref) = self.state_object {
+                    obj_ref.as_object()
+                } else {
+                    let new_obj = vm.bx.heap.new_object();
+                    let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                    self.state_object = Some(obj_ref);
+                    new_obj
+                };
 
                 for track in &self.tracks {
                     let elapsed = current_time - track.start_time;
                     let (ended, time) = track.play.get_ended_time(elapsed);
                     let mix = if ended { 1.0 } else { track.ease.map(time) };
-
 
                     if !ended {
                         any_animating = true;
@@ -622,7 +637,7 @@ impl Animator {
                     Self::interpolate_object(
                         vm,
                         state_obj,
-                        track.from_snapshot,
+                        track.from_snapshot.as_object(),
                         track.target_apply,
                         mix,
                     );

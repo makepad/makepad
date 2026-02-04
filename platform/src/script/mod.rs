@@ -16,4 +16,5 @@ pub fn define_script_modules(vm:&mut ScriptVm){
     crate::script::run::define_run_module(vm);
     crate::script::timer::extend_std_module_with_timer(vm);
     crate::script::task::extend_std_module_with_task(vm);
+    crate::script::std::extend_std_module_with_println(vm);
 }

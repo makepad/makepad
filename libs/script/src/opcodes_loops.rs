@@ -218,7 +218,7 @@ impl<'a> ScriptVm<'a> {
                 
                 while self.bx.threads.cur_ref().scopes.len() > bases_scope{
                     let scope = self.bx.threads.cur().scopes.pop().unwrap();
-                    self.bx.heap.free_object_if_unreffed(scope);
+                    self.bx.heap.free_object_if_unreffed(scope); // DISABLED: investigating RootObject already freed
                 }
                 let scope = self.bx.heap.new_with_proto((*self.bx.threads.cur_ref().scopes.last().unwrap()).into());
                 self.bx.threads.cur().scopes.push(scope);

@@ -5,6 +5,7 @@ pub use makepad_math;
 pub use makepad_math::makepad_micro_serde;
 pub use makepad_script_derive;
 pub mod colorhex;
+pub mod gen_index;
 pub mod heap;
 pub mod mod_gc;
 pub mod mod_math;

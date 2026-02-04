@@ -21,7 +21,7 @@ pub struct PageFlip {
     #[live(false)] lazy_init: bool,
     #[live] active_page: LiveId,
     #[rust] draw_state: DrawStateWrap<Walk>,
-    #[rust] templates: ComponentMap<LiveId, ScriptValue>,
+    #[rust] templates: ComponentMap<LiveId, ScriptObjectRef>,
     #[rust] pages: ComponentMap<LiveId, WidgetRef>,
 }
 
@@ -34,28 +34,34 @@ impl ScriptHook for PageFlip {
     
     fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
         // Handle $prop children from the object's vec (these are our page templates)
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |vm, vec| {
-                for kv in vec {
-                    if kv.key.is_prefixed_id() {  // $prop children are our page templates
-                        if let Some(id) = kv.key.as_id() {
-                            self.templates.insert(id, kv.value);
-                            
-                            // If we already have this page instantiated, apply updates to it
-                            if let Some(page) = self.pages.get_mut(&id) {
-                                page.script_apply(vm, apply, scope, kv.value);
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if kv.key.is_prefixed_id() {  // $prop children are our page templates
+                            if let Some(id) = kv.key.as_id() {
+                                if let Some(template_obj) = kv.value.as_object() {
+                                    self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                }
+                                
+                                // If we already have this page instantiated, apply updates to it
+                                if let Some(page) = self.pages.get_mut(&id) {
+                                    page.script_apply(vm, apply, scope, kv.value);
+                                }
                             }
                         }
                     }
-                }
-            });
+                });
+            }
         }
         
         // If not lazy_init, create all pages upfront
         if !self.lazy_init && (apply.is_new() || apply.is_reload()) {
-            for (page_id, template) in self.templates.iter() {
+            for (page_id, template_ref) in self.templates.iter() {
                 if !self.pages.contains_key(page_id) {
-                    let page = WidgetRef::script_from_value_scoped(vm, scope, *template);
+                    let template_value: ScriptValue = template_ref.as_object().into();
+                    let page = WidgetRef::script_from_value_scoped(vm, scope, template_value);
                     self.pages.insert(*page_id, page);
                 }
             }
@@ -66,10 +72,11 @@ impl ScriptHook for PageFlip {
 impl PageFlip {
     /// Returns the widget for the given page templated ID, creating it if necessary.
     pub fn page(&mut self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
-        if let Some(template) = self.templates.get(&page_id).copied() {
+        if let Some(template_ref) = self.templates.get(&page_id) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             if !self.pages.contains_key(&page_id) {
                 let page = cx.with_vm(|vm| {
-                    WidgetRef::script_from_value(vm, template)
+                    WidgetRef::script_from_value(vm, template_value)
                 });
                 self.pages.insert(page_id, page);
             }

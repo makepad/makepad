@@ -112,8 +112,9 @@ impl ScriptHook for FlatList {
         // Update existing items if templates changed
         if apply.is_reload() {
             for (_, item) in self.items.iter_mut() {
-                if let Some(template_value) = self.templates.get(&item.template) {
-                    item.widget.script_apply(vm, apply, scope, *template_value);
+                if let Some(template_ref) = self.templates.get(&item.template) {
+                    let template_value: ScriptValue = template_ref.as_object().into();
+                    item.widget.script_apply(vm, apply, scope, template_value);
                 }
             }
         }
@@ -145,7 +146,8 @@ impl FlatList {
     pub fn item(&mut self, cx: &mut Cx, id: LiveId, template: LiveId) -> Option<WidgetRef> {
         use std::collections::hash_map::Entry;
 
-        if let Some(template_value) = self.templates.get(&template).copied() {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             match self.items.entry(id) {
                 Entry::Occupied(occ) => Some(occ.get().widget.clone()),
                 Entry::Vacant(vac) => {

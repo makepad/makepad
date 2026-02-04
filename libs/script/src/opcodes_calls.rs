@@ -76,8 +76,7 @@ impl<'a> ScriptVm<'a> {
                     self.bx.threads.cur().is_paused = false;
                     
                     self.bx.threads.cur().trap.ip = ip;
-                    self.bx.threads.cur().push_stack_value(ret);
-                    self.bx.heap.free_object_if_unreffed(args);
+                    self.bx.threads.cur().push_stack_value(ret); self.bx.heap.free_object_if_unreffed(args); // DISABLED: investigating RootObject already freed
                     self.bx.threads.cur().trap.goto_next();
                     return true // Native complete: caller should handle pop_to_me
                 }

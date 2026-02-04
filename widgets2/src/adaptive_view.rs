@@ -86,7 +86,7 @@ pub struct AdaptiveView {
 
     /// A map of templates that are used to create the active widget.
     #[rust]
-    templates: ComponentMap<LiveId, ScriptValue>,
+    templates: ComponentMap<LiveId, ScriptObjectRef>,
 
     /// The active widget that is currently being displayed.
     #[rust]
@@ -159,26 +159,31 @@ impl ScriptHook for AdaptiveView {
 
     fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
         // Handle $prop children from the object's vec
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |vm, vec| {
-                for kv in vec {
-                    if kv.key.is_prefixed_id() {  // $prop children
-                        if let Some(id) = kv.key.as_id() {
-                            self.templates.insert(id, kv.value);
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if kv.key.is_prefixed_id() {  // $prop children
+                            if let Some(id) = kv.key.as_id() {
+                                if let Some(template_obj) = kv.value.as_object() {
+                                    self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                }
 
-                            if id != id!($Desktop) && id != id!($Mobile) {
-                                self.has_custom_templates = true;
-                            }
+                                if id != id!($Desktop) && id != id!($Mobile) {
+                                    self.has_custom_templates = true;
+                                }
 
-                            if let Some(widget_variant) = self.active_widget.as_mut() {
-                                if widget_variant.template_id == id {
-                                    widget_variant.widget_ref.script_apply(vm, apply, scope, kv.value);
+                                if let Some(widget_variant) = self.active_widget.as_mut() {
+                                    if widget_variant.template_id == id {
+                                        widget_variant.widget_ref.script_apply(vm, apply, scope, kv.value);
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            });
+                });
+            }
         }
 
         // Do not override the current selector if we are updating from the doc
@@ -189,8 +194,9 @@ impl ScriptHook for AdaptiveView {
         // If there are no custom templates, create a default widget with the default variant Desktop
         // This is needed so that methods that run before drawing (find_widgets, walk) have something to work with
         if !self.has_custom_templates {
-            let template = self.templates.get(&id!($Desktop)).unwrap();
-            let widget_ref = WidgetRef::script_from_value_scoped(vm, scope, *template);
+            let template_ref = self.templates.get(&id!($Desktop)).unwrap();
+            let template_value: ScriptValue = template_ref.as_object().into();
+            let widget_ref = WidgetRef::script_from_value_scoped(vm, scope, template_value);
             self.active_widget = Some(WidgetVariant {
                 template_id: live_id!(Desktop),
                 widget_ref,
@@ -271,9 +277,10 @@ impl AdaptiveView {
         cx.widget_query_invalidation_event = Some(cx.event_id());
 
         // Otherwise create a new widget from the template
-        let template = *self.templates.get(&template_id).unwrap();
+        let template_ref = self.templates.get(&template_id).unwrap();
+        let template_value: ScriptValue = template_ref.as_object().into();
         let widget_ref = cx.with_vm(|vm| {
-            WidgetRef::script_from_value(vm, template)
+            WidgetRef::script_from_value(vm, template_value)
         });
 
         // Update this widget's walk to match the walk of the active widget,

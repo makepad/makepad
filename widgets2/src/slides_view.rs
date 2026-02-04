@@ -92,7 +92,7 @@ pub struct SlidesView {
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
-    templates: ComponentMap<LiveId, ScriptValue>,
+    templates: ComponentMap<LiveId, ScriptObjectRef>,
     #[rust]
     slides: ComponentMap<LiveId, WidgetRef>,
     #[rust]
@@ -127,30 +127,36 @@ impl ScriptHook for SlidesView {
         value: ScriptValue,
     ) {
         // Handle $prop children from the object's vec (these are our slide templates)
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |vm, vec| {
-                for kv in vec {
-                    if kv.key.is_prefixed_id() {
-                        // $prop children are our slides
-                        if let Some(id) = kv.key.as_id() {
-                            self.templates.insert(id, kv.value);
-                            self.draw_order.push(id);
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if kv.key.is_prefixed_id() {
+                            // $prop children are our slides
+                            if let Some(id) = kv.key.as_id() {
+                                if let Some(template_obj) = kv.value.as_object() {
+                                    self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    self.draw_order.push(id);
+                                }
 
-                            // If we already have this slide instantiated, apply updates to it
-                            if let Some(slide) = self.slides.get_mut(&id) {
-                                slide.script_apply(vm, apply, scope, kv.value);
+                                // If we already have this slide instantiated, apply updates to it
+                                if let Some(slide) = self.slides.get_mut(&id) {
+                                    slide.script_apply(vm, apply, scope, kv.value);
+                                }
                             }
                         }
                     }
-                }
-            });
+                });
+            }
         }
 
         // Create all slides upfront (slides need to be available for navigation)
         if apply.is_new() || apply.is_reload() {
-            for (slide_id, template) in self.templates.iter() {
+            for (slide_id, template_ref) in self.templates.iter() {
                 if !self.slides.contains_key(slide_id) {
-                    let slide = WidgetRef::script_from_value_scoped(vm, scope, *template);
+                    let template_value: ScriptValue = template_ref.as_object().into();
+                    let slide = WidgetRef::script_from_value_scoped(vm, scope, template_value);
                     self.slides.insert(*slide_id, slide);
                 }
             }

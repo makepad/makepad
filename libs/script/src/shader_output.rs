@@ -371,7 +371,7 @@ impl ShaderOutput{
         }
         // Check if it's a pod instance
         if let Some(pod) = value.as_pod() {
-            let pod = &vm.bx.heap.pods[pod.index as usize];
+            let pod = &vm.bx.heap.pods[pod];
             return Some(pod.ty);
         }
         // Check if it's a pod type reference

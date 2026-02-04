@@ -116,9 +116,10 @@ fn derive_script_impl_inner(
         // Declare variables for apply_default fields to store their dirty values
 
         for field in &fields {
-            // Handle #[source] field specially - when applying from script, set it to the object being applied
+            // Handle #[source] field specially - only update during New/Reload, NOT during Eval
+            // Eval creates temporary prototype objects that shouldn't become the permanent source
             if field.attrs.iter().any(|a| a.name == "source") {
-                tb.add("if apply.is_from_script() {");
+                tb.add("if !apply.is_eval() && apply.is_from_script() {");
                 tb.add("    if let Some(obj) = value.as_object() {");
                 tb.add("        self.")
                     .ident(&field.name)

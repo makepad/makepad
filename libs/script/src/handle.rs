@@ -74,19 +74,18 @@ impl ScriptHeap {
         mut hgc: Box<dyn ScriptHandleGc>,
     ) -> ScriptHandle {
         if let Some(mut handle) = self.handles_free.pop() {
+            // handle already has the correct generation from gc.rs sweep
+            handle.ty = ty;
             hgc.set_handle(handle);
-            self.handles[handle.index as usize] = Some(ScriptHandleData {
+            self.handles[handle] = Some(ScriptHandleData {
                 tag: Default::default(),
                 handle: hgc,
             });
-            handle.ty = ty;
             handle
         } else {
             let index = self.handles.len();
-            let handle = ScriptHandle {
-                ty,
-                index: index as _,
-            };
+            // New slot starts at generation 0
+            let handle = ScriptHandle::new(ty, index as _, 0);
             hgc.set_handle(handle);
             self.handles.push(Some(ScriptHandleData {
                 tag: Default::default(),
@@ -97,9 +96,8 @@ impl ScriptHeap {
     }
 
     pub fn handle_ref<T: ScriptHandleGc + 'static>(&self, handle: ScriptHandle) -> Option<&T> {
-        self.handles
-            .get(handle.index as usize)
-            .and_then(|h| h.as_ref())
+        self.handles[handle]
+            .as_ref()
             .and_then(|h| h.handle.downcast_ref::<T>())
     }
 
@@ -107,9 +105,8 @@ impl ScriptHeap {
         &mut self,
         handle: ScriptHandle,
     ) -> Option<&mut T> {
-        self.handles
-            .get_mut(handle.index as usize)
-            .and_then(|h| h.as_mut())
+        self.handles[handle]
+            .as_mut()
             .and_then(|h| h.handle.downcast_mut::<T>())
     }
 }
