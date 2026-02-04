@@ -25,7 +25,6 @@ use {
             apple_media::CxAppleMedia,
             cx_native::EventFlow,
             metal::{DrawPassMode, MetalCx},
-            metal_xpc::start_xpc_service,
         },
         permission::Permission,
         thread::SignalToUI,
@@ -814,12 +813,6 @@ impl Cx {
 impl CxOsApi for Cx {
     fn pre_start() -> bool {
         init_apple_classes_global();
-        for arg in std::env::args() {
-            if arg == "--metal-xpc" {
-                start_xpc_service();
-                return true;
-            }
-        }
         false
     }
 
@@ -855,7 +848,8 @@ impl CxOsApi for Cx {
     }
 
     fn start_stdin_service(&mut self) {
-        self.start_xpc_service()
+        // IOSurface-based texture sharing doesn't need a separate service
+        // The mach ports are passed directly via stdin JSON messages
     }
 
     fn seconds_since_app_start(&self) -> f64 {

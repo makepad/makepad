@@ -1341,5 +1341,43 @@ extern "C" {
     pub static GCControllerDidStopBeingCurrentNotification: ObjcId;
 }
 
+// IOSurface framework for cross-process texture sharing
+#[cfg(target_os = "macos")]
+pub type IOSurfaceRef = *mut c_void;
+#[cfg(target_os = "macos")]
+pub type IOSurfaceID = u32;
+#[cfg(target_os = "macos")]
+pub type mach_port_t = u32;
+
+#[cfg(target_os = "macos")]
+pub const MACH_PORT_NULL: mach_port_t = 0;
+
+#[cfg(target_os = "macos")]
+#[link(name = "IOSurface", kind = "framework")]
+extern "C" {
+    pub fn IOSurfaceCreate(properties: ObjcId) -> IOSurfaceRef;
+    pub fn IOSurfaceGetID(surface: IOSurfaceRef) -> IOSurfaceID;
+    pub fn IOSurfaceLookup(surface_id: IOSurfaceID) -> IOSurfaceRef;
+    pub fn IOSurfaceCreateMachPort(surface: IOSurfaceRef) -> mach_port_t;
+    pub fn IOSurfaceLookupFromMachPort(port: mach_port_t) -> IOSurfaceRef;
+    pub fn IOSurfaceGetWidth(surface: IOSurfaceRef) -> usize;
+    pub fn IOSurfaceGetHeight(surface: IOSurfaceRef) -> usize;
+    pub fn IOSurfaceIncrementUseCount(surface: IOSurfaceRef);
+    pub fn IOSurfaceDecrementUseCount(surface: IOSurfaceRef);
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    pub fn CFRelease(cf: *const c_void);
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "System")]
+extern "C" {
+    pub fn mach_port_deallocate(task: mach_port_t, name: mach_port_t) -> i32;
+    pub fn mach_task_self() -> mach_port_t;
+}
+
 
 
