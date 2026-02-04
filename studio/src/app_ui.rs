@@ -352,69 +352,18 @@ script_mod! {
         DockToolbar{
             $content +: {
                 align: Align{x: 0. y: 0.5}
-                View{
-                    width: Fit
-                    flow: Flow.Right
-                    CheckBoxCustom{
-                        text: "Error"
-                        align: Align{y: 0.5}
-
-                        icon_walk: Walk{width: 7.}
-                        draw_icon +: {
-                            color: theme.color_label_outer
-                            color_active: STUDIO_PALETTE_4
-                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
-                        }
-                    }
-                    CheckBoxCustom{
-                        text: "Warning"
-                        align: Align{y: 0.5}
-
-                        icon_walk: Walk{width: 7.}
-                        draw_icon +: {
-                            color: theme.color_label_outer
-                            color_active: STUDIO_PALETTE_1
-                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
-                        }
-                    }
-                    CheckBoxCustom{
-                        text: "Log"
-                        align: Align{y: 0.5}
-
-                        icon_walk: Walk{width: 7.}
-                        draw_icon +: {
-                            color: theme.color_label_outer
-                            color_active: theme.color_u_5
-                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
-                        }
-                    }
-                    CheckBoxCustom{
-                        text: "Wait"
-                        align: Align{y: 0.5}
-
-                        icon_walk: Walk{width: 7.}
-                        draw_icon +: {
-                            color: theme.color_label_outer
-                            color_active: STUDIO_PALETTE_2
-                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
-                        }
-                    }
-                    CheckBoxCustom{
-                        text: "Panic"
-                        align: Align{y: 0.5}
-
-                        icon_walk: Walk{width: 7.}
-                        draw_icon +: {
-                            color: theme.color_label_outer
-                            color_active: STUDIO_PALETTE_5
-                            svg: crate_resource("self://resources/icons/icon_log_bullet.svg")
-                        }
-                    }
+                $tail_checkbox: Toggle{
+                    text: "Tail"
+                    active: true
                 }
                 Filler{}
-                TextInputFlat{
+                $log_filter: TextInputFlat{
                     width: 200.
                     empty_text: "Filter"
+                }
+                $clear_filter: ButtonFlatter{
+                    padding: Inset{left: 4. right: 4.}
+                    text: "x"
                 }
             }
         }
