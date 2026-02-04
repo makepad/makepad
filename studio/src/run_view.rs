@@ -304,7 +304,6 @@ impl RunView {
                     // Inform the client about the new swapchain it *should* use
                     // (using older swapchains isn't an error, but the draw calls
                     // will either be noops, or write to orphaned GPU memory ranges).
-
                     manager.send_host_to_stdin(
                         run_view_id,
                         HostToStdin::Swapchain(shared_swapchain.images_map(|pi| pi.image.unwrap())),
