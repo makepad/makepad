@@ -874,7 +874,7 @@ impl MatchEvent for App {
         let log_list = self.ui.log_list(ids!($log_list));
         let tail_checkbox = self.ui.check_box(ids!($tail_checkbox));
         if let Some(tail) = tail_checkbox.changed(&actions) {
-            log_list.set_tail(tail);
+            log_list.set_tail(cx, tail);
         }
         // If user scrolled and is no longer at end, uncheck tail
         if log_list.scrolled(&actions) && !log_list.is_at_end() {

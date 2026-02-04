@@ -1131,6 +1131,16 @@ impl PortalListRef {
         inner.smooth_scroll_to_end(cx, speed, max_items_to_show);
     }
     
+    /// Immediately jumps to the end of the list without animation.
+    pub fn scroll_to_end(&self, cx: &mut Cx) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        if inner.range_end > 0 {
+            inner.first_id = inner.range_end - 1;
+            inner.first_scroll = 0.0;
+            inner.area.redraw(cx);
+        }
+    }
+    
     /// Returns whether this PortalList is currently filling the viewport.
     pub fn is_filling_viewport(&self) -> bool {
         let Some(inner) = self.borrow() else { return false };
