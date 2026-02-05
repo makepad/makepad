@@ -56,6 +56,9 @@ enum ScrollState {
         delta: f64,
         next_frame: NextFrame,
     },
+    Tailing {
+        next_frame: NextFrame,
+    },
 }
 
 /// Auto-scroll state while selecting text beyond viewport bounds
@@ -138,7 +141,7 @@ impl HeightCache {
         }
     }
 
-    fn reset(&mut self) {
+    fn _reset(&mut self) {
         self.measured_sum = 0.0;
         self.measured_count = 0;
     }
@@ -286,9 +289,31 @@ impl HeightTree {
         (item_idx.min(self.size.saturating_sub(1)), offset.max(0.0))
     }
 
-    /// Resize the tree when range changes
+    /// Resize the tree when range changes - extends efficiently, only recreates if shrinking
     fn resize(&mut self, new_size: usize, default_height: f64) {
-        *self = HeightTree::new(new_size, default_height);
+        if new_size == self.size {
+            return;
+        }
+
+        if new_size > self.size {
+            // Extend the tree - add new items with default_height
+            let old_size = self.size;
+            self.size = new_size;
+            self.tree.resize(new_size + 1, 0.0);
+            self.measured.resize(new_size, false);
+
+            // Add each new item to the tree
+            for i in old_size..new_size {
+                let mut j = i + 1; // 1-indexed
+                while j <= new_size {
+                    self.tree[j] += default_height;
+                    j += j & j.wrapping_neg();
+                }
+            }
+        } else {
+            // Shrinking - rebuild (rare case, e.g., clearing chat)
+            *self = HeightTree::new(new_size, default_height);
+        }
     }
 
     /// Update the default height for unmeasured items
@@ -375,8 +400,13 @@ pub struct PortalList {
     #[live(false)]
     auto_tail: bool,
 
+    #[live(false)]
+    smooth_tail: bool,
+
     #[rust(false)]
     tail_range: bool,
+    #[rust(0.0)]
+    tail_adjustment_needed: f64,
     #[rust(false)]
     at_end: bool,
     #[rust(true)]
@@ -635,8 +665,37 @@ impl PortalList {
                     tree.update_default_height(new_avg);
                 }
 
-                if !self.scroll_bar.animator_in_state(cx, ids!(hover.drag)) {
-                    self.update_scroll_bar(cx);
+                // When tail_range is true and we're not already at the end, we need to scroll
+                // down to keep the bottom of the content visible
+                if self.tail_range && !self.at_end {
+                    // Calculate how much we need to scroll to get to the end
+                    // The shift calculation above tells us: viewport_height - last_item_pos
+                    // When this is negative, content extends beyond viewport
+                    if let Some(last_pos) = last_item_pos {
+                        let viewport_height = viewport.size.index(vi);
+                        let overflow = last_pos - viewport_height;
+                        if overflow > 0.5 {
+                            // Content extends beyond viewport, store the adjustment needed
+                            self.tail_adjustment_needed = overflow;
+                        }
+                    }
+                }
+
+                // Apply tail scroll adjustment - scroll down to keep bottom visible
+                if self.tail_adjustment_needed > 0.5 {
+                    if self.smooth_tail {
+                        // Start smooth tailing animation via scroll state
+                        if !matches!(self.scroll_state, ScrollState::Tailing { .. }) {
+                            self.scroll_state = ScrollState::Tailing {
+                                next_frame: cx.new_next_frame(),
+                            };
+                        }
+                    } else {
+                        // Instant jump: adjust first_scroll to scroll down
+                        self.first_scroll -= self.tail_adjustment_needed;
+                        self.tail_adjustment_needed = 0.0;
+                        self.area.redraw(cx);
+                    }
                 }
             }
         }
@@ -678,6 +737,12 @@ impl PortalList {
                     dvec2(virtual_total, 100.0),
                 );
             }
+        }
+
+        // Update scroll bar position AFTER draw_scroll_bar sets view_total
+        // This ensures the position is clamped correctly
+        if !self.scroll_bar.animator_in_state(cx, ids!(hover.drag)) {
+            self.update_scroll_bar(cx);
         }
 
         // Keep items when selecting so we can copy text from scrolled-out items
@@ -1050,6 +1115,10 @@ impl PortalList {
             // first_scroll is typically 0 or negative (item partially scrolled off top)
             // Negate it because negative first_scroll means we've scrolled down into the item
             let scroll_pos = (height_before - self.first_scroll).max(0.0);
+
+            log!("update_scroll_bar: first_id={}, first_idx={}, first_scroll={}, height_before={}, scroll_pos={}, at_end={}, tree.total={}",
+                 self.first_id, first_idx, self.first_scroll, height_before, scroll_pos, self.at_end, tree.total());
+
             self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
         } else {
             // Fallback to old integer-based calculation
@@ -1095,6 +1164,17 @@ impl PortalList {
     /// Returns `true` if currently at the end of the list.
     pub fn is_at_end(&self) -> bool {
         self.at_end
+    }
+
+    /// Enables or disables auto-tracking the last item in the list.
+    pub fn set_tail_range(&mut self, tail_range: bool) {
+        self.tail_range = tail_range;
+    }
+
+    /// Sets the first visible item and scroll offset.
+    pub fn set_first_id_and_scroll(&mut self, first_id: usize, first_scroll: f64) {
+        self.first_id = first_id;
+        self.first_scroll = first_scroll;
     }
 
     /// Returns the number of items that are currently visible in the viewport.
@@ -1494,25 +1574,20 @@ impl Widget for PortalList {
             });
 
         if let Some((scroll_to, at_end)) = scroll_to {
-            if at_end && self.auto_tail {
-                self.first_id = self.range_end.max(1) - 1;
-                self.first_scroll = 0.0;
-                self.tail_range = true;
-            } else {
-                self.tail_range = false;
+            // Set tail_range based on whether we're at the end
+            self.tail_range = at_end && self.auto_tail;
 
-                // Use height_tree to map scroll position to item + offset
-                if let Some(ref tree) = self.height_tree {
-                    let (item_idx, offset) = tree.find_position(scroll_to);
-                    self.first_id = self.range_start + item_idx;
-                    // first_scroll is negative when scrolled into the item
-                    self.first_scroll = -offset;
-                } else {
-                    // Fallback to old integer-based calculation
-                    self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
-                        * self.view_window as f64) as usize;
-                    self.first_scroll = 0.0;
-                }
+            // Use height_tree to map scroll position to item + offset
+            if let Some(ref tree) = self.height_tree {
+                let (item_idx, offset) = tree.find_position(scroll_to);
+                self.first_id = self.range_start + item_idx;
+                // first_scroll is negative when scrolled into the item
+                self.first_scroll = -offset;
+            } else {
+                // Fallback to old integer-based calculation
+                self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
+                    * self.view_window as f64) as usize;
+                self.first_scroll = 0.0;
             }
 
             cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
@@ -1523,7 +1598,7 @@ impl Widget for PortalList {
         // When selectable, we handle mouse/touch events at PortalList level for cross-item selection.
         // However, we need to pass through events to interactive items (links, buttons, etc.)
         // so they can be clicked. We check if the event point hits any interactive item.
-        // 
+        //
         // Hover events (FingerHoverIn/Out/Over) are ALWAYS passed through so interactive items
         // can properly show/hide their hover states.
         let mut pass_through_to_children = true;
@@ -1661,6 +1736,30 @@ impl Widget for PortalList {
                         self.area.redraw(cx);
                     } else {
                         self.was_scrolling = false;
+                        self.scroll_state = ScrollState::Stopped;
+                    }
+                }
+            }
+            ScrollState::Tailing { next_frame } => {
+                if next_frame.is_event(event).is_some() {
+                    if self.tail_adjustment_needed > 0.5 {
+                        // Smooth scroll: move a fraction of the distance each frame
+                        // Use exponential ease-out for smooth deceleration
+                        let step = self.tail_adjustment_needed * 0.25;
+                        let step = step.max(1.0); // Minimum 1 pixel per frame
+                        self.first_scroll -= step;
+                        self.tail_adjustment_needed -= step;
+
+                        if self.tail_adjustment_needed > 0.5 {
+                            *next_frame = cx.new_next_frame();
+                        } else {
+                            self.tail_adjustment_needed = 0.0;
+                            self.scroll_state = ScrollState::Stopped;
+                        }
+                        cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+                        self.area.redraw(cx);
+                    } else {
+                        self.tail_adjustment_needed = 0.0;
                         self.scroll_state = ScrollState::Stopped;
                     }
                 }

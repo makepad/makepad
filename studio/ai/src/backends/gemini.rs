@@ -12,6 +12,12 @@ struct GeminiResponse {
     #[rename(usageMetadata)]
     usage_metadata: Option<GeminiUsageMetadata>,
     error: Option<GeminiError>,
+    #[rename(modelVersion)]
+    #[allow(dead_code)]
+    model_version: Option<String>,
+    #[rename(responseId)]
+    #[allow(dead_code)]
+    response_id: Option<String>,
 }
 
 #[derive(DeJson, Debug)]
@@ -23,6 +29,7 @@ struct GeminiCandidate {
 
 #[derive(DeJson, Debug, Clone)]
 struct GeminiContent {
+    #[allow(dead_code)]
     role: Option<String>,
     parts: Vec<GeminiPart>,
 }
@@ -41,6 +48,15 @@ struct GeminiFunctionCall {
 }
 
 #[derive(DeJson, Debug, Clone)]
+struct GeminiTokenDetails {
+    #[allow(dead_code)]
+    modality: Option<String>,
+    #[rename(tokenCount)]
+    #[allow(dead_code)]
+    token_count: Option<u32>,
+}
+
+#[derive(DeJson, Debug, Clone)]
 struct GeminiUsageMetadata {
     #[rename(promptTokenCount)]
     prompt_token_count: Option<u32>,
@@ -49,6 +65,12 @@ struct GeminiUsageMetadata {
     #[rename(totalTokenCount)]
     #[allow(dead_code)]
     total_token_count: Option<u32>,
+    #[rename(promptTokensDetails)]
+    #[allow(dead_code)]
+    prompt_tokens_details: Option<Vec<GeminiTokenDetails>>,
+    #[rename(candidatesTokensDetails)]
+    #[allow(dead_code)]
+    candidates_tokens_details: Option<Vec<GeminiTokenDetails>>,
 }
 
 #[derive(DeJson, Debug)]
