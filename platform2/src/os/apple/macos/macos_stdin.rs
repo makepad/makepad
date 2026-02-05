@@ -3,14 +3,16 @@ use {
         cx::Cx,
         cx_api::CxOsOp,
         draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-        //makepad_live_compiler::LiveFileChange,
         event::Event,
         event::{WindowGeom, WindowGeomChangeEvent},
         makepad_live_id::*,
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
-            cx_stdin::{HostToStdin, PollTimer, PresentableDraw, StdinToHost, Swapchain},
+            cx_stdin::{
+                HostToStdin, PollTimer, PresentableDraw, PresentableImageId, StdinToHost,
+                SWAPCHAIN_IMAGE_COUNT,
+            },
             metal::{DrawPassMode, MetalCx},
         },
         texture::{Texture, TextureFormat},
@@ -20,18 +22,26 @@ use {
     std::{io, io::prelude::*, io::BufReader},
 };
 
+/// Local swapchain for client-side texture management
+struct LocalSwapchain {
+    alloc_width: u32,
+    alloc_height: u32,
+    presentable_images: [LocalPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+struct LocalPresentableImage {
+    id: PresentableImageId,
+    iosurface_id: u32,
+    texture: Option<Texture>,
+}
+
 pub(crate) struct StdinWindow {
-    swapchain: Option<Swapchain<Option<Texture>>>,
-    /// IOSurface IDs for the presentable images (received from host)
-    iosurface_ids: Vec<u32>,
+    swapchain: Option<LocalSwapchain>,
 }
 
 impl StdinWindow {
     fn new() -> Self {
-        Self {
-            swapchain: None,
-            iosurface_ids: Vec::new(),
-        }
+        Self { swapchain: None }
     }
 }
 
@@ -62,7 +72,7 @@ impl Cx {
                 CxDrawPassParent::Window(window_id) => {
                     if let Some(swapchain) = &mut stdin_windows[window_id.id()].swapchain {
                         let [current_image] = &swapchain.presentable_images;
-                        if let Some(texture) = &current_image.image {
+                        if let Some(texture) = &current_image.texture {
                             let window = &mut self.windows[window_id];
                             let pass = &mut self.passes[window.main_pass_id.unwrap()];
                             pass.color_textures = vec![CxDrawPassColorTexture {
@@ -226,40 +236,42 @@ impl Cx {
                     }
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
-                    // Store the IOSurface IDs from the swapchain
-                    stdin_windows[new_swapchain.window_id].iosurface_ids = 
-                        new_swapchain.presentable_images.iter()
-                            .map(|pi| pi.image.iosurface_id)
-                            .collect();
-                    
-                    stdin_windows[new_swapchain.window_id].swapchain =
-                        Some(new_swapchain.images_map(|_| None));
+                    // Convert SharedSwapchain to LocalSwapchain
+                    stdin_windows[new_swapchain.window_id].swapchain = Some(LocalSwapchain {
+                        alloc_width: new_swapchain.alloc_width,
+                        alloc_height: new_swapchain.alloc_height,
+                        presentable_images: new_swapchain.presentable_images.map(|pi| {
+                            LocalPresentableImage {
+                                id: pi.id,
+                                iosurface_id: pi.iosurface_id,
+                                texture: None,
+                            }
+                        }),
+                    });
 
                     self.redraw_all();
                     self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
                 }
                 HostToStdin::Tick => {
                     for stdin_window in &mut stdin_windows {
-                        if stdin_window.swapchain.is_some() {
-                            let swapchain = stdin_window.swapchain.as_mut().unwrap();
-                            let [presentable_image] = &swapchain.presentable_images;
+                        if let Some(swapchain) = stdin_window.swapchain.as_mut() {
+                            let [presentable_image] = &mut swapchain.presentable_images;
                             // Create texture from IOSurface via global ID lookup
-                            if presentable_image.image.is_none() && !stdin_window.iosurface_ids.is_empty() {
-                                let iosurface_id = stdin_window.iosurface_ids[0];
-                                if iosurface_id != 0 {
-                                    let format = TextureFormat::SharedBGRAu8 {
-                                        id: presentable_image.id,
-                                        width: swapchain.alloc_width as usize,
-                                        height: swapchain.alloc_height as usize,
-                                        initial: true,
-                                    };
-                                    let texture = Texture::new_with_format(self, format);
-                                    if self.textures[texture.texture_id()]
-                                        .update_from_shared_handle(metal_cx, iosurface_id)
-                                    {
-                                        let [presentable_image] = &mut swapchain.presentable_images;
-                                        presentable_image.image = Some(texture);
-                                    }
+                            if presentable_image.texture.is_none()
+                                && presentable_image.iosurface_id != 0
+                            {
+                                let format = TextureFormat::SharedBGRAu8 {
+                                    id: presentable_image.id,
+                                    width: swapchain.alloc_width as usize,
+                                    height: swapchain.alloc_height as usize,
+                                    initial: true,
+                                };
+                                let texture = Texture::new_with_format(self, format);
+                                if self.textures[texture.texture_id()].update_from_shared_handle(
+                                    metal_cx,
+                                    presentable_image.iosurface_id,
+                                ) {
+                                    presentable_image.texture = Some(texture);
                                 }
                             }
                         }
@@ -285,7 +297,7 @@ impl Cx {
                     self.handle_networking_events();
                     self.handle_gamepad_events();
                     self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
-                    
+
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(self.os.stdin_timers.time_now());
@@ -307,11 +319,19 @@ impl Cx {
                             vm.gc();
                         }
                     });
+
+                    // If we have pending animations or timers, request another frame from the host
+                    if self.new_next_frames.len() != 0
+                        || self.need_redrawing()
+                        || !self.os.stdin_timers.timers.is_empty()
+                    {
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::RequestAnimationFrame.to_json().as_bytes());
+                    }
                 }
             }
         }
         // we should poll our runloop
-
     }
 
     fn stdin_handle_platform_ops(

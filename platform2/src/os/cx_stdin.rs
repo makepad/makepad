@@ -1,122 +1,50 @@
 #![allow(dead_code)]
 use {
+    crate::{
+        area::Area,
+        cursor::MouseCursor,
+        cx::Cx,
+        event::{
+            KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+            ScrollEvent, TextInputEvent, TimerEvent,
+        },
+        makepad_math::{dvec2, Vec2d},
+        makepad_micro_serde::*,
+        window::WindowId,
+    },
     std::cell::Cell,
     std::collections::HashMap,
-    crate::{
-        cx::Cx,
-        cursor::MouseCursor,
-        makepad_micro_serde::*,
-        makepad_math::{dvec2,Vec2d},
-        window::WindowId,
-        area::Area,
-        event::{
-            KeyModifiers,
-            TextInputEvent,
-            TimerEvent,
-            KeyEvent,
-            ScrollEvent,
-            MouseButton,
-            MouseDownEvent,
-            MouseUpEvent,
-            MouseMoveEvent,
-        }
-    }
 };
 
 // HACK(eddyb) more or less `<[T; N]>::each_ref`, which is still unstable.
 fn ref_array_to_array_of_refs<T, const N: usize>(ref_array: &[T; N]) -> [&T; N] {
     let mut out_refs = std::mem::MaybeUninit::<[&T; N]>::uninit();
     for (i, ref_elem) in ref_array.iter().enumerate() {
-        unsafe { *out_refs.as_mut_ptr().cast::<&T>().add(i) = ref_elem; }
+        unsafe {
+            *out_refs.as_mut_ptr().cast::<&T>().add(i) = ref_elem;
+        }
     }
     unsafe { out_refs.assume_init() }
 }
 
 pub const SWAPCHAIN_IMAGE_COUNT: usize = match () {
-    // HACK(eddyb) done like this so that we can override each target easily.
-    _ if cfg!(target_os = "linux")   => 3,
-    _ if cfg!(target_os = "macos")   => 1,
+    _ if cfg!(target_os = "linux") => 3,
+    _ if cfg!(target_os = "macos") => 1,
     _ if cfg!(target_os = "windows") => 2,
     _ => 2,
 };
 
-/// "Swapchains" group together some number (i.e. `SWAPCHAIN_IMAGE_COUNT` here)
-/// of "presentable images", to form a queue of render targets which can be
-/// "presented" (to a surface, like a display, window, etc.) independently of
-/// rendering being done onto *other* "presentable images" in the "swapchain".
-///
-/// Certain configurations of swapchains often have older/more specific names,
-/// e.g. "double buffering" for `SWAPCHAIN_IMAGE_COUNT == 2` (or "triple" etc.).
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct Swapchain<I>
-    // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
-    where I: Sized
-{
-    pub window_id: usize,
-    pub alloc_width: u32,
-    pub alloc_height: u32,
-    pub presentable_images: [PresentableImage<I>; SWAPCHAIN_IMAGE_COUNT],
-}
-
-impl Swapchain<()> {
-    pub fn new(window_id: usize, alloc_width: u32, alloc_height: u32) -> Self {
-        let presentable_images = [(); SWAPCHAIN_IMAGE_COUNT].map(|()| PresentableImage {
-            id: PresentableImageId::alloc(),
-            image: (),
-        });
-        Self { window_id, alloc_width, alloc_height, presentable_images }
-    }
-}
-
-impl<I> Swapchain<I> {
-    pub fn get_image(&self, id: PresentableImageId) -> Option<&PresentableImage<I>> {
-        self.presentable_images.iter().find(|pi| pi.id == id)
-    }
-    pub fn images_as_ref(&self) -> Swapchain<&I> {
-        let Swapchain { window_id, alloc_width, alloc_height, ref presentable_images } = *self;
-        let presentable_images = ref_array_to_array_of_refs(presentable_images)
-            .map(|&PresentableImage { id, ref image }| PresentableImage { id, image });
-        Swapchain { window_id, alloc_width, alloc_height, presentable_images }
-    }
-    pub fn images_map<I2>(self, mut f: impl FnMut(PresentableImage<I>) -> I2) -> Swapchain<I2> {
-        let Swapchain { window_id, alloc_width, alloc_height, presentable_images } = self;
-        let presentable_images = presentable_images
-            .map(|pi| PresentableImage { id: pi.id, image: f(pi) });
-        Swapchain { window_id, alloc_width, alloc_height, presentable_images }
-    }
-}
-
-/// One of the "presentable images" of a [`SharedSwapchain`].
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct PresentableImage<I>
-    // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
-    where I: Sized
-{
-    pub id: PresentableImageId,
-    pub image: I,
-}
-
-/// Cross-process-unique (on best-effort) ID of a [`SharedPresentableImage`],
-/// such that multiple processes on the same system should be able to share
-/// swapchains with each-other and (effectively) never observe collisions.
+/// Cross-process-unique ID of a presentable image.
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct PresentableImageId {
-    /// PID of the originating process (which allocated this ID).
     origin_pid: u32,
-
-    /// The atomically-acquired value of a (private) counter, during allocation,
-    /// in the originating process, which will guarantee that the same process
-    /// continuously generating new swapchains will not overlap with itself,
-    /// unless it generates billions of swapchains, mixing old and new ones.
     per_origin_counter: u32,
 }
 
 impl PresentableImageId {
     pub fn alloc() -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};
-
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-
         Self {
             origin_pid: std::process::id(),
             per_origin_counter: COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -124,11 +52,9 @@ impl PresentableImageId {
     }
 
     pub fn as_u64(self) -> u64 {
-        let Self { origin_pid, per_origin_counter } = self;
-        (u64::from(origin_pid) << 32) | u64::from(per_origin_counter)
+        (u64::from(self.origin_pid) << 32) | u64::from(self.per_origin_counter)
     }
 
-    // NOT public intentionally! (while not too dangerous, this could be misused)
     fn from_u64(pid_and_counter: u64) -> Self {
         Self {
             origin_pid: (pid_and_counter >> 32) as u32,
@@ -137,44 +63,228 @@ impl PresentableImageId {
     }
 }
 
-pub type SharedSwapchain = Swapchain<SharedPresentableImageOsHandle>;
+// ============================================================================
+// Host-side swapchain (holds Textures, used by studio)
+// ============================================================================
+use crate::texture::Texture;
 
-// FIXME(eddyb) move these type aliases into `os::{linux,apple,windows}`.
+#[derive(Clone, Debug)]
+pub struct HostPresentableImage {
+    pub id: PresentableImageId,
+    pub texture: Texture,
+}
 
-/// [DMA-BUF](crate::os::linux::dma_buf)-backed image from `eglExportDMABUFImageMESA`.
-#[cfg(all(target_os = "linux", not(target_env="ohos")))]
-pub type SharedPresentableImageOsHandle =
-    crate::os::linux::dma_buf::Image<aux_chan::AuxChannedImageFd>;
+#[derive(Clone, Debug)]
+pub struct HostSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [HostPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
 
-// macOS uses IOSurface global IDs for cross-process texture sharing.
-// The IOSurface ID is a system-wide identifier that can be looked up
-// from any process using IOSurfaceLookup().
+impl HostSwapchain {
+    pub fn new(
+        window_id: usize,
+        alloc_width: u32,
+        alloc_height: u32,
+        cx: &mut crate::cx::Cx,
+    ) -> Self {
+        use crate::texture::TextureFormat;
+        Self {
+            window_id,
+            alloc_width,
+            alloc_height,
+            presentable_images: std::array::from_fn(|_| {
+                let id = PresentableImageId::alloc();
+                HostPresentableImage {
+                    id,
+                    texture: Texture::new_with_format(
+                        cx,
+                        TextureFormat::SharedBGRAu8 {
+                            id,
+                            width: alloc_width as usize,
+                            height: alloc_height as usize,
+                            initial: true,
+                        },
+                    ),
+                }
+            }),
+        }
+    }
+
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&HostPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
+
+    pub fn regenerate_ids(&mut self) {
+        for pi in &mut self.presentable_images {
+            pi.id = PresentableImageId::alloc();
+        }
+    }
+}
+
+// ============================================================================
+// macOS: IOSurface-based swapchain (for serialization)
+// ============================================================================
 #[cfg(target_os = "macos")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedPresentableImageOsHandle {
-    /// Global IOSurface ID. Use IOSurfaceLookup() to get the IOSurface.
+pub struct SharedPresentableImage {
+    pub id: PresentableImageId,
     pub iosurface_id: u32,
 }
 
-/// DirectX 11 `HANDLE` from `IDXGIResource::GetSharedHandle`.
-#[cfg(target_os = "windows")]
-// FIXME(eddyb) actually use a newtype of `HANDLE` with manual trait impls.
-pub type SharedPresentableImageOsHandle = u64;
-
-// FIXME(eddyb) use `enum Foo {}` here ideally, when the derives are fixed.
-#[cfg(not(any(all(target_os = "linux", not(target_env="ohos")), target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "macos")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedPresentableImageOsHandle {
-    // HACK(eddyb) non-`()` field working around deriving limitations.
-    pub _dummy_for_unsupported: Option<u32>,
+pub struct SharedSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(target_os = "macos")]
+impl SharedSwapchain {
+    pub fn from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> Self {
+        Self {
+            window_id: host.window_id,
+            alloc_width: host.alloc_width,
+            alloc_height: host.alloc_height,
+            presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+                id: host.presentable_images[i].id,
+                iosurface_id: cx
+                    .share_texture_for_presentable_image(&host.presentable_images[i].texture),
+            }),
+        }
+    }
+
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
+}
+
+// ============================================================================
+// Windows: HANDLE-based swapchain
+// ============================================================================
+#[cfg(target_os = "windows")]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedPresentableImage {
+    pub id: PresentableImageId,
+    pub handle: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(target_os = "windows")]
+impl SharedSwapchain {
+    pub fn from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> Self {
+        Self {
+            window_id: host.window_id,
+            alloc_width: host.alloc_width,
+            alloc_height: host.alloc_height,
+            presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+                id: host.presentable_images[i].id,
+                handle: cx.share_texture_for_presentable_image(&host.presentable_images[i].texture),
+            }),
+        }
+    }
+
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
+}
+
+// ============================================================================
+// Linux: DMA-BUF-based swapchain
+// ============================================================================
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedPresentableImage {
+    pub id: PresentableImageId,
+    pub image: crate::os::linux::dma_buf::Image<aux_chan::AuxChannedImageFd>,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl SharedSwapchain {
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
+}
+
+// ============================================================================
+// Fallback for unsupported platforms
+// ============================================================================
+#[cfg(not(any(
+    all(target_os = "linux", not(target_env = "ohos")),
+    target_os = "macos",
+    target_os = "windows"
+)))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedPresentableImage {
+    pub id: PresentableImageId,
+    pub _dummy: Option<u32>,
+}
+
+#[cfg(not(any(
+    all(target_os = "linux", not(target_env = "ohos")),
+    target_os = "macos",
+    target_os = "windows"
+)))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(not(any(
+    all(target_os = "linux", not(target_env = "ohos")),
+    target_os = "macos",
+    target_os = "windows"
+)))]
+impl SharedSwapchain {
+    pub fn new(window_id: usize, alloc_width: u32, alloc_height: u32) -> Self {
+        Self {
+            window_id,
+            alloc_width,
+            alloc_height,
+            presentable_images: [(); SWAPCHAIN_IMAGE_COUNT].map(|()| SharedPresentableImage {
+                id: PresentableImageId::alloc(),
+                _dummy: None,
+            }),
+        }
+    }
+
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
 }
 
 /// Auxiliary communication channel, besides stdin (only on Linux).
-#[cfg(all(target_os = "linux", not(target_env="ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 pub mod aux_chan {
     use super::*;
     use crate::os::linux::ipc::{self as linux_ipc, FixedSizeEncoding};
-    use std::{io, os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd}};
+    use std::{
+        io,
+        os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+    };
 
     // HACK(eddyb) `io::Error::other` stabilization is too recent.
     fn io_error_other(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
@@ -185,7 +295,7 @@ pub mod aux_chan {
     pub type H2C = (PresentableImageId, OwnedFd);
     pub type C2H = linux_ipc::Never;
 
-    impl FixedSizeEncoding<{u64::BYTE_LEN}, 0> for PresentableImageId {
+    impl FixedSizeEncoding<{ u64::BYTE_LEN }, 0> for PresentableImageId {
         fn encode(&self) -> ([u8; Self::BYTE_LEN], [std::os::fd::BorrowedFd<'_>; 0]) {
             let (bytes, []) = self.as_u64().encode();
             (bytes, [])
@@ -204,7 +314,10 @@ pub mod aux_chan {
     pub type InheritableClientEndpoint = linux_ipc::InheritableChannel<C2H, H2C>;
     impl InheritableClientEndpoint {
         pub fn extra_args_for_client_spawning(&self) -> [String; 1] {
-            [format!("--stdin-loop-aux-chan-fd={}", self.as_fd().as_raw_fd())]
+            [format!(
+                "--stdin-loop-aux-chan-fd={}",
+                self.as_fd().as_raw_fd()
+            )]
         }
         pub fn from_process_args_in_client() -> io::Result<Self> {
             for arg in std::env::args() {
@@ -229,14 +342,18 @@ pub mod aux_chan {
     }
     type PrDmaBufImg<FD> = PresentableImage<crate::os::linux::dma_buf::Image<FD>>;
     impl PrDmaBufImg<OwnedFd> {
-        pub fn send_fds_to_aux_chan(self, host_endpoint: &HostEndpoint)
-            -> io::Result<PrDmaBufImg<AuxChannedImageFd>>
-        {
+        pub fn send_fds_to_aux_chan(
+            self,
+            host_endpoint: &HostEndpoint,
+        ) -> io::Result<PrDmaBufImg<AuxChannedImageFd>> {
             let Self { id, image } = self;
             let mut plane_idx = 0;
             let mut success = Ok(());
             let image = image.planes_fd_map(|fd| {
-                assert_eq!(plane_idx, 0, "only images with one DMA-BUF plane are supported");
+                assert_eq!(
+                    plane_idx, 0,
+                    "only images with one DMA-BUF plane are supported"
+                );
                 plane_idx += 1;
                 if success.is_ok() {
                     success = host_endpoint.send((self.id, fd));
@@ -248,50 +365,67 @@ pub mod aux_chan {
         }
     }
     impl PrDmaBufImg<AuxChannedImageFd> {
-        pub fn recv_fds_from_aux_chan(self, client_endpoint: &ClientEndpoint)
-            -> io::Result<PrDmaBufImg<OwnedFd>>
-        {
+        pub fn recv_fds_from_aux_chan(
+            self,
+            client_endpoint: &ClientEndpoint,
+        ) -> io::Result<PrDmaBufImg<OwnedFd>> {
             let Self { id, image } = self;
             let mut plane_idx = 0;
             let mut success = Ok(());
             let image = image.planes_fd_map(|_| {
-                assert_eq!(plane_idx, 0, "only images with one DMA-BUF plane are supported");
+                assert_eq!(
+                    plane_idx, 0,
+                    "only images with one DMA-BUF plane are supported"
+                );
                 plane_idx += 1;
 
-                client_endpoint.recv().and_then(|(recv_id, recv_fd)|
-                if recv_id != id {
-                    Err(io_error_other(format!(
-                        "recv_fds_from_aux_chan: ID mismatch \
+                client_endpoint
+                    .recv()
+                    .and_then(|(recv_id, recv_fd)| {
+                        if recv_id != id {
+                            Err(io_error_other(format!(
+                                "recv_fds_from_aux_chan: ID mismatch \
                          (expected {id:?}, got {recv_id:?}",
-                    )))
-                } else {
-                    Ok(recv_fd)
-                }).map_err(|err| if success.is_ok() { success = Err(err); })
+                            )))
+                        } else {
+                            Ok(recv_fd)
+                        }
+                    })
+                    .map_err(|err| {
+                        if success.is_ok() {
+                            success = Err(err);
+                        }
+                    })
             });
             success?;
             Ok(PresentableImage {
                 id,
-                image: image.planes_fd_map(Result::unwrap)
+                image: image.planes_fd_map(Result::unwrap),
             })
         }
     }
 }
-#[cfg(not(all(target_os = "linux", not(target_env="ohos"))))]
+#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
 pub mod aux_chan {
     use std::io;
 
     #[derive(Clone)]
-    pub struct HostEndpoint { _private: () }
-    pub struct ClientEndpoint { _private: () }
+    pub struct HostEndpoint {
+        _private: (),
+    }
+    pub struct ClientEndpoint {
+        _private: (),
+    }
     pub fn make_host_and_client_endpoint_pair() -> io::Result<(HostEndpoint, ClientEndpoint)> {
-        Ok((HostEndpoint { _private: () }, ClientEndpoint { _private: () }))
+        Ok((
+            HostEndpoint { _private: () },
+            ClientEndpoint { _private: () },
+        ))
     }
 
     pub struct InheritableClientEndpoint(ClientEndpoint);
     impl ClientEndpoint {
-        pub fn into_child_process_inheritable(
-            self,
-        ) -> io::Result<InheritableClientEndpoint> {
+        pub fn into_child_process_inheritable(self) -> io::Result<InheritableClientEndpoint> {
             Ok(InheritableClientEndpoint(self))
         }
     }
@@ -305,26 +439,25 @@ pub mod aux_chan {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinKeyModifiers{
+pub struct StdinKeyModifiers {
     pub shift: bool,
     pub control: bool,
     pub alt: bool,
-    pub logo: bool
+    pub logo: bool,
 }
 
-impl StdinKeyModifiers{
-    pub fn into_key_modifiers(&self)->KeyModifiers{
-        KeyModifiers{
+impl StdinKeyModifiers {
+    pub fn into_key_modifiers(&self) -> KeyModifiers {
+        KeyModifiers {
             shift: self.shift,
             control: self.control,
             alt: self.alt,
             logo: self.logo,
         }
     }
-    pub fn from_key_modifiers(km:&KeyModifiers)->Self{
-        Self{
+    pub fn from_key_modifiers(km: &KeyModifiers) -> Self {
+        Self {
             shift: km.shift,
             control: km.control,
             alt: km.alt,
@@ -333,14 +466,13 @@ impl StdinKeyModifiers{
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct StdinMouseDown {
-   pub button_raw_bits: u32,
-   pub x: f64,
-   pub y: f64,
-   pub time: f64,
-   pub modifiers: StdinKeyModifiers
+    pub button_raw_bits: u32,
+    pub x: f64,
+    pub y: f64,
+    pub time: f64,
+    pub modifiers: StdinKeyModifiers,
 }
 
 impl StdinMouseDown {
@@ -357,16 +489,16 @@ impl StdinMouseDown {
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinMouseMove{
-   pub time: f64,
-   pub x: f64,
-   pub y: f64,
-   pub modifiers: StdinKeyModifiers
+pub struct StdinMouseMove {
+    pub time: f64,
+    pub x: f64,
+    pub y: f64,
+    pub modifiers: StdinKeyModifiers,
 }
 
 impl StdinMouseMove {
     pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseMoveEvent {
-        MouseMoveEvent{
+        MouseMoveEvent {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             window_id,
             modifiers: self.modifiers.into_key_modifiers(),
@@ -378,24 +510,24 @@ impl StdinMouseMove {
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct StdinMouseUp {
-   pub time: f64,
-   pub button_raw_bits: u32,
-   pub x: f64,
-   pub y: f64,
-   pub modifiers: StdinKeyModifiers
+    pub time: f64,
+    pub button_raw_bits: u32,
+    pub x: f64,
+    pub y: f64,
+    pub modifiers: StdinKeyModifiers,
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinTextInput{
+pub struct StdinTextInput {
     pub time: f64,
     pub window_id: usize,
     pub raw_button: usize,
     pub x: f64,
-    pub y: f64
+    pub y: f64,
 }
 
 impl StdinMouseUp {
-   pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseUpEvent {
+    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseUpEvent {
         MouseUpEvent {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             button: MouseButton::from_bits_retain(self.button_raw_bits),
@@ -406,21 +538,20 @@ impl StdinMouseUp {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinScroll{
-   pub time: f64,
-   pub sx: f64,
-   pub sy: f64,
-   pub x: f64,
-   pub y: f64,
-   pub is_mouse: bool,
-   pub modifiers: StdinKeyModifiers
+pub struct StdinScroll {
+    pub time: f64,
+    pub sx: f64,
+    pub sy: f64,
+    pub x: f64,
+    pub y: f64,
+    pub is_mouse: bool,
+    pub modifiers: StdinKeyModifiers,
 }
 
 impl StdinScroll {
     pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> ScrollEvent {
-        ScrollEvent{
+        ScrollEvent {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             scroll: dvec2(self.sx, self.sy),
             window_id,
@@ -434,7 +565,7 @@ impl StdinScroll {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum HostToStdin{
+pub enum HostToStdin {
     Swapchain(SharedSwapchain),
     WindowGeomChange {
         dpi_factor: f64,
@@ -454,7 +585,6 @@ pub enum HostToStdin{
         time: f64,
     },
     */
-    
     MouseDown(StdinMouseDown),
     MouseUp(StdinMouseUp),
     MouseMove(StdinMouseMove),
@@ -481,55 +611,53 @@ pub struct PresentableDraw {
 }
 
 #[repr(usize)]
-pub enum WindowKindId{
+pub enum WindowKindId {
     Main = 0,
     Design = 1,
-    Outline = 2
+    Outline = 2,
 }
 
-impl WindowKindId{
-    pub fn from_usize(d:usize)->Self{
-        match d{
-            0=>Self::Main,
-            1=>Self::Design,
-            2=>Self::Outline,
-            _=>panic!()
+impl WindowKindId {
+    pub fn from_usize(d: usize) -> Self {
+        match d {
+            0 => Self::Main,
+            1 => Self::Design,
+            2 => Self::Outline,
+            _ => panic!(),
         }
     }
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost {
-    CreateWindow{window_id: usize, kind_id:usize},
+    CreateWindow { window_id: usize, kind_id: usize },
     ReadyToStart,
+    RequestAnimationFrame,
     SetCursor(MouseCursor),
     // the client is done drawing, and the texture is completely updated
-    DrawCompleteAndFlip(PresentableDraw)
+    DrawCompleteAndFlip(PresentableDraw),
 }
 
-impl StdinToHost{
-    pub fn to_json(&self)->String{
+impl StdinToHost {
+    pub fn to_json(&self) -> String {
         let mut json = self.serialize_json();
         json.push('\n');
         json
     }
 }
 
-impl HostToStdin{
-    pub fn to_json(&self)->String{
+impl HostToStdin {
+    pub fn to_json(&self) -> String {
         let mut json = self.serialize_json();
         json.push('\n');
         json
     }
 }
 
-impl Cx {
-    
-}
+impl Cx {}
 
-
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 
 pub struct PollTimer {
     pub start_time: Instant,
@@ -549,39 +677,41 @@ impl PollTimer {
     }
 }
 
-pub struct PollTimers{
+pub struct PollTimers {
     pub timers: HashMap<u64, PollTimer>,
     pub time_start: Instant,
     pub last_time: Instant,
 }
-impl Default for PollTimers{
-    fn default()->Self{
-        Self{
+impl Default for PollTimers {
+    fn default() -> Self {
+        Self {
             time_start: Instant::now(),
             last_time: Instant::now(),
-            timers: Default::default()
+            timers: Default::default(),
         }
     }
 }
-impl PollTimers{
-   
+impl PollTimers {
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_secs_f64()
     }
 
-    pub fn get_dispatch(&mut self)->Vec<TimerEvent>{
+    pub fn get_dispatch(&mut self) -> Vec<TimerEvent> {
         let mut to_be_dispatched = Vec::with_capacity(self.timers.len());
         let mut to_be_removed = Vec::with_capacity(self.timers.len());
         let now = Instant::now();
         let time = self.time_now();
         for (id, timer) in self.timers.iter_mut() {
             let elapsed_time = now - timer.start_time;
-            let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
-            
+            let next_due_time =
+                Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
+
             if elapsed_time > next_due_time {
-                
-                to_be_dispatched.push(TimerEvent {timer_id: *id, time:Some(time)});
+                to_be_dispatched.push(TimerEvent {
+                    timer_id: *id,
+                    time: Some(time),
+                });
                 if timer.repeats {
                     timer.step += 1;
                 } else {
@@ -589,7 +719,7 @@ impl PollTimers{
                 }
             }
         }
-        
+
         for id in to_be_removed {
             self.timers.remove(&id);
         }

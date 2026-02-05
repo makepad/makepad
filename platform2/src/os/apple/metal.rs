@@ -29,8 +29,7 @@ use {
 // Uses global IOSurface IDs which work across processes without needing Mach port transfer
 #[cfg(target_os = "macos")]
 use crate::os::apple::apple_sys::{
-    IOSurfaceRef, IOSurfaceCreate, IOSurfaceGetID, IOSurfaceLookup,
-    IOSurfaceID, CFRelease
+    CFRelease, IOSurfaceCreate, IOSurfaceGetID, IOSurfaceID, IOSurfaceLookup, IOSurfaceRef,
 };
 
 impl Cx {
@@ -895,27 +894,14 @@ impl Cx {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn share_texture_for_presentable_image(
-        &mut self,
-        texture: &Texture,
-    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
+    pub fn share_texture_for_presentable_image(&mut self, texture: &Texture) -> u32 {
         let cxtexture = &mut self.textures[texture.texture_id()];
-        let iosurface_id = cxtexture.update_shared_texture(self.os.metal_device.unwrap());
-
-        // Return the IOSurface ID so the client can use IOSurfaceLookup
-        crate::cx_stdin::SharedPresentableImageOsHandle {
-            iosurface_id,
-        }
+        cxtexture.update_shared_texture(self.os.metal_device.unwrap())
     }
 
     #[cfg(any(target_os = "ios", target_os = "tvos"))]
-    pub fn share_texture_for_presentable_image(
-        &mut self,
-        _texture: &Texture,
-    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
-        crate::cx_stdin::SharedPresentableImageOsHandle {
-            _dummy_for_unsupported: None,
-        }
+    pub fn share_texture_for_presentable_image(&mut self, _texture: &Texture) -> u32 {
+        0
     }
 }
 
@@ -1564,51 +1550,56 @@ impl CxTexture {
             return self.os.iosurface_id;
         }
         let alloc = self.alloc.as_ref().unwrap();
-        
+
         // Create IOSurface properties dictionary
         let iosurface_props: ObjcId = unsafe {
             let dict: ObjcId = msg_send![class!(NSMutableDictionary), new];
-            
+
             // IOSurfaceWidth
             let width_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceWidth");
-            let width_val: ObjcId = msg_send![class!(NSNumber), numberWithUnsignedInteger: alloc.width as u64];
+            let width_val: ObjcId =
+                msg_send![class!(NSNumber), numberWithUnsignedInteger: alloc.width as u64];
             let _: () = msg_send![dict, setObject: width_val forKey: width_key];
-            
-            // IOSurfaceHeight  
+
+            // IOSurfaceHeight
             let height_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceHeight");
-            let height_val: ObjcId = msg_send![class!(NSNumber), numberWithUnsignedInteger: alloc.height as u64];
+            let height_val: ObjcId =
+                msg_send![class!(NSNumber), numberWithUnsignedInteger: alloc.height as u64];
             let _: () = msg_send![dict, setObject: height_val forKey: height_key];
-            
+
             // IOSurfaceBytesPerElement (4 for BGRA8)
             let bpe_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceBytesPerElement");
             let bpe_val: ObjcId = msg_send![class!(NSNumber), numberWithUnsignedInteger: 4u64];
             let _: () = msg_send![dict, setObject: bpe_val forKey: bpe_key];
-            
+
             // IOSurfacePixelFormat (BGRA = 'BGRA' = 0x42475241)
             let pf_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfacePixelFormat");
-            let pf_val: ObjcId = msg_send![class!(NSNumber), numberWithUnsignedInteger: 0x42475241u64];
+            let pf_val: ObjcId =
+                msg_send![class!(NSNumber), numberWithUnsignedInteger: 0x42475241u64];
             let _: () = msg_send![dict, setObject: pf_val forKey: pf_key];
-            
+
             // Mark as global to allow cross-process lookup via IOSurfaceLookup
             let global_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceIsGlobal");
             let global_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
             let _: () = msg_send![dict, setObject: global_val forKey: global_key];
-            
+
             dict
         };
-        
+
         // Create IOSurface
         let iosurface = unsafe { IOSurfaceCreate(iosurface_props) };
-        unsafe { let _: () = msg_send![iosurface_props, release]; }
-        
+        unsafe {
+            let _: () = msg_send![iosurface_props, release];
+        }
+
         if iosurface.is_null() {
             crate::error!("Failed to create IOSurface");
             return 0;
         }
-        
+
         // Get the global IOSurface ID for cross-process sharing
         let iosurface_id = unsafe { IOSurfaceGetID(iosurface) };
-        
+
         // Create Metal texture descriptor
         let descriptor = RcObjcId::from_owned(
             NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
@@ -1625,28 +1616,34 @@ impl CxTexture {
         let _: () = unsafe {
             msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]
         };
-        
+
         // Create Metal texture from IOSurface
         let texture: ObjcId = unsafe {
             msg_send![metal_device, newTextureWithDescriptor: descriptor.as_id() iosurface: iosurface plane: 0u64]
         };
-        
+
         if texture.is_null() {
             crate::error!("Failed to create Metal texture from IOSurface");
-            unsafe { CFRelease(iosurface); }
+            unsafe {
+                CFRelease(iosurface);
+            }
             return 0;
         }
-        
+
         // Store the IOSurface and ID (keep IOSurface alive)
         self.os.iosurface = Some(iosurface);
         self.os.iosurface_id = iosurface_id;
         self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
-        
+
         iosurface_id
     }
 
     #[cfg(target_os = "macos")]
-    pub fn update_from_shared_handle(&mut self, metal_cx: &MetalCx, iosurface_id: IOSurfaceID) -> bool {
+    pub fn update_from_shared_handle(
+        &mut self,
+        metal_cx: &MetalCx,
+        iosurface_id: IOSurfaceID,
+    ) -> bool {
         // we need a width/height for this one.
         if !self.alloc_shared() {
             return true;
@@ -1659,7 +1656,7 @@ impl CxTexture {
             crate::error!("Failed to lookup IOSurface with ID {}", iosurface_id);
             return false;
         }
-        
+
         // Create Metal texture descriptor
         let descriptor = RcObjcId::from_owned(
             NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
@@ -1673,35 +1670,41 @@ impl CxTexture {
             unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget] };
-        let _: () = unsafe {
-            msg_send![descriptor.as_id(), setPixelFormat: MTLPixelFormat::BGRA8Unorm]
-        };
-        
+        let _: () =
+            unsafe { msg_send![descriptor.as_id(), setPixelFormat: MTLPixelFormat::BGRA8Unorm] };
+
         // Create Metal texture from IOSurface
         let texture: ObjcId = unsafe {
             msg_send![metal_cx.device, newTextureWithDescriptor: descriptor.as_id() iosurface: iosurface plane: 0u64]
         };
-        
+
         if texture.is_null() {
             crate::error!("Failed to create Metal texture from IOSurface");
-            unsafe { CFRelease(iosurface); }
-            return false;
-        }
-        
-        let width: u64 = unsafe { msg_send![texture, width] };
-        let height: u64 = unsafe { msg_send![texture, height] };
-        
-        // FIXME(eddyb) can these be an assert now?
-        if width != alloc.width as u64 || height != alloc.height as u64 {
-            crate::error!("IOSurface size mismatch: expected {}x{}, got {}x{}", 
-                alloc.width, alloc.height, width, height);
-            unsafe { 
-                let _: () = msg_send![texture, release];
-                CFRelease(iosurface); 
+            unsafe {
+                CFRelease(iosurface);
             }
             return false;
         }
-        
+
+        let width: u64 = unsafe { msg_send![texture, width] };
+        let height: u64 = unsafe { msg_send![texture, height] };
+
+        // FIXME(eddyb) can these be an assert now?
+        if width != alloc.width as u64 || height != alloc.height as u64 {
+            crate::error!(
+                "IOSurface size mismatch: expected {}x{}, got {}x{}",
+                alloc.width,
+                alloc.height,
+                width,
+                height
+            );
+            unsafe {
+                let _: () = msg_send![texture, release];
+                CFRelease(iosurface);
+            }
+            return false;
+        }
+
         // Store IOSurface and texture
         self.os.iosurface = Some(iosurface);
         self.os.iosurface_id = iosurface_id;

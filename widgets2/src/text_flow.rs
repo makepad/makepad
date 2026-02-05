@@ -611,12 +611,21 @@ pub struct TextFlow {
     /// Actual drawn char count
     #[rust]
     actual_chars: f32,
+    /// Previous actual_chars for rate calculation
+    #[rust]
+    prev_actual_chars: f32,
+    /// Estimated chars per second based on incoming rate
+    #[rust]
+    chars_per_sec: f32,
+    /// Last time we measured char rate
+    #[rust]
+    last_rate_time: f64,
     /// Number of chars over which to fade (default 50)
     #[live(50.0)]
     pub fade_chars: f32,
-    /// Animation speed in chars per frame
-    #[live(5.0)]
-    pub fade_speed: f32,
+    /// Minimum animation speed in chars per second
+    #[live(100.0)]
+    pub min_fade_speed: f32,
 }
 
 impl TextFlow {
@@ -728,17 +737,47 @@ impl Widget for TextFlow {
         }
 
         // Handle streaming animation NextFrame
-        if let Some(_) = self.next_frame.is_event(event) {
-            let target = self.actual_chars + self.fade_chars;
+        if let Some(ev) = self.next_frame.is_event(event) {
+            let time = ev.time;
+            // Calculate time delta
+            let dt = if self.last_rate_time > 0.0 {
+                (time - self.last_rate_time).max(0.001)
+            } else {
+                1.0 / 60.0
+            };
+
+            // Update char arrival rate estimate
+            let new_chars = self.actual_chars - self.prev_actual_chars;
+            if new_chars > 0.0 {
+                let instant_rate = new_chars / dt as f32;
+                self.chars_per_sec = self.chars_per_sec * 0.7 + instant_rate * 0.3;
+            }
+            self.prev_actual_chars = self.actual_chars;
+            self.last_rate_time = time;
+
+            // Animation speed matches incoming rate, with minimum
+            let speed = self.chars_per_sec.max(self.min_fade_speed) * dt as f32;
+
+            // Target depends on streaming state:
+            // - While streaming: chase actual_chars (so new text fades in)
+            // - After streaming: go to actual_chars + fade_chars (complete the fade)
+            let target = if self.streaming_animation {
+                self.actual_chars
+            } else {
+                self.actual_chars + self.fade_chars
+            };
 
             if self.animated_chars < target {
-                self.animated_chars = (self.animated_chars + self.fade_speed).min(target);
-                // Trigger redraw - set_total_chars will be called in end() with fresh area
-                self.redraw(cx);
+                self.animated_chars = (self.animated_chars + speed).min(target);
+                // Update shader directly and request redraw for the area
+                self.draw_text.set_total_chars(cx, self.animated_chars);
+                self.draw_text.draw_vars.area.redraw(cx);
             }
 
-            // Continue animation if still streaming or not caught up
-            if self.streaming_animation || self.animated_chars < target {
+            // Keep animation alive if streaming or not done fading
+            let done = !self.streaming_animation
+                && self.animated_chars >= self.actual_chars + self.fade_chars;
+            if !done {
                 self.next_frame = cx.new_next_frame();
             }
         }
@@ -860,11 +899,18 @@ impl TextFlow {
     /// Start streaming text animation with fade-in effect on new characters.
     /// Call this before drawing when streaming new content.
     pub fn start_streaming_animation(&mut self) {
-        if !self.streaming_animation {
-            self.streaming_animation = true;
-            self.animated_chars = 0.0;
-            self.actual_chars = 0.0;
-        }
+        self.streaming_animation = true;
+    }
+
+    /// Reset streaming animation state (for reused widgets).
+    /// Call this when starting to stream new content.
+    pub fn reset_streaming_animation(&mut self) {
+        self.streaming_animation = true;
+        self.animated_chars = 0.0;
+        self.actual_chars = 0.0;
+        self.prev_actual_chars = 0.0;
+        self.chars_per_sec = 0.0;
+        self.last_rate_time = 0.0;
     }
 
     /// Stop streaming animation. The fade will complete naturally.

@@ -2,13 +2,20 @@
 //!
 //! Supports:
 //! - Claude (Anthropic) - API key or OAuth token for Pro/Max subscriptions
+//! - Claude ACP - Via Zed's Claude Code (session-based)
 //! - OpenAI - GPT-4, o3-mini, etc.
 //! - Google Gemini
+//!
+//! Two APIs are available:
+//! - `AiBackend` trait: Stateless request/response (legacy, for simple uses)
+//! - `Agent` trait: Session-based with conversation history (recommended)
 
+pub mod agent;
 pub mod backend;
 pub mod backends;
 pub mod types;
 
+pub use agent::*;
 pub use backend::*;
 pub use backends::*;
 pub use types::*;

@@ -3,6 +3,10 @@ use {
         app::AppAction,
         build_manager::{build_client::BuildClient, build_protocol::*},
         file_system::file_system::{FileSystem, LiveFileChange},
+        makepad_code_editor::{
+            decoration::{Decoration, DecorationType},
+            text,
+        },
         makepad_file_server::FileSystemRoots,
         makepad_micro_serde::*,
         // Using stub LiveFileChange from file_system module
@@ -16,12 +20,7 @@ use {
         },
         makepad_shell::*,
         makepad_widgets::*,
-        makepad_code_editor::{
-            decoration::{Decoration, DecorationType},
-            text,
-        },        
     },
-    
     makepad_http::server::*,
     std::{
         cell::RefCell,
@@ -41,8 +40,8 @@ pub struct ActiveBuild {
     pub root: String,
     pub log_index: String,
     pub process: BuildProcess,
-    pub swapchain: HashMap<usize, Option<cx_stdin::Swapchain<Texture>>>,
-    pub last_swapchain_with_completed_draws: HashMap<usize, Option<cx_stdin::Swapchain<Texture>>>,
+    pub swapchain: HashMap<usize, Option<cx_stdin::HostSwapchain>>,
+    pub last_swapchain_with_completed_draws: HashMap<usize, Option<cx_stdin::HostSwapchain>>,
     pub app_area: HashMap<usize, Area>,
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
@@ -53,7 +52,7 @@ pub struct ActiveBuild {
     pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
 }
 impl ActiveBuild {
-    pub fn swapchain_mut(&mut self, index: usize) -> &mut Option<cx_stdin::Swapchain<Texture>> {
+    pub fn swapchain_mut(&mut self, index: usize) -> &mut Option<cx_stdin::HostSwapchain> {
         match self.swapchain.entry(index) {
             hash_map::Entry::Occupied(o) => o.into_mut(),
             hash_map::Entry::Vacant(v) => v.insert(None),
@@ -62,13 +61,13 @@ impl ActiveBuild {
     pub fn last_swapchain_with_completed_draws_mut(
         &mut self,
         index: usize,
-    ) -> &mut Option<cx_stdin::Swapchain<Texture>> {
+    ) -> &mut Option<cx_stdin::HostSwapchain> {
         match self.last_swapchain_with_completed_draws.entry(index) {
             hash_map::Entry::Occupied(o) => o.into_mut(),
             hash_map::Entry::Vacant(v) => v.insert(None),
         }
     }
-    pub fn swapchain(&self, index: usize) -> Option<&cx_stdin::Swapchain<Texture>> {
+    pub fn swapchain(&self, index: usize) -> Option<&cx_stdin::HostSwapchain> {
         if let Some(e) = self.swapchain.get(&index) {
             if let Some(e) = e {
                 return Some(e);
@@ -79,7 +78,7 @@ impl ActiveBuild {
     pub fn last_swapchain_with_completed_draws(
         &mut self,
         index: usize,
-    ) -> Option<&cx_stdin::Swapchain<Texture>> {
+    ) -> Option<&cx_stdin::HostSwapchain> {
         if let Some(e) = self.last_swapchain_with_completed_draws.get(&index) {
             if let Some(e) = e {
                 return Some(e);
