@@ -157,6 +157,11 @@ script_mod! {
                             width: 80
                             visible: false
                         }
+
+                        $clear_button: Button {
+                            text: "Clear"
+                            width: 80
+                        }
                     }
 
                     // Status bar
@@ -185,10 +190,80 @@ pub static CHAT_DATA: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatD
     is_streaming: false,
 });
 
+const CHAT_SAVE_PATH: &str = "aichat_history.json";
+
+use makepad_widgets2::makepad_platform::makepad_micro_serde::*;
+
+#[derive(SerJson, DeJson)]
+struct SavedMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(SerJson, DeJson, Default)]
+struct SavedHistory {
+    messages: Vec<SavedMessage>,
+}
+
 pub struct ChatData {
     pub messages: Vec<Message>,
     pub streaming_text: String,
     pub is_streaming: bool,
+}
+
+impl ChatData {
+    pub fn save_to_disk(&self) {
+        let saved = SavedHistory {
+            messages: self
+                .messages
+                .iter()
+                .map(|m| {
+                    let content: String = m
+                        .content
+                        .iter()
+                        .filter_map(|block| {
+                            if let ContentBlock::Text { text } = block {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    SavedMessage {
+                        role: match m.role {
+                            MessageRole::User => "user".to_string(),
+                            MessageRole::Assistant => "assistant".to_string(),
+                            _ => "user".to_string(),
+                        },
+                        content,
+                    }
+                })
+                .collect(),
+        };
+        let json = saved.serialize_json();
+        let _ = std::fs::write(CHAT_SAVE_PATH, json);
+    }
+
+    pub fn load_from_disk() -> Vec<Message> {
+        std::fs::read_to_string(CHAT_SAVE_PATH)
+            .ok()
+            .and_then(|s| SavedHistory::deserialize_json(&s).ok())
+            .map(|saved| {
+                saved
+                    .messages
+                    .into_iter()
+                    .map(|m| {
+                        if m.role == "user" {
+                            Message::user(&m.content)
+                        } else {
+                            Message::assistant(&m.content)
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 // ChatList widget that uses PortalList to display messages
@@ -392,11 +467,28 @@ impl App {
             ai_manager.set_active("gemini");
         }
 
+        // Load saved chat history
+        {
+            let mut data = CHAT_DATA.write().unwrap();
+            data.messages = ChatData::load_from_disk();
+        }
+
         let mut app = App::from_script_mod(vm, self::script_mod);
         app.ai_manager = ai_manager;
         app.available_backends = available_backends;
         app.current_request = None;
         app
+    }
+
+    fn clear_chat(&mut self, cx: &mut Cx) {
+        {
+            let mut data = CHAT_DATA.write().unwrap();
+            data.messages.clear();
+            data.streaming_text.clear();
+            data.is_streaming = false;
+            data.save_to_disk();
+        }
+        self.ui.redraw(cx);
     }
 
     fn send_message(&mut self, cx: &mut Cx) {
@@ -489,6 +581,11 @@ impl MatchEvent for App {
             self.cancel_request(cx);
         }
 
+        // Handle clear button
+        if self.ui.button(ids!($clear_button)).clicked(actions) {
+            self.clear_chat(cx);
+        }
+
         // Handle Enter key in input
         if self.ui.text_input(ids!($input)).returned(actions).is_some() {
             self.send_message(cx);
@@ -538,6 +635,7 @@ impl AppMain for App {
                         data.messages.push(response.message);
                         data.streaming_text.clear();
                         data.is_streaming = false;
+                        data.save_to_disk();
                     }
                     self.current_request = None;
 
