@@ -1432,6 +1432,18 @@ impl PortalList {
 
         self.area.redraw(cx);
     }
+
+    /// Check if a point hits any interactive item (link, button, etc.) in any of the visible items.
+    /// Used to decide whether to start selection or pass through to interactive items.
+    fn point_hits_interactive_item(&self, cx: &Cx, abs: DVec2) -> bool {
+        for item in self.items.values() {
+            if Self::with_text_flow(&item.widget, |tf| tf.point_hits_item(cx, abs)).unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl WidgetNode for PortalList {
@@ -1509,17 +1521,40 @@ impl Widget for PortalList {
         }
 
         // When selectable, we handle mouse/touch events at PortalList level for cross-item selection.
-        // Don't pass these events to children when selectable (they'd start their own selection).
-        // Other events (keyboard, etc.) still go to children.
-        let dominated_by_selection = self.selectable
-            && matches!(
-                event,
-                Event::MouseDown(_)
-                    | Event::MouseMove(_)
-                    | Event::MouseUp(_)
-                    | Event::TouchUpdate(_)
-            );
-        if !dominated_by_selection && !self.is_selecting {
+        // However, we need to pass through events to interactive items (links, buttons, etc.)
+        // so they can be clicked. We check if the event point hits any interactive item.
+        // 
+        // Hover events (FingerHoverIn/Out/Over) are ALWAYS passed through so interactive items
+        // can properly show/hide their hover states.
+        let mut pass_through_to_children = true;
+        if self.selectable {
+            match event {
+                // Always pass hover events through for proper hover state management
+                Event::MouseMove(_) => {
+                    // MouseMove generates hover events - always pass through
+                    pass_through_to_children = true;
+                }
+                // For click/drag events, only pass through if over an interactive item
+                Event::MouseDown(e) => {
+                    pass_through_to_children =
+                        !self.is_selecting && self.point_hits_interactive_item(cx, e.abs);
+                }
+                Event::MouseUp(e) => {
+                    pass_through_to_children =
+                        !self.is_selecting && self.point_hits_interactive_item(cx, e.abs);
+                }
+                Event::TouchUpdate(e) => {
+                    if self.is_selecting {
+                        pass_through_to_children = false;
+                    } else if let Some(t) = e.touches.first() {
+                        pass_through_to_children = self.point_hits_interactive_item(cx, t.abs);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if pass_through_to_children {
             for (_item_id, item) in self.items.iter_mut() {
                 let item_uid = item.widget.widget_uid();
                 cx.group_widget_actions(uid, item_uid, |cx| {
@@ -1721,8 +1756,9 @@ impl Widget for PortalList {
                         _ => true,
                     };
 
-                    // Handle selection when selectable
-                    if self.selectable && fe.is_primary_hit() {
+                    // Handle selection when selectable, but not if clicking on interactive items
+                    let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
+                    if self.selectable && fe.is_primary_hit() && !on_interactive {
                         if let Some((item_id, char_idx)) = self.hit_test_selection(cx, fe.abs) {
                             cx.set_key_focus(self.area);
                             self.selection_anchor = Some((item_id, char_idx));
@@ -1734,7 +1770,7 @@ impl Widget for PortalList {
                             });
                             self.update_item_selections(cx);
                         }
-                    } else if self.drag_scrolling && fe.is_primary_hit() {
+                    } else if self.drag_scrolling && fe.is_primary_hit() && !on_interactive {
                         self.scroll_state = ScrollState::Drag {
                             samples: vec![ScrollSample {
                                 abs: fe.abs.index(vi),
@@ -1759,7 +1795,10 @@ impl Widget for PortalList {
                             self.update_item_selections(cx);
                         }
                     } else {
-                        cx.set_cursor(MouseCursor::Default);
+                        // Don't override cursor when over interactive items (they set their own)
+                        if !self.point_hits_interactive_item(cx, e.abs) {
+                            cx.set_cursor(MouseCursor::Default);
+                        }
                         if let ScrollState::Drag { samples } = &mut self.scroll_state {
                             let new_abs = e.abs.index(vi);
                             let old_sample = *samples.last().unwrap();
@@ -1815,8 +1854,12 @@ impl Widget for PortalList {
                         }
                     }
                 }
-                Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) if self.selectable => {
-                    cx.set_cursor(MouseCursor::Text);
+                Hit::FingerHoverIn(fhe) | Hit::FingerHoverOver(fhe) if self.selectable => {
+                    // Only set Text cursor if not over an interactive item
+                    // (interactive items like links will set their own cursor, e.g., Hand)
+                    if !self.point_hits_interactive_item(cx, fhe.abs) {
+                        cx.set_cursor(MouseCursor::Text);
+                    }
                 }
                 Hit::KeyFocus(_) => {}
                 Hit::KeyFocusLost(_) => {

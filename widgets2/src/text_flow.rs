@@ -1169,6 +1169,28 @@ impl TextFlow {
         None
     }
 
+    /// Check if a point hits any interactive item widget in this TextFlow.
+    /// This includes links, buttons, and any other inline components.
+    /// Used by PortalList to decide whether to handle selection or pass through to items.
+    pub fn point_hits_item(&self, cx: &Cx, abs: DVec2) -> bool {
+        for (_id, (widget, _template)) in self.items.as_ref().unwrap().iter() {
+            // Check if the point is within this item widget's area
+            let area = widget.area();
+            if !area.is_empty() && area.rect(cx).contains(abs) {
+                return true;
+            }
+            // Also check TextFlowLink's drawn_areas (since links span multiple text rects)
+            if let Some(link) = widget.as_text_flow_link().borrow() {
+                for area in link.drawn_areas.iter() {
+                    if area.rect(cx).contains(abs) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub fn draw_text(&mut self, cx: &mut Cx2d, text: &str) {
         if let Some(DrawState::Drawing) = self.draw_state.get() {
             if (text == " " || text == "") && self.first_thing_on_a_line {
@@ -1308,7 +1330,7 @@ pub enum TextFlowLinkAction {
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
-struct TextFlowLink {
+pub struct TextFlowLink {
     #[source]
     source: ScriptObjectRef,
     #[apply_default]
@@ -1321,7 +1343,7 @@ struct TextFlowLink {
     #[live(true)]
     click_on_down: bool,
     #[rust]
-    drawn_areas: SmallVec<[Area; 2]>,
+    pub drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)]
     grab_key_focus: bool,
     #[live]
