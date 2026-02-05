@@ -1017,7 +1017,45 @@ impl PortalList {
         let vi = self.vec_index;
         let mouse_pos = abs.index(vi);
 
-        // Find which item contains this position
+        if self.items.is_empty() {
+            return None;
+        }
+
+        // Get the PortalList's own rect to check viewport bounds
+        let list_rect = self.area.rect(cx);
+        let list_top = list_rect.pos.index(vi);
+        let list_bottom = list_top + list_rect.size.index(vi);
+
+        // Use first_id (already tracked) and find last by adding item count
+        // Items in the HashMap are a contiguous range starting from first_id
+        let first_id = self.first_id;
+        let last_id = self.items.keys().max().copied()?;
+
+        // Find the bottom edge of the last item for empty space detection
+        let bottom_edge = self
+            .items
+            .get(&last_id)
+            .map(|item| {
+                let rect = item.widget.area().rect(cx);
+                rect.pos.index(vi) + rect.size.index(vi)
+            })
+            .unwrap_or(list_bottom);
+
+        // Check if mouse is above or below the viewport
+        if mouse_pos < list_top {
+            // Mouse is above viewport - select from start of first item
+            return Some((first_id, 0));
+        } else if mouse_pos > list_bottom {
+            // Mouse is below viewport - select to end of last item
+            let text_len = self
+                .items
+                .get(&last_id)
+                .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
+                .unwrap_or(0);
+            return Some((last_id, text_len));
+        }
+
+        // Mouse is within the viewport - find which item contains this position
         for (item_id, item) in self.items.iter() {
             let item_rect = item.widget.area().rect(cx);
             if item_rect.contains(abs) {
@@ -1030,39 +1068,15 @@ impl PortalList {
             }
         }
 
-        // Mouse is outside all items - find the topmost and bottommost items
-        let mut top_item: Option<(usize, f64)> = None; // (item_id, top_edge)
-        let mut bottom_item: Option<(usize, f64)> = None; // (item_id, bottom_edge)
-
-        for (item_id, item) in self.items.iter() {
-            let item_rect = item.widget.area().rect(cx);
-            let item_top = item_rect.pos.index(vi);
-            let item_bottom = item_top + item_rect.size.index(vi);
-
-            if top_item.is_none() || item_top < top_item.unwrap().1 {
-                top_item = Some((*item_id, item_top));
-            }
-            if bottom_item.is_none() || item_bottom > bottom_item.unwrap().1 {
-                bottom_item = Some((*item_id, item_bottom));
-            }
-        }
-
-        // If mouse is above all items, use topmost item with char 0
-        // If mouse is below all items, use bottommost item with text_len
-        if let (Some((top_id, top_edge)), Some((bottom_id, bottom_edge))) = (top_item, bottom_item)
-        {
-            if mouse_pos < top_edge {
-                // Mouse is above all items - select from start of topmost
-                return Some((top_id, 0));
-            } else if mouse_pos > bottom_edge {
-                // Mouse is below all items - select to end of bottommost
-                let text_len = self
-                    .items
-                    .get(&bottom_id)
-                    .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
-                    .unwrap_or(0);
-                return Some((bottom_id, text_len));
-            }
+        // Mouse is inside viewport but not in any item (empty space below items)
+        // Snap to end of last item
+        if mouse_pos > bottom_edge {
+            let text_len = self
+                .items
+                .get(&last_id)
+                .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
+                .unwrap_or(0);
+            return Some((last_id, text_len));
         }
 
         None
@@ -1216,9 +1230,18 @@ impl Widget for PortalList {
             self.area.redraw(cx);
         }
 
-        // When selectable, we handle events at PortalList level, so don't pass to children
-        // during selection. Children still need events for other interactions (links, etc.)
-        if !self.is_selecting {
+        // When selectable, we handle mouse/touch events at PortalList level for cross-item selection.
+        // Don't pass these events to children when selectable (they'd start their own selection).
+        // Other events (keyboard, etc.) still go to children.
+        let dominated_by_selection = self.selectable
+            && matches!(
+                event,
+                Event::MouseDown(_)
+                    | Event::MouseMove(_)
+                    | Event::MouseUp(_)
+                    | Event::TouchUpdate(_)
+            );
+        if !dominated_by_selection && !self.is_selecting {
             for (_item_id, item) in self.items.iter_mut() {
                 let item_uid = item.widget.widget_uid();
                 cx.group_widget_actions(uid, item_uid, |cx| {

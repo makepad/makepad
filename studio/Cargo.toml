@@ -11,7 +11,7 @@ metadata.makepad-auto-version = "EkK1QSsxv7UT52XhDLrPkeaEQA8="
 metadata.makepad-check-platform = "desktop"
 
 [dependencies]
-makepad-widgets2 = {path="../widgets2" , version="2.0.0", features = ["html"]}
+makepad-widgets2 = {path="../widgets2" , version="2.0.0", features = ["html", "svg", "markdown"]}
 makepad-code-editor2 = {path="../code_editor2", version="2.0.0"}
 makepad-file-protocol = {path="./file_protocol", version="1.0.0"}
 makepad-file-server = {path="./file_server", version="1.0.0"}
