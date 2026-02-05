@@ -78,7 +78,7 @@ script_mod! {
                 }
             }
         }
-        $flow: TextFlow {
+        $selectable: TextFlow {
             width: Fill
             height: Fit
             selectable: true
