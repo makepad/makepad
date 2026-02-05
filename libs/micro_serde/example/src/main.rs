@@ -15,6 +15,16 @@ struct MyStruct<T> where T: Clone {
     i: MyEnum<T>,
     j: String,
     k: [u32;2]
+}
+
+// Test struct for #[rename] attribute
+#[derive(SerJson, DeJson, PartialEq, Debug)]
+struct RenamedStruct {
+    #[rename(firstName)]
+    first_name: String,
+    #[rename(lastName)]
+    last_name: String,
+    age: u32,  // Not renamed
 } 
 
 #[derive(SerBin, DeBin, SerJson, DeJson, SerRon, DeRon, PartialEq)]
@@ -55,4 +65,22 @@ fn main() {
     println!("RON Output {}", ron);
     let y:MyStruct<usize> = DeRon::deserialize_ron(&ron).unwrap();
     println!("RON roundtrip equality {}", x == y);
+    
+    // Test #[rename] attribute
+    let renamed = RenamedStruct {
+        first_name: "John".to_string(),
+        last_name: "Doe".to_string(),
+        age: 30,
+    };
+    let renamed_json = renamed.serialize_json();
+    println!("\nRenamed JSON Output: {}", renamed_json);
+    // Should output: {"firstName":"John","lastName":"Doe","age":30}
+    
+    let renamed_back: RenamedStruct = DeJson::deserialize_json(&renamed_json).unwrap();
+    println!("Renamed roundtrip equality: {}", renamed == renamed_back);
+    
+    // Test deserializing from external JSON with renamed fields
+    let external_json = r#"{"firstName":"Jane","lastName":"Smith","age":25}"#;
+    let from_external: RenamedStruct = DeJson::deserialize_json(external_json).unwrap();
+    println!("Deserialized from external JSON: {:?}", from_external);
 }

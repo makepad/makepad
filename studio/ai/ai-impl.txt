@@ -1,0 +1,1126 @@
+# Makepad AI Implementation Plan
+
+## Overview
+
+Create `makepad-ai` crate in `studio/ai/` that provides:
+1. Unified AI backend abstraction
+2. Claude backend (API key + OAuth token for Pro/Max subscriptions)
+3. OpenAI backend
+4. Google Gemini backend
+5. Reusable chat UI components
+
+---
+
+## API Reference Sources
+
+### Claude (Anthropic)
+- Messages API: https://platform.claude.com/docs/en/api/messages
+- Streaming: https://platform.claude.com/docs/en/api/messages-streaming
+- Endpoint: `POST https://api.anthropic.com/v1/messages`
+- Auth headers: `x-api-key: <key>`, `anthropic-version: 2023-06-01`
+- For OAuth tokens (Pro/Max): User runs `claude setup-token` once to get token
+
+### OpenAI
+- Chat Completions: https://platform.openai.com/docs/api-reference/chat
+- Streaming: https://platform.openai.com/docs/api-reference/chat-streaming
+- Endpoint: `POST https://api.openai.com/v1/chat/completions`
+- Auth header: `Authorization: Bearer <key>`
+
+### Google Gemini
+- Generate Content: https://ai.google.dev/api/generate-content
+- Endpoint: `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
+- Streaming: `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse`
+- Auth: API key in URL query param `?key=<key>` or header `x-goog-api-key: <key>`
+
+---
+
+## Crate Structure
+
+```
+studio/ai/
+├── Cargo.toml
+└── src/
+    ├── lib.rs              # Public API, re-exports
+    ├── types.rs            # Unified message types
+    ├── backend.rs          # AiBackend trait definition
+    ├── manager.rs          # AiManager - manages backends, handles events
+    ├── backends/
+    │   ├── mod.rs
+    │   ├── claude.rs       # Claude/Anthropic backend
+    │   ├── openai.rs       # OpenAI backend
+    │   └── gemini.rs       # Google Gemini backend
+    └── ui/
+        ├── mod.rs
+        └── chat_view.rs    # Reusable chat widget (optional, can be later)
+```
+
+---
+
+## Part 1: Core Types (`types.rs`)
+
+### Unified Message Types
+
+```rust
+use makepad_micro_serde::*;
+use makepad_live_id::*;
+
+/// Role in a conversation
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// Content block - supports text, images, tool calls
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub enum ContentBlock {
+    Text { text: String },
+    Image {
+        media_type: String,  // "image/png", "image/jpeg", etc.
+        data: String,        // base64 encoded
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: String,  // JSON string
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
+}
+
+/// A message in the conversation
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct Message {
+    pub role: MessageRole,
+    pub content: Vec<ContentBlock>,
+}
+
+impl Message {
+    pub fn user(text: &str) -> Self {
+        Self {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text { text: text.to_string() }],
+        }
+    }
+
+    pub fn assistant(text: &str) -> Self {
+        Self {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::Text { text: text.to_string() }],
+        }
+    }
+
+    pub fn system(text: &str) -> Self {
+        Self {
+            role: MessageRole::System,
+            content: vec![ContentBlock::Text { text: text.to_string() }],
+        }
+    }
+
+    /// Get concatenated text content
+    pub fn text(&self) -> String {
+        self.content.iter().filter_map(|c| {
+            if let ContentBlock::Text { text } = c { Some(text.as_str()) } else { None }
+        }).collect::<Vec<_>>().join("")
+    }
+}
+
+/// Tool definition for function calling
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: String,  // JSON Schema as string
+}
+
+/// Request to send to AI backend
+#[derive(Clone, Debug)]
+pub struct AiRequest {
+    pub messages: Vec<Message>,
+    pub system_prompt: Option<String>,
+    pub max_tokens: u32,
+    pub temperature: Option<f32>,
+    pub tools: Vec<ToolDefinition>,
+    pub stream: bool,
+}
+
+impl Default for AiRequest {
+    fn default() -> Self {
+        Self {
+            messages: vec![],
+            system_prompt: None,
+            max_tokens: 4096,
+            temperature: None,
+            tools: vec![],
+            stream: true,
+        }
+    }
+}
+
+/// Streaming delta from AI
+#[derive(Clone, Debug)]
+pub enum StreamDelta {
+    /// Text content being streamed
+    TextDelta { text: String },
+    /// Tool use started
+    ToolUseStart { id: String, name: String },
+    /// Tool use input JSON delta
+    ToolUseDelta { partial_json: String },
+    /// Tool use completed
+    ToolUseEnd,
+    /// Message completed
+    Done {
+        stop_reason: StopReason,
+        usage: Option<Usage>,
+    },
+    /// Error occurred
+    Error { message: String },
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum StopReason {
+    #[default]
+    EndTurn,
+    MaxTokens,
+    StopSequence,
+    ToolUse,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// Complete response (non-streaming)
+#[derive(Clone, Debug)]
+pub struct AiResponse {
+    pub message: Message,
+    pub stop_reason: StopReason,
+    pub usage: Usage,
+}
+```
+
+---
+
+## Part 2: Backend Trait (`backend.rs`)
+
+```rust
+use crate::types::*;
+use makepad_widgets2::*;
+
+/// Identifies an in-flight request
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RequestId(pub LiveId);
+
+impl RequestId {
+    pub fn new() -> Self {
+        Self(LiveId::unique())
+    }
+}
+
+/// Configuration for an AI backend
+#[derive(Clone, Debug)]
+pub enum BackendConfig {
+    Claude {
+        api_key: Option<String>,      // API key mode
+        oauth_token: Option<String>,  // OAuth token for Pro/Max
+        model: String,                // e.g. "claude-sonnet-4-5-20250929"
+    },
+    OpenAI {
+        api_key: String,
+        model: String,                // e.g. "gpt-4o", "o3-mini"
+        base_url: Option<String>,     // For custom endpoints
+        reasoning_effort: Option<String>,  // For o-series models
+    },
+    Gemini {
+        api_key: String,
+        model: String,                // e.g. "gemini-2.5-pro-preview-03-25"
+    },
+}
+
+impl BackendConfig {
+    pub fn name(&self) -> &'static str {
+        match self {
+            BackendConfig::Claude { .. } => "Claude",
+            BackendConfig::OpenAI { .. } => "OpenAI",
+            BackendConfig::Gemini { .. } => "Gemini",
+        }
+    }
+}
+
+/// Events emitted by backends during streaming
+#[derive(Clone, Debug)]
+pub enum AiEvent {
+    /// Stream delta received
+    StreamDelta {
+        request_id: RequestId,
+        delta: StreamDelta,
+    },
+    /// Request completed successfully
+    Complete {
+        request_id: RequestId,
+        response: AiResponse,
+    },
+    /// Request failed
+    Error {
+        request_id: RequestId,
+        error: String,
+    },
+}
+
+/// Trait for AI backend implementations
+pub trait AiBackend {
+    /// Send a request, returns request ID for tracking
+    fn send_request(&mut self, cx: &mut Cx, request: AiRequest) -> RequestId;
+
+    /// Cancel an in-flight request
+    fn cancel_request(&mut self, cx: &mut Cx, request_id: RequestId);
+
+    /// Process network events, returns any AI events
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<AiEvent>;
+
+    /// Get backend configuration
+    fn config(&self) -> &BackendConfig;
+}
+```
+
+---
+
+## Part 3: Claude Backend (`backends/claude.rs`)
+
+### Protocol Types (internal)
+
+```rust
+// Request types
+#[derive(SerJson)]
+struct ClaudeRequest {
+    model: String,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<ClaudeMessage>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ClaudeTool>,
+}
+
+#[derive(SerJson)]
+struct ClaudeMessage {
+    role: String,  // "user" or "assistant"
+    content: ClaudeContent,
+}
+
+// Content can be string or array of blocks
+#[derive(SerJson)]
+#[serde(untagged)]
+enum ClaudeContent {
+    Text(String),
+    Blocks(Vec<ClaudeContentBlock>),
+}
+
+#[derive(SerJson)]
+#[serde(tag = "type")]
+enum ClaudeContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: ClaudeImageSource },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String, input: serde_json::Value },
+    #[serde(rename = "tool_result")]
+    ToolResult { tool_use_id: String, content: String, #[serde(skip_serializing_if = "std::ops::Not::not")] is_error: bool },
+}
+
+#[derive(SerJson)]
+struct ClaudeImageSource {
+    #[serde(rename = "type")]
+    source_type: String,  // "base64"
+    media_type: String,
+    data: String,
+}
+
+#[derive(SerJson)]
+struct ClaudeTool {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+// Response/streaming types
+#[derive(DeJson)]
+struct ClaudeStreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    // Fields vary by event type - use JsonValue for flexibility
+    message: Option<JsonValue>,
+    index: Option<u32>,
+    content_block: Option<JsonValue>,
+    delta: Option<JsonValue>,
+    usage: Option<ClaudeUsage>,
+}
+
+#[derive(DeJson)]
+struct ClaudeUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+```
+
+### Streaming Event Types
+
+From https://platform.claude.com/docs/en/api/messages-streaming:
+
+1. `message_start` - Contains initial Message object with empty content
+2. `content_block_start` - New content block beginning (index, content_block with type)
+3. `content_block_delta` - Delta for content block:
+   - `text_delta` with `text` field
+   - `input_json_delta` with `partial_json` field (for tool use)
+4. `content_block_stop` - Content block finished
+5. `message_delta` - Top-level message changes (stop_reason, usage)
+6. `message_stop` - Stream complete
+7. `ping` - Keep-alive
+8. `error` - Error occurred
+
+### SSE Parsing
+
+```rust
+// SSE format: "event: <type>\ndata: <json>\n\n"
+fn parse_sse_events(data: &str) -> Vec<(String, String)> {
+    let mut events = vec![];
+    for chunk in data.split("\n\n") {
+        let mut event_type = String::new();
+        let mut event_data = String::new();
+        for line in chunk.lines() {
+            if let Some(t) = line.strip_prefix("event: ") {
+                event_type = t.to_string();
+            } else if let Some(d) = line.strip_prefix("data: ") {
+                event_data = d.to_string();
+            }
+        }
+        if !event_data.is_empty() {
+            events.push((event_type, event_data));
+        }
+    }
+    events
+}
+```
+
+### Backend Implementation
+
+```rust
+pub struct ClaudeBackend {
+    config: BackendConfig,
+    in_flight: HashMap<LiveId, InFlightRequest>,
+}
+
+struct InFlightRequest {
+    request_id: RequestId,
+    accumulated_text: String,
+    current_tool_use: Option<ToolUseAccumulator>,
+    content_blocks: Vec<ContentBlock>,
+}
+
+struct ToolUseAccumulator {
+    id: String,
+    name: String,
+    partial_json: String,
+}
+
+impl ClaudeBackend {
+    pub fn new(config: BackendConfig) -> Self {
+        Self {
+            config,
+            in_flight: HashMap::new(),
+        }
+    }
+
+    fn build_request(&self, request: &AiRequest) -> HttpRequest {
+        let BackendConfig::Claude { api_key, oauth_token, model } = &self.config else {
+            panic!("Wrong config type");
+        };
+
+        let mut http = HttpRequest::new(
+            "https://api.anthropic.com/v1/messages".to_string(),
+            HttpMethod::POST
+        );
+        http.set_is_streaming();
+        http.set_header("Content-Type".to_string(), "application/json".to_string());
+        http.set_header("anthropic-version".to_string(), "2023-06-01".to_string());
+
+        // Use OAuth token if available, otherwise API key
+        if let Some(token) = oauth_token {
+            http.set_header("Authorization".to_string(), format!("Bearer {}", token));
+        } else if let Some(key) = api_key {
+            http.set_header("x-api-key".to_string(), key.clone());
+        }
+
+        // Convert messages to Claude format
+        let messages = request.messages.iter()
+            .filter(|m| m.role != MessageRole::System)
+            .map(|m| convert_message_to_claude(m))
+            .collect();
+
+        let body = ClaudeRequest {
+            model: model.clone(),
+            max_tokens: request.max_tokens,
+            system: request.system_prompt.clone(),
+            messages,
+            stream: request.stream,
+            temperature: request.temperature,
+            tools: request.tools.iter().map(convert_tool_to_claude).collect(),
+        };
+
+        http.set_json_body(body);
+        http
+    }
+}
+
+impl AiBackend for ClaudeBackend {
+    fn send_request(&mut self, cx: &mut Cx, request: AiRequest) -> RequestId {
+        let request_id = RequestId::new();
+        let http = self.build_request(&request);
+
+        self.in_flight.insert(request_id.0, InFlightRequest {
+            request_id,
+            accumulated_text: String::new(),
+            current_tool_use: None,
+            content_blocks: vec![],
+        });
+
+        cx.http_request(request_id.0, http);
+        request_id
+    }
+
+    fn cancel_request(&mut self, cx: &mut Cx, request_id: RequestId) {
+        if self.in_flight.remove(&request_id.0).is_some() {
+            cx.cancel_http_request(request_id.0);
+        }
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<AiEvent> {
+        let mut ai_events = vec![];
+
+        if let Event::NetworkResponses(responses) = event {
+            for response in responses {
+                if let Some(in_flight) = self.in_flight.get_mut(&response.request_id) {
+                    match &response.response {
+                        NetworkResponse::HttpStreamResponse(res) => {
+                            let data = res.get_string_body().unwrap_or_default();
+                            ai_events.extend(self.process_sse_data(response.request_id, &data));
+                        }
+                        NetworkResponse::HttpStreamComplete(_) => {
+                            if let Some(in_flight) = self.in_flight.remove(&response.request_id) {
+                                // Build final response
+                                ai_events.push(AiEvent::Complete {
+                                    request_id: in_flight.request_id,
+                                    response: AiResponse {
+                                        message: Message {
+                                            role: MessageRole::Assistant,
+                                            content: in_flight.content_blocks,
+                                        },
+                                        stop_reason: StopReason::EndTurn,
+                                        usage: Usage::default(),
+                                    },
+                                });
+                            }
+                        }
+                        NetworkResponse::HttpRequestError(err) => {
+                            if let Some(in_flight) = self.in_flight.remove(&response.request_id) {
+                                ai_events.push(AiEvent::Error {
+                                    request_id: in_flight.request_id,
+                                    error: err.message.clone(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        ai_events
+    }
+
+    fn config(&self) -> &BackendConfig {
+        &self.config
+    }
+}
+```
+
+---
+
+## Part 4: OpenAI Backend (`backends/openai.rs`)
+
+### Protocol Types
+
+```rust
+#[derive(SerJson)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,  // For o-series: "low", "medium", "high"
+}
+
+#[derive(SerJson, DeJson)]
+struct OpenAiMessage {
+    role: String,  // "system", "user", "assistant", "tool"
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(SerJson, DeJson)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,  // "function"
+    function: OpenAiFunction,
+}
+
+#[derive(SerJson, DeJson)]
+struct OpenAiFunction {
+    name: String,
+    arguments: String,
+}
+
+#[derive(SerJson)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    tool_type: String,  // "function"
+    function: OpenAiFunctionDef,
+}
+
+#[derive(SerJson)]
+struct OpenAiFunctionDef {
+    name: String,
+    description: String,
+    parameters: JsonValue,
+}
+
+// Streaming response
+#[derive(DeJson)]
+struct OpenAiStreamChunk {
+    id: String,
+    object: String,
+    created: u64,
+    model: String,
+    choices: Vec<OpenAiStreamChoice>,
+}
+
+#[derive(DeJson)]
+struct OpenAiStreamChoice {
+    index: u32,
+    delta: OpenAiDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(DeJson)]
+struct OpenAiDelta {
+    role: Option<String>,
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+}
+
+#[derive(DeJson)]
+struct OpenAiToolCallDelta {
+    index: u32,
+    id: Option<String>,
+    #[serde(rename = "type")]
+    call_type: Option<String>,
+    function: Option<OpenAiFunctionDelta>,
+}
+
+#[derive(DeJson)]
+struct OpenAiFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+```
+
+### SSE Format
+
+OpenAI uses: `data: <json>\n\n` with `data: [DONE]` to signal completion.
+
+```rust
+fn parse_openai_sse(data: &str) -> Vec<Option<OpenAiStreamChunk>> {
+    data.split("\n\n")
+        .filter_map(|chunk| chunk.strip_prefix("data: "))
+        .map(|json| {
+            if json == "[DONE]" {
+                None
+            } else {
+                OpenAiStreamChunk::deserialize_json(json).ok()
+            }
+        })
+        .collect()
+}
+```
+
+### Backend Implementation
+
+Similar structure to Claude backend, but:
+- Endpoint: `https://api.openai.com/v1/chat/completions` (or custom base_url)
+- Auth: `Authorization: Bearer <key>`
+- System messages go in messages array with role "system"
+- Tool results use role "tool" with tool_call_id
+
+---
+
+## Part 5: Gemini Backend (`backends/gemini.rs`)
+
+### Protocol Types
+
+```rust
+#[derive(SerJson)]
+struct GeminiRequest {
+    contents: Vec<GeminiContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<GeminiContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_config: Option<GeminiGenerationConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<GeminiTool>,
+}
+
+#[derive(SerJson, DeJson)]
+struct GeminiContent {
+    role: Option<String>,  // "user" or "model"
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(SerJson, DeJson)]
+struct GeminiPart {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline_data: Option<GeminiInlineData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_call: Option<GeminiFunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_response: Option<GeminiFunctionResponse>,
+}
+
+#[derive(SerJson, DeJson)]
+struct GeminiInlineData {
+    mime_type: String,
+    data: String,  // base64
+}
+
+#[derive(SerJson, DeJson)]
+struct GeminiFunctionCall {
+    name: String,
+    args: JsonValue,
+}
+
+#[derive(SerJson, DeJson)]
+struct GeminiFunctionResponse {
+    name: String,
+    response: JsonValue,
+}
+
+#[derive(SerJson)]
+struct GeminiGenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+}
+
+#[derive(SerJson)]
+struct GeminiTool {
+    function_declarations: Vec<GeminiFunctionDeclaration>,
+}
+
+#[derive(SerJson)]
+struct GeminiFunctionDeclaration {
+    name: String,
+    description: String,
+    parameters: JsonValue,
+}
+
+// Response
+#[derive(DeJson)]
+struct GeminiResponse {
+    candidates: Vec<GeminiCandidate>,
+    usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+#[derive(DeJson)]
+struct GeminiCandidate {
+    content: GeminiContent,
+    finish_reason: Option<String>,
+}
+
+#[derive(DeJson)]
+struct GeminiUsageMetadata {
+    prompt_token_count: u32,
+    candidates_token_count: u32,
+    total_token_count: u32,
+}
+```
+
+### SSE Format
+
+Gemini streaming with `alt=sse`: `data: <json>\r\n\r\n`
+
+Note: Gemini uses `\r\n\r\n` as separator (not `\n\n`).
+
+### Backend Implementation
+
+- Non-streaming: `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}`
+- Streaming: `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={key}`
+- Role mapping: User -> "user", Assistant -> "model"
+- System prompt goes in `system_instruction` field
+
+---
+
+## Part 6: AI Manager (`manager.rs`)
+
+```rust
+pub struct AiManager {
+    backends: HashMap<String, Box<dyn AiBackend>>,
+    active_backend: Option<String>,
+}
+
+impl AiManager {
+    pub fn new() -> Self {
+        Self {
+            backends: HashMap::new(),
+            active_backend: None,
+        }
+    }
+
+    pub fn add_backend(&mut self, name: &str, config: BackendConfig) {
+        let backend: Box<dyn AiBackend> = match &config {
+            BackendConfig::Claude { .. } => Box::new(ClaudeBackend::new(config)),
+            BackendConfig::OpenAI { .. } => Box::new(OpenAiBackend::new(config)),
+            BackendConfig::Gemini { .. } => Box::new(GeminiBackend::new(config)),
+        };
+        self.backends.insert(name.to_string(), backend);
+        if self.active_backend.is_none() {
+            self.active_backend = Some(name.to_string());
+        }
+    }
+
+    pub fn set_active(&mut self, name: &str) {
+        if self.backends.contains_key(name) {
+            self.active_backend = Some(name.to_string());
+        }
+    }
+
+    pub fn send_request(&mut self, cx: &mut Cx, request: AiRequest) -> Option<RequestId> {
+        let name = self.active_backend.as_ref()?;
+        let backend = self.backends.get_mut(name)?;
+        Some(backend.send_request(cx, request))
+    }
+
+    pub fn cancel_request(&mut self, cx: &mut Cx, request_id: RequestId) {
+        for backend in self.backends.values_mut() {
+            backend.cancel_request(cx, request_id);
+        }
+    }
+
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<AiEvent> {
+        let mut all_events = vec![];
+        for backend in self.backends.values_mut() {
+            all_events.extend(backend.handle_event(cx, event));
+        }
+        all_events
+    }
+}
+```
+
+---
+
+## Part 7: Example Application (`examples/aichat/`)
+
+### Structure
+
+```
+examples/aichat/
+├── Cargo.toml
+└── src/
+    └── app.rs
+```
+
+### Cargo.toml
+
+```toml
+[package]
+name = "makepad-example-aichat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets2 = { path = "../../widgets2" }
+makepad-ai = { path = "../../studio/ai" }
+```
+
+### Basic App Structure
+
+```rust
+use makepad_widgets2::*;
+use makepad_ai::*;
+
+app_main!(App);
+
+script_mod!{
+    use mod.prelude.widgets.*
+
+    load_all_resources() do #(App::script_component(vm)){
+        ui: Root{
+            $main_window: Window{
+                window.inner_size: vec2(800, 600)
+                $body +: {
+                    flow: Down
+                    padding: 10
+
+                    // Chat history
+                    $chat_scroll: ScrollYView {
+                        width: Fill
+                        height: Fill
+
+                        $chat_list: View {
+                            flow: Down
+                            width: Fill
+                            height: Fit
+                            spacing: 10
+                        }
+                    }
+
+                    // Input area
+                    View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 10
+
+                        $input: TextInput {
+                            width: Fill
+                            height: Fit
+                            empty_text: "Type a message..."
+                        }
+
+                        $send_button: Button {
+                            text: "Send"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Script, ScriptHook)]
+pub struct App {
+    #[live] ui: WidgetRef,
+    #[rust] ai_manager: AiManager,
+    #[rust] messages: Vec<Message>,
+    #[rust] current_response: String,
+    #[rust] current_request: Option<RequestId>,
+}
+
+impl App {
+    fn run(vm: &mut ScriptVm) -> Self {
+        crate::makepad_widgets2::script_mod(vm);
+
+        let mut ai_manager = AiManager::new();
+
+        // Add Claude backend (read API key from env or file)
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+            ai_manager.add_backend("claude", BackendConfig::Claude {
+                api_key: Some(key),
+                oauth_token: None,
+                model: "claude-sonnet-4-5-20250929".to_string(),
+            });
+        }
+
+        // Add OpenAI backend
+        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+            ai_manager.add_backend("openai", BackendConfig::OpenAI {
+                api_key: key,
+                model: "gpt-4o".to_string(),
+                base_url: None,
+                reasoning_effort: None,
+            });
+        }
+
+        // Add Gemini backend
+        if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
+            ai_manager.add_backend("gemini", BackendConfig::Gemini {
+                api_key: key,
+                model: "gemini-2.5-pro-preview-03-25".to_string(),
+            });
+        }
+
+        let mut app = App::from_script_mod(vm, self::script_mod);
+        app.ai_manager = ai_manager;
+        app
+    }
+
+    fn send_message(&mut self, cx: &mut Cx) {
+        let input = self.ui.text_input(ids!($input));
+        let text = input.text();
+        if text.is_empty() { return; }
+
+        // Add user message
+        self.messages.push(Message::user(&text));
+        input.set_text(cx, "");
+
+        // Send to AI
+        let request = AiRequest {
+            messages: self.messages.clone(),
+            stream: true,
+            ..Default::default()
+        };
+
+        self.current_response.clear();
+        self.current_request = self.ai_manager.send_request(cx, request);
+
+        self.redraw_chat(cx);
+    }
+
+    fn redraw_chat(&mut self, cx: &mut Cx) {
+        // Update UI with messages
+        self.ui.redraw(cx);
+    }
+}
+
+impl MatchEvent for App {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(ids!($send_button)).clicked(actions) {
+            self.send_message(cx);
+        }
+
+        // Handle Enter key in input
+        if let Some(text) = self.ui.text_input(ids!($input)).returned(actions) {
+            self.send_message(cx);
+        }
+    }
+}
+
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
+
+        // Handle AI events
+        for ai_event in self.ai_manager.handle_event(cx, event) {
+            match ai_event {
+                AiEvent::StreamDelta { delta, .. } => {
+                    if let StreamDelta::TextDelta { text } = delta {
+                        self.current_response.push_str(&text);
+                        self.redraw_chat(cx);
+                    }
+                }
+                AiEvent::Complete { response, .. } => {
+                    self.messages.push(response.message);
+                    self.current_response.clear();
+                    self.current_request = None;
+                    self.redraw_chat(cx);
+                }
+                AiEvent::Error { error, .. } => {
+                    log!("AI Error: {}", error);
+                    self.current_request = None;
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+## Part 8: OAuth Token Support for Claude Pro/Max
+
+For users with Claude Pro/Max subscriptions who don't have API keys:
+
+### Getting the Token
+
+User runs once in terminal:
+```bash
+npm install -g @anthropic-ai/claude-code
+claude setup-token
+```
+
+This opens browser for OAuth, then prints a token to terminal.
+
+### Using the Token
+
+The token can be used in place of API key:
+```rust
+ai_manager.add_backend("claude-pro", BackendConfig::Claude {
+    api_key: None,
+    oauth_token: Some(token_from_setup),
+    model: "claude-sonnet-4-5-20250929".to_string(),
+});
+```
+
+The backend sends it as: `Authorization: Bearer <token>`
+
+### Token Storage
+
+For convenience, the app could store the token in:
+- macOS: Keychain (via Security framework)
+- Linux: `~/.config/makepad/ai_credentials.json`
+- Windows: Credential Manager or file
+
+---
+
+## Implementation Order
+
+1. **Core types** (`types.rs`) - Message, ContentBlock, AiRequest, StreamDelta, etc.
+2. **Backend trait** (`backend.rs`) - AiBackend trait, BackendConfig enum
+3. **Claude backend** (`backends/claude.rs`) - Most complex, good reference
+4. **OpenAI backend** (`backends/openai.rs`) - Similar patterns
+5. **Gemini backend** (`backends/gemini.rs`) - Different SSE separator
+6. **Manager** (`manager.rs`) - Simple orchestration
+7. **Example app** - Test everything works
+
+---
+
+## Testing
+
+Each backend should be testable with:
+```bash
+# Claude
+ANTHROPIC_API_KEY=sk-... cargo run -p makepad-example-aichat
+
+# OpenAI
+OPENAI_API_KEY=sk-... cargo run -p makepad-example-aichat
+
+# Gemini
+GOOGLE_API_KEY=... cargo run -p makepad-example-aichat
+```
+
+---
+
+## Future Enhancements
+
+- Tool/function calling UI
+- Image input support
+- Conversation persistence
+- Multiple simultaneous conversations
+- Token counting/budget tracking
+- Retry with exponential backoff
+- Rate limiting
