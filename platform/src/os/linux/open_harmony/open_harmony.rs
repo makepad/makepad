@@ -1,11 +1,21 @@
 use {
     self::super::{
-        super::gl_sys::LibGl,
-        super::gl_sys, arkts_obj_ref::ArkTsObjRef, oh_callbacks::*, oh_media::CxOpenHarmonyMedia,
-        raw_file::RawFileMgr,
+        super::gl_sys, super::gl_sys::LibGl, arkts_obj_ref::ArkTsObjRef, oh_callbacks::*,
+        oh_media::CxOpenHarmonyMedia, raw_file::RawFileMgr,
     },
     crate::{
-        cx::{Cx, OpenHarmonyParams, OsType}, cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace}, cx_stdin::{PollTimer, PollTimers}, egl_sys::{self, LibEgl, EGL_NONE}, event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom}, gpu_info::GpuPerformance, makepad_math::*, os::cx_native::EventFlow, pass::{CxPassParent, PassClearColor, PassClearDepth, PassId}, thread::SignalToUI, window::CxWindowPool, WindowGeomChangeEvent
+        cx::{Cx, OpenHarmonyParams, OsType},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_stdin::{PollTimer, PollTimers},
+        egl_sys::{self, LibEgl, EGL_NONE},
+        event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom},
+        gpu_info::GpuPerformance,
+        makepad_math::*,
+        os::cx_native::EventFlow,
+        pass::{CxPassParent, PassClearColor, PassClearDepth, PassId},
+        thread::SignalToUI,
+        window::CxWindowPool,
+        WindowGeomChangeEvent,
     },
     napi_derive_ohos::napi,
     napi_ohos::{sys::*, Env, JsObject, NapiRaw},
@@ -86,7 +96,7 @@ impl Cx {
     fn handle_other_events(&mut self) {
         // Timers
         let events = self.os.timers.get_dispatch();
-        for event in events{
+        for event in events {
             self.call_event_handler(&Event::Timer(event));
         }
 
@@ -119,11 +129,12 @@ impl Cx {
 
     fn handle_drawing(&mut self) {
         if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
+            let time_now = self.os.timers.time_now();
             if !self.new_next_frames.is_empty() {
-                self.call_next_frame_event(self.os.timers.time_now());
+                self.call_next_frame_event(time_now);
             }
             if self.need_redrawing() {
-                self.call_draw_event();
+                self.call_draw_event(time_now);
                 self.opengl_compile_shaders();
             }
 
@@ -198,16 +209,18 @@ impl Cx {
                     touch.abs /= dpi_factor;
                 }
                 self.fingers.process_touch_update_start(time, &touches);
-                let e = Event::TouchUpdate(
-                    TouchUpdateEvent {
-                        time,
-                        window_id: CxWindowPool::id_zero(),
-                        touches,
-                        modifiers: Default::default()
-                    }
-                );
+                let e = Event::TouchUpdate(TouchUpdateEvent {
+                    time,
+                    window_id: CxWindowPool::id_zero(),
+                    touches,
+                    modifiers: Default::default(),
+                });
                 self.call_event_handler(&e);
-                let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
+                let e = if let Event::TouchUpdate(e) = e {
+                    e
+                } else {
+                    panic!()
+                };
                 self.fingers.process_touch_update_end(&e.touches);
             }
             FromOhosMessage::TextInput(e) => {
@@ -346,17 +359,18 @@ impl Cx {
             let (egl_context, egl_config, egl_display) = unsafe {
                 egl_sys::create_egl_context(&mut libegl).expect("Can't create EGL context")
             };
-            let libgl = LibGl::try_load(| s | {
-                for s in s{
+            let libgl = LibGl::try_load(|s| {
+                for s in s {
                     let s = CString::new(*s).unwrap();
-                    let p = unsafe{libegl.eglGetProcAddress.unwrap()(s.as_ptr())};
-                    if !p.is_null(){
-                        return p
+                    let p = unsafe { libegl.eglGetProcAddress.unwrap()(s.as_ptr()) };
+                    if !p.is_null() {
+                        return p;
                     }
                 }
                 0 as _
-            }).expect("Cant load openGL functions");
-            
+            })
+            .expect("Cant load openGL functions");
+
             let win_attr = vec![EGL_NONE];
             let surface = unsafe {
                 (libegl.eglCreateWindowSurface.unwrap())(
@@ -543,7 +557,7 @@ impl Cx {
                     //self.os.keyboard_visible = false;
                     //unsafe {android_jni::to_java_show_keyboard(false);}
                 }
-                e=>{
+                e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
             }
@@ -600,8 +614,8 @@ pub struct CxOs {
     pub(crate) display: Option<CxOhosDisplay>,
 }
 
-impl CxOs{
-    pub (crate) fn gl(&self)->&LibGl{
+impl CxOs {
+    pub(crate) fn gl(&self) -> &LibGl {
         &self.display.as_ref().unwrap().libgl
     }
 }

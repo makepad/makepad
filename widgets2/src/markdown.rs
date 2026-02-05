@@ -265,23 +265,113 @@ pub struct Markdown {
     auto_id: u64,
     #[live]
     heading_base_scale: f64,
+
+    // Height animation fields
+    /// Enable smooth height animation when content changes
+    #[live(false)]
+    pub stream_height_animation: bool,
+    /// Current animated height (what we display)
+    #[rust]
+    animated_height: f64,
+    /// Target height (actual content height)
+    #[rust]
+    target_height: f64,
+    /// NextFrame for driving height animation
+    #[rust]
+    height_next_frame: NextFrame,
+    /// Last frame time for dt calculation
+    #[rust]
+    height_last_time: f64,
+    /// Smoothing factor (0-1, higher = faster, 0.8 = smooth and fast)
+    #[live(0.5)]
+    pub height_smoothing: f32,
 }
 
 impl Widget for Markdown {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
+
+        // Handle height animation NextFrame
+        if self.stream_height_animation {
+            if let Some(ev) = self.height_next_frame.is_event(event) {
+                let time = ev.time;
+                let dt = if self.height_last_time > 0.0 {
+                    (time - self.height_last_time).max(0.001)
+                } else {
+                    1.0 / 60.0
+                };
+                self.height_last_time = time;
+
+                let distance = self.target_height - self.animated_height;
+
+                if distance.abs() > 0.5 {
+                    // Exponential smoothing - move a fraction of the remaining distance each frame
+                    // Adjust for frame rate: at 60fps with smoothing=0.5, we move 50% per frame
+                    let frame_rate_adjust = (dt * 60.0).min(1.0);
+                    let factor = 1.0 - (1.0 - self.height_smoothing as f64).powf(frame_rate_adjust);
+
+                    self.animated_height += distance * factor;
+
+                    // Request redraw since height affects layout
+                    self.redraw(cx);
+                    self.height_next_frame = cx.new_next_frame();
+                } else {
+                    // Snap to target and stop
+                    self.animated_height = self.target_height;
+                }
+            }
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.auto_id = 0;
-        self.begin(cx, walk);
-        #[cfg(feature = "markdown")]
-        self.process_markdown_doc(cx);
-        #[cfg(not(feature = "markdown"))]
-        {
-            self.text_flow.draw_text(cx, "Markdown feature not enabled");
+
+        if self.stream_height_animation {
+            // Draw content normally to measure it
+            self.begin(cx, walk);
+            #[cfg(feature = "markdown")]
+            self.process_markdown_doc(cx);
+            #[cfg(not(feature = "markdown"))]
+            {
+                self.text_flow.draw_text(cx, "Markdown feature not enabled");
+            }
+
+            // Capture actual content height
+            let used = cx.turtle().used();
+            let content_height = used.y;
+
+            // Update target and determine what height to report
+            if content_height > 0.0 {
+                if self.animated_height == 0.0 {
+                    // First draw - snap to content height
+                    self.animated_height = content_height;
+                    self.target_height = content_height;
+                } else if (self.target_height - content_height).abs() > 0.5 {
+                    // Content height changed - update target and start animation
+                    self.target_height = content_height;
+                    self.height_next_frame = cx.new_next_frame();
+                }
+            }
+
+            // Override used height to report animated height instead of actual
+            // This makes the container grow smoothly while content is fully drawn
+            if self.animated_height > 0.0 && self.animated_height < content_height {
+                cx.turtle_mut().set_used(used.x, self.animated_height);
+            }
+
+            self.end(cx);
+        } else {
+            // Normal drawing without height animation
+            self.begin(cx, walk);
+            #[cfg(feature = "markdown")]
+            self.process_markdown_doc(cx);
+            #[cfg(not(feature = "markdown"))]
+            {
+                self.text_flow.draw_text(cx, "Markdown feature not enabled");
+            }
+            self.end(cx);
         }
-        self.end(cx);
+
         DrawStep::done()
     }
 
@@ -604,6 +694,27 @@ impl MarkdownRef {
             inner.text_flow.is_streaming_animation_done()
         } else {
             true
+        }
+    }
+
+    /// Reset height animation state (for reused widgets or new content).
+    pub fn reset_height_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.animated_height = 0.0;
+            inner.target_height = 0.0;
+            inner.height_last_time = 0.0;
+        }
+    }
+
+    /// Reset all streaming animations (both text fade and height).
+    pub fn reset_all_streaming_animations(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            // Reset text animation
+            inner.text_flow.reset_streaming_animation();
+            // Reset height animation
+            inner.animated_height = 0.0;
+            inner.target_height = 0.0;
+            inner.height_last_time = 0.0;
         }
     }
 }

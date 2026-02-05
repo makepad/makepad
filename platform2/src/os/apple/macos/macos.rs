@@ -405,12 +405,13 @@ impl Cx {
             }
             MacosEvent::Paint => {
                 let has_next_frames = self.new_next_frames.len() != 0;
+                let time_now = with_macos_app(|app| app.time_now());
                 if has_next_frames {
-                    self.call_next_frame_event(with_macos_app(|app| app.time_now()));
+                    self.call_next_frame_event(time_now);
                 }
                 let needs_redrawing = self.need_redrawing();
                 if needs_redrawing {
-                    self.call_draw_event();
+                    self.call_draw_event(time_now);
                     self.mtl_compile_shaders(&metal_cx);
                 }
 

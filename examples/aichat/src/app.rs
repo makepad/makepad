@@ -18,8 +18,7 @@ script_mod! {
             flow: Down
             drag_scrolling: false
             auto_tail: true
-            smooth_tail: true
-            smooth_tail_speed: 0.1
+            smooth_tail: false
             selectable: true
 
             $User: RoundedView {
@@ -76,7 +75,8 @@ script_mod! {
                     height: Fit
                     selectable: true
                     body: "..."
-
+                    stream_height_animation: true
+                    height_smoothing:0.3
                     draw_text +: {
                         get_color: fn() {
                             // Fade in the last 50 characters with exponential curve
@@ -308,7 +308,7 @@ impl Widget for ChatList {
                         markdown.set_text(cx, text);
                         // Reset animation on first draw, then keep animating
                         if just_started {
-                            markdown.reset_streaming_animation();
+                            markdown.reset_all_streaming_animations();
                         } else {
                             markdown.start_streaming_animation();
                         }
