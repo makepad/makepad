@@ -1,6 +1,27 @@
 use proc_macro::TokenStream;
 use makepad_micro_proc_macro::*;
 
+fn get_json_field_name(field: &StructField) -> String {
+    // Check for #[rename(OtherName)] attribute
+    for attr in &field.attrs {
+        if attr.name == "rename" {
+            if let Some(ref args) = attr.args {
+                // Parse the argument as an identifier
+                let mut parser = TokenParser::new(args.clone());
+                if let Some(name) = parser.eat_any_ident() {
+                    return name;
+                }
+            }
+        }
+    }
+    // Fall back to the field name, stripping leading underscore if present
+    if let Some(v) = field.name.strip_prefix("_") {
+        v.to_string()
+    } else {
+        field.name.clone()
+    }
+}
+
 pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
 
     let mut parser = TokenParser::new(input);
@@ -33,10 +54,11 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                 let fields_len = fields.len();
                 tb.add("s . st_pre ( ) ;");
                 // named struct
-                for (i, field) in fields.into_iter().enumerate() {
-                    if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                for (i, field) in fields.iter().enumerate() {
+                    let json_name = get_json_field_name(field);
+                    if field.ty.clone().into_iter().next().unwrap().to_string() == "Option"{
                         tb.add("if let Some ( t ) = ").add("& self .").ident(&field.name).add("{");
-                        tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
+                        tb.add("s . field ( d + 1 ,").string(&json_name).add(") ;");
                         tb.add("t . ser_json ( d + 1 , s ) ;");
                         if i != fields_len - 1 {
                             tb.add("s . conl ( ) ;");
@@ -44,7 +66,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                         tb.add("} ;");
                     }
                     else{
-                        tb.add("s . field ( d + 1 ,").string(&field.name).add(" ) ;");
+                        tb.add("s . field ( d + 1 ,").string(&json_name).add(" ) ;");
                         tb.add("self .").ident(&field.name).add(". ser_json ( d + 1 , s ) ;");
                         if i != fields_len - 1 {
                             tb.add("s . conl ( ) ;");
@@ -111,11 +133,11 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                         tb.add("s . st_pre ( ) ;");
 
                         let fields_len = fields.len();
-                        for (i, field) in fields.into_iter().enumerate() {
-                            let field_strip = if let Some(v) = field.name.strip_prefix("_"){v}else{&field.name};
-                            if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                        for (i, field) in fields.iter().enumerate() {
+                            let json_name = get_json_field_name(field);
+                            if field.ty.clone().into_iter().next().unwrap().to_string() == "Option"{
                                 tb.add("if let Some ( t ) = ").ident(&field.name).add("{");
-                                tb.add("s . field ( d + 1 ,").string(&field_strip).add(") ;");
+                                tb.add("s . field ( d + 1 ,").string(&json_name).add(") ;");
                                 tb.add("t . ser_json ( d + 1 , s ) ;");
                                 if i != fields_len - 1 {
                                     tb.add("s . conl ( ) ;");
@@ -123,7 +145,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                                 tb.add("} ;");
                             }
                             else{
-                                tb.add("s . field ( d + 1 ,").string(&field_strip).add(" ) ;");
+                                tb.add("s . field ( d + 1 ,").string(&json_name).add(" ) ;");
                                 tb.ident(&field.name).add(". ser_json ( d + 1 , s ) ;");
                                 if i != fields_len - 1 {
                                     tb.add("s . conl ( ) ;");
@@ -191,8 +213,8 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                 tb.add("while let Some ( _ ) = s . next_str ( ) {");
                 tb.add("match s . strbuf . as_ref ( ) {");
                 for field in &fields{
-                    let field_strip = if let Some(v) = field.name.strip_prefix("_"){v}else{&field.name};
-                    tb.string(&field_strip).add("=> { s . next_colon ( i ) ? ;");
+                    let json_name = get_json_field_name(field);
+                    tb.string(&json_name).add("=> { s . next_colon ( i ) ? ;");
                     tb.ident(&format!("_{}",field.name)).add("= Some (DeJson :: de_json ( s , i ) ? ) ; } ,");
                 }
                 tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
@@ -200,16 +222,17 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                 tb.add("} ; s . curly_close ( i ) ? ;");
                 
                 tb.add("std :: result :: Result :: Ok ( Self {");
-                for field in fields{
+                for field in &fields{
+                    let json_name = get_json_field_name(field);
                     tb.ident(&field.name).add(":");
-                    if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                    if field.ty.clone().into_iter().next().unwrap().to_string() == "Option"{
                         tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                         tb.add("{ t } else { None } ,");
                     }
                     else{
                         tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                         tb.add("{ t } else { return Err ( s . err_nf (");
-                        tb.string(&field.name).add(") ) } ,");
+                        tb.string(&json_name).add(") ) } ,");
                     }
                 }
                 tb.add("} )");
@@ -262,7 +285,8 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                         tb.add("while let Some ( _ ) = s . next_str ( ) {");
                         tb.add("match s . strbuf . as_ref ( ) {");
                         for field in &fields{
-                            tb.string(&field.name).add("=> { s . next_colon ( i ) ? ;");
+                            let json_name = get_json_field_name(field);
+                            tb.string(&json_name).add("=> { s . next_colon ( i ) ? ;");
                             tb.ident(&format!("_{}",field.name)).add("= Some (DeJson :: de_json ( s , i ) ? ) ; } ,");
                         }
                         tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
@@ -270,16 +294,17 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                         tb.add("} s . curly_close ( i ) ? ;");
                         
                         tb.add("Self ::").ident(&variant).add("{");
-                        for field in fields{
+                        for field in &fields{
+                            let json_name = get_json_field_name(field);
                             tb.ident(&field.name).add(":");
-                            if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                            if field.ty.clone().into_iter().next().unwrap().to_string() == "Option"{
                                 tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                                 tb.add("{ t } else { None } ,");
                             }
                             else{
                                 tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                                 tb.add("{ t } else { return Err ( s . err_nf (");
-                                tb.string(&field.name).add(") ) } ,");
+                                tb.string(&json_name).add(") ) } ,");
                             }
                         }
                         tb.add("}");

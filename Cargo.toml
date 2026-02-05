@@ -20,10 +20,12 @@ workspace.members = [
     "examples/slides",
     "examples/xr_net",
     "examples/comfyui",
+    "examples/aichat",
     "libs/math_widget",
     "libs/svg",
     "platform2/script/test",
     "studio",
+    "studio/ai",
     "tools/cargo_makepad",
 ]
 
