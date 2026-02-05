@@ -1415,8 +1415,10 @@ impl PortalList {
             }
         }
 
-        // Mouse is inside viewport but not in any item (empty space below items)
-        // Snap to end of last item
+        // Mouse is inside viewport but not in any item (gap between items or empty space)
+        // Find the closest item boundary and snap to it
+
+        // Snap to end of last item if below all items
         if mouse_pos > bottom_edge {
             let text_len = self
                 .items
@@ -1426,7 +1428,64 @@ impl PortalList {
             return Some((last_id, text_len));
         }
 
-        None
+        // Mouse is in a gap between items - find the item above and below
+        let mut item_above: Option<(usize, f64)> = None; // (item_id, bottom_edge)
+        let mut item_below: Option<(usize, f64)> = None; // (item_id, top_edge)
+
+        for (item_id, item) in self.items.iter() {
+            let item_rect = item.widget.area().rect(cx);
+            let item_top = item_rect.pos.index(vi);
+            let item_bottom = item_top + item_rect.size.index(vi);
+
+            // Item is above the mouse position
+            if item_bottom <= mouse_pos {
+                if item_above.is_none() || item_bottom > item_above.unwrap().1 {
+                    item_above = Some((*item_id, item_bottom));
+                }
+            }
+            // Item is below the mouse position
+            else if item_top >= mouse_pos {
+                if item_below.is_none() || item_top < item_below.unwrap().1 {
+                    item_below = Some((*item_id, item_top));
+                }
+            }
+        }
+
+        // Snap to the closest boundary
+        match (item_above, item_below) {
+            (Some((above_id, above_bottom)), Some((_, below_top))) => {
+                // Determine which item is closer
+                let dist_to_above = mouse_pos - above_bottom;
+                let dist_to_below = below_top - mouse_pos;
+
+                if dist_to_above <= dist_to_below {
+                    // Snap to end of item above
+                    let text_len = self
+                        .items
+                        .get(&above_id)
+                        .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
+                        .unwrap_or(0);
+                    Some((above_id, text_len))
+                } else {
+                    // Snap to start of item below
+                    Some((item_below.unwrap().0, 0))
+                }
+            }
+            (Some((above_id, _)), None) => {
+                // Only item above - snap to its end
+                let text_len = self
+                    .items
+                    .get(&above_id)
+                    .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
+                    .unwrap_or(0);
+                Some((above_id, text_len))
+            }
+            (None, Some((below_id, _))) => {
+                // Only item below - snap to its start
+                Some((below_id, 0))
+            }
+            (None, None) => None,
+        }
     }
 
     fn get_selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
