@@ -402,6 +402,9 @@ pub struct PortalList {
 
     #[live(false)]
     smooth_tail: bool,
+    /// Speed factor for smooth tail animation (0.0-1.0, lower = slower). Default 0.25.
+    #[live(0.25)]
+    smooth_tail_speed: f64,
 
     #[rust(false)]
     tail_range: bool,
@@ -1741,7 +1744,7 @@ impl Widget for PortalList {
                     if self.tail_adjustment_needed > 0.5 {
                         // Smooth scroll: move a fraction of the distance each frame
                         // Use exponential ease-out for smooth deceleration
-                        let step = self.tail_adjustment_needed * 0.25;
+                        let step = self.tail_adjustment_needed * self.smooth_tail_speed;
                         let step = step.max(1.0); // Minimum 1 pixel per frame
                         self.first_scroll -= step;
                         self.tail_adjustment_needed -= step;
