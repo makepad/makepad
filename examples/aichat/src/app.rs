@@ -297,7 +297,7 @@ impl Widget for ChatList {
                             self.animating_msg = Some(item_id);
                         }
 
-                        let (item_widget, existed) =
+                        let (item_widget, _existed) =
                             list.item_with_existed(cx, item_id, id!($Streaming));
                         let text = if data.streaming_text.is_empty() {
                             "..."
