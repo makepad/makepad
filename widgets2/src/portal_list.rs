@@ -1115,10 +1115,6 @@ impl PortalList {
             // first_scroll is typically 0 or negative (item partially scrolled off top)
             // Negate it because negative first_scroll means we've scrolled down into the item
             let scroll_pos = (height_before - self.first_scroll).max(0.0);
-
-            log!("update_scroll_bar: first_id={}, first_idx={}, first_scroll={}, height_before={}, scroll_pos={}, at_end={}, tree.total={}",
-                 self.first_id, first_idx, self.first_scroll, height_before, scroll_pos, self.at_end, tree.total());
-
             self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
         } else {
             // Fallback to old integer-based calculation
