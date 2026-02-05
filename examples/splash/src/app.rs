@@ -23,6 +23,86 @@ script_mod! {
     }
 
     // ===========================================
+    // SCROLLBAR TEST - Variable height items
+    // ===========================================
+
+    // Small item template (30px)
+    let ScrollTestSmall = RoundedView{
+        width: Fill height: 30
+        margin: Inset{top: 1 bottom: 1 left: 5 right: 5}
+        padding: Inset{left: 10 right: 10}
+        draw_bg.color: #346
+        draw_bg.radius: 3.0
+        align: Align{y: 0.5}
+        $label: Label{text: "Small" draw_text.color: #fff draw_text.text_style.font_size: 9}
+    }
+
+    // Medium item template (60px)
+    let ScrollTestMedium = RoundedView{
+        width: Fill height: 60
+        margin: Inset{top: 1 bottom: 1 left: 5 right: 5}
+        padding: Inset{left: 10 right: 10}
+        draw_bg.color: #463
+        draw_bg.radius: 3.0
+        align: Align{y: 0.5}
+        $label: Label{text: "Medium" draw_text.color: #fff draw_text.text_style.font_size: 10}
+    }
+
+    // Large item template (120px)
+    let ScrollTestLarge = RoundedView{
+        width: Fill height: 120
+        margin: Inset{top: 1 bottom: 1 left: 5 right: 5}
+        padding: Inset{left: 10 right: 10}
+        draw_bg.color: #634
+        draw_bg.radius: 3.0
+        align: Align{y: 0.5}
+        $label: Label{text: "Large" draw_text.color: #fff draw_text.text_style.font_size: 11}
+    }
+
+    // Extra large item template (200px)
+    let ScrollTestXLarge = RoundedView{
+        width: Fill height: 200
+        margin: Inset{top: 1 bottom: 1 left: 5 right: 5}
+        padding: Inset{left: 10 right: 10}
+        draw_bg.color: #643
+        draw_bg.radius: 3.0
+        align: Align{y: 0.5}
+        $label: Label{text: "Extra Large" draw_text.color: #fff draw_text.text_style.font_size: 12}
+    }
+
+    // Scrollbar test list widget
+    let ScrollbarTestList = #(ScrollbarTestList::register_widget(vm)) {
+        width: Fill
+        height: Fill
+        $list: PortalList{
+            width: Fill
+            height: Fill
+            flow: Down
+            $Small: ScrollTestSmall{}
+            $Medium: ScrollTestMedium{}
+            $Large: ScrollTestLarge{}
+            $XLarge: ScrollTestXLarge{}
+        }
+    }
+
+    // Tab content for scrollbar test
+    let TabScrollbarTest = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        flow: Down spacing: 10
+
+        View{
+            width: Fill height: Fit
+            padding: 15
+            flow: Down spacing: 5
+            Label{text: "Scrollbar Height Test" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "100 items with varying heights (30/60/120/200px). Scrollbar should reflect actual content size." draw_text.color: #888 draw_text.text_style.font_size: 10}
+        }
+
+        ScrollbarTestList{}
+    }
+
+    // ===========================================
     // SELECTION TEST - TextFlow in PortalList
     // ===========================================
 
@@ -751,7 +831,7 @@ script_mod! {
 
         // Left panel - Selection test first, then input widgets
         $left_tabs: DockTabs{
-            tabs: [$selection_test_tab, $toggles_tab, $sliders_tab, $text_tab, $dropdowns_tab]
+            tabs: [$scrollbar_test_tab, $selection_test_tab, $toggles_tab, $sliders_tab, $text_tab, $dropdowns_tab]
             selected: 0
             closable: false
         }
@@ -771,6 +851,13 @@ script_mod! {
         }
 
         // Selection test tab - first tab for testing cross-boundary selection
+        // Scrollbar test tab - first tab for testing variable height items
+        $scrollbar_test_tab: DockTab{
+            name: "Scrollbar"
+            template: $CloseableTab
+            kind: $TabScrollbarTest
+        }
+
         $selection_test_tab: DockTab{
             name: "Selection"
             template: $CloseableTab
@@ -863,6 +950,7 @@ script_mod! {
         }
 
         // Content templates by widget type
+        $TabScrollbarTest: TabScrollbarTest{}
         $TabSelectionTest: TabSelectionTest{}
         $TabButtons: TabButtons{}
         $TabToggles: TabToggles{}
@@ -1222,6 +1310,47 @@ impl Widget for SelectionTestList {
                             tf.draw_text(cx, &text);
                         }
                     }
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+// ScrollbarTestList widget demonstrating variable height items in PortalList
+#[derive(Script, ScriptHook, Widget)]
+pub struct ScrollbarTestList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for ScrollbarTestList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = item.borrow_mut::<PortalList>() {
+                // 10 items - should give roughly 2x viewport height so scrollbar is ~50%
+                list.set_item_range(cx, 0, 10);
+
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    // Cycle through different height templates
+                    let (template, height_name) = match item_id % 4 {
+                        0 => (id!($Small), "Small (30px)"),
+                        1 => (id!($Medium), "Medium (60px)"),
+                        2 => (id!($Large), "Large (120px)"),
+                        _ => (id!($XLarge), "XLarge (200px)"),
+                    };
+
+                    let item_widget = list.item(cx, item_id, template);
+
+                    // Set the label text
+                    let text = format!("Item {} - {}", item_id, height_name);
+                    item_widget.label(ids!($label)).set_text(cx, &text);
+
+                    item_widget.draw_all(cx, &mut Scope::empty());
                 }
             }
         }
