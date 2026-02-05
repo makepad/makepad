@@ -81,6 +81,7 @@ script_mod! {
         $flow: TextFlow {
             width: Fill
             height: Fit
+            selectable: true
 
             $code_view: CodeView {
                 editor +: {

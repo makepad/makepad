@@ -2,9 +2,9 @@ use makepad_widgets2::animator::Animate;
 use makepad_widgets2::file_tree::FileTree;
 use makepad_widgets2::*;
 use std::path::Path;
- 
+
 app_main!(App);
- 
+
 script_mod! {
     use mod.prelude.widgets.*
 
@@ -253,9 +253,10 @@ script_mod! {
         ScrollYView{
             width: Fill height: Fill flow: Down padding: 15 spacing: 15
 
-            Label{text: "Markdown" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "Markdown (selectable - try selecting text!)" draw_text.color: #fff draw_text.text_style.font_size: 13}
             $markdown: Markdown{
                 width: Fill height: Fit
+                selectable: true
                 body: "# Heading\n\nThis is **bold** and *italic*.\n\n- List item 1\n- List item 2\n\n> Blockquote\n\n`inline code`"
             }
 
@@ -705,7 +706,7 @@ script_mod! {
 
         // Center panel - content widgets
         $center_tabs: DockTabs{
-            tabs: [$buttons_tab, $markup_tab, $media_tab, $modal_tab]
+            tabs: [$markup_tab, $buttons_tab, $media_tab, $modal_tab]
             selected: 0
             closable: true
         }
@@ -819,11 +820,11 @@ script_mod! {
         $TabSlides: TabSlides{}
         $TabSlidePanel: TabSlidePanel{}
     }
-    
+
     mod.gc.set_static(mod)
     mod.gc.set_static(AppDock)
     mod.gc.run()
-    
+
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             $main_window: Window{

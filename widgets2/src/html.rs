@@ -1,31 +1,31 @@
 use crate::{
+    animator::{Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_html::*,
     text_flow::TextFlow,
     widget::*,
-    animator::{Animator, AnimatorImpl, AnimatorAction},
     WidgetMatchEvent,
 };
 
 const BULLET: &str = "•";
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.HtmlLinkBase = #(HtmlLink::register_widget(vm))
-    
+
     mod.widgets.HtmlBase = #(Html::register_widget(vm))
-    
+
     mod.widgets.HtmlLink = set_type_default() do mod.widgets.HtmlLinkBase{
         width: Fit height: Fit
         align: Align{x: 0. y: 0.}
-        
+
         color: #x0000EE
         hover_color: #x00EE00
         pressed_color: #xEE0000
-        
+
         animator: Animator{
             hover: {
                 default: @off
@@ -37,7 +37,7 @@ script_mod!{
                         pressed: 0.0
                     }
                 }
-                
+
                 on: AnimatorState{
                     redraw: true
                     from: {
@@ -49,7 +49,7 @@ script_mod!{
                         pressed: snap(1.0)
                     }
                 }
-                
+
                 pressed: AnimatorState{
                     redraw: true
                     from: {all: Forward {duration: 0.01}}
@@ -61,49 +61,49 @@ script_mod!{
             }
         }
     }
-    
+
     mod.widgets.Html = set_type_default() do mod.widgets.HtmlBase{
         width: Fill height: Fit
         flow: Flow.Right{wrap: true}
         padding: theme.mspace_1
-        
+
         ul_markers: ["•", "-"]
         ol_separator: "."
-        
+
         heading_margin: Inset{top: 1.0, bottom: 0.1}
         paragraph_margin: Inset{top: 0.33, bottom: 0.33}
-        
+
         font_size: theme.font_size_p
         font_color: theme.color_label_inner
-        
+
         draw_normal +: {
             text_style: theme.font_regular{
                 font_size: theme.font_size_p
             }
             color: theme.color_label_inner
         }
-        
+
         draw_italic +: {
             text_style: theme.font_italic{
                 font_size: theme.font_size_p
             }
             color: theme.color_label_inner
         }
-        
+
         draw_bold +: {
             text_style: theme.font_bold{
                 font_size: theme.font_size_p
             }
             color: theme.color_label_inner
         }
-        
+
         draw_bold_italic +: {
             text_style: theme.font_bold_italic{
                 font_size: theme.font_size_p
             }
             color: theme.color_label_inner
         }
-        
+
         draw_fixed +: {
             temp_y_shift: 0.24
             text_style: theme.font_code{
@@ -111,19 +111,19 @@ script_mod!{
             }
             color: theme.color_label_inner
         }
-        
+
         code_layout: Layout{
             flow: Flow.Right{wrap: true}
             padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
         code_walk: Walk{width: Fill height: Fit}
-        
+
         quote_layout: Layout{
             flow: Flow.Right{wrap: true}
             padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
         quote_walk: Walk{width: Fill height: Fit}
-        
+
         list_item_layout: Layout{
             flow: Flow.Right{wrap: true}
             padding: theme.mspace_1
@@ -131,26 +131,27 @@ script_mod!{
         list_item_walk: Walk{
             height: Fit width: Fill
         }
-        
+
         inline_code_padding: theme.mspace_1
         inline_code_margin: theme.mspace_1
-        
+
         sep_walk: Walk{
             width: Fill height: 4.
             margin: theme.mspace_v_1
         }
-        
+
         $a: mod.widgets.HtmlLink{}
-        
+
         draw_block +: {
             line_color: theme.color_label_inner
             sep_color: theme.color_shadow
             quote_bg_color: theme.color_bg_highlight
             quote_fg_color: theme.color_label_inner
             code_color: theme.color_bg_highlight
+            selection_color: theme.color_selection_focus
             space_1: uniform(theme.space_1)
             space_2: uniform(theme.space_2)
-            
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 match self.block_type {
@@ -186,6 +187,9 @@ script_mod!{
                         sdf.fill(self.line_color)
                         return sdf.result
                     }
+                    FlowBlockType.Selection => {
+                        return vec4(self.selection_color.rgb * self.selection_color.a, self.selection_color.a)
+                    }
                 }
                 return #f00
             }
@@ -209,20 +213,27 @@ pub enum TrimWhitespaceInText {
 
 #[derive(Script, Widget)]
 pub struct Html {
-    #[deref] pub text_flow: TextFlow,
-    #[live] pub body: ArcStringMut,
-    #[rust] pub doc: HtmlDoc,
-    
+    #[deref]
+    pub text_flow: TextFlow,
+    #[live]
+    pub body: ArcStringMut,
+    #[rust]
+    pub doc: HtmlDoc,
+
     /// Markers used for unordered lists, indexed by the list's nesting level.
     /// The marker can be an arbitrary string, such as a bullet point or a custom icon.
-    #[live] ul_markers: Vec<String>,
+    #[live]
+    ul_markers: Vec<String>,
     /// Markers used for ordered lists, indexed by the list's nesting level.
-    #[rust] ol_markers: Vec<OrderedListType>,
+    #[rust]
+    ol_markers: Vec<OrderedListType>,
     /// The character used to separate an ordered list's item number from the content.
-    #[live] ol_separator: String,
+    #[live]
+    ol_separator: String,
 
     /// The stack of list levels encountered so far, used to track nested lists.
-    #[rust] list_stack: Vec<ListLevel>,
+    #[rust]
+    list_stack: Vec<ListLevel>,
 }
 
 impl ScriptHook for Html {
@@ -236,8 +247,14 @@ impl ScriptHook for Html {
             ];
         }
     }
-    
-    fn on_after_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+
+    fn on_after_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         let mut errors = Some(Vec::new());
         let new_doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
         if new_doc != self.doc {
@@ -260,10 +277,14 @@ impl Html {
         ol_markers: &Vec<OrderedListType>,
         ol_separator: &str,
     ) -> (Option<LiveId>, TrimWhitespaceInText) {
-
         let mut trim_whitespace_in_text = TrimWhitespaceInText::default();
 
-        fn open_header_tag(cx: &mut Cx2d, tf: &mut TextFlow, scale: f64, trim: &mut TrimWhitespaceInText) {
+        fn open_header_tag(
+            cx: &mut Cx2d,
+            tf: &mut TextFlow,
+            scale: f64,
+            trim: &mut TrimWhitespaceInText,
+        ) {
             *trim = TrimWhitespaceInText::Trim;
             tf.bold.push();
             tf.push_size_abs_scale(scale);
@@ -309,22 +330,17 @@ impl Html {
                 tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
-            some_id!(hr)
-            | some_id!(sep) => {
+            some_id!(hr) | some_id!(sep) => {
                 tf.new_line_collapsed(cx);
                 tf.sep(cx);
                 tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(u) => tf.underline.push(),
-            some_id!(del)
-            | some_id!(s)
-            | some_id!(strike) => tf.strikethrough.push(),
+            some_id!(del) | some_id!(s) | some_id!(strike) => tf.strikethrough.push(),
 
-            some_id!(b)
-            | some_id!(strong) => tf.bold.push(),
-            some_id!(i)
-            | some_id!(em) => tf.italic.push(),
+            some_id!(b) | some_id!(strong) => tf.bold.push(),
+            some_id!(i) | some_id!(em) => tf.italic.push(),
 
             some_id!(sub) => {
                 tf.push_size_rel_scale(0.7);
@@ -341,19 +357,17 @@ impl Html {
                     padding: 2.5,
                 });
             }
-            some_id!(ol) => { 
+            some_id!(ol) => {
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 let start_attr = node.find_attr_lc(live_id!(start));
-                let start: i32 = start_attr
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
+                let start: i32 = start_attr.and_then(|s| s.parse().ok()).unwrap_or(1);
 
                 let type_attr = node.find_attr_lc(live_id!(type));
                 let numbering_type = type_attr.and_then(OrderedListType::from_type_attribute);
 
                 list_stack.push(ListLevel {
                     list_kind: ListKind::Ordered,
-                    numbering_type, 
+                    numbering_type,
                     li_count: start,
                     padding: 2.5,
                 });
@@ -364,10 +378,10 @@ impl Html {
                 let index = indent_level.saturating_sub(1);
                 let marker_and_pad = list_stack.last_mut().map(|ll| {
                     let marker = match ll.list_kind {
-                        ListKind::Unordered => {
-                            ul_markers.get(index).cloned()
-                                .unwrap_or_else(|| BULLET.into())
-                        }
+                        ListKind::Unordered => ul_markers
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| BULLET.into()),
                         ListKind::Ordered => {
                             let value_attr = node.find_attr_lc(live_id!(value));
                             let value: i32 = value_attr
@@ -375,9 +389,11 @@ impl Html {
                                 .unwrap_or(ll.li_count);
 
                             let type_attr = node.find_attr_lc(live_id!(type));
-                            let numbering_type = type_attr.and_then(OrderedListType::from_type_attribute);
+                            let numbering_type =
+                                type_attr.and_then(OrderedListType::from_type_attribute);
 
-                            numbering_type.as_ref()
+                            numbering_type
+                                .as_ref()
                                 .or_else(|| ll.numbering_type.as_ref())
                                 .or_else(|| ol_markers.get(index))
                                 .map(|ol_type| ol_type.marker(value, ol_separator))
@@ -387,19 +403,20 @@ impl Html {
                     ll.li_count += 1;
                     (marker, ll.padding)
                 });
-                let (marker, pad) = marker_and_pad.as_ref()
+                let (marker, pad) = marker_and_pad
+                    .as_ref()
                     .map(|(m, p)| (m.as_str(), *p))
                     .unwrap_or((BULLET, 2.5));
-                
+
                 tf.new_line_collapsed(cx);
                 tf.begin_list_item(cx, marker, pad);
             }
             Some(x) => return (Some(x), trim_whitespace_in_text),
-            _ => ()
+            _ => (),
         }
         (None, trim_whitespace_in_text)
     }
-    
+
     fn handle_close_tag(
         cx: &mut Cx2d,
         tf: &mut TextFlow,
@@ -415,12 +432,13 @@ impl Html {
             | some_id!(h6) => {
                 let size = tf.font_sizes.pop();
                 tf.bold.pop();
-                tf.new_line_collapsed_with_spacing(cx, size.unwrap_or(0.0) as f64 * tf.heading_margin.bottom);
+                tf.new_line_collapsed_with_spacing(
+                    cx,
+                    size.unwrap_or(0.0) as f64 * tf.heading_margin.bottom,
+                );
             }
-            some_id!(b)
-            | some_id!(strong) => tf.bold.pop(),
-            some_id!(i)
-            | some_id!(em) => tf.italic.pop(),
+            some_id!(b) | some_id!(strong) => tf.bold.pop(),
+            some_id!(i) | some_id!(em) => tf.italic.pop(),
             some_id!(p) => {
                 let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.bottom);
@@ -434,13 +452,13 @@ impl Html {
                 tf.inline_code.pop();
                 tf.font_sizes.pop();
                 tf.combine_spaces.pop();
-                tf.fixed.pop(); 
+                tf.fixed.pop();
             }
             some_id!(pre) => {
                 tf.fixed.pop();
                 tf.ignore_newlines.pop();
                 tf.combine_spaces.pop();
-                tf.end_code(cx);     
+                tf.end_code(cx);
             }
             some_id!(sub) => {
                 tf.font_sizes.pop();
@@ -448,25 +466,22 @@ impl Html {
             some_id!(sup) => {
                 tf.font_sizes.pop();
             }
-            some_id!(ul)
-            | some_id!(ol) => {
+            some_id!(ul) | some_id!(ol) => {
                 list_stack.pop();
             }
             some_id!(li) => tf.end_list_item(cx),
             some_id!(u) => tf.underline.pop(),
-            some_id!(del)
-            | some_id!(s)
-            | some_id!(strike) => tf.strikethrough.pop(),
-            _ => ()
+            some_id!(del) | some_id!(s) | some_id!(strike) => tf.strikethrough.pop(),
+            _ => (),
         }
         None
     }
-    
+
     pub fn handle_text_node(
         cx: &mut Cx2d,
         tf: &mut TextFlow,
         node: &mut HtmlWalker,
-        trim: TrimWhitespaceInText,    
+        trim: TrimWhitespaceInText,
     ) -> bool {
         if let Some(text) = node.text() {
             let text = if trim == TrimWhitespaceInText::Trim {
@@ -476,8 +491,7 @@ impl Html {
             };
             tf.draw_text(cx, text);
             true
-        }
-        else {
+        } else {
             false
         }
     }
@@ -487,7 +501,7 @@ impl Widget for Html {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let tf = &mut self.text_flow;
         tf.begin(cx, walk);
@@ -495,29 +509,37 @@ impl Widget for Html {
         let mut auto_id = 0;
         while !node.done() {
             let mut trim = TrimWhitespaceInText::default();
-            match Self::handle_open_tag(cx, tf, &mut node, &mut self.list_stack, &self.ul_markers, &self.ol_markers, &self.ol_separator) {
+            match Self::handle_open_tag(
+                cx,
+                tf,
+                &mut node,
+                &mut self.list_stack,
+                &self.ul_markers,
+                &self.ol_markers,
+                &self.ol_separator,
+            ) {
                 (Some(_), _tws) => {
-                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id); 
+                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id);
                 }
                 (None, tws) => {
                     trim = tws;
                 }
             }
             match Self::handle_close_tag(cx, tf, &mut node, &mut self.list_stack) {
-                _ => ()
+                _ => (),
             }
             Self::handle_text_node(cx, tf, &mut node, trim);
             node.walk();
         }
         tf.end(cx);
         DrawStep::done()
-    }  
-     
+    }
+
     fn text(&self) -> String {
         self.body.as_ref().to_string()
     }
-    
-    fn set_text(&mut self, cx:&mut Cx, v:&str){
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.body.set(v);
         let mut errors = Some(Vec::new());
         self.doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
@@ -526,8 +548,7 @@ impl Widget for Html {
         }
         self.redraw(cx);
     }
-} 
-
+}
 
 fn handle_custom_widget(
     cx: &mut Cx2d,
@@ -556,7 +577,6 @@ fn handle_custom_widget(
     node.jump_to_close();
 }
 
-
 #[derive(Clone, Debug, Default)]
 pub enum HtmlLinkAction {
     #[default]
@@ -573,30 +593,44 @@ pub enum HtmlLinkAction {
 
 #[derive(Script, Widget, Animator)]
 pub struct HtmlLink {
-    #[source] source: ScriptObjectRef,
+    #[source]
+    source: ScriptObjectRef,
     #[apply_default]
     animator: Animator,
 
-    #[redraw] #[area] area: Area,
+    #[redraw]
+    #[area]
+    area: Area,
 
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
 
-    #[rust] drawn_areas: SmallVec<[Area; 2]>,
-    #[live(true)] grab_key_focus: bool,
+    #[rust]
+    drawn_areas: SmallVec<[Area; 2]>,
+    #[live(true)]
+    grab_key_focus: bool,
 
-    #[live] hovered: f32,
-    #[live] pressed: f32,
+    #[live]
+    hovered: f32,
+    #[live]
+    pressed: f32,
 
     /// The default font color for the link when not hovered on or pressed.
-    #[live] color: Option<Vec4f>,
+    #[live]
+    color: Option<Vec4f>,
     /// The font color used when the link is hovered on.
-    #[live] hover_color: Option<Vec4f>,
+    #[live]
+    hover_color: Option<Vec4f>,
     /// The font color used when the link is pressed.
-    #[live] pressed_color: Option<Vec4f>,
+    #[live]
+    pressed_color: Option<Vec4f>,
 
-    #[live] pub text: ArcStringMut,
-    #[live] pub url: String,
+    #[live]
+    pub text: ArcStringMut,
+    #[live]
+    pub url: String,
 }
 
 impl ScriptHook for HtmlLink {
@@ -605,13 +639,11 @@ impl ScriptHook for HtmlLink {
         // populate its struct fields from the `<a>` tag's attributes.
         if let Some(doc) = scope.props.get::<HtmlDoc>() {
             let mut walker = doc.new_walker_with_index(scope.index + 1);
-            
+
             if let Some((lc, attr)) = walker.while_attr_lc() {
                 match lc {
-                    live_id!(href) => {
-                        self.url = attr.into()
-                    }
-                    _ => ()
+                    live_id!(href) => self.url = attr.into(),
+                    _ => (),
                 }
             }
         }
@@ -633,7 +665,7 @@ impl Widget for HtmlLink {
                 self.drawn_areas.iter().for_each(|area| area.redraw(cx));
             }
         }
-        
+
         self.widget_match_event(cx, event, scope);
 
         for area in self.drawn_areas.clone().into_iter() {
@@ -644,8 +676,7 @@ impl Widget for HtmlLink {
                             cx.set_key_focus(self.area());
                         }
                         self.animator_play(cx, ids!(hover.pressed));
-                    }
-                    else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
+                    } else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
                         cx.widget_action(
                             self.widget_uid(),
                             &scope.path,
@@ -681,10 +712,7 @@ impl Widget for HtmlLink {
                         self.animator_play(cx, ids!(hover.off));
                     }
 
-                    if fu.is_over
-                        && fu.is_primary_hit()
-                        && fu.was_tap()
-                    {
+                    if fu.is_over && fu.is_primary_hit() && fu.was_tap() {
                         cx.widget_action(
                             self.widget_uid(),
                             &scope.path,
@@ -699,7 +727,7 @@ impl Widget for HtmlLink {
             }
         }
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         let Some(tf) = scope.data.get_mut::<TextFlow>() else {
             return DrawStep::done();
@@ -725,42 +753,41 @@ impl Widget for HtmlLink {
             }
         }
         tf.draw_text(cx, self.text.as_ref());
-        
+
         if pushed_color {
             tf.font_colors.pop();
         }
         tf.underline.pop();
 
         let (start, end) = tf.areas_tracker.pop_tracker();
-        
-        if self.drawn_areas.len() == end-start {
-            for i in 0..end-start {
-                self.drawn_areas[i] = cx.update_area_refs(self.drawn_areas[i], 
-                    tf.areas_tracker.areas[i+start]);
+
+        if self.drawn_areas.len() == end - start {
+            for i in 0..end - start {
+                self.drawn_areas[i] =
+                    cx.update_area_refs(self.drawn_areas[i], tf.areas_tracker.areas[i + start]);
             }
-        }
-        else {
-            self.drawn_areas = SmallVec::from(
-                &tf.areas_tracker.areas[start..end]
-            );
+        } else {
+            self.drawn_areas = SmallVec::from(&tf.areas_tracker.areas[start..end]);
         }
 
         DrawStep::done()
     }
-    
+
     fn text(&self) -> String {
         self.text.as_ref().to_string()
     }
 
-    fn set_text(&mut self, cx:&mut Cx, v: &str) {
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
     }
 }
 
 impl HtmlRef {
-    pub fn set_text(&mut self, cx:&mut Cx, v:&str) {
-        let Some(mut inner) = self.borrow_mut() else { return };
+    pub fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
         inner.set_text(cx, v)
     }
 }
@@ -835,12 +862,18 @@ impl OrderedListType {
     /// * Roman numerals >= 4000 will return an integer number marker.
     pub fn marker(&self, count: i32, separator: &str) -> String {
         let to_number = || format!("{count}{separator}");
-        if count <= 0 { return to_number(); }
+        if count <= 0 {
+            return to_number();
+        }
 
         match self {
             OrderedListType::Numbers => to_number(),
-            OrderedListType::UpperAlpha => format!("{}{separator}", ('A' as u8 + count as u8 - 1) as char),
-            OrderedListType::LowerAlpha => format!("{}{separator}", ('a' as u8 + count as u8 - 1) as char),
+            OrderedListType::UpperAlpha => {
+                format!("{}{separator}", ('A' as u8 + count as u8 - 1) as char)
+            }
+            OrderedListType::LowerAlpha => {
+                format!("{}{separator}", ('a' as u8 + count as u8 - 1) as char)
+            }
             OrderedListType::UpperRoman => to_roman_numeral(count)
                 .map(|m| format!("{}{separator}", m))
                 .unwrap_or_else(to_number),
@@ -873,13 +906,24 @@ impl OrderedListType {
 pub fn to_roman_numeral(mut count: i32) -> Option<String> {
     const MAX: i32 = 3999;
     static NUMERALS: &[(i32, &str)] = &[
-        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
-        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
-        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"),
-        (1, "I")
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
     ];
 
-    if count <= 0 || count > MAX { return None; }
+    if count <= 0 || count > MAX {
+        return None;
+    }
     let mut output = String::new();
     for &(value, s) in NUMERALS.iter() {
         while count >= value {
