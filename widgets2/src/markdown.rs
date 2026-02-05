@@ -258,7 +258,7 @@ struct ListState {
 #[derive(Script, ScriptHook, Widget)]
 pub struct Markdown {
     #[deref]
-    text_flow: TextFlow,
+    pub text_flow: TextFlow,
     #[live]
     body: ArcStringMut,
     #[live]

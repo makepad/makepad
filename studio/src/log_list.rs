@@ -192,6 +192,7 @@ script_mod! {
             grab_key_focus: false
             auto_tail: true
             drag_scrolling: false
+            selectable: true
             height: Fill
             width: Fill
             flow: Down
