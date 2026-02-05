@@ -22,7 +22,7 @@ workspace.members = [
     "examples/comfyui",
     "libs/math_widget",
     "libs/svg",
-    "platform2/libs/script/test",
+    "platform2/script/test",
     "studio",
     "tools/cargo_makepad",
 ]
