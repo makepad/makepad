@@ -113,7 +113,7 @@ impl Area {
     /// Extends this area to include another area if they're in the same draw call.
     /// If self is stale (redraw_id doesn't match Cx), returns new_area.
     /// If self is current, extends to cover both ranges.
-    pub fn extend_with(self, cx: &Cx, new_area: Area) -> Area {
+    pub fn extend_with(self, _cx: &Cx, new_area: Area) -> Area {
         // If self is empty, just use the new one
         if let Area::Empty = self {
             return new_area;
