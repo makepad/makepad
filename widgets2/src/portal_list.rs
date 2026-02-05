@@ -1373,27 +1373,36 @@ impl PortalList {
         let list_top = list_rect.pos.index(vi);
         let list_bottom = list_top + list_rect.size.index(vi);
 
-        // Use first_id (already tracked) and find last by adding item count
-        // Items in the HashMap are a contiguous range starting from first_id
-        let first_id = self.first_id;
-        let last_id = self.items.keys().max().copied()?;
+        // Find visible items (those with non-zero rects) and their bounds
+        // Items in the map may include non-visible items with zero rects
+        let mut first_visible_id: Option<usize> = None;
+        let mut last_visible_id: Option<usize> = None;
+        let mut bottom_edge = list_top;
 
-        // Find the bottom edge of the last item for empty space detection
-        let bottom_edge = self
-            .items
-            .get(&last_id)
-            .map(|item| {
-                let rect = item.widget.area().rect(cx);
-                rect.pos.index(vi) + rect.size.index(vi)
-            })
-            .unwrap_or(list_bottom);
+        for (&item_id, item) in self.items.iter() {
+            let rect = item.widget.area().rect(cx);
+            // Only consider items with valid (non-zero) rects
+            if rect.size.index(vi) > 0.0 {
+                if first_visible_id.is_none() || item_id < first_visible_id.unwrap() {
+                    first_visible_id = Some(item_id);
+                }
+                if last_visible_id.is_none() || item_id > last_visible_id.unwrap() {
+                    last_visible_id = Some(item_id);
+                }
+                let item_bottom = rect.pos.index(vi) + rect.size.index(vi);
+                if item_bottom > bottom_edge {
+                    bottom_edge = item_bottom;
+                }
+            }
+        }
+
+        let first_id = first_visible_id.unwrap_or(self.first_id);
+        let last_id = last_visible_id.unwrap_or(self.first_id);
 
         // Check if mouse is above or below the viewport
         if mouse_pos < list_top {
-            // Mouse is above viewport - select from start of first item
             return Some((first_id, 0));
         } else if mouse_pos > list_bottom {
-            // Mouse is below viewport - select to end of last item
             let text_len = self
                 .items
                 .get(&last_id)
@@ -1428,14 +1437,19 @@ impl PortalList {
             return Some((last_id, text_len));
         }
 
-        // Mouse is in a gap between items - find the item above and below
+        // Mouse is in a gap between items - find the item directly above
+        // For selection purposes, gaps belong to the item above (snap to end of that item)
         let mut item_above: Option<(usize, f64)> = None; // (item_id, bottom_edge)
-        let mut item_below: Option<(usize, f64)> = None; // (item_id, top_edge)
 
         for (item_id, item) in self.items.iter() {
             let item_rect = item.widget.area().rect(cx);
             let item_top = item_rect.pos.index(vi);
             let item_bottom = item_top + item_rect.size.index(vi);
+
+            // Skip items with zero-size rects (not currently visible)
+            if item_rect.size.index(vi) <= 0.0 {
+                continue;
+            }
 
             // Item is above the mouse position
             if item_bottom <= mouse_pos {
@@ -1443,49 +1457,20 @@ impl PortalList {
                     item_above = Some((*item_id, item_bottom));
                 }
             }
-            // Item is below the mouse position
-            else if item_top >= mouse_pos {
-                if item_below.is_none() || item_top < item_below.unwrap().1 {
-                    item_below = Some((*item_id, item_top));
-                }
-            }
         }
 
-        // Snap to the closest boundary
-        match (item_above, item_below) {
-            (Some((above_id, above_bottom)), Some((_, below_top))) => {
-                // Determine which item is closer
-                let dist_to_above = mouse_pos - above_bottom;
-                let dist_to_below = below_top - mouse_pos;
-
-                if dist_to_above <= dist_to_below {
-                    // Snap to end of item above
-                    let text_len = self
-                        .items
-                        .get(&above_id)
-                        .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
-                        .unwrap_or(0);
-                    Some((above_id, text_len))
-                } else {
-                    // Snap to start of item below
-                    Some((item_below.unwrap().0, 0))
-                }
-            }
-            (Some((above_id, _)), None) => {
-                // Only item above - snap to its end
-                let text_len = self
-                    .items
-                    .get(&above_id)
-                    .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
-                    .unwrap_or(0);
-                Some((above_id, text_len))
-            }
-            (None, Some((below_id, _))) => {
-                // Only item below - snap to its start
-                Some((below_id, 0))
-            }
-            (None, None) => None,
+        // Snap to end of item above
+        if let Some((above_id, _)) = item_above {
+            let text_len = self
+                .items
+                .get(&above_id)
+                .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
+                .unwrap_or(0);
+            return Some((above_id, text_len));
         }
+
+        // No item above - snap to start of first item
+        Some((first_id, 0))
     }
 
     fn get_selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
