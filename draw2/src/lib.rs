@@ -2,65 +2,45 @@
 pub use makepad_platform2;
 pub use makepad_platform2 as makepad_platform;
 pub use makepad_platform2::*;
-pub mod match_event;
-pub mod overlay;
 pub mod cx_2d;
-pub mod draw_list_2d;
 pub mod cx_3d;
 pub mod cx_draw;
-pub mod shader;
-pub mod turtle;
+pub mod draw_list_2d;
 pub mod geometry;
+pub mod match_event;
 pub mod nav;
+pub mod overlay;
+pub mod shader;
 pub mod text;
- 
+pub mod turtle;
+
 pub use crate::{
-    match_event::MatchEvent, 
-    turtle::{
-        Layout,
-        Walk,
-        Metrics,
-        Align,
-        Flow,
-        Size,
-        TurtleAlignRange,
-        DeferredWalk
-    },
-    overlay::Overlay,
-    nav::{
-        NavRole,
-        NavOrder,
-        NavStop,
-        NavItem,
-        NavScrollIndex
-    },
-    draw_list_2d::{
-        DrawListExt,
-        DrawList2d,
-        ManyInstances,
-        Redrawing,
-        RedrawingApi,
-    },
-    cx_draw::CxDraw,
     cx_2d::Cx2d,
     cx_3d::Cx3d,
+    cx_draw::CxDraw,
+    draw_list_2d::{DrawList2d, DrawListExt, ManyInstances, Redrawing, RedrawingApi},
+    match_event::MatchEvent,
+    nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
+    overlay::Overlay,
     shader::{
+        draw_quad::DrawColor,
         //draw_shape::{DrawShape, Shape, Fill},
         draw_quad::DrawQuad,
-        draw_quad::DrawColor,
         draw_text::DrawText,
+        draw_text::TextStyle,
     },
     /*
     geometry::{
         GeometryGen,
         GeometryQuad2D,
     },*/
+    turtle::{Align, DeferredWalk, Flow, Layout, Metrics, Size, TurtleAlignRange, Walk},
 };
 
 #[cfg(feature = "svg")]
 pub use crate::shader::draw_svg::DrawSvg;
 
-pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{
+pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::turtle::script_mod(vm);
     crate::shader::sdf::script_mod(vm);
     crate::geometry::script_mod(vm);

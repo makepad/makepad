@@ -128,40 +128,28 @@ script_mod! {
         inline_code_margin: theme.mspace_1
         heading_base_scale: 1.8
 
-        draw_normal +: {
-            text_style: theme.font_regular{
-                font_size: theme.font_size_p
-            }
+        draw_text +: {
             color: theme.color_label_inner
         }
 
-        draw_italic +: {
-            text_style: theme.font_italic{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_label_inner
+        text_style_normal: theme.font_regular{
+            font_size: theme.font_size_p
         }
 
-        draw_bold +: {
-            text_style: theme.font_bold{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_label_inner
+        text_style_italic: theme.font_italic{
+            font_size: theme.font_size_p
         }
 
-        draw_bold_italic +: {
-            text_style: theme.font_bold_italic{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_label_inner
+        text_style_bold: theme.font_bold{
+            font_size: theme.font_size_p
         }
 
-        draw_fixed +: {
-            temp_y_shift: 0.25
-            text_style: theme.font_code{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_label_inner
+        text_style_bold_italic: theme.font_bold_italic{
+            font_size: theme.font_size_p
+        }
+
+        text_style_fixed: theme.font_code{
+            font_size: theme.font_size_p
         }
 
         code_layout: Layout{
@@ -587,6 +575,29 @@ impl MarkdownRef {
             return;
         };
         inner.set_text(cx, v)
+    }
+
+    /// Start streaming text animation with fade-in effect.
+    pub fn start_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.start_streaming_animation();
+        }
+    }
+
+    /// Stop streaming animation (fade will complete naturally).
+    pub fn stop_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.stop_streaming_animation();
+        }
+    }
+
+    /// Check if streaming animation is completely done.
+    pub fn is_streaming_animation_done(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.text_flow.is_streaming_animation_done()
+        } else {
+            true
+        }
     }
 }
 

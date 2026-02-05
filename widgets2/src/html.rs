@@ -76,40 +76,28 @@ script_mod! {
         font_size: theme.font_size_p
         font_color: theme.color_label_inner
 
-        draw_normal +: {
-            text_style: theme.font_regular{
-                font_size: theme.font_size_p
-            }
+        draw_text +: {
             color: theme.color_label_inner
         }
 
-        draw_italic +: {
-            text_style: theme.font_italic{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_label_inner
+        text_style_normal: theme.font_regular{
+            font_size: theme.font_size_p
         }
 
-        draw_bold +: {
-            text_style: theme.font_bold{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_label_inner
+        text_style_italic: theme.font_italic{
+            font_size: theme.font_size_p
         }
 
-        draw_bold_italic +: {
-            text_style: theme.font_bold_italic{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_label_inner
+        text_style_bold: theme.font_bold{
+            font_size: theme.font_size_p
         }
 
-        draw_fixed +: {
-            temp_y_shift: 0.24
-            text_style: theme.font_code{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_label_inner
+        text_style_bold_italic: theme.font_bold_italic{
+            font_size: theme.font_size_p
+        }
+
+        text_style_fixed: theme.font_code{
+            font_size: theme.font_size_p
         }
 
         code_layout: Layout{

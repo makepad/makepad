@@ -65,7 +65,7 @@ impl ScriptHook for DrawVars {
             }
         }
         // Update areas for animated properties only
-        if apply.is_animate() || apply.is_eval(){
+        if apply.is_animate() || apply.is_eval() {
             if let Some(io_self) = value.as_object() {
                 let cx = vm.host.cx_mut();
                 self.update_instance_areas_when_in_object(cx, &vm.bx.heap, io_self);
@@ -130,10 +130,13 @@ impl DrawVars {
                 for input in &sh.mapping.instances.inputs {
                     let key: ScriptValue = input.id.into();
                     if obj_map.contains_key(&key) {
-                    // Debug trace for 'active' instance
-                    if cx.debug_trace_active && input.id == live_id!(active) {
-                        crate::log!("DEBUG update_instance_areas: active = {} (from inst_slice)", inst_slice[input.offset]);
-                    }
+                        // Debug trace for 'active' instance
+                        if cx.debug_trace_active && input.id == live_id!(active) {
+                            crate::log!(
+                                "DEBUG update_instance_areas: active = {} (from inst_slice)",
+                                inst_slice[input.offset]
+                            );
+                        }
                         for j in 0..repeat {
                             for i in 0..input.slots {
                                 instances[input.offset + i + j * stride] =
@@ -310,22 +313,117 @@ impl DrawVars {
         }
     }
 
-    fn fill_dyn_instances(&mut self, cx: &Cx, heap: &ScriptHeap, io_self: ScriptObject, shallow: bool) {
+    /// Sets a uniform value and also updates the draw call on the area if valid.
+    /// This is used to update uniforms after drawing has completed.
+    pub fn set_uniform_on_area(&mut self, cx: &mut Cx, id: LiveId, value: &[f32]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
+
+            // Find the uniform input
+            if let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) {
+                let slots = input.slots.min(value.len());
+
+                // Update local dyn_uniforms
+                for i in 0..slots {
+                    self.dyn_uniforms[input.offset + i] = value[i];
+                }
+
+                // Update the draw call if we have a valid area
+                if let Some(inst) = self.area.valid_instance(cx) {
+                    let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                    let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                    let draw_call = draw_item.kind.draw_call_mut().unwrap();
+
+                    for i in 0..slots {
+                        draw_call.dyn_uniforms[input.offset + i] = value[i];
+                    }
+                    draw_call.uniforms_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Sets an instance value on all instances in the area.
+    /// This is used to update instance data after drawing has completed.
+    pub fn set_instance_on_area(&mut self, cx: &mut Cx, id: LiveId, value: &[f32]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            if let Some(inst) = self.area.valid_instance(cx) {
+                let sh = &cx.draw_shaders[draw_shader_id.index];
+
+                // Find the instance input
+                if let Some(input) = sh.mapping.instances.inputs.iter().find(|i| i.id == id) {
+                    let slots = input.slots.min(value.len());
+                    let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                    let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                    let draw_call = draw_item.kind.draw_call_mut().unwrap();
+
+                    let stride = sh.mapping.instances.total_slots;
+                    let all_instances = draw_item.instances.as_mut().unwrap();
+
+                    // Validate area bounds
+                    let available = all_instances.len().saturating_sub(inst.instance_offset);
+                    let max_count = available / stride;
+                    if inst.instance_count > max_count {
+                        crate::log!(
+                            "stale: cnt={} max={} redraw={} list_redraw={}",
+                            inst.instance_count,
+                            max_count,
+                            inst.redraw_id,
+                            draw_list.redraw_id
+                        );
+                        return; // Area is stale, skip update
+                    }
+
+                    let instances = &mut all_instances[inst.instance_offset..];
+
+                    // Update all instances in this area
+                    for j in 0..inst.instance_count {
+                        for i in 0..slots {
+                            instances[input.offset + i + j * stride] = value[i];
+                        }
+                    }
+
+                    draw_call.instance_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                }
+            }
+        }
+    }
+
+    fn fill_dyn_instances(
+        &mut self,
+        cx: &Cx,
+        heap: &ScriptHeap,
+        io_self: ScriptObject,
+        shallow: bool,
+    ) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let mapping = &cx.draw_shaders.shaders[draw_shader_id.index].mapping;
             let base_offset = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
 
             for input in &mapping.dyn_instances.inputs {
-                let value =
-                    Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_INSTANCE, shallow);
+                let value = Self::extract_shader_io_value(
+                    heap,
+                    io_self,
+                    input.id,
+                    SHADER_IO_DYN_INSTANCE,
+                    shallow,
+                );
                 if !value.is_nil() && !value.is_err() {
                     // Debug trace for 'active' instance
                     if cx.debug_trace_active && input.id == live_id!(active) {
                         if let Some(v) = value.as_f64() {
                             // Print all keys in the object's direct map
                             let map = heap.map_ref(io_self);
-                            let keys: Vec<_> = map.iter().map(|(k, _)| format!("{:?}", k)).collect();
-                            crate::log!("DEBUG fill_dyn_instances: active = {} (shallow={}) obj_keys={:?}", v, shallow, keys);
+                            let keys: Vec<_> =
+                                map.iter().map(|(k, _)| format!("{:?}", k)).collect();
+                            crate::log!(
+                                "DEBUG fill_dyn_instances: active = {} (shallow={}) obj_keys={:?}",
+                                v,
+                                shallow,
+                                keys
+                            );
                         }
                     }
                     Self::write_value_to_f32_slots(
@@ -340,13 +438,24 @@ impl DrawVars {
         }
     }
 
-    fn fill_dyn_uniforms(&mut self, cx: &Cx, heap: &ScriptHeap, io_self: ScriptObject, shallow: bool) {
+    fn fill_dyn_uniforms(
+        &mut self,
+        cx: &Cx,
+        heap: &ScriptHeap,
+        io_self: ScriptObject,
+        shallow: bool,
+    ) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let mapping = &cx.draw_shaders.shaders[draw_shader_id.index].mapping;
 
             for input in &mapping.dyn_uniforms.inputs {
-                let value =
-                    Self::extract_shader_io_value(heap, io_self, input.id, SHADER_IO_DYN_UNIFORM, shallow);
+                let value = Self::extract_shader_io_value(
+                    heap,
+                    io_self,
+                    input.id,
+                    SHADER_IO_DYN_UNIFORM,
+                    shallow,
+                );
                 if !value.is_nil() && !value.is_err() {
                     Self::write_value_to_f32_slots(
                         heap,
@@ -369,7 +478,10 @@ impl DrawVars {
     ) -> ScriptValue {
         // For shallow lookups, only check the object's own map (no prototype chain)
         let value = if shallow {
-            heap.map_ref(io_self).get(&id.into()).map(|v| v.value).unwrap_or(NIL)
+            heap.map_ref(io_self)
+                .get(&id.into())
+                .map(|v| v.value)
+                .unwrap_or(NIL)
         } else {
             heap.value(io_self, id.into(), NoTrap)
         };

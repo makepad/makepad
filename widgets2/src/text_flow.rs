@@ -86,39 +86,29 @@ script_mod! {
         font_size: theme.font_size_p
         font_color: theme.color_text
 
-        draw_normal +: {
-            text_style: theme.font_regular{
-                font_size: theme.font_size_p
-            }
+        draw_text +: {
             color: theme.color_text
+            extend_area: true
         }
 
-        draw_italic +: {
-            text_style: theme.font_italic{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_text
+        text_style_normal: theme.font_regular{
+            font_size: theme.font_size_p
         }
 
-        draw_bold +: {
-            text_style: theme.font_bold{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_text
+        text_style_italic: theme.font_italic{
+            font_size: theme.font_size_p
         }
 
-        draw_bold_italic +: {
-            text_style: theme.font_bold_italic{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_text
+        text_style_bold: theme.font_bold{
+            font_size: theme.font_size_p
         }
 
-        draw_fixed +: {
-            text_style: theme.font_code{
-                font_size: theme.font_size_p
-            }
-            color: theme.color_text
+        text_style_bold_italic: theme.font_bold_italic{
+            font_size: theme.font_size_p
+        }
+
+        text_style_fixed: theme.font_code{
+            font_size: theme.font_size_p
         }
 
         code_layout: Layout{
@@ -499,15 +489,17 @@ impl SelectionTracker {
 #[derive(Script, Widget)]
 pub struct TextFlow {
     #[live]
-    pub draw_normal: DrawText,
+    pub draw_text: DrawText,
     #[live]
-    pub draw_italic: DrawText,
+    pub text_style_normal: TextStyle,
     #[live]
-    pub draw_bold: DrawText,
+    pub text_style_italic: TextStyle,
     #[live]
-    pub draw_bold_italic: DrawText,
+    pub text_style_bold: TextStyle,
     #[live]
-    pub draw_fixed: DrawText,
+    pub text_style_bold_italic: TextStyle,
+    #[live]
+    pub text_style_fixed: TextStyle,
     #[live]
     pub draw_block: DrawFlowBlock,
 
@@ -606,6 +598,25 @@ pub struct TextFlow {
     /// Whether currently dragging to select
     #[rust]
     is_selecting: bool,
+
+    // Streaming text animation fields
+    #[rust]
+    next_frame: NextFrame,
+    /// Whether streaming animation is active
+    #[rust]
+    pub streaming_animation: bool,
+    /// Animated char count for fade effect (lags behind actual)
+    #[rust]
+    animated_chars: f32,
+    /// Actual drawn char count
+    #[rust]
+    actual_chars: f32,
+    /// Number of chars over which to fade (default 50)
+    #[live(50.0)]
+    pub fade_chars: f32,
+    /// Animation speed in chars per frame
+    #[live(5.0)]
+    pub fade_speed: f32,
 }
 
 impl TextFlow {
@@ -716,6 +727,22 @@ impl Widget for TextFlow {
             });
         }
 
+        // Handle streaming animation NextFrame
+        if let Some(_) = self.next_frame.is_event(event) {
+            let target = self.actual_chars + self.fade_chars;
+
+            if self.animated_chars < target {
+                self.animated_chars = (self.animated_chars + self.fade_speed).min(target);
+                // Trigger redraw - set_total_chars will be called in end() with fresh area
+                self.redraw(cx);
+            }
+
+            // Continue animation if still streaming or not caught up
+            if self.streaming_animation || self.animated_chars < target {
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+
         // Handle selection events when selectable (standalone mode only)
         // When inside a selectable PortalList, PortalList handles events directly
         if !self.selectable {
@@ -778,6 +805,15 @@ impl TextFlow {
         if self.selectable {
             self.selection_tracker.clear();
         }
+        // Reset char_index for streaming animation (also while fading out)
+        if self.streaming_animation || !self.is_animation_idle() {
+            self.draw_text.reset_char_index();
+        }
+    }
+
+    /// Check if animation is completely idle (not streaming and fade complete)
+    fn is_animation_idle(&self) -> bool {
+        !self.streaming_animation && self.animated_chars >= self.actual_chars + self.fade_chars
     }
 
     fn clear_stacks(&mut self) {
@@ -811,6 +847,34 @@ impl TextFlow {
         self.draw_selection(cx);
         cx.end_turtle_with_area(&mut self.area);
         self.items.as_mut().unwrap().retain_visible();
+
+        // Update streaming animation state after drawing (also while fading out)
+        let is_idle = self.is_animation_idle();
+        if self.streaming_animation || !is_idle {
+            self.actual_chars = self.draw_text.char_index;
+            self.draw_text.set_total_chars(cx, self.animated_chars);
+            self.next_frame = cx.new_next_frame();
+        }
+    }
+
+    /// Start streaming text animation with fade-in effect on new characters.
+    /// Call this before drawing when streaming new content.
+    pub fn start_streaming_animation(&mut self) {
+        if !self.streaming_animation {
+            self.streaming_animation = true;
+            self.animated_chars = 0.0;
+            self.actual_chars = 0.0;
+        }
+    }
+
+    /// Stop streaming animation. The fade will complete naturally.
+    pub fn stop_streaming_animation(&mut self) {
+        self.streaming_animation = false;
+    }
+
+    /// Check if streaming animation is still running (including fade-out)
+    pub fn is_streaming_animation_done(&self) -> bool {
+        self.is_animation_idle()
     }
 
     /// Draw selection highlight rectangles
@@ -928,12 +992,8 @@ impl TextFlow {
     }
 
     pub fn begin_list_item(&mut self, cx: &mut Cx2d, dot: &str, pad: f64) {
-        let fs = self.font_sizes.last().unwrap_or(&self.font_size);
-        self.draw_normal.text_style.font_size = *fs as _;
-        let fc = self.font_colors.last().unwrap_or(&self.font_color);
-        self.draw_normal.color = *fc;
-
-        let font_based_padding = self.draw_normal.text_style.font_size as f64 * pad;
+        let fs = *self.font_sizes.last().unwrap_or(&self.font_size);
+        let font_based_padding = fs as f64 * pad;
 
         cx.begin_turtle(
             self.list_item_walk,
@@ -1202,23 +1262,29 @@ impl TextFlow {
                 text.trim_end_matches("\n")
             };
 
-            let dt = if self.fixed.value() > 0 {
-                &mut self.draw_fixed
+            // Select the appropriate text style based on bold/italic/fixed state
+            let text_style = if self.fixed.value() > 0 {
+                self.text_style_fixed.clone()
             } else if self.bold.value() > 0 {
                 if self.italic.value() > 0 {
-                    &mut self.draw_bold_italic
+                    self.text_style_bold_italic.clone()
                 } else {
-                    &mut self.draw_bold
+                    self.text_style_bold.clone()
                 }
             } else if self.italic.value() > 0 {
-                &mut self.draw_italic
+                self.text_style_italic.clone()
             } else {
-                &mut self.draw_normal
+                self.text_style_normal.clone()
             };
+
+            // Apply the text style to the single draw_text instance
+            self.draw_text.text_style = text_style;
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
-            dt.text_style.font_size = *font_size as _;
-            dt.color = *font_color;
+            self.draw_text.text_style.font_size = *font_size as _;
+            self.draw_text.color = *font_color;
+
+            let dt = &mut self.draw_text;
 
             // Capture LaidoutText for selection when selectable
             if self.selectable {
