@@ -1,29 +1,25 @@
 use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*,
-    text_flow::TextFlow,
-    link_label::LinkLabel,
-    WidgetMatchEvent,
+    link_label::LinkLabel, makepad_derive_widget::*, makepad_draw::*, text_flow::TextFlow,
+    widget::*, WidgetMatchEvent,
 };
 
 #[cfg(feature = "markdown")]
 use pulldown_cmark::{Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.MarkdownLinkBase = #(MarkdownLink::register_widget(vm))
-    
+
     mod.widgets.MarkdownBase = #(Markdown::register_widget(vm))
-    
+
     mod.widgets.MarkdownLink = set_type_default() do mod.widgets.MarkdownLinkBase{
         width: Fit height: Fit
         align: Align{x: 0. y: 0.}
-        
+
         label_walk: Walk{width: Fit height: Fit}
-        
+
         draw_icon +: {
             hover: instance(0.0)
             pressed: instance(0.0)
@@ -40,7 +36,7 @@ script_mod!{
                 )
             }
         }
-        
+
         animator: Animator{
             hover: {
                 default: @off
@@ -52,7 +48,7 @@ script_mod!{
                         draw_text: {pressed: 0.0 hover: 0.0}
                     }
                 }
-                
+
                 on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
@@ -64,7 +60,7 @@ script_mod!{
                         draw_text: {pressed: 0.0 hover: snap(1.0)}
                     }
                 }
-                
+
                 pressed: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -75,7 +71,7 @@ script_mod!{
                 }
             }
         }
-        
+
         draw_bg +: {
             pressed: instance(0.0)
             hover: instance(0.0)
@@ -92,7 +88,7 @@ script_mod!{
                 ), mix(0.0, 0.8, self.hover))
             }
         }
-        
+
         draw_text +: {
             pressed: instance(0.0)
             hover: instance(0.0)
@@ -117,49 +113,49 @@ script_mod!{
             }
         }
     }
-    
+
     mod.widgets.Markdown = set_type_default() do mod.widgets.MarkdownBase{
         width: Fill height: Fit
         flow: Flow.Right{wrap: true}
         padding: theme.mspace_1
-                
+
         font_size: theme.font_size_p
         font_color: theme.color_label_inner
-        
+
         paragraph_spacing: 16
         pre_code_spacing: 8
         inline_code_padding: theme.mspace_1
         inline_code_margin: theme.mspace_1
         heading_base_scale: 1.8
-                
+
         draw_normal +: {
             text_style: theme.font_regular{
                 font_size: theme.font_size_p
             }
             color: theme.color_label_inner
         }
-        
+
         draw_italic +: {
             text_style: theme.font_italic{
                 font_size: theme.font_size_p
             }
             color: theme.color_label_inner
         }
-        
+
         draw_bold +: {
             text_style: theme.font_bold{
                 font_size: theme.font_size_p
             }
             color: theme.color_label_inner
         }
-        
+
         draw_bold_italic +: {
             text_style: theme.font_bold_italic{
                 font_size: theme.font_size_p
             }
             color: theme.color_label_inner
         }
-        
+
         draw_fixed +: {
             temp_y_shift: 0.25
             text_style: theme.font_code{
@@ -167,19 +163,19 @@ script_mod!{
             }
             color: theme.color_label_inner
         }
-        
+
         code_layout: Layout{
             flow: Flow.Right{wrap: true}
             padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: 10}
         }
         code_walk: Walk{width: Fill height: Fit}
-        
+
         quote_layout: Layout{
             flow: Flow.Right{wrap: true}
             padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
         quote_walk: Walk{width: Fill height: Fit}
-        
+
         list_item_layout: Layout{
             flow: Flow.Right{wrap: true}
             padding: theme.mspace_1
@@ -187,21 +183,22 @@ script_mod!{
         list_item_walk: Walk{
             height: Fit width: Fill
         }
-        
+
         sep_walk: Walk{
             width: Fill height: 4.
             margin: theme.mspace_v_1
         }
-        
+
         draw_block +: {
             line_color: theme.color_label_inner
             sep_color: theme.color_shadow
             quote_bg_color: theme.color_bg_highlight
             quote_fg_color: theme.color_label_inner
             code_color: theme.color_bg_highlight
+            selection_color: theme.color_selection_focus
             space_1: uniform(theme.space_1)
             space_2: uniform(theme.space_2)
-            
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 match self.block_type {
@@ -237,11 +234,14 @@ script_mod!{
                         sdf.fill(self.line_color)
                         return sdf.result
                     }
+                    FlowBlockType.Selection => {
+                        return vec4(self.selection_color.rgb * self.selection_color.a, self.selection_color.a)
+                    }
                 }
                 return #f00
             }
         }
-        
+
         $link: mod.widgets.MarkdownLink{}
     }
 }
@@ -250,31 +250,41 @@ script_mod!{
 #[cfg(feature = "markdown")]
 struct ListState {
     // Current item number for ordered lists.
-    current_number: u64,         
+    current_number: u64,
     // Start number for ordered lists, None for unordered.
-    start_number: Option<u64>,  
+    start_number: Option<u64>,
 }
 
 #[derive(Script, ScriptHook, Widget)]
-pub struct Markdown{
-    #[deref] text_flow: TextFlow,
-    #[live] body: ArcStringMut,
-    #[live] paragraph_spacing: f64,
-    #[live] pre_code_spacing: f64,
-    #[live(false)] use_code_block_widget:bool,
-    #[rust] in_code_block: bool,
-    #[rust] code_block_string: String,
-    #[live(false)] use_math_widget: bool,
-    #[rust] auto_id: u64,
-    #[live] heading_base_scale: f64,
+pub struct Markdown {
+    #[deref]
+    text_flow: TextFlow,
+    #[live]
+    body: ArcStringMut,
+    #[live]
+    paragraph_spacing: f64,
+    #[live]
+    pre_code_spacing: f64,
+    #[live(false)]
+    use_code_block_widget: bool,
+    #[rust]
+    in_code_block: bool,
+    #[rust]
+    code_block_string: String,
+    #[live(false)]
+    use_math_widget: bool,
+    #[rust]
+    auto_id: u64,
+    #[live]
+    heading_base_scale: f64,
 }
 
 impl Widget for Markdown {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
-    } 
-    
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.auto_id = 0;
         self.begin(cx, walk);
         #[cfg(feature = "markdown")]
@@ -286,13 +296,13 @@ impl Widget for Markdown {
         self.end(cx);
         DrawStep::done()
     }
-     
-    fn text(&self)->String{
+
+    fn text(&self) -> String {
         self.body.as_ref().to_string()
-    } 
-    
-    fn set_text(&mut self, cx:&mut Cx, v:&str){
-        if self.body.as_ref() != v{
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.body.as_ref() != v {
             self.body.set(v);
             self.redraw(cx);
         }
@@ -307,21 +317,24 @@ impl Markdown {
         let mut list_stack: Vec<ListState> = Vec::new();
         let mut is_first_block = true;
 
-        let parser = Parser::new_ext(self.body.as_ref(), Options::ENABLE_TABLES | Options::ENABLE_MATH);        
-        
+        let parser = Parser::new_ext(
+            self.body.as_ref(),
+            Options::ENABLE_TABLES | Options::ENABLE_MATH,
+        );
+
         for event in parser.into_iter() {
             match event {
                 MdEvent::Start(Tag::Heading { level, .. }) => {
                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
-                    is_first_block = false; 
+                    is_first_block = false;
                     let heading_base = self.heading_base_scale;
                     let scale = match level {
                         HeadingLevel::H1 => heading_base,
                         HeadingLevel::H2 => heading_base * 0.75,
                         HeadingLevel::H3 => heading_base * 0.58,
-                        HeadingLevel::H4 => heading_base * 0.5, 
+                        HeadingLevel::H4 => heading_base * 0.5,
                         HeadingLevel::H5 => heading_base * 0.42,
                         HeadingLevel::H6 => heading_base * 0.33,
                     };
@@ -331,11 +344,11 @@ impl Markdown {
                 MdEvent::End(TagEnd::Heading(_level)) => {
                     tf.bold.pop();
                     tf.font_sizes.pop();
-                    cx.turtle_new_line();
+                    tf.new_line_collapsed(cx);
                 }
                 MdEvent::Start(Tag::Paragraph) => {
                     if !is_first_block {
-                         cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
                 }
@@ -343,8 +356,8 @@ impl Markdown {
                     // No special handling needed, turtle position is managed by content/following blocks
                 }
                 MdEvent::Start(Tag::BlockQuote(_)) => {
-                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
                     tf.begin_quote(cx);
@@ -362,10 +375,10 @@ impl Markdown {
                     list_stack.pop();
                 }
                 MdEvent::Start(Tag::Item) => {
-                     if !is_first_block {
-                         cx.turtle_new_line();
-                     }
-                     is_first_block = false;
+                    if !is_first_block {
+                        tf.new_line_collapsed(cx);
+                    }
+                    is_first_block = false;
                     let marker = if let Some(state) = list_stack.last_mut() {
                         if state.start_number.is_some() {
                             // Ordered list - use and increment the counter
@@ -411,7 +424,9 @@ impl Markdown {
                 MdEvent::End(TagEnd::Link) => {
                     // Link handling is done in Start event
                 }
-                MdEvent::Start(Tag::Image { dest_url, title, .. }) => {
+                MdEvent::Start(Tag::Image {
+                    dest_url, title, ..
+                }) => {
                     tf.draw_text(cx, "Image[name:");
                     tf.draw_text(cx, &title);
                     tf.draw_text(cx, ", url:");
@@ -420,7 +435,7 @@ impl Markdown {
                 }
                 MdEvent::Start(Tag::CodeBlock(_kind)) => {
                     if !is_first_block {
-                         cx.turtle_new_line_with_spacing(self.pre_code_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.pre_code_spacing);
                     }
                     is_first_block = false;
                     if self.use_code_block_widget {
@@ -439,13 +454,12 @@ impl Markdown {
                         self.in_code_block = false;
                         let entry_id = tf.new_counted_id();
                         let cbs = &self.code_block_string;
-                        
-                        tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf|{
+
+                        tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf| {
                             item.widget(ids!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
                         });
-                    }
-                    else{
+                    } else {
                         tf.font_sizes.pop();
                         tf.fixed.pop();
                         tf.combine_spaces.pop();
@@ -486,7 +500,7 @@ impl Markdown {
                 // Display math ($$...$$)
                 MdEvent::DisplayMath(text) => {
                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
 
@@ -523,16 +537,16 @@ impl Markdown {
                     if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
-                         cx.turtle_new_line();
+                        tf.new_line_collapsed(cx);
                     }
                 }
                 MdEvent::Rule => {
-                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
-                     is_first_block = false;
+                    is_first_block = false;
                     tf.sep(cx);
-                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                 }
                 MdEvent::TaskListMarker(_) => {
                     // TODO: Implement task list markers
@@ -568,8 +582,10 @@ impl Markdown {
 }
 
 impl MarkdownRef {
-    pub fn set_text(&mut self, cx:&mut Cx, v:&str) {
-        let Some(mut inner) = self.borrow_mut() else { return };
+    pub fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
         inner.set_text(cx, v)
     }
 }
@@ -608,7 +624,7 @@ impl Widget for MarkdownLink {
         self.link.text()
     }
 
-    fn set_text(&mut self, cx:&mut Cx, v: &str) {
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.link.set_text(cx, v);
     }
 }
