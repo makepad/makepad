@@ -115,6 +115,204 @@ struct AlignItem {
     index: usize,
 }
 
+/// Cache for computing average item height
+#[derive(Default)]
+struct HeightCache {
+    /// Running sum of measured heights
+    measured_sum: f64,
+    /// Count of measured items
+    measured_count: usize,
+}
+
+impl HeightCache {
+    fn record_height(&mut self, height: f64) {
+        self.measured_sum += height;
+        self.measured_count += 1;
+    }
+
+    fn average(&self) -> f64 {
+        if self.measured_count > 0 {
+            self.measured_sum / self.measured_count as f64
+        } else {
+            30.0 // reasonable default
+        }
+    }
+
+    fn reset(&mut self) {
+        self.measured_sum = 0.0;
+        self.measured_count = 0;
+    }
+}
+
+/// Fenwick tree (Binary Indexed Tree) for O(log n) prefix sum queries on item heights.
+/// Enables fast mapping between virtual scroll position and item index.
+struct HeightTree {
+    /// 1-indexed tree array storing partial sums
+    tree: Vec<f64>,
+    /// Number of items
+    size: usize,
+    /// Default height for unmeasured items
+    default_height: f64,
+    /// Tracks which items have been measured
+    measured: Vec<bool>,
+}
+
+impl HeightTree {
+    /// Create a new tree for `size` items, all initialized to `default_height`
+    fn new(size: usize, default_height: f64) -> Self {
+        if size == 0 {
+            return HeightTree {
+                tree: Vec::new(),
+                size: 0,
+                default_height,
+                measured: Vec::new(),
+            };
+        }
+
+        // Build the tree with all items having default_height
+        let mut tree = vec![0.0; size + 1]; // 1-indexed
+
+        // Initialize: each position contributes default_height
+        for i in 1..=size {
+            tree[i] += default_height;
+            let parent = i + (i & i.wrapping_neg());
+            if parent <= size {
+                tree[parent] += tree[i];
+            }
+        }
+
+        HeightTree {
+            tree,
+            size,
+            default_height,
+            measured: vec![false; size],
+        }
+    }
+
+    /// Get the prefix sum of heights from index 0 to i (inclusive)
+    fn prefix_sum(&self, i: usize) -> f64 {
+        if self.size == 0 {
+            return 0.0;
+        }
+        let i = i.min(self.size - 1);
+        let mut sum = 0.0;
+        let mut j = i + 1; // convert to 1-indexed
+        while j > 0 {
+            sum += self.tree[j];
+            j -= j & j.wrapping_neg(); // clear lowest set bit
+        }
+        sum
+    }
+
+    /// Get the height at a specific index
+    fn point_query(&self, i: usize) -> f64 {
+        if i >= self.size {
+            return self.default_height;
+        }
+        if i == 0 {
+            self.prefix_sum(0)
+        } else {
+            self.prefix_sum(i) - self.prefix_sum(i - 1)
+        }
+    }
+
+    /// Update the height at index i to new_height
+    fn update(&mut self, i: usize, new_height: f64) {
+        if i >= self.size {
+            return;
+        }
+
+        let old_height = self.point_query(i);
+        let delta = new_height - old_height;
+
+        if delta.abs() < 0.001 {
+            // No significant change
+            self.measured[i] = true;
+            return;
+        }
+
+        self.measured[i] = true;
+
+        let mut j = i + 1; // convert to 1-indexed
+        while j <= self.size {
+            self.tree[j] += delta;
+            j += j & j.wrapping_neg(); // add lowest set bit
+        }
+    }
+
+    /// Get the total sum of all heights
+    fn total(&self) -> f64 {
+        if self.size == 0 {
+            return 0.0;
+        }
+        self.prefix_sum(self.size - 1)
+    }
+
+    /// Binary search to find the item index where cumulative height reaches target.
+    /// Returns (item_index, offset_within_item)
+    fn find_position(&self, target: f64) -> (usize, f64) {
+        if self.size == 0 || target <= 0.0 {
+            return (0, 0.0);
+        }
+
+        let total = self.total();
+        if target >= total {
+            // Beyond the end
+            return (
+                self.size.saturating_sub(1),
+                self.point_query(self.size.saturating_sub(1)),
+            );
+        }
+
+        // Binary search using the Fenwick tree structure
+        let mut pos = 0usize;
+        let mut sum = 0.0;
+        let mut bit = (self.size + 1).next_power_of_two() >> 1;
+
+        while bit > 0 {
+            let next_pos = pos + bit;
+            if next_pos <= self.size && sum + self.tree[next_pos] < target {
+                pos = next_pos;
+                sum += self.tree[pos];
+            }
+            bit >>= 1;
+        }
+
+        // pos is now the index (1-indexed) where prefix_sum < target
+        // The target falls within item at index pos (0-indexed)
+        let item_idx = pos; // convert back to 0-indexed
+        let offset = target - sum;
+
+        (item_idx.min(self.size.saturating_sub(1)), offset.max(0.0))
+    }
+
+    /// Resize the tree when range changes
+    fn resize(&mut self, new_size: usize, default_height: f64) {
+        *self = HeightTree::new(new_size, default_height);
+    }
+
+    /// Update the default height for unmeasured items
+    fn update_default_height(&mut self, new_default: f64) {
+        if (new_default - self.default_height).abs() < 0.001 {
+            return;
+        }
+
+        let delta = new_default - self.default_height;
+        self.default_height = new_default;
+
+        // Update all unmeasured items
+        for i in 0..self.size {
+            if !self.measured[i] {
+                let mut j = i + 1;
+                while j <= self.size {
+                    self.tree[j] += delta;
+                    j += j & j.wrapping_neg();
+                }
+            }
+        }
+    }
+}
+
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet)]
 pub struct PortalList {
     #[source]
@@ -216,6 +414,14 @@ pub struct PortalList {
     /// Auto-scroll state during selection
     #[rust]
     select_scroll_state: Option<SelectScrollState>,
+
+    // Pixel-based scrollbar support
+    /// Height tree for O(log n) scroll position lookups
+    #[rust]
+    height_tree: Option<HeightTree>,
+    /// Cache for computing average item height
+    #[rust]
+    height_cache: HeightCache,
 }
 
 impl ScriptHook for PortalList {
@@ -336,7 +542,7 @@ impl PortalList {
                     };
 
                     let mut pos = first_pos.min(min);
-                    for item in list {
+                    for item in list.iter() {
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(
                             &item.align_range,
@@ -407,6 +613,28 @@ impl PortalList {
                         self.first_scroll = start_pos;
                     }
                 }
+                // Capture measured heights into height_tree and height_cache
+                for item in list.iter() {
+                    if item.index >= self.range_start && item.index < self.range_end {
+                        let height = item.size.index(vi);
+                        let idx = item.index - self.range_start;
+
+                        // Record in cache for average calculation
+                        self.height_cache.record_height(height);
+
+                        // Update in tree
+                        if let Some(ref mut tree) = self.height_tree {
+                            tree.update(idx, height);
+                        }
+                    }
+                }
+
+                // Update unmeasured items with new average if it changed significantly
+                if let Some(ref mut tree) = self.height_tree {
+                    let new_avg = self.height_cache.average();
+                    tree.update_default_height(new_avg);
+                }
+
                 if !self.scroll_bar.animator_in_state(cx, ids!(hover.drag)) {
                     self.update_scroll_bar(cx);
                 }
@@ -423,14 +651,23 @@ impl PortalList {
                 self.tail_range = true;
             }
         }
-        let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
+
+        // Use pixel-based total from height_tree, fallback to old calculation
+        let virtual_total = if let Some(ref tree) = self.height_tree {
+            tree.total()
+        } else {
+            let total_views =
+                (self.range_end - self.range_start) as f64 / self.view_window.max(1) as f64;
+            rect.size.index(vi) * total_views
+        };
+
         match self.vec_index {
             Vec2Index::Y => {
                 self.scroll_bar.draw_scroll_bar(
                     cx,
                     ScrollAxis::Vertical,
                     rect,
-                    dvec2(100.0, rect.size.y * total_views),
+                    dvec2(100.0, virtual_total),
                 );
             }
             Vec2Index::X => {
@@ -438,7 +675,7 @@ impl PortalList {
                     cx,
                     ScrollAxis::Horizontal,
                     rect,
-                    dvec2(rect.size.x * total_views, 100.0),
+                    dvec2(virtual_total, 100.0),
                 );
             }
         }
@@ -774,9 +1011,22 @@ impl PortalList {
     }
 
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
+        let range_changed = self.range_start != range_start || self.range_end != range_end;
         self.range_start = range_start;
-        if self.range_end != range_end {
+
+        if range_changed {
             self.range_end = range_end;
+
+            // Initialize or resize the height tree
+            let size = range_end.saturating_sub(range_start);
+            let default_height = self.height_cache.average();
+
+            if let Some(ref mut tree) = self.height_tree {
+                tree.resize(size, default_height);
+            } else {
+                self.height_tree = Some(HeightTree::new(size, default_height));
+            }
+
             if self.tail_range {
                 self.first_id = self.range_end.max(1) - 1;
                 self.first_scroll = 0.0;
@@ -786,11 +1036,29 @@ impl PortalList {
     }
 
     pub fn update_scroll_bar(&mut self, cx: &mut Cx) {
-        let scroll_pos = ((self.first_id - self.range_start) as f64
-            / ((self.range_end - self.range_start).max(self.view_window + 1) - self.view_window)
-                as f64)
-            * self.scroll_bar.get_scroll_view_total();
-        self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
+        // Use pixel-based position from height_tree
+        if let Some(ref tree) = self.height_tree {
+            let first_idx = self.first_id.saturating_sub(self.range_start);
+
+            // Get cumulative height up to (but not including) first_id
+            let height_before = if first_idx > 0 {
+                tree.prefix_sum(first_idx - 1)
+            } else {
+                0.0
+            };
+
+            // first_scroll is typically 0 or negative (item partially scrolled off top)
+            // Negate it because negative first_scroll means we've scrolled down into the item
+            let scroll_pos = (height_before - self.first_scroll).max(0.0);
+            self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
+        } else {
+            // Fallback to old integer-based calculation
+            let scroll_pos = ((self.first_id - self.range_start) as f64
+                / ((self.range_end - self.range_start).max(self.view_window + 1) - self.view_window)
+                    as f64)
+                * self.scroll_bar.get_scroll_view_total();
+            self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
+        }
     }
 
     fn delta_top_scroll(
@@ -1220,11 +1488,21 @@ impl Widget for PortalList {
                 self.tail_range = true;
             } else {
                 self.tail_range = false;
+
+                // Use height_tree to map scroll position to item + offset
+                if let Some(ref tree) = self.height_tree {
+                    let (item_idx, offset) = tree.find_position(scroll_to);
+                    self.first_id = self.range_start + item_idx;
+                    // first_scroll is negative when scrolled into the item
+                    self.first_scroll = -offset;
+                } else {
+                    // Fallback to old integer-based calculation
+                    self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
+                        * self.view_window as f64) as usize;
+                    self.first_scroll = 0.0;
+                }
             }
 
-            self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
-                * self.view_window as f64) as usize;
-            self.first_scroll = 0.0;
             cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
             self.was_scrolling = false;
             self.area.redraw(cx);
