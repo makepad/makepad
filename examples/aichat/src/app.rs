@@ -19,6 +19,7 @@ script_mod! {
             drag_scrolling: false
             auto_tail: true
             smooth_tail: true
+            smooth_tail_speed: 0.1
             selectable: true
 
             $User: RoundedView {
