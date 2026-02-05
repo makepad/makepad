@@ -1688,11 +1688,19 @@ impl Widget for PortalList {
         }
 
         if pass_through_to_children {
-            for (_item_id, item) in self.items.iter_mut() {
-                let item_uid = item.widget.widget_uid();
-                cx.group_widget_actions(uid, item_uid, |cx| {
-                    item.widget.handle_event(cx, event, scope);
-                });
+            // Iterate in visual order (by item_id) for deterministic event handling
+            // Use keys().min/max to get actual item range without allocation
+            if let (Some(&min_id), Some(&max_id)) =
+                (self.items.keys().min(), self.items.keys().max())
+            {
+                for item_id in min_id..=max_id {
+                    if let Some(item) = self.items.get_mut(&item_id) {
+                        let item_uid = item.widget.widget_uid();
+                        cx.group_widget_actions(uid, item_uid, |cx| {
+                            item.widget.handle_event(cx, event, scope);
+                        });
+                    }
+                }
             }
         }
 
