@@ -58,6 +58,8 @@ enum ScrollState {
     },
     Tailing {
         next_frame: NextFrame,
+        /// Current scroll velocity for smooth animation
+        velocity: f64,
     },
 }
 
@@ -687,12 +689,16 @@ impl PortalList {
                 // Apply tail scroll adjustment - scroll down to keep bottom visible
                 if self.tail_adjustment_needed > 0.5 {
                     if self.smooth_tail {
-                        // Start smooth tailing animation via scroll state
+                        // Start or continue smooth tailing animation via scroll state
                         if !matches!(self.scroll_state, ScrollState::Tailing { .. }) {
+                            // Start new tailing animation with initial velocity
                             self.scroll_state = ScrollState::Tailing {
                                 next_frame: cx.new_next_frame(),
+                                velocity: 0.0,
                             };
                         }
+                        // Note: if already Tailing, the event handler will schedule next frames
+                        // and the velocity will naturally adapt to the accumulated tail_adjustment_needed
                     } else {
                         // Instant jump: adjust first_scroll to scroll down
                         self.first_scroll -= self.tail_adjustment_needed;
@@ -1791,20 +1797,47 @@ impl Widget for PortalList {
                     }
                 }
             }
-            ScrollState::Tailing { next_frame } => {
+            ScrollState::Tailing {
+                next_frame,
+                velocity,
+            } => {
                 if next_frame.is_event(event).is_some() {
-                    if self.tail_adjustment_needed > 0.5 {
-                        // Smooth scroll: move a fraction of the distance each frame
-                        // Use exponential ease-out for smooth deceleration
-                        let step = self.tail_adjustment_needed * self.smooth_tail_speed;
-                        let step = step.max(1.0); // Minimum 1 pixel per frame
-                        self.first_scroll -= step;
-                        self.tail_adjustment_needed -= step;
+                    if self.tail_adjustment_needed > 0.5 || velocity.abs() > 0.5 {
+                        // Spring-damper animation for smooth, natural-feeling scroll
+                        // This creates momentum that absorbs rapid content additions gracefully
 
-                        if self.tail_adjustment_needed > 0.5 {
+                        // Spring constant - how strongly we're pulled toward target
+                        // Higher = faster response, lower = more gradual
+                        let spring_k = self.smooth_tail_speed * 0.15;
+
+                        // Damping ratio - prevents oscillation
+                        // 1.0 = critically damped (no overshoot), <1 = underdamped (bouncy)
+                        let damping = 0.85;
+
+                        // Calculate spring force toward target
+                        let spring_force = self.tail_adjustment_needed * spring_k;
+
+                        // Apply spring force to velocity, then apply damping
+                        *velocity = (*velocity + spring_force) * damping;
+
+                        // Clamp velocity to reasonable bounds
+                        let max_velocity = 60.0; // pixels per frame
+                        *velocity = velocity.clamp(0.0, max_velocity);
+
+                        // Apply velocity to scroll position
+                        let step = *velocity;
+                        if step > 0.1 {
+                            self.first_scroll -= step;
+                            self.tail_adjustment_needed =
+                                (self.tail_adjustment_needed - step).max(0.0);
+                        }
+
+                        // Continue animation if still moving or not at target
+                        if self.tail_adjustment_needed > 0.5 || velocity.abs() > 0.5 {
                             *next_frame = cx.new_next_frame();
                         } else {
                             self.tail_adjustment_needed = 0.0;
+                            *velocity = 0.0;
                             self.scroll_state = ScrollState::Stopped;
                         }
                         cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
