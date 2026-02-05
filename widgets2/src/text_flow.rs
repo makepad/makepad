@@ -716,7 +716,8 @@ impl Widget for TextFlow {
             });
         }
 
-        // Handle selection events when selectable
+        // Handle selection events when selectable (standalone mode only)
+        // When inside a selectable PortalList, PortalList handles events directly
         if !self.selectable {
             return;
         }
@@ -727,7 +728,6 @@ impl Widget for TextFlow {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.area);
-
                 if let Some(idx) = self.selection_tracker.point_to_index(fe.abs) {
                     self.selection_anchor = idx;
                     self.selection_cursor = idx;
@@ -751,7 +751,6 @@ impl Widget for TextFlow {
                 self.redraw(cx);
             }
             Hit::TextCopy(event) => {
-                // Copy selection to clipboard (triggered by Cmd+C / Ctrl+C)
                 let text = self.selected_text();
                 if !text.is_empty() {
                     *event.response.borrow_mut() = Some(text);
@@ -762,7 +761,6 @@ impl Widget for TextFlow {
                 modifiers,
                 ..
             }) if modifiers.is_primary() => {
-                // Select all
                 self.select_all();
                 self.redraw(cx);
             }
@@ -881,6 +879,37 @@ impl TextFlow {
             self.selection_anchor = anchor;
             self.selection_cursor = cursor;
         }
+    }
+
+    /// Get the full text content (for cross-boundary copy)
+    pub fn get_full_text(&self) -> String {
+        // Filter out object replacement characters from gaps
+        self.selection_tracker
+            .text
+            .chars()
+            .filter(|c| *c != '\u{FFFC}')
+            .collect()
+    }
+
+    /// Get text for a specific character range (for cross-boundary copy)
+    pub fn get_text_for_range(&self, start: usize, end: usize) -> String {
+        self.selection_tracker
+            .text
+            .get(start..end)
+            .unwrap_or("")
+            .chars()
+            .filter(|c| *c != '\u{FFFC}')
+            .collect()
+    }
+
+    /// Get the total text length
+    pub fn text_len(&self) -> usize {
+        self.selection_tracker.total_len()
+    }
+
+    /// Convert absolute position to character index
+    pub fn point_to_char_index(&self, abs: DVec2) -> Option<usize> {
+        self.selection_tracker.point_to_index(abs)
     }
 
     pub fn begin_code(&mut self, cx: &mut Cx2d) {
@@ -1260,6 +1289,13 @@ impl TextFlow {
             item.draw_all(cx, &mut Scope::with_data(tf));
         })
     }
+}
+
+/// Actions emitted by TextFlow for cross-boundary selection in PortalList
+#[derive(Debug, Clone, Default)]
+pub enum TextFlowAction {
+    #[default]
+    None,
 }
 
 #[derive(Debug, Clone, Default)]
