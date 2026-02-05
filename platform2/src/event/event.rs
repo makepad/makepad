@@ -1,36 +1,29 @@
 use {
-    std::{
-        f64::consts::PI,
-        rc::Rc,
-        cell::Cell,
-        collections::{HashSet, HashMap}
-    },
     crate::{
+        action::ActionsBuf,
+        area::Area,
+        audio::AudioDevicesEvent,
+        //makepad_math::*,
+        cx::Cx,
+        draw_list::DrawListId,
+        //midi::{Midi1InputData, MidiInputInfo},
+        event::{
+            designer::*, drag_drop::*, finger::*, game_input::*, keyboard::*, network::*,
+            video_playback::*, window::*, xr::*,
+        },
         //makepad_live_compiler::LiveEditEvent,
         makepad_live_id::LiveId,
         makepad_script::*,
-        //makepad_math::*,
-        cx::Cx,
-        area::Area,
-        window::WindowId,
-        //midi::{Midi1InputData, MidiInputInfo},
-        event::{
-            finger::*,
-            keyboard::*,
-            window::*,
-            xr::*,
-            drag_drop::*,
-            designer::*,
-            network::*,
-            video_playback::*,
-            game_input::*,
-        },
-        action::ActionsBuf,
-        audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
+        permission::PermissionResult,
         video::VideoInputsEvent,
-        draw_list::DrawListId,
-        permission::{PermissionResult},
+        window::WindowId,
+    },
+    std::{
+        cell::Cell,
+        collections::{HashMap, HashSet},
+        f64::consts::PI,
+        rc::Rc,
     },
 };
 
@@ -97,7 +90,7 @@ pub enum Event {
     /// | others   | coming soon...              |
     ///
     /// [`onStop`]: https://developer.android.com/reference/android/app/Activity#onStop()
-    #[doc(alias("stop, hide")) ]
+    #[doc(alias("stop, hide"))]
     Background,
 
     /// The application is now in the foreground and being actively used,
@@ -128,7 +121,7 @@ pub enum Event {
     ///
     /// [`onPause`]: https://developer.android.com/reference/android/app/Activity#onPause()
     Pause,
-    
+
     Draw(DrawEvent),
     LiveEdit,
     /// A window has gained focus and is now the active window receiving user input.
@@ -139,7 +132,7 @@ pub enum Event {
     NextFrame(NextFrameEvent),
     XrUpdate(XrUpdateEvent),
     XrLocal(XrLocalEvent),
-    
+
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
@@ -214,7 +207,7 @@ pub enum Event {
     VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent),
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
-    
+
     /// The "go back" navigational button or gesture was performed.
     ///
     /// Tip: use the [`Event::consume_back_pressed()`] method to handle this event
@@ -225,169 +218,169 @@ pub enum Event {
     BackPressed {
         handled: Cell<bool>,
     },
-    
+
     /// Permission check or request result
     PermissionResult(PermissionResult),
-    
+
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
-    
+
     DesignerPick(DesignerPickEvent),
 }
 
-impl Event{
-    pub fn name(&self)->&'static str{
+impl Event {
+    pub fn name(&self) -> &'static str {
         Self::name_from_u32(self.to_u32())
     }
 
-    pub fn name_from_u32(v:u32)->&'static str{
-        match v{
-            1=>"Startup",
-            2=>"Shutdown",
+    pub fn name_from_u32(v: u32) -> &'static str {
+        match v {
+            1 => "Startup",
+            2 => "Shutdown",
 
-            3=>"Foreground",
-            4=>"Background",
+            3 => "Foreground",
+            4 => "Background",
 
-            5=>"Resume",
-            6=>"Pause",
+            5 => "Resume",
+            6 => "Pause",
 
-            7=>"Draw",
-            8=>"LiveEdit",
-            9=>"WindowGotFocus",
-            10=>"WindowLostFocus",
-            11=>"GameInputConnected",
-            12=>"NextFrame",
-            13=>"XRUpdate",
+            7 => "Draw",
+            8 => "LiveEdit",
+            9 => "WindowGotFocus",
+            10 => "WindowLostFocus",
+            11 => "GameInputConnected",
+            12 => "NextFrame",
+            13 => "XRUpdate",
 
-            14=>"WindowDragQuery",
-            15=>"WindowCloseRequested",
-            16=>"WindowClosed",
-            17=>"WindowGeomChange",
-            18=>"VirtualKeyboard",
-            19=>"ClearAtlasses",
+            14 => "WindowDragQuery",
+            15 => "WindowCloseRequested",
+            16 => "WindowClosed",
+            17 => "WindowGeomChange",
+            18 => "VirtualKeyboard",
+            19 => "ClearAtlasses",
 
-            20=>"MouseDown",
-            21=>"MouseMove",
-            22=>"MouseUp",
-            23=>"TouchUpdate",
-            24=>"LongPress",
-            25=>"Scroll",
+            20 => "MouseDown",
+            21 => "MouseMove",
+            22 => "MouseUp",
+            23 => "TouchUpdate",
+            24 => "LongPress",
+            25 => "Scroll",
 
-            26=>"Timer",
+            26 => "Timer",
 
-            27=>"Signal",
-            28=>"Trigger",
-            29=>"MacosMenuCommand",
-            30=>"KeyFocus",
-            31=>"KeyFocusLost",
-            32=>"KeyDown",
-            33=>"KeyUp",
-            34=>"TextInput",
-            35=>"TextRangeReplace",
-            36=>"TextCopy",
-            37=>"TextCut",
+            27 => "Signal",
+            28 => "Trigger",
+            29 => "MacosMenuCommand",
+            30 => "KeyFocus",
+            31 => "KeyFocusLost",
+            32 => "KeyDown",
+            33 => "KeyUp",
+            34 => "TextInput",
+            35 => "TextRangeReplace",
+            36 => "TextCopy",
+            37 => "TextCut",
 
-            38=>"Drag",
-            39=>"Drop",
-            40=>"DragEnd",
+            38 => "Drag",
+            39 => "Drop",
+            40 => "DragEnd",
 
-            41=>"AudioDevices",
-            42=>"MidiPorts",
-            43=>"VideoInputs",
-            44=>"NetworkResponses",
+            41 => "AudioDevices",
+            42 => "MidiPorts",
+            43 => "VideoInputs",
+            44 => "NetworkResponses",
 
-            45=>"VideoPlaybackPrepared",
-            46=>"VideoTextureUpdated",
-            47=>"VideoPlaybackCompleted",
-            48=>"VideoDecodingError",
-            49=>"VideoPlaybackResourcesReleased",
-            50=>"TextureHandleReady",
-            51=>"MouseLeave",
-            52=>"Actions",
-            53=>"BackPressed",
-            54=>"PermissionResult",
+            45 => "VideoPlaybackPrepared",
+            46 => "VideoTextureUpdated",
+            47 => "VideoPlaybackCompleted",
+            48 => "VideoDecodingError",
+            49 => "VideoPlaybackResourcesReleased",
+            50 => "TextureHandleReady",
+            51 => "MouseLeave",
+            52 => "Actions",
+            53 => "BackPressed",
+            54 => "PermissionResult",
 
             #[cfg(target_arch = "wasm32")]
-            55=>"ToWasmMsg",
-            
-            56=>"DesignerPick",
-            57=>"XrLocal",
-            _=>panic!()
+            55 => "ToWasmMsg",
+
+            56 => "DesignerPick",
+            57 => "XrLocal",
+            _ => panic!(),
         }
     }
 
-    pub fn to_u32(&self)->u32{
-        match self{
-            Self::Startup=>1,
-            Self::Shutdown=>2,
+    pub fn to_u32(&self) -> u32 {
+        match self {
+            Self::Startup => 1,
+            Self::Shutdown => 2,
 
-            Self::Foreground=>3,
-            Self::Background=>4,
+            Self::Foreground => 3,
+            Self::Background => 4,
 
-            Self::Resume=>5,
-            Self::Pause=>6,
+            Self::Resume => 5,
+            Self::Pause => 6,
 
-            Self::Draw(_)=>7,
-            Self::LiveEdit=>8,
-            Self::WindowGotFocus(_)=>9,
-            Self::WindowLostFocus(_)=>10,
-            Self::GameInputConnected(_)=>11,
-            Self::NextFrame(_)=>12,
-            Self::XrUpdate(_)=>13,
+            Self::Draw(_) => 7,
+            Self::LiveEdit => 8,
+            Self::WindowGotFocus(_) => 9,
+            Self::WindowLostFocus(_) => 10,
+            Self::GameInputConnected(_) => 11,
+            Self::NextFrame(_) => 12,
+            Self::XrUpdate(_) => 13,
 
-            Self::WindowDragQuery(_)=>14,
-            Self::WindowCloseRequested(_)=>15,
-            Self::WindowClosed(_)=>16,
-            Self::WindowGeomChange(_)=>17,
-            Self::VirtualKeyboard(_)=>18,
-            Self::ClearAtlasses=>19,
+            Self::WindowDragQuery(_) => 14,
+            Self::WindowCloseRequested(_) => 15,
+            Self::WindowClosed(_) => 16,
+            Self::WindowGeomChange(_) => 17,
+            Self::VirtualKeyboard(_) => 18,
+            Self::ClearAtlasses => 19,
 
-            Self::MouseDown(_)=>20,
-            Self::MouseMove(_)=>21,
-            Self::MouseUp(_)=>22,
-            Self::TouchUpdate(_)=>23,
-            Self::LongPress(_)=>24,
-            Self::Scroll(_)=>25,
+            Self::MouseDown(_) => 20,
+            Self::MouseMove(_) => 21,
+            Self::MouseUp(_) => 22,
+            Self::TouchUpdate(_) => 23,
+            Self::LongPress(_) => 24,
+            Self::Scroll(_) => 25,
 
-            Self::Timer(_)=>26,
+            Self::Timer(_) => 26,
 
-            Self::Signal=>27,
-            Self::Trigger(_)=>28,
-            Self::MacosMenuCommand(_)=>29,
-            Self::KeyFocus(_)=>30,
-            Self::KeyFocusLost(_)=>31,
-            Self::KeyDown(_)=>32,
-            Self::KeyUp(_)=>33,
-            Self::TextInput(_)=>34,
-            Self::TextRangeReplace(_)=>35,
-            Self::TextCopy(_)=>36,
-            Self::TextCut(_)=>37,
+            Self::Signal => 27,
+            Self::Trigger(_) => 28,
+            Self::MacosMenuCommand(_) => 29,
+            Self::KeyFocus(_) => 30,
+            Self::KeyFocusLost(_) => 31,
+            Self::KeyDown(_) => 32,
+            Self::KeyUp(_) => 33,
+            Self::TextInput(_) => 34,
+            Self::TextRangeReplace(_) => 35,
+            Self::TextCopy(_) => 36,
+            Self::TextCut(_) => 37,
 
-            Self::Drag(_)=>38,
-            Self::Drop(_)=>39,
-            Self::DragEnd=>40,
+            Self::Drag(_) => 38,
+            Self::Drop(_) => 39,
+            Self::DragEnd => 40,
 
-            Self::AudioDevices(_)=>41,
-            Self::MidiPorts(_)=>42,
-            Self::VideoInputs(_)=>43,
-            Self::NetworkResponses(_)=>44,
+            Self::AudioDevices(_) => 41,
+            Self::MidiPorts(_) => 42,
+            Self::VideoInputs(_) => 43,
+            Self::NetworkResponses(_) => 44,
 
-            Self::VideoPlaybackPrepared(_)=>45,
-            Self::VideoTextureUpdated(_)=>46,
-            Self::VideoPlaybackCompleted(_)=>47,
-            Self::VideoDecodingError(_)=>48,
-            Self::VideoPlaybackResourcesReleased(_)=>49,
-            Self::TextureHandleReady(_)=>50,
-            Self::MouseLeave(_)=>51,
-            Self::Actions(_)=>52,
-            Self::BackPressed{..}=>53,
-            Self::PermissionResult(_)=>54,
-            
+            Self::VideoPlaybackPrepared(_) => 45,
+            Self::VideoTextureUpdated(_) => 46,
+            Self::VideoPlaybackCompleted(_) => 47,
+            Self::VideoDecodingError(_) => 48,
+            Self::VideoPlaybackResourcesReleased(_) => 49,
+            Self::TextureHandleReady(_) => 50,
+            Self::MouseLeave(_) => 51,
+            Self::Actions(_) => 52,
+            Self::BackPressed { .. } => 53,
+            Self::PermissionResult(_) => 54,
+
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>55,
-            
-            Self::DesignerPick(_) =>56,
-            Self::XrLocal(_)=>57,
+            Self::ToWasmMsg(_) => 55,
+
+            Self::DesignerPick(_) => 56,
+            Self::XrLocal(_) => 57,
         }
     }
 
@@ -406,9 +399,8 @@ impl Event{
     }
 }
 
-
 #[derive(Debug)]
-pub enum Hit{
+pub enum Hit {
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
@@ -427,35 +419,34 @@ pub enum Hit{
     FingerHoverOut(FingerHoverEvent),
     FingerUp(FingerUpEvent),
     FingerLongPress(FingerLongPressEvent),
-    
+
     DesignerPick(DesignerPickEvent),
 
-    Nothing
+    Nothing,
 }
 
 #[derive(Clone)]
-pub enum DragHit{
+pub enum DragHit {
     Drag(DragHitEvent),
     Drop(DropHitEvent),
     DragEnd,
-    NoHit
+    NoHit,
 }
 
-impl Event{
-    pub fn requires_visibility(&self) -> bool{
-        match self{
-            Self::MouseDown(_)|
-            Self::MouseMove(_)|
-            Self::TouchUpdate(_)|
-            Self::Scroll(_)=>true,
-            _=>false
+impl Event {
+    pub fn requires_visibility(&self) -> bool {
+        match self {
+            Self::MouseDown(_) | Self::MouseMove(_) | Self::TouchUpdate(_) | Self::Scroll(_) => {
+                true
+            }
+            _ => false,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct TriggerEvent {
-    pub triggers: HashMap<Area, Vec<Trigger>>
+    pub triggers: HashMap<Area, Vec<Trigger>>,
 }
 
 /*
@@ -469,31 +460,30 @@ pub struct DrawEvent {
     pub draw_lists: Vec<DrawListId>,
     pub draw_lists_and_children: Vec<DrawListId>,
     pub redraw_all: bool,
-    pub xr_state: Option<Rc<XrState>>
+    pub xr_state: Option<Rc<XrState>>,
+    pub time: f64,
 }
 
-impl DrawEvent{
+impl DrawEvent {
     pub fn will_redraw(&self) -> bool {
-        self.redraw_all
-            || self.draw_lists.len() != 0
-            || self.draw_lists_and_children.len() != 0
+        self.redraw_all || self.draw_lists.len() != 0 || self.draw_lists_and_children.len() != 0
     }
 
-    pub fn draw_list_will_redraw(&self, cx:&Cx, draw_list_id:DrawListId)->bool{
-         if self.redraw_all {
+    pub fn draw_list_will_redraw(&self, cx: &Cx, draw_list_id: DrawListId) -> bool {
+        if self.redraw_all {
             return true;
         }
         // figure out if areas are in some way a child of view_id, then we need to redraw
         for check_draw_list_id in &self.draw_lists {
             let mut next = Some(*check_draw_list_id);
-            while let Some(vw) = next{
+            while let Some(vw) = next {
                 if vw == draw_list_id {
-                    return true
+                    return true;
                 }
-                if let Some(n) = cx.draw_lists.checked_index(vw){
+                if let Some(n) = cx.draw_lists.checked_index(vw) {
                     next = n.codeflow_parent_id;
-                }
-                else{ // a drawlist in our redraw lists was reused
+                } else {
+                    // a drawlist in our redraw lists was reused
                     break;
                 }
             }
@@ -501,14 +491,14 @@ impl DrawEvent{
         // figure out if areas are in some way a parent of view_id, then redraw
         for check_draw_list_id in &self.draw_lists_and_children {
             let mut next = Some(draw_list_id);
-            while let Some(vw) = next{
+            while let Some(vw) = next {
                 if vw == *check_draw_list_id {
-                    return true
+                    return true;
                 }
-                if let Some(n) = cx.draw_lists.checked_index(vw){
+                if let Some(n) = cx.draw_lists.checked_index(vw) {
                     next = n.codeflow_parent_id;
-                }
-                else{ // a drawlist in our redraw lists was reused
+                } else {
+                    // a drawlist in our redraw lists was reused
                     break;
                 }
             }
@@ -517,56 +507,97 @@ impl DrawEvent{
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
 pub enum Ease {
-    #[pick] Linear,
-    #[live] None,
-    #[live(1.0)] Constant(f64),
-    #[live] InQuad,
-    #[live] OutQuad,
-    #[live] InOutQuad,
-    #[live] InCubic,
-    #[live] OutCubic,
-    #[live] InOutCubic,
-    #[live] InQuart,
-    #[live] OutQuart,
-    #[live] InOutQuart,
-    #[live] InQuint,
-    #[live] OutQuint,
-    #[live] InOutQuint,
-    #[live] InSine,
-    #[live] OutSine,
-    #[live] InOutSine,
-    #[live] InExp,
-    #[live] OutExp,
-    #[live] InOutExp,
-    #[live] InCirc,
-    #[live] OutCirc,
-    #[live] InOutCirc,
-    #[live] InElastic,
-    #[live] OutElastic,
-    #[live] InOutElastic,
-    #[live] InBack,
-    #[live] OutBack,
-    #[live] InOutBack,
-    #[live] InBounce,
-    #[live] OutBounce,
-    #[live] InOutBounce,
-    #[live {d1: 0.82, d2: 0.97, max: 100}] ExpDecay {d1: f64, d2: f64, max: usize},
-        
-    #[live {begin: 0.0, end: 1.0}] Pow {begin: f64, end: f64},
-    #[live {cp0: 0.0, cp1: 0.0, cp2: 1.0, cp3: 1.0}] Bezier {cp0: f64, cp1: f64, cp2: f64, cp3: f64}
+    #[pick]
+    Linear,
+    #[live]
+    None,
+    #[live(1.0)]
+    Constant(f64),
+    #[live]
+    InQuad,
+    #[live]
+    OutQuad,
+    #[live]
+    InOutQuad,
+    #[live]
+    InCubic,
+    #[live]
+    OutCubic,
+    #[live]
+    InOutCubic,
+    #[live]
+    InQuart,
+    #[live]
+    OutQuart,
+    #[live]
+    InOutQuart,
+    #[live]
+    InQuint,
+    #[live]
+    OutQuint,
+    #[live]
+    InOutQuint,
+    #[live]
+    InSine,
+    #[live]
+    OutSine,
+    #[live]
+    InOutSine,
+    #[live]
+    InExp,
+    #[live]
+    OutExp,
+    #[live]
+    InOutExp,
+    #[live]
+    InCirc,
+    #[live]
+    OutCirc,
+    #[live]
+    InOutCirc,
+    #[live]
+    InElastic,
+    #[live]
+    OutElastic,
+    #[live]
+    InOutElastic,
+    #[live]
+    InBack,
+    #[live]
+    OutBack,
+    #[live]
+    InOutBack,
+    #[live]
+    InBounce,
+    #[live]
+    OutBounce,
+    #[live]
+    InOutBounce,
+    #[live {d1: 0.82, d2: 0.97, max: 100}]
+    ExpDecay { d1: f64, d2: f64, max: usize },
+
+    #[live {begin: 0.0, end: 1.0}]
+    Pow { begin: f64, end: f64 },
+    #[live {cp0: 0.0, cp1: 0.0, cp2: 1.0, cp3: 1.0}]
+    Bezier {
+        cp0: f64,
+        cp1: f64,
+        cp2: f64,
+        cp3: f64,
+    },
 }
 
 impl Ease {
     pub fn map(&self, t: f64) -> f64 {
         match self {
-            Self::ExpDecay {d1, d2, max} => { // there must be a closed form for this
+            Self::ExpDecay { d1, d2, max } => {
+                // there must be a closed form for this
                 if t > 0.999 {
                     return 1.0;
                 }
-                
+
                 // first we count the number of steps we'd need to decay
                 let mut di = *d1;
                 let mut dt = 1.0;
@@ -586,9 +617,10 @@ impl Ease {
                 let mut steps = 0.0;
                 while dt > 0.001 && steps < max_steps {
                     steps += 1.0;
-                    if steps >= step { // right step
+                    if steps >= step {
+                        // right step
                         let fac = steps - step;
-                        return 1.0 - (dt * fac + (dt * di) * (1.0 - fac))
+                        return 1.0 - (dt * fac + (dt * di) * (1.0 - fac));
                     }
                     dt = dt * di;
                     di *= d2;
@@ -597,14 +629,14 @@ impl Ease {
             }
             Self::Linear => {
                 return t.max(0.0).min(1.0);
-            },
+            }
             Self::Constant(t) => {
                 return t.max(0.0).min(1.0);
-            },
+            }
             Self::None => {
                 return 1.0;
-            },
-            Self::Pow {begin, end} => {
+            }
+            Self::Pow { begin, end } => {
                 if t < 0. {
                     return 0.;
                 }
@@ -615,133 +647,123 @@ impl Ease {
                 let b = 1. + 1. / (end * end).max(1.0);
                 let t2 = (((a - 1.) * -b) / (a * (1. - b))).powf(t);
                 return (-a * b + b * a * t2) / (a * t2 - b);
-            },
-                        
+            }
+
             Self::InQuad => {
                 return t * t;
-            },
+            }
             Self::OutQuad => {
                 return t * (2.0 - t);
-            },
+            }
             Self::InOutQuad => {
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * t * t;
-                }
-                else {
+                } else {
                     let t = t - 1.;
                     return -0.5 * (t * (t - 2.) - 1.);
                 }
-            },
+            }
             Self::InCubic => {
                 return t * t * t;
-            },
+            }
             Self::OutCubic => {
                 let t2 = t - 1.0;
                 return t2 * t2 * t2 + 1.0;
-            },
+            }
             Self::InOutCubic => {
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * t * t * t;
-                }
-                else {
+                } else {
                     let t = t - 2.;
                     return 1. / 2. * (t * t * t + 2.);
                 }
-            },
-            Self::InQuart => {
-                return t * t * t * t
-            },
+            }
+            Self::InQuart => return t * t * t * t,
             Self::OutQuart => {
                 let t = t - 1.;
                 return -(t * t * t * t - 1.);
-            },
+            }
             Self::InOutQuart => {
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * t * t * t * t;
-                }
-                else {
+                } else {
                     let t = t - 2.;
                     return -0.5 * (t * t * t * t - 2.);
                 }
-            },
+            }
             Self::InQuint => {
                 return t * t * t * t * t;
-            },
+            }
             Self::OutQuint => {
                 let t = t - 1.;
                 return t * t * t * t * t + 1.;
-            },
+            }
             Self::InOutQuint => {
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * t * t * t * t * t;
-                }
-                else {
+                } else {
                     let t = t - 2.;
                     return 0.5 * (t * t * t * t * t + 2.);
                 }
-            },
+            }
             Self::InSine => {
                 return -(t * PI * 0.5).cos() + 1.;
-            },
+            }
             Self::OutSine => {
                 return (t * PI * 0.5).sin();
-            },
+            }
             Self::InOutSine => {
                 return -0.5 * ((t * PI).cos() - 1.);
-            },
+            }
             Self::InExp => {
                 if t < 0.001 {
                     return 0.;
-                }
-                else {
+                } else {
                     return 2.0f64.powf(10. * (t - 1.));
                 }
-            },
+            }
             Self::OutExp => {
                 if t > 0.999 {
                     return 1.;
-                }
-                else {
+                } else {
                     return -(2.0f64.powf(-10. * t)) + 1.;
                 }
-            },
+            }
             Self::InOutExp => {
-                if t<0.001 {
+                if t < 0.001 {
                     return 0.;
                 }
-                if t>0.999 {
+                if t > 0.999 {
                     return 1.;
                 }
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * 2.0f64.powf(10. * (t - 1.));
-                }
-                else {
+                } else {
                     let t = t - 1.;
                     return 0.5 * (-(2.0f64.powf(-10. * t)) + 2.);
                 }
-            },
+            }
             Self::InCirc => {
                 return -((1. - t * t).sqrt() - 1.);
-            },
+            }
             Self::OutCirc => {
                 let t = t - 1.;
                 return (1. - t * t).sqrt();
-            },
+            }
             Self::InOutCirc => {
                 let t = t * 2.;
                 if t < 1. {
                     return -0.5 * ((1. - t * t).sqrt() - 1.);
-                }
-                else {
+                } else {
                     let t = t - 2.;
                     return 0.5 * ((1. - t * t).sqrt() + 1.);
                 }
-            },
+            }
             Self::InElastic => {
                 let p = 0.3;
                 let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
@@ -753,11 +775,11 @@ impl Ease {
                 }
                 let t = t - 1.0;
                 return -(2.0f64.powf(10.0 * t) * ((t - s) * (2.0 * PI) / p).sin());
-            },
+            }
             Self::OutElastic => {
                 let p = 0.3;
                 let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
-                                
+
                 if t < 0.001 {
                     return 0.;
                 }
@@ -765,7 +787,7 @@ impl Ease {
                     return 1.;
                 }
                 return 2.0f64.powf(-10.0 * t) * ((t - s) * (2.0 * PI) / p).sin() + 1.0;
-            },
+            }
             Self::InOutElastic => {
                 let p = 0.3;
                 let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
@@ -779,36 +801,34 @@ impl Ease {
                 if t < 1. {
                     let t = t - 1.0;
                     return -0.5 * (2.0f64.powf(10.0 * t) * ((t - s) * (2.0 * PI) / p).sin());
-                }
-                else {
+                } else {
                     let t = t - 1.0;
                     return 0.5 * 2.0f64.powf(-10.0 * t) * ((t - s) * (2.0 * PI) / p).sin() + 1.0;
                 }
-            },
+            }
             Self::InBack => {
                 let s = 1.70158;
                 return t * t * ((s + 1.) * t - s);
-            },
+            }
             Self::OutBack => {
                 let s = 1.70158;
                 let t = t - 1.;
                 return t * t * ((s + 1.) * t + s) + 1.;
-            },
+            }
             Self::InOutBack => {
                 let s = 1.70158;
                 let t = t * 2.0;
                 if t < 1. {
                     let s = s * 1.525;
                     return 0.5 * (t * t * ((s + 1.) * t - s));
-                }
-                else {
+                } else {
                     let t = t - 2.;
                     return 0.5 * (t * t * ((s + 1.) * t + s) + 2.);
                 }
-            },
+            }
             Self::InBounce => {
                 return 1.0 - Self::OutBounce.map(1.0 - t);
-            },
+            }
             Self::OutBounce => {
                 if t < (1. / 2.75) {
                     return 7.5625 * t * t;
@@ -823,27 +843,26 @@ impl Ease {
                 }
                 let t = t - (2.625 / 2.75);
                 return 7.5625 * t * t + 0.984375;
-            },
+            }
             Self::InOutBounce => {
-                if t <0.5 {
+                if t < 0.5 {
                     return Self::InBounce.map(t * 2.) * 0.5;
-                }
-                else {
+                } else {
                     return Self::OutBounce.map(t * 2. - 1.) * 0.5 + 0.5;
                 }
-            },
-            Self::Bezier {cp0, cp1, cp2, cp3} => {
+            }
+            Self::Bezier { cp0, cp1, cp2, cp3 } => {
                 if t < 0. {
                     return 0.;
                 }
                 if t > 1. {
                     return 1.;
                 }
-                                
+
                 if (cp0 - cp1).abs() < 0.001 && (cp2 - cp3).abs() < 0.001 {
                     return t;
                 }
-                                
+
                 let epsilon = 1.0 / 200.0 * t;
                 let cx = 3.0 * cp0;
                 let bx = 3.0 * (cp2 - cp0) - cx;
@@ -852,7 +871,7 @@ impl Ease {
                 let by = 3.0 * (cp3 - cp1) - cy;
                 let ay = 1.0 - cy - by;
                 let mut u = t;
-                                
+
                 for _i in 0..6 {
                     let x = ((ax * u + bx) * u + cx) * u - t;
                     if x.abs() < epsilon {
@@ -863,15 +882,15 @@ impl Ease {
                         break;
                     }
                     u = u - x / d;
-                };
-                                
+                }
+
                 if t > 1. {
                     return (ay + by) + cy;
                 }
                 if t < 0. {
                     return 0.0;
                 }
-                                
+
                 let mut w = 0.0;
                 let mut v = 1.0;
                 u = t;
@@ -880,16 +899,15 @@ impl Ease {
                     if (x - t).abs() < epsilon {
                         return ((ay * u + by) * u + cy) * u;
                     }
-                                        
+
                     if t > x {
                         w = u;
-                    }
-                    else {
+                    } else {
                         v = u;
                     }
                     u = (v - w) * 0.5 + w;
                 }
-                                
+
                 return ((ay * u + by) * u + cy) * u;
             }
         }
@@ -897,30 +915,45 @@ impl Ease {
 }
 
 #[derive(Clone, Debug)]
-pub enum VirtualKeyboardEvent{
-    WillShow{time:f64, height:f64, duration:f64, ease:Ease},
-    WillHide{time:f64, height:f64, duration:f64, ease:Ease},
-    DidShow{time:f64, height:f64},
-    DidHide{time:f64},
+pub enum VirtualKeyboardEvent {
+    WillShow {
+        time: f64,
+        height: f64,
+        duration: f64,
+        ease: Ease,
+    },
+    WillHide {
+        time: f64,
+        height: f64,
+        duration: f64,
+        ease: Ease,
+    },
+    DidShow {
+        time: f64,
+        height: f64,
+    },
+    DidHide {
+        time: f64,
+    },
 }
 
 #[derive(Clone, Default, Debug)]
 pub struct NextFrameEvent {
     pub frame: u64,
     pub time: f64,
-    pub set: HashSet<NextFrame>
+    pub set: HashSet<NextFrame>,
 }
 
 #[derive(Clone, Debug)]
 pub struct TimerEvent {
     pub time: Option<f64>,
-    pub timer_id: u64
+    pub timer_id: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct Trigger{
-    pub id:LiveId,
-    pub from:Area
+pub struct Trigger {
+    pub id: LiveId,
+    pub from: Area,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -929,23 +962,23 @@ pub struct TriggerHitEvent(pub Vec<Trigger>);
 #[derive(Clone, Debug)]
 pub struct WebSocketErrorEvent {
     pub socket_id: LiveId,
-    pub error: String
+    pub error: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct WebSocketMessageEvent {
     pub socket_id: LiveId,
-    pub data: Vec<u8>
+    pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
 pub struct NextFrame(pub u64);
 
-impl NextFrame{
-    pub fn is_event(&self, event:&Event)->Option<NextFrameEvent>{
-        if let Event::NextFrame(ne) = event{
-            if ne.set.contains(&self){
-                return Some(ne.clone())
+impl NextFrame {
+    pub fn is_event(&self, event: &Event) -> Option<NextFrameEvent> {
+        if let Event::NextFrame(ne) = event {
+            if ne.set.contains(&self) {
+                return Some(ne.clone());
             }
         }
         None
@@ -956,18 +989,18 @@ impl NextFrame{
 pub struct Timer(pub u64);
 
 impl Timer {
-    pub fn is_event(&self, event:&Event)->Option<TimerEvent>{
-        if let Event::Timer(te) = event{
-            if te.timer_id == self.0{
-                return Some(te.clone())
+    pub fn is_event(&self, event: &Event) -> Option<TimerEvent> {
+        if let Event::Timer(te) = event {
+            if te.timer_id == self.0 {
+                return Some(te.clone());
             }
         }
         None
     }
 
-    pub fn is_timer(&self, event:&TimerEvent)->Option<TimerEvent>{
-        if event.timer_id == self.0{
-            return Some(event.clone())
+    pub fn is_timer(&self, event: &TimerEvent) -> Option<TimerEvent> {
+        if event.timer_id == self.0 {
+            return Some(event.clone());
         }
         None
     }
@@ -989,13 +1022,15 @@ use crate::makepad_wasm_bridge::ToWasmMsgRef;
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug)]
-pub struct ToWasmMsgEvent{
+pub struct ToWasmMsgEvent {
     pub id: LiveId,
     pub msg: ToWasmMsg,
-    pub offset: usize
+    pub offset: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
-impl ToWasmMsgEvent{
-    pub fn as_ref(&self)->ToWasmMsgRef<'_>{self.msg.as_ref_at(self.offset)}
+impl ToWasmMsgEvent {
+    pub fn as_ref(&self) -> ToWasmMsgRef<'_> {
+        self.msg.as_ref_at(self.offset)
+    }
 }
