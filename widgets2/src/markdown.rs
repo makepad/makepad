@@ -584,6 +584,13 @@ impl MarkdownRef {
         }
     }
 
+    /// Reset and start streaming animation (for reused widgets).
+    pub fn reset_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.reset_streaming_animation();
+        }
+    }
+
     /// Stop streaming animation (fade will complete naturally).
     pub fn stop_streaming_animation(&self) {
         if let Some(mut inner) = self.borrow_mut() {

@@ -117,11 +117,11 @@ impl RunView {
             // (or the previous one, before any draws on the current one),
             // and look them up by their unique IDs, to avoid rendering
             // different textures than the ones the client just drew to.
-            let mut try_present_through = |swapchain: &Option<Swapchain<Texture>>| {
+            let mut try_present_through = |swapchain: &Option<cx_stdin::HostSwapchain>| {
                 let swapchain = swapchain.as_ref()?;
                 let drawn = swapchain.get_image(presentable_draw.target_id)?;
 
-                self.draw_app.set_texture(0, &drawn.image);
+                self.draw_app.set_texture(0, &drawn.texture);
                 self.draw_app.draw_vars.set_dyn_instance(
                     cx,
                     id!(tex_scale),
@@ -174,6 +174,14 @@ impl RunView {
 
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.draw_app.redraw(cx);
+    }
+
+    pub fn request_animation_frame(&mut self, cx: &mut Cx) {
+        // Keep repainting to ensure ticks are sent to the child
+        if self.redraw_countdown < 2 {
+            self.redraw_countdown = 2;
+        }
+        self.redraw(cx);
     }
 
     pub fn resend_framebuffer(&mut self, _cx: &mut Cx) {
@@ -245,9 +253,7 @@ impl RunView {
                 // be regenerated, to tell apart swapchains when e.g. resizing
                 // constantly, so textures keep getting created and replaced.
                 if let Some(swapchain) = v.swapchain_mut(self.window_id) {
-                    for pi in &mut swapchain.presentable_images {
-                        pi.id = cx_stdin::PresentableImageId::alloc();
-                    }
+                    swapchain.regenerate_ids();
                 }
 
                 // Update the swapchain allocated size, rounding it up to
@@ -256,59 +262,15 @@ impl RunView {
                 let alloc_height = min_height.max(64).next_power_of_two();
 
                 let swapchain = v.swapchain_mut(self.window_id).get_or_insert_with(|| {
-                    Swapchain::new(self.window_id, alloc_width, alloc_height).images_map(|pi| {
-                        // Prepare a version of the swapchain for cross-process sharing.
-                        Texture::new_with_format(
-                            cx,
-                            TextureFormat::SharedBGRAu8 {
-                                id: pi.id,
-                                width: alloc_width as usize,
-                                height: alloc_height as usize,
-                                initial: true,
-                            },
-                        )
-                    })
+                    cx_stdin::HostSwapchain::new(self.window_id, alloc_width, alloc_height, cx)
                 });
 
-                let shared_swapchain = swapchain
-                    .images_as_ref()
-                    .images_map(|pi| cx.share_texture_for_presentable_image(&pi.image));
+                // Create shared swapchain for cross-process serialization
+                let shared_swapchain =
+                    cx_stdin::SharedSwapchain::from_host_swapchain(swapchain, cx);
 
-                let shared_swapchain = {
-                    // FIMXE(eddyb) this could be platform-agnostic if the serializer
-                    // could drive the out-of-band UNIX domain socket messaging itself.
-                    #[cfg(target_os = "linux")]
-                    {
-                        shared_swapchain.images_map(|pi| {
-                            pi.send_fds_to_aux_chan(v.aux_chan_host_endpoint.as_ref().unwrap())
-                                .map(|pi| pi.image)
-                        })
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        shared_swapchain.images_map(|pi| std::io::Result::Ok(pi.image))
-                    }
-                };
-
-                let mut any_errors = false;
-                for pi in &shared_swapchain.presentable_images {
-                    if let Err(err) = &pi.image {
-                        // FIXME(eddyb) is this recoverable or should the whole
-                        // client be restarted? desyncs can get really bad...
-                        error!("failed to send swapchain image to client: {:?}", err);
-                        any_errors = true;
-                    }
-                }
-
-                if !any_errors {
-                    // Inform the client about the new swapchain it *should* use
-                    // (using older swapchains isn't an error, but the draw calls
-                    // will either be noops, or write to orphaned GPU memory ranges).
-                    manager.send_host_to_stdin(
-                        run_view_id,
-                        HostToStdin::Swapchain(shared_swapchain.images_map(|pi| pi.image.unwrap())),
-                    );
-                }
+                // Inform the client about the new swapchain it *should* use
+                manager.send_host_to_stdin(run_view_id, HostToStdin::Swapchain(shared_swapchain));
             }
         }
         self.last_rect = rect;

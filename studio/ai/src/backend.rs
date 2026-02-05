@@ -20,6 +20,7 @@ pub enum BackendConfig {
         oauth_token: Option<String>,
         model: String,
     },
+    ClaudeAcp,
     OpenAI {
         api_key: String,
         model: String,
@@ -36,6 +37,7 @@ impl BackendConfig {
     pub fn name(&self) -> &'static str {
         match self {
             BackendConfig::Claude { .. } => "Claude",
+            BackendConfig::ClaudeAcp => "Claude (ACP)",
             BackendConfig::OpenAI { .. } => "OpenAI",
             BackendConfig::Gemini { .. } => "Gemini",
         }
@@ -44,6 +46,7 @@ impl BackendConfig {
     pub fn model(&self) -> &str {
         match self {
             BackendConfig::Claude { model, .. } => model,
+            BackendConfig::ClaudeAcp => "claude-code-acp",
             BackendConfig::OpenAI { model, .. } => model,
             BackendConfig::Gemini { model, .. } => model,
         }

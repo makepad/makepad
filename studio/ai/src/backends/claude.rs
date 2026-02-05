@@ -244,12 +244,23 @@ impl ClaudeBackend {
 
         // Use OAuth token if available, otherwise API key
         if let Some(token) = oauth_token {
+            log!("Claude: Using OAuth token (length: {})", token.len());
             http.set_header("Authorization".to_string(), format!("Bearer {}", token));
+            // OAuth requires beta header for authentication
+            http.set_header(
+                "anthropic-beta".to_string(),
+                "oauth-2025-04-20,interleaved-thinking-2025-05-14,output-128k-2025-02-19"
+                    .to_string(),
+            );
         } else if let Some(key) = api_key {
+            log!("Claude: Using API key (length: {})", key.len());
             http.set_header("x-api-key".to_string(), key.clone());
+        } else {
+            log!("Claude: WARNING - No API key or OAuth token configured!");
         }
 
         let body = Self::build_request_json(request, model);
+        log!("Claude: Sending request to model: {}", model);
         http.set_string_body(body);
         http
     }
@@ -449,11 +460,17 @@ impl AiBackend for ClaudeBackend {
 
                 match &response.response {
                     NetworkResponse::HttpStreamResponse(res) => {
+                        log!("Claude: Got stream response, status: {:?}", res.status_code);
                         if let Some(data) = res.get_string_body() {
+                            log!(
+                                "Claude: Stream data (first 500 chars): {}",
+                                &data.chars().take(500).collect::<String>()
+                            );
                             ai_events.extend(self.process_stream_data(response.request_id, &data));
                         }
                     }
-                    NetworkResponse::HttpStreamComplete(_) => {
+                    NetworkResponse::HttpStreamComplete(res) => {
+                        log!("Claude: Stream complete, status: {:?}", res.status_code);
                         if let Some(mut in_flight) = self.in_flight.remove(&response.request_id) {
                             if !in_flight.accumulated_text.is_empty() {
                                 let text = std::mem::take(&mut in_flight.accumulated_text);
@@ -490,6 +507,7 @@ impl AiBackend for ClaudeBackend {
                         }
                     }
                     NetworkResponse::HttpRequestError(err) => {
+                        log!("Claude: HTTP request error: {}", err.message);
                         if let Some(in_flight) = self.in_flight.remove(&response.request_id) {
                             ai_events.push(AiEvent::Error {
                                 request_id: in_flight.request_id,
