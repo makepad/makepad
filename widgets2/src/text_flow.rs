@@ -611,13 +611,7 @@ pub struct TextFlow {
     /// Actual drawn char count
     #[rust]
     actual_chars: f32,
-    /// Previous actual_chars for rate calculation
-    #[rust]
-    prev_actual_chars: f32,
-    /// Estimated chars per second based on incoming rate
-    #[rust]
-    chars_per_sec: f32,
-    /// Last time we measured char rate
+    /// Last frame time for dt calculation
     #[rust]
     last_rate_time: f64,
     /// Number of chars over which to fade (default 50)
@@ -745,18 +739,7 @@ impl Widget for TextFlow {
             } else {
                 1.0 / 60.0
             };
-
-            // Update char arrival rate estimate
-            let new_chars = self.actual_chars - self.prev_actual_chars;
-            if new_chars > 0.0 {
-                let instant_rate = new_chars / dt as f32;
-                self.chars_per_sec = self.chars_per_sec * 0.7 + instant_rate * 0.3;
-            }
-            self.prev_actual_chars = self.actual_chars;
             self.last_rate_time = time;
-
-            // Animation speed matches incoming rate, with minimum
-            let speed = self.chars_per_sec.max(self.min_fade_speed) * dt as f32;
 
             // Target depends on streaming state:
             // - While streaming: chase actual_chars (so new text fades in)
@@ -767,8 +750,24 @@ impl Widget for TextFlow {
                 self.actual_chars + self.fade_chars
             };
 
-            if self.animated_chars < target {
-                self.animated_chars = (self.animated_chars + speed).min(target);
+            // Calculate how far behind we are
+            let distance = target - self.animated_chars;
+
+            if distance > 0.0 {
+                // Speed scales with distance - further behind = faster catch up
+                // Use a proportional approach: catch up ~20% of distance per frame at 60fps
+                // Plus a minimum speed to ensure we always make progress
+                let catch_up_factor = 0.15; // Fraction of distance to cover per frame (at 60fps baseline)
+                let frame_factor = (dt * 60.0) as f32; // Scale for actual frame rate
+                let proportional_speed = distance * catch_up_factor * frame_factor;
+                let min_speed = self.min_fade_speed * dt as f32;
+                let speed = proportional_speed.max(min_speed);
+
+                self.animated_chars += speed;
+                // Don't overshoot
+                if self.animated_chars > target {
+                    self.animated_chars = target;
+                }
                 // Update shader directly and request redraw for the area
                 self.draw_text.set_total_chars(cx, self.animated_chars);
                 self.draw_text.draw_vars.area.redraw(cx);
@@ -908,8 +907,6 @@ impl TextFlow {
         self.streaming_animation = true;
         self.animated_chars = 0.0;
         self.actual_chars = 0.0;
-        self.prev_actual_chars = 0.0;
-        self.chars_per_sec = 0.0;
         self.last_rate_time = 0.0;
     }
 
