@@ -22,6 +22,57 @@ script_mod! {
         draw_text.color: #0f0
     }
 
+    // ===========================================
+    // SELECTION TEST - TextFlow in PortalList
+    // ===========================================
+
+    // Item template for the selectable TextFlow list
+    let SelectableTextItem = View{
+        width: Fill height: Fit
+        padding: Inset{top: 4 bottom: 4 left: 10 right: 10}
+
+        $selectable: TextFlow{
+            width: Fill height: Fit
+            selectable: true
+            font_size: 10
+        }
+    }
+
+    // Widget that demonstrates cross-boundary selection in PortalList
+    let SelectionTestList = #(SelectionTestList::register_widget(vm)) {
+        width: Fill
+        height: Fill
+        $list: PortalList{
+            width: Fill
+            height: Fill
+            flow: Down
+            selectable: true
+            drag_scrolling: false
+            $Item: SelectableTextItem{}
+        }
+    }
+
+    // Tab content for selection test
+    let TabSelectionTest = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        flow: Down spacing: 10
+
+        View{
+            width: Fill height: Fit
+            padding: 15
+            flow: Down spacing: 5
+            Label{text: "Cross-Boundary Text Selection Test" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "Click and drag to select text across multiple items. Use Cmd+C to copy." draw_text.color: #888 draw_text.text_style.font_size: 10}
+        }
+
+        SelectionTestList{}
+    }
+
+    // ===========================================
+    // PORTAL LIST DEMO
+    // ===========================================
+
     // Item template for the PortalList
     let ListItem = RoundedView{
         width: Fill height: Fit
@@ -262,9 +313,10 @@ script_mod! {
 
             Hr{}
 
-            Label{text: "HTML" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "HTML (selectable)" draw_text.color: #fff draw_text.text_style.font_size: 13}
             $html: Html{
                 width: Fill height: Fit
+                selectable: true
                 body: "<h3>HTML Content</h3><p><b>Bold</b> and <i>italic</i> text.</p><ul><li>Item one</li><li>Item two</li></ul><p><a href='https://makepad.dev'>Link</a></p>"
             }
         }
@@ -682,40 +734,47 @@ script_mod! {
     let AppDock = Dock{
         width: Fill height: Fill
 
-        // Dock structure - organized by widget type
+        // Dock structure - 3 areas: left, center-top, center-bottom
         $root: DockSplitter{
             axis: SplitterAxis.Horizontal
             align: SplitterAlign.FromA(280.0)
             a: $left_tabs
-            b: $split1
+            b: $right_split
         }
 
-        $split1: DockSplitter{
+        $right_split: DockSplitter{
             axis: SplitterAxis.Vertical
             align: SplitterAlign.FromB(250.0)
             a: $center_tabs
             b: $bottom_tabs
         }
 
-        // Left panel - input widgets
+        // Left panel - Selection test first, then input widgets
         $left_tabs: DockTabs{
-            tabs: [$toggles_tab, $sliders_tab, $text_tab, $dropdowns_tab]
+            tabs: [$selection_test_tab, $toggles_tab, $sliders_tab, $text_tab, $dropdowns_tab]
             selected: 0
             closable: false
         }
 
         // Center panel - content widgets
         $center_tabs: DockTabs{
-            tabs: [$markup_tab, $buttons_tab, $media_tab, $modal_tab]
+            tabs: [$markup_tab, $buttons_tab, $media_tab, $modal_tab, $lists_tab]
             selected: 0
             closable: true
         }
 
-        // Bottom panel - containers/lists
+        // Bottom panel - containers/presentations
         $bottom_tabs: DockTabs{
-            tabs: [$slidepanel_tab, $slides_tab, $filetree_tab $lists_tab, $folds_tab, $expandable_tab]
+            tabs: [$slidepanel_tab, $slides_tab, $filetree_tab, $folds_tab, $expandable_tab]
             selected: 0
             closable: true
+        }
+
+        // Selection test tab - first tab for testing cross-boundary selection
+        $selection_test_tab: DockTab{
+            name: "Selection"
+            template: $CloseableTab
+            kind: $TabSelectionTest
         }
 
         // Individual tabs
@@ -804,6 +863,7 @@ script_mod! {
         }
 
         // Content templates by widget type
+        $TabSelectionTest: TabSelectionTest{}
         $TabButtons: TabButtons{}
         $TabToggles: TabToggles{}
         $TabSliders: TabSliders{}
@@ -815,8 +875,7 @@ script_mod! {
         $TabMedia: TabMedia{}
         $TabExpandable: TabExpandable{}
         $TabModal: TabModal{}
-        $TabFileTree: TabFileTree{
-        }
+        $TabFileTree: TabFileTree{}
         $TabSlides: TabSlides{}
         $TabSlidePanel: TabSlidePanel{}
     }
@@ -1115,6 +1174,54 @@ impl Widget for NewsListTest {
                     }
 
                     item.draw_all(cx, &mut Scope::empty());
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+// SelectionTestList widget demonstrating cross-boundary text selection in PortalList
+#[derive(Script, ScriptHook, Widget)]
+pub struct SelectionTestList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for SelectionTestList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = item.borrow_mut::<PortalList>() {
+                // 200 items for testing scrolling
+                list.set_item_range(cx, 0, 200);
+
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let mut item = list.item(cx, item_id, id!($Item)).as_view();
+
+                    // Generate varied text content for each item
+                    let text = match item_id % 10 {
+                        0 => format!("[{}] This is a log entry with some important information about the system state.", item_id),
+                        1 => format!("[{}] Warning: Something might need attention here. Please review the details.", item_id),
+                        2 => format!("[{}] Error occurred at line 42: unexpected token 'foo' in expression.", item_id),
+                        3 => format!("[{}] Successfully completed operation in 0.42ms", item_id),
+                        4 => format!("[{}] Loading resources from disk... Processing file batch #{}", item_id, item_id * 7),
+                        5 => format!("[{}] Connection established to server at 192.168.1.100:8080", item_id),
+                        6 => format!("[{}] User 'admin' logged in from IP 10.0.0.1 at timestamp {}", item_id, item_id * 1000),
+                        7 => format!("[{}] Memory usage: {}MB / 1024MB ({}%)", item_id, item_id * 5 % 800, (item_id * 5 % 800) * 100 / 1024),
+                        8 => format!("[{}] Compiling module 'core' - {} dependencies resolved", item_id, item_id % 20 + 1),
+                        _ => format!("[{}] Debug: variable x = {}, y = {}, z = {}", item_id, item_id * 3, item_id * 7, item_id * 11),
+                    };
+
+                    // Draw the item and its TextFlow
+                    while let Some(step) = item.draw(cx, &mut Scope::empty()).step() {
+                        if let Some(mut tf) = step.as_text_flow().borrow_mut() {
+                            tf.draw_text(cx, &text);
+                        }
+                    }
                 }
             }
         }
