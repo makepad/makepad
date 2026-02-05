@@ -49,5 +49,3 @@ path = "src/lib.rs"
 version = "0.3"
 default-features = false
 
-[profile.dev]
-opt-level = 1
