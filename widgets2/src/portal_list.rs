@@ -1051,12 +1051,8 @@ impl PortalList {
         // If mouse is below all items, use bottommost item with text_len
         if let (Some((top_id, top_edge)), Some((bottom_id, bottom_edge))) = (top_item, bottom_item)
         {
-            log!("hit_test outside items: mouse_pos={} top_edge={} bottom_edge={} top_id={} bottom_id={}",
-                 mouse_pos, top_edge, bottom_edge, top_id, bottom_id);
-
             if mouse_pos < top_edge {
                 // Mouse is above all items - select from start of topmost
-                log!("  -> above all, using top_id={} char=0", top_id);
                 return Some((top_id, 0));
             } else if mouse_pos > bottom_edge {
                 // Mouse is below all items - select to end of bottommost
@@ -1065,16 +1061,10 @@ impl PortalList {
                     .get(&bottom_id)
                     .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
                     .unwrap_or(0);
-                log!(
-                    "  -> below all, using bottom_id={} char={}",
-                    bottom_id,
-                    text_len
-                );
                 return Some((bottom_id, text_len));
             }
         }
 
-        log!("hit_test: no result for mouse_pos={}", mouse_pos);
         None
     }
 
@@ -1260,13 +1250,7 @@ impl Widget for PortalList {
                     // Mouse below viewport - scroll down (only if not already at end)
                     if !self.at_end {
                         let distance = (mouse_pos - (bottom_edge - scroll_margin)).max(1.0);
-                        // Gentler speed: 5 + 0.5 * distance, capped at 50
                         let scroll_speed = -(5.0 + distance * 0.5).clamp(5.0, 50.0);
-                        log!(
-                            "scrolling DOWN: distance={} speed={}",
-                            distance,
-                            scroll_speed
-                        );
                         self.delta_top_scroll(cx, scroll_speed, false, false);
                         self.area.redraw(cx);
                     }
