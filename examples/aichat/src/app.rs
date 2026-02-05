@@ -492,35 +492,6 @@ impl AppMain for App {
                 AiEvent::Complete { response, .. } => {
                     {
                         let mut data = CHAT_DATA.write().unwrap();
-                        // Debug: compare backend accumulated text vs app streaming text
-                        let backend_text: String = response
-                            .message
-                            .content
-                            .iter()
-                            .filter_map(|b| {
-                                if let ContentBlock::Text { text } = b {
-                                    Some(text.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("");
-                        log!(
-                            "Complete: backend={} chars, app={} chars",
-                            backend_text.len(),
-                            data.streaming_text.len()
-                        );
-                        if backend_text != data.streaming_text {
-                            log!(
-                                "MISMATCH! Backend first 200: {:?}",
-                                backend_text.chars().take(200).collect::<String>()
-                            );
-                            log!(
-                                "MISMATCH! App first 200: {:?}",
-                                data.streaming_text.chars().take(200).collect::<String>()
-                            );
-                        }
                         data.messages.push(response.message);
                         data.streaming_text.clear();
                         data.is_streaming = false;
