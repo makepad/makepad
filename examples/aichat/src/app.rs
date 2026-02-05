@@ -19,6 +19,7 @@ script_mod! {
             drag_scrolling: false
             auto_tail: true
             smooth_tail: true
+            selectable: true
 
             $User: RoundedView {
                 width: Fill
@@ -31,9 +32,10 @@ script_mod! {
                     radius: 8.0
                 }
 
-                $md: Markdown {
+                $selectable: Markdown {
                     width: Fill
                     height: Fit
+                    selectable: true
                     body: ""
                 }
             }
@@ -49,9 +51,10 @@ script_mod! {
                     radius: 8.0
                 }
 
-                $md: Markdown {
+                $selectable: Markdown {
                     width: Fill
                     height: Fit
+                    selectable: true
                     body: ""
                 }
             }
@@ -63,14 +66,25 @@ script_mod! {
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
                 show_bg: true
                 draw_bg +: {
-                    color: #2a3a2a
+                    color: #2a2a3a
                     radius: 8.0
                 }
 
-                $md: Markdown {
+                $selectable: Markdown {
                     width: Fill
                     height: Fit
+                    selectable: true
                     body: "..."
+
+                    draw_text +: {
+                        get_color: fn() {
+                            // Fade in the last 50 characters
+                            let fade_chars = 50.0
+                            let dist_from_end = self.total_chars - self.char_index
+                            let alpha = clamp(dist_from_end / fade_chars, 0.0, 1.0)
+                            return vec4(self.color.rgb, self.color.a * alpha)
+                        }
+                    }
                 }
             }
         }
@@ -181,6 +195,9 @@ pub struct ChatData {
 pub struct ChatList {
     #[deref]
     view: View,
+    /// Track which message index is animating (streaming or fading out)
+    #[rust]
+    animating_msg: Option<usize>,
 }
 
 impl Widget for ChatList {
@@ -199,6 +216,26 @@ impl Widget for ChatList {
                 list.set_item_range(cx, 0, items_len);
 
                 while let Some(item_id) = list.next_visible_item(cx) {
+                    // Streaming placeholder (when streaming and item_id equals msg_count)
+                    if data.is_streaming && item_id == msg_count {
+                        // Start animation when beginning new streaming message
+                        if self.animating_msg != Some(item_id) {
+                            self.animating_msg = Some(item_id);
+                        }
+
+                        let item_widget = list.item(cx, item_id, id!($Streaming));
+                        let text = if data.streaming_text.is_empty() {
+                            "..."
+                        } else {
+                            &data.streaming_text
+                        };
+                        let mut markdown = item_widget.markdown(ids!($selectable));
+                        markdown.set_text(cx, text);
+                        markdown.start_streaming_animation();
+                        item_widget.draw_all_unscoped(cx);
+                        continue;
+                    }
+
                     // Check if this is a real message
                     if let Some(msg) = data.messages.get(item_id) {
                         // Get text content from message
@@ -215,27 +252,32 @@ impl Widget for ChatList {
                             .collect::<Vec<_>>()
                             .join("\n");
 
+                        // Use Streaming template while animation is still running
+                        let is_animating = self.animating_msg == Some(item_id);
                         let template = match msg.role {
                             MessageRole::User => id!($User),
+                            MessageRole::Assistant if is_animating => id!($Streaming),
                             MessageRole::Assistant => id!($Assistant),
                             _ => id!($User),
                         };
                         let item_widget = list.item(cx, item_id, template);
-                        item_widget.widget(ids!($md)).set_text(cx, &text);
-                        item_widget.draw_all_unscoped(cx);
-                        continue;
-                    }
+                        let mut markdown = item_widget.markdown(ids!($selectable));
+                        markdown.set_text(cx, &text);
 
-                    // Streaming placeholder (only when item_id equals msg_count)
-                    if data.is_streaming && item_id == msg_count {
-                        let item_widget = list.item(cx, item_id, id!($Streaming));
-                        let text = if data.streaming_text.is_empty() {
-                            "..."
-                        } else {
-                            &data.streaming_text
-                        };
-                        item_widget.widget(ids!($md)).set_text(cx, text);
+                        if is_animating {
+                            // Stop streaming (fade will continue naturally)
+                            markdown.stop_streaming_animation();
+                        }
+
                         item_widget.draw_all_unscoped(cx);
+
+                        if is_animating {
+                            // Clear tracking when fade completes (check after drawing)
+                            if markdown.is_streaming_animation_done() {
+                                self.animating_msg = None;
+                            }
+                        }
+                        continue;
                     }
                 }
             }

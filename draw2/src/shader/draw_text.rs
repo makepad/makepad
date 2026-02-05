@@ -65,6 +65,7 @@ script_mod! {
 
         radius: uniform(float)
         cutoff: uniform(float)
+        total_chars: instance(1000000.0)
 
         grayscale_texture: texture_2d(float)
         color_texture: texture_2d(float)
@@ -130,6 +131,11 @@ pub struct DrawText {
     #[live]
     pub temp_y_shift: f32,
 
+    /// When true, successive draws extend the area instead of replacing it.
+    /// Useful when drawing multiple text chunks that should be treated as one area.
+    #[live]
+    pub extend_area: bool,
+
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -145,7 +151,7 @@ pub struct DrawText {
     #[live]
     pub texture_index: f32,
     #[live]
-    pub pad1: f32,
+    pub char_index: f32,
     #[live(vec4(1., 1., 1., 1.))]
     pub color: Vec4f,
     #[live]
@@ -390,8 +396,14 @@ impl DrawText {
                 &mut instances.instances,
             );
         }
-        let area = cx.end_many_instances(instances);
-        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, area);
+        let new_area = cx.end_many_instances(instances);
+        let old_area = self.draw_vars.area;
+        if self.extend_area {
+            let extended = old_area.extend_with(cx, new_area);
+            self.draw_vars.area = cx.update_area_refs(old_area, extended);
+        } else {
+            self.draw_vars.area = cx.update_area_refs(old_area, new_area);
+        }
     }
 
     fn update_draw_vars(&mut self, cx: &mut Cx2d) {
@@ -542,6 +554,21 @@ impl DrawText {
 
         output.extend_from_slice(slice);
         self.glyph_depth += 0.000001;
+        self.char_index += 1.0;
+    }
+
+    /// Resets the character index counter to 0. Call this before drawing text
+    /// when you want to track character positions for animation effects.
+    pub fn reset_char_index(&mut self) {
+        self.char_index = 0.0;
+    }
+
+    /// Sets the total_chars instance value on all instances in the area after drawing is complete.
+    /// This allows the shader to know how many characters are in the buffer
+    /// for fade-in animation effects.
+    pub fn set_total_chars(&mut self, cx: &mut Cx, total: f32) {
+        self.draw_vars
+            .set_instance_on_area(cx, live_id!(total_chars), &[total]);
     }
 }
 
