@@ -1,28 +1,16 @@
 use {
-    std::{
-        cell::RefCell,
-        ops::Deref,
-        ops::DerefMut,
-        rc::Rc,
-    },
     crate::{
-        makepad_math::{Vec2d,dvec2},
+        draw_list_2d::DrawList2d,
+        makepad_math::{dvec2, Vec2d},
         makepad_platform::{
-            DrawEvent,
-            Area,
-            DrawListId,
-            WindowId,
-            DrawPassId,
-            DrawPass,
-            CxDrawPassParent,
-            CxDrawPassRect,
-            Cx
+            Area, Cx, CxDrawPassParent, CxDrawPassRect, DrawEvent, DrawListId, DrawPass,
+            DrawPassId, WindowId,
         },
         nav::CxNavTreeRc,
-        draw_list_2d::DrawList2d,
-        text::{loader::FontFamilyDefinition, fonts::Fonts, layouter},
+        text::{fonts::Fonts, layouter, loader::FontFamilyDefinition},
     },
     rustybuzz::UnicodeBuffer,
+    std::{cell::RefCell, ops::Deref, ops::DerefMut, rc::Rc},
 };
 
 pub struct PassStackItem {
@@ -32,19 +20,27 @@ pub struct PassStackItem {
     //turtles_len: usize
 }
 
-
 pub struct CxDraw<'a> {
     pub cx: &'a mut Cx,
     pub draw_event: &'a DrawEvent,
-    pub (crate) pass_stack: Vec<PassStackItem>,
+    pub(crate) pass_stack: Vec<PassStackItem>,
     pub draw_list_stack: Vec<DrawListId>,
     pub fonts: Rc<RefCell<Fonts>>,
     pub nav_tree_rc: CxNavTreeRc,
-    pub rustybuzz_buffer: Option<UnicodeBuffer>, 
+    pub rustybuzz_buffer: Option<UnicodeBuffer>,
 }
 
-impl<'a> Deref for CxDraw<'a> {type Target = Cx; fn deref(&self) -> &Self::Target {self.cx}}
-impl<'a> DerefMut for CxDraw<'a> {fn deref_mut(&mut self) -> &mut Self::Target {self.cx}}
+impl<'a> Deref for CxDraw<'a> {
+    type Target = Cx;
+    fn deref(&self) -> &Self::Target {
+        self.cx
+    }
+}
+impl<'a> DerefMut for CxDraw<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.cx
+    }
+}
 
 impl<'a> Drop for CxDraw<'a> {
     fn drop(&mut self) {
@@ -62,7 +58,7 @@ impl<'a> CxDraw<'a> {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         fonts.borrow_mut().prepare_atlases_if_needed(cx);
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
-        Self{
+        Self {
             fonts,
             cx: cx,
             draw_event,
@@ -74,76 +70,78 @@ impl<'a> CxDraw<'a> {
     }
 }
 
-impl<'a> CxDraw<'a>{
-     
+impl<'a> CxDraw<'a> {
+    /// Returns the time from the current draw event
+    pub fn time(&self) -> f64 {
+        self.draw_event.time
+    }
+
     pub fn lazy_construct_fonts(cx: &mut Cx) -> bool {
         if cx.has_global::<Rc<RefCell<Fonts>>>() {
             return false;
         }
-        let mut fonts = Fonts::new(
-            cx,
-            layouter::Settings::default(),
-        );
-        fonts.define_font_family(0.into(), FontFamilyDefinition {
-            font_ids: vec![]
-        });
+        let mut fonts = Fonts::new(cx, layouter::Settings::default());
+        fonts.define_font_family(0.into(), FontFamilyDefinition { font_ids: vec![] });
         cx.set_global(Rc::new(RefCell::new(fonts)));
         true
-    }   
-    
-    pub fn get_current_window_id(&self)->Option<WindowId>{
-        self.cx.get_pass_window_id(self.pass_stack.last().unwrap().pass_id)
     }
-    
+
+    pub fn get_current_window_id(&self) -> Option<WindowId> {
+        self.cx
+            .get_pass_window_id(self.pass_stack.last().unwrap().pass_id)
+    }
+
     pub fn current_dpi_factor(&self) -> f64 {
         self.pass_stack.last().unwrap().dpi_factor
     }
-        
+
     pub fn inside_pass(&self) -> bool {
-        self.pass_stack.len()>0
+        self.pass_stack.len() > 0
     }
-        
+
     pub fn make_child_pass(&mut self, pass: &DrawPass) {
         let pass_id = self.pass_stack.last().unwrap().pass_id;
         let cxpass = &mut self.passes[pass.draw_pass_id()];
         cxpass.parent = CxDrawPassParent::DrawPass(pass_id);
     }
-        
+
     pub fn begin_pass(&mut self, pass: &DrawPass, dpi_override: Option<f64>) {
         let cxpass = &mut self.passes[pass.draw_pass_id()];
         cxpass.main_draw_list_id = None;
-        let dpi_factor = if let Some(dpi_override) = dpi_override {dpi_override}
-        else {
+        let dpi_factor = if let Some(dpi_override) = dpi_override {
+            dpi_override
+        } else {
             match cxpass.parent {
                 CxDrawPassParent::Window(window_id) => {
-                    self.passes[pass.draw_pass_id()].pass_rect = Some(CxDrawPassRect::Size(self.windows[window_id].get_inner_size()));
+                    self.passes[pass.draw_pass_id()].pass_rect = Some(CxDrawPassRect::Size(
+                        self.windows[window_id].get_inner_size(),
+                    ));
                     self.get_delegated_dpi_factor(pass.draw_pass_id())
                 }
                 CxDrawPassParent::DrawPass(pass_id) => {
-                    self.passes[pass.draw_pass_id()].pass_rect = self.passes[pass_id].pass_rect.clone();
+                    self.passes[pass.draw_pass_id()].pass_rect =
+                        self.passes[pass_id].pass_rect.clone();
                     self.get_delegated_dpi_factor(pass_id)
                 }
-                _ => {
-                    1.0
-                }
+                _ => 1.0,
             }
         };
         self.passes[pass.draw_pass_id()].dpi_factor = Some(dpi_factor);
-                
+
         self.pass_stack.push(PassStackItem {
             dpi_factor,
             draw_list_stack_len: self.draw_list_stack.len(),
             //turtles_len: self.turtles.len(),
-            pass_id: pass.draw_pass_id()
+            pass_id: pass.draw_pass_id(),
         });
     }
-        
+
     pub fn end_pass(&mut self, pass: &DrawPass) {
         let stack_item = self.pass_stack.pop().unwrap();
         if stack_item.pass_id != pass.draw_pass_id() {
             panic!();
         }
-                
+
         if self.draw_list_stack.len() != stack_item.draw_list_stack_len {
             panic!("Draw list stack disaligned, forgot an end_view(cx)");
         }
@@ -151,46 +149,48 @@ impl<'a> CxDraw<'a>{
         //    panic!("Turtle stack disaligned, forgot an end_turtle()");
         //}
     }
-        
+
     pub fn set_pass_area(&mut self, pass: &DrawPass, area: Area) {
         self.passes[pass.draw_pass_id()].pass_rect = Some(CxDrawPassRect::Area(area));
     }
-            
-    pub fn set_pass_area_with_origin(&mut self, pass: &DrawPass, area: Area, origin:Vec2d) {
+
+    pub fn set_pass_area_with_origin(&mut self, pass: &DrawPass, area: Area, origin: Vec2d) {
         self.passes[pass.draw_pass_id()].pass_rect = Some(CxDrawPassRect::AreaOrigin(area, origin));
     }
-            
+
     pub fn set_pass_shift_scale(&mut self, pass: &DrawPass, shift: Vec2d, scale: Vec2d) {
         self.passes[pass.draw_pass_id()].view_shift = shift;
         self.passes[pass.draw_pass_id()].view_scale = scale;
     }
-        
+
     /*
     pub fn set_pass_scaled_area(&mut self, pass: &Pass, area: Area, scale:f64) {
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::ScaledArea(area, scale));
     }   */
-    
+
     pub fn current_pass_size(&self) -> Vec2d {
-        self.cx.get_pass_rect(
-            self.pass_stack.last().unwrap().pass_id, 
-            self.current_dpi_factor()
-        ).map(|v| v.size).unwrap_or(dvec2(0.0,0.0))
+        self.cx
+            .get_pass_rect(
+                self.pass_stack.last().unwrap().pass_id,
+                self.current_dpi_factor(),
+            )
+            .map(|v| v.size)
+            .unwrap_or(dvec2(0.0, 0.0))
     }
-        
-    pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d)  {
+
+    pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d) {
         let dl = &mut self.cx.draw_lists[*self.draw_list_stack.last().unwrap()];
         dl.append_sub_list(self.cx.redraw_id, draw_list_2d.id());
     }
-    
+
     /*pub fn set_sweep_lock(&mut self, lock:Area){
         *self.overlay_sweep_lock.as_ref().unwrap().borrow_mut() = lock;
     }
-    
+
     pub fn clear_sweep_lock(&mut self, lock:Area){
         let mut sweep_lock = self.overlay_sweep_lock.as_ref().unwrap().borrow_mut();
         if *sweep_lock == lock{
             *sweep_lock = Area::Empty
         }
     }*/
-        
 }

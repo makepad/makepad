@@ -299,12 +299,13 @@ impl Cx {
                     self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
 
                     // we should now run all the stuff.
+                    let time_now = self.os.stdin_timers.time_now();
                     if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(self.os.stdin_timers.time_now());
+                        self.call_next_frame_event(time_now);
                     }
 
                     if self.need_redrawing() {
-                        self.call_draw_event();
+                        self.call_draw_event(time_now);
                         self.mtl_compile_shaders(metal_cx);
                     }
                     self.stdin_handle_repaint(

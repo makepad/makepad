@@ -25,6 +25,28 @@ struct GeminiCandidate {
     content: Option<GeminiContent>,
     #[rename(finishReason)]
     finish_reason: Option<String>,
+    #[rename(citationMetadata)]
+    #[allow(dead_code)]
+    citation_metadata: Option<GeminiCitationMetadata>,
+}
+
+#[derive(DeJson, Debug)]
+struct GeminiCitationMetadata {
+    #[rename(citationSources)]
+    #[allow(dead_code)]
+    citation_sources: Option<Vec<GeminiCitationSource>>,
+}
+
+#[derive(DeJson, Debug)]
+struct GeminiCitationSource {
+    #[rename(startIndex)]
+    #[allow(dead_code)]
+    start_index: Option<u32>,
+    #[rename(endIndex)]
+    #[allow(dead_code)]
+    end_index: Option<u32>,
+    #[allow(dead_code)]
+    uri: Option<String>,
 }
 
 #[derive(DeJson, Debug, Clone)]

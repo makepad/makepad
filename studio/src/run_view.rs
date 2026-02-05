@@ -177,9 +177,13 @@ impl RunView {
     }
 
     pub fn request_animation_frame(&mut self, cx: &mut Cx) {
-        // Keep repainting to ensure ticks are sent to the child
-        if self.redraw_countdown < 2 {
-            self.redraw_countdown = 2;
+        // Keep repainting to ensure ticks are sent to the child.
+        // Use the same value as draw_complete_and_flip (20) since both indicate
+        // the child is actively animating and needs consistent tick delivery.
+        // This provides enough buffer to account for message round-trip latency
+        // and ensures smooth animation even when the host is otherwise idle.
+        if self.redraw_countdown < 120 {
+            self.redraw_countdown = 120;
         }
         self.redraw(cx);
     }

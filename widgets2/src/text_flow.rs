@@ -704,7 +704,7 @@ impl RectAreasTracker {
 }
 
 #[derive(Clone)]
-enum DrawState {
+pub enum DrawState {
     Begin,
     Drawing,
 }
@@ -850,11 +850,11 @@ impl TextFlow {
     }
 
     /// Check if animation is completely idle (not streaming and fade complete)
-    fn is_animation_idle(&self) -> bool {
+    pub fn is_animation_idle(&self) -> bool {
         !self.streaming_animation && self.animated_chars >= self.actual_chars + self.fade_chars
     }
 
-    fn clear_stacks(&mut self) {
+    pub fn clear_stacks(&mut self) {
         self.item_counter = 0;
         self.areas_tracker.clear_stack();
         self.bold.clear();
