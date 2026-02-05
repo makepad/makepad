@@ -32,6 +32,7 @@ struct ClaudeResponseBlock {
     #[rename(type)]
     #[allow(dead_code)]
     block_type: Option<String>,
+    #[allow(dead_code)]
     text: Option<String>,
     id: Option<String>,
     name: Option<String>,

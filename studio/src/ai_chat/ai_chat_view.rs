@@ -248,12 +248,25 @@ script_mod! {
                     }
                     icon_walk: Walk{ width: 10. }
                 }
+
+                $stop_button: ButtonFlatter {
+                    width: Fit
+                    text: ""
+                    visible: false
+                    draw_bg +: { color_focus: #0000 }
+                    draw_icon +: {
+                        color: theme.color_error
+                        svg_file: crate_resource("self://resources/icons/icon_times.svg")
+                    }
+                    icon_walk: Walk{ width: 10. }
+                }
             }
         }
 
         $list: PortalList {
             drag_scrolling: false
             max_pull_down: 0.0
+            auto_tail: true
             $User: User {}
             $Assistant: Assistant {}
         }
@@ -320,6 +333,9 @@ impl AiChatView {
                     cx.action(AppAction::RedrawAiChat { chat_id });
                     cx.action(AppAction::SaveAiChat { chat_id });
                 }
+                if self.button(ids!($stop_button)).pressed(actions) {
+                    cx.action(AppAction::CancelAiGeneration { chat_id });
+                }
 
                 if let Some(ctx_id) = self.drop_down(ids!($context_dropdown)).selected(actions) {
                     let ctx_name = &data.ai_chat_manager.contexts[ctx_id].name;
@@ -338,6 +354,16 @@ impl AiChatView {
                 }
 
                 let list = self.view.portal_list(ids!($list));
+
+                // handle escape globally to stop streaming
+                for action in actions {
+                    if let Some(action) = action.as_widget_action() {
+                        if let TextInputAction::Escaped = action.cast() {
+                            cx.action(AppAction::CancelAiGeneration { chat_id });
+                        }
+                    }
+                }
+
                 for (item_id, item) in list.items_with_actions(actions) {
                     //let item_id = items_len - item_id - 1;
                     let message_input = item.text_input(ids!($message_input));
@@ -346,9 +372,6 @@ impl AiChatView {
                             .fork_chat_at(cx, &mut self.history_slot, item_id, text);
                         cx.action(AppAction::RedrawAiChat { chat_id });
                         cx.action(AppAction::SaveAiChat { chat_id });
-                    }
-                    if message_input.escaped(actions) {
-                        cx.action(AppAction::CancelAiGeneration { chat_id });
                     }
 
                     if let Some(ke) = item
@@ -420,6 +443,11 @@ impl AiChatView {
                         });
                         cx.action(AppAction::SaveAiChat { chat_id });
                         cx.action(AppAction::RedrawAiChat { chat_id });
+                        // scroll to end and enable tailing
+                        let items_len = doc.file.history[self.history_slot].messages.len();
+                        list.set_tail_range(true);
+                        list.set_first_id_and_scroll(items_len.saturating_sub(1), 0.0);
+                        list.redraw(cx);
                     }
                     // lets clear the messages
                     if item.button(ids!($clear_button)).pressed(actions) {
@@ -453,6 +481,10 @@ impl Widget for AiChatView {
                 }
 
                 self.check_box(ids!($auto_run)).set_active(cx, doc.auto_run);
+
+                // show/hide stop button based on in_flight status
+                self.button(ids!($stop_button))
+                    .set_visible(cx, doc.in_flight.is_some());
 
                 let history_len = doc.file.history.len();
                 self.label(ids!($slot))
