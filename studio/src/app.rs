@@ -668,6 +668,18 @@ impl MatchEvent for App {
                             }
                         }
                     }
+                    StdinToHost::RequestAnimationFrame => {
+                        // Child has pending animations, keep the run_view repainting
+                        if let Some(mut dock) = dock.borrow_mut() {
+                            for (_, (_, item)) in dock.items().iter() {
+                                if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                                    if run_view.build_id == Some(build_id) {
+                                        run_view.request_animation_frame(cx);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             BuildManagerAction::None => (),
@@ -791,7 +803,13 @@ impl MatchEvent for App {
                             // from inside the dock
                             if drop_event.modifiers.logo {
                                 // Cloning a tab - need to register new tab with file system
-                                if let Some(file_id) = self.data.file_system.tab_id_to_file_node_id.get(internal_id).copied() {
+                                if let Some(file_id) = self
+                                    .data
+                                    .file_system
+                                    .tab_id_to_file_node_id
+                                    .get(internal_id)
+                                    .copied()
+                                {
                                     let tab_id = dock.unique_id(internal_id.0);
                                     self.data.file_system.request_open_file(tab_id, file_id);
                                     dock.drop_clone(
@@ -874,7 +892,7 @@ impl MatchEvent for App {
         if let Some(filter) = file_tree_filter.changed(&actions) {
             file_tree_view.set_filter(cx, filter, &self.data.file_system);
         }
-        
+
         // Handle clicks on filtered files in the file tree
         if let Some(file_id) = file_tree_view.filter_file_clicked(&actions) {
             // If the tab is already open, focus it
