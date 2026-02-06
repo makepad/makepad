@@ -10,30 +10,30 @@ use std::path::{Path, PathBuf};
 live_design!{
     link widgets;
     use link::shaders::*;
-    
+
     DrawImage= {{DrawImage}} {
         texture image: texture2d
         opacity: 1.0
         image_scale: vec2(1.0, 1.0)
         image_pan: vec2(0.0, 0.0)
-                
+
         fn get_color_scale_pan(self, scale: vec2, pan: vec2) -> vec4 {
             return sample2d(self.image, self.pos * scale + pan).xyzw;
         }
-                                
+
         fn get_color(self) -> vec4 {
             return self.get_color_scale_pan(self.image_scale, self.image_pan)
         }
-        
+
         fn pixel(self) -> vec4 {
             let color = mix(self.get_color(), #3, self.async_load);
             return Pal::premul(vec4(color.xyz, color.w * self.opacity))
         }
-        
+
     }
-    
+
     pub ImageBase = {{Image}} {}
-    
+
     pub Image = <ImageBase> {
         animator: {
             async_load = {
@@ -54,11 +54,11 @@ live_design!{
                 }
             }
         }
-        
+
         width: 100
         height: 100
     }
-    
+
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -110,7 +110,7 @@ impl ImageCacheImpl for Image {
     fn get_texture(&self, _id:usize) -> &Option<Texture> {
         &self.texture
     }
-    
+
     fn set_texture(&mut self, texture: Option<Texture>, _id:usize) {
         self.texture = texture;
     }
@@ -170,13 +170,13 @@ impl Widget for Image {
                     let num_frames = animation.num_frames as f64;
                     match self.animation{
                         ImageAnimation::Stop=>{
-                            
+
                         }
                         ImageAnimation::Frame(frame)=>{
-                            self.animation_frame = frame;                                                   
+                            self.animation_frame = frame;
                         }
                         ImageAnimation::Factor(pos)=>{
-                            self.animation_frame = pos * (num_frames - 1.0);         
+                            self.animation_frame = pos * (num_frames - 1.0);
                         }
                         ImageAnimation::Once=>{
                             self.animation_frame += 1.0;
@@ -227,14 +227,14 @@ impl Widget for Image {
                     }
                     // alright now lets turn animation_frame into the right image_pan
                     let last_pan = self.draw_bg.image_pan;
-                    
+
                     let frame = if self.animation_frame >= num_frames{
                         num_frames * 2.0 - 1.0 - self.animation_frame
                     }
                     else{
                         self.animation_frame
                     } as usize;
-                    
+
                     let horizontal_frames = texture_width / animation.width;
                     let xpos = ((frame % horizontal_frames) * animation.width) as f32 / texture_width as f32;
                     let ypos = ((frame / horizontal_frames) * animation.height) as f32 / texture_height as f32;
@@ -247,7 +247,7 @@ impl Widget for Image {
             }
         }
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk)
     }
@@ -275,10 +275,10 @@ impl Image {
         // we change either nothing, or width or height
         let rect = cx.peek_walk_turtle(walk);
         let dpi = cx.current_dpi_factor();
-        
+
         let (width, height) = if let Some((w,h)) = &self.async_image_size{
             // still loading
-            
+
             (*w as f64,*h as f64)
         }else if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
@@ -300,9 +300,51 @@ impl Image {
             self.draw_bg.draw_vars.empty_texture(0);
             (self.min_width as f64 / dpi, self.min_height as f64 / dpi)
         };
-        
+
         let aspect = width / height;
         match self.fit {
+            ImageFit::AutoFit => {
+                if rect.size.x > width && rect.size.y > height {
+                    walk.width = Size::Fixed(width);
+                    walk.height = Size::Fixed(height);
+                } else {
+                    let walk_height = rect.size.x / aspect;
+                    if walk_height > rect.size.y {
+                        walk.width = Size::Fixed(rect.size.y * aspect);
+                    }
+                    else {
+                        walk.height = Size::Fixed(walk_height);
+                    }
+                }
+            }
+            ImageFit::AutoFitWidth => {
+                if rect.size.x > width {
+                walk.width = Size::Fixed(width);
+                walk.height = Size::Fixed(height);
+                } else {
+                    let walk_height = rect.size.x / aspect;
+                    if walk_height > rect.size.y {
+                        walk.width = Size::Fixed(rect.size.y * aspect);
+                    }
+                    else {
+                        walk.height = Size::Fixed(walk_height);
+                    }
+                }
+            }
+            ImageFit::AutoFitHeight => {
+                if rect.size.y > height {
+                    walk.width = Size::Fixed(width);
+                    walk.height = Size::Fixed(height);
+                } else {
+                    let walk_height = rect.size.x / aspect;
+                    if walk_height > rect.size.y {
+                        walk.width = Size::Fixed(rect.size.y * aspect);
+                    }
+                    else {
+                        walk.height = Size::Fixed(walk_height);
+                    }
+                }
+            }
             ImageFit::Size => {
                 walk.width = Size::Fixed(width);
                 walk.height = Size::Fixed(height);
@@ -334,13 +376,13 @@ impl Image {
                 }
             }
         }
-        
-        
+
+
         self.draw_bg.draw_walk(cx, walk);
-        
+
         DrawStep::done()
     }
-    
+
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
     pub fn load_image_file_by_path_async(&mut self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
         if let Ok(result) = self.load_image_file_by_path_async_impl(cx, image_path, 0){
@@ -358,7 +400,7 @@ impl Image {
             // lets set the w-h
         }
         Ok(())
-    }    
+    }
     pub fn load_image_from_data_async(&mut self, cx: &mut Cx, image_path: &Path, data: Arc<Vec<u8>>) -> Result<(), ImageError> {
         if let Ok(result) = self.load_image_from_data_async_impl(cx, image_path, data, 0){
             match result{
@@ -392,7 +434,7 @@ impl ImageRef {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
-    
+
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
     pub fn load_image_file_by_path(&self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
@@ -401,23 +443,23 @@ impl ImageRef {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
-    
+
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
     pub fn load_image_file_by_path_async(&self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             return inner.load_image_file_by_path_async(cx, image_path)
         }
         Ok(())
-    }    
-            
+    }
+
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
     pub fn load_image_from_data_async(&self, cx: &mut Cx,  image_path: &Path, data:Arc<Vec<u8>>) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             return inner.load_image_from_data_async(cx, image_path, data)
         }
         Ok(())
-    }    
-    
+    }
+
     /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
     pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
@@ -426,7 +468,7 @@ impl ImageRef {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
-    
+
     /// Loads a PNG into this `ImageRef` by decoding the given encoded PNG `data`.
     pub fn load_png_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
@@ -435,7 +477,7 @@ impl ImageRef {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
-    
+
     pub fn set_texture(&self, cx:&mut Cx, texture: Option<Texture>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.texture = texture;
@@ -444,7 +486,7 @@ impl ImageRef {
             }
         }
     }
-    
+
     pub fn set_uniform(&self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.set_uniform(cx, uniform, value);
@@ -469,4 +511,3 @@ impl ImageRef {
         }
     }
 }
-
