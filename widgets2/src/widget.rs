@@ -60,15 +60,16 @@ impl<'a> fmt::Display for WidgetTreeDisplay<'a> {
         for node in &self.tree.nodes {
             match node {
                 WidgetTreeNode::BeginNode { ty, name, .. } => {
-                    let indent = "  ".repeat(depth);
+                    for _ in 0..depth {
+                        write!(f, " - ")?;
+                    }
                     let type_name = self.heap.type_name_by_id(*ty)
-                        .map(|id| id.as_string(|s| s.unwrap_or("?").to_string()))
+                        .and_then(|id| id.as_string(|s| s.map(|s| s.to_string())))
                         .unwrap_or_else(|| format!("{:?}", ty));
-                    if *name != LiveId(0) {
-                        let name_str = name.as_string(|s| s.unwrap_or("?").to_string());
-                        writeln!(f, "{}{}: {}", indent, name_str, type_name)?;
+                    if let Some(name_str) = name.as_string(|s| s.map(|s| s.to_string())) {
+                        writeln!(f, "{}: {}", name_str, type_name)?;
                     } else {
-                        writeln!(f, "{}{}", indent, type_name)?;
+                        writeln!(f, "{}", type_name)?;
                     }
                     depth += 1;
                 }
@@ -87,12 +88,13 @@ impl Debug for WidgetTree {
         for node in &self.nodes {
             match node {
                 WidgetTreeNode::BeginNode { ty, name, .. } => {
-                    let indent = "  ".repeat(depth);
-                    if *name != LiveId(0) {
-                        let name_str = name.as_string(|s| s.unwrap_or("?").to_string());
-                        writeln!(f, "{}{}: {:?}", indent, name_str, ty)?;
+                    for _ in 0..depth {
+                        write!(f, " - ")?;
+                    }
+                    if let Some(name_str) = name.as_string(|s| s.map(|s| s.to_string())) {
+                        writeln!(f, "{}: {:?}", name_str, ty)?;
                     } else {
-                        writeln!(f, "{}{:?}", indent, ty)?;
+                        writeln!(f, "{:?}", ty)?;
                     }
                     depth += 1;
                 }
@@ -134,6 +136,13 @@ pub trait WidgetNode: ScriptApply {
     /// The default implementation does nothing (leaf node). Container widgets
     /// should override this to walk their children.
     fn widget_tree_walk(&self, _nodes: &mut Vec<WidgetTreeNode>) {}
+
+    /// Build a complete WidgetTree from this node and all its descendants.
+    fn widget_tree(&self) -> WidgetTree {
+        let mut nodes = Vec::new();
+        self.widget_tree_walk(&mut nodes);
+        WidgetTree { nodes }
+    }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}

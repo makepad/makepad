@@ -688,25 +688,6 @@ pub struct TextFlow {
     #[live(100.0)]
     pub min_fade_speed: f32,
 
-    // Streaming height animation fields
-    /// Enable smooth height animation when content changes
-    #[live(false)]
-    pub stream_height_animation: bool,
-    /// Current animated height (what we display)
-    #[rust]
-    animated_height: f64,
-    /// Target height (actual content height)
-    #[rust]
-    target_height: f64,
-    /// NextFrame for driving height animation
-    #[rust]
-    height_next_frame: NextFrame,
-    /// Last frame time for height animation dt calculation
-    #[rust]
-    height_last_time: f64,
-    /// Smoothing factor (0-1, higher = faster, 0.8 = smooth and fast)
-    #[live(0.5)]
-    pub height_smoothing: f32,
 }
 
 impl TextFlow {
@@ -930,37 +911,6 @@ impl Widget for TextFlow {
             }
         }
 
-        // Handle height animation NextFrame
-        if self.stream_height_animation {
-            if let Some(ev) = self.height_next_frame.is_event(event) {
-                let time = ev.time;
-                let dt = if self.height_last_time > 0.0 {
-                    (time - self.height_last_time).max(0.001)
-                } else {
-                    1.0 / 60.0
-                };
-                self.height_last_time = time;
-
-                let distance = self.target_height - self.animated_height;
-
-                if distance.abs() > 0.5 {
-                    // Exponential smoothing - move a fraction of the remaining distance each frame
-                    // Adjust for frame rate: at 60fps with smoothing=0.5, we move 50% per frame
-                    let frame_rate_adjust = (dt * 60.0).min(1.0);
-                    let factor = 1.0 - (1.0 - self.height_smoothing as f64).powf(frame_rate_adjust);
-
-                    self.animated_height += distance * factor;
-
-                    // Request redraw since height affects layout
-                    self.redraw(cx);
-                    self.height_next_frame = cx.new_next_frame();
-                } else {
-                    // Snap to target and stop
-                    self.animated_height = self.target_height;
-                }
-            }
-        }
-
         // Handle selection events when selectable (standalone mode only)
         // When inside a selectable PortalList, PortalList handles events directly
         if !self.selectable {
@@ -1074,32 +1024,6 @@ impl TextFlow {
         // Draw selection highlight before finishing the turtle
         self.draw_selection(cx);
 
-        // Handle height animation if enabled
-        if self.stream_height_animation {
-            // Capture actual content height before ending turtle
-            let used = cx.turtle().used();
-            let content_height = used.y;
-
-            // Update target and determine what height to report
-            if content_height > 0.0 {
-                if self.animated_height == 0.0 {
-                    // First draw - snap to content height
-                    self.animated_height = content_height;
-                    self.target_height = content_height;
-                } else if (self.target_height - content_height).abs() > 0.5 {
-                    // Content height changed - update target and start animation
-                    self.target_height = content_height;
-                    self.height_next_frame = cx.new_next_frame();
-                }
-            }
-
-            // Override used height to report animated height instead of actual
-            // This makes the container grow smoothly while content is fully drawn
-            if self.animated_height > 0.0 && self.animated_height < content_height {
-                cx.turtle_mut().set_used(used.x, self.animated_height);
-            }
-        }
-
         cx.end_turtle_with_area(&mut self.area);
         self.items.as_mut().unwrap().retain_visible();
 
@@ -1137,19 +1061,9 @@ impl TextFlow {
         self.is_animation_idle()
     }
 
-    /// Reset height animation state (for reused widgets or new content).
-    pub fn reset_height_animation(&mut self) {
-        self.animated_height = 0.0;
-        self.target_height = 0.0;
-        self.height_last_time = 0.0;
-    }
-
-    /// Reset all streaming animations (both text fade and height).
+    /// Reset all streaming animations (text fade).
     pub fn reset_all_streaming_animations(&mut self) {
-        // Reset text animation
         self.reset_streaming_animation();
-        // Reset height animation
-        self.reset_height_animation();
     }
 
     /// Draw selection highlight rectangles

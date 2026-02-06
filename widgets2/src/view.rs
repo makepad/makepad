@@ -163,6 +163,11 @@ impl ScriptHook for View {
             if let Some(obj) = value.as_object() {
                 let mut anon_index = 0usize;
                 vm.vec_with(obj, |vm, vec| {
+                    // Debug: log vec at start of processing
+                    if apply.is_reload() {
+                        log!("View vec processing: {} items, children_start={}", 
+                            vec.len(), self.children.len());
+                    }
                     for kv in vec {
                         // Determine the id: use prefixed id if available, otherwise use numbered id for anonymous children
                         let id = if kv.key.is_prefixed_id() {
@@ -201,6 +206,10 @@ impl ScriptHook for View {
             for (idx, id) in self.live_update_order.iter().enumerate() {
                 if let Some(pos) = self.children.iter().position(|(i, _v)| *i == *id) {
                     self.children.swap(idx, pos);
+                } else {
+                    // This means an id was added to live_update_order but no child was created
+                    // This shouldn't happen - indicates a bug in the creation path
+                    log!("VIEW BUG: id {:?} in live_update_order but not in children!", id);
                 }
             }
             self.children.truncate(self.live_update_order.len());
