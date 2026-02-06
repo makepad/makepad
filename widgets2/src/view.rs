@@ -186,7 +186,8 @@ impl ScriptHook for View {
                             {
                                 node.script_apply(vm, apply, scope, kv.value);
                             } else {
-                                let widget = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                                let widget =
+                                    WidgetRef::script_from_value_scoped(vm, scope, kv.value);
                                 self.children.push((id, widget));
                             }
                         }
@@ -565,6 +566,63 @@ impl WidgetNode for View {
         }
     }
 
+    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
+        for (_, child) in &self.children {
+            child.find_widgets_from_point(cx, point, found);
+        }
+    }
+
+    fn selection_text_len(&self) -> usize {
+        for (_, child) in &self.children {
+            let v = child.selection_text_len();
+            if v > 0 { return v; }
+        }
+        0
+    }
+
+    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {
+        for (_, child) in &self.children {
+            if let Some(v) = child.selection_point_to_char_index(abs) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    fn selection_set(&mut self, anchor: usize, cursor: usize) {
+        for (_, child) in &self.children {
+            child.selection_set(anchor, cursor);
+        }
+    }
+
+    fn selection_clear(&mut self) {
+        for (_, child) in &self.children {
+            child.selection_clear();
+        }
+    }
+
+    fn selection_select_all(&mut self) {
+        for (_, child) in &self.children {
+            child.selection_select_all();
+        }
+    }
+
+    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
+        for (_, child) in &self.children {
+            let v = child.selection_get_text_for_range(start, end);
+            if !v.is_empty() { return v; }
+        }
+        String::new()
+    }
+
+    fn selection_get_full_text(&self) -> String {
+        for (_, child) in &self.children {
+            let v = child.selection_get_full_text();
+            if !v.is_empty() { return v; }
+        }
+        String::new()
+    }
+
     fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
         if self.visible != visible {
             self.visible = visible;
@@ -578,6 +636,10 @@ impl WidgetNode for View {
 }
 
 impl Widget for View {
+    fn is_interactive(&self) -> bool {
+        self.cursor.is_some() || self.animator.is_defined
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.visible && event.requires_visibility() {
             return;
