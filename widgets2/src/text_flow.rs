@@ -790,7 +790,14 @@ impl WidgetNode for TextFlow {
         self.area.redraw(cx);
     }
 
-    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        // Forward to all children - TextFlow items have computed IDs
+        if let Some(items) = self.items.as_ref() {
+            for (_id, (widget, _template)) in items.iter() {
+                widget.find_widgets(path, cached, results);
+            }
+        }
+    }
 
     fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
         WidgetRef::empty()

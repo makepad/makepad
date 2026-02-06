@@ -6,8 +6,10 @@ mod derive_from_live_id;
 use crate::derive_from_live_id::*;
 
 // Helper to parse an identifier that may be prefixed with $
+// Note: Use eat_punct_any('$') not eat_punct_alone('$') because in `$foo` 
+// the $ has Joint spacing (no space before identifier)
 fn parse_maybe_prefixed_ident(parser: &mut TokenParser) -> Result<String, TokenStream> {
-    if parser.eat_punct_alone('$') {
+    if parser.eat_punct_any('$') {
         // $ followed by ident
         let ident = parser.expect_any_ident()?;
         Ok(format!("${}", ident))
@@ -18,7 +20,7 @@ fn parse_maybe_prefixed_ident(parser: &mut TokenParser) -> Result<String, TokenS
 
 // Helper to eat an identifier that may be prefixed with $ (returns None if not found)
 fn eat_maybe_prefixed_ident(parser: &mut TokenParser) -> Option<String> {
-    if parser.eat_punct_alone('$') {
+    if parser.eat_punct_any('$') {
         // $ followed by ident
         parser.eat_any_ident().map(|ident| format!("${}", ident))
     } else {
@@ -96,7 +98,8 @@ pub fn ids(item: TokenStream) -> TokenStream {
                 tb.add("]");
                 return Ok(())
             }
-            parser.expect_punct_alone('.')?
+            // Use expect_punct_any because `.` has Joint spacing when followed by `$`
+            parser.expect_punct_any('.')?
         }
     }
     if let Err(e) = parse(&mut parser, &mut tb){
@@ -124,7 +127,8 @@ fn ids_array_impl(item: TokenStream) -> TokenStream {
                     tb.add("]");
                     break
                 }
-                parser.expect_punct_alone('.')?
+                // Use expect_punct_any because `.` has Joint spacing when followed by `$`
+                parser.expect_punct_any('.')?
             }
             tb.add(",");
             if parser.eat_eot(){
