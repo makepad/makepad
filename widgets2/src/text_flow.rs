@@ -380,7 +380,7 @@ impl SelectionTracker {
                     text_start,
                     text_len,
                 } => {
-                    if !area.is_empty() {
+                    if area.is_valid(cx) {
                         let rect = area.rect(cx);
                         if rect.size.y > 0.0 && rect.contains(point) {
                             // Linear interpolation based on y position
@@ -441,7 +441,7 @@ impl SelectionTracker {
                     text_start,
                     text_len,
                 } => {
-                    if !area.is_empty() {
+                    if area.is_valid(cx) {
                         let rect = area.rect(cx);
                         let dist = Self::point_to_rect_distance(point, rect);
                         if best.map_or(true, |(_, d)| dist < d) {
@@ -1741,12 +1741,12 @@ impl WidgetNode for TextFlowLink {
     fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
         // Check main area
         let area = self.area();
-        if !area.is_empty() && area.rect(cx).contains(point) {
+        if area.is_valid(cx) && area.rect(cx).contains(point) {
             return true;
         }
         // Links span multiple text rects via drawn_areas
         for area in self.drawn_areas.iter() {
-            if area.rect(cx).contains(point) {
+            if area.is_valid(cx) && area.rect(cx).contains(point) {
                 return true;
             }
         }
