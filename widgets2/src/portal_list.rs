@@ -1522,6 +1522,12 @@ impl WidgetNode for PortalList {
             item.widget.find_widgets_from_point(cx, point, found);
         }
     }
+
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        for item in self.items.values() {
+            item.widget.widget_tree_walk(nodes);
+        }
+    }
 }
 
 impl Widget for PortalList {

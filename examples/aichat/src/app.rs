@@ -51,6 +51,14 @@ script_mod! {
                             }
                         }
                     }
+                    $splash_block: View {
+                        width: Fill
+                        height: Fit
+                        $splash_view: Splash {
+                            width: Fill
+                            height: Fit
+                        }
+                    }
                 }
 
                 View {
@@ -112,6 +120,14 @@ script_mod! {
                             }
                         }
                     }
+                    $splash_block: View {
+                        width: Fill
+                        height: Fit
+                        $splash_view: Splash {
+                            width: Fill
+                            height: Fit
+                        }
+                    }
                 }
 
                 View {
@@ -168,8 +184,8 @@ script_mod! {
                         }
 
                         $backend_dropdown: DropDown {
-                            width: 150
-                            labels: ["Claude (ACP)" "Claude (API)" "Gemini" "OpenAI"]
+                            width: 170
+                            labels: ["Claude (ACP)" "Claude (API)" "Gemini" "Gemini Splash" "OpenAI"]
                         }
                     }
 
@@ -407,6 +423,7 @@ enum BackendType {
     ClaudeAcp,
     ClaudeApi,
     Gemini,
+    GeminiSplash,
     OpenAi,
 }
 
@@ -453,6 +470,7 @@ impl App {
 
         if Self::read_key_file("GOOGLE_API_KEY").is_some() {
             available_backends.push(BackendType::Gemini);
+            available_backends.push(BackendType::GeminiSplash);
         }
 
         if Self::read_key_file("OPENAI_API_KEY").is_some() {
@@ -492,13 +510,15 @@ impl App {
                 });
                 Box::new(StatelessBackendAdapter::new(Box::new(backend))) as Box<dyn Agent>
             }),
-            BackendType::Gemini => Self::read_key_file("GOOGLE_API_KEY").map(|key| {
-                let backend = GeminiBackend::new(BackendConfig::Gemini {
-                    api_key: key,
-                    model: "gemini-2.0-flash".to_string(),
-                });
-                Box::new(StatelessBackendAdapter::new(Box::new(backend))) as Box<dyn Agent>
-            }),
+            BackendType::Gemini | BackendType::GeminiSplash => {
+                Self::read_key_file("GOOGLE_API_KEY").map(|key| {
+                    let backend = GeminiBackend::new(BackendConfig::Gemini {
+                        api_key: key,
+                        model: "gemini-2.0-flash".to_string(),
+                    });
+                    Box::new(StatelessBackendAdapter::new(Box::new(backend))) as Box<dyn Agent>
+                })
+            }
             BackendType::OpenAi => Self::read_key_file("OPENAI_API_KEY").map(|key| {
                 let backend = OpenAiBackend::new(BackendConfig::OpenAI {
                     api_key: key,
@@ -508,6 +528,87 @@ impl App {
                 });
                 Box::new(StatelessBackendAdapter::new(Box::new(backend))) as Box<dyn Agent>
             }),
+        }
+    }
+
+    fn system_prompt_for_backend(backend_type: BackendType) -> String {
+        match backend_type {
+            BackendType::GeminiSplash => {
+                let splash_md = include_str!("../../../splash.md");
+                format!(
+                    r#"You are an AI agent that can create on-demand UI using Makepad's Splash scripting language.
+
+You can answer questions normally using markdown. But when it makes sense to show something visually — a layout, a UI mockup, a styled card, a button arrangement, an animation, or anything graphical — you should embed a ```runsplash code block in your markdown response. The content inside a ```runsplash block is live Splash script that will be rendered as real interactive UI inline in the chat.
+
+## How to use runsplash blocks
+
+In your markdown output, write:
+
+```runsplash
+View{{
+    flow: Down
+    padding: 20
+    spacing: 10
+    Label{{text: "Hello from Splash!"}}
+    Button{{text: "Click me"}}
+}}
+```
+
+IMPORTANT: `use mod.prelude.widgets.*` is automatically prepended to every runsplash block — do NOT include it yourself. All widget names (View, Label, Button, etc.) are already in scope.
+
+The block content is Splash script. It gets evaluated and rendered as a live widget tree. Do NOT wrap it in Root{{}} or Window{{}} — the content is placed directly inside a container.
+
+## Let bindings for reusable components
+
+You can define `let` bindings to create reusable widget templates. **`let` bindings must be defined ABOVE (before) the places where they are used.**
+
+```runsplash
+let MyCard = RoundedView{{
+    width: Fill height: Fit
+    padding: 15 flow: Down spacing: 8
+    show_bg: true
+    draw_bg.color: #334
+    draw_bg.border_radius: 8.0
+}}
+
+View{{
+    flow: Down spacing: 12 padding: 20
+    MyCard{{
+        Label{{text: "Card 1"}}
+    }}
+    MyCard{{
+        Label{{text: "Card 2"}}
+    }}
+}}
+```
+
+## Syntax warnings
+
+- Strings use double quotes only: `text: "Hello"`. No single quotes, no backticks.
+- No commas between properties — they are whitespace-delimited.
+- No semicolons.
+- Every opening brace `{{` must have a matching closing brace `}}`.
+- Property values that are widgets need the type name: `Label{{text: "hi"}}` not just `{{text: "hi"}}`.
+
+## Splash Script Reference
+
+Here is the complete Splash scripting manual. Use it to construct your UI responses:
+
+{splash_md}
+
+## Guidelines
+
+- Use runsplash blocks for anything visual: UI mockups, styled cards, layouts, color palettes, shader demos, button groups, form layouts, etc.
+- You can have multiple runsplash blocks in a single response, mixed with normal markdown text.
+- Keep splash blocks focused — one concept per block when possible.
+- Use `let` bindings at the top of a block to define reusable styled components, then instantiate them below.
+- Use theme variables (theme.color_bg_app, theme.space_2, etc.) for consistent styling.
+- You can use custom shaders with pixel: fn(){{}} for creative visual effects.
+- For simple text answers, just use normal markdown without runsplash blocks.
+- Be creative! Show off what Splash can do."#
+                )
+            }
+            _ => "You are a helpful assistant. Be concise but thorough.".to_string(),
         }
     }
 
@@ -526,9 +627,7 @@ impl App {
 
             // Create session
             let config = SessionConfig {
-                system_prompt: Some(
-                    "You are a helpful assistant. Be concise but thorough.".to_string(),
-                ),
+                system_prompt: Some(Self::system_prompt_for_backend(backend_type)),
                 ..Default::default()
             };
             if let Some(agent) = &mut self.agent {
@@ -551,10 +650,9 @@ impl App {
 
         // Create new session for fresh conversation
         if let Some(agent) = &mut self.agent {
+            let backend_type = self.active_backend.unwrap_or(BackendType::Gemini);
             let config = SessionConfig {
-                system_prompt: Some(
-                    "You are a helpful assistant. Be concise but thorough.".to_string(),
-                ),
+                system_prompt: Some(Self::system_prompt_for_backend(backend_type)),
                 ..Default::default()
             };
             self.session_id = Some(agent.create_session(cx, config));
@@ -649,6 +747,7 @@ impl App {
             Some(BackendType::ClaudeAcp) => "Active: Claude (ACP via Zed)",
             Some(BackendType::ClaudeApi) => "Active: Claude (API)",
             Some(BackendType::Gemini) => "Active: Gemini",
+            Some(BackendType::GeminiSplash) => "Active: Gemini Splash (UI Agent)",
             Some(BackendType::OpenAi) => "Active: OpenAI",
             None => "No backend selected",
         };
@@ -660,8 +759,19 @@ impl App {
             0 => Some(BackendType::ClaudeAcp),
             1 => Some(BackendType::ClaudeApi),
             2 => Some(BackendType::Gemini),
-            3 => Some(BackendType::OpenAi),
+            3 => Some(BackendType::GeminiSplash),
+            4 => Some(BackendType::OpenAi),
             _ => None,
+        }
+    }
+
+    fn index_from_backend_type(&self, backend_type: BackendType) -> Option<usize> {
+        match backend_type {
+            BackendType::ClaudeAcp => Some(0),
+            BackendType::ClaudeApi => Some(1),
+            BackendType::Gemini => Some(2),
+            BackendType::GeminiSplash => Some(3),
+            BackendType::OpenAi => Some(4),
         }
     }
 }
@@ -711,9 +821,18 @@ impl MatchEvent for App {
     }
 
     fn handle_startup(&mut self, cx: &mut Cx) {
-        // Initialize with first available backend
-        if let Some(&first_backend) = self.available_backends.first() {
-            self.switch_backend(cx, first_backend);
+        // Prefer Gemini Splash as default, fall back to first available
+        let default_backend = if self.available_backends.contains(&BackendType::GeminiSplash) {
+            Some(BackendType::GeminiSplash)
+        } else {
+            self.available_backends.first().copied()
+        };
+        if let Some(backend) = default_backend {
+            self.switch_backend(cx, backend);
+            // Set the dropdown to match
+            if let Some(idx) = self.index_from_backend_type(backend) {
+                self.ui.drop_down(ids!($backend_dropdown)).set_selected_item(cx, idx);
+            }
         }
         self.update_status(cx);
     }

@@ -163,6 +163,12 @@ impl WidgetNode for CachedWidget {
         }
         WidgetRef::empty()
     }
+
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        if let Some(widget) = &self.widget {
+            widget.widget_tree_walk_named(self.template_id, nodes);
+        }
+    }
 }
 
 impl Widget for CachedWidget {

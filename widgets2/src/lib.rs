@@ -77,6 +77,8 @@ pub mod html;
 #[cfg(feature = "markdown")]
 pub mod markdown;
 
+pub mod splash;
+
 // Touch gesture support (used by expandable_panel)
 pub mod touch_gesture;
 
@@ -183,7 +185,7 @@ pub use crate::{
         CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
         WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
         WidgetActionsApi, WidgetCache, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister,
-        WidgetRegistry, WidgetSet, WidgetSetIterator, WidgetUid,
+        WidgetRegistry, WidgetSet, WidgetSetIterator, WidgetTree, WidgetTreeNode, WidgetUid,
     },
     widget_match_event::WidgetMatchEvent,
 
@@ -197,6 +199,8 @@ pub use crate::html::*;
 
 #[cfg(feature = "markdown")]
 pub use crate::markdown::*;
+
+pub use crate::splash::*;
 
 #[cfg(target_os = "android")]
 pub use crate::video::*;
@@ -300,6 +304,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::html::script_mod(vm);
     #[cfg(feature = "markdown")]
     crate::markdown::script_mod(vm);
+
+    crate::splash::script_mod(vm);
 
     // make the prelude.widgetst with all our components
 

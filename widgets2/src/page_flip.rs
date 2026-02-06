@@ -131,6 +131,12 @@ impl WidgetNode for PageFlip {
         }
         WidgetRef::empty()
     }
+
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        for (id, page) in self.pages.iter() {
+            page.widget_tree_walk_named(*id, nodes);
+        }
+    }
 }        
 
 impl Widget for PageFlip {

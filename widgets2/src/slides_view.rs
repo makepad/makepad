@@ -183,6 +183,12 @@ impl WidgetNode for SlidesView {
         }
     }
 
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        for (id, child) in self.slides.iter() {
+            child.widget_tree_walk_named(*id, nodes);
+        }
+    }
+
     fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
         for child in self.slides.values() {
             let x = child.uid_to_widget(uid);

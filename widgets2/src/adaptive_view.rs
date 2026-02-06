@@ -148,6 +148,12 @@ impl WidgetNode for AdaptiveView {
             WidgetRef::empty()
         }
     }
+
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        if let Some(active_widget) = self.active_widget.as_ref() {
+            active_widget.widget_ref.widget_tree_walk_named(active_widget.template_id, nodes);
+        }
+    }
 }
 
 impl ScriptHook for AdaptiveView {

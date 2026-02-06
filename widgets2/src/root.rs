@@ -99,6 +99,12 @@ impl WidgetNode for Root {
         }
         WidgetRef::empty()
     }
+
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        for (id, component) in self.components.iter() {
+            component.widget_tree_walk_named(*id, nodes);
+        }
+    }
 }
 
 impl Widget for Root {
