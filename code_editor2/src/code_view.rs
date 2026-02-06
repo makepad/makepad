@@ -22,9 +22,8 @@ script_mod! {
     mod.widgets.CodeView = mod.widgets.CodeViewBase {}
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct CodeView {
-    #[wrap]
     #[live]
     pub editor: CodeEditor,
     // alright we have to have a session and a document.
@@ -35,6 +34,79 @@ pub struct CodeView {
 
     #[live]
     text: ArcStringMut,
+}
+
+impl WidgetNode for CodeView {
+    fn walk(&mut self, cx: &mut Cx) -> Walk {
+        self.editor.walk(cx)
+    }
+    fn area(&self) -> Area {
+        self.editor.area()
+    }
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.editor.redraw(cx)
+    }
+    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
+        self.editor.uid_to_widget(uid)
+    }
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        self.editor.find_widgets(path, cached, results)
+    }
+    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
+        self.editor.find_widgets_from_point(cx, point, found)
+    }
+    fn visible(&self) -> bool {
+        self.editor.visible()
+    }
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.editor.set_visible(cx, visible)
+    }
+
+    // Selection API - map to code editor document text
+    fn selection_text_len(&self) -> usize {
+        self.text.as_ref().len()
+    }
+
+    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {
+        // Use the editor's cached viewport rect for hit testing
+        let rect = self.editor.viewport_rect();
+        if rect.size.y <= 0.0 {
+            return None;
+        }
+        let text = self.text.as_ref();
+        let text_len = text.len();
+        if text_len == 0 {
+            return Some(0);
+        }
+        // Linear interpolation based on y position within the widget
+        let local_y = (abs.y - rect.pos.y).max(0.0);
+        let fraction = (local_y / rect.size.y).min(1.0);
+        Some((fraction * text_len as f64) as usize)
+    }
+
+    fn selection_set(&mut self, _anchor: usize, _cursor: usize) {
+        // Visual highlight in code editor is a future enhancement
+    }
+
+    fn selection_clear(&mut self) {
+    }
+
+    fn selection_select_all(&mut self) {
+    }
+
+    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
+        let text = self.text.as_ref();
+        let start = start.min(text.len());
+        let end = end.min(text.len());
+        if start >= end {
+            return String::new();
+        }
+        text[start..end].to_string()
+    }
+
+    fn selection_get_full_text(&self) -> String {
+        self.text.as_ref().to_string()
+    }
 }
 
 impl CodeView {

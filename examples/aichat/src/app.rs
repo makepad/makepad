@@ -18,7 +18,7 @@ script_mod! {
             flow: Down
             drag_scrolling: false
             auto_tail: true
-            smooth_tail: false
+            smooth_tail: true
             selectable: true
 
             $User: RoundedView {
@@ -26,6 +26,7 @@ script_mod! {
                 height: Fit
                 margin: Inset{top: 4 bottom: 4 left: 50 right: 8}
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
+                flow: Overlay
                 show_bg: true
                 draw_bg +: {
                     color: #3a5a8a
@@ -36,7 +37,37 @@ script_mod! {
                     width: Fill
                     height: Fit
                     selectable: true
+                    use_code_block_widget: true
                     body: ""
+                    $code_block: View {
+                        width: Fill
+                        height: Fit
+                        flow: Overlay
+                        $code_view: CodeView {
+                            keep_cursor_at_end: false
+                            editor +: {
+                                height: Fit
+                                draw_bg +: { color: #1a1a2e }
+                            }
+                        }
+                    }
+                }
+
+                View {
+                    width: Fill
+                    height: Fit
+                    align: Align{x: 1.0}
+                    $delete_button: ButtonFlat {
+                        width: Fit
+                        height: Fit
+                        padding: Inset{top: 2 bottom: 2 left: 6 right: 6}
+                        margin: Inset{top: 2 right: 2}
+                        text: "x"
+                        draw_text +: {
+                            color: #888
+                            text_style +: { font_size: 9 }
+                        }
+                    }
                 }
             }
 
@@ -45,6 +76,7 @@ script_mod! {
                 height: Fit
                 margin: Inset{top: 4 bottom: 4 left: 8 right: 50}
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
+                flow: Overlay
                 show_bg: true
                 draw_bg +: {
                     color: #2a2a3a
@@ -55,37 +87,46 @@ script_mod! {
                     width: Fill
                     height: Fit
                     selectable: true
+                    use_code_block_widget: true
                     body: ""
-                }
-            }
-
-            $Streaming: RoundedView {
-                width: Fill
-                height: Fit
-                margin: Inset{top: 4 bottom: 4 left: 8 right: 50}
-                padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
-                show_bg: true
-                draw_bg +: {
-                    color: #2a2a3a
-                    radius: 8.0
-                }
-
-                $selectable: Markdown {
-                    width: Fill
-                    height: Fit
-                    selectable: true
-                    body: "..."
                     stream_height_animation: true
-                    height_smoothing:0.3
+                    height_smoothing: 0.3
                     draw_text +: {
                         get_color: fn() {
-                            // Fade in the last 50 characters with exponential curve
                             let fade_chars = 50.0
                             let dist_from_end = self.total_chars - self.char_index
                             let t = clamp(dist_from_end / fade_chars, 0.0, 1.0)
-                            // Exponential: front quarter fades, rest is solid
-                            let alpha = pow(t,0.5)
+                            let alpha = pow(t, 0.5)
                             return vec4(self.color.rgb, self.color.a * alpha)
+                        }
+                    }
+                    $code_block: View {
+                        width: Fill
+                        height: Fit
+                        flow: Overlay
+                        $code_view: CodeView {
+                            keep_cursor_at_end: true
+                            editor +: {
+                                height: Fit
+                                draw_bg +: { color: #1a1a2e }
+                            }
+                        }
+                    }
+                }
+
+                View {
+                    width: Fill
+                    height: Fit
+                    align: Align{x: 1.0}
+                    $delete_button: ButtonFlat {
+                        width: Fit
+                        height: Fit
+                        padding: Inset{top: 2 bottom: 2 left: 6 right: 6}
+                        margin: Inset{top: 2 right: 2}
+                        text: "x"
+                        draw_text +: {
+                            color: #888
+                            text_style +: { font_size: 9 }
                         }
                     }
                 }
@@ -292,13 +333,14 @@ impl Widget for ChatList {
 
                 while let Some(item_id) = list.next_visible_item(cx) {
                     if data.is_streaming && item_id == msg_count {
+                        // Streaming message
                         let just_started = self.animating_msg != Some(item_id);
                         if just_started {
                             self.animating_msg = Some(item_id);
                         }
 
                         let (item_widget, _existed) =
-                            list.item_with_existed(cx, item_id, id!($Streaming));
+                            list.item_with_existed(cx, item_id, id!($Assistant));
                         let text = if data.streaming_text.is_empty() {
                             "..."
                         } else {
@@ -306,7 +348,6 @@ impl Widget for ChatList {
                         };
                         let mut markdown = item_widget.markdown(ids!($selectable));
                         markdown.set_text(cx, text);
-                        // Reset animation on first draw, then keep animating
                         if just_started {
                             markdown.reset_all_streaming_animations();
                         } else {
@@ -320,7 +361,6 @@ impl Widget for ChatList {
                         let is_animating = self.animating_msg == Some(item_id);
                         let template = match msg.role {
                             ChatRole::User => id!($User),
-                            ChatRole::Assistant if is_animating => id!($Streaming),
                             ChatRole::Assistant => id!($Assistant),
                         };
                         let item_widget = list.item(cx, item_id, template);
@@ -384,6 +424,8 @@ pub struct App {
     available_backends: Vec<BackendType>,
     #[rust]
     active_backend: Option<BackendType>,
+    #[rust]
+    history_injected: bool,
 }
 
 impl App {
@@ -429,6 +471,7 @@ impl App {
         app.session_id = None;
         app.current_prompt = None;
         app.active_backend = None;
+        app.history_injected = false;
         app
     }
 
@@ -479,6 +522,7 @@ impl App {
             self.active_backend = Some(backend_type);
             self.session_id = None;
             self.current_prompt = None;
+            self.history_injected = false;
 
             // Create session
             let config = SessionConfig {
@@ -503,6 +547,7 @@ impl App {
             data.is_streaming = false;
             data.save_to_disk();
         }
+        self.history_injected = false;
 
         // Create new session for fresh conversation
         if let Some(agent) = &mut self.agent {
@@ -544,6 +589,24 @@ impl App {
             data.messages.len() + 1
         };
         input.set_text(cx, "");
+
+        // Inject saved history on first prompt for stateless backends
+        if !self.history_injected && agent.is_stateless() {
+            let data = CHAT_DATA.read().unwrap();
+            // Convert all messages except the one we just added
+            let history: Vec<Message> = data.messages[..data.messages.len() - 1]
+                .iter()
+                .map(|m| match m.role {
+                    ChatRole::User => Message::user(&m.text),
+                    ChatRole::Assistant => Message::assistant(&m.text),
+                })
+                .collect();
+            drop(data);
+            if !history.is_empty() {
+                agent.inject_history(session_id, history);
+            }
+            self.history_injected = true;
+        }
 
         // Send prompt to agent
         let prompt_id = agent.send_prompt(cx, session_id, &text);
@@ -621,9 +684,28 @@ impl MatchEvent for App {
             self.send_message(cx);
         }
 
+        if self.ui.text_input(ids!($input)).escaped(actions) {
+            self.cancel_request(cx);
+        }
+
         if let Some(item) = self.ui.drop_down(ids!($backend_dropdown)).selected(actions) {
             if let Some(backend_type) = self.backend_type_from_index(item) {
                 self.switch_backend(cx, backend_type);
+            }
+        }
+
+        // Handle message deletion from delete buttons in portal list
+        let chat_list = self.ui.widget(ids!($chat_list));
+        let list = chat_list.portal_list(ids!($list));
+        for (item_id, item) in list.items_with_actions(actions) {
+            if item.button(ids!($delete_button)).pressed(actions) {
+                let mut data = CHAT_DATA.write().unwrap();
+                if item_id < data.messages.len() {
+                    data.messages.remove(item_id);
+                    data.save_to_disk();
+                }
+                drop(data);
+                self.ui.redraw(cx);
             }
         }
     }
