@@ -9,7 +9,10 @@ use {
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
-            cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
+            cx_stdin::{
+                HostToStdin, PresentableDraw, PresentableImageId, StdinToHost,
+                SWAPCHAIN_IMAGE_COUNT,
+            },
             d3d11::D3d11Cx,
             win32_app::Win32Time,
         },
@@ -22,9 +25,18 @@ use {
     std::{cell::RefCell, io, io::prelude::*, io::BufReader, rc::Rc},
 };
 
+struct LocalPresentableImage {
+    id: PresentableImageId,
+    image: Texture,
+}
+
+struct LocalSwapchain {
+    presentable_images: [LocalPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
 #[derive(Default)]
 pub(crate) struct StdinWindow {
-    swapchain: Option<Swapchain<Texture>>,
+    swapchain: Option<LocalSwapchain>,
     present_index: usize,
     new_frame_being_rendered: Option<PresentableDraw>,
 }
@@ -147,9 +159,8 @@ impl Cx {
                     }));
                     let text = response.borrow().clone();
                     if let Some(text) = text {
-                        let _ = io::stdout().write_all(
-                            StdinToHost::SetClipboard(text).to_json().as_bytes(),
-                        );
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
                         let _ = io::stdout().flush();
                     }
                 }
@@ -160,9 +171,8 @@ impl Cx {
                     }));
                     let text = response.borrow().clone();
                     if let Some(text) = text {
-                        let _ = io::stdout().write_all(
-                            StdinToHost::SetClipboard(text).to_json().as_bytes(),
-                        );
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
                         let _ = io::stdout().flush();
                     }
                 }
@@ -218,23 +228,27 @@ impl Cx {
                     self.redraw_all();
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
-                    let new_swapchain = new_swapchain.images_map(|pi| {
-                        let handle = HANDLE(pi.image as isize);
-
-                        let format = TextureFormat::SharedBGRAu8 {
-                            id: pi.id,
-                            width: new_swapchain.alloc_width as usize,
-                            height: new_swapchain.alloc_height as usize,
-                            initial: true,
-                        };
-                        let texture = Texture::new_with_format(self, format);
-                        self.textures[texture.texture_id()]
-                            .update_from_shared_handle(d3d11_cx, handle);
-                        texture
-                    });
                     let window_id = new_swapchain.window_id;
+                    let local_swapchain = LocalSwapchain {
+                        presentable_images: new_swapchain.presentable_images.map(|pi| {
+                            let handle = HANDLE(pi.handle as isize);
+                            let format = TextureFormat::SharedBGRAu8 {
+                                id: pi.id,
+                                width: new_swapchain.alloc_width as usize,
+                                height: new_swapchain.alloc_height as usize,
+                                initial: true,
+                            };
+                            let texture = Texture::new_with_format(self, format);
+                            self.textures[texture.texture_id()]
+                                .update_from_shared_handle(d3d11_cx, handle);
+                            LocalPresentableImage {
+                                id: pi.id,
+                                image: texture,
+                            }
+                        }),
+                    };
                     let stdin_window = &mut stdin_windows[window_id];
-                    stdin_window.swapchain = Some(new_swapchain);
+                    stdin_window.swapchain = Some(local_swapchain);
                     stdin_window.present_index = 0;
 
                     self.redraw_all();
@@ -352,9 +366,8 @@ impl Cx {
                         io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
                 }
                 CxOsOp::CopyToClipboard(content) => {
-                    let _ = io::stdout().write_all(
-                        StdinToHost::SetClipboard(content).to_json().as_bytes(),
-                    );
+                    let _ = io::stdout()
+                        .write_all(StdinToHost::SetClipboard(content).to_json().as_bytes());
                     let _ = io::stdout().flush();
                 }
                 _ => (), /*
