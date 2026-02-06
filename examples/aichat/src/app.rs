@@ -91,41 +91,48 @@ script_mod! {
                     radius: 8.0
                 }
 
-                $selectable: Markdown {
+                RubberView {
                     width: Fill
                     height: Fit
-                    selectable: true
-                    use_code_block_widget: true
-                    body: ""
-                    stream_height_animation: true
-                    height_smoothing: 0.3
-                    draw_text +: {
-                        get_color: fn() {
-                            let fade_chars = 50.0
-                            let dist_from_end = self.total_chars - self.char_index
-                            let t = clamp(dist_from_end / fade_chars, 0.0, 1.0)
-                            let alpha = pow(t, 0.5)
-                            return vec4(self.color.rgb, self.color.a * alpha)
-                        }
-                    }
-                    $code_block: View {
+                    smoothing: 0.3
+
+                    $selectable: Markdown {
                         width: Fill
                         height: Fit
-                        flow: Overlay
-                        $code_view: CodeView {
-                            keep_cursor_at_end: true
-                            editor +: {
-                                height: Fit
-                                draw_bg +: { color: #1a1a2e }
+                        selectable: true
+                        use_code_block_widget: true
+                        body: ""
+                        draw_text +: {
+                            get_color: fn() {
+                                let fade_chars = 50.0
+                                let dist_from_end = self.total_chars - self.char_index
+                                let t = clamp(dist_from_end / fade_chars, 0.0, 1.0)
+                                let alpha = pow(t, 0.5)
+                                return vec4(self.color.rgb, self.color.a * alpha)
                             }
                         }
-                    }
-                    $splash_block: View {
-                        width: Fill
-                        height: Fit
-                        $splash_view: Splash {
+                        $code_block: View {
                             width: Fill
                             height: Fit
+                            flow: Overlay
+                            $code_view: CodeView {
+                                keep_cursor_at_end: true
+                                editor +: {
+                                    height: Fit
+                                    draw_bg +: { color: #1a1a2e }
+                                }
+                            }
+                        }
+                        $splash_block: SolidView{
+                            flow: Overlay
+                            optimize: ViewOptimize.DrawList
+                            width: Fill
+                            height: Fit
+                            $splash_view: Splash {
+                                flow: Overlay
+                                width: Fill
+                                height: Fit
+                            }
                         }
                     }
                 }
