@@ -863,11 +863,21 @@ impl AppMain for App {
                             .set_text(cx, &format!("Error: {}", error));
                     }
                     AgentEvent::TextDelta { text, .. } => {
-                        {
+                        let item_id = {
                             let mut data = CHAT_DATA.write().unwrap();
                             data.streaming_text.push_str(&text);
+                            data.messages.len() // streaming item is at messages.len()
+                        };
+                        // Redraw the specific Splash widget that has DrawList optimization
+                        let chat_list = self.ui.widget(ids!($chat_list));
+                        let list = chat_list.portal_list(ids!($list));
+                        if let Some((_template, item)) = list.get_item(item_id) {
+                            // Clear query cache before searching (items are dynamically created)
+                            item.clear_query_cache();
+                            // Redraw the splash_view inside the markdown's splash_block
+                            item.widget(ids!($splash_view)).redraw(cx);
                         }
-                        self.ui.redraw(cx);
+                        cx.redraw_all();
                     }
                     AgentEvent::TurnComplete { .. } => {
                         {
@@ -884,7 +894,7 @@ impl AppMain for App {
                         }
                         self.current_prompt = None;
                         self.ui.view(ids!($cancel_button)).set_visible(cx, false);
-                        self.ui.redraw(cx);
+                        cx.redraw_all();
                     }
                     AgentEvent::PromptError { error, .. } => {
                         {
@@ -896,8 +906,8 @@ impl AppMain for App {
                         self.ui
                             .label(ids!($status_label))
                             .set_text(cx, &format!("Error: {}", error));
-                        self.ui.redraw(cx);
-                    }
+                            cx.redraw_all();
+                        }
                     AgentEvent::ToolRequest { .. } => {
                         // Not handling tools yet
                     }
