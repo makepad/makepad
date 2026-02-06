@@ -53,7 +53,7 @@ pub trait WidgetNode: ScriptApply {
     /// multiple hit areas (e.g. TextFlowLink with drawn_areas).
     fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
         let area = self.area();
-        !area.is_empty() && area.rect(cx).contains(point)
+        area.is_valid(cx) && area.rect(cx).contains(point)
     }
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
