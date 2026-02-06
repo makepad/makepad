@@ -28,6 +28,7 @@ pub mod scroll_bar;
 pub mod scroll_bars;
 pub mod view;
 pub mod view_ui;
+pub mod rubber_view;
 
 pub mod button;
 pub mod check_box;
@@ -181,6 +182,7 @@ pub use crate::{
     turtle_step::*,
 
     view::*,
+    rubber_view::*,
     widget::{
         CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
         WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
@@ -242,6 +244,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
     crate::view_ui::script_mod(vm);
+    crate::rubber_view::script_mod(vm);
 
     crate::label::script_mod(vm);
     crate::link_label::script_mod(vm);

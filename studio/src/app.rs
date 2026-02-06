@@ -702,10 +702,6 @@ impl MatchEvent for App {
             }
             FileSystemAction::LiveReloadNeeded(live_file_change) => {
                 self.data.build_manager.live_reload_needed(live_file_change);
-                self.data
-                    .build_manager
-                    .clear_log(cx, &dock, &mut self.data.file_system);
-                log_list.redraw(cx);
             }
             FileSystemAction::FileChangedOnDisk(_res) => {}
             FileSystemAction::SearchResults => {

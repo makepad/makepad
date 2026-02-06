@@ -17,14 +17,17 @@ pub struct Splash {
     pub view: View,
     #[live]
     body: ArcStringMut,
+    #[rust]
+    eval_count: u64
 }
 
 impl Splash {
     fn eval_body(&mut self, cx: &mut Cx) {
         let body = self.body.as_ref();
         if !body.is_empty() {
-            let self_id = self as *const Self as u64;
-            let code = format!("use mod.prelude.widgets.*\n__script_source__{{~@HI; {} }};", body);
+            let self_id = self as *const Self as u64 + self.eval_count;
+            self.eval_count += 1;
+            let code = format!("use mod.prelude.widgets.*\n__script_source__{{ {} }};", body);
            
             let script_mod = ScriptMod {
                 cargo_manifest_path: String::new(),
@@ -51,12 +54,10 @@ impl Widget for Splash {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let mut nodes = Vec::new();
-        self.view.widget_tree_walk(&mut nodes);
-        let tree = WidgetTree { nodes };
-        cx.with_vm(|vm| {
-            log!("{}", tree.display(vm.heap()));
-        });
+        //let tree = self.view.widget_tree();
+        //cx.with_vm(|vm| {
+        //    log!("{}", tree.display(vm.heap()));
+        //});
         self.view.draw_walk(cx, scope, walk)
     }
 

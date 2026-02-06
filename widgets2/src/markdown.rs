@@ -460,6 +460,10 @@ impl Markdown {
 
                         // Draw the splash block using the $splash_block template
                         tf.item_with(cx, entry_id, id!($splash_block), |cx, item, _tf| {
+                            //let tree = item.widget_tree();
+                            //cx.with_vm(|vm| {
+                            //    log!("$splash_block widget tree:\n{}", tree.display(vm.heap()));
+                            //});
                             item.widget(ids!($splash_view)).set_text(cx, sbs);
                             item.draw_all_unscoped(cx);
                         });
@@ -648,14 +652,7 @@ impl MarkdownRef {
         }
     }
 
-    /// Reset height animation state (for reused widgets or new content).
-    pub fn reset_height_animation(&self) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.text_flow.reset_height_animation();
-        }
-    }
-
-    /// Reset all streaming animations (both text fade and height).
+    /// Reset all streaming animations (text fade).
     pub fn reset_all_streaming_animations(&self) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.text_flow.reset_all_streaming_animations();
