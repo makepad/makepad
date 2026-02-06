@@ -84,7 +84,7 @@ script_mod! {
     mod.widgets.RunList = set_type_default() do mod.widgets.RunListBase {
         width: Fill
         height: Fill
-
+        optimize: ViewOptimize.DrawList
         $list: FlatList {
             height: Fill
             width: Fill
@@ -304,6 +304,13 @@ impl Widget for RunList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::KeyDown(ke) = event {
+            if ke.key_code == KeyCode::KeyD && ke.modifiers.logo {
+                log!("=== RunList debug dump triggered ===");
+                self.view.set_debug_dump(cx, true);
+                self.view.redraw(cx);
+            }
+        }
         self.widget_match_event(cx, event, scope);
         self.view.handle_event(cx, event, scope);
     }
