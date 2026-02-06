@@ -580,9 +580,9 @@ impl WidgetNode for View {
         0
     }
 
-    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {
+    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
         for (_, child) in &self.children {
-            if let Some(v) = child.selection_point_to_char_index(abs) {
+            if let Some(v) = child.selection_point_to_char_index(cx, abs) {
                 return Some(v);
             }
         }

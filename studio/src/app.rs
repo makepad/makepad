@@ -668,6 +668,9 @@ impl MatchEvent for App {
                             }
                         }
                     }
+                    StdinToHost::SetClipboard(content) => {
+                        cx.copy_to_clipboard(&content);
+                    }
                     StdinToHost::RequestAnimationFrame => {
                         // Child has pending animations, keep the run_view repainting
                         if let Some(mut dock) = dock.borrow_mut() {

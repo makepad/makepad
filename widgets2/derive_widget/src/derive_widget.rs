@@ -113,7 +113,7 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             tb.add("   }");
             // Selection API delegation through wrap field
             tb.add("    fn selection_text_len(&self) -> usize { self.").ident(wrap_field).add(".selection_text_len() }");
-            tb.add("    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> { self.").ident(wrap_field).add(".selection_point_to_char_index(abs) }");
+            tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> { self.").ident(wrap_field).add(".selection_point_to_char_index(cx, abs) }");
             tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.").ident(wrap_field).add(".selection_set(anchor, cursor) }");
             tb.add("    fn selection_clear(&mut self) { self.").ident(wrap_field).add(".selection_clear() }");
             tb.add("    fn selection_select_all(&mut self) { self.").ident(wrap_field).add(".selection_select_all() }");
@@ -208,9 +208,9 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                     tb.add("        { let v = self.").ident(find_field).add(".selection_text_len(); if v > 0 { return v; } }");
                 }
                 tb.add("        0 }");
-                tb.add("    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {");
+                tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {");
                 for find_field in &find_fields {
-                    tb.add("        if let Some(v) = self.").ident(find_field).add(".selection_point_to_char_index(abs) { return Some(v); }");
+                    tb.add("        if let Some(v) = self.").ident(find_field).add(".selection_point_to_char_index(cx, abs) { return Some(v); }");
                 }
                 tb.add("        None }");
                 tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) {");
@@ -252,7 +252,7 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 tb.add("   }");
                 // Selection API delegation through deref field
                 tb.add("    fn selection_text_len(&self) -> usize { self.").ident(deref_field).add(".selection_text_len() }");
-                tb.add("    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> { self.").ident(deref_field).add(".selection_point_to_char_index(abs) }");
+                tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> { self.").ident(deref_field).add(".selection_point_to_char_index(cx, abs) }");
                 tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.").ident(deref_field).add(".selection_set(anchor, cursor) }");
                 tb.add("    fn selection_clear(&mut self) { self.").ident(deref_field).add(".selection_clear() }");
                 tb.add("    fn selection_select_all(&mut self) { self.").ident(deref_field).add(".selection_select_all() }");

@@ -268,10 +268,11 @@ pub enum SelectionSegment {
         /// Start index in accumulated text buffer
         text_start: usize,
     },
-    /// A child widget whose text content participates in selection (e.g. CodeView)
+    /// A child widget whose text content participates in selection (e.g. CodeView).
+    /// The widget draws its own selection highlights; TextFlow skips it in draw_selection.
     WidgetText {
-        /// Bounding rect in screen coordinates
-        rect: Rect,
+        /// The widget's draw area (queried at event time for its rect)
+        area: Area,
         /// Start index in accumulated text buffer
         text_start: usize,
         /// Length of the widget's text in the accumulated buffer
@@ -321,13 +322,13 @@ impl SelectionTracker {
 
     /// Push a child widget's text content as a selectable segment.
     /// The text is stored in the accumulated buffer so it participates in
-    /// copy, char-index mapping, and selection highlighting.
-    pub fn push_widget_text(&mut self, rect: Rect, text: &str) {
+    /// copy and char-index mapping. The widget draws its own selection highlights.
+    pub fn push_widget_text(&mut self, area: Area, text: &str) {
         let text_start = self.text.len();
         let text_len = text.len();
         self.text.push_str(text);
         self.segments.push(SelectionSegment::WidgetText {
-            rect,
+            area,
             text_start,
             text_len,
         });
@@ -341,8 +342,9 @@ impl SelectionTracker {
         self.text.len()
     }
 
-    /// Find character index from screen point
-    pub fn point_to_index(&self, point: DVec2) -> Option<usize> {
+    /// Find character index from screen point.
+    /// `cx` is needed to query widget areas for WidgetText segments.
+    pub fn point_to_index(&self, cx: &Cx, point: DVec2) -> Option<usize> {
         for segment in &self.segments {
             match segment {
                 SelectionSegment::Text {
@@ -374,28 +376,29 @@ impl SelectionTracker {
                     }
                 }
                 SelectionSegment::WidgetText {
-                    rect,
+                    area,
                     text_start,
                     text_len,
                 } => {
-                    let contains = rect.contains(point);
-                    log!("SELECTION: point_to_index WidgetText rect={:?} text_start={} text_len={} contains={}", rect, text_start, text_len, contains);
-                    if contains {
-                        // Linear interpolation based on y position within the widget
-                        let local_y = (point.y - rect.pos.y).max(0.0);
-                        let fraction = (local_y / rect.size.y).min(1.0);
-                        return Some(text_start + (fraction * *text_len as f64) as usize);
+                    if !area.is_empty() {
+                        let rect = area.rect(cx);
+                        if rect.size.y > 0.0 && rect.contains(point) {
+                            // Linear interpolation based on y position
+                            let local_y = (point.y - rect.pos.y).max(0.0);
+                            let fraction = (local_y / rect.size.y).min(1.0);
+                            return Some(text_start + (fraction * *text_len as f64) as usize);
+                        }
                     }
                 }
             }
         }
 
         // Find nearest segment if point outside all
-        self.nearest_index(point)
+        self.nearest_index(cx, point)
     }
 
     /// Find the nearest character index when point is outside all segments
-    fn nearest_index(&self, point: DVec2) -> Option<usize> {
+    fn nearest_index(&self, cx: &Cx, point: DVec2) -> Option<usize> {
         let mut best: Option<(usize, f64)> = None;
 
         for segment in &self.segments {
@@ -434,16 +437,23 @@ impl SelectionTracker {
                     }
                 }
                 SelectionSegment::WidgetText {
-                    rect,
+                    area,
                     text_start,
                     text_len,
                 } => {
-                    let dist = Self::point_to_rect_distance(point, *rect);
-                    if best.map_or(true, |(_, d)| dist < d) {
-                        // Linear interpolation based on y position
-                        let local_y = (point.y - rect.pos.y).max(0.0);
-                        let fraction = (local_y / rect.size.y.max(1.0)).min(1.0);
-                        best = Some((text_start + (fraction * *text_len as f64) as usize, dist));
+                    if !area.is_empty() {
+                        let rect = area.rect(cx);
+                        let dist = Self::point_to_rect_distance(point, rect);
+                        if best.map_or(true, |(_, d)| dist < d) {
+                            // Linear interpolation based on y position
+                            let local_y = (point.y - rect.pos.y).max(0.0);
+                            let fraction = if rect.size.y > 0.0 {
+                                (local_y / rect.size.y).min(1.0)
+                            } else {
+                                0.0
+                            };
+                            best = Some((text_start + (fraction * *text_len as f64) as usize, dist));
+                        }
                     }
                 }
             }
@@ -528,16 +538,8 @@ impl SelectionTracker {
                         rects.push(*rect);
                     }
                 }
-                SelectionSegment::WidgetText {
-                    rect,
-                    text_start,
-                    text_len,
-                } => {
-                    let seg_end = text_start + text_len;
-                    if start < seg_end && end > *text_start {
-                        // Highlight the full widget rect when any part is selected
-                        rects.push(*rect);
-                    }
+                SelectionSegment::WidgetText { .. } => {
+                    // Widget draws its own selection highlights - skip here
                 }
             }
         }
@@ -654,6 +656,11 @@ pub struct TextFlow {
     /// Selection tracker (only populated when selectable)
     #[rust]
     selection_tracker: SelectionTracker,
+
+    /// Child widgets participating in selection, with their text ranges.
+    /// Kept separate from the tracker so it only holds Areas, not WidgetRefs.
+    #[rust]
+    widget_text_entries: Vec<(WidgetRef, usize, usize)>,
 
     /// Whether currently dragging to select
     #[rust]
@@ -817,19 +824,12 @@ impl WidgetNode for TextFlow {
     }
 
     fn selection_text_len(&self) -> usize {
-        let len = self.text_len();
-        if len > 0 {
-            log!("SELECTION: TextFlow::selection_text_len = {} segments={}", len, self.selection_tracker.segments.len());
-        }
-        len
+        self.text_len()
     }
-    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {
-        let result = self.point_to_char_index(abs);
-        log!("SELECTION: TextFlow::selection_point_to_char_index abs={:?} result={:?} segments={}", abs, result, self.selection_tracker.segments.len());
-        result
+    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
+        self.selection_tracker.point_to_index(cx, abs)
     }
     fn selection_set(&mut self, anchor: usize, cursor: usize) {
-        log!("SELECTION: TextFlow::selection_set anchor={} cursor={} text_len={}", anchor, cursor, self.selection_tracker.total_len());
         self.set_selection(anchor, cursor)
     }
     fn selection_clear(&mut self) {
@@ -965,7 +965,7 @@ impl Widget for TextFlow {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.area);
-                if let Some(idx) = self.selection_tracker.point_to_index(fe.abs) {
+                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
                     self.selection_anchor = idx;
                     self.selection_cursor = idx;
                     self.is_selecting = true;
@@ -973,7 +973,7 @@ impl Widget for TextFlow {
                 }
             }
             Hit::FingerMove(fe) if self.is_selecting => {
-                if let Some(idx) = self.selection_tracker.point_to_index(fe.abs) {
+                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
                     if self.selection_cursor != idx {
                         self.selection_cursor = idx;
                         self.redraw(cx);
@@ -1014,6 +1014,7 @@ impl TextFlow {
         self.clear_stacks();
         if self.selectable {
             self.selection_tracker.clear();
+            self.widget_text_entries.clear();
         }
         // Always reset char_index so it doesn't accumulate across redraws.
         // Without this, char_index grows unboundedly and eventually exceeds
@@ -1156,10 +1157,6 @@ impl TextFlow {
             return;
         }
 
-        let rects = self.selection_tracker.selection_rects(start, end);
-        log!("SELECTION: draw_selection anchor={} cursor={} start={} end={} rects={}", 
-             self.selection_anchor, self.selection_cursor, start, end, rects.len());
-
         self.draw_block.block_type = FlowBlockType::Selection;
 
         for rect in self.selection_tracker.selection_rects(start, end) {
@@ -1192,6 +1189,9 @@ impl TextFlow {
         if self.selectable {
             self.selection_anchor = 0;
             self.selection_cursor = self.selection_tracker.total_len();
+            for (widget, _, _) in &self.widget_text_entries {
+                widget.selection_select_all();
+            }
         }
     }
 
@@ -1200,6 +1200,9 @@ impl TextFlow {
         self.selection_anchor = 0;
         self.selection_cursor = 0;
         self.is_selecting = false;
+        for (widget, _, _) in &self.widget_text_entries {
+            widget.selection_clear();
+        }
     }
 
     /// Check if there is a selection
@@ -1207,11 +1210,27 @@ impl TextFlow {
         self.selectable && self.selection_anchor != self.selection_cursor
     }
 
-    /// Set selection range (for external control, e.g., cross-TextFlow selection)
+    /// Set selection range (for external control, e.g., cross-TextFlow selection).
+    /// Propagates sub-ranges to child WidgetText widgets so they draw their own selection.
     pub fn set_selection(&mut self, anchor: usize, cursor: usize) {
         if self.selectable {
             self.selection_anchor = anchor;
             self.selection_cursor = cursor;
+
+            let start = anchor.min(cursor);
+            let end = anchor.max(cursor);
+
+            // Propagate selection to child widgets
+            for (widget, text_start, text_len) in &self.widget_text_entries {
+                let seg_end = text_start + text_len;
+                if start < seg_end && end > *text_start {
+                    let sub_start = start.saturating_sub(*text_start);
+                    let sub_end = (end - text_start).min(*text_len);
+                    widget.selection_set(sub_start, sub_end);
+                } else {
+                    widget.selection_clear();
+                }
+            }
         }
     }
 
@@ -1241,19 +1260,17 @@ impl TextFlow {
         self.selection_tracker.total_len()
     }
 
-    /// Convert absolute position to character index
-    pub fn point_to_char_index(&self, abs: DVec2) -> Option<usize> {
-        self.selection_tracker.point_to_index(abs)
-    }
-
     /// Register a child widget's text content in the selection tracker.
     /// Call after drawing a child widget whose text should participate
     /// in cross-child selection (e.g. CodeView code blocks).
-    pub fn push_widget_text_for_selection(&mut self, rect: Rect, text: &str) {
-        log!("SELECTION: push_widget_text_for_selection selectable={} rect={:?} text_len={} tracker_segments_before={}", 
-             self.selectable, rect, text.len(), self.selection_tracker.segments.len());
+    /// The widget's Area is stored in the tracker for hit testing;
+    /// the WidgetRef is stored separately for selection propagation.
+    pub fn push_widget_text_for_selection(&mut self, widget: WidgetRef, text: &str) {
         if self.selectable {
-            self.selection_tracker.push_widget_text(rect, text);
+            let text_start = self.selection_tracker.text.len();
+            let text_len = text.len();
+            self.selection_tracker.push_widget_text(widget.area(), text);
+            self.widget_text_entries.push((widget, text_start, text_len));
         }
     }
 
