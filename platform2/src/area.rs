@@ -273,7 +273,6 @@ impl Area {
         return match self {
             Area::Instance(inst) => {
                 if inst.instance_count == 0 {
-                    panic!();
                     error!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return Rect::default();
                 }
