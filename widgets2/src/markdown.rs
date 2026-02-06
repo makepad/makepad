@@ -4,7 +4,7 @@ use crate::{
 };
 
 #[cfg(feature = "markdown")]
-use pulldown_cmark::{Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -259,6 +259,10 @@ pub struct Markdown {
     in_code_block: bool,
     #[rust]
     code_block_string: String,
+    #[rust]
+    in_splash_block: bool,
+    #[rust]
+    splash_block_string: String,
     #[live(false)]
     use_math_widget: bool,
     #[rust]
@@ -427,12 +431,17 @@ impl Markdown {
                     tf.draw_text(cx, &dest_url);
                     tf.draw_text(cx, "]");
                 }
-                MdEvent::Start(Tag::CodeBlock(_kind)) => {
+                MdEvent::Start(Tag::CodeBlock(kind)) => {
                     if !is_first_block {
                         tf.new_line_collapsed_with_spacing(cx, self.pre_code_spacing);
                     }
                     is_first_block = false;
-                    if self.use_code_block_widget {
+                    // Check if this is a runsplash block
+                    let is_runsplash = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.as_ref() == "runsplash");
+                    if is_runsplash {
+                        self.in_splash_block = true;
+                        self.splash_block_string.clear();
+                    } else if self.use_code_block_widget {
                         self.in_code_block = true;
                         self.code_block_string.clear();
                     } else {
@@ -444,7 +453,17 @@ impl Markdown {
                     }
                 }
                 MdEvent::End(TagEnd::CodeBlock) => {
-                    if self.in_code_block {
+                    if self.in_splash_block {
+                        self.in_splash_block = false;
+                        let entry_id = tf.new_counted_id();
+                        let sbs = &self.splash_block_string;
+
+                        // Draw the splash block using the $splash_block template
+                        tf.item_with(cx, entry_id, id!($splash_block), |cx, item, _tf| {
+                            item.widget(ids!($splash_view)).set_text(cx, sbs);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else if self.in_code_block {
                         self.in_code_block = false;
                         let entry_id = tf.new_counted_id();
                         let cbs = &self.code_block_string;
@@ -524,21 +543,27 @@ impl Markdown {
                     }
                 }
                 MdEvent::Text(text) => {
-                    if self.in_code_block {
+                    if self.in_splash_block {
+                        self.splash_block_string.push_str(&text);
+                    } else if self.in_code_block {
                         self.code_block_string.push_str(&text);
                     } else {
                         tf.draw_text(cx, &text.trim_end_matches("\n"));
                     }
                 }
                 MdEvent::SoftBreak => {
-                    if self.in_code_block {
+                    if self.in_splash_block {
+                        self.splash_block_string.push('\n');
+                    } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
                         tf.draw_text(cx, " ");
                     }
                 }
                 MdEvent::HardBreak => {
-                    if self.in_code_block {
+                    if self.in_splash_block {
+                        self.splash_block_string.push('\n');
+                    } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
                         tf.new_line_collapsed(cx);

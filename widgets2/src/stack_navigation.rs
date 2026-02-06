@@ -460,6 +460,10 @@ impl WidgetNode for StackNavigation {
     fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
         self.view.uid_to_widget(uid)
     }
+
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        self.view.widget_tree_walk(nodes)
+    }
 }
 
 impl WidgetMatchEvent for StackNavigation {

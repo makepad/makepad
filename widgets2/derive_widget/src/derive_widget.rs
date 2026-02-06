@@ -111,6 +111,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 .ident(wrap_field)
                 .add(".find_widgets_from_point(cx, point, found)");
             tb.add("   }");
+            tb.add("   fn widget_tree_walk(&self, nodes:&mut Vec<WidgetTreeNode>){");
+            tb.add("       self.")
+                .ident(wrap_field)
+                .add(".widget_tree_walk(nodes)");
+            tb.add("   }");
             // Selection API delegation through wrap field
             tb.add("    fn selection_text_len(&self) -> usize { self.").ident(wrap_field).add(".selection_text_len() }");
             tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> { self.").ident(wrap_field).add(".selection_point_to_char_index(cx, abs) }");
@@ -202,6 +207,13 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                         .add(".find_widgets_from_point(cx, point, found);");
                 }
                 tb.add("    }");
+                tb.add("    fn widget_tree_walk(&self, nodes:&mut Vec<WidgetTreeNode>){");
+                for find_field in &find_fields {
+                    tb.add("    self.")
+                        .ident(find_field)
+                        .add(".widget_tree_walk(nodes);");
+                }
+                tb.add("    }");
                 // Selection API delegation through find fields (first non-default wins)
                 tb.add("    fn selection_text_len(&self) -> usize {");
                 for find_field in &find_fields {
@@ -249,6 +261,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 tb.add("       self.")
                     .ident(deref_field)
                     .add(".find_widgets_from_point(cx, point, found)");
+                tb.add("   }");
+                tb.add("   fn widget_tree_walk(&self, nodes:&mut Vec<WidgetTreeNode>){");
+                tb.add("       self.")
+                    .ident(deref_field)
+                    .add(".widget_tree_walk(nodes)");
                 tb.add("   }");
                 // Selection API delegation through deref field
                 tb.add("    fn selection_text_len(&self) -> usize { self.").ident(deref_field).add(".selection_text_len() }");

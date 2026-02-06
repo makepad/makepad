@@ -586,6 +586,12 @@ impl WidgetNode for View {
         }
     }
 
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        for (id, child) in &self.children {
+            child.widget_tree_walk_named(*id, nodes);
+        }
+    }
+
     fn selection_text_len(&self) -> usize {
         for (_, child) in &self.children {
             let v = child.selection_text_len();

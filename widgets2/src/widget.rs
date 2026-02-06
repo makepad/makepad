@@ -30,6 +30,81 @@ pub enum WidgetDesignAction {
     None,
 }
 
+pub enum WidgetTreeNode {
+    BeginNode {
+        widget: WidgetRef,
+        ty: TypeId,
+        name: LiveId,
+    },
+    EndNode,
+}
+
+pub struct WidgetTree {
+    pub nodes: Vec<WidgetTreeNode>,
+}
+
+impl WidgetTree {
+    pub fn display<'a>(&'a self, heap: &'a ScriptHeap) -> WidgetTreeDisplay<'a> {
+        WidgetTreeDisplay { tree: self, heap }
+    }
+}
+
+pub struct WidgetTreeDisplay<'a> {
+    tree: &'a WidgetTree,
+    heap: &'a ScriptHeap,
+}
+
+impl<'a> fmt::Display for WidgetTreeDisplay<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        let mut depth: usize = 0;
+        for node in &self.tree.nodes {
+            match node {
+                WidgetTreeNode::BeginNode { ty, name, .. } => {
+                    let indent = "  ".repeat(depth);
+                    let type_name = self.heap.type_name_by_id(*ty)
+                        .map(|id| id.as_string(|s| s.unwrap_or("?").to_string()))
+                        .unwrap_or_else(|| format!("{:?}", ty));
+                    if *name != LiveId(0) {
+                        let name_str = name.as_string(|s| s.unwrap_or("?").to_string());
+                        writeln!(f, "{}{}: {}", indent, name_str, type_name)?;
+                    } else {
+                        writeln!(f, "{}{}", indent, type_name)?;
+                    }
+                    depth += 1;
+                }
+                WidgetTreeNode::EndNode => {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Debug for WidgetTree {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        let mut depth: usize = 0;
+        for node in &self.nodes {
+            match node {
+                WidgetTreeNode::BeginNode { ty, name, .. } => {
+                    let indent = "  ".repeat(depth);
+                    if *name != LiveId(0) {
+                        let name_str = name.as_string(|s| s.unwrap_or("?").to_string());
+                        writeln!(f, "{}{}: {:?}", indent, name_str, ty)?;
+                    } else {
+                        writeln!(f, "{}{:?}", indent, ty)?;
+                    }
+                    depth += 1;
+                }
+                WidgetTreeNode::EndNode => {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub trait WidgetNode: ScriptApply {
     fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign> {
         return None;
@@ -55,6 +130,11 @@ pub trait WidgetNode: ScriptApply {
         let area = self.area();
         area.is_valid(cx) && area.rect(cx).contains(point)
     }
+    /// Walk the widget tree depth-first, appending BeginNode/EndNode entries.
+    /// The default implementation does nothing (leaf node). Container widgets
+    /// should override this to walk their children.
+    fn widget_tree_walk(&self, _nodes: &mut Vec<WidgetTreeNode>) {}
+
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
@@ -636,6 +716,32 @@ impl WidgetRef {
             }
             inner.widget.find_widgets_from_point(cx, point, found)
         }
+    }
+
+    /// Walk the widget tree, emitting BeginNode/EndNode with no name (LiveId(0)).
+    pub fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        self.widget_tree_walk_named(LiveId(0), nodes);
+    }
+
+    /// Walk the widget tree, emitting BeginNode/EndNode with the given name.
+    pub fn widget_tree_walk_named(&self, name: LiveId, nodes: &mut Vec<WidgetTreeNode>) {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            let ty = inner.widget.ref_cast_type_id();
+            nodes.push(WidgetTreeNode::BeginNode {
+                widget: self.clone(),
+                ty,
+                name,
+            });
+            inner.widget.widget_tree_walk(nodes);
+            nodes.push(WidgetTreeNode::EndNode);
+        }
+    }
+
+    /// Build a complete WidgetTree from this widget and all its descendants.
+    pub fn widget_tree(&self) -> WidgetTree {
+        let mut nodes = Vec::new();
+        self.widget_tree_walk(&mut nodes);
+        WidgetTree { nodes }
     }
 
     pub fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
