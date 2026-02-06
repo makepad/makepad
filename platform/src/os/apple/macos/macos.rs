@@ -754,7 +754,7 @@ impl Cx {
             let result_clone = permission_result.clone();
 
             // Create a block that will be executed on the main thread
-            let main_thread_block = objc_block!(move || {
+            let main_thread_block = objc_block!(move | | {
                 MacosApp::do_callback(MacosEvent::PermissionResult(result_clone.clone()));
             });
 

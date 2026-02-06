@@ -701,6 +701,8 @@ pub struct TextInput {
     #[rust] last_sent_ime_sel_start: usize,
     /// Cached selection end (byte index) we last sent to the platform IME.
     #[rust] last_sent_ime_sel_end: usize, 
+    
+    #[rust] last_layout_width: f64,
 }
 
  impl LiveHook for TextInput{
@@ -939,9 +941,25 @@ impl TextInput {
     }
 
     fn layout_text(&mut self, cx: &mut Cx2d) {
+        let max_width = cx.turtle().inner_width();
+        
+        let width_changed = if self.last_layout_width.is_nan() {
+            !max_width.is_nan()
+        } else if max_width.is_nan() {
+            true
+        } else {
+            self.last_layout_width != max_width
+        };
+        if width_changed {
+            self.laidout_text = None;
+        }
+        
         if self.laidout_text.is_some() {
             return;
         }
+        
+        self.last_layout_width = max_width;
+        
         let text = if self.is_password {
             self.password_text.clear();
             for grapheme in self.text.graphemes(true) {
