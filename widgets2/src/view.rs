@@ -234,7 +234,21 @@ pub enum ViewAction {
     KeyUp(KeyEvent),
 }
 
+impl View {
+    pub fn set_debug_dump(&mut self, cx: &mut Cx, debug: bool) {
+        if let Some(draw_list) = &self.draw_list {
+            cx.draw_lists[draw_list.id()].debug_dump = debug;
+        }
+    }
+}
+
 impl ViewRef {
+    pub fn set_debug_dump(&self, cx: &mut Cx, debug: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_debug_dump(cx, debug);
+        }
+    }
+
     pub fn finger_down(&self, actions: &Actions) -> Option<FingerDownEvent> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ViewAction::FingerDown(fd) = item.cast() {

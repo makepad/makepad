@@ -297,6 +297,7 @@ impl CxDrawItems{
 #[derive(Default)]
 pub struct CxDrawList {
     pub debug_id: LiveId,
+    pub debug_dump: bool,
     
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
     

@@ -46,8 +46,11 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        //self.views[view_id].set_clipping_uniforms();
-        //self.draw_lists[draw_list_id].uniform_view_transform(&Mat4f::identity());
+        let debug_dump = self.draw_lists[draw_list_id].debug_dump;
+        if debug_dump {
+            println!("=== DEBUG DUMP draw_list {:?} ({} items) ===", draw_list_id.index(), draw_items_len);
+            self.draw_lists[draw_list_id].debug_dump = false;
+        }
 
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id]
@@ -143,12 +146,15 @@ impl Cx {
                     geometry.dirty = false;
                 }
 
-                // Uncomment to enable draw call debug output:
-                // Self::_debug_call_info2(
-                //    sh,
-                //    draw_item.instances.as_ref().unwrap(),
-                //    instances,
-                //);
+                if debug_dump {
+                    Self::debug_dump_draw_call(
+                        draw_item_id,
+                        sh,
+                        draw_item.instances.as_ref().unwrap(),
+                        draw_call,
+                        instances,
+                    );
+                }
 
                 if let Some(inner) = geometry.os.vertex_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {
@@ -309,6 +315,44 @@ impl Cx {
     }
 
     /// Debug helper for printing draw call info. Called when shader has `debug: true` flag.
+    fn debug_dump_draw_call(
+        draw_item_id: usize,
+        sh: &CxDrawShader,
+        instance_data: &[f32],
+        draw_call: &crate::draw_list::CxDrawCall,
+        instances: u64,
+    ) {
+        let total_slots = sh.mapping.instances.total_slots;
+        println!("-- call {} shader:{:?} instances:{} --", draw_item_id, sh.debug_id, instances);
+
+        // Named dyn_uniforms
+        for input in &sh.mapping.dyn_uniforms.inputs {
+            let end = (input.offset + input.slots).min(draw_call.dyn_uniforms.len());
+            println!("  u {:?}: {:?}", input.id, &draw_call.dyn_uniforms[input.offset..end]);
+        }
+
+        // All instances with named values
+        for inst_idx in 0..instances as usize {
+            let base = inst_idx * total_slots;
+            if base + total_slots <= instance_data.len() {
+                let mut parts = Vec::new();
+                for input in &sh.mapping.instances.inputs {
+                    let start = base + input.offset;
+                    let end = start + input.slots;
+                    if end <= instance_data.len() {
+                        let vals = &instance_data[start..end];
+                        if input.slots == 1 {
+                            parts.push(format!("{:?}={}", input.id, vals[0]));
+                        } else {
+                            parts.push(format!("{:?}={:?}", input.id, vals));
+                        }
+                    }
+                }
+                println!("  i[{}] {}", inst_idx, parts.join(" "));
+            }
+        }
+    }
+
     fn _debug_call_info(
         sh: &CxDrawShader,
         instance_data: &[f32],
@@ -317,97 +361,28 @@ impl Cx {
         geometry: &crate::geometry::CxGeometry,
     ) {
         let total_slots = sh.mapping.instances.total_slots;
-
         println!("=== METAL DRAW CALL DEBUG ===");
         println!("  shader debug_id: {:?}", sh.debug_id);
-        println!("  instance_count: {}", instances);
-        println!("  total_slots per instance: {}", total_slots);
-        println!("  instance_data.len(): {} floats", instance_data.len());
-
-        // Print instance layout (all instance fields: dyn + rust)
-        println!(
-            "  --- Instance Layout ({} inputs, {} total_slots) ---",
-            sh.mapping.instances.inputs.len(),
-            sh.mapping.instances.total_slots
-        );
+        println!("  instance_count: {}, total_slots: {}, data_len: {}", instances, total_slots, instance_data.len());
         for input in &sh.mapping.instances.inputs {
-            println!(
-                "    {:?}: offset={}, slots={}",
-                input.id, input.offset, input.slots
-            );
+            println!("    inst {:?}: offset={}, slots={}", input.id, input.offset, input.slots);
         }
-
-        // Print dyn_instances layout (just the dynamic portion)
-        if !sh.mapping.dyn_instances.inputs.is_empty() {
-            println!(
-                "  --- Dyn Instance Layout ({} inputs, {} total_slots) ---",
-                sh.mapping.dyn_instances.inputs.len(),
-                sh.mapping.dyn_instances.total_slots
-            );
-            for input in &sh.mapping.dyn_instances.inputs {
-                println!(
-                    "    {:?}: offset={}, slots={}",
-                    input.id, input.offset, input.slots
-                );
-            }
-        }
-
-        // Print first few instances with named values
-        let num_instances_to_print = 3.min(instances as usize);
-        for inst_idx in 0..num_instances_to_print {
-            let base = inst_idx * total_slots;
+        let num = 3.min(instances as usize);
+        for i in 0..num {
+            let base = i * total_slots;
             if base + total_slots <= instance_data.len() {
-                println!("  --- Instance {} ---", inst_idx);
+                println!("  --- Instance {} ---", i);
                 for input in &sh.mapping.instances.inputs {
-                    let start = base + input.offset;
-                    let end = start + input.slots;
-                    if end <= instance_data.len() {
-                        let values = &instance_data[start..end];
-                        println!("    {:?}: {:?}", input.id, values);
-                    }
+                    let s = base + input.offset;
+                    let e = s + input.slots;
+                    if e <= instance_data.len() { println!("    {:?}: {:?}", input.id, &instance_data[s..e]); }
                 }
             }
         }
-        if instances > 3 {
-            println!("  ... ({} more instances)", instances - 3);
-        }
-
-        // Print uniform info
-        let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
-        println!(
-            "    dyn_uniforms ({} floats): {:?}",
-            draw_call.dyn_uniforms.len(),
-            &draw_call.dyn_uniforms[..draw_call.dyn_uniforms.len().min(8)]
-        );
-        println!(
-            "    draw_call_uniforms ({} floats): {:?}",
-            draw_call_uniforms.len(),
-            draw_call_uniforms
-        );
-
-        // Print texture info
-        println!("    texture_slots count: {}", sh.mapping.textures.len());
-        for (i, slot) in draw_call.texture_slots.iter().enumerate() {
-            if let Some(texture) = slot {
-                println!("    texture[{}]: Some(id={})", i, texture.texture_id().0);
-            } else {
-                println!("    texture[{}]: None", i);
-            }
-        }
-
-        // Print geometry info
-        println!(">>> METAL drawIndexedPrimitives:");
-        println!("    indexCount: {}", geometry.indices.len());
-        println!("    instanceCount: {}", instances);
-        println!("    geometry vertices: {}", geometry.vertices.len());
-        if !geometry.vertices.is_empty() {
-            let num_verts = 12.min(geometry.vertices.len());
-            println!(
-                "    first {} vertex floats: {:?}",
-                num_verts,
-                &geometry.vertices[..num_verts]
-            );
-        }
+        if instances > 3 { println!("  ... ({} more)", instances - 3); }
+        println!("  dyn_uniforms: {:?}", &draw_call.dyn_uniforms[..draw_call.dyn_uniforms.len().min(8)]);
+        println!("  draw_call_uniforms: {:?}", draw_call.draw_call_uniforms.as_slice());
+        println!("  geom: indices={} vertices={}", geometry.indices.len(), geometry.vertices.len());
         println!("=============================");
     }
 
