@@ -1,6 +1,12 @@
 use crate::{
-    code_editor::KeepCursorInView, decoration::DecorationSet, makepad_widgets::*, CodeDocument,
-    CodeEditor, CodeSession,
+    code_editor::KeepCursorInView,
+    decoration::DecorationSet,
+    history::NewGroup,
+    makepad_widgets::*,
+    selection::Affinity,
+    session::SelectionMode,
+    text::Position,
+    CodeDocument, CodeEditor, CodeSession,
 };
 
 script_mod! {
@@ -67,31 +73,51 @@ impl WidgetNode for CodeView {
         self.text.as_ref().len()
     }
 
-    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {
-        // Use the editor's cached viewport rect for hit testing
+    fn selection_point_to_char_index(&self, _cx: &Cx, abs: DVec2) -> Option<usize> {
+        // Use the editor's pick method for precise character mapping
+        let session = self.session.as_ref()?;
         let rect = self.editor.viewport_rect();
         if rect.size.y <= 0.0 {
             return None;
         }
+        let ((position, _affinity), _) = self.editor.pick(session, abs);
         let text = self.text.as_ref();
-        let text_len = text.len();
-        if text_len == 0 {
-            return Some(0);
-        }
-        // Linear interpolation based on y position within the widget
-        let local_y = (abs.y - rect.pos.y).max(0.0);
-        let fraction = (local_y / rect.size.y).min(1.0);
-        Some((fraction * text_len as f64) as usize)
+        Some(CodeView::position_to_byte_offset(text, position))
     }
 
-    fn selection_set(&mut self, _anchor: usize, _cursor: usize) {
-        // Visual highlight in code editor is a future enhancement
+    fn selection_set(&mut self, anchor: usize, cursor: usize) {
+        self.lazy_init_session();
+        let text = self.text.as_ref().to_string();
+        let anchor_pos = CodeView::byte_offset_to_position(&text, anchor);
+        let cursor_pos = CodeView::byte_offset_to_position(&text, cursor);
+        if let Some(session) = &self.session {
+            session.set_selection(anchor_pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+            session.move_to(cursor_pos, Affinity::Before, NewGroup::Yes);
+        }
     }
 
     fn selection_clear(&mut self) {
+        if let Some(session) = &self.session {
+            // Extract cursor position, then drop the Ref before mutating
+            let pos = {
+                let selections = session.selections();
+                if selections.is_empty() { return; }
+                selections[0].cursor.position
+            };
+            session.set_selection(pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+        }
     }
 
     fn selection_select_all(&mut self) {
+        self.lazy_init_session();
+        let text = self.text.as_ref();
+        let text_len = text.len();
+        let start = Position { line_index: 0, byte_index: 0 };
+        let end = CodeView::byte_offset_to_position(text, text_len);
+        if let Some(session) = &self.session {
+            session.set_selection(start, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+            session.move_to(end, Affinity::Before, NewGroup::Yes);
+        }
     }
 
     fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
@@ -121,6 +147,39 @@ impl CodeView {
                 self.editor.keep_cursor_in_view = KeepCursorInView::Once
             }
         }
+    }
+
+    /// Convert a byte offset into the text to a Position (line_index, byte_index).
+    fn byte_offset_to_position(text: &str, offset: usize) -> Position {
+        let offset = offset.min(text.len());
+        let mut line_index = 0;
+        let mut line_start = 0;
+        for (i, ch) in text.char_indices() {
+            if i >= offset {
+                break;
+            }
+            if ch == '\n' {
+                line_index += 1;
+                line_start = i + 1;
+            }
+        }
+        Position {
+            line_index,
+            byte_index: offset - line_start,
+        }
+    }
+
+    /// Convert a Position (line_index, byte_index) to an absolute byte offset.
+    fn position_to_byte_offset(text: &str, pos: Position) -> usize {
+        let mut offset = 0;
+        for (i, line) in text.split('\n').enumerate() {
+            if i == pos.line_index {
+                return offset + pos.byte_index.min(line.len());
+            }
+            offset += line.len() + 1; // +1 for the '\n'
+        }
+        // Past end of text
+        text.len()
     }
 }
 

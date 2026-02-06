@@ -1340,7 +1340,7 @@ impl PortalList {
             let item_rect = item.widget.area().rect(cx);
             if item_rect.contains(abs) {
                 // Found the item, now get char index
-                let char_idx = item.widget.selection_point_to_char_index(abs);
+                let char_idx = item.widget.selection_point_to_char_index(cx, abs);
                 if let Some(char_idx) = char_idx {
                     return Some((*item_id, char_idx));
                 }

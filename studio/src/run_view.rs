@@ -313,6 +313,12 @@ impl Widget for RunView {
             Hit::KeyUp(e) => {
                 manager.send_host_to_stdin(run_view_id, HostToStdin::KeyUp(e));
             }
+            Hit::TextCopy(_) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::TextCopy);
+            }
+            Hit::TextCut(_) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::TextCut);
+            }
             _ => (),
         }
     }

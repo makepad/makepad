@@ -591,6 +591,8 @@ pub enum HostToStdin {
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
+    TextCopy,
+    TextCut,
     Scroll(StdinScroll),
     /*ReloadFile{
         file:String,
@@ -634,6 +636,7 @@ pub enum StdinToHost {
     ReadyToStart,
     RequestAnimationFrame,
     SetCursor(MouseCursor),
+    SetClipboard(String),
     // the client is done drawing, and the texture is completely updated
     DrawCompleteAndFlip(PresentableDraw),
 }
