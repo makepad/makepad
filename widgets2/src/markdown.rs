@@ -449,35 +449,20 @@ impl Markdown {
                         let entry_id = tf.new_counted_id();
                         let cbs = &self.code_block_string;
 
-                        let start_pos = if tf.selectable {
-                            Some(cx.turtle().pos())
-                        } else {
-                            None
-                        };
-
+                        // Draw the code block and capture the CodeView widget ref
+                        let mut code_view_ref = WidgetRef::empty();
                         tf.item_with(cx, entry_id, id!($code_block), |cx, item, _tf| {
                             item.widget(ids!($code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
+                            code_view_ref = item.widget(ids!($code_view));
                         });
 
-                        // Track code block text for cross-child selection
-                        if let Some(start) = start_pos {
-                            let end_pos = cx.turtle().pos();
-                            let height = (end_pos.y - start.y).max(10.0);
-                            let width = cx.turtle().width().max(1.0);
-                            let rect = Rect {
-                                pos: start,
-                                size: dvec2(width, height),
-                            };
-                            log!("SELECTION: Markdown code block start={:?} end_pos={:?} width={} height={} text_len={}",
-                                 start, end_pos, width, height, self.code_block_string.len());
-                            tf.push_widget_text_for_selection(
-                                rect,
-                                &self.code_block_string,
-                            );
-                        } else {
-                            log!("SELECTION: Markdown code block skipped (selectable={})", tf.selectable);
-                        }
+                        // Register the code view widget for cross-child selection
+                        // (its area will be queried at event time, not draw time)
+                        tf.push_widget_text_for_selection(
+                            code_view_ref,
+                            &self.code_block_string,
+                        );
                     } else {
                         tf.font_sizes.pop();
                         tf.fixed.pop();

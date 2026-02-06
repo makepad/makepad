@@ -3,7 +3,7 @@ use {
         cx::Cx,
         cx_api::CxOsOp,
         draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-        event::{Event, WindowGeom},
+        event::{Event, TextClipboardEvent, WindowGeom},
         makepad_live_id::*,
         makepad_math::*,
         makepad_micro_serde::*,
@@ -13,7 +13,7 @@ use {
         window::CxWindowPool,
         CxOsApi,
     },
-    std::io::{self, prelude::*, BufReader},
+    std::{cell::RefCell, io::{self, prelude::*, BufReader}, rc::Rc},
 };
 
 #[derive(Default)]
@@ -127,6 +127,32 @@ impl Cx {
                 }
                 HostToStdin::TextInput(e) => {
                     self.call_event_handler(&Event::TextInput(e));
+                }
+                HostToStdin::TextCopy => {
+                    let response = Rc::new(RefCell::new(None));
+                    self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
+                        response: response.clone(),
+                    }));
+                    let text = response.borrow().clone();
+                    if let Some(text) = text {
+                        let _ = io::stdout().write_all(
+                            StdinToHost::SetClipboard(text).to_json().as_bytes(),
+                        );
+                        let _ = io::stdout().flush();
+                    }
+                }
+                HostToStdin::TextCut => {
+                    let response = Rc::new(RefCell::new(None));
+                    self.call_event_handler(&Event::TextCut(TextClipboardEvent {
+                        response: response.clone(),
+                    }));
+                    let text = response.borrow().clone();
+                    if let Some(text) = text {
+                        let _ = io::stdout().write_all(
+                            StdinToHost::SetClipboard(text).to_json().as_bytes(),
+                        );
+                        let _ = io::stdout().flush();
+                    }
                 }
                 HostToStdin::MouseDown(e) => {
                     self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
@@ -311,6 +337,12 @@ impl Cx {
                 }
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.stdin_timers.timers.remove(&timer_id);
+                }
+                CxOsOp::CopyToClipboard(content) => {
+                    let _ = io::stdout().write_all(
+                        StdinToHost::SetClipboard(content).to_json().as_bytes(),
+                    );
+                    let _ = io::stdout().flush();
                 }
                 _ => (), /*
                          CxOsOp::CloseWindow(_window_id) => {},

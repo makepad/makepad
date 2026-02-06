@@ -74,7 +74,7 @@ pub trait WidgetNode: ScriptApply {
     fn selection_text_len(&self) -> usize {
         0
     }
-    fn selection_point_to_char_index(&self, _abs: DVec2) -> Option<usize> {
+    fn selection_point_to_char_index(&self, _cx: &Cx, _abs: DVec2) -> Option<usize> {
         None
     }
     fn selection_set(&mut self, _anchor: usize, _cursor: usize) {}
@@ -670,9 +670,9 @@ impl WidgetRef {
         }
     }
 
-    pub fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {
+    pub fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
         if let Some(inner) = self.0.borrow().as_ref() {
-            inner.widget.selection_point_to_char_index(abs)
+            inner.widget.selection_point_to_char_index(cx, abs)
         } else {
             None
         }
