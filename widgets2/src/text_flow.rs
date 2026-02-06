@@ -268,6 +268,15 @@ pub enum SelectionSegment {
         /// Start index in accumulated text buffer
         text_start: usize,
     },
+    /// A child widget whose text content participates in selection (e.g. CodeView)
+    WidgetText {
+        /// Bounding rect in screen coordinates
+        rect: Rect,
+        /// Start index in accumulated text buffer
+        text_start: usize,
+        /// Length of the widget's text in the accumulated buffer
+        text_len: usize,
+    },
 }
 
 /// Tracks all segments during drawing for selection support
@@ -310,6 +319,20 @@ impl SelectionTracker {
             .push(SelectionSegment::Gap { rect, text_start });
     }
 
+    /// Push a child widget's text content as a selectable segment.
+    /// The text is stored in the accumulated buffer so it participates in
+    /// copy, char-index mapping, and selection highlighting.
+    pub fn push_widget_text(&mut self, rect: Rect, text: &str) {
+        let text_start = self.text.len();
+        let text_len = text.len();
+        self.text.push_str(text);
+        self.segments.push(SelectionSegment::WidgetText {
+            rect,
+            text_start,
+            text_len,
+        });
+    }
+
     pub fn push_newline(&mut self) {
         self.text.push('\n');
     }
@@ -348,6 +371,20 @@ impl SelectionTracker {
                 SelectionSegment::Gap { rect, text_start } => {
                     if rect.contains(point) {
                         return Some(*text_start);
+                    }
+                }
+                SelectionSegment::WidgetText {
+                    rect,
+                    text_start,
+                    text_len,
+                } => {
+                    let contains = rect.contains(point);
+                    log!("SELECTION: point_to_index WidgetText rect={:?} text_start={} text_len={} contains={}", rect, text_start, text_len, contains);
+                    if contains {
+                        // Linear interpolation based on y position within the widget
+                        let local_y = (point.y - rect.pos.y).max(0.0);
+                        let fraction = (local_y / rect.size.y).min(1.0);
+                        return Some(text_start + (fraction * *text_len as f64) as usize);
                     }
                 }
             }
@@ -394,6 +431,19 @@ impl SelectionTracker {
                     let dist = Self::point_to_rect_distance(point, *rect);
                     if best.map_or(true, |(_, d)| dist < d) {
                         best = Some((*text_start, dist));
+                    }
+                }
+                SelectionSegment::WidgetText {
+                    rect,
+                    text_start,
+                    text_len,
+                } => {
+                    let dist = Self::point_to_rect_distance(point, *rect);
+                    if best.map_or(true, |(_, d)| dist < d) {
+                        // Linear interpolation based on y position
+                        let local_y = (point.y - rect.pos.y).max(0.0);
+                        let fraction = (local_y / rect.size.y.max(1.0)).min(1.0);
+                        best = Some((text_start + (fraction * *text_len as f64) as usize, dist));
                     }
                 }
             }
@@ -478,6 +528,17 @@ impl SelectionTracker {
                         rects.push(*rect);
                     }
                 }
+                SelectionSegment::WidgetText {
+                    rect,
+                    text_start,
+                    text_len,
+                } => {
+                    let seg_end = text_start + text_len;
+                    if start < seg_end && end > *text_start {
+                        // Highlight the full widget rect when any part is selected
+                        rects.push(*rect);
+                    }
+                }
             }
         }
 
@@ -486,7 +547,7 @@ impl SelectionTracker {
 }
 
 // this widget has a retained and an immediate mode api
-#[derive(Script, Widget)]
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct TextFlow {
     #[live]
     pub draw_text: DrawText,
@@ -569,7 +630,6 @@ pub struct TextFlow {
     #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})]
     pub paragraph_margin: Inset,
 
-    #[redraw]
     #[rust]
     area: Area,
     #[rust]
@@ -620,6 +680,26 @@ pub struct TextFlow {
     /// Minimum animation speed in chars per second
     #[live(100.0)]
     pub min_fade_speed: f32,
+
+    // Streaming height animation fields
+    /// Enable smooth height animation when content changes
+    #[live(false)]
+    pub stream_height_animation: bool,
+    /// Current animated height (what we display)
+    #[rust]
+    animated_height: f64,
+    /// Target height (actual content height)
+    #[rust]
+    target_height: f64,
+    /// NextFrame for driving height animation
+    #[rust]
+    height_next_frame: NextFrame,
+    /// Last frame time for height animation dt calculation
+    #[rust]
+    height_last_time: f64,
+    /// Smoothing factor (0-1, higher = faster, 0.8 = smooth and fast)
+    #[live(0.5)]
+    pub height_smoothing: f32,
 }
 
 impl TextFlow {
@@ -709,7 +789,68 @@ pub enum DrawState {
     Drawing,
 }
 
+impl WidgetNode for TextFlow {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn area(&self) -> Area {
+        self.area.area()
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+    }
+
+    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
+
+    fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
+        WidgetRef::empty()
+    }
+
+    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
+        if let Some(items) = self.items.as_ref() {
+            for (_id, (widget, _template)) in items.iter() {
+                widget.find_widgets_from_point(cx, point, found);
+            }
+        }
+    }
+
+    fn selection_text_len(&self) -> usize {
+        let len = self.text_len();
+        if len > 0 {
+            log!("SELECTION: TextFlow::selection_text_len = {} segments={}", len, self.selection_tracker.segments.len());
+        }
+        len
+    }
+    fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {
+        let result = self.point_to_char_index(abs);
+        log!("SELECTION: TextFlow::selection_point_to_char_index abs={:?} result={:?} segments={}", abs, result, self.selection_tracker.segments.len());
+        result
+    }
+    fn selection_set(&mut self, anchor: usize, cursor: usize) {
+        log!("SELECTION: TextFlow::selection_set anchor={} cursor={} text_len={}", anchor, cursor, self.selection_tracker.total_len());
+        self.set_selection(anchor, cursor)
+    }
+    fn selection_clear(&mut self) {
+        self.clear_selection()
+    }
+    fn selection_select_all(&mut self) {
+        self.select_all()
+    }
+    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
+        self.get_text_for_range(start, end)
+    }
+    fn selection_get_full_text(&self) -> String {
+        self.get_full_text()
+    }
+}
+
 impl Widget for TextFlow {
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::Begin) {
             self.begin(cx, walk);
@@ -781,6 +922,37 @@ impl Widget for TextFlow {
             }
         }
 
+        // Handle height animation NextFrame
+        if self.stream_height_animation {
+            if let Some(ev) = self.height_next_frame.is_event(event) {
+                let time = ev.time;
+                let dt = if self.height_last_time > 0.0 {
+                    (time - self.height_last_time).max(0.001)
+                } else {
+                    1.0 / 60.0
+                };
+                self.height_last_time = time;
+
+                let distance = self.target_height - self.animated_height;
+
+                if distance.abs() > 0.5 {
+                    // Exponential smoothing - move a fraction of the remaining distance each frame
+                    // Adjust for frame rate: at 60fps with smoothing=0.5, we move 50% per frame
+                    let frame_rate_adjust = (dt * 60.0).min(1.0);
+                    let factor = 1.0 - (1.0 - self.height_smoothing as f64).powf(frame_rate_adjust);
+
+                    self.animated_height += distance * factor;
+
+                    // Request redraw since height affects layout
+                    self.redraw(cx);
+                    self.height_next_frame = cx.new_next_frame();
+                } else {
+                    // Snap to target and stop
+                    self.animated_height = self.target_height;
+                }
+            }
+        }
+
         // Handle selection events when selectable (standalone mode only)
         // When inside a selectable PortalList, PortalList handles events directly
         if !self.selectable {
@@ -843,14 +1015,23 @@ impl TextFlow {
         if self.selectable {
             self.selection_tracker.clear();
         }
-        // Reset char_index for streaming animation (also while fading out)
-        if self.streaming_animation || !self.is_animation_idle() {
-            self.draw_text.reset_char_index();
-        }
+        // Always reset char_index so it doesn't accumulate across redraws.
+        // Without this, char_index grows unboundedly and eventually exceeds
+        // the shader default total_chars (1 000 000), causing get_color to
+        // compute alpha=0 for every glyph — making text invisible.
+        self.draw_text.reset_char_index();
     }
 
     /// Check if animation is completely idle (not streaming and fade complete)
     pub fn is_animation_idle(&self) -> bool {
+        // Animation was never started — both counters still at their initial zero
+        // values and streaming flag is off.  Without this early-out a fresh
+        // TextFlow would be treated as "mid-animation" because 0.0 < 0.0 + fade_chars,
+        // causing set_total_chars(0.0) which overrides the shader default (1 000 000)
+        // and makes all text invisible.
+        if !self.streaming_animation && self.animated_chars == 0.0 && self.actual_chars == 0.0 {
+            return true;
+        }
         !self.streaming_animation && self.animated_chars >= self.actual_chars + self.fade_chars
     }
 
@@ -883,6 +1064,33 @@ impl TextFlow {
     pub fn end(&mut self, cx: &mut Cx2d) {
         // Draw selection highlight before finishing the turtle
         self.draw_selection(cx);
+
+        // Handle height animation if enabled
+        if self.stream_height_animation {
+            // Capture actual content height before ending turtle
+            let used = cx.turtle().used();
+            let content_height = used.y;
+
+            // Update target and determine what height to report
+            if content_height > 0.0 {
+                if self.animated_height == 0.0 {
+                    // First draw - snap to content height
+                    self.animated_height = content_height;
+                    self.target_height = content_height;
+                } else if (self.target_height - content_height).abs() > 0.5 {
+                    // Content height changed - update target and start animation
+                    self.target_height = content_height;
+                    self.height_next_frame = cx.new_next_frame();
+                }
+            }
+
+            // Override used height to report animated height instead of actual
+            // This makes the container grow smoothly while content is fully drawn
+            if self.animated_height > 0.0 && self.animated_height < content_height {
+                cx.turtle_mut().set_used(used.x, self.animated_height);
+            }
+        }
+
         cx.end_turtle_with_area(&mut self.area);
         self.items.as_mut().unwrap().retain_visible();
 
@@ -920,6 +1128,21 @@ impl TextFlow {
         self.is_animation_idle()
     }
 
+    /// Reset height animation state (for reused widgets or new content).
+    pub fn reset_height_animation(&mut self) {
+        self.animated_height = 0.0;
+        self.target_height = 0.0;
+        self.height_last_time = 0.0;
+    }
+
+    /// Reset all streaming animations (both text fade and height).
+    pub fn reset_all_streaming_animations(&mut self) {
+        // Reset text animation
+        self.reset_streaming_animation();
+        // Reset height animation
+        self.reset_height_animation();
+    }
+
     /// Draw selection highlight rectangles
     fn draw_selection(&mut self, cx: &mut Cx2d) {
         if !self.selectable {
@@ -932,6 +1155,10 @@ impl TextFlow {
         if start == end {
             return;
         }
+
+        let rects = self.selection_tracker.selection_rects(start, end);
+        log!("SELECTION: draw_selection anchor={} cursor={} start={} end={} rects={}", 
+             self.selection_anchor, self.selection_cursor, start, end, rects.len());
 
         self.draw_block.block_type = FlowBlockType::Selection;
 
@@ -1017,6 +1244,17 @@ impl TextFlow {
     /// Convert absolute position to character index
     pub fn point_to_char_index(&self, abs: DVec2) -> Option<usize> {
         self.selection_tracker.point_to_index(abs)
+    }
+
+    /// Register a child widget's text content in the selection tracker.
+    /// Call after drawing a child widget whose text should participate
+    /// in cross-child selection (e.g. CodeView code blocks).
+    pub fn push_widget_text_for_selection(&mut self, rect: Rect, text: &str) {
+        log!("SELECTION: push_widget_text_for_selection selectable={} rect={:?} text_len={} tracker_segments_before={}", 
+             self.selectable, rect, text.len(), self.selection_tracker.segments.len());
+        if self.selectable {
+            self.selection_tracker.push_widget_text(rect, text);
+        }
     }
 
     pub fn begin_code(&mut self, cx: &mut Cx2d) {
@@ -1272,28 +1510,6 @@ impl TextFlow {
         None
     }
 
-    /// Check if a point hits any interactive item widget in this TextFlow.
-    /// This includes links, buttons, and any other inline components.
-    /// Used by PortalList to decide whether to handle selection or pass through to items.
-    pub fn point_hits_item(&self, cx: &Cx, abs: DVec2) -> bool {
-        for (_id, (widget, _template)) in self.items.as_ref().unwrap().iter() {
-            // Check if the point is within this item widget's area
-            let area = widget.area();
-            if !area.is_empty() && area.rect(cx).contains(abs) {
-                return true;
-            }
-            // Also check TextFlowLink's drawn_areas (since links span multiple text rects)
-            if let Some(link) = widget.as_text_flow_link().borrow() {
-                for area in link.drawn_areas.iter() {
-                    if area.rect(cx).contains(abs) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
     pub fn draw_text(&mut self, cx: &mut Cx2d, text: &str) {
         if let Some(DrawState::Drawing) = self.draw_state.get() {
             if (text == " " || text == "") && self.first_thing_on_a_line {
@@ -1438,15 +1654,14 @@ pub enum TextFlowLinkAction {
     None,
 }
 
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister, Animator)]
 pub struct TextFlowLink {
     #[source]
     source: ScriptObjectRef,
     #[apply_default]
     animator: Animator,
 
-    #[redraw]
-    #[area]
+    #[rust]
     area: Area,
 
     #[live(true)]
@@ -1475,9 +1690,51 @@ pub struct TextFlowLink {
     #[live]
     pub text: ArcStringMut,
 
-    #[action_data]
     #[rust]
     action_data: WidgetActionData,
+}
+
+impl WidgetNode for TextFlowLink {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        Walk::default()
+    }
+
+    fn area(&self) -> Area {
+        self.area.area()
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+    }
+
+    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
+
+    fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
+        WidgetRef::empty()
+    }
+
+    fn set_action_data(&mut self, data: std::sync::Arc<dyn ActionTrait>) {
+        self.action_data.set_box(data)
+    }
+
+    fn action_data(&self) -> Option<std::sync::Arc<dyn ActionTrait>> {
+        self.action_data.clone_data()
+    }
+
+    fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
+        // Check main area
+        let area = self.area();
+        if !area.is_empty() && area.rect(cx).contains(point) {
+            return true;
+        }
+        // Links span multiple text rects via drawn_areas
+        for area in self.drawn_areas.iter() {
+            if area.rect(cx).contains(point) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Widget for TextFlowLink {

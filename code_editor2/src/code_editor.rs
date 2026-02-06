@@ -335,6 +335,10 @@ impl CodeEditor {
         self.scroll_bars.area()
     }
 
+    pub fn viewport_rect(&self) -> Rect {
+        self.viewport_rect
+    }
+
     pub fn walk(&self, _cx: &mut Cx) -> Walk {
         self.walk
     }
@@ -344,6 +348,14 @@ impl CodeEditor {
     }
 
     pub fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
+
+    pub fn find_widgets_from_point(
+        &self,
+        _cx: &Cx,
+        _point: DVec2,
+        _found: &mut dyn FnMut(&WidgetRef),
+    ) {
+    }
 
     pub fn draw_empty_editor(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.scroll_bars.begin(cx, walk, Layout::default());
@@ -1480,7 +1492,10 @@ impl CodeEditor {
                     let end_y = start_y + line.scale();
                     if (start_y..=end_y).contains(&position.y) {
                         // Get x position where text starts on this row (after wrap indent)
-                        let (row_text_start_x, _) = line.grid_to_normalized_position(row_index, line.wrap_indent_column_count());
+                        let (row_text_start_x, _) = line.grid_to_normalized_position(
+                            row_index,
+                            line.wrap_indent_column_count(),
+                        );
                         return if position.x < 0.0 {
                             (
                                 (

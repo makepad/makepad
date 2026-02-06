@@ -100,6 +100,14 @@ pub trait Agent {
 
     /// Check if a session is ready
     fn is_session_ready(&self, session_id: SessionId) -> bool;
+
+    /// Whether this agent uses a stateless backend that needs history injected
+    fn is_stateless(&self) -> bool {
+        false
+    }
+
+    /// Inject prior conversation history into a session (for stateless backends)
+    fn inject_history(&mut self, _session_id: SessionId, _messages: Vec<Message>) {}
 }
 
 /// Simple wrapper to use an Agent with automatic session management
@@ -341,5 +349,18 @@ impl Agent for StatelessBackendAdapter {
     fn is_session_ready(&self, session_id: SessionId) -> bool {
         // Stateless sessions are always ready (no initialization needed)
         self.sessions.contains_key(&session_id.0)
+    }
+
+    fn is_stateless(&self) -> bool {
+        true
+    }
+
+    fn inject_history(&mut self, session_id: SessionId, messages: Vec<Message>) {
+        if let Some(session) = self.sessions.get_mut(&session_id.0) {
+            // Prepend history before any existing messages
+            let existing = std::mem::take(&mut session.messages);
+            session.messages = messages;
+            session.messages.extend(existing);
+        }
     }
 }

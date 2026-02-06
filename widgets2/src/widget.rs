@@ -36,6 +36,25 @@ pub trait WidgetNode: ScriptApply {
     }
     fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef;
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
+    /// Find all widgets whose area contains the given point. Calls the closure for each found widget.
+    fn find_widgets_from_point(&self, _cx: &Cx, _point: DVec2, _found: &mut dyn FnMut(&WidgetRef)) {
+    }
+    /// Find the first interactive widget at the given point, or None.
+    fn find_interactive_widget_from_point(&self, cx: &Cx, point: DVec2) -> Option<WidgetRef> {
+        let mut result = None;
+        self.find_widgets_from_point(cx, point, &mut |widget| {
+            if result.is_none() && widget.is_interactive() {
+                result = Some(widget.clone());
+            }
+        });
+        result
+    }
+    /// Whether this widget's area contains the given point. Override for widgets with
+    /// multiple hit areas (e.g. TextFlowLink with drawn_areas).
+    fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
+        let area = self.area();
+        !area.is_empty() && area.rect(cx).contains(point)
+    }
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
@@ -47,6 +66,25 @@ pub trait WidgetNode: ScriptApply {
     fn set_visible(&mut self, _cx: &mut Cx, _visible: bool) {}
     fn visible(&self) -> bool {
         true
+    }
+
+    // Selection API - override for widgets that support text selection.
+    // Containers should delegate to children (the derive macro does this
+    // automatically for #[deref], #[wrap], and #[find] fields).
+    fn selection_text_len(&self) -> usize {
+        0
+    }
+    fn selection_point_to_char_index(&self, _abs: DVec2) -> Option<usize> {
+        None
+    }
+    fn selection_set(&mut self, _anchor: usize, _cursor: usize) {}
+    fn selection_clear(&mut self) {}
+    fn selection_select_all(&mut self) {}
+    fn selection_get_text_for_range(&self, _start: usize, _end: usize) -> String {
+        String::new()
+    }
+    fn selection_get_full_text(&self) -> String {
+        String::new()
     }
 }
 
@@ -61,6 +99,12 @@ pub trait Widget: WidgetNode {
         self.handle_event(cx, event, scope)
     }
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+    /// Whether this widget is interactive (wants mouse/touch events like hover, click).
+    /// Defaults to true. Override to return false for non-interactive widgets.
+    fn is_interactive(&self) -> bool {
+        true
+    }
 
     fn widget(&self, path: &[LiveId]) -> WidgetRef {
         let mut results = WidgetSet::default();
@@ -577,6 +621,94 @@ impl WidgetRef {
     pub fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         if let Some(inner) = self.0.borrow().as_ref() {
             inner.widget.find_widgets(path, cached, results)
+        }
+    }
+
+    pub fn find_widgets_from_point(
+        &self,
+        cx: &Cx,
+        point: DVec2,
+        found: &mut dyn FnMut(&WidgetRef),
+    ) {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            if inner.widget.point_hits_area(cx, point) {
+                found(self);
+            }
+            inner.widget.find_widgets_from_point(cx, point, found)
+        }
+    }
+
+    pub fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.point_hits_area(cx, point)
+        } else {
+            false
+        }
+    }
+
+    pub fn find_interactive_widget_from_point(&self, cx: &Cx, point: DVec2) -> Option<WidgetRef> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.find_interactive_widget_from_point(cx, point)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_interactive(&self) -> bool {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.is_interactive()
+        } else {
+            false
+        }
+    }
+
+    pub fn selection_text_len(&self) -> usize {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.selection_text_len()
+        } else {
+            0
+        }
+    }
+
+    pub fn selection_point_to_char_index(&self, abs: DVec2) -> Option<usize> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.selection_point_to_char_index(abs)
+        } else {
+            None
+        }
+    }
+
+    pub fn selection_set(&self, anchor: usize, cursor: usize) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.selection_set(anchor, cursor)
+        }
+    }
+
+    pub fn selection_clear(&self) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.selection_clear()
+        }
+    }
+
+    pub fn selection_select_all(&self) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.selection_select_all()
+        }
+    }
+
+    pub fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.selection_get_text_for_range(start, end)
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn selection_get_full_text(&self) -> String {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.selection_get_full_text()
+        } else {
+            String::new()
         }
     }
 

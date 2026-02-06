@@ -4,16 +4,10 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
-        text_flow::{TextFlow, TextFlowWidgetRefExt},
         widget::*,
     },
     std::collections::HashMap,
 };
-
-#[cfg(feature = "html")]
-use crate::html::HtmlWidgetRefExt;
-#[cfg(feature = "markdown")]
-use crate::markdown::MarkdownWidgetRefExt;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -1269,82 +1263,6 @@ impl PortalList {
 
     // ---- Cross-boundary text selection methods ----
 
-    /// Get mutable access to TextFlow within an item widget.
-    /// First tries the widget directly (TextFlow, Html, Markdown),
-    /// then searches for a child named $selectable.
-    fn with_text_flow_mut<F, R>(widget: &WidgetRef, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut TextFlow) -> R,
-    {
-        // Try direct TextFlow
-        if let Some(mut tf) = widget.as_text_flow().borrow_mut() {
-            return Some(f(&mut tf));
-        }
-        // Try Html
-        #[cfg(feature = "html")]
-        if let Some(mut html) = widget.as_html().borrow_mut() {
-            return Some(f(&mut html.text_flow));
-        }
-        // Try Markdown
-        #[cfg(feature = "markdown")]
-        if let Some(mut md) = widget.as_markdown().borrow_mut() {
-            return Some(f(&mut md.text_flow));
-        }
-
-        // Search for $selectable child - try TextFlow first
-        if let Some(mut tf) = widget.text_flow(ids!($selectable)).borrow_mut() {
-            return Some(f(&mut tf));
-        }
-        // Try Html child
-        #[cfg(feature = "html")]
-        if let Some(mut html) = widget.html(ids!($selectable)).borrow_mut() {
-            return Some(f(&mut html.text_flow));
-        }
-        // Try Markdown child
-        #[cfg(feature = "markdown")]
-        if let Some(mut md) = widget.markdown(ids!($selectable)).borrow_mut() {
-            return Some(f(&mut md.text_flow));
-        }
-
-        None
-    }
-
-    /// Get immutable access to TextFlow within an item widget.
-    fn with_text_flow<F, R>(widget: &WidgetRef, f: F) -> Option<R>
-    where
-        F: FnOnce(&TextFlow) -> R,
-    {
-        // Try direct TextFlow
-        if let Some(tf) = widget.as_text_flow().borrow() {
-            return Some(f(&tf));
-        }
-        // Try Html
-        #[cfg(feature = "html")]
-        if let Some(html) = widget.as_html().borrow() {
-            return Some(f(&html.text_flow));
-        }
-        // Try Markdown
-        #[cfg(feature = "markdown")]
-        if let Some(md) = widget.as_markdown().borrow() {
-            return Some(f(&md.text_flow));
-        }
-
-        // Search for $selectable child
-        if let Some(tf) = widget.text_flow(ids!($selectable)).borrow() {
-            return Some(f(&tf));
-        }
-        #[cfg(feature = "html")]
-        if let Some(html) = widget.html(ids!($selectable)).borrow() {
-            return Some(f(&html.text_flow));
-        }
-        #[cfg(feature = "markdown")]
-        if let Some(md) = widget.markdown(ids!($selectable)).borrow() {
-            return Some(f(&md.text_flow));
-        }
-
-        None
-    }
-
     /// Check if we have an active selection
     pub fn has_selection(&self) -> bool {
         self.selection_anchor.is_some() && self.selection_cursor.is_some()
@@ -1359,7 +1277,7 @@ impl PortalList {
 
         // Clear selection on all items
         for item in self.items.values() {
-            Self::with_text_flow_mut(&item.widget, |tf| tf.clear_selection());
+            item.widget.selection_clear();
         }
         self.area.redraw(cx);
     }
@@ -1412,7 +1330,7 @@ impl PortalList {
             let text_len = self
                 .items
                 .get(&last_id)
-                .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
+                .map(|item| item.widget.selection_text_len())
                 .unwrap_or(0);
             return Some((last_id, text_len));
         }
@@ -1421,10 +1339,9 @@ impl PortalList {
         for (item_id, item) in self.items.iter() {
             let item_rect = item.widget.area().rect(cx);
             if item_rect.contains(abs) {
-                // Found the item, now get char index from TextFlow
-                if let Some(char_idx) =
-                    Self::with_text_flow(&item.widget, |tf| tf.point_to_char_index(abs)).flatten()
-                {
+                // Found the item, now get char index
+                let char_idx = item.widget.selection_point_to_char_index(abs);
+                if let Some(char_idx) = char_idx {
                     return Some((*item_id, char_idx));
                 }
             }
@@ -1438,7 +1355,7 @@ impl PortalList {
             let text_len = self
                 .items
                 .get(&last_id)
-                .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
+                .map(|item| item.widget.selection_text_len())
                 .unwrap_or(0);
             return Some((last_id, text_len));
         }
@@ -1470,7 +1387,7 @@ impl PortalList {
             let text_len = self
                 .items
                 .get(&above_id)
-                .and_then(|item| Self::with_text_flow(&item.widget, |tf| tf.text_len()))
+                .map(|item| item.widget.selection_text_len())
                 .unwrap_or(0);
             return Some((above_id, text_len));
         }
@@ -1502,28 +1419,25 @@ impl PortalList {
         // Iterate through items in order
         for item_id in start.0..=end.0 {
             if let Some(item) = self.items.get(&item_id) {
-                let text = Self::with_text_flow(&item.widget, |tf| {
-                    if item_id == start.0 && item_id == end.0 {
-                        // Single item selection
-                        tf.get_text_for_range(start.1, end.1)
-                    } else if item_id == start.0 {
-                        // First item - from start char to end
-                        tf.get_text_for_range(start.1, tf.text_len())
-                    } else if item_id == end.0 {
-                        // Last item - from beginning to end char
-                        tf.get_text_for_range(0, end.1)
-                    } else {
-                        // Middle item - full text
-                        tf.get_full_text()
-                    }
-                });
+                let text = if item_id == start.0 && item_id == end.0 {
+                    // Single item selection
+                    item.widget.selection_get_text_for_range(start.1, end.1)
+                } else if item_id == start.0 {
+                    // First item - from start char to end
+                    item.widget
+                        .selection_get_text_for_range(start.1, item.widget.selection_text_len())
+                } else if item_id == end.0 {
+                    // Last item - from beginning to end char
+                    item.widget.selection_get_text_for_range(0, end.1)
+                } else {
+                    // Middle item - full text
+                    item.widget.selection_get_full_text()
+                };
 
-                if let Some(text) = text {
-                    if !result.is_empty() && !text.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(&text);
+                if !result.is_empty() && !text.is_empty() {
+                    result.push('\n');
                 }
+                result.push_str(&text);
             }
         }
 
@@ -1535,38 +1449,37 @@ impl PortalList {
         let Some((start, end)) = self.get_selection_range() else {
             return;
         };
-
         for (item_id, item) in self.items.iter() {
             let item_id = *item_id;
-            Self::with_text_flow_mut(&item.widget, |tf| {
-                if item_id < start.0 || item_id > end.0 {
-                    // Not in selection range
-                    tf.clear_selection();
-                } else if item_id == start.0 && item_id == end.0 {
-                    // Single item selection
-                    tf.set_selection(start.1, end.1);
-                } else if item_id == start.0 {
-                    // First item - from start char to end of text
-                    let len = tf.text_len();
-                    tf.set_selection(start.1, len);
-                } else if item_id == end.0 {
-                    // Last item - from beginning to end char
-                    tf.set_selection(0, end.1);
-                } else {
-                    // Middle item - select all
-                    tf.select_all();
-                }
-            });
+            if item_id < start.0 || item_id > end.0 {
+                // Not in selection range
+                item.widget.selection_clear();
+            } else if item_id == start.0 && item_id == end.0 {
+                // Single item selection
+                item.widget.selection_set(start.1, end.1);
+            } else if item_id == start.0 {
+                // First item - from start char to end of text
+                let len = item.widget.selection_text_len();
+                item.widget.selection_set(start.1, len);
+            } else if item_id == end.0 {
+                // Last item - from beginning to end char
+                item.widget.selection_set(0, end.1);
+            } else {
+                // Middle item - select all
+                item.widget.selection_select_all();
+            }
         }
 
         self.area.redraw(cx);
     }
 
-    /// Check if a point hits any interactive item (link, button, etc.) in any of the visible items.
-    /// Used to decide whether to start selection or pass through to interactive items.
+    /// Check if a point hits any interactive widget (link, button, etc.) in any of the visible items.
     fn point_hits_interactive_item(&self, cx: &Cx, abs: DVec2) -> bool {
         for item in self.items.values() {
-            if Self::with_text_flow(&item.widget, |tf| tf.point_hits_item(cx, abs)).unwrap_or(false)
+            if item
+                .widget
+                .find_interactive_widget_from_point(cx, abs)
+                .is_some()
             {
                 return true;
             }
@@ -1601,6 +1514,12 @@ impl WidgetNode for PortalList {
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         for item in self.items.values() {
             item.widget.find_widgets(path, cached, results);
+        }
+    }
+
+    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
+        for item in self.items.values() {
+            item.widget.find_widgets_from_point(cx, point, found);
         }
     }
 }
@@ -1942,7 +1861,8 @@ impl Widget for PortalList {
                     // Handle selection when selectable, but not if clicking on interactive items
                     let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
                     if self.selectable && fe.is_primary_hit() && !on_interactive {
-                        if let Some((item_id, char_idx)) = self.hit_test_selection(cx, fe.abs) {
+                        let hit = self.hit_test_selection(cx, fe.abs);
+                        if let Some((item_id, char_idx)) = hit {
                             cx.set_key_focus(self.area);
                             self.selection_anchor = Some((item_id, char_idx));
                             self.selection_cursor = Some((item_id, char_idx));
@@ -1973,7 +1893,8 @@ impl Widget for PortalList {
                         }
 
                         // Update cursor position
-                        if let Some((item_id, char_idx)) = self.hit_test_selection(cx, e.abs) {
+                        let hit = self.hit_test_selection(cx, e.abs);
+                        if let Some((item_id, char_idx)) = hit {
                             self.selection_cursor = Some((item_id, char_idx));
                             self.update_item_selections(cx);
                         }
