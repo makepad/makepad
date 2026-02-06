@@ -823,6 +823,14 @@ impl WidgetNode for TextFlow {
         }
     }
 
+    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
+        if let Some(items) = self.items.as_ref() {
+            for (id, (widget, _template)) in items.iter() {
+                widget.widget_tree_walk_named(*id, nodes);
+            }
+        }
+    }
+
     fn selection_text_len(&self) -> usize {
         self.text_len()
     }

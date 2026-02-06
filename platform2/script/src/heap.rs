@@ -132,6 +132,16 @@ impl ScriptHeap {
         None
     }
 
+    /// Returns the registered script name for a given TypeId, if any.
+    pub fn type_name_by_id(&self, type_id: ScriptTypeId) -> Option<LiveId> {
+        if let Some(index) = self.type_index.get(&type_id) {
+            if let Some(object) = &self.type_check[index.0 as usize].object {
+                return object.name;
+            }
+        }
+        None
+    }
+
     pub fn new_module(&mut self, id: LiveId) -> ScriptObject {
         let md = self.new_with_proto(id.into());
         self.set_value_def(self.modules, id.into(), md.into());

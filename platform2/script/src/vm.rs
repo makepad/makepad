@@ -725,9 +725,7 @@ impl<'a> ScriptVm<'a> {
             );
             drop(bodies);
             // lets point our thread to it
-
             let result = self.run_root(body_id);
-
             // Mark the result object with FROM_EVAL flag
             if let Some(result_obj) = result.as_object() {
                 self.bx.heap.set_from_eval(result_obj);
@@ -738,6 +736,7 @@ impl<'a> ScriptVm<'a> {
             NIL
         }
     }
+    
 }
 
 pub struct ScriptVmBase {
