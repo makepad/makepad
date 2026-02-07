@@ -482,10 +482,7 @@ impl Markdown {
 
                         // Register the code view widget for cross-child selection
                         // (its area will be queried at event time, not draw time)
-                        tf.push_widget_text_for_selection(
-                            code_view_ref,
-                            &self.code_block_string,
-                        );
+                        tf.push_widget_text_for_selection(code_view_ref, &self.code_block_string);
                     } else {
                         tf.font_sizes.pop();
                         tf.fixed.pop();

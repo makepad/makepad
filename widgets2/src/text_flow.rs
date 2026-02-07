@@ -452,7 +452,8 @@ impl SelectionTracker {
                             } else {
                                 0.0
                             };
-                            best = Some((text_start + (fraction * *text_len as f64) as usize, dist));
+                            best =
+                                Some((text_start + (fraction * *text_len as f64) as usize, dist));
                         }
                     }
                 }
@@ -687,7 +688,6 @@ pub struct TextFlow {
     /// Minimum animation speed in chars per second
     #[live(100.0)]
     pub min_fade_speed: f32,
-
 }
 
 impl TextFlow {
@@ -1205,7 +1205,8 @@ impl TextFlow {
             let text_start = self.selection_tracker.text.len();
             let text_len = text.len();
             self.selection_tracker.push_widget_text(widget.area(), text);
-            self.widget_text_entries.push((widget, text_start, text_len));
+            self.widget_text_entries
+                .push((widget, text_start, text_len));
         }
     }
 
@@ -1385,6 +1386,12 @@ impl TextFlow {
                 let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
                 (widget, template)
             });
+            // If the template changed (e.g. streaming markdown switched code block type),
+            // recreate the widget from the new template.
+            if entry.1 != template {
+                let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                *entry = (widget, template);
+            }
             f(cx, &entry.0, self)
         } else {
             R::default()
@@ -1404,6 +1411,10 @@ impl TextFlow {
                     let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
                     (widget, template)
                 });
+            if entry.1 != template {
+                let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                *entry = (widget, template);
+            }
             return entry.0.clone();
         }
         WidgetRef::empty()
@@ -1421,6 +1432,10 @@ impl TextFlow {
                     let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
                     (widget, template)
                 });
+            if entry.1 != template {
+                let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                *entry = (widget, template);
+            }
             return entry.0.clone();
         }
         WidgetRef::empty()

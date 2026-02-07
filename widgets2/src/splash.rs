@@ -17,71 +17,44 @@ pub struct Splash {
     pub view: View,
     #[live]
     body: ArcStringMut,
-    #[rust]
-    eval_count: u64,
 }
 
+const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*View{height:Fit, ";
+
 impl Splash {
+    /// Stable identity for the streaming script body, based on pointer address.
+    fn self_id(&self) -> usize {
+        self as *const Self as usize
+    }
+
     fn eval_body(&mut self, cx: &mut Cx) {
         let body = self.body.as_ref();
-        if !body.is_empty() {
-            let self_id = self as *const Self as u64 + self.eval_count;
-            self.eval_count += 1;
-            let code = format!("use mod.prelude.widgets.*View{{height:Fit,  {} }};", body);
-
-            let script_mod = ScriptMod {
-                cargo_manifest_path: String::new(),
-                module_path: String::new(),
-                file: String::new(),
-                line: self_id as usize,
-                column: 0,
-                code,
-                values: vec![],
-            };
-            //let view = &mut self.view;
-            let body_preview: String = body.chars().take(100).collect();
-            log!(
-                "Splash eval_body: body_len={} preview={:?}",
-                body.len(),
-                body_preview
-            );
-            cx.with_vm(|vm| {
-                //let source = view.script_source();
-                let value = vm.eval_with_source(script_mod, NIL.into());
-                // Only apply if the eval didn't produce an error
-                if !value.is_err() && !value.is_nil() {
-                    // Debug: log the value structure
-                    if let Some(obj) = value.as_object() {
-                        let mut vec_info = String::new();
-                        vm.vec_with(obj, |vm, vec| {
-                            vec_info = format!("vec_len={}", vec.len());
-                            for (i, kv) in vec.iter().take(3).enumerate() {
-                                vec_info.push_str(&format!(" [{}]={:?}", i, kv.value.value_type()));
-                                // If it's an object, also show its vec len
-                                if let Some(inner_obj) = kv.value.as_object() {
-                                    let mut inner_vec_len = 0;
-                                    vm.vec_with(inner_obj, |_, inner_vec| {
-                                        inner_vec_len = inner_vec.len();
-                                    });
-                                    vec_info.push_str(&format!("(inner_vec={})", inner_vec_len));
-                                }
-                            }
-                        });
-                        log!("Splash eval result: obj={:?} {}", obj, vec_info);
-                    } else {
-                        log!("Splash eval result: value_type={:?}", value.value_type());
-                    }
-                    self.view
-                        .script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
-                } else {
-                    log!(
-                        "Splash eval SKIPPED: is_err={} is_nil={}",
-                        value.is_err(),
-                        value.is_nil()
-                    );
-                }
-            });
+        if body.is_empty() {
+            return;
         }
+
+        let self_id = self.self_id();
+        // Full code string: prefix + body (no closing - parser auto-closes)
+        let code = format!("{}{}", SPLASH_PREFIX, body);
+
+        // ScriptMod identity is stable (same file/line/column each call)
+        let script_mod = ScriptMod {
+            cargo_manifest_path: String::new(),
+            module_path: String::new(),
+            file: String::new(),
+            line: self_id,
+            column: 0,
+            code: String::new(),
+            values: vec![],
+        };
+
+        cx.with_vm(|vm| {
+            let value = vm.eval_with_append_source(script_mod, &code, NIL.into());
+            if !value.is_err() && !value.is_nil() {
+                self.view
+                    .script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
+            }
+        });
     }
 }
 

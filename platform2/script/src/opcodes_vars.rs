@@ -27,7 +27,10 @@ impl<'a> ScriptVm<'a> {
     /// Part 1 of proto-inherit (+:) operator.
     pub(crate) fn handle_proto_inherit_read(&mut self) {
         let field = self.bx.threads.cur().peek_stack_value();
-        let me = self.bx.threads.cur_ref().mes.last().unwrap();
+        let Some(me) = self.bx.threads.cur_ref().mes.last() else {
+            self.bail("mes empty in proto_inherit_read");
+            return;
+        };
         let proto = if let ScriptMe::Object(object) = me {
             let object = *object;
             let value = self.bx.heap.proto_field_from_value(
@@ -212,7 +215,10 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub(crate) fn handle_end_proto(&mut self) {
-        let me = self.bx.threads.cur().mes.pop().unwrap();
+        let Some(me) = self.bx.threads.cur().mes.pop() else {
+            self.bail("mes empty in end_proto");
+            return;
+        };
         if let ScriptMe::Object(me) = me {
             self.bx.heap.finalize_maybe_pod_type(
                 me,
@@ -231,7 +237,10 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub(crate) fn handle_end_bare(&mut self) {
-        let me = self.bx.threads.cur().mes.pop().unwrap();
+        let Some(me) = self.bx.threads.cur().mes.pop() else {
+            self.bail("mes empty in end_bare");
+            return;
+        };
         self.bx.threads.cur().push_stack_unchecked(me.into());
         self.bx.threads.cur().trap.goto_next();
     }
@@ -243,7 +252,10 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub(crate) fn handle_end_array(&mut self) {
-        let me = self.bx.threads.cur().mes.pop().unwrap();
+        let Some(me) = self.bx.threads.cur().mes.pop() else {
+            self.bail("mes empty in end_array");
+            return;
+        };
         self.bx.threads.cur().push_stack_unchecked(me.into());
         self.bx.threads.cur().trap.goto_next();
     }
@@ -340,7 +352,11 @@ impl<'a> ScriptVm<'a> {
 
     pub(crate) fn handle_me_field(&mut self) {
         let field = self.bx.threads.cur().pop_stack_value();
-        let value = match self.bx.threads.cur_ref().mes.last().unwrap() {
+        let Some(me) = self.bx.threads.cur_ref().mes.last() else {
+            self.bail("mes empty in me_field");
+            return;
+        };
+        let value = match me {
             ScriptMe::Array(_) => {
                 script_err_not_allowed!(
                     self.bx.threads.cur_ref().trap,
@@ -426,7 +442,11 @@ impl<'a> ScriptVm<'a> {
             return;
         }
 
-        match self.bx.threads.cur_ref().mes.last().unwrap() {
+        let Some(me) = self.bx.threads.cur_ref().mes.last() else {
+            self.bail("mes empty in me_splat");
+            return;
+        };
+        match me {
             ScriptMe::Object(obj) => {
                 let obj = *obj;
                 if let Some(source_obj) = source.as_object() {
@@ -631,11 +651,15 @@ impl<'a> ScriptVm<'a> {
 
     pub(crate) fn handle_me(&mut self) {
         let value = if self.bx.threads.cur_ref().call_has_me() {
-            match self.bx.threads.cur_ref().mes.last().unwrap() {
-                ScriptMe::Array(arr) => (*arr).into(),
-                ScriptMe::Call { args, .. } => (*args).into(),
-                ScriptMe::Pod { pod, .. } => (*pod).into(),
-                ScriptMe::Object(obj) => (*obj).into(),
+            match self.bx.threads.cur_ref().mes.last() {
+                Some(ScriptMe::Array(arr)) => (*arr).into(),
+                Some(ScriptMe::Call { args, .. }) => (*args).into(),
+                Some(ScriptMe::Pod { pod, .. }) => (*pod).into(),
+                Some(ScriptMe::Object(obj)) => (*obj).into(),
+                None => {
+                    self.bail("mes empty in me");
+                    return;
+                }
             }
         } else {
             NIL
@@ -645,7 +669,10 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub(crate) fn handle_scope(&mut self) {
-        let scope = *self.bx.threads.cur().scopes.last_mut().unwrap();
+        let Some(&scope) = self.bx.threads.cur().scopes.last() else {
+            self.bail("scopes empty in scope");
+            return;
+        };
         self.bx.threads.cur().push_stack_value(scope.into());
         self.bx.threads.cur().trap.goto_next();
     }
