@@ -10,7 +10,6 @@ script_mod! {
     use mod.prelude.widgets_internal.*
 
     mod.widgets.ViewBase = set_type_default() do #(View::register_widget(vm))
-    mod.widgets.ViewOptimize = set_type_default() do #(ViewOptimize::script_api(vm))
 }
 
 // maybe we should put an enum on the bools like
@@ -79,7 +78,13 @@ pub struct View {
     #[live]
     dpi_factor: Option<f64>,
 
-    #[live]
+    #[live(false)]
+    pub new_batch: bool,
+
+    #[live(false)]
+    pub texture_caching: bool,
+
+    #[rust]
     optimize: ViewOptimize,
     #[live]
     event_order: EventOrder,
@@ -214,6 +219,12 @@ impl ScriptHook for View {
                 }
                 self.children.truncate(self.live_update_order.len());
             }
+        }
+
+        if self.texture_caching {
+            self.optimize = ViewOptimize::Texture;
+        } else if self.new_batch {
+            self.optimize = ViewOptimize::DrawList;
         }
 
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {

@@ -35,6 +35,7 @@ RoundedView{
     width: 380 height: Fit
     flow: Down spacing: 4
     padding: 16
+    new_batch: true
     draw_bg.color: #1e1e2e
     draw_bg.border_radius: 10.0
     Label{text: "My Tasks" draw_text.color: #fff draw_text.text_style.font_size: 14}
@@ -102,8 +103,7 @@ Just output the raw Splash script starting with `use mod.prelude.widgets.*` — 
 ┌─────────────────────────────────────────────────────────────────┐
 │  EVERY View, SolidView, RoundedView MUST HAVE height: Fit      │
 │                                                                 │
-│  ❌ WRONG:  View{ flow: Down padding: 10 ... }                  │
-│  ✅ RIGHT:  View{ flow: Down height: Fit padding: 10 ... }      │
+│  ✅ View{ flow: Down height: Fit padding: 10 ... }              │
 │                                                                 │
 │  If you forget height: Fit, your UI will be INVISIBLE (0px)    │
 └─────────────────────────────────────────────────────────────────┘
@@ -264,6 +264,20 @@ View{
 
 You can override ANY property on an `id :=` child: `label.draw_text.color: #f00`, `icon.visible: false`, `subtitle.draw_text.text_style.font_size: 10`, etc.
 
+**⛔ Named children inside anonymous containers are UNREACHABLE.** If a `:=` child is nested inside an anonymous `View{}` (no `:=` on the View), the override path cannot find it. The override fails silently and the default text shows instead:
+
+Every container in the path from root to the child must have a `:=` name. Then use the full dot-path to override:
+```
+let Item = View{
+    flow: Right
+    texts := View{                           // named with :=
+        flow: Down
+        label := Label{text: "default"}
+    }
+}
+Item{texts.label.text: "new text"}           // full path through named containers
+```
+
 ## Syntax Fundamentals
 
 ```
@@ -398,7 +412,7 @@ align: Center            // Align preset or Align{x: y:}
 // Display
 show_bg: true            // enable background drawing (false by default)
 visible: true
-optimize: ViewOptimize.None  // None | DrawList | Texture
+new_batch: true              // see "Draw Batching" section below
 cursor: MouseCursor.Hand
 grab_key_focus: true
 block_signal_event: false
@@ -408,6 +422,39 @@ clip_y: true
 
 // Scrollbar (for ScrollXView/ScrollYView/ScrollXYView)
 scroll_bars: ScrollBar{}
+```
+
+### Draw Batching and `new_batch: true`
+
+In Makepad, widgets that use the same shader are automatically collected into the same GPU draw call for performance. This means if you draw `Label{} SolidView{ Label{} }`, the second Label's text can end up **behind** the SolidView's background — because both Labels are batched into the same text draw call, which executes before the SolidView's background draw call.
+
+**Set `new_batch: true` on any View that has `show_bg: true` AND contains text children.** This tells the View to start a new draw batch, ensuring its background is drawn before its children's text.
+
+**⛔ CRITICAL for hover effects:** If a View has `show_bg: true` with a hover animator (background goes from transparent `#0000` to opaque on hover), you MUST set `new_batch: true` on that View. Without it, when the hover activates the background becomes opaque and covers the text — making text disappear on hover. This is the #1 mistake with hoverable list items.
+
+**When to use `new_batch: true`:**
+- **Any View/SolidView/RoundedView with `show_bg: true` that contains Labels or other text** — always add `new_batch: true`
+- **Hoverable items** — a View with `show_bg: true` + animator hover that contains text MUST have `new_batch: true` or text vanishes on hover
+- **Container of repeated items** that each have their own background — the container itself also needs `new_batch: true`
+- When text appears invisible despite having the correct color — this is almost always a batching issue
+
+```
+// Hoverable item: new_batch ensures text draws on top of hover bg
+let HoverItem = View{
+    width: Fill height: Fit
+    new_batch: true
+    show_bg: true
+    draw_bg +: { color: uniform(#0000) color_hover: uniform(#fff2) hover: instance(0.0) ... }
+    animator: Animator{ hover: { ... } }
+    label := Label{text: "item" draw_text.color: #fff}
+}
+
+// Parent container of repeated items also needs new_batch
+RoundedView{
+    flow: Down height: Fit new_batch: true
+    HoverItem{label.text: "Walk the dog"}
+    HoverItem{label.text: "Do laundry"}
+}
 ```
 
 ### draw_bg Properties (for SolidView, RoundedView, etc.)
@@ -441,6 +488,14 @@ Label{
     draw_text.color: #fff
     draw_text.text_style.font_size: 12
     text: "Styled"
+}
+```
+
+**⛔ CRITICAL: Default text color is WHITE.** All text widgets (Label, H1, H2, Button text, etc.) default to white (`#fff`). For light/white themes, you MUST explicitly set `draw_text.color` to a dark color on EVERY text element, or text will be invisible (white-on-white). Example:
+For light themes, always set dark text explicitly:
+```
+RoundedView{ draw_bg.color: #f5f5f5 height: Fit new_batch: true
+    Label{text: "Visible!" draw_text.color: #222}
 }
 ```
 
@@ -641,6 +696,25 @@ Vr{}     // vertical rule
 ### Filler (spacer)
 ```
 Filler{}   // View{width: Fill height: Fill} - pushes siblings apart
+```
+
+**⛔ Do NOT use `Filler{}` next to a `width: Fill` sibling in `flow: Right`.** Both compete for remaining space and split it 50/50, causing text to be clipped halfway. Instead, give the content element `width: Fill` — it naturally pushes `width: Fit` siblings to the edge. Only use `Filler{}` between `width: Fit` siblings:
+```
+// Filler between Fit siblings — correct use
+View{ flow: Right
+    Label{text: "left"}
+    Filler{}
+    Label{text: "right"}
+}
+
+// width: Fill takes remaining space, pushes Fit siblings right — no Filler needed
+View{ flow: Right
+    texts := View{ width: Fill height: Fit flow: Down
+        label := Label{text: "title"}
+        sub := Label{text: "subtitle"}
+    }
+    tag := Label{text: "tag"}
+}
 ```
 
 ### Splitter
@@ -935,10 +1009,18 @@ draw_bg +: {
         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
         sdf.box(0. 0. self.rect_size.x self.rect_size.y 4.0)
         sdf.fill(#f00)
-        return sdf.result
+        return sdf.result  // already premultiplied by sdf.fill(), no Pal.premul() needed
     }
 }
 ```
+
+**⛔ CRITICAL: Premultiply colors returned from pixel()!** When you hand-code a `pixel: fn()` that returns a color (not via `sdf.result`), you MUST premultiply the alpha. Without this, colors with alpha (e.g. `#ffffff08`) will render as bright white instead of a subtle tint. Always wrap your return value in `Pal.premul()`:
+```
+pixel: fn(){
+    return Pal.premul(self.color.mix(self.color_hover, self.hover))
+}
+```
+Note: `sdf.fill()` / `sdf.stroke()` already premultiply internally, so `return sdf.result` is safe without extra `Pal.premul()`.
 
 ### SDF Primitives
 ```
@@ -1001,8 +1083,9 @@ self.draw_pass.time  // float: elapsed time (for animation)
 mix(color1 color2 factor)
 color1.mix(color2 factor)           // chained
 #f00.mix(#0f0 0.5).mix(#00f hover)  // multi-chain
-Pal.premul(color)                    // premultiply alpha
+Pal.premul(color)                    // premultiply alpha — REQUIRED when returning from pixel()!
 ```
+⚠️ Always wrap your final color in `Pal.premul()` when returning from `pixel: fn()` (unless returning `sdf.result` which is already premultiplied).
 
 ### Math Utilities
 ```
@@ -1025,14 +1108,6 @@ The animator drives `instance()` variables on draw shaders over time, enabling h
 
 **To make a Label hoverable, wrap it in a View:**
 ```
-// WRONG — Label ignores animator entirely:
-Label{
-    cursor: MouseCursor.Hand
-    animator: Animator{hover: { ... }}    // SILENTLY IGNORED! Label has no animator field
-    text: "broken hover"
-}
-
-// CORRECT — use View as the hoverable container:
 View{
     width: Fill height: Fit
     cursor: MouseCursor.Hand
@@ -1042,7 +1117,7 @@ View{
         color_hover: uniform(#fff2)
         hover: instance(0.0)
         pixel: fn(){
-            return self.color.mix(self.color_hover, self.hover)
+            return Pal.premul(self.color.mix(self.color_hover, self.hover))
         }
     }
     animator: Animator{
@@ -1297,9 +1372,6 @@ Usage: `cursor: MouseCursor.Hand`
 ### SlideSide
 `Left` `Right` `Top`
 
-### ViewOptimize
-`None` `DrawList` `Texture`
-
 ### DragAxis (for Slider)
 `Horizontal` `Vertical`
 
@@ -1384,7 +1456,7 @@ View{
                 min(self.rect_size.x self.rect_size.y) * 0.4
             )
             sdf.fill(#f80)
-            return sdf.result
+            return sdf.result  // already premultiplied by sdf.fill(), no Pal.premul() needed
         }
     }
 }
@@ -1397,6 +1469,7 @@ let HoverItem = View{
     width: Fill height: Fit
     padding: 8
     cursor: MouseCursor.Hand
+    new_batch: true
     show_bg: true
     draw_bg +: {
         color: uniform(#0000)
@@ -1425,6 +1498,7 @@ let HoverItem = View{
 RoundedView{
     width: 300 height: Fit
     padding: 10 flow: Down spacing: 4
+    new_batch: true
     draw_bg.color: #222
     draw_bg.border_radius: 5.0
     Label{text: "Todo Items" draw_text.color: #fff}
@@ -1458,8 +1532,11 @@ RectShadowView{
 
 ## Notes
 
+- **⛔ Default text color is WHITE.** For light/white themes, set `draw_text.color` to a dark color (e.g. `#222`, `#333`) on ALL text elements. Otherwise text is invisible (white-on-white).
+- **⛔ Set `new_batch: true` on ANY View with `show_bg: true` that contains text.** Makepad batches same-shader widgets into one draw call. Without `new_batch: true`, text renders behind backgrounds (invisible text). This is especially critical for **hoverable items** — text vanishes on hover when the background becomes opaque. Set it on BOTH the item template AND the parent container.
 - **⚠️ ALWAYS set `height: Fit` on containers!** The default is `height: Fill` which causes 0-height (invisible UI) in this context.
 - **⛔ Named children in `let` templates MUST use `:=`:** `label := Label{...}`, `tag := Label{...}`, `check := CheckBox{...}`. Override with `Item{label.text: "x"}`. Without `:=`, text is invisible.
+- **⛔ Named children inside anonymous Views are UNREACHABLE.** If `label :=` is inside an unnamed `View{}`, `Item{label.text: "x"}` fails silently. Give the View a name: `texts := View{ label := Label{...} }` then override with `Item{texts.label.text: "x"}`.
 - **🚫 DO NOT invent properties or syntax.** Only use what's documented in this manual. No guessing.
 - No commas between sibling properties (space or newline separated)
 - **Use commas when values contain negative numbers or could be parsed as expressions**: `vec4(-1.0, -1.0, -1.0, -1.0)` NOT `vec4(-1.0 -1.0 -1.0 -1.0)` (the parser would see `-1.0 -1.0` as subtraction). Safe rule: always use commas inside `vec2()`, `vec4()`, and array literals when any value is negative or an expression

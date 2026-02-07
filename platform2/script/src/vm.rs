@@ -839,15 +839,25 @@ impl<'a> ScriptVm<'a> {
             }
 
             let prev_len = body.source_len;
-            if code.len() >= prev_len {
+            // Check if the content has diverged (not just appended to).
+            // Compare the new code's prefix against what the tokenizer already has.
+            let content_changed = prev_len > 0
+                && (code.len() < prev_len
+                    || code[..prev_len] != body.tokenizer.original[..prev_len]);
+
+            if content_changed {
+                // Content changed entirely — reset and re-tokenize from scratch
+                body.tokenizer.clear();
+                body.parser = ScriptParser::default();
+                body.checkpoint = None;
+                body.source_len = code.len();
+                body.tokenizer.tokenize(code, &mut self.bx.heap);
+            } else if code.len() >= prev_len {
                 body.source_len = code.len();
                 let new_chars = &code[prev_len..];
                 if !new_chars.is_empty() {
                     body.tokenizer.tokenize(new_chars, &mut self.bx.heap);
                 }
-            } else {
-                // Code got shorter (e.g. markdown re-parsing trimmed whitespace).
-                // Skip tokenizing — existing opcodes are still valid.
             }
 
             // If we stopped mid-string, intern the partial content so the parser

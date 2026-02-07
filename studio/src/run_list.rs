@@ -84,7 +84,7 @@ script_mod! {
     mod.widgets.RunList = set_type_default() do mod.widgets.RunListBase {
         width: Fill
         height: Fill
-        optimize: ViewOptimize.DrawList
+        new_batch: true
         list := FlatList {
             height: Fill
             width: Fill

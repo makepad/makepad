@@ -13,6 +13,7 @@ workspace.members = [
     "examples/web_cam",
     "examples/arracing",
     "examples/splash",
+    "examples/scratchpad",
     "examples/text_flow",
     "examples/teamtalk",
     "examples/websocket_image",

@@ -1373,7 +1373,7 @@ impl ShaderFnCompiler {
                 script_err_shader!(self.trap, "SCOPE: `scope` keyword not supported in shaders");
             }
             // For
-            Opcode::FOR_1 => self.handle_for_1(vm),
+            Opcode::FOR_1 => self.handle_for_1(vm, &output.backend),
             Opcode::FOR_2 => {
                 script_err_shader!(self.trap, "FOR_2: `for k, v in obj` iteration not supported in shaders, use `for i in 0..n`");
             }
