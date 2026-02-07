@@ -1687,14 +1687,147 @@ pub fn main() {
 
     // Final GC to verify no issues
     vm.gc();
-    let code = script!{
+    let code = script! {
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
-        ~fib(38);
-    };                
+        ~fib(20);
+    };
     let dt = std::time::Instant::now();
-                
+
     vm.eval(code);
     println!("Duration {}", dt.elapsed().as_secs_f64());
-    
+
     println!("Test done");
+
+    // ========================================
+    // Streaming (incremental) parser test
+    // Mimics what Splash widget does: feeds a growing
+    // string to tokenizer+parser incrementally, compares
+    // opcodes against a full non-incremental parse of the
+    // same final string at each step.
+    // ========================================
+    println!("Running streaming parser test...");
+    {
+        use makepad_script::parser::ScriptParser;
+        use makepad_script::tokenizer::ScriptTokenizer;
+
+        let prefix = "use mod.prelude.widgets.*View{height:Fit, ";
+        // A splash-like body that gets streamed in
+        let body = r#"flow: Down height: Fit spacing: 10 padding: 20
+View{
+    flow: Right height: Fit spacing: 10
+    SolidView{width: 50 height: 50 draw_bg.color: #f00}
+    SolidView{width: 50 height: 50 draw_bg.color: #0f0}
+    SolidView{width: 50 height: 50 draw_bg.color: #00f}
+}
+View{
+    flow: Right height: Fit spacing: 10
+    Button{text: "Buttoqwkehrqlkwjerhqwjkerhqlkwjehrlqkjwehrqlkjwehrqklwjehrlqkwjehrqlkwjehrkqjlwehrlqkwjehrlkqwejhrlkqjwehrlkjwqehn 1"}
+    Button{text: "Button 2"}
+    Button{text: "Button 3"}
+    Button{text: "Button 4"}
+}"#;
+
+        let full_code = format!("{}{}", prefix, body);
+
+        // --- Part 1: Opcode comparison (manual tokenizer/parser) ---
+        {
+            let mut inc_tokenizer = ScriptTokenizer::default();
+            let mut inc_parser = ScriptParser::default();
+            let mut prev_len = 0usize;
+            let mut checkpoint: Option<makepad_script::parser::ParserCheckpoint> = None;
+
+            for end in 1..=full_code.len() {
+                let code_so_far = &full_code[..end];
+
+                if let Some(cp) = checkpoint.take() {
+                    inc_parser.restore_checkpoint(cp);
+                }
+
+                let new_chars = &code_so_far[prev_len..];
+                if !new_chars.is_empty() {
+                    inc_tokenizer.tokenize(new_chars, &mut vm.heap_mut());
+                }
+                prev_len = end;
+
+                let unfinished = inc_tokenizer.intern_unfinished_string(&mut vm.heap_mut());
+                let cp = inc_parser.parse_streaming(&inc_tokenizer, "", (0, 0), &[], unfinished);
+
+                let mut ref_tokenizer = ScriptTokenizer::default();
+                let mut ref_parser = ScriptParser::default();
+                ref_tokenizer.tokenize(code_so_far, &mut vm.heap_mut());
+                let ref_unfinished = ref_tokenizer.intern_unfinished_string(&mut vm.heap_mut());
+                ref_parser.parse_streaming(&ref_tokenizer, "", (0, 0), &[], ref_unfinished);
+
+                let tok_match = ref_tokenizer.tokens.len() == inc_tokenizer.tokens.len();
+                let op_match = ref_parser.opcodes == inc_parser.opcodes;
+                if !tok_match || !op_match {
+                    let mut msg = format!(
+                        "STREAM MISMATCH at byte {}/{}\n  code so far: {:?}\n  tokens: ref={} inc={}\n  opcodes: ref={} inc={}",
+                        end, full_code.len(), code_so_far,
+                        ref_tokenizer.tokens.len(), inc_tokenizer.tokens.len(),
+                        ref_parser.opcodes.len(), inc_parser.opcodes.len(),
+                    );
+                    for i in 0..ref_parser.opcodes.len().max(inc_parser.opcodes.len()) {
+                        let r = ref_parser.opcodes.get(i);
+                        let s = inc_parser.opcodes.get(i);
+                        let marker = if r != s { " <<< DIFF" } else { "" };
+                        msg.push_str(&format!(
+                            "\n  opcode[{}]: ref={:?} inc={:?}{}",
+                            i, r, s, marker
+                        ));
+                    }
+                    panic!("{}", msg);
+                }
+                checkpoint = Some(cp);
+            }
+            println!("  Opcode comparison passed ({} steps)", full_code.len());
+        }
+
+        // --- Part 2: Actual execution via eval_with_append_source (byte at a time) ---
+        {
+            for end in 1..=full_code.len() {
+                let code_so_far = &full_code[..end];
+                let script_mod = ScriptMod {
+                    cargo_manifest_path: String::new(),
+                    module_path: String::new(),
+                    file: "streaming_test".to_string(),
+                    line: 0,
+                    column: 0,
+                    code: String::new(),
+                    values: vec![],
+                };
+                // Execute incrementally — errors are expected for incomplete code,
+                // but panics/crashes would indicate bad opcode generation.
+                let _value = vm.eval_with_append_source(script_mod, code_so_far, NIL.into());
+            }
+            println!("  Execution passed ({} steps)", full_code.len());
+        }
+
+        // --- Part 3: 20-char chunks like aichat fake streaming ---
+        {
+            let mut pos = 0usize;
+            let mut steps = 0;
+            while pos < full_code.len() {
+                let mut end = (pos + 20).min(full_code.len());
+                // Align to char boundary
+                while end < full_code.len() && !full_code.is_char_boundary(end) {
+                    end += 1;
+                }
+                let code_so_far = &full_code[..end];
+                let script_mod = ScriptMod {
+                    cargo_manifest_path: String::new(),
+                    module_path: String::new(),
+                    file: "streaming_20char".to_string(),
+                    line: 0,
+                    column: 0,
+                    code: String::new(),
+                    values: vec![],
+                };
+                let _value = vm.eval_with_append_source(script_mod, code_so_far, NIL.into());
+                pos = end;
+                steps += 1;
+            }
+            println!("  20-char chunk execution passed ({} steps)", steps);
+        }
+    }
 }

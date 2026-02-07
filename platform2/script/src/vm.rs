@@ -42,6 +42,8 @@ pub struct ScriptBody {
     pub parser: ScriptParser,
     pub scope: ScriptObjectRef,
     pub me: ScriptObjectRef,
+    pub checkpoint: Option<ParserCheckpoint>,
+    pub source_len: usize,
 }
 
 #[derive(Default)]
@@ -123,6 +125,20 @@ pub struct ScriptVm<'a> {
 }
 
 impl<'a> ScriptVm<'a> {
+    /// Bail out of the interpreter with a script error.
+    /// Use this when a stack (mes, scopes, loops, calls) is unexpectedly empty,
+    /// indicating corrupted bytecode (e.g. from incomplete streaming input).
+    /// Sets trap.on to Return(err) so run_core exits cleanly.
+    pub(crate) fn bail(&mut self, msg: &str) {
+        let err = script_err_unexpected!(self.bx.threads.cur_ref().trap, "{}", msg);
+        self.bx
+            .threads
+            .cur()
+            .trap
+            .on
+            .set(Some(ScriptTrapOn::Bail(err)));
+    }
+
     pub fn heap(&self) -> &ScriptHeap {
         &self.bx.heap
     }
@@ -261,6 +277,9 @@ impl<'a> ScriptVm<'a> {
         loop {
             let err = self.bx.threads.cur().trap.err.borrow_mut().pop_front();
             if let Some(err) = err {
+                if self.bx.silence_errors {
+                    continue;
+                }
                 if let Some(ptr) = err.value.as_err() {
                     if let Some(loc2) = self.bx.code.ip_to_loc(ptr.ip) {
                         log_with_level(
@@ -371,6 +390,24 @@ impl<'a> ScriptVm<'a> {
                     match self.bx.threads.cur().trap.on.take().unwrap() {
                         ScriptTrapOn::Pause => return NIL,
                         ScriptTrapOn::Return(value) => return value,
+                        ScriptTrapOn::Bail(value) => {
+                            // Stack corruption — unwind calls to find our root frame
+                            // and truncate all stacks back to clean state
+                            loop {
+                                if let Some(call) = self.bx.threads.cur().calls.pop() {
+                                    self.bx
+                                        .threads
+                                        .cur()
+                                        .truncate_bases(call.bases, &mut self.bx.heap);
+                                    if call.return_ip.is_none() {
+                                        break; // found the root of this run_core
+                                    }
+                                } else {
+                                    break; // calls stack empty
+                                }
+                            }
+                            return value;
+                        }
                     }
                 }
             } else {
@@ -665,6 +702,8 @@ impl<'a> ScriptVm<'a> {
             parser: ScriptParser::default(),
             scope,
             me,
+            checkpoint: None,
+            source_len: 0,
         };
         let mut bodies = self.bx.code.bodies.borrow_mut();
         for (i, body) in bodies.iter_mut().enumerate() {
@@ -736,7 +775,111 @@ impl<'a> ScriptVm<'a> {
             NIL
         }
     }
-    
+
+    /// Evaluate script incrementally by appending new source to an existing body.
+    ///
+    /// Pass the full growing source code string each time. On first call, creates
+    /// the body and tokenizes/parses everything. On subsequent calls, computes the
+    /// delta (new chars since last call), restores the parser checkpoint (removing
+    /// auto-close opcodes), tokenizes only the new chars, continues parsing, then
+    /// auto-closes again for execution. Always re-executes from opcode 0.
+    pub fn eval_with_append_source(
+        &mut self,
+        script_mod: ScriptMod,
+        code: &str,
+        source: ScriptObject,
+    ) -> ScriptValue {
+        // Look for an existing body with matching file/line/column
+        let existing_body_id = {
+            let bodies = self.bx.code.bodies.borrow();
+            let mut found = None;
+            for (i, body) in bodies.iter().enumerate() {
+                if let ScriptSource::Mod(existing_mod) = &body.source {
+                    if existing_mod.file == script_mod.file
+                        && existing_mod.line == script_mod.line
+                        && existing_mod.column == script_mod.column
+                    {
+                        found = Some(i as u16);
+                        break;
+                    }
+                }
+            }
+            found
+        };
+
+        let body_id = match existing_body_id {
+            Some(id) => id,
+            None => self.add_script_mod(script_mod),
+        };
+
+        // Set __script_source__ on the scope if source is provided
+        if source != ScriptObject::ZERO {
+            let actual_source = if self.bx.heap.is_from_eval(source) {
+                if let Some(proto) = self.bx.heap.proto(source).as_object() {
+                    proto
+                } else {
+                    source
+                }
+            } else {
+                source
+            };
+            let scope = self.bx.code.bodies.borrow()[body_id as usize].scope.obj;
+            self.bx
+                .heap
+                .set_value_def(scope, id!(__script_source__).into(), actual_source.into());
+        }
+
+        let mut bodies = self.bx.code.bodies.borrow_mut();
+        let body = &mut bodies[body_id as usize];
+
+        if let ScriptSource::Mod(existing_mod) = &body.source {
+            // Restore checkpoint (removes auto-close opcodes from previous run)
+            if let Some(cp) = body.checkpoint.take() {
+                body.parser.restore_checkpoint(cp);
+            }
+
+            let prev_len = body.source_len;
+            if code.len() >= prev_len {
+                body.source_len = code.len();
+                let new_chars = &code[prev_len..];
+                if !new_chars.is_empty() {
+                    body.tokenizer.tokenize(new_chars, &mut self.bx.heap);
+                }
+            } else {
+                // Code got shorter (e.g. markdown re-parsing trimmed whitespace).
+                // Skip tokenizing — existing opcodes are still valid.
+            }
+
+            // If we stopped mid-string, intern the partial content so the parser
+            // can emit the real string value into opcodes for incremental rendering.
+            let unfinished = body.tokenizer.intern_unfinished_string(&mut self.bx.heap);
+
+            // Incremental parse: continue from checkpoint, auto-close for execution
+            let cp = body.parser.parse_streaming(
+                &body.tokenizer,
+                &existing_mod.file,
+                (existing_mod.line, existing_mod.column),
+                &existing_mod.values,
+                unfinished,
+            );
+
+            body.checkpoint = Some(cp);
+
+            drop(bodies);
+            // Silence runtime errors during incremental eval — incomplete code
+            // will inevitably produce errors that are meaningless until the
+            // source is fully received.
+            self.bx.silence_errors = true;
+            let result = self.run_root(body_id);
+            self.bx.silence_errors = false;
+            if let Some(result_obj) = result.as_object() {
+                self.bx.heap.set_from_eval(result_obj);
+            }
+            result
+        } else {
+            NIL
+        }
+    }
 }
 
 pub struct ScriptVmBase {
@@ -745,6 +888,7 @@ pub struct ScriptVmBase {
     pub heap: ScriptHeap,
     pub threads: ScriptThreads,
     pub debug_trace: bool,
+    pub silence_errors: bool,
 }
 
 impl ScriptVmBase {
@@ -755,6 +899,7 @@ impl ScriptVmBase {
             threads: ScriptThreads::empty(),
             heap: ScriptHeap::empty(),
             debug_trace: false,
+            silence_errors: false,
         }
     }
 
@@ -780,6 +925,7 @@ impl ScriptVmBase {
             threads: ScriptThreads::new(),
             heap: heap,
             debug_trace: false,
+            silence_errors: false,
         }
     }
 }

@@ -410,9 +410,12 @@ impl ScriptHeap {
                 for err in thread.trap.err.borrow().iter() {
                     self.mark_value(err.value);
                 }
-                // Trap return values
-                if let Some(ScriptTrapOn::Return(v)) = thread.trap.on.get() {
-                    self.mark_value(v);
+                // Trap return/bail values
+                match thread.trap.on.get() {
+                    Some(ScriptTrapOn::Return(v)) | Some(ScriptTrapOn::Bail(v)) => {
+                        self.mark_value(v);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -518,7 +521,8 @@ impl ScriptHeap {
                 if !str.tag.is_marked() {
                     if let Some((k, _)) = self.string_intern.remove_entry(&str.string) {
                         self.strings.set_at(i, None);
-                        if let Some(s) = Arc::into_inner(k.0) {
+                        if let Some(mut s) = Arc::into_inner(k.0) {
+                            s.clear();
                             self.strings_reuse.push(s);
                         }
                         // Increment generation, then push ref with new generation

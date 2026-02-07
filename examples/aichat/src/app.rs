@@ -1,4 +1,5 @@
 use makepad_ai::*;
+use makepad_widgets2::makepad_platform::makepad_micro_serde::*;
 use makepad_widgets2::*;
 
 app_main!(App);
@@ -7,7 +8,6 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.CodeView
 
-    // Chat list widget
     let ChatList = #(ChatList::register_widget(vm)) {
         width: Fill
         height: Fill
@@ -170,7 +170,6 @@ script_mod! {
                     padding: Inset{left: 16 top: 16 right: 16 bottom: 16}
                     spacing: 12
 
-                    // Header with backend selector
                     View {
                         width: Fill
                         height: Fit
@@ -192,14 +191,12 @@ script_mod! {
 
                         $backend_dropdown: DropDown {
                             width: 170
-                            labels: ["Claude (ACP)" "Claude (API)" "Gemini" "Gemini Splash" "OpenAI"]
+                            labels: ["Claude Splash" "Claude (ACP)" "Claude (API)" "Gemini" "Gemini Splash" "OpenAI"]
                         }
                     }
 
-                    // Chat messages area using PortalList
                     $chat_list: ChatList {}
 
-                    // Input area
                     View {
                         width: Fill
                         height: Fit
@@ -230,7 +227,6 @@ script_mod! {
                         }
                     }
 
-                    // Status bar
                     View {
                         width: Fill
                         height: Fit
@@ -249,7 +245,7 @@ script_mod! {
     }
 }
 
-// Store for chat messages accessible to ChatList widget
+// Global chat state accessible to ChatList widget
 pub static CHAT_DATA: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatData {
     messages: Vec::new(),
     streaming_text: String::new(),
@@ -257,8 +253,6 @@ pub static CHAT_DATA: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatD
 });
 
 const CHAT_SAVE_PATH: &str = "aichat_history.json";
-
-use makepad_widgets2::makepad_platform::makepad_micro_serde::*;
 
 #[derive(SerJson, DeJson)]
 struct SavedMessage {
@@ -271,7 +265,6 @@ struct SavedHistory {
     messages: Vec<SavedMessage>,
 }
 
-/// Chat message for display (simplified from AI Message type)
 #[derive(Clone)]
 pub struct ChatMessage {
     pub role: ChatRole,
@@ -305,8 +298,7 @@ impl ChatData {
                 })
                 .collect(),
         };
-        let json = saved.serialize_json();
-        let _ = std::fs::write(CHAT_SAVE_PATH, json);
+        let _ = std::fs::write(CHAT_SAVE_PATH, saved.serialize_json());
     }
 
     pub fn load_from_disk() -> Vec<ChatMessage> {
@@ -331,7 +323,7 @@ impl ChatData {
     }
 }
 
-// ChatList widget that uses PortalList to display messages
+// ChatList widget wrapping PortalList for chat message display
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChatList {
     #[deref]
@@ -347,23 +339,17 @@ impl Widget for ChatList {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let msg_count = data.messages.len();
-                let items_len = if data.is_streaming {
-                    msg_count + 1
-                } else {
-                    msg_count
-                };
+                let items_len = msg_count + data.is_streaming as usize;
                 list.set_item_range(cx, 0, items_len);
 
                 while let Some(item_id) = list.next_visible_item(cx) {
                     if data.is_streaming && item_id == msg_count {
-                        // Streaming message
                         let just_started = self.animating_msg != Some(item_id);
                         if just_started {
                             self.animating_msg = Some(item_id);
                         }
 
-                        let (item_widget, _existed) =
-                            list.item_with_existed(cx, item_id, id!($Assistant));
+                        let (item_widget, _) = list.item_with_existed(cx, item_id, id!($Assistant));
                         let text = if data.streaming_text.is_empty() {
                             "..."
                         } else {
@@ -389,19 +375,13 @@ impl Widget for ChatList {
                         let item_widget = list.item(cx, item_id, template);
                         let mut markdown = item_widget.markdown(ids!($selectable));
                         markdown.set_text(cx, &msg.text);
-
                         if is_animating {
                             markdown.stop_streaming_animation();
                         }
-
                         item_widget.draw_all_unscoped(cx);
-
-                        if is_animating {
-                            if markdown.is_streaming_animation_done() {
-                                self.animating_msg = None;
-                            }
+                        if is_animating && markdown.is_streaming_animation_done() {
+                            self.animating_msg = None;
                         }
-                        continue;
                     }
                 }
             }
@@ -414,24 +394,69 @@ impl Widget for ChatList {
     }
 }
 
-impl ChatListRef {
-    pub fn scroll_to_end(&self, cx: &mut Cx) {
-        if let Some(inner) = self.borrow() {
-            let list = inner.view.portal_list(ids!($list));
-            list.set_tail_range(true);
-            list.scroll_to_end(cx);
-        }
-    }
-}
-
-/// Available backend types
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BackendType {
+    ClaudeSplash,
     ClaudeAcp,
     ClaudeApi,
     Gemini,
     GeminiSplash,
     OpenAi,
+}
+
+const ALL_BACKENDS: [BackendType; 6] = [
+    BackendType::ClaudeSplash,
+    BackendType::ClaudeAcp,
+    BackendType::ClaudeApi,
+    BackendType::Gemini,
+    BackendType::GeminiSplash,
+    BackendType::OpenAi,
+];
+
+impl BackendType {
+    fn to_index(self) -> usize {
+        ALL_BACKENDS.iter().position(|&b| b == self).unwrap()
+    }
+
+    fn from_index(index: usize) -> Option<Self> {
+        ALL_BACKENDS.get(index).copied()
+    }
+
+    fn status_label(self) -> &'static str {
+        match self {
+            Self::ClaudeSplash => "Active: Claude Splash (UI Agent via ACP)",
+            Self::ClaudeAcp => "Active: Claude (ACP via Zed)",
+            Self::ClaudeApi => "Active: Claude (API)",
+            Self::Gemini => "Active: Gemini",
+            Self::GeminiSplash => "Active: Gemini Splash (UI Agent)",
+            Self::OpenAi => "Active: OpenAI",
+        }
+    }
+
+    fn system_prompt(self) -> String {
+        match self {
+            Self::ClaudeSplash | Self::GeminiSplash => {
+                let splash_md_path =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../splash.md");
+                let splash_md = std::fs::read_to_string(&splash_md_path)
+                    .unwrap_or_else(|_| include_str!("../../../splash.md").to_string());
+                format!(
+                    r#"You are an AI agent that can create on-demand UI using Makepad's Splash scripting language.
+
+You can answer questions normally using markdown. But when it makes sense to show something visually — a layout, a UI mockup, a styled card, a button arrangement, an animation, or anything graphical — you should embed a ```runsplash code block in your markdown response. The content inside a ```runsplash block is live Splash script that will be rendered as real interactive UI inline in the chat.
+
+IMPORTANT: `use mod.prelude.widgets.*` is automatically prepended to every runsplash block — do NOT include it yourself. All widget names (View, Label, Button, etc.) are already in scope.
+
+The block content is Splash script. It gets evaluated and rendered as a live widget tree. Do NOT wrap it in Root{{}} or Window{{}} — the content is placed directly inside a container.
+
+Here is the complete Splash scripting manual. Follow it exactly:
+
+{splash_md}"#
+                )
+            }
+            _ => "You are a helpful assistant. Be concise but thorough.".to_string(),
+        }
+    }
 }
 
 #[derive(Script, ScriptHook)]
@@ -450,15 +475,36 @@ pub struct App {
     active_backend: Option<BackendType>,
     #[rust]
     history_injected: bool,
-    #[rust]
-    fake_stream_timer: Timer,
-    #[rust]
-    fake_stream_text: String,
-    #[rust]
-    fake_stream_pos: usize,
 }
 
 impl App {
+    fn run(vm: &mut ScriptVm) -> Self {
+        crate::makepad_widgets2::script_mod(vm);
+        crate::makepad_code_editor2::script_mod(vm);
+
+        let mut available_backends = vec![];
+        if ClaudeAcpAgent::is_available() {
+            available_backends.push(BackendType::ClaudeSplash);
+            available_backends.push(BackendType::ClaudeAcp);
+        }
+        if Self::read_key_file("ANTHROPIC_API_KEY").is_some() {
+            available_backends.push(BackendType::ClaudeApi);
+        }
+        if Self::read_key_file("GOOGLE_API_KEY").is_some() {
+            available_backends.push(BackendType::Gemini);
+            available_backends.push(BackendType::GeminiSplash);
+        }
+        if Self::read_key_file("OPENAI_API_KEY").is_some() {
+            available_backends.push(BackendType::OpenAi);
+        }
+
+        CHAT_DATA.write().unwrap().messages = ChatData::load_from_disk();
+
+        let mut app = App::from_script_mod(vm, self::script_mod);
+        app.available_backends = available_backends;
+        app
+    }
+
     fn read_key_file(path: &str) -> Option<String> {
         std::fs::read_to_string(path)
             .ok()
@@ -466,187 +512,60 @@ impl App {
             .filter(|s| !s.is_empty())
     }
 
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets2::script_mod(vm);
-        crate::makepad_code_editor2::script_mod(vm);
-
-        let mut available_backends = vec![];
-
-        // Check what's available
-        if ClaudeAcpAgent::is_available() {
-            available_backends.push(BackendType::ClaudeAcp);
-        }
-
-        if Self::read_key_file("ANTHROPIC_API_KEY").is_some() {
-            available_backends.push(BackendType::ClaudeApi);
-        }
-
-        if Self::read_key_file("GOOGLE_API_KEY").is_some() {
-            available_backends.push(BackendType::Gemini);
-            available_backends.push(BackendType::GeminiSplash);
-        }
-
-        if Self::read_key_file("OPENAI_API_KEY").is_some() {
-            available_backends.push(BackendType::OpenAi);
-        }
-
-        // Load saved chat history
-        {
-            let mut data = CHAT_DATA.write().unwrap();
-            data.messages = ChatData::load_from_disk();
-        }
-
-        let mut app = App::from_script_mod(vm, self::script_mod);
-        app.available_backends = available_backends;
-        app.agent = None;
-        app.session_id = None;
-        app.current_prompt = None;
-        app.active_backend = None;
-        app.history_injected = false;
-        app
-    }
-
-    fn create_agent(&self, backend_type: BackendType) -> Option<Box<dyn Agent>> {
-        match backend_type {
-            BackendType::ClaudeAcp => {
-                if ClaudeAcpAgent::is_available() {
-                    Some(Box::new(ClaudeAcpAgent::new()))
-                } else {
-                    None
-                }
-            }
+    fn create_agent(&self, backend: BackendType) -> Option<Box<dyn Agent>> {
+        match backend {
+            BackendType::ClaudeSplash | BackendType::ClaudeAcp => ClaudeAcpAgent::is_available()
+                .then(|| Box::new(ClaudeAcpAgent::new()) as Box<dyn Agent>),
             BackendType::ClaudeApi => Self::read_key_file("ANTHROPIC_API_KEY").map(|key| {
-                let backend = ClaudeBackend::new(BackendConfig::Claude {
-                    api_key: Some(key),
-                    oauth_token: None,
-                    model: "claude-sonnet-4-5-20250929".to_string(),
-                });
-                Box::new(StatelessBackendAdapter::new(Box::new(backend))) as Box<dyn Agent>
+                Box::new(StatelessBackendAdapter::new(Box::new(ClaudeBackend::new(
+                    BackendConfig::Claude {
+                        api_key: Some(key),
+                        oauth_token: None,
+                        model: "claude-sonnet-4-5-20250929".to_string(),
+                    },
+                )))) as Box<dyn Agent>
             }),
             BackendType::Gemini | BackendType::GeminiSplash => {
                 Self::read_key_file("GOOGLE_API_KEY").map(|key| {
-                    let backend = GeminiBackend::new(BackendConfig::Gemini {
-                        api_key: key,
-                        model: "gemini-2.0-flash".to_string(),
-                    });
-                    Box::new(StatelessBackendAdapter::new(Box::new(backend))) as Box<dyn Agent>
+                    Box::new(StatelessBackendAdapter::new(Box::new(GeminiBackend::new(
+                        BackendConfig::Gemini {
+                            api_key: key,
+                            model: "gemini-3-pro-preview".to_string(),
+                        },
+                    )))) as Box<dyn Agent>
                 })
             }
             BackendType::OpenAi => Self::read_key_file("OPENAI_API_KEY").map(|key| {
-                let backend = OpenAiBackend::new(BackendConfig::OpenAI {
-                    api_key: key,
-                    model: "gpt-4o".to_string(),
-                    base_url: None,
-                    reasoning_effort: None,
-                });
-                Box::new(StatelessBackendAdapter::new(Box::new(backend))) as Box<dyn Agent>
+                Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
+                    BackendConfig::OpenAI {
+                        api_key: key,
+                        model: "gpt-4o".to_string(),
+                        base_url: None,
+                        reasoning_effort: None,
+                    },
+                )))) as Box<dyn Agent>
             }),
         }
     }
 
-    fn system_prompt_for_backend(backend_type: BackendType) -> String {
-        match backend_type {
-            BackendType::GeminiSplash => {
-                let splash_md = include_str!("../../../splash.md");
-                format!(
-                    r#"You are an AI agent that can create on-demand UI using Makepad's Splash scripting language.
-
-You can answer questions normally using markdown. But when it makes sense to show something visually — a layout, a UI mockup, a styled card, a button arrangement, an animation, or anything graphical — you should embed a ```runsplash code block in your markdown response. The content inside a ```runsplash block is live Splash script that will be rendered as real interactive UI inline in the chat.
-
-## How to use runsplash blocks
-
-In your markdown output, write:
-
-```runsplash
-View{{
-    flow: Down
-    padding: 20
-    spacing: 10
-    Label{{text: "Hello from Splash!"}}
-    Button{{text: "Click me"}}
-}}
-```
-
-IMPORTANT: `use mod.prelude.widgets.*` is automatically prepended to every runsplash block — do NOT include it yourself. All widget names (View, Label, Button, etc.) are already in scope.
-
-The block content is Splash script. It gets evaluated and rendered as a live widget tree. Do NOT wrap it in Root{{}} or Window{{}} — the content is placed directly inside a container.
-
-## Let bindings for reusable components
-
-You can define `let` bindings to create reusable widget templates. **`let` bindings must be defined ABOVE (before) the places where they are used.**
-
-```runsplash
-let MyCard = RoundedView{{
-    width: Fill height: Fit
-    padding: 15 flow: Down spacing: 8
-    show_bg: true
-    draw_bg.color: #334
-    draw_bg.border_radius: 8.0
-}}
-
-View{{
-    flow: Down spacing: 12 padding: 20
-    MyCard{{
-        Label{{text: "Card 1"}}
-    }}
-    MyCard{{
-        Label{{text: "Card 2"}}
-    }}
-}}
-```
-
-## Syntax warnings
-
-- Strings use double quotes only: `text: "Hello"`. No single quotes, no backticks.
-- No commas between properties — they are whitespace-delimited.
-- No semicolons.
-- Every opening brace `{{` must have a matching closing brace `}}`.
-- Property values that are widgets need the type name: `Label{{text: "hi"}}` not just `{{text: "hi"}}`.
-
-## Splash Script Reference
-
-Here is the complete Splash scripting manual. Use it to construct your UI responses:
-
-{splash_md}
-
-## Guidelines
-
-- Use runsplash blocks for anything visual: UI mockups, styled cards, layouts, color palettes, shader demos, button groups, form layouts, etc.
-- You can have multiple runsplash blocks in a single response, mixed with normal markdown text.
-- Keep splash blocks focused — one concept per block when possible.
-- Use `let` bindings at the top of a block to define reusable styled components, then instantiate them below.
-- Use theme variables (theme.color_bg_app, theme.space_2, etc.) for consistent styling.
-- You can use custom shaders with pixel: fn(){{}} for creative visual effects.
-- For simple text answers, just use normal markdown without runsplash blocks.
-- Be creative! Show off what Splash can do."#
-                )
-            }
-            _ => "You are a helpful assistant. Be concise but thorough.".to_string(),
-        }
-    }
-
-    fn switch_backend(&mut self, cx: &mut Cx, backend_type: BackendType) {
-        if self.active_backend == Some(backend_type) {
+    fn switch_backend(&mut self, cx: &mut Cx, backend: BackendType) {
+        if self.active_backend == Some(backend) {
             return;
         }
-
-        // Create new agent
-        if let Some(agent) = self.create_agent(backend_type) {
+        if let Some(agent) = self.create_agent(backend) {
             self.agent = Some(agent);
-            self.active_backend = Some(backend_type);
+            self.active_backend = Some(backend);
             self.session_id = None;
             self.current_prompt = None;
             self.history_injected = false;
 
-            // Create session
             let config = SessionConfig {
-                system_prompt: Some(Self::system_prompt_for_backend(backend_type)),
+                system_prompt: Some(backend.system_prompt()),
                 ..Default::default()
             };
             if let Some(agent) = &mut self.agent {
                 self.session_id = Some(agent.create_session(cx, config));
             }
-
             self.update_status(cx);
         }
     }
@@ -661,16 +580,14 @@ Here is the complete Splash scripting manual. Use it to construct your UI respon
         }
         self.history_injected = false;
 
-        // Create new session for fresh conversation
         if let Some(agent) = &mut self.agent {
-            let backend_type = self.active_backend.unwrap_or(BackendType::Gemini);
+            let backend = self.active_backend.unwrap_or(BackendType::Gemini);
             let config = SessionConfig {
-                system_prompt: Some(Self::system_prompt_for_backend(backend_type)),
+                system_prompt: Some(backend.system_prompt()),
                 ..Default::default()
             };
             self.session_id = Some(agent.create_session(cx, config));
         }
-
         self.ui.redraw(cx);
     }
 
@@ -683,12 +600,9 @@ Here is the complete Splash scripting manual. Use it to construct your UI respon
 
         let (agent, session_id) = match (&mut self.agent, self.session_id) {
             (Some(agent), Some(session_id)) => (agent, session_id),
-            _ => {
-                return;
-            }
+            _ => return,
         };
 
-        // Add user message to display
         let items_len = {
             let mut data = CHAT_DATA.write().unwrap();
             data.messages.push(ChatMessage {
@@ -701,10 +615,9 @@ Here is the complete Splash scripting manual. Use it to construct your UI respon
         };
         input.set_text(cx, "");
 
-        // Inject saved history on first prompt for stateless backends
+        // Inject history on first prompt for stateless backends
         if !self.history_injected && agent.is_stateless() {
             let data = CHAT_DATA.read().unwrap();
-            // Convert all messages except the one we just added
             let history: Vec<Message> = data.messages[..data.messages.len() - 1]
                 .iter()
                 .map(|m| match m.role {
@@ -719,18 +632,21 @@ Here is the complete Splash scripting manual. Use it to construct your UI respon
             self.history_injected = true;
         }
 
-        // Send prompt to agent
-        let prompt_id = agent.send_prompt(cx, session_id, &text);
-        self.current_prompt = Some(prompt_id);
-
-        // Update UI
+        // ACP doesn't support system prompts via the protocol, so for ClaudeSplash
+        // we prepend the splash system prompt context to each user message.
+        let prompt_text = if self.active_backend == Some(BackendType::ClaudeSplash) {
+            let system = BackendType::ClaudeSplash.system_prompt();
+            format!("<system>\n{system}\n</system>\n\n{text}")
+        } else {
+            text
+        };
+        self.current_prompt = Some(agent.send_prompt(cx, session_id, &prompt_text));
         self.ui.view(ids!($cancel_button)).set_visible(cx, true);
 
         let chat_list = self.ui.widget(ids!($chat_list));
         let list = chat_list.portal_list(ids!($list));
         list.set_tail_range(true);
         list.set_first_id_and_scroll(items_len.saturating_sub(1), 0.0);
-
         self.ui.redraw(cx);
     }
 
@@ -738,17 +654,16 @@ Here is the complete Splash scripting manual. Use it to construct your UI respon
         if let (Some(agent), Some(prompt_id)) = (&mut self.agent, self.current_prompt.take()) {
             agent.cancel_prompt(cx, prompt_id);
 
-            {
-                let mut data = CHAT_DATA.write().unwrap();
-                if !data.streaming_text.is_empty() {
-                    let text = std::mem::take(&mut data.streaming_text);
-                    data.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        text,
-                    });
-                }
-                data.is_streaming = false;
+            let mut data = CHAT_DATA.write().unwrap();
+            let text = std::mem::take(&mut data.streaming_text);
+            if !text.is_empty() {
+                data.messages.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    text,
+                });
             }
+            data.is_streaming = false;
+            drop(data);
 
             self.ui.view(ids!($cancel_button)).set_visible(cx, false);
             self.ui.redraw(cx);
@@ -757,35 +672,10 @@ Here is the complete Splash scripting manual. Use it to construct your UI respon
 
     fn update_status(&self, cx: &mut Cx) {
         let status = match self.active_backend {
-            Some(BackendType::ClaudeAcp) => "Active: Claude (ACP via Zed)",
-            Some(BackendType::ClaudeApi) => "Active: Claude (API)",
-            Some(BackendType::Gemini) => "Active: Gemini",
-            Some(BackendType::GeminiSplash) => "Active: Gemini Splash (UI Agent)",
-            Some(BackendType::OpenAi) => "Active: OpenAI",
+            Some(b) => b.status_label(),
             None => "No backend selected",
         };
         self.ui.label(ids!($status_label)).set_text(cx, status);
-    }
-
-    fn backend_type_from_index(&self, index: usize) -> Option<BackendType> {
-        match index {
-            0 => Some(BackendType::ClaudeAcp),
-            1 => Some(BackendType::ClaudeApi),
-            2 => Some(BackendType::Gemini),
-            3 => Some(BackendType::GeminiSplash),
-            4 => Some(BackendType::OpenAi),
-            _ => None,
-        }
-    }
-
-    fn index_from_backend_type(&self, backend_type: BackendType) -> Option<usize> {
-        match backend_type {
-            BackendType::ClaudeAcp => Some(0),
-            BackendType::ClaudeApi => Some(1),
-            BackendType::Gemini => Some(2),
-            BackendType::GeminiSplash => Some(3),
-            BackendType::OpenAi => Some(4),
-        }
     }
 }
 
@@ -794,30 +684,25 @@ impl MatchEvent for App {
         if self.ui.button(ids!($send_button)).clicked(actions) {
             self.send_message(cx);
         }
-
         if self.ui.button(ids!($cancel_button)).clicked(actions) {
             self.cancel_request(cx);
         }
-
         if self.ui.button(ids!($clear_button)).clicked(actions) {
             self.clear_chat(cx);
         }
-
         if self.ui.text_input(ids!($input)).returned(actions).is_some() {
             self.send_message(cx);
         }
-
         if self.ui.text_input(ids!($input)).escaped(actions) {
             self.cancel_request(cx);
         }
-
-        if let Some(item) = self.ui.drop_down(ids!($backend_dropdown)).selected(actions) {
-            if let Some(backend_type) = self.backend_type_from_index(item) {
-                self.switch_backend(cx, backend_type);
+        if let Some(index) = self.ui.drop_down(ids!($backend_dropdown)).selected(actions) {
+            if let Some(backend) = BackendType::from_index(index) {
+                self.switch_backend(cx, backend);
             }
         }
 
-        // Handle message deletion from delete buttons in portal list
+        // Handle message deletion
         let chat_list = self.ui.widget(ids!($chat_list));
         let list = chat_list.portal_list(ids!($list));
         for (item_id, item) in list.items_with_actions(actions) {
@@ -834,47 +719,20 @@ impl MatchEvent for App {
     }
 
     fn handle_startup(&mut self, cx: &mut Cx) {
-        // Prefer Gemini Splash as default, fall back to first available
-        let default_backend = if self.available_backends.contains(&BackendType::GeminiSplash) {
+        let default_backend = if self.available_backends.contains(&BackendType::ClaudeSplash) {
+            Some(BackendType::ClaudeSplash)
+        } else if self.available_backends.contains(&BackendType::GeminiSplash) {
             Some(BackendType::GeminiSplash)
         } else {
             self.available_backends.first().copied()
         };
         if let Some(backend) = default_backend {
             self.switch_backend(cx, backend);
-            // Set the dropdown to match
-            if let Some(idx) = self.index_from_backend_type(backend) {
-                self.ui
-                    .drop_down(ids!($backend_dropdown))
-                    .set_selected_item(cx, idx);
-            }
+            self.ui
+                .drop_down(ids!($backend_dropdown))
+                .set_selected_item(cx, backend.to_index());
         }
         self.update_status(cx);
-
-        // Fake-stream the last assistant message from history for debugging
-        {
-            let mut data = CHAT_DATA.write().unwrap();
-            // Pop the last assistant message to re-stream it
-            if let Some(last) = data.messages.last() {
-                if last.role == ChatRole::Assistant {
-                    self.fake_stream_text = last.text.clone();
-                    self.fake_stream_pos = 0;
-                    let items_len = data.messages.len(); // streaming item will be at this index
-                    data.messages.pop();
-                    data.streaming_text.clear();
-                    data.is_streaming = true;
-
-                    // Scroll the list to show the streaming item
-                    let chat_list = self.ui.widget(ids!($chat_list));
-                    let list = chat_list.portal_list(ids!($list));
-                    list.set_tail_range(true);
-                    list.set_first_id_and_scroll(items_len.saturating_sub(1), 0.0);
-
-                    self.fake_stream_timer = cx.start_timeout(0.3);
-                    self.ui.redraw(cx);
-                }
-            }
-        }
     }
 }
 
@@ -883,56 +741,6 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
 
-        // Handle fake streaming timer
-        if self.fake_stream_timer.is_event(event).is_some() {
-            let chunk_size = 20;
-            let end = (self.fake_stream_pos + chunk_size).min(self.fake_stream_text.len());
-            // Align to char boundary
-            let end = {
-                let mut e = end;
-                while e < self.fake_stream_text.len() && !self.fake_stream_text.is_char_boundary(e)
-                {
-                    e += 1;
-                }
-                e
-            };
-            let chunk = &self.fake_stream_text[self.fake_stream_pos..end];
-            self.fake_stream_pos = end;
-
-            {
-                let mut data = CHAT_DATA.write().unwrap();
-                data.streaming_text.push_str(chunk);
-            }
-
-            if self.fake_stream_pos >= self.fake_stream_text.len() {
-                // Done streaming - finalize the message
-                let mut data = CHAT_DATA.write().unwrap();
-                let text = std::mem::take(&mut data.streaming_text);
-                if !text.is_empty() {
-                    data.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        text,
-                    });
-                }
-                data.is_streaming = false;
-                self.fake_stream_text.clear();
-            } else {
-                // Schedule next tick (~50ms for ~2s total over ~420 chars)
-                self.fake_stream_timer = cx.start_timeout(0.05);
-            }
-
-            // Redraw splash widget if visible
-            let chat_list = self.ui.widget(ids!($chat_list));
-            let list = chat_list.portal_list(ids!($list));
-            let item_id = CHAT_DATA.read().unwrap().messages.len();
-            if let Some((_template, item)) = list.get_item(item_id) {
-                item.clear_query_cache();
-                item.widget(ids!($splash_view)).redraw(cx);
-            }
-            cx.redraw_all();
-        }
-
-        // Handle agent events
         if let Some(agent) = &mut self.agent {
             for event in agent.handle_event(cx, event) {
                 match event {
@@ -948,41 +756,35 @@ impl AppMain for App {
                         let item_id = {
                             let mut data = CHAT_DATA.write().unwrap();
                             data.streaming_text.push_str(&text);
-                            data.messages.len() // streaming item is at messages.len()
+                            data.messages.len()
                         };
-                        // Redraw the specific Splash widget that has DrawList optimization
                         let chat_list = self.ui.widget(ids!($chat_list));
                         let list = chat_list.portal_list(ids!($list));
-                        if let Some((_template, item)) = list.get_item(item_id) {
-                            // Clear query cache before searching (items are dynamically created)
+                        if let Some((_, item)) = list.get_item(item_id) {
                             item.clear_query_cache();
-                            // Redraw the splash_view inside the markdown's splash_block
                             item.widget(ids!($splash_view)).redraw(cx);
                         }
                         cx.redraw_all();
                     }
                     AgentEvent::TurnComplete { .. } => {
-                        {
-                            let mut data = CHAT_DATA.write().unwrap();
-                            let text = std::mem::take(&mut data.streaming_text);
-                            if !text.is_empty() {
-                                data.messages.push(ChatMessage {
-                                    role: ChatRole::Assistant,
-                                    text,
-                                });
-                            }
-                            data.is_streaming = false;
-                            data.save_to_disk();
+                        let mut data = CHAT_DATA.write().unwrap();
+                        let text = std::mem::take(&mut data.streaming_text);
+                        if !text.is_empty() {
+                            data.messages.push(ChatMessage {
+                                role: ChatRole::Assistant,
+                                text,
+                            });
                         }
+                        data.is_streaming = false;
+                        data.save_to_disk();
+                        drop(data);
+
                         self.current_prompt = None;
                         self.ui.view(ids!($cancel_button)).set_visible(cx, false);
                         cx.redraw_all();
                     }
                     AgentEvent::PromptError { error, .. } => {
-                        {
-                            let mut data = CHAT_DATA.write().unwrap();
-                            data.is_streaming = false;
-                        }
+                        CHAT_DATA.write().unwrap().is_streaming = false;
                         self.current_prompt = None;
                         self.ui.view(ids!($cancel_button)).set_visible(cx, false);
                         self.ui
@@ -990,9 +792,7 @@ impl AppMain for App {
                             .set_text(cx, &format!("Error: {}", error));
                         cx.redraw_all();
                     }
-                    AgentEvent::ToolRequest { .. } => {
-                        // Not handling tools yet
-                    }
+                    AgentEvent::ToolRequest { .. } => {}
                 }
             }
         }
