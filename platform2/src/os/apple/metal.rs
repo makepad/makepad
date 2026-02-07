@@ -46,10 +46,21 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        let debug_dump = self.draw_lists[draw_list_id].debug_dump;
-        if debug_dump {
-            println!("=== DEBUG DUMP draw_list {:?} ({} items) ===", draw_list_id.index(), draw_items_len);
+        let debug_dump_count = self.draw_lists[draw_list_id].debug_dump_count;
+        let debug_dump = debug_dump_count > 0;
+        if self.draw_lists[draw_list_id].debug_dump {
             self.draw_lists[draw_list_id].debug_dump = false;
+            self.draw_lists[draw_list_id].debug_dump_count = 6; // dump 6 consecutive frames
+        }
+        if debug_dump {
+            println!(
+                "=== DEBUG DUMP draw_list {:?} ({} items) repaint_id={} frames_left={} ===",
+                draw_list_id.index(),
+                draw_items_len,
+                self.repaint_id,
+                debug_dump_count,
+            );
+            self.draw_lists[draw_list_id].debug_dump_count -= 1;
         }
 
         for draw_item_id in 0..draw_items_len {
@@ -87,6 +98,16 @@ impl Cx {
                     self.demo_time_repaint = true;
                 }
 
+                if debug_dump {
+                    println!(
+                        "  [item {}] instance_dirty={} buffer_index={} instances_len={}",
+                        draw_item_id,
+                        draw_call.instance_dirty,
+                        draw_item.os.instance_buffer.index,
+                        draw_item.instances.as_ref().map(|i| i.len()).unwrap_or(0),
+                    );
+                }
+
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
@@ -98,6 +119,13 @@ impl Cx {
                         .get_mut()
                         .cpu_write()
                         .update(metal_cx, &draw_item.instances.as_ref().unwrap());
+
+                    if debug_dump {
+                        println!(
+                            "    -> advanced to buffer_index={}",
+                            draw_item.os.instance_buffer.index
+                        );
+                    }
                 }
 
                 // update the zbias uniform if we have it.
@@ -323,12 +351,19 @@ impl Cx {
         instances: u64,
     ) {
         let total_slots = sh.mapping.instances.total_slots;
-        println!("-- call {} shader:{:?} instances:{} --", draw_item_id, sh.debug_id, instances);
+        println!(
+            "-- call {} shader:{:?} instances:{} --",
+            draw_item_id, sh.debug_id, instances
+        );
 
         // Named dyn_uniforms
         for input in &sh.mapping.dyn_uniforms.inputs {
             let end = (input.offset + input.slots).min(draw_call.dyn_uniforms.len());
-            println!("  u {:?}: {:?}", input.id, &draw_call.dyn_uniforms[input.offset..end]);
+            println!(
+                "  u {:?}: {:?}",
+                input.id,
+                &draw_call.dyn_uniforms[input.offset..end]
+            );
         }
 
         // All instances with named values
@@ -363,9 +398,17 @@ impl Cx {
         let total_slots = sh.mapping.instances.total_slots;
         println!("=== METAL DRAW CALL DEBUG ===");
         println!("  shader debug_id: {:?}", sh.debug_id);
-        println!("  instance_count: {}, total_slots: {}, data_len: {}", instances, total_slots, instance_data.len());
+        println!(
+            "  instance_count: {}, total_slots: {}, data_len: {}",
+            instances,
+            total_slots,
+            instance_data.len()
+        );
         for input in &sh.mapping.instances.inputs {
-            println!("    inst {:?}: offset={}, slots={}", input.id, input.offset, input.slots);
+            println!(
+                "    inst {:?}: offset={}, slots={}",
+                input.id, input.offset, input.slots
+            );
         }
         let num = 3.min(instances as usize);
         for i in 0..num {
@@ -375,14 +418,28 @@ impl Cx {
                 for input in &sh.mapping.instances.inputs {
                     let s = base + input.offset;
                     let e = s + input.slots;
-                    if e <= instance_data.len() { println!("    {:?}: {:?}", input.id, &instance_data[s..e]); }
+                    if e <= instance_data.len() {
+                        println!("    {:?}: {:?}", input.id, &instance_data[s..e]);
+                    }
                 }
             }
         }
-        if instances > 3 { println!("  ... ({} more)", instances - 3); }
-        println!("  dyn_uniforms: {:?}", &draw_call.dyn_uniforms[..draw_call.dyn_uniforms.len().min(8)]);
-        println!("  draw_call_uniforms: {:?}", draw_call.draw_call_uniforms.as_slice());
-        println!("  geom: indices={} vertices={}", geometry.indices.len(), geometry.vertices.len());
+        if instances > 3 {
+            println!("  ... ({} more)", instances - 3);
+        }
+        println!(
+            "  dyn_uniforms: {:?}",
+            &draw_call.dyn_uniforms[..draw_call.dyn_uniforms.len().min(8)]
+        );
+        println!(
+            "  draw_call_uniforms: {:?}",
+            draw_call.draw_call_uniforms.as_slice()
+        );
+        println!(
+            "  geom: indices={} vertices={}",
+            geometry.indices.len(),
+            geometry.vertices.len()
+        );
         println!("=============================");
     }
 

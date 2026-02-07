@@ -441,36 +441,39 @@ impl Animator {
             // For each key in target_apply (including prototype chain), get the "from" value:
             // 1. First try state_object (current animated values)
             // 2. Fall back to default state's apply if not in state_object
-            vm.proto_map_iter_mut_with(target_apply, &mut |vm: &mut ScriptVm, target_map: &mut ScriptObjectMap| {
-                for (key, _) in target_map.iter() {
-                    // Try state_object first, fall back to default_apply
-                    let from_val = if let Some(ref state_obj_ref) = self.state_object {
-                        let v = vm.bx.heap.value(state_obj_ref.as_object(), *key, NoTrap);
-                        if !v.is_nil() && !v.is_err() {
-                            v
+            vm.proto_map_iter_mut_with(
+                target_apply,
+                &mut |vm: &mut ScriptVm, target_map: &mut ScriptObjectMap| {
+                    for (key, _) in target_map.iter() {
+                        // Try state_object first, fall back to default_apply
+                        let from_val = if let Some(ref state_obj_ref) = self.state_object {
+                            let v = vm.bx.heap.value(state_obj_ref.as_object(), *key, NoTrap);
+                            if !v.is_nil() && !v.is_err() {
+                                v
+                            } else if let Some(default_obj) = default_apply {
+                                vm.bx.heap.value(default_obj, *key, NoTrap)
+                            } else {
+                                ScriptValue::NIL
+                            }
                         } else if let Some(default_obj) = default_apply {
                             vm.bx.heap.value(default_obj, *key, NoTrap)
                         } else {
                             ScriptValue::NIL
-                        }
-                    } else if let Some(default_obj) = default_apply {
-                        vm.bx.heap.value(default_obj, *key, NoTrap)
-                    } else {
-                        ScriptValue::NIL
-                    };
+                        };
 
-                    if !from_val.is_nil() && !from_val.is_err() {
-                        // Deep copy if it's an object
-                        if let Some(from_obj) = from_val.as_object() {
-                            let new_obj = vm.bx.heap.new_object();
-                            Self::deep_copy_object(vm, new_obj, from_obj);
-                            vm.bx.heap.set_value_def(snapshot, *key, new_obj.into());
-                        } else {
-                            vm.bx.heap.set_value_def(snapshot, *key, from_val);
+                        if !from_val.is_nil() && !from_val.is_err() {
+                            // Deep copy if it's an object
+                            if let Some(from_obj) = from_val.as_object() {
+                                let new_obj = vm.bx.heap.new_object();
+                                Self::deep_copy_object(vm, new_obj, from_obj);
+                                vm.bx.heap.set_value_def(snapshot, *key, new_obj.into());
+                            } else {
+                                vm.bx.heap.set_value_def(snapshot, *key, from_val);
+                            }
                         }
                     }
-                }
-            });
+                },
+            );
 
             // Create a ScriptObjectRef to prevent GC from freeing the snapshot
             vm.bx.heap.new_object_ref(snapshot)
@@ -566,6 +569,58 @@ impl Animator {
         }
 
         false
+    }
+
+    /// Debug dump of animator state for diagnosing flickering issues
+    pub fn debug_dump(&self, heap: &ScriptHeap) -> String {
+        let mut out = String::new();
+        // Current states
+        out.push_str("states:{");
+        for (i, (group_id, state_id)) in self.current_states.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            group_id.as_string(|s| {
+                out.push_str(s.unwrap_or("?"));
+            });
+            out.push(':');
+            state_id.as_string(|s| {
+                out.push_str(s.unwrap_or("?"));
+            });
+        }
+        out.push_str("} ");
+        // Active tracks
+        if !self.tracks.is_empty() {
+            out.push_str("tracks:[");
+            for (i, track) in self.tracks.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                track.group_id.as_string(|s| {
+                    out.push_str(s.unwrap_or("?"));
+                });
+                out.push_str("->");
+                track.state_id.as_string(|s| {
+                    out.push_str(s.unwrap_or("?"));
+                });
+            }
+            out.push_str("] ");
+        }
+        // State object
+        if let Some(ref state_obj) = self.state_object {
+            out.push_str("state_obj:");
+            let mut recur = Vec::new();
+            heap.to_debug_string(
+                ScriptValue::from(state_obj.clone()),
+                &mut recur,
+                &mut out,
+                false,
+                0,
+            );
+        } else {
+            out.push_str("state_obj:None");
+        }
+        out
     }
 
     /// Check if any animation tracks are currently active
@@ -687,59 +742,71 @@ impl Animator {
     ) {
         // Iterate over the 'to' object's properties INCLUDING prototype chain
         // This ensures we don't miss inherited properties
-        vm.proto_map_iter_mut_with(to, &mut |vm: &mut ScriptVm, to_map: &mut ScriptObjectMap| {
-            for (key, to_value) in to_map.iter() {
-                let to_val = to_value.value;
+        vm.proto_map_iter_mut_with(
+            to,
+            &mut |vm: &mut ScriptVm, to_map: &mut ScriptObjectMap| {
+                for (key, to_value) in to_map.iter() {
+                    let to_val = to_value.value;
 
-                // Read from 'from' snapshot (never mutated)
-                let from_val = vm.bx.heap.value(from, *key, NoTrap);
+                    // Read from 'from' snapshot (never mutated)
+                    let from_val = vm.bx.heap.value(from, *key, NoTrap);
 
-                // Get existing value at this key in result's OWN map only (not prototype)
-                // This is critical: we must not reuse objects from prototypes as they
-                // might be shared with template objects
-                let existing = vm.map_mut_with(result, |_vm, result_map| {
-                    result_map.get(key).map(|v| v.value).unwrap_or(ScriptValue::NIL)
-                });
-                
-                // Interpolate values (creates new objects for nested structures to avoid aliasing)
-                let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
+                    // Get existing value at this key in result's OWN map only (not prototype)
+                    // This is critical: we must not reuse objects from prototypes as they
+                    // might be shared with template objects
+                    let existing = vm.map_mut_with(result, |_vm, result_map| {
+                        result_map
+                            .get(key)
+                            .map(|v| v.value)
+                            .unwrap_or(ScriptValue::NIL)
+                    });
 
-                // Write to result (state_object)
-                vm.bx.heap.set_value_def(result, *key, interpolated);
-            }
-        });
+                    // Interpolate values (creates new objects for nested structures to avoid aliasing)
+                    let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
+
+                    // Write to result (state_object)
+                    vm.bx.heap.set_value_def(result, *key, interpolated);
+                }
+            },
+        );
     }
 
     /// Merge source object's values into target object (used for snap/cut operations)
     /// IMPORTANT: This deep-copies objects from source to avoid mutating templates
     /// Uses proto_map_iter_mut_with to include inherited properties from prototypes
     fn merge_object(vm: &mut ScriptVm, target: ScriptObject, source: ScriptObject) {
-        vm.proto_map_iter_mut_with(source, &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
-            for (key, source_value) in source_map.iter() {
-                let source_val = source_value.value;
+        vm.proto_map_iter_mut_with(
+            source,
+            &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
+                for (key, source_value) in source_map.iter() {
+                    let source_val = source_value.value;
 
-                // Get existing value at this key in target's OWN map only
-                let existing = vm.map_mut_with(target, |_vm, target_map| {
-                    target_map.get(key).map(|v| v.value).unwrap_or(ScriptValue::NIL)
-                });
+                    // Get existing value at this key in target's OWN map only
+                    let existing = vm.map_mut_with(target, |_vm, target_map| {
+                        target_map
+                            .get(key)
+                            .map(|v| v.value)
+                            .unwrap_or(ScriptValue::NIL)
+                    });
 
-                if let Some(source_obj) = source_val.as_object() {
-                    // Source is an object - we need to handle it carefully
-                    if let Some(existing_obj) = existing.as_object() {
-                        // Both exist as objects in own map - recursively merge into existing
-                        Self::merge_object(vm, existing_obj, source_obj);
+                    if let Some(source_obj) = source_val.as_object() {
+                        // Source is an object - we need to handle it carefully
+                        if let Some(existing_obj) = existing.as_object() {
+                            // Both exist as objects in own map - recursively merge into existing
+                            Self::merge_object(vm, existing_obj, source_obj);
+                        } else {
+                            // Target doesn't have this in own map yet - create a COPY, don't reference
+                            let new_obj = vm.bx.heap.new_object();
+                            Self::deep_copy_object(vm, new_obj, source_obj);
+                            vm.bx.heap.set_value_def(target, *key, new_obj.into());
+                        }
                     } else {
-                        // Target doesn't have this in own map yet - create a COPY, don't reference
-                        let new_obj = vm.bx.heap.new_object();
-                        Self::deep_copy_object(vm, new_obj, source_obj);
-                        vm.bx.heap.set_value_def(target, *key, new_obj.into());
+                        // Primitive value - just copy it directly (primitives are value types)
+                        vm.bx.heap.set_value_def(target, *key, source_val);
                     }
-                } else {
-                    // Primitive value - just copy it directly (primitives are value types)
-                    vm.bx.heap.set_value_def(target, *key, source_val);
                 }
-            }
-        });
+            },
+        );
     }
 
     /// Deep copy all values from source object to dest object
@@ -747,21 +814,24 @@ impl Animator {
     /// IMPORTANT: Flattens the prototype chain to avoid shared prototype issues
     fn deep_copy_object(vm: &mut ScriptVm, dest: ScriptObject, source: ScriptObject) {
         // Use proto_map_iter_mut_with to walk the prototype chain and flatten all values
-        vm.proto_map_iter_mut_with(source, &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
-            for (key, source_value) in source_map.iter() {
-                let source_val = source_value.value;
+        vm.proto_map_iter_mut_with(
+            source,
+            &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
+                for (key, source_value) in source_map.iter() {
+                    let source_val = source_value.value;
 
-                if let Some(source_obj) = source_val.as_object() {
-                    // Recursively copy nested objects (also flattening their prototypes)
-                    let new_obj = vm.bx.heap.new_object();
-                    Self::deep_copy_object(vm, new_obj, source_obj);
-                    vm.bx.heap.set_value_def(dest, *key, new_obj.into());
-                } else {
-                    // Primitive - copy directly
-                    vm.bx.heap.set_value_def(dest, *key, source_val);
+                    if let Some(source_obj) = source_val.as_object() {
+                        // Recursively copy nested objects (also flattening their prototypes)
+                        let new_obj = vm.bx.heap.new_object();
+                        Self::deep_copy_object(vm, new_obj, source_obj);
+                        vm.bx.heap.set_value_def(dest, *key, new_obj.into());
+                    } else {
+                        // Primitive - copy directly
+                        vm.bx.heap.set_value_def(dest, *key, source_val);
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     /// Interpolate between two ScriptValues
