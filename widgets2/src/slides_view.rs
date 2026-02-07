@@ -22,7 +22,7 @@ script_mod! {
             color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             radius: theme.container_corner_radius
         }
-        $title: H1{
+        title := H1{
             text: "SlideTitle"
             draw_text +: {
                 color: theme.color_text
@@ -42,7 +42,7 @@ script_mod! {
             color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             radius: theme.container_corner_radius
         }
-        $title: H1{
+        title := H1{
             text: "SlideTitle"
             draw_text +: {
                 color: theme.color_text
@@ -126,17 +126,18 @@ impl ScriptHook for SlidesView {
         scope: &mut Scope,
         value: ScriptValue,
     ) {
-        // Handle $prop children from the object's vec (these are our slide templates)
+        // Handle vec_key children from the object's vec (these are our slide templates)
         // Only collect during template applies (not eval) to avoid storing temporary objects
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 vm.vec_with(obj, |vm, vec| {
                     for kv in vec {
-                        if kv.key.is_prefixed_id() {
-                            // $prop children are our slides
+                        if kv.key.as_id().is_some() {
+                            // vec_key children are our slides
                             if let Some(id) = kv.key.as_id() {
                                 if let Some(template_obj) = kv.value.as_object() {
-                                    self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    self.templates
+                                        .insert(id, vm.bx.heap.new_object_ref(template_obj));
                                     self.draw_order.push(id);
                                 }
 

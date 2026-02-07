@@ -406,6 +406,54 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().trap.goto_next();
     }
 
+    pub(crate) fn handle_assign_me_vec(&mut self) {
+        let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let field = self.bx.threads.cur().pop_stack_value();
+        if self.bx.threads.cur_ref().call_has_me() {
+            let Some(me) = self.bx.threads.cur_ref().mes.last() else {
+                self.bail("mes empty in handle_assign_me_vec");
+                return;
+            };
+            match me {
+                ScriptMe::Call { args, .. } => {
+                    let args = *args;
+                    self.bx.heap.named_fn_arg(
+                        args,
+                        field,
+                        value,
+                        self.bx.threads.cur().trap.pass(),
+                    );
+                }
+                ScriptMe::Object(obj) => {
+                    let obj = *obj;
+                    self.bx.heap.set_value_vec(
+                        obj,
+                        field,
+                        value,
+                        self.bx.threads.cur().trap.pass(),
+                    );
+                }
+                ScriptMe::Pod { pod, .. } => {
+                    let pod = *pod;
+                    self.bx.heap.set_pod_field(
+                        pod,
+                        field,
+                        value,
+                        self.bx.threads.cur().trap.pass(),
+                    );
+                }
+                ScriptMe::Array(_arr) => {
+                    script_err_not_allowed!(
+                        self.bx.threads.cur_ref().trap,
+                        "vec assign {:?} not allowed in array literal context",
+                        field
+                    );
+                }
+            }
+        }
+        self.bx.threads.cur().trap.goto_next();
+    }
+
     pub(crate) fn handle_assign_me_before_after(&mut self, opcode: Opcode) {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let field = self.bx.threads.cur().pop_stack_value();

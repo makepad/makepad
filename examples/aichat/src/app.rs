@@ -12,7 +12,7 @@ script_mod! {
         width: Fill
         height: Fill
 
-        $list: PortalList {
+        list := PortalList {
             width: Fill
             height: Fill
             flow: Down
@@ -21,7 +21,7 @@ script_mod! {
             smooth_tail: true
             selectable: true
 
-            $User: RoundedView {
+            User := RoundedView {
                 width: Fill
                 height: Fit
                 margin: Inset{top: 4 bottom: 4 left: 50 right: 8}
@@ -33,17 +33,17 @@ script_mod! {
                     radius: 8.0
                 }
 
-                $selectable: Markdown {
+                selectable := Markdown {
                     width: Fill
                     height: Fit
                     selectable: true
                     use_code_block_widget: true
                     body: ""
-                    $code_block: View {
+                    code_block := View {
                         width: Fill
                         height: Fit
                         flow: Overlay
-                        $code_view: CodeView {
+                        code_view := CodeView {
                             keep_cursor_at_end: false
                             editor +: {
                                 height: Fit
@@ -51,10 +51,10 @@ script_mod! {
                             }
                         }
                     }
-                    $splash_block: View {
+                    splash_block := View {
                         width: Fill
                         height: Fit
-                        $splash_view: Splash {
+                        splash_view := Splash {
                             width: Fill
                             height: Fit
                         }
@@ -65,7 +65,7 @@ script_mod! {
                     width: Fill
                     height: Fit
                     align: Align{x: 1.0}
-                    $delete_button: ButtonFlat {
+                    delete_button := ButtonFlat {
                         width: Fit
                         height: Fit
                         padding: Inset{top: 2 bottom: 2 left: 6 right: 6}
@@ -79,7 +79,7 @@ script_mod! {
                 }
             }
 
-            $Assistant: RoundedView {
+            Assistant := RoundedView {
                 width: Fill
                 height: Fit
                 margin: Inset{top: 4 bottom: 4 left: 8 right: 50}
@@ -96,7 +96,7 @@ script_mod! {
                     height: Fit
                     smoothing: 0.3
 
-                    $selectable: Markdown {
+                    selectable := Markdown {
                         width: Fill
                         height: Fit
                         selectable: true
@@ -111,11 +111,11 @@ script_mod! {
                                 return vec4(self.color.rgb, self.color.a * alpha)
                             }
                         }
-                        $code_block: View {
+                        code_block := View {
                             width: Fill
                             height: Fit
                             flow: Overlay
-                            $code_view: CodeView {
+                            code_view := CodeView {
                                 keep_cursor_at_end: true
                                 editor +: {
                                     height: Fit
@@ -123,12 +123,12 @@ script_mod! {
                                 }
                             }
                         }
-                        $splash_block: SolidView{
+                        splash_block := SolidView{
                             flow: Overlay
                             optimize: ViewOptimize.DrawList
                             width: Fill
                             height: Fit
-                            $splash_view: Splash {
+                            splash_view := Splash {
                                 flow: Overlay
                                 width: Fill
                                 height: Fit
@@ -141,7 +141,7 @@ script_mod! {
                     width: Fill
                     height: Fit
                     align: Align{x: 1.0}
-                    $delete_button: ButtonFlat {
+                    delete_button := ButtonFlat {
                         width: Fit
                         height: Fit
                         padding: Inset{top: 2 bottom: 2 left: 6 right: 6}
@@ -162,10 +162,10 @@ script_mod! {
 
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
-            $main_window: Window{
+            main_window := Window{
                 window.inner_size: vec2(900, 700)
                 window.title: "AI Chat"
-                $body +: {
+                body +: {
                     flow: Down
                     padding: Inset{left: 16 top: 16 right: 16 bottom: 16}
                     spacing: 12
@@ -189,13 +189,13 @@ script_mod! {
                             draw_text.text_style.font_size: 12
                         }
 
-                        $backend_dropdown: DropDown {
+                        backend_dropdown := DropDown {
                             width: 170
                             labels: ["Claude Splash" "Claude (ACP)" "Claude (API)" "Gemini" "Gemini Splash" "OpenAI"]
                         }
                     }
 
-                    $chat_list: ChatList {}
+                    chat_list := ChatList {}
 
                     View {
                         width: Fill
@@ -204,24 +204,24 @@ script_mod! {
                         spacing: 8
                         align: Align{y: 1.0}
 
-                        $input: TextInput {
+                        input := TextInput {
                             width: Fill
                             height: Fit
                             empty_text: "Type a message... (Enter to send)"
                         }
 
-                        $send_button: Button {
+                        send_button := Button {
                             text: "Send"
                             width: 80
                         }
 
-                        $cancel_button: Button {
+                        cancel_button := Button {
                             text: "Cancel"
                             width: 80
                             visible: false
                         }
 
-                        $clear_button: Button {
+                        clear_button := Button {
                             text: "Clear"
                             width: 80
                         }
@@ -231,7 +231,7 @@ script_mod! {
                         width: Fill
                         height: Fit
 
-                        $status_label: Label {
+                        status_label := Label {
                             width: Fill
                             height: Fit
                             text: "Initializing..."
@@ -349,13 +349,13 @@ impl Widget for ChatList {
                             self.animating_msg = Some(item_id);
                         }
 
-                        let (item_widget, _) = list.item_with_existed(cx, item_id, id!($Assistant));
+                        let (item_widget, _) = list.item_with_existed(cx, item_id, id!(Assistant));
                         let text = if data.streaming_text.is_empty() {
                             "..."
                         } else {
                             &data.streaming_text
                         };
-                        let mut markdown = item_widget.markdown(ids!($selectable));
+                        let mut markdown = item_widget.markdown(ids!(selectable));
                         markdown.set_text(cx, text);
                         if just_started {
                             markdown.reset_all_streaming_animations();
@@ -369,11 +369,11 @@ impl Widget for ChatList {
                     if let Some(msg) = data.messages.get(item_id) {
                         let is_animating = self.animating_msg == Some(item_id);
                         let template = match msg.role {
-                            ChatRole::User => id!($User),
-                            ChatRole::Assistant => id!($Assistant),
+                            ChatRole::User => id!(User),
+                            ChatRole::Assistant => id!(Assistant),
                         };
                         let item_widget = list.item(cx, item_id, template);
-                        let mut markdown = item_widget.markdown(ids!($selectable));
+                        let mut markdown = item_widget.markdown(ids!(selectable));
                         markdown.set_text(cx, &msg.text);
                         if is_animating {
                             markdown.stop_streaming_animation();
@@ -592,7 +592,7 @@ impl App {
     }
 
     fn send_message(&mut self, cx: &mut Cx) {
-        let input = self.ui.text_input(ids!($input));
+        let input = self.ui.text_input(ids!(input));
         let text = input.text();
         if text.trim().is_empty() {
             return;
@@ -641,10 +641,10 @@ impl App {
             text
         };
         self.current_prompt = Some(agent.send_prompt(cx, session_id, &prompt_text));
-        self.ui.view(ids!($cancel_button)).set_visible(cx, true);
+        self.ui.view(ids!(cancel_button)).set_visible(cx, true);
 
-        let chat_list = self.ui.widget(ids!($chat_list));
-        let list = chat_list.portal_list(ids!($list));
+        let chat_list = self.ui.widget(ids!(chat_list));
+        let list = chat_list.portal_list(ids!(list));
         list.set_tail_range(true);
         list.set_first_id_and_scroll(items_len.saturating_sub(1), 0.0);
         self.ui.redraw(cx);
@@ -665,7 +665,7 @@ impl App {
             data.is_streaming = false;
             drop(data);
 
-            self.ui.view(ids!($cancel_button)).set_visible(cx, false);
+            self.ui.view(ids!(cancel_button)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
     }
@@ -675,38 +675,38 @@ impl App {
             Some(b) => b.status_label(),
             None => "No backend selected",
         };
-        self.ui.label(ids!($status_label)).set_text(cx, status);
+        self.ui.label(ids!(status_label)).set_text(cx, status);
     }
 }
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(ids!($send_button)).clicked(actions) {
+        if self.ui.button(ids!(send_button)).clicked(actions) {
             self.send_message(cx);
         }
-        if self.ui.button(ids!($cancel_button)).clicked(actions) {
+        if self.ui.button(ids!(cancel_button)).clicked(actions) {
             self.cancel_request(cx);
         }
-        if self.ui.button(ids!($clear_button)).clicked(actions) {
+        if self.ui.button(ids!(clear_button)).clicked(actions) {
             self.clear_chat(cx);
         }
-        if self.ui.text_input(ids!($input)).returned(actions).is_some() {
+        if self.ui.text_input(ids!(input)).returned(actions).is_some() {
             self.send_message(cx);
         }
-        if self.ui.text_input(ids!($input)).escaped(actions) {
+        if self.ui.text_input(ids!(input)).escaped(actions) {
             self.cancel_request(cx);
         }
-        if let Some(index) = self.ui.drop_down(ids!($backend_dropdown)).selected(actions) {
+        if let Some(index) = self.ui.drop_down(ids!(backend_dropdown)).selected(actions) {
             if let Some(backend) = BackendType::from_index(index) {
                 self.switch_backend(cx, backend);
             }
         }
 
         // Handle message deletion
-        let chat_list = self.ui.widget(ids!($chat_list));
-        let list = chat_list.portal_list(ids!($list));
+        let chat_list = self.ui.widget(ids!(chat_list));
+        let list = chat_list.portal_list(ids!(list));
         for (item_id, item) in list.items_with_actions(actions) {
-            if item.button(ids!($delete_button)).pressed(actions) {
+            if item.button(ids!(delete_button)).pressed(actions) {
                 let mut data = CHAT_DATA.write().unwrap();
                 if item_id < data.messages.len() {
                     data.messages.remove(item_id);
@@ -729,7 +729,7 @@ impl MatchEvent for App {
         if let Some(backend) = default_backend {
             self.switch_backend(cx, backend);
             self.ui
-                .drop_down(ids!($backend_dropdown))
+                .drop_down(ids!(backend_dropdown))
                 .set_selected_item(cx, backend.to_index());
         }
         self.update_status(cx);
@@ -749,7 +749,7 @@ impl AppMain for App {
                     }
                     AgentEvent::SessionError { error, .. } => {
                         self.ui
-                            .label(ids!($status_label))
+                            .label(ids!(status_label))
                             .set_text(cx, &format!("Error: {}", error));
                     }
                     AgentEvent::TextDelta { text, .. } => {
@@ -758,11 +758,11 @@ impl AppMain for App {
                             data.streaming_text.push_str(&text);
                             data.messages.len()
                         };
-                        let chat_list = self.ui.widget(ids!($chat_list));
-                        let list = chat_list.portal_list(ids!($list));
+                        let chat_list = self.ui.widget(ids!(chat_list));
+                        let list = chat_list.portal_list(ids!(list));
                         if let Some((_, item)) = list.get_item(item_id) {
                             item.clear_query_cache();
-                            item.widget(ids!($splash_view)).redraw(cx);
+                            item.widget(ids!(splash_view)).redraw(cx);
                         }
                         cx.redraw_all();
                     }
@@ -780,15 +780,15 @@ impl AppMain for App {
                         drop(data);
 
                         self.current_prompt = None;
-                        self.ui.view(ids!($cancel_button)).set_visible(cx, false);
+                        self.ui.view(ids!(cancel_button)).set_visible(cx, false);
                         cx.redraw_all();
                     }
                     AgentEvent::PromptError { error, .. } => {
                         CHAT_DATA.write().unwrap().is_streaming = false;
                         self.current_prompt = None;
-                        self.ui.view(ids!($cancel_button)).set_visible(cx, false);
+                        self.ui.view(ids!(cancel_button)).set_visible(cx, false);
                         self.ui
-                            .label(ids!($status_label))
+                            .label(ids!(status_label))
                             .set_text(cx, &format!("Error: {}", error));
                         cx.redraw_all();
                     }

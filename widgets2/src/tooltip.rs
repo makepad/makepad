@@ -44,7 +44,7 @@ script_mod!{
                 radius: 2.
             }
                 
-            $tooltip_label: Label{
+            tooltip_label := Label{
                 width: 270
                 draw_text +: {
                     text_style: theme.font_regular{font_size: 9}
@@ -93,7 +93,7 @@ impl Widget for Tooltip {
             return;
         }
 
-        let content = self.view.widget(ids!($content));
+        let content = self.view.widget(ids!(content));
         content.handle_event(cx, event, scope);
 
         // Hide the tooltip if any kind of user interaction occurs (taps/clicks, drags, scrolls, etc).
@@ -139,7 +139,7 @@ impl Widget for Tooltip {
     }
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
-        self.label(ids!($tooltip_label)).set_text(cx, text);
+        self.label(ids!(tooltip_label)).set_text(cx, text);
     }
 }
 

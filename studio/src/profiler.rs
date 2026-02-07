@@ -62,12 +62,12 @@ script_mod! {
             padding: theme.mspace_2
             spacing: theme.space_2
 
-            $running_button: ToggleFlat {
+            running_button := ToggleFlat {
                 text: "Running"
                 active: true
                 icon_walk: Walk{ width: 8. }
             }
-            $clear_button: ButtonFlat {
+            clear_button := ButtonFlat {
                 text: "Clear"
                 icon_walk: Walk{ width: 12. }
                 draw_icon +: {
@@ -335,7 +335,7 @@ struct Profiler {
 impl WidgetMatchEvent for Profiler {
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
         let _data = scope.data.get_mut::<AppData>().unwrap();
-        if self.button(ids!($clear_button)).clicked(&actions) {
+        if self.button(ids!(clear_button)).clicked(&actions) {
             crate::log!("CLICK");
         }
     }

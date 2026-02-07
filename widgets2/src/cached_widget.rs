@@ -1,14 +1,10 @@
 use std::collections::HashMap;
 
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*,
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
-    
+
     mod.widgets.CachedWidget = #(CachedWidget::register_widget(vm))
 }
 
@@ -32,7 +28,7 @@ script_mod!{
 /// The child widget will be created once and cached.
 /// Subsequent uses of this `CachedWidget` with the same child id (`my_widget`) will reuse the cached instance.
 /// Note that only one child is supported per `CachedWidget`.
-/// 
+///
 /// CachedWidget supports Makepad's widget finding mechanism, allowing child widgets to be located as expected.
 ///
 /// # Implementation Details
@@ -47,34 +43,52 @@ script_mod!{
 /// it should be used judiciously. Overuse of caching can lead to unexpected behavior if not managed properly.
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct CachedWidget {
-    #[source] source: ScriptObjectRef,
-    #[walk] walk: Walk,
-    #[rust] area: Area,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[rust]
+    area: Area,
 
     /// The ID of the child widget template
-    #[rust] template_id: LiveId,
+    #[rust]
+    template_id: LiveId,
 
     /// The cached child widget template value
-    #[rust] template_value: Option<ScriptValue>,
+    #[rust]
+    template_value: Option<ScriptValue>,
 
     /// The cached child widget instance
-    #[rust] widget: Option<WidgetRef>,
+    #[rust]
+    widget: Option<WidgetRef>,
 }
 
 impl ScriptHook for CachedWidget {
-    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+    fn on_before_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         if apply.is_reload() {
             self.template_value = None;
         }
     }
 
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
         // Handle children from the object's vec - get the first prefixed child
         if let Some(obj) = value.as_object() {
             vm.vec_with(obj, |_vm, vec| {
                 for kv in vec {
                     if let Some(id) = kv.key.as_id() {
-                        if kv.key.is_prefixed_id() {
+                        if kv.key.as_id().is_some() {
                             if self.template_value.is_some() {
                                 error!("CachedWidget only supports one child widget, skipping additional instances");
                                 continue;
@@ -86,7 +100,7 @@ impl ScriptHook for CachedWidget {
                 }
             });
         }
-        
+
         // If widget already exists, apply updates to it
         if let Some(widget) = &mut self.widget {
             if let Some(template_value) = self.template_value {
@@ -94,13 +108,13 @@ impl ScriptHook for CachedWidget {
             }
             return;
         }
-        
+
         // Ensure the global widget cache exists
         let cx = vm.cx_mut();
         if !cx.has_global::<WidgetWrapperCache>() {
             cx.set_global(WidgetWrapperCache::default())
         }
-        
+
         // Try to retrieve the widget from the global cache
         if let Some(widget) = cx
             .get_global::<WidgetWrapperCache>()
@@ -128,7 +142,7 @@ impl WidgetNode for CachedWidget {
             self.walk
         }
     }
-    
+
     fn area(&self) -> Area {
         if let Some(widget) = &self.widget {
             widget.area()
@@ -145,7 +159,9 @@ impl WidgetNode for CachedWidget {
 
     // Searches for widgets within this CachedWidget based on the given path.
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        let Some(widget) = self.widget.as_ref() else { return };
+        let Some(widget) = self.widget.as_ref() else {
+            return;
+        };
         if self.template_id == path[0] {
             if path.len() == 1 {
                 // If the child widget is the target widget, add it to the results

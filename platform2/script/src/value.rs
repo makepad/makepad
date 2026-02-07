@@ -1289,14 +1289,6 @@ impl ScriptValue {
         self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
     }
 
-    pub const fn is_prefixed_id(&self) -> bool {
-        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED != 0
-    }
-
-    pub const fn is_unprefixed_id(&self) -> bool {
-        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED == 0
-    }
-
     // string
     // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
 

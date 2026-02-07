@@ -20,7 +20,7 @@ script_mod! {
         flow: Down
         height: Fit
 
-        $popup: RoundedView{
+        popup := RoundedView{
             flow: Down
             height: Fit
             visible: false
@@ -64,7 +64,7 @@ script_mod! {
                 }
             }
 
-            $header_view: View{
+            header_view := View{
                 width: Fill
                 height: Fit
                 padding: {left: 12., right: 12., top: 12., bottom: 12.}
@@ -92,7 +92,7 @@ script_mod! {
                     }
                 }
 
-                $header_label: Label{
+                header_label := Label{
                     draw_text +: {
                         color: theme.color_label_inner
                         text_style: theme.font_regular{
@@ -104,31 +104,31 @@ script_mod! {
 
             // Wrapper workaround to hide search input when inline search is enabled
             // as we currently can't hide the search input avoiding events.
-            $search_input_wrapper: RoundedView{
+            search_input_wrapper := RoundedView{
                 height: Fit
-                $search_input: TextInput{
+                search_input := TextInput{
                     width: Fill
                     height: Fit
                 }
             }
 
-            $list: CommandTextInputList{
+            list := CommandTextInputList{
                 height: Fit
             }
         }
 
-        $persistent: RoundedView{
+        persistent := RoundedView{
             flow: Down
             height: Fit
-            $top: View{ height: Fit }
-            $center: RoundedView{
+            top := View{ height: Fit }
+            center := RoundedView{
                 height: Fit
                 // `left` and `right` seems to not work with `height: Fill`.
-                $left: View{ width: Fit, height: Fit }
-                $text_input: TextInput{ width: Fill }
-                $right: View{ width: Fit, height: Fit }
+                left := View{ width: Fit, height: Fit }
+                text_input := TextInput{ width: Fill }
+                right := View{ width: Fit, height: Fit }
             }
-            $bottom: View{ height: Fit }
+            bottom := View{ height: Fit }
         }
     }
 }
@@ -240,7 +240,7 @@ impl Widget for CommandTextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if cx.has_key_focus(self.key_controller_text_input_ref().area()) {
             if let Event::KeyDown(key_event) = event {
-                let popup_visible = self.view(ids!($popup)).visible();
+                let popup_visible = self.view(ids!(popup)).visible();
 
                 if popup_visible {
                     let mut eat_the_event = true;
@@ -377,12 +377,12 @@ impl Widget for CommandTextInput {
 impl CommandTextInput {
     // Ensure popup state consistency
     fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
-        if self.view(ids!($popup)).visible() {
+        if self.view(ids!(popup)).visible() {
             if self.inline_search {
-                self.view(ids!($search_input_wrapper))
+                self.view(ids!(search_input_wrapper))
                     .set_visible(cx, false);
             } else {
-                self.view(ids!($search_input_wrapper)).set_visible(cx, true);
+                self.view(ids!(search_input_wrapper)).set_visible(cx, true);
             }
         }
     }
@@ -407,10 +407,10 @@ impl CommandTextInput {
             self.trigger_position = Some(get_head(&self.text_input_ref()));
 
             if self.inline_search {
-                self.view(ids!($search_input_wrapper))
+                self.view(ids!(search_input_wrapper))
                     .set_visible(cx, false);
             } else {
-                self.view(ids!($search_input_wrapper)).set_visible(cx, true);
+                self.view(ids!(search_input_wrapper)).set_visible(cx, true);
                 self.is_search_input_focus_pending = true;
             }
 
@@ -493,18 +493,18 @@ impl CommandTextInput {
 
     fn show_popup(&mut self, cx: &mut Cx) {
         if self.inline_search {
-            self.view(ids!($search_input_wrapper))
+            self.view(ids!(search_input_wrapper))
                 .set_visible(cx, false);
         } else {
-            self.view(ids!($search_input_wrapper)).set_visible(cx, true);
+            self.view(ids!(search_input_wrapper)).set_visible(cx, true);
         }
-        self.view(ids!($popup)).set_visible(cx, true);
-        self.view(ids!($popup)).redraw(cx);
+        self.view(ids!(popup)).set_visible(cx, true);
+        self.view(ids!(popup)).redraw(cx);
     }
 
     fn hide_popup(&mut self, cx: &mut Cx) {
         self.clear_popup(cx);
-        self.view(ids!($popup)).set_visible(cx, false);
+        self.view(ids!(popup)).set_visible(cx, false);
     }
 
     /// Clear all text and hide the popup going back to initial state.
@@ -531,7 +531,7 @@ impl CommandTextInput {
     ///
     /// Normally called as response to `should_build_items`.
     pub fn clear_items(&mut self) {
-        self.list(ids!($list)).clear();
+        self.list(ids!(list)).clear();
         self.selectable_widgets.clear();
         self.keyboard_focus_index = None;
         self.pointer_hover_index = None;
@@ -541,7 +541,7 @@ impl CommandTextInput {
     ///
     /// Normally called after clearing the previous items.
     pub fn add_item(&mut self, widget: WidgetRef) {
-        self.list(ids!($list)).add(widget.clone());
+        self.list(ids!(list)).add(widget.clone());
         self.selectable_widgets.push(widget);
         self.keyboard_focus_index = self.keyboard_focus_index.or(Some(0));
     }
@@ -552,7 +552,7 @@ impl CommandTextInput {
     ///
     /// Normally called after clearing the previous items.
     pub fn add_unselectable_item(&mut self, widget: WidgetRef) {
-        self.list(ids!($list)).add(widget);
+        self.list(ids!(list)).add(widget);
     }
 
     /// Get the current search query.
@@ -701,12 +701,12 @@ impl CommandTextInput {
 
     /// Returns a reference to the inner `TextInput` widget.
     pub fn text_input_ref(&self) -> TextInputRef {
-        self.text_input(ids!($text_input))
+        self.text_input(ids!(text_input))
     }
 
     /// Returns a reference to the inner `TextInput` widget used for search.
     pub fn search_input_ref(&self) -> TextInputRef {
-        self.text_input(ids!($search_input))
+        self.text_input(ids!(search_input))
     }
 
     fn trigger_grapheme(&self) -> Option<&str> {

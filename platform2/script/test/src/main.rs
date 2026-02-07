@@ -567,11 +567,11 @@ pub fn main() {
         //   for v in set        - value only (array, object, range)
         //   for k v in set      - key/index + value (object: key,value; array: index,value; range: index,value)
         //   for i k v in set    - index + key + value (object only, errors on array)
-        // NOTE: Object iteration only works on the "vec" part (keys like $a:)
-        //       not the "map" part (keys like a:). This is by design.
+        // NOTE: Object iteration only works on the "vec" part (keys using :=)
+        //       not the "map" part (keys using :). This is by design.
         fn test_for_destructuring() {
             let arr = [10, 20, 30]
-            let obj = {$a:1, $b:2, $c:3}  // Use $key: to put in vec (iterable), not map
+            let obj = {a := 1, b := 2, c := 3}  // Use := to put in vec (iterable), not map
 
             // for v in array (value only)
             let values1 = []
@@ -590,7 +590,7 @@ pub fn main() {
                 keys3.push(k)
                 values3.push(v)
             }
-            assert(keys3.len() == 3)  // Key comparison with @$a syntax needs fixing
+            assert(keys3.len() == 3)
             assert(values3 == [1 2 3])
 
             // for i v in array (index, value)
@@ -613,7 +613,7 @@ pub fn main() {
                 values5.push(v)
             }
             assert(indices5 == [0 1 2])
-            assert(keys5.len() == 3)  // Key comparison with @$a syntax needs fixing
+            assert(keys5.len() == 3)
             assert(values5 == [1 2 3])
 
             // for i in range (basic range iteration)
@@ -811,6 +811,135 @@ pub fn main() {
         let x = {sub:[{prop:1, x:1}]}
         x.sub[0] += {prop:2}
         assert(x.sub[0].prop == 2 && x.sub[0].x == 1)
+
+        // ============================================================
+        // := (ASSIGN_ME_VEC) TESTS
+        // := stores key-value pairs in the object's vec (ordered storage)
+        // : stores in the map (hash storage)
+        // ============================================================
+
+        // Basic := stores in vec, not map
+        let obj = {a := 1, b := 2}
+        // Iteration works on vec items
+        let vals = []
+        for v in obj { vals.push(v) }
+        assert(vals == [1 2])
+
+        // := and : coexist — map props and vec props are separate
+        let obj = {map_prop: 10, vec_prop := 20}
+        assert(obj.map_prop == 10)
+        // vec_prop is in the vec, accessible via deep lookup
+        assert(obj.vec_prop == 20)
+
+        // Modifying a := property via dot access
+        let obj = {prop := {val: 1}}
+        obj.prop.val = 2
+        assert(obj.prop.val == 2)
+
+        // +: merge on a := defined property
+        let base = {child := {x: 1, y: 2}}
+        let derived = base{child +: {x: 10}}
+        assert(derived.child.x == 10)
+        assert(derived.child.y == 2)
+        // original unchanged
+        assert(base.child.x == 1)
+
+        // +: merge on nested := property
+        let base = {inner := {sub: {a: 1, b: 2}}}
+        let derived = base{inner +: {sub +: {a: 99}}}
+        assert(derived.inner.sub.a == 99)
+        assert(derived.inner.sub.b == 2)
+
+        // := in a type-checked object (+: merge)
+        // Simulates the Window/body pattern: type has body := View{},
+        // then derived object does body +: {extra: stuff}
+        let Widget = {flow: 1}.freeze_component()
+        let Window = Widget{body := Widget{flow: 2}}
+        let app = Window{body +: {flow: 3}}
+        assert(app.body.flow == 3)
+
+        // Multiple := props, then +: on one of them
+        let Base = {
+            a := {x: 1}
+            b := {x: 2}
+            c := {x: 3}
+        }
+        let derived = Base{b +: {x: 20}}
+        assert(derived.a.x == 1)
+        assert(derived.b.x == 20)
+        assert(derived.c.x == 3)
+
+        // body +: adding children inside the merged object
+        let View = {flow: 0, width: 100}.freeze_component()
+        let Window2 = View{body := View{flow: 1}}
+        let app2 = Window2{body +: {
+            flow: 2
+            width: 200
+        }}
+        assert(app2.body.flow == 2)
+        assert(app2.body.width == 200)
+
+        // Verify body +: creates a new object (doesn't mutate prototype)
+        let Base2 = {x: 1}.freeze_component()
+        let Mid = Base2{child := Base2{x: 2}}
+        let D1 = Mid{child +: {x: 10}}
+        let D2 = Mid{child +: {x: 20}}
+        assert(D1.child.x == 10)
+        assert(D2.child.x == 20)
+        assert(Mid.child.x == 2) // original untouched
+
+        // := property with nested := children, then +: on outer
+        let Inner = {val: 0}.freeze_component()
+        let Outer = Inner{
+            panel := Inner{val: 1}
+            sidebar := Inner{val: 2}
+        }
+        let page = Outer{panel +: {val: 10}}
+        assert(page.panel.val == 10)
+        assert(page.sidebar.val == 2)
+
+        // Reading a := property that only exists on prototype (not overridden)
+        let Proto = {m: 1}.freeze_component()
+        let Parent = Proto{child := Proto{m: 5}}
+        let Child = Parent{}
+        assert(Child.child.m == 5)
+
+        // dot access write through to a := property
+        let Base3 = {v: 0}.freeze_component()
+        let Obj = Base3{sub := Base3{v: 1}}
+        let inst = Obj{}
+        inst.sub.v = 99
+        assert(inst.sub.v == 99)
+
+        // ============================================================
+        // := vec/map storage introspection tests
+        // These verify the key bits that widget on_after_apply relies on
+        // ============================================================
+
+        // := puts items in vec, : puts items in map
+        let obj = {map_a: 1, vec_b := 2, vec_c := 3}
+        assert(obj.vec_len() == 2)
+        assert(obj.map_len() == 1)
+
+        // vec_key returns an escaped id for the key at given vec index
+        ~@vec_b
+        ~@vec_c
+        assert(@vec_b !== @vec_c)
+        ~obj.vec_key(0)
+        ~obj.vec_key(1)
+        assert(obj.vec_key(0) !== obj.vec_key(1))
+        assert(obj.vec_key(0) == @vec_b)
+        assert(obj.vec_key(1) == @vec_c)
+
+        // After proto-inherit (+:), vec keys should be preserved
+        let Widget2 = {flow: 0}.freeze_component()
+        let Win2 = Widget2{body := Widget2{flow: 1}}
+        assert(Win2.vec_len() == 1)
+        assert(Win2.vec_key(0) == @body)
+        let app2 = Win2{body +: {flow: 2}}
+        assert(app2.vec_len() == 1)
+        assert(app2.vec_key(0) == @body)
+        assert(app2.body.flow == 2)
 
         // prefix use of .. splat operator
         let x = {a:1 b:2}

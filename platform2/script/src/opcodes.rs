@@ -13,89 +13,90 @@ use crate::opcode::*;
 use crate::vm::ScriptVm;
 
 impl<'a> ScriptVm<'a> {
-    
     #[inline]
     pub fn opcode(&mut self, opcode: Opcode, opargs: OpcodeArgs) {
-        
         match opcode {
-// ARITHMETIC            
+            // ARITHMETIC
             Opcode::NOT => self.handle_not(),
             Opcode::NEG => self.handle_neg(),
             Opcode::MUL => self.handle_mul(opargs),
             Opcode::DIV => self.handle_div(opargs),
-            Opcode::MOD => self.handle_f64_op(opargs, |a,b| a%b),
+            Opcode::MOD => self.handle_f64_op(opargs, |a, b| a % b),
             Opcode::ADD => self.handle_add(opargs),
             Opcode::SUB => self.handle_sub(opargs),
-            Opcode::SHL => self.handle_fu64_op(opargs, |a,b| a<<b),
-            Opcode::SHR => self.handle_fu64_op(opargs, |a,b| a>>b),
-            Opcode::AND => self.handle_fu64_op(opargs, |a,b| a&b),
-            Opcode::OR => self.handle_fu64_op(opargs, |a,b| a|b),
-            Opcode::XOR => self.handle_fu64_op(opargs, |a,b| a^b),
-            
-// ASSIGN
+            Opcode::SHL => self.handle_fu64_op(opargs, |a, b| a << b),
+            Opcode::SHR => self.handle_fu64_op(opargs, |a, b| a >> b),
+            Opcode::AND => self.handle_fu64_op(opargs, |a, b| a & b),
+            Opcode::OR => self.handle_fu64_op(opargs, |a, b| a | b),
+            Opcode::XOR => self.handle_fu64_op(opargs, |a, b| a ^ b),
+
+            // ASSIGN
             Opcode::ASSIGN => self.handle_assign(),
             Opcode::ASSIGN_ADD => self.handle_assign_add(),
-            Opcode::ASSIGN_SUB => self.handle_f64_scope_assign_op(|a,b| a-b),
-            Opcode::ASSIGN_MUL => self.handle_f64_scope_assign_op(|a,b| a*b),
-            Opcode::ASSIGN_DIV => self.handle_f64_scope_assign_op(|a,b| a/b),
-            Opcode::ASSIGN_MOD => self.handle_f64_scope_assign_op(|a,b| a%b),
-            Opcode::ASSIGN_AND => self.handle_fu64_scope_assign_op(|a,b| a&b),
-            Opcode::ASSIGN_OR => self.handle_fu64_scope_assign_op(|a,b| a|b),
-            Opcode::ASSIGN_XOR => self.handle_fu64_scope_assign_op(|a,b| a^b),
-            Opcode::ASSIGN_SHL => self.handle_fu64_scope_assign_op(|a,b| a<<b),
-            Opcode::ASSIGN_SHR => self.handle_fu64_scope_assign_op(|a,b| a>>b),
+            Opcode::ASSIGN_SUB => self.handle_f64_scope_assign_op(|a, b| a - b),
+            Opcode::ASSIGN_MUL => self.handle_f64_scope_assign_op(|a, b| a * b),
+            Opcode::ASSIGN_DIV => self.handle_f64_scope_assign_op(|a, b| a / b),
+            Opcode::ASSIGN_MOD => self.handle_f64_scope_assign_op(|a, b| a % b),
+            Opcode::ASSIGN_AND => self.handle_fu64_scope_assign_op(|a, b| a & b),
+            Opcode::ASSIGN_OR => self.handle_fu64_scope_assign_op(|a, b| a | b),
+            Opcode::ASSIGN_XOR => self.handle_fu64_scope_assign_op(|a, b| a ^ b),
+            Opcode::ASSIGN_SHL => self.handle_fu64_scope_assign_op(|a, b| a << b),
+            Opcode::ASSIGN_SHR => self.handle_fu64_scope_assign_op(|a, b| a >> b),
             Opcode::ASSIGN_IFNIL => self.handle_assign_ifnil(opargs),
 
-// ASSIGN FIELD                       
+            // ASSIGN FIELD
             Opcode::ASSIGN_FIELD => self.handle_assign_field(),
             Opcode::ASSIGN_FIELD_ADD => self.handle_assign_field_add(),
-            Opcode::ASSIGN_FIELD_SUB => self.handle_f64_field_assign_op(|a,b| a-b),
-            Opcode::ASSIGN_FIELD_MUL => self.handle_f64_field_assign_op(|a,b| a*b),
-            Opcode::ASSIGN_FIELD_DIV => self.handle_f64_field_assign_op(|a,b| a/b),
-            Opcode::ASSIGN_FIELD_MOD => self.handle_f64_field_assign_op(|a,b| a%b),
-            Opcode::ASSIGN_FIELD_AND => self.handle_fu64_field_assign_op(|a,b| a&b),
-            Opcode::ASSIGN_FIELD_OR => self.handle_fu64_field_assign_op(|a,b| a|b),
-            Opcode::ASSIGN_FIELD_XOR => self.handle_fu64_field_assign_op(|a,b| a^b),
-            Opcode::ASSIGN_FIELD_SHL => self.handle_fu64_field_assign_op(|a,b| a<<b),
-            Opcode::ASSIGN_FIELD_SHR => self.handle_fu64_field_assign_op(|a,b| a>>b),
+            Opcode::ASSIGN_FIELD_SUB => self.handle_f64_field_assign_op(|a, b| a - b),
+            Opcode::ASSIGN_FIELD_MUL => self.handle_f64_field_assign_op(|a, b| a * b),
+            Opcode::ASSIGN_FIELD_DIV => self.handle_f64_field_assign_op(|a, b| a / b),
+            Opcode::ASSIGN_FIELD_MOD => self.handle_f64_field_assign_op(|a, b| a % b),
+            Opcode::ASSIGN_FIELD_AND => self.handle_fu64_field_assign_op(|a, b| a & b),
+            Opcode::ASSIGN_FIELD_OR => self.handle_fu64_field_assign_op(|a, b| a | b),
+            Opcode::ASSIGN_FIELD_XOR => self.handle_fu64_field_assign_op(|a, b| a ^ b),
+            Opcode::ASSIGN_FIELD_SHL => self.handle_fu64_field_assign_op(|a, b| a << b),
+            Opcode::ASSIGN_FIELD_SHR => self.handle_fu64_field_assign_op(|a, b| a >> b),
             Opcode::ASSIGN_FIELD_IFNIL => self.handle_assign_field_ifnil(),
-                        
+
             Opcode::ASSIGN_INDEX => self.handle_assign_index(),
             Opcode::ASSIGN_INDEX_ADD => self.handle_assign_index_add(),
-            Opcode::ASSIGN_INDEX_SUB => self.handle_f64_index_assign_op(|a,b| a-b),
-            Opcode::ASSIGN_INDEX_MUL => self.handle_f64_index_assign_op(|a,b| a*b),
-            Opcode::ASSIGN_INDEX_DIV => self.handle_f64_index_assign_op(|a,b| a/b),
-            Opcode::ASSIGN_INDEX_MOD => self.handle_f64_index_assign_op(|a,b| a%b),
-            Opcode::ASSIGN_INDEX_AND => self.handle_fu64_index_assign_op(|a,b| a&b),
-            Opcode::ASSIGN_INDEX_OR => self.handle_fu64_index_assign_op(|a,b| a|b),
-            Opcode::ASSIGN_INDEX_XOR => self.handle_fu64_index_assign_op(|a,b| a^b),
-            Opcode::ASSIGN_INDEX_SHL => self.handle_fu64_index_assign_op(|a,b| a<<b),
-            Opcode::ASSIGN_INDEX_SHR => self.handle_fu64_index_assign_op(|a,b| a>>b),
+            Opcode::ASSIGN_INDEX_SUB => self.handle_f64_index_assign_op(|a, b| a - b),
+            Opcode::ASSIGN_INDEX_MUL => self.handle_f64_index_assign_op(|a, b| a * b),
+            Opcode::ASSIGN_INDEX_DIV => self.handle_f64_index_assign_op(|a, b| a / b),
+            Opcode::ASSIGN_INDEX_MOD => self.handle_f64_index_assign_op(|a, b| a % b),
+            Opcode::ASSIGN_INDEX_AND => self.handle_fu64_index_assign_op(|a, b| a & b),
+            Opcode::ASSIGN_INDEX_OR => self.handle_fu64_index_assign_op(|a, b| a | b),
+            Opcode::ASSIGN_INDEX_XOR => self.handle_fu64_index_assign_op(|a, b| a ^ b),
+            Opcode::ASSIGN_INDEX_SHL => self.handle_fu64_index_assign_op(|a, b| a << b),
+            Opcode::ASSIGN_INDEX_SHR => self.handle_fu64_index_assign_op(|a, b| a >> b),
             Opcode::ASSIGN_INDEX_IFNIL => self.handle_assign_index_ifnil(),
 
-// ASSIGN ME            
+            // ASSIGN ME
             Opcode::ASSIGN_ME => self.handle_assign_me(),
-            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER => self.handle_assign_me_before_after(opcode),
+            Opcode::ASSIGN_ME_VEC => self.handle_assign_me_vec(),
+            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER => {
+                self.handle_assign_me_before_after(opcode)
+            }
             Opcode::ASSIGN_ME_BEGIN => self.handle_assign_me_begin(),
-            
-// CONCAT  
+
+            // CONCAT
             Opcode::CONCAT => self.handle_concat(),
 
-// EQUALITY
+            // EQUALITY
             Opcode::EQ => self.handle_eq(),
             Opcode::NEQ => self.handle_neq(),
-            Opcode::LT => self.handle_f64_cmp_op(opargs, |a,b| a<b),
-            Opcode::GT => self.handle_f64_cmp_op(opargs, |a,b| a>b),
-            Opcode::LEQ => self.handle_f64_cmp_op(opargs, |a,b| a<=b),
-            Opcode::GEQ => self.handle_f64_cmp_op(opargs, |a,b| a>=b),
-            
+            Opcode::LT => self.handle_f64_cmp_op(opargs, |a, b| a < b),
+            Opcode::GT => self.handle_f64_cmp_op(opargs, |a, b| a > b),
+            Opcode::LEQ => self.handle_f64_cmp_op(opargs, |a, b| a <= b),
+            Opcode::GEQ => self.handle_f64_cmp_op(opargs, |a, b| a >= b),
+
             Opcode::LOGIC_AND_TEST => self.handle_logic_and_test(opargs),
             Opcode::LOGIC_OR_TEST => self.handle_logic_or_test(opargs),
             Opcode::NIL_OR_TEST => self.handle_nil_or_test(opargs),
             Opcode::SHALLOW_EQ => self.handle_shallow_eq(),
             Opcode::SHALLOW_NEQ => self.handle_shallow_neq(),
 
-// Object/Array begin
+            // Object/Array begin
             Opcode::BEGIN_PROTO => self.handle_begin_proto(),
             Opcode::PROTO_INHERIT_READ => self.handle_proto_inherit_read(),
             Opcode::PROTO_INHERIT_WRITE => self.handle_proto_inherit_write(),
@@ -111,24 +112,24 @@ impl<'a> ScriptVm<'a> {
             Opcode::BEGIN_ARRAY => self.handle_begin_array(),
             Opcode::END_ARRAY => self.handle_end_array(),
 
-// Calling
+            // Calling
             Opcode::CALL_ARGS => self.handle_call_args(),
             Opcode::CALL_EXEC | Opcode::METHOD_CALL_EXEC => {
                 let should_pop_to_me = self.handle_call_exec(opargs);
-                if should_pop_to_me && opargs.is_pop_to_me(){
+                if should_pop_to_me && opargs.is_pop_to_me() {
                     self.pop_to_me();
                 }
-                return
+                return;
             }
             Opcode::METHOD_CALL_ARGS => {
                 if self.handle_method_call_args() {
                     // Pod case: return early, skip pop_to_me (original returned before end)
-                    return
+                    return;
                 }
                 // Normal case: falls through to end-of-function pop_to_me check
             }
 
-// Fn def
+            // Fn def
             Opcode::FN_ARGS => self.handle_fn_args(),
             Opcode::FN_LET_ARGS => self.handle_fn_let_args(),
             Opcode::FN_ARG_DYN => self.handle_fn_arg_dyn(opargs),
@@ -137,34 +138,34 @@ impl<'a> ScriptVm<'a> {
             Opcode::FN_BODY_TYPED => self.handle_fn_body_typed(opargs),
             Opcode::RETURN => {
                 self.handle_return(opargs);
-                if opargs.is_pop_to_me(){
+                if opargs.is_pop_to_me() {
                     self.pop_to_me();
                 }
-                return
+                return;
             }
             Opcode::RETURN_IF_ERR => {
                 if self.handle_return_if_err(opargs) {
                     // Error case: original fell through to end-of-function check
-                    if opargs.is_pop_to_me(){
+                    if opargs.is_pop_to_me() {
                         self.pop_to_me();
                     }
-                    return
+                    return;
                 }
                 // Non-error case: falls through to end-of-function pop_to_me check
             }
 
-// IF            
+            // IF
             Opcode::IF_TEST => self.handle_if_test(opargs),
             Opcode::IF_ELSE => self.handle_if_else(opargs),
 
-// Use            
+            // Use
             Opcode::USE => {
                 self.handle_use();
                 // Original returned early, skipping pop_to_me
-                return
+                return;
             }
 
-// Field            
+            // Field
             Opcode::FIELD => self.handle_field(),
             Opcode::FIELD_NIL => self.handle_field_nil(),
             Opcode::ME_FIELD => self.handle_me_field(),
@@ -172,26 +173,26 @@ impl<'a> ScriptVm<'a> {
             Opcode::POP_TO_ME => self.handle_pop_to_me(),
             Opcode::ME_SPLAT => self.handle_me_splat(),
 
-// Array index            
+            // Array index
             Opcode::ARRAY_INDEX => self.handle_array_index(),
 
-// Let                   
+            // Let
             Opcode::LET_DYN => self.handle_let_dyn(opargs),
             Opcode::LET_TYPED => self.handle_let_typed(opargs),
             Opcode::VAR_DYN => self.handle_var_dyn(opargs),
             Opcode::VAR_TYPED => self.handle_var_typed(opargs),
 
-// Tree search            
+            // Tree search
             Opcode::SEARCH_TREE => self.handle_search_tree(),
 
-// Log            
+            // Log
             Opcode::LOG => self.handle_log(),
 
-// Me/Scope
+            // Me/Scope
             Opcode::ME => self.handle_me(),
             Opcode::SCOPE => self.handle_scope(),
 
-// For            
+            // For
             Opcode::FOR_1 => self.handle_for_1(opargs),
             Opcode::FOR_2 => self.handle_for_2(opargs),
             Opcode::FOR_3 => self.handle_for_3(opargs),
@@ -201,20 +202,20 @@ impl<'a> ScriptVm<'a> {
             Opcode::BREAKIFNOT => self.handle_breakifnot(),
             Opcode::CONTINUE => self.handle_continue(),
 
-// Range            
+            // Range
             Opcode::RANGE => self.handle_range(),
 
-// Is            
+            // Is
             Opcode::IS => self.handle_is(),
 
-// Try / OK            
+            // Try / OK
             Opcode::OK_TEST => self.handle_ok_test(opargs),
             Opcode::OK_END => self.handle_ok_end(),
             Opcode::TRY_TEST => self.handle_try_test(opargs),
             Opcode::TRY_ERR => self.handle_try_err(opargs),
             Opcode::TRY_OK => self.handle_try_ok(opargs),
 
-// Destructuring
+            // Destructuring
             Opcode::DUP => self.handle_dup(),
             Opcode::DROP => self.handle_drop(),
             Opcode::ARRAY_INDEX_NIL => self.handle_array_index_nil(),
@@ -226,7 +227,7 @@ impl<'a> ScriptVm<'a> {
                 self.bx.threads.cur().trap.goto_next();
             }
         }
-        if opargs.is_pop_to_me(){
+        if opargs.is_pop_to_me() {
             self.pop_to_me();
         }
     }

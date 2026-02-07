@@ -72,11 +72,11 @@ script_mod! {
                 }
             }
         }
-        $flow: TextFlow {
+        flow := TextFlow {
             width: Fill
             height: Fit
 
-            $code_view: CodeView {
+            code_view := CodeView {
                 editor +: {
                     word_wrap: false
                     draw_bg +: { color: #0000 }
@@ -85,7 +85,7 @@ script_mod! {
                 }
             }
 
-            $fold_button: FoldButton {
+            fold_button := FoldButton {
                 animator: Animator {
                     active: {default: @off}
                 }
@@ -113,16 +113,16 @@ script_mod! {
                 shadow_offset: vec2(0.0, 1.0)
                 color: theme.color_fg_app
             }
-            $content: View {
+            content := View {
                 spacing: theme.space_2
                 align: Align{ y: 0.5 }
-                $search_input: TextInputFlat {
+                search_input := TextInputFlat {
                     width: Fill
                     empty_text: "Search"
                 }
             }
         }
-        $list: PortalList {
+        list := PortalList {
             capture_overload: false
             grab_key_focus: false
             auto_tail: true
@@ -131,12 +131,12 @@ script_mod! {
             height: Fill
             width: Fill
             flow: Down
-            $SearchResult: mod.widgets.SearchResult {}
-            $Empty: mod.widgets.SearchResult {
+            SearchResult := mod.widgets.SearchResult {}
+            Empty := mod.widgets.SearchResult {
                 cursor: MouseCursor.Default
                 width: Fill
                 height: 25
-                $body: P { margin: 0 text: "" }
+                body := P { margin: 0 text: "" }
             }
         }
     }
@@ -167,7 +167,7 @@ impl Search {
             let is_even = item_id & 1 == 0;
             let mut location = String::new();
             if let Some(res) = file_system.search_results.get(item_id as usize) {
-                let mut item = list.item(cx, item_id, id!($SearchResult)).as_view();
+                let mut item = list.item(cx, item_id, id!(SearchResult)).as_view();
 
                 let is_even_f = if is_even { 1.0 } else { 0.0 };
                 script_apply_eval!(cx, item, {
@@ -177,7 +177,7 @@ impl Search {
                 while let Some(step) = item.draw(cx, &mut Scope::empty()).step() {
                     if let Some(mut tf) = step.as_text_flow().borrow_mut() {
                         let fold_button = tf
-                            .draw_item_counted_ref(cx, id!($fold_button))
+                            .draw_item_counted_ref(cx, id!(fold_button))
                             .as_fold_button();
 
                         fmt_over!(
@@ -188,11 +188,11 @@ impl Search {
                             res.column_byte + 1
                         );
 
-                        tf.draw_link(cx, id!($link), JumpToFileLink { item_id }, &location);
+                        tf.draw_link(cx, id!(link), JumpToFileLink { item_id }, &location);
 
                         let open = fold_button.open_float();
                         cx.turtle_new_line();
-                        let code = tf.item_counted(cx, id!($code_view));
+                        let code = tf.item_counted(cx, id!(code_view));
                         code.set_text(cx, &res.result_line);
                         if let Some(mut code_view) = code.as_code_view().borrow_mut() {
                             code_view.lazy_init_session();
@@ -211,7 +211,7 @@ impl Search {
                 }
                 continue;
             }
-            let mut item = list.item(cx, item_id, id!($Empty)).as_view();
+            let mut item = list.item(cx, item_id, id!(Empty)).as_view();
             let is_even_f = if is_even { 1.0 } else { 0.0 };
             script_apply_eval!(cx, item, {
                 draw_bg +: {is_even: #(is_even_f)}
@@ -236,11 +236,11 @@ impl Widget for Search {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let search_results = self.view.portal_list(ids!($list));
+        let search_results = self.view.portal_list(ids!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get_mut::<AppData>().unwrap();
         if let Event::Actions(actions) = event {
-            if let Some(search) = self.view.text_input(ids!($search_input)).changed(&actions) {
+            if let Some(search) = self.view.text_input(ids!(search_input)).changed(&actions) {
                 let mut set = Vec::new();
                 for item in search.split("|") {
                     if let Some(item) = item.strip_suffix("\\b") {

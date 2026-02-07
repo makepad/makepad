@@ -512,6 +512,7 @@ impl State {
             id!(||) | id!(|?) => 17,
             id!(..) => 18,
             id!(:)
+            | id!(:=)
             | id!(=)
             | id!(>:)
             | id!(<:)
@@ -531,6 +532,7 @@ impl State {
         match op {
             id!(=)
             | id!(:)
+            | id!(:=)
             | id!(+=)
             | id!(<:)
             | id!(+:)
@@ -646,6 +648,7 @@ impl State {
             id!(||) => Opcode::LOGIC_OR_TEST,
             id!(|?) => Opcode::NIL_OR_TEST,
             id!(:) => Opcode::ASSIGN_ME,
+            id!(:=) => Opcode::ASSIGN_ME_VEC,
             id!(<:) => Opcode::ASSIGN_ME_BEFORE,
             id!(>:) => Opcode::ASSIGN_ME_AFTER,
             id!(^:) => Opcode::ASSIGN_ME_BEGIN,
@@ -836,7 +839,7 @@ impl ScriptParser {
     ) -> u32 {
         let op = tok.operator();
         let sep = tok.separator();
-        let (id, starts_with_ds) = tok.identifier();
+        let id = tok.identifier();
         match self.state.pop().unwrap() {
             State::ForIdent { idents, index } => {
                 // we push k and v
@@ -3351,12 +3354,7 @@ impl ScriptParser {
                     return 1;
                 }
                 if id.not_empty() {
-                    if starts_with_ds {
-                        // $identifier escapes by default - no scope resolution
-                        self.push_code(id.escape(), self.index);
-                    } else {
-                        self.push_code(ScriptValue::from_id(id), self.index);
-                    }
+                    self.push_code(ScriptValue::from_id(id), self.index);
                     self.state.push(State::EndExpr);
                     return 1;
                 }
@@ -3904,7 +3902,7 @@ impl ScriptParser {
                             });
                             return 0;
                         }
-                        if opcode == Opcode::ASSIGN_ME {
+                        if opcode == Opcode::ASSIGN_ME || opcode == Opcode::ASSIGN_ME_VEC {
                             //code.set_opcode_is_statement();
                             self.state.push(State::BeginStmt {
                                 last_was_sep: false,

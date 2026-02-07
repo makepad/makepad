@@ -38,7 +38,7 @@ script_mod! {
         TextStyle: mod.std.set_type_default() do #(TextStyle::script_api(vm)){
             font_size: 10
             font_family: text.FontFamily{
-                $latin: text.FontMember{res: crate_resource("self:../../widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
+                latin := text.FontMember{res: crate_resource("self:../../widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
             }
             line_spacing: 1.2
         }

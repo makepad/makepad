@@ -230,7 +230,7 @@ script_mod! {
             }
         }
 
-        $link: mod.widgets.MarkdownLink{}
+        link := mod.widgets.MarkdownLink{}
     }
 }
 
@@ -459,12 +459,12 @@ impl Markdown {
                         let sbs = &self.splash_block_string;
 
                         // Draw the splash block using the $splash_block template
-                        tf.item_with(cx, entry_id, id!($splash_block), |cx, item, _tf| {
+                        tf.item_with(cx, entry_id, id!(splash_block), |cx, item, _tf| {
                             //let tree = item.widget_tree();
                             //cx.with_vm(|vm| {
                             //    log!("$splash_block widget tree:\n{}", tree.display(vm.heap()));
                             //});
-                            item.widget(ids!($splash_view)).set_text(cx, sbs);
+                            item.widget(ids!(splash_view)).set_text(cx, sbs);
                             item.draw_all_unscoped(cx);
                         });
                     } else if self.in_code_block {
@@ -474,10 +474,10 @@ impl Markdown {
 
                         // Draw the code block and capture the CodeView widget ref
                         let mut code_view_ref = WidgetRef::empty();
-                        tf.item_with(cx, entry_id, id!($code_block), |cx, item, _tf| {
-                            item.widget(ids!($code_view)).set_text(cx, cbs);
+                        tf.item_with(cx, entry_id, id!(code_block), |cx, item, _tf| {
+                            item.widget(ids!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
-                            code_view_ref = item.widget(ids!($code_view));
+                            code_view_ref = item.widget(ids!(code_view));
                         });
 
                         // Register the code view widget for cross-child selection

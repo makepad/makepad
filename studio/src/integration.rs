@@ -24,7 +24,7 @@ script_mod! {
             flow: Down
             spacing: 10.0
 
-            $github_token_input: TextInput {
+            github_token_input := TextInput {
                 width: Fill
                 height: Fit
                 margin: Inset{left: 10.0 right: 10.0 top: 10.0}
@@ -37,21 +37,21 @@ script_mod! {
                 flow: Right
                 margin: Inset{left: 10.0 right: 10.0}
 
-                $run_button: Button {
+                run_button := Button {
                     text: "Run"
                     width: Fit
                     height: Fit
                     margin: Inset{right: 10.0}
                 }
 
-                $observe_checkbox: CheckBox {
+                observe_checkbox := CheckBox {
                     text: "Observe"
                     width: Fit
                     height: Fit
                 }
             }
 
-            $output_log: TextInput {
+            output_log := TextInput {
                 width: Fill
                 height: Fill
                 margin: Inset{left: 10.0 right: 10.0 bottom: 10.0}
@@ -70,7 +70,7 @@ struct Integration {
 
 impl WidgetMatchEvent for Integration {
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
-        if self.view.button(ids!($run_button)).clicked(actions) {
+        if self.view.button(ids!(run_button)).clicked(actions) {
             println!("run button clicked");
             // Handle the run button click event
             // You can add your custom code here to respond to the button click

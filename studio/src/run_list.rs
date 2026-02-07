@@ -85,22 +85,22 @@ script_mod! {
         width: Fill
         height: Fill
         optimize: ViewOptimize.DrawList
-        $list: FlatList {
+        list := FlatList {
             height: Fill
             width: Fill
             flow: Down
             grab_key_focus: true
             drag_scrolling: false
 
-            $Target: mod.widgets.BuildItem {
+            Target := mod.widgets.BuildItem {
                 padding: 0
-                $check: mod.widgets.RunButton { margin: Inset{left: 23.} }
+                check := mod.widgets.RunButton { margin: Inset{left: 23.} }
             }
 
-            $Binary: mod.widgets.BuildItem {
+            Binary := mod.widgets.BuildItem {
                 flow: Right
 
-                $fold: FoldButton {
+                fold := FoldButton {
                     height: 25
                     width: 15
                     margin: Inset{ left: theme.space_2 }
@@ -127,10 +127,10 @@ script_mod! {
                         }
                     }
                 }
-                $check: mod.widgets.RunButton {}
+                check := mod.widgets.RunButton {}
             }
 
-            $Empty: mod.widgets.BuildItem {
+            Empty := mod.widgets.BuildItem {
                 height: Fit
                 width: Fill
                 cursor: MouseCursor.Default
@@ -187,30 +187,30 @@ impl RunList {
             let is_even = counter & 1 == 0;
 
             let item_id = LiveId::from_str(&binary.name);
-            let mut item = list.item(cx, item_id, id!($Binary)).unwrap().as_view();
+            let mut item = list.item(cx, item_id, id!(Binary)).unwrap().as_view();
             let name = &binary.name;
             let is_even_f = if is_even { 1.0 } else { 0.0 };
 
             script_apply_eval!(cx, item, {
                 draw_bg +: {is_even: #(is_even_f)}
             });
-            
-            item.fold_button(ids!($fold))
+
+            item.fold_button(ids!(fold))
                 .set_action_data(ActionData::FoldBinary { binary_id });
 
-            let cb = item.check_box(ids!($check));
+            let cb = item.check_box(ids!(check));
             cb.set_text(name);
             cb.set_active(cx, build_manager.active.any_binary_active(&binary.name));
             cb.set_action_data(ActionData::RunMain { binary_id });
 
             item.draw_all(cx, &mut Scope::empty());
             counter += 1;
-            
+
             if binary.open > 0.001 {
                 for i in 0..BuildTarget::len() {
                     let is_even = counter & 1 == 0;
                     let item_id = item_id.bytes_append(&i.to_be_bytes());
-                    let mut item = list.item(cx, item_id, id!($Target)).unwrap().as_view();
+                    let mut item = list.item(cx, item_id, id!(Target)).unwrap().as_view();
                     let height = 25.0 * binary.open;
                     let is_even_f = if is_even { 1.0 } else { 0.0 };
                     let target_name = BuildTarget::from_id(i).name();
@@ -218,7 +218,7 @@ impl RunList {
                         height: #(height)
                         draw_bg +: {is_even: #(is_even_f)}
                     });
-                    let cb = item.check_box(ids!($check));
+                    let cb = item.check_box(ids!(check));
                     cb.set_text(target_name);
                     cb.set_active(cx, build_manager.active.item_id_active(item_id));
 
@@ -234,7 +234,7 @@ impl RunList {
         while list.space_left(cx) > 0.0 {
             let is_even = counter & 1 == 0;
             let item_id = LiveId::from_str("empty").bytes_append(&counter.to_be_bytes());
-            let mut item = list.item(cx, item_id, id!($Empty)).unwrap().as_view();
+            let mut item = list.item(cx, item_id, id!(Empty)).unwrap().as_view();
             let height = list.space_left(cx).min(20.0);
             let is_even_f = if is_even { 1.0 } else { 0.0 };
             script_apply_eval!(cx, item, {
@@ -250,9 +250,9 @@ impl RunList {
 impl WidgetMatchEvent for RunList {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
         let build_manager = &mut scope.data.get_mut::<AppData>().unwrap().build_manager;
-        let run_list = self.view.flat_list(ids!($list));
+        let run_list = self.view.flat_list(ids!(list));
         for (_item_id, item) in run_list.items_with_actions(&actions) {
-            let fb = item.fold_button(ids!($fold));
+            let fb = item.fold_button(ids!(fold));
             if let Some(v) = fb.animating(&actions) {
                 if let ActionData::FoldBinary { binary_id } = fb.action_data().cast_ref() {
                     build_manager.binaries[*binary_id].open = v;
@@ -260,7 +260,7 @@ impl WidgetMatchEvent for RunList {
                 }
             }
 
-            let cb = item.check_box(ids!($check));
+            let cb = item.check_box(ids!(check));
             if let Some(change) = cb.changed(&actions) {
                 item.redraw(cx);
                 match cb.action_data().cast_ref() {
@@ -308,7 +308,7 @@ impl Widget for RunList {
             if ke.key_code == KeyCode::KeyD && ke.modifiers.logo {
                 log!("=== RunList debug dump triggered ===");
                 self.view.set_debug_dump(cx, true);
-                self.view.redraw(cx);
+                self.view.repaint(cx);
             }
         }
         self.widget_match_event(cx, event, scope);

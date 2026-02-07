@@ -17,8 +17,8 @@ script_mod! {
         flow: Down
         align: Align{x: 0.5}
 
-        $message: Label {text: "test" width: Fill height: Fit}
-        $run_button: ButtonFlat {
+        message := Label {text: "test" width: Fill height: Fit}
+        run_button := ButtonFlat {
             width: Fit
             height: Fit
             padding: theme.mspace_2
@@ -36,7 +36,7 @@ script_mod! {
             }
             icon_walk: Walk{ width: 9. }
         }
-        $image: Image {
+        image := Image {
             width: 200
             height: 100
             margin: Inset{top: 10 bottom: 10}
@@ -86,7 +86,7 @@ script_mod! {
                 shadow_offset: vec2(0.0, 1.0)
                 color: theme.color_fg_app
             }
-            $content: View {
+            content := View {
                 height: Fit
                 padding: Inset{top: 1}
                 spacing: theme.space_2
@@ -94,15 +94,15 @@ script_mod! {
                 View {
                     height: Fit
                     spacing: 5
-                    $roots_dropdown: DropDownFlat { width: Fit }
-                    $snapshot_button: ButtonFlat {text: "Snapshot"}
+                    roots_dropdown := DropDownFlat { width: Fit }
+                    snapshot_button := ButtonFlat {text: "Snapshot"}
                     Filler {}
                     ToggleFlat {text: "Auto"}
                 }
-                $message_input: TextInputFlat {empty_text: "Description"}
+                message_input := TextInputFlat {empty_text: "Description"}
             }
         }
-        $list: PortalList {
+        list := PortalList {
             capture_overload: false
             grab_key_focus: false
             auto_tail: true
@@ -111,8 +111,8 @@ script_mod! {
             height: Fill
             width: Fill
             flow: Down
-            $SnapshotItem: mod.widgets.SnapshotItem {}
-            $Empty: SolidView {
+            SnapshotItem := mod.widgets.SnapshotItem {}
+            Empty := SolidView {
                 cursor: MouseCursor.Default
                 draw_bg +: {color: #44}
                 width: Fill
@@ -152,10 +152,10 @@ impl Snapshot {
         while let Some(item_id) = list.next_visible_item(cx) {
             let item = if let Some(commit) = git_log.commits.get(item_id) {
                 let item = list.item(cx, item_id, live_id!(SnapshotItem)).as_view();
-                item.label(ids!($message)).set_text(cx, &commit.message);
+                item.label(ids!(message)).set_text(cx, &commit.message);
                 // lets construct a snapshot image filepath from the commit message
                 // check if we have a image path or not
-                let image = item.image(ids!($image));
+                let image = item.image(ids!(image));
 
                 let load = match file_system.snapshot_image_data.borrow().get(&commit.hash) {
                     Some(SnapshotImageData::Loading) => {
@@ -189,7 +189,7 @@ impl Snapshot {
     }
 
     fn load_snapshot(&mut self, _cx: &mut Cx, data: &mut AppData, item_id: usize) {
-        let root_id = self.drop_down(ids!($roots_dropdown)).selected_item();
+        let root_id = self.drop_down(ids!(roots_dropdown)).selected_item();
         let git_log = data.file_system.git_logs.get(root_id).unwrap();
         if let Some(commit) = git_log.commits.get(item_id) {
             data.file_system
@@ -198,7 +198,7 @@ impl Snapshot {
     }
 
     fn make_snapshot(&mut self, _cx: &mut Cx, data: &mut AppData) {
-        let root_id = self.drop_down(ids!($roots_dropdown)).selected_item();
+        let root_id = self.drop_down(ids!(roots_dropdown)).selected_item();
         let git_log = data.file_system.git_logs.get(root_id).unwrap();
         // we should find all active build ids with the same root
 
@@ -208,7 +208,7 @@ impl Snapshot {
             .builds_with_root(git_log.root.clone());
         if let Some(item) = iter.next() {
             // we should do a shell git commit at the right path
-            let message = self.view(ids!($message_input)).text();
+            let message = self.view(ids!(message_input)).text();
             if message.len() == 0 {
                 return;
             }
@@ -235,7 +235,7 @@ impl Widget for Snapshot {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let data = scope.data.get_mut::<AppData>().unwrap();
 
-        let dd = self.drop_down(ids!($roots_dropdown));
+        let dd = self.drop_down(ids!(roots_dropdown));
         let mut i = data.file_system.git_logs.iter();
         dd.set_labels_with(cx, |label| {
             i.next().map(|m| label.push_str(&m.root));
@@ -250,16 +250,16 @@ impl Widget for Snapshot {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let snapshots = self.view.portal_list(ids!($list));
+        let snapshots = self.view.portal_list(ids!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get_mut::<AppData>().unwrap();
         if let Event::Actions(actions) = event {
-            if self.view.button(ids!($snapshot_button)).clicked(actions) {
+            if self.view.button(ids!(snapshot_button)).clicked(actions) {
                 self.make_snapshot(cx, data);
             }
             if let Some(_search) = self.view.text_input(ids!(search_input)).changed(&actions) {}
             for (item_id, _item) in snapshots.items_with_actions(&actions) {
-                if let Some(wa) = actions.widget_action(ids!($run_button)) {
+                if let Some(wa) = actions.widget_action(ids!(run_button)) {
                     if wa.widget().as_button().pressed(actions) {
                         self.load_snapshot(cx, data, item_id);
                     }
@@ -272,7 +272,7 @@ impl Widget for Snapshot {
 impl SnapshotRef {
     pub fn set_message(&self, cx: &mut Cx, message: String) {
         if let Some(inner) = self.borrow_mut() {
-            inner.view(ids!($message_input)).set_text(cx, &message);
+            inner.view(ids!(message_input)).set_text(cx, &message);
         }
     }
 }

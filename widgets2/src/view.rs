@@ -170,8 +170,8 @@ impl ScriptHook for View {
                 vm.vec_with(obj, |vm, vec| {
                     for kv in vec {
                         // Determine the id: use prefixed id if available, otherwise use numbered id for anonymous children
-                        let id = if kv.key.is_prefixed_id() {
-                            kv.key.as_id()
+                        let id = if let Some(id) = kv.key.as_id() {
+                            Some(id)
                         } else if kv.key.is_nil() {
                             // Anonymous child widget - use numbered id
                             let id = LiveId(anon_index as u64);
@@ -250,12 +250,26 @@ impl View {
             cx.draw_lists[draw_list.id()].debug_dump = debug;
         }
     }
+
+    pub fn repaint(&mut self, cx: &mut Cx) {
+        if let Some(draw_list) = &self.draw_list {
+            if let Some(pass_id) = cx.draw_lists[draw_list.id()].draw_pass_id {
+                cx.repaint_pass(pass_id);
+            }
+        }
+    }
 }
 
 impl ViewRef {
     pub fn set_debug_dump(&self, cx: &mut Cx, debug: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_debug_dump(cx, debug);
+        }
+    }
+
+    pub fn repaint(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.repaint(cx);
         }
     }
 
