@@ -638,17 +638,7 @@ impl ScriptHeap {
             object.vec.len()
         )
     }
-
-    fn value_vec(&self, ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
-        let object = &self.objects[ptr];
-        for kv in object.vec.iter().rev() {
-            if kv.key == key {
-                return kv.value;
-            }
-        }
-        script_err_not_found!(trap, "vec key {:?} not found", key)
-    }
-
+    
     fn value_deep_map(
         &self,
         obj_ptr: ScriptObject,

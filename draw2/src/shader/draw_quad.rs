@@ -71,7 +71,7 @@ script_mod!{
         }
         
         pixel: fn(){
-            #0f0
+            #0000
         }
     }
     

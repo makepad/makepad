@@ -2,8 +2,6 @@ use crate::makepad_platform::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
-    use mod.widgets.ViewOptimize
-
     mod.widgets.View =  mod.widgets.ViewBase {}
 
     mod.widgets.Hr = mod.widgets.View {
@@ -669,7 +667,7 @@ script_mod! {
     }
 
     mod.widgets.CachedView = mod.widgets.ViewBase {
-        optimize: ViewOptimize.Texture
+        texture_caching: true
         draw_bg +: {
             image: texture_2d(float)
             scale: varying(vec2(0))
@@ -689,7 +687,7 @@ script_mod! {
     }
 
     mod.widgets.CachedRoundedView = mod.widgets.ViewBase {
-        optimize: ViewOptimize.Texture
+        texture_caching: true
         draw_bg +: {
             border_size: uniform(0.0)
             border_color: instance(#000F)

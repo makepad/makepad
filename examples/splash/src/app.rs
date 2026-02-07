@@ -537,7 +537,7 @@ script_mod! {
         //Label{text: "FileTree Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
         //Label{text: "Displays file system hierarchy" draw_text.color: #888 draw_text.text_style.font_size: 10}
         View{
-            optimize: ViewOptimize.DrawList
+            new_batch: true
             FileTreeDemo{
                 width: Fill height: Fill
             }
