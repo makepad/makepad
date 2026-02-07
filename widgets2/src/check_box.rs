@@ -1,31 +1,31 @@
 use crate::{
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
-    animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
 };
 
 #[cfg(feature = "svg")]
 use crate::makepad_draw::DrawSvg;
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.CheckBoxBase = #(CheckBox::register_widget(vm))
-    
+
     mod.widgets.CheckBoxFlat = set_type_default() do mod.widgets.CheckBoxBase{
         width: Fit
         height: Fit
         padding: theme.mspace_2
         align: Align{x: 0., y: 0.}
-        
+
         label_walk: Walk{
             width: Fit
             height: Fit
             margin: theme.mspace_h_1{left: 13.}
         }
-        
+
         draw_bg +: {
             disabled: instance(0.0)
             down: instance(0.0)
@@ -116,7 +116,7 @@ script_mod!{
                 return sdf.result
             }
         }
-            
+
         draw_text +: {
             focus: instance(0.0)
             hover: instance(0.0)
@@ -143,9 +143,9 @@ script_mod!{
                 font_size: theme.font_size_p
             }
         }
-            
+
         icon_walk: Walk{width: 14.0, height: Fit}
-            
+
         animator: Animator{
             disabled: {
                 default: @off
@@ -280,7 +280,7 @@ script_mod!{
 
                 sdf.fill_keep(color_fill)
                 sdf.stroke(color_stroke, self.border_size)
-                    
+
                 // Draw toggle mark
                 let mark_padding = 1.5
                 let mark_size = sz_px.y * 0.5 - self.border_size - mark_padding
@@ -359,37 +359,50 @@ script_mod!{
     }
 }
 
-
-
 #[derive(Script, Widget, Animator)]
 pub struct CheckBox {
-    #[source] source: ScriptObjectRef,
-    
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
+    #[source]
+    source: ScriptObjectRef,
+
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
     #[apply_default]
     animator: Animator,
-    
-    #[live] icon_walk: Walk,
-    #[live] label_walk: Walk,
-    #[live] label_align: Align,
-    
-    #[redraw] #[live] draw_bg: DrawQuad,
-    #[live] draw_text: DrawText,
-    
-    #[cfg(feature = "svg")]
-    #[live] draw_icon: DrawSvg,
-    
-    #[live] text: ArcStringMut,
 
-    #[visible] #[live(true)]
+    #[live]
+    icon_walk: Walk,
+    #[live]
+    label_walk: Walk,
+    #[live]
+    label_align: Align,
+
+    #[redraw]
+    #[live]
+    draw_bg: DrawQuad,
+    #[live]
+    draw_text: DrawText,
+
+    #[cfg(feature = "svg")]
+    #[live]
+    draw_icon: DrawSvg,
+
+    #[live]
+    text: ArcStringMut,
+
+    #[visible]
+    #[live(true)]
     pub visible: bool,
-    
+
     #[live(None)]
     pub active: Option<bool>,
-    
-    #[live] bind: String,
-    #[action_data] #[rust] action_data: WidgetActionData,
+
+    #[live]
+    bind: String,
+    #[action_data]
+    #[rust]
+    action_data: WidgetActionData,
 }
 
 impl ScriptHook for CheckBox {
@@ -406,23 +419,23 @@ impl ScriptHook for CheckBox {
 pub enum CheckBoxAction {
     Change(bool),
     #[default]
-    None
+    None,
 }
 
 impl CheckBox {
-    
     pub fn draw_check_box(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        
+
         #[cfg(feature = "svg")]
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
+
+        self.draw_text
+            .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
-        DrawStep::done() 
+        DrawStep::done()
     }
-    
+
     pub fn changed(&self, actions: &Actions) -> Option<bool> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let CheckBoxAction::Change(b) = item.cast() {
@@ -431,32 +444,41 @@ impl CheckBox {
         }
         None
     }
-    
+
     pub fn active(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(active.on))
     }
-    
+
     pub fn set_active(&mut self, cx: &mut Cx, value: bool) {
         self.animator_toggle(cx, value, Animate::Yes, ids!(active.on), ids!(active.off));
+    }
+
+    pub fn debug_dump_animator(&self, heap: &ScriptHeap) -> String {
+        self.animator.debug_dump(heap)
     }
 }
 
 impl Widget for CheckBox {
-
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
-        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
+        self.animator_toggle(
+            cx,
+            disabled,
+            Animate::Yes,
+            ids!(disabled.on),
+            ids!(disabled.off),
+        );
     }
-                
+
     fn disabled(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(disabled.on))
     }
-    
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
-                
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -471,39 +493,44 @@ impl Widget for CheckBox {
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
-            },
+            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.set_key_focus(cx);
                 if self.animator_in_state(cx, ids!(active.on)) {
                     self.animator_play(cx, ids!(active.off));
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
-                }
-                else {
+                    cx.widget_action_with_data(
+                        &self.action_data,
+                        uid,
+                        &scope.path,
+                        CheckBoxAction::Change(false),
+                    );
+                } else {
                     self.animator_play(cx, ids!(active.on));
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
+                    cx.widget_action_with_data(
+                        &self.action_data,
+                        uid,
+                        &scope.path,
+                        CheckBoxAction::Change(true),
+                    );
                 }
-            },
-            Hit::FingerUp(_fe) => {
-                                    
             }
-            Hit::FingerMove(_fe) => {
-                                    
-            }
-            _ => ()
+            Hit::FingerUp(_fe) => {}
+            Hit::FingerMove(_fe) => {}
+            _ => (),
         }
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
         }
         self.draw_check_box(cx, walk)
     }
-    
+
     fn text(&self) -> String {
         self.text.as_ref().to_string()
     }
-    
+
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
@@ -511,30 +538,36 @@ impl Widget for CheckBox {
 }
 
 impl CheckBoxRef {
-
     pub fn changed(&self, actions: &Actions) -> Option<bool> {
         self.borrow().and_then(|inner| inner.changed(actions))
     }
-    
+
     pub fn set_text(&self, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             let s = inner.text.as_mut_empty();
             s.push_str(text);
         }
     }
-    
+
     pub fn active(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
             inner.active(cx)
-        }
-        else {
+        } else {
             false
         }
     }
-    
+
     pub fn set_active(&self, cx: &mut Cx, value: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_active(cx, value);
+        }
+    }
+
+    pub fn debug_dump_animator(&self, heap: &ScriptHeap) -> String {
+        if let Some(inner) = self.borrow() {
+            inner.debug_dump_animator(heap)
+        } else {
+            "no borrow".to_string()
         }
     }
 }

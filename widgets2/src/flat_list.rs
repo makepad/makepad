@@ -23,9 +23,9 @@ pub enum FlatListAction {
     None,
 }
 
-struct WidgetItem {
-    widget: WidgetRef,
-    template: LiveId,
+pub struct WidgetItem {
+    pub widget: WidgetRef,
+    pub template: LiveId,
 }
 
 #[derive(Script, Widget)]
@@ -68,7 +68,7 @@ pub struct FlatList {
     #[rust]
     templates: HashMap<LiveId, ScriptObjectRef>,
     #[rust]
-    items: ComponentMap<LiveId, WidgetItem>,
+    pub items: ComponentMap<LiveId, WidgetItem>,
 }
 
 impl ScriptHook for FlatList {
@@ -101,7 +101,8 @@ impl ScriptHook for FlatList {
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 // Root the template object so it survives GC
-                                self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                self.templates
+                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
                             }
                         }
                     }

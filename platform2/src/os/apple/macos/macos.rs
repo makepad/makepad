@@ -414,7 +414,6 @@ impl Cx {
                     self.call_draw_event(time_now);
                     self.mtl_compile_shaders(&metal_cx);
                 }
-
                 // Start timer if we have work
                 if has_next_frames
                     || needs_redrawing

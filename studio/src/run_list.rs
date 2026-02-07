@@ -306,9 +306,19 @@ impl Widget for RunList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::KeyDown(ke) = event {
             if ke.key_code == KeyCode::KeyD && ke.modifiers.logo {
-                log!("=== RunList debug dump triggered ===");
-                self.view.set_debug_dump(cx, true);
-                self.view.repaint(cx);
+                log!("=== RunList animator debug dump ===");
+                let heap = &cx.script_vm.as_ref().unwrap().heap;
+                let run_list = self.view.flat_list(ids!(list));
+                if let Some(inner) = run_list.borrow() {
+                    for (item_id, item) in inner.items.iter() {
+                        let cb = item.widget.check_box(ids!(check));
+                        let dump = cb.debug_dump_animator(heap);
+                        item_id.as_string(|s| {
+                            log!("  item[{}]: {}", s.unwrap_or("?"), dump);
+                        });
+                    }
+                }
+                log!("=== end dump ===");
             }
         }
         self.widget_match_event(cx, event, scope);
