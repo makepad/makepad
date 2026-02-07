@@ -19,23 +19,23 @@ script_mod! {
         show_bg: true
         draw_bg.color: theme.color_app_caption_bar
 
-        $content: View{
+        content := View{
             width: Fill height: Fit
             flow: Overlay
 
-            $title_container: View{
+            title_container := View{
                 width: Fill height: Fit
                 align: Align{x: 0.5 y: 0.5}
 
-                $title: H4{
+                title := H4{
                     width: Fit height: Fit
                     margin: 0
                     text: "Stack View Title"
                 }
             }
 
-            $button_container: View{
-                $left_button: Button{
+            button_container := View{
+                left_button := Button{
                     width: Fit height: 68
                     icon_walk: Walk{width: 10 height: 68}
                     draw_bg +: {
@@ -58,12 +58,12 @@ script_mod! {
         draw_bg.color: theme.color_white
 
         // Empty slot to place a generic full-screen background
-        $background: View{
+        background := View{
             width: Fill height: Fill
             visible: false
         }
 
-        $body: View{
+        body := View{
             width: Fill height: Fill
             flow: Down
 
@@ -71,7 +71,7 @@ script_mod! {
             margin: Inset{top: (HEADER_HEIGHT)}
         }
 
-        $header: mod.widgets.StackViewHeader{}
+        header := mod.widgets.StackViewHeader{}
 
         offset: 4000.0
 
@@ -99,7 +99,7 @@ script_mod! {
         width: Fill height: Fill
         flow: Overlay
 
-        $root_view: View{}
+        root_view := View{}
     }
 }
 
@@ -235,7 +235,7 @@ impl StackNavigationView {
         // * the "back" button on the mouse was clicked.
         if matches!(self.state, StackNavigationViewState::Active) {
             if event.back_pressed()
-                || matches!(event, Event::Actions(actions) if self.button(ids!($left_button)).clicked(&actions))
+                || matches!(event, Event::Actions(actions) if self.button(ids!(left_button)).clicked(&actions))
                 || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())
             {
                 cx.widget_action(
@@ -416,7 +416,7 @@ impl Widget for StackNavigation {
         // ensuring that we don't forward it to the root view twice.
         let mut visible_views = self.get_visible_views(cx);
         if !event.requires_visibility() {
-            let root_view = self.view.widget(ids!($root_view));
+            let root_view = self.view.widget(ids!(root_view));
             if !visible_views.contains(&root_view) {
                 visible_views.insert(0, root_view);
             }
@@ -550,7 +550,7 @@ impl StackNavigation {
         match self.navigation_stack.current() {
             None => {
                 // No views in stack, show root view
-                vec![self.view.widget(ids!($root_view))]
+                vec![self.view.widget(ids!(root_view))]
             }
             Some(current_entry) => {
                 let current_view_ref = self.stack_navigation_view(&[current_entry.view_id]);
@@ -565,7 +565,7 @@ impl StackNavigation {
                         views.push(previous_view_ref.0.clone());
                     } else {
                         // Show the root view if there's no previous stack view
-                        views.push(self.view.widget(ids!($root_view)));
+                        views.push(self.view.widget(ids!(root_view)));
                     }
                 }
 
@@ -655,7 +655,7 @@ impl StackNavigationRef {
     pub fn set_title(&self, cx: &mut Cx, view_id: LiveId, title: &str) {
         if let Some(inner) = self.borrow_mut() {
             let stack_view_ref = inner.stack_navigation_view(&[view_id]);
-            stack_view_ref.label(ids!($title)).set_text(cx, title);
+            stack_view_ref.label(ids!(title)).set_text(cx, title);
         }
     }
 

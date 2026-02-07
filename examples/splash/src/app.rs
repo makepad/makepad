@@ -34,7 +34,7 @@ script_mod! {
         draw_bg.color: #346
         draw_bg.radius: 3.0
         align: Align{y: 0.5}
-        $label: Label{text: "Small" draw_text.color: #fff draw_text.text_style.font_size: 9}
+        label := Label{text: "Small" draw_text.color: #fff draw_text.text_style.font_size: 9}
     }
 
     // Medium item template (60px)
@@ -45,7 +45,7 @@ script_mod! {
         draw_bg.color: #463
         draw_bg.radius: 3.0
         align: Align{y: 0.5}
-        $label: Label{text: "Medium" draw_text.color: #fff draw_text.text_style.font_size: 10}
+        label := Label{text: "Medium" draw_text.color: #fff draw_text.text_style.font_size: 10}
     }
 
     // Large item template (120px)
@@ -56,7 +56,7 @@ script_mod! {
         draw_bg.color: #634
         draw_bg.radius: 3.0
         align: Align{y: 0.5}
-        $label: Label{text: "Large" draw_text.color: #fff draw_text.text_style.font_size: 11}
+        label := Label{text: "Large" draw_text.color: #fff draw_text.text_style.font_size: 11}
     }
 
     // Extra large item template (200px)
@@ -67,21 +67,21 @@ script_mod! {
         draw_bg.color: #643
         draw_bg.radius: 3.0
         align: Align{y: 0.5}
-        $label: Label{text: "Extra Large" draw_text.color: #fff draw_text.text_style.font_size: 12}
+        label := Label{text: "Extra Large" draw_text.color: #fff draw_text.text_style.font_size: 12}
     }
 
     // Scrollbar test list widget
     let ScrollbarTestList = #(ScrollbarTestList::register_widget(vm)) {
         width: Fill
         height: Fill
-        $list: PortalList{
+        list := PortalList{
             width: Fill
             height: Fill
             flow: Down
-            $Small: ScrollTestSmall{}
-            $Medium: ScrollTestMedium{}
-            $Large: ScrollTestLarge{}
-            $XLarge: ScrollTestXLarge{}
+            Small := ScrollTestSmall{}
+            Medium := ScrollTestMedium{}
+            Large := ScrollTestLarge{}
+            XLarge := ScrollTestXLarge{}
         }
     }
 
@@ -111,7 +111,7 @@ script_mod! {
         width: Fill height: Fit
         padding: Inset{top: 4 bottom: 4 left: 10 right: 10}
 
-        $selectable: TextFlow{
+        selectable := TextFlow{
             width: Fill height: Fit
             selectable: true
             font_size: 10
@@ -122,13 +122,13 @@ script_mod! {
     let SelectionTestList = #(SelectionTestList::register_widget(vm)) {
         width: Fill
         height: Fill
-        $list: PortalList{
+        list := PortalList{
             width: Fill
             height: Fill
             flow: Down
             selectable: true
             drag_scrolling: false
-            $Item: SelectableTextItem{}
+            Item := SelectableTextItem{}
         }
     }
 
@@ -164,10 +164,10 @@ script_mod! {
 
         View{
             width: Fill height: Fit flow: Down spacing: 4
-            $title: Label{text: "Item Title" draw_text.color: #fff draw_text.text_style.font_size: 11}
-            $subtitle: Label{text: "Item subtitle text" draw_text.color: #888 draw_text.text_style.font_size: 9}
+            title := Label{text: "Item Title" draw_text.color: #fff draw_text.text_style.font_size: 11}
+            subtitle := Label{text: "Item subtitle text" draw_text.color: #888 draw_text.text_style.font_size: 9}
         }
-        $action_btn: ButtonFlatter{text: "View" draw_text.text_style.font_size: 9}
+        action_btn := ButtonFlatter{text: "View" draw_text.text_style.font_size: 9}
     }
 
     let ListHeader = View{
@@ -184,13 +184,13 @@ script_mod! {
     let NewsListTest = #(NewsListTest::register_widget(vm)) {
         width: Fill
         height: Fill
-        $list: PortalList{
+        list := PortalList{
             width: Fill
             height: Fill
             flow: Down
-            $Header: ListHeader{}
-            $Item: ListItem{}
-            $Footer: ListFooter{}
+            Header := ListHeader{}
+            Item := ListItem{}
+            Footer := ListFooter{}
         }
     }
 
@@ -210,11 +210,11 @@ script_mod! {
             Label{text: "Button Variants" draw_text.color: #fff draw_text.text_style.font_size: 13}
 
             View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
-            $button: Button{text: "Standard"}
-            $flat_button: ButtonFlat{text: "Flat"}
-            $flatter_button: ButtonFlatter{text: "Flatter"}
+            button := Button{text: "Standard"}
+            flat_button := ButtonFlat{text: "Flat"}
+            flatter_button := ButtonFlatter{text: "Flatter"}
 
-            $icon_button: Button{
+            icon_button := Button{
                 text: "With Icon"
                 icon_walk: Walk{width: 16 height: 16}
                 draw_icon.color: #fff
@@ -225,7 +225,7 @@ script_mod! {
 
             Label{text: "Icon Only" draw_text.color: #888 draw_text.text_style.font_size: 10}
             View{width: Fill height: Fit flow: Right spacing: 15}
-            $test_icon: Icon{
+            test_icon := Icon{
                 draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_file.svg")
                 draw_icon.color: #0ff
                 icon_walk: Walk{width: 32 height: 32}
@@ -242,9 +242,9 @@ script_mod! {
             Label{text: "Click buttons to show tooltips, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
 
             View{width: Fill height: Fit flow: Right spacing: 10}
-            $tooltip_btn1: Button{text: "Show Tooltip 1"}
-            $tooltip_btn2: Button{text: "Show Tooltip 2"}
-            $tooltip_btn3: ButtonFlat{text: "Show Help Tip"}
+            tooltip_btn1 := Button{text: "Show Tooltip 1"}
+            tooltip_btn2 := Button{text: "Show Tooltip 2"}
+            tooltip_btn3 := ButtonFlat{text: "Show Help Tip"}
 
             Hr{}
 
@@ -252,17 +252,17 @@ script_mod! {
             Label{text: "Click to show/hide notification popup" draw_text.color: #888 draw_text.text_style.font_size: 10}
 
             View{width: Fill height: Fit flow: Right spacing: 10}
-            $show_popup_btn: Button{text: "Show Notification"}
-            $hide_popup_btn: ButtonFlat{text: "Hide Notification"}
+            show_popup_btn := Button{text: "Show Notification"}
+            hide_popup_btn := ButtonFlat{text: "Hide Notification"}
         }
 
         // Tooltip overlay
-        $buttons_tooltip: Tooltip{}
+        buttons_tooltip := Tooltip{}
 
         // Popup notification overlay
-        $popup_notif: PopupNotification{
+        popup_notif := PopupNotification{
             align: Align{x: 1.0 y: 0.0}
-            $content +: {
+            content +: {
                 margin: Inset{top: 10 right: 10}
 
                 RoundedView{
@@ -290,23 +290,23 @@ script_mod! {
             width: Fill height: Fill flow: Down padding: 15 spacing: 10
 
             Label{text: "Checkboxes" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $checkbox: CheckBox{text: "Enable feature"}
+            checkbox := CheckBox{text: "Enable feature"}
             CheckBox{text: "Show notifications"}
             CheckBox{text: "Auto-save on exit"}
 
             Hr{}
 
             Label{text: "Toggles" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $toggle: Toggle{text: "Dark mode"}
+            toggle := Toggle{text: "Dark mode"}
             Toggle{text: "Compact view"}
             Toggle{text: "Developer mode"}
 
             Hr{}
 
             Label{text: "Radio Buttons" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $radio1: RadioButton{text: "Option A"}
-            $radio2: RadioButton{text: "Option B"}
-            $radio3: RadioButton{text: "Option C"}
+            radio1 := RadioButton{text: "Option A"}
+            radio2 := RadioButton{text: "Option B"}
+            radio3 := RadioButton{text: "Option C"}
         }
     }
 
@@ -319,7 +319,7 @@ script_mod! {
 
             Label{text: "Sliders" draw_text.color: #fff draw_text.text_style.font_size: 13}
 
-            $slider: Slider{width: Fill text: "Volume" min: 0.0 max: 100.0 default: 50.0}
+            slider := Slider{width: Fill text: "Volume" min: 0.0 max: 100.0 default: 50.0}
             Slider{width: Fill text: "Brightness" min: 0.0 max: 100.0 default: 75.0}
             Slider{width: Fill text: "Contrast" min: -50.0 max: 50.0 default: 0.0}
             Slider{width: Fill text: "Saturation" min: 0.0 max: 200.0 default: 100.0}
@@ -340,7 +340,7 @@ script_mod! {
             width: Fill height: Fill flow: Down padding: 15 spacing: 10
 
             Label{text: "Headings" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $heading: H1{text: "Heading 1"}
+            heading := H1{text: "Heading 1"}
             H2{text: "Heading 2"}
             H3{text: "Heading 3"}
 
@@ -348,14 +348,14 @@ script_mod! {
 
             Label{text: "Text Inputs" draw_text.color: #fff draw_text.text_style.font_size: 13}
             Label{text: "Username:" draw_text.color: #aaa draw_text.text_style.font_size: 10}
-            $username: TextInput{width: Fill height: Fit empty_text: "Enter username"}
+            username := TextInput{width: Fill height: Fit empty_text: "Enter username"}
             Label{text: "Password:" draw_text.color: #aaa draw_text.text_style.font_size: 10}
-            $password: TextInput{width: Fill height: Fit empty_text: "Enter password" is_password: true}
+            password := TextInput{width: Fill height: Fit empty_text: "Enter password" is_password: true}
 
             Hr{}
 
             Label{text: "Links" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $link: LinkLabel{text: "Visit Makepad" url: "https://makepad.dev"}
+            link := LinkLabel{text: "Visit Makepad" url: "https://makepad.dev"}
         }
     }
 
@@ -367,7 +367,7 @@ script_mod! {
             width: Fill height: Fill flow: Down padding: 15 spacing: 12
 
             Label{text: "Dropdown" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $dropdown: DropDown{labels: ["Option A" "Option B" "Option C" "Option D"]}
+            dropdown := DropDown{labels: ["Option A" "Option B" "Option C" "Option D"]}
 
             Hr{}
 
@@ -385,7 +385,7 @@ script_mod! {
             width: Fill height: Fill flow: Down padding: 15 spacing: 15
 
             Label{text: "Markdown (selectable - try selecting text!)" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $markdown: Markdown{
+            markdown := Markdown{
                 width: Fill height: Fit
                 selectable: true
                 body: "# Heading\n\nThis is **bold** and *italic*.\n\n- List item 1\n- List item 2\n\n> Blockquote\n\n`inline code`"
@@ -394,7 +394,7 @@ script_mod! {
             Hr{}
 
             Label{text: "HTML (selectable)" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $html: Html{
+            html := Html{
                 width: Fill height: Fit
                 selectable: true
                 body: "<h3>HTML Content</h3><p><b>Bold</b> and <i>italic</i> text.</p><ul><li>Item one</li><li>Item two</li></ul><p><a href='https://makepad.dev'>Link</a></p>"
@@ -411,7 +411,7 @@ script_mod! {
         Label{text: "Expandable Panel Demo" draw_text.color: #fff draw_text.text_style.font_size: 13 padding: 15}
         Label{text: "Drag the panel up/down" draw_text.color: #888 draw_text.text_style.font_size: 10 padding: Inset{left: 15 bottom: 10}}
 
-        $expandable: ExpandablePanel{
+        expandable := ExpandablePanel{
             width: Fill height: Fill
             initial_offset: 100.0
 
@@ -424,7 +424,7 @@ script_mod! {
             }
 
             // The draggable panel
-            $panel: RoundedView{
+            panel := RoundedView{
                 width: Fill height: Fill
                 draw_bg.color: #445
                 draw_bg.radius: vec4(15.0 15.0 0.0 0.0)
@@ -452,7 +452,7 @@ script_mod! {
 
                 View{height: Fill}
 
-                $reset_btn: Button{text: "Reset Panel Position"}
+                reset_btn := Button{text: "Reset Panel Position"}
             }
         }
     }
@@ -560,9 +560,9 @@ script_mod! {
             Hr{}
 
             View{width: Fill height: Fit flow: Right spacing: 10}
-            $slide_left_btn: Button{text: "Toggle Left Panel"}
-            $slide_top_btn: Button{text: "Toggle Top Panel"}
-            $slide_right_btn: Button{text: "Toggle Right Panel"}
+            slide_left_btn := Button{text: "Toggle Left Panel"}
+            slide_top_btn := Button{text: "Toggle Top Panel"}
+            slide_right_btn := Button{text: "Toggle Right Panel"}
 
             // Content area placeholder
             View{
@@ -573,7 +573,7 @@ script_mod! {
         }
 
         // Left slide panel
-        $left_panel: SlidePanel{
+        left_panel := SlidePanel{
             side: SlideSide.Left
             width: 200
             height: Fill
@@ -594,7 +594,7 @@ script_mod! {
         }
 
         // Top slide panel
-        $top_panel: SlidePanel{
+        top_panel := SlidePanel{
             side: SlideSide.Top
             width: Fill
             height: 120
@@ -614,7 +614,7 @@ script_mod! {
         }
 
         // Right slide panel
-        $right_panel: SlidePanel{
+        right_panel := SlidePanel{
             side: SlideSide.Right
             width: 200
             height: Fill
@@ -643,33 +643,33 @@ script_mod! {
         Label{text: "SlidesView Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
         Label{text: "Use arrow keys (left/right) to navigate slides" draw_text.color: #888 draw_text.text_style.font_size: 10}
 
-        $slides: SlidesView{
+        slides := SlidesView{
             width: Fill height: Fill
 
-            $slide1: Slide{
-                $title: H1{text: "Welcome to Makepad"}
+            slide1 := Slide{
+                title := H1{text: "Welcome to Makepad"}
                 SlideBody{text: "A modern UI framework for Rust"}
             }
 
-            $slide2: SlideChapter{
-                $title: H1{text: "Chapter 1: Getting Started"}
+            slide2 := SlideChapter{
+                title := H1{text: "Chapter 1: Getting Started"}
                 SlideBody{text: "Learn the basics of Makepad widgets"}
             }
 
-            $slide3: Slide{
-                $title: H1{text: "Features"}
+            slide3 := Slide{
+                title := H1{text: "Features"}
                 SlideBody{text: "- Fast GPU rendering"}
                 SlideBody{text: "- Cross-platform support"}
                 SlideBody{text: "- Live design system"}
             }
 
-            $slide4: SlideChapter{
-                $title: H1{text: "Chapter 2: Advanced Topics"}
+            slide4 := SlideChapter{
+                title := H1{text: "Chapter 2: Advanced Topics"}
                 SlideBody{text: "Dive deeper into Makepad"}
             }
 
-            $slide5: Slide{
-                $title: H1{text: "Thank You!"}
+            slide5 := Slide{
+                title := H1{text: "Thank You!"}
                 SlideBody{text: "Questions?"}
             }
         }
@@ -683,17 +683,17 @@ script_mod! {
             width: Fill height: Fill flow: Down padding: 15 spacing: 12
 
             Label{text: "Images" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $test_image: Image{width: 180 height: 120 fit: ImageFit.Stretch}
+            test_image := Image{width: 180 height: 120 fit: ImageFit.Stretch}
 
             Hr{}
 
             Label{text: "Loading Spinner" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $spinner: LoadingSpinner{width: 40 height: 40}
+            spinner := LoadingSpinner{width: 40 height: 40}
 
             Hr{}
 
             Label{text: "Custom Shader" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            $test: TestDraw{}
+            test := TestDraw{}
         }
     }
 
@@ -713,27 +713,27 @@ script_mod! {
             Hr{}
 
             Label{text: "Basic Modal" draw_text.color: #fff draw_text.text_style.font_size: 11}
-            $open_modal_btn: Button{text: "Open Modal"}
+            open_modal_btn := Button{text: "Open Modal"}
 
             Hr{}
 
             Label{text: "Confirmation Modal" draw_text.color: #fff draw_text.text_style.font_size: 11}
-            $open_confirm_modal_btn: Button{text: "Open Confirmation Dialog"}
+            open_confirm_modal_btn := Button{text: "Open Confirmation Dialog"}
 
             Hr{}
 
             Label{text: "Non-dismissable Modal" draw_text.color: #fff draw_text.text_style.font_size: 11}
             Label{text: "This modal cannot be dismissed by clicking outside" draw_text.color: #888 draw_text.text_style.font_size: 9}
-            $open_nodismiss_modal_btn: Button{text: "Open Non-dismissable Modal"}
+            open_nodismiss_modal_btn := Button{text: "Open Non-dismissable Modal"}
 
             Hr{}
 
-            $modal_status: Label{text: "Modal status: Closed" draw_text.color: #8f8 draw_text.text_style.font_size: 10}
+            modal_status := Label{text: "Modal status: Closed" draw_text.color: #8f8 draw_text.text_style.font_size: 10}
         }
 
         // Basic Modal
-        $test_modal: Modal{
-            $content +: {
+        test_modal := Modal{
+            content +: {
                 width: 300
                 height: Fit
                 padding: 20
@@ -752,14 +752,14 @@ script_mod! {
 
                     View{height: 10}
 
-                    $close_modal_btn: Button{text: "Close Modal"}
+                    close_modal_btn := Button{text: "Close Modal"}
                 }
             }
         }
 
         // Confirmation Modal
-        $confirm_modal: Modal{
-            $content +: {
+        confirm_modal := Modal{
+            content +: {
                 width: 350
                 height: Fit
 
@@ -779,17 +779,17 @@ script_mod! {
                         width: Fill height: Fit
                         flow: Right spacing: 10 align: Align{x: 1.0 y: 0.5}
 
-                        $cancel_confirm_btn: ButtonFlat{text: "Cancel"}
-                        $confirm_btn: Button{text: "Confirm"}
+                        cancel_confirm_btn := ButtonFlat{text: "Cancel"}
+                        confirm_btn := Button{text: "Confirm"}
                     }
                 }
             }
         }
 
         // Non-dismissable Modal
-        $nodismiss_modal: Modal{
+        nodismiss_modal := Modal{
             can_dismiss: false
-            $content +: {
+            content +: {
                 width: 320
                 height: Fit
 
@@ -805,7 +805,7 @@ script_mod! {
 
                     View{height: 10}
 
-                    $close_nodismiss_btn: Button{text: "I Understand, Close Modal"}
+                    close_nodismiss_btn := Button{text: "I Understand, Close Modal"}
                 }
             }
         }
@@ -815,157 +815,141 @@ script_mod! {
         width: Fill height: Fill
 
         // Dock structure - 3 areas: left, center-top, center-bottom
-        $root: DockSplitter{
+        root := DockSplitter{
             axis: SplitterAxis.Horizontal
             align: SplitterAlign.FromA(280.0)
-            a: $left_tabs
-            b: $right_split
+            a: @left_tabs
+            b: @right_split
         }
 
-        $right_split: DockSplitter{
+        right_split := DockSplitter{
             axis: SplitterAxis.Vertical
             align: SplitterAlign.FromB(250.0)
-            a: $center_tabs
-            b: $bottom_tabs
+            a: @center_tabs
+            b: @bottom_tabs
         }
 
         // Left panel - Selection test first, then input widgets
-        $left_tabs: DockTabs{
-            tabs: [$scrollbar_test_tab, $selection_test_tab, $toggles_tab, $sliders_tab, $text_tab, $dropdowns_tab]
+        left_tabs := DockTabs{
+            tabs: [@scrollbar_test_tab, @selection_test_tab, @toggles_tab, @sliders_tab, @text_tab, @dropdowns_tab]
             selected: 0
             closable: false
         }
 
         // Center panel - content widgets
-        $center_tabs: DockTabs{
-            tabs: [$markup_tab, $buttons_tab, $media_tab, $modal_tab, $lists_tab]
+        center_tabs := DockTabs{
+            tabs: [@markup_tab, @buttons_tab, @media_tab, @modal_tab, @lists_tab]
             selected: 0
             closable: true
         }
 
         // Bottom panel - containers/presentations
-        $bottom_tabs: DockTabs{
-            tabs: [$slidepanel_tab, $slides_tab, $filetree_tab, $folds_tab, $expandable_tab]
+        bottom_tabs := DockTabs{
+            tabs: [@slidepanel_tab, @slides_tab, @filetree_tab, @folds_tab, @expandable_tab]
             selected: 0
             closable: true
         }
 
         // Selection test tab - first tab for testing cross-boundary selection
         // Scrollbar test tab - first tab for testing variable height items
-        $scrollbar_test_tab: DockTab{
+        scrollbar_test_tab := DockTab{
             name: "Scrollbar"
-            template: $CloseableTab
-            kind: $TabScrollbarTest
-        }
+            template: @CloseableTab
+            kind: @TabScrollbarTest        }
 
-        $selection_test_tab: DockTab{
+        selection_test_tab := DockTab{
             name: "Selection"
-            template: $CloseableTab
-            kind: $TabSelectionTest
-        }
+            template: @CloseableTab
+            kind: @TabSelectionTest        }
 
         // Individual tabs
-        $buttons_tab: DockTab{
+        buttons_tab := DockTab{
             name: "Buttons"
-            template: $CloseableTab
-            kind: $TabButtons
-        }
+            template: @CloseableTab
+            kind: @TabButtons        }
 
-        $toggles_tab: DockTab{
+        toggles_tab := DockTab{
             name: "Toggles"
-            template: $CloseableTab
-            kind: $TabToggles
-        }
+            template: @CloseableTab
+            kind: @TabToggles        }
 
-        $sliders_tab: DockTab{
+        sliders_tab := DockTab{
             name: "Sliders"
-            template: $CloseableTab
-            kind: $TabSliders
-        }
+            template: @CloseableTab
+            kind: @TabSliders        }
 
-        $text_tab: DockTab{
+        text_tab := DockTab{
             name: "Text"
-            template: $CloseableTab
-            kind: $TabText
-        }
+            template: @CloseableTab
+            kind: @TabText        }
 
-        $dropdowns_tab: DockTab{
+        dropdowns_tab := DockTab{
             name: "Selects"
-            template: $CloseableTab
-            kind: $TabDropdowns
-        }
+            template: @CloseableTab
+            kind: @TabDropdowns        }
 
-        $markup_tab: DockTab{
+        markup_tab := DockTab{
             name: "Markup"
-            template: $CloseableTab
-            kind: $TabMarkup
-        }
+            template: @CloseableTab
+            kind: @TabMarkup        }
 
-        $folds_tab: DockTab{
+        folds_tab := DockTab{
             name: "Folds"
-            template: $CloseableTab
-            kind: $TabFolds
-        }
+            template: @CloseableTab
+            kind: @TabFolds        }
 
-        $lists_tab: DockTab{
+        lists_tab := DockTab{
             name: "Lists"
-            template: $CloseableTab
-            kind: $TabLists
-        }
+            template: @CloseableTab
+            kind: @TabLists        }
 
-        $expandable_tab: DockTab{
+        expandable_tab := DockTab{
             name: "Expandable"
-            template: $CloseableTab
-            kind: $TabExpandable
-        }
+            template: @CloseableTab
+            kind: @TabExpandable        }
 
-        $media_tab: DockTab{
+        media_tab := DockTab{
             name: "Media"
-            template: $CloseableTab
-            kind: $TabMedia
-        }
+            template: @CloseableTab
+            kind: @TabMedia        }
 
-        $filetree_tab: DockTab{
+        filetree_tab := DockTab{
             name: "FileTree"
-            template: $CloseableTab
-            kind: $TabFileTree
-        }
+            template: @CloseableTab
+            kind: @TabFileTree        }
 
-        $slidepanel_tab: DockTab{
+        slidepanel_tab := DockTab{
             name: "SlidePanel"
-            template: $CloseableTab
-            kind: $TabSlidePanel
-        }
+            template: @CloseableTab
+            kind: @TabSlidePanel        }
 
-        $slides_tab: DockTab{
+        slides_tab := DockTab{
             name: "Slides"
-            template: $CloseableTab
-            kind: $TabSlides
-        }
+            template: @CloseableTab
+            kind: @TabSlides        }
 
-        $modal_tab: DockTab{
+        modal_tab := DockTab{
             name: "Modal"
-            template: $CloseableTab
-            kind: $TabModal
-        }
+            template: @CloseableTab
+            kind: @TabModal        }
 
         // Content templates by widget type
-        $TabScrollbarTest: TabScrollbarTest{}
-        $TabSelectionTest: TabSelectionTest{}
-        $TabButtons: TabButtons{}
-        $TabToggles: TabToggles{}
-        $TabSliders: TabSliders{}
-        $TabText: TabText{}
-        $TabDropdowns: TabDropdowns{}
-        $TabMarkup: TabMarkup{}
-        $TabFolds: TabFolds{}
-        $TabLists: TabLists{}
-        $TabMedia: TabMedia{}
-        $TabExpandable: TabExpandable{}
-        $TabModal: TabModal{}
-        $TabFileTree: TabFileTree{}
-        $TabSlides: TabSlides{}
-        $TabSlidePanel: TabSlidePanel{}
+        TabScrollbarTest := TabScrollbarTest{}
+        TabSelectionTest := TabSelectionTest{}
+        TabButtons := TabButtons{}
+        TabToggles := TabToggles{}
+        TabSliders := TabSliders{}
+        TabText := TabText{}
+        TabDropdowns := TabDropdowns{}
+        TabMarkup := TabMarkup{}
+        TabFolds := TabFolds{}
+        TabLists := TabLists{}
+        TabMedia := TabMedia{}
+        TabExpandable := TabExpandable{}
+        TabModal := TabModal{}
+        TabFileTree := TabFileTree{}
+        TabSlides := TabSlides{}
+        TabSlidePanel := TabSlidePanel{}
     }
 
     mod.gc.set_static(mod)
@@ -974,12 +958,12 @@ script_mod! {
 
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
-            $main_window: Window{
+            main_window := Window{
                 pass.clear_color: vec4(0.3 0.3 0.3 1.0)
                 window.inner_size: vec2(1000 700)
-                $body +: {
+                body +: {
                     padding: 4
-                    $dock: AppDock{}
+                    dock := AppDock{}
                 }
             }
         }
@@ -1006,7 +990,7 @@ impl MatchEvent for App {
             Path::new("tools/open_harmony/deveco/AppScope/resources/base/media/app_icon.png");
         if let Err(e) = self
             .ui
-            .image(ids!($test_image))
+            .image(ids!(test_image))
             .load_image_file_by_path(cx, image_path)
         {
             log!("Failed to load image: {:?}", e);
@@ -1014,23 +998,23 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(ids!($button)).clicked(actions) {
+        if self.ui.button(ids!(button)).clicked(actions) {
             log!("Button clicked!");
         }
-        if self.ui.button(ids!($flat_button)).clicked(actions) {
+        if self.ui.button(ids!(flat_button)).clicked(actions) {
             log!("Flat button clicked!");
         }
-        if self.ui.button(ids!($flatter_button)).clicked(actions) {
+        if self.ui.button(ids!(flatter_button)).clicked(actions) {
             log!("Flatter button clicked!");
         }
-        if self.ui.button(ids!($icon_button)).clicked(actions) {
+        if self.ui.button(ids!(icon_button)).clicked(actions) {
             log!("Icon button clicked!");
         }
 
         // Tooltip demo - show tooltips on button click
-        if self.ui.button(ids!($tooltip_btn1)).clicked(actions) {
+        if self.ui.button(ids!(tooltip_btn1)).clicked(actions) {
             log!("Showing tooltip 1");
-            self.ui.tooltip(ids!($buttons_tooltip)).show_with_options(
+            self.ui.tooltip(ids!(buttons_tooltip)).show_with_options(
                 cx,
                 dvec2(350.0, 280.0),
                 "This is the standard button. Click it to perform the primary action.",
@@ -1038,34 +1022,34 @@ impl MatchEvent for App {
         }
 
         // Popup notification demo
-        if self.ui.button(ids!($show_popup_btn)).clicked(actions) {
+        if self.ui.button(ids!(show_popup_btn)).clicked(actions) {
             log!("Showing popup notification");
-            self.ui.popup_notification(ids!($popup_notif)).open(cx);
+            self.ui.popup_notification(ids!(popup_notif)).open(cx);
         }
 
-        if let Some(value) = self.ui.check_box(ids!($checkbox)).changed(actions) {
+        if let Some(value) = self.ui.check_box(ids!(checkbox)).changed(actions) {
             log!("Checkbox changed: {}", value);
         }
-        if let Some(value) = self.ui.check_box(ids!($toggle)).changed(actions) {
+        if let Some(value) = self.ui.check_box(ids!(toggle)).changed(actions) {
             log!("Toggle changed: {}", value);
         }
         if let Some(index) = self
             .ui
-            .radio_button_set(ids_list!($radio1, $radio2, $radio3))
+            .radio_button_set(ids_list!(radio1, radio2, radio3))
             .selected(cx, actions)
         {
             log!("Radio button selected: {}", index);
         }
 
         // ExpandablePanel test
-        if self.ui.button(ids!($reset_btn)).clicked(actions) {
+        if self.ui.button(ids!(reset_btn)).clicked(actions) {
             log!("Resetting expandable panel");
-            self.ui.expandable_panel(ids!($expandable)).reset(cx);
+            self.ui.expandable_panel(ids!(expandable)).reset(cx);
         }
 
         if let Some(offset) = self
             .ui
-            .expandable_panel(ids!($expandable))
+            .expandable_panel(ids!(expandable))
             .scrolled_at(actions)
         {
             log!("ExpandablePanel scrolled to: {}", offset);
@@ -1073,104 +1057,104 @@ impl MatchEvent for App {
 
         // Modal tests
         // Open basic modal
-        if self.ui.button(ids!($open_modal_btn)).clicked(actions) {
+        if self.ui.button(ids!(open_modal_btn)).clicked(actions) {
             log!("Opening basic modal");
-            self.ui.modal(ids!($test_modal)).open(cx);
+            self.ui.modal(ids!(test_modal)).open(cx);
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Basic Modal Open");
         }
 
         // Close basic modal
-        if self.ui.button(ids!($close_modal_btn)).clicked(actions) {
+        if self.ui.button(ids!(close_modal_btn)).clicked(actions) {
             log!("Closing basic modal via button");
-            self.ui.modal(ids!($test_modal)).close(cx);
+            self.ui.modal(ids!(test_modal)).close(cx);
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Closed via button");
         }
 
         // Check if basic modal was dismissed (clicked outside or pressed Escape)
-        if self.ui.modal(ids!($test_modal)).dismissed(actions) {
+        if self.ui.modal(ids!(test_modal)).dismissed(actions) {
             log!("Basic modal was dismissed");
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Dismissed (clicked outside or Escape)");
         }
 
         // Open confirmation modal
         if self
             .ui
-            .button(ids!($open_confirm_modal_btn))
+            .button(ids!(open_confirm_modal_btn))
             .clicked(actions)
         {
             log!("Opening confirmation modal");
-            self.ui.modal(ids!($confirm_modal)).open(cx);
+            self.ui.modal(ids!(confirm_modal)).open(cx);
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Confirmation Modal Open");
         }
 
         // Cancel confirmation
-        if self.ui.button(ids!($cancel_confirm_btn)).clicked(actions) {
+        if self.ui.button(ids!(cancel_confirm_btn)).clicked(actions) {
             log!("Confirmation cancelled");
-            self.ui.modal(ids!($confirm_modal)).close(cx);
+            self.ui.modal(ids!(confirm_modal)).close(cx);
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Confirmation Cancelled");
         }
 
         // Confirm action
-        if self.ui.button(ids!($confirm_btn)).clicked(actions) {
+        if self.ui.button(ids!(confirm_btn)).clicked(actions) {
             log!("Action confirmed!");
-            self.ui.modal(ids!($confirm_modal)).close(cx);
+            self.ui.modal(ids!(confirm_modal)).close(cx);
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Action Confirmed!");
         }
 
         // Check if confirmation modal was dismissed
-        if self.ui.modal(ids!($confirm_modal)).dismissed(actions) {
+        if self.ui.modal(ids!(confirm_modal)).dismissed(actions) {
             log!("Confirmation modal was dismissed");
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Confirmation dismissed");
         }
 
         // Open non-dismissable modal
         if self
             .ui
-            .button(ids!($open_nodismiss_modal_btn))
+            .button(ids!(open_nodismiss_modal_btn))
             .clicked(actions)
         {
             log!("Opening non-dismissable modal");
-            self.ui.modal(ids!($nodismiss_modal)).open(cx);
+            self.ui.modal(ids!(nodismiss_modal)).open(cx);
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Non-dismissable Modal Open");
         }
 
         // Close non-dismissable modal
-        if self.ui.button(ids!($close_nodismiss_btn)).clicked(actions) {
+        if self.ui.button(ids!(close_nodismiss_btn)).clicked(actions) {
             log!("Closing non-dismissable modal via button");
-            self.ui.modal(ids!($nodismiss_modal)).close(cx);
+            self.ui.modal(ids!(nodismiss_modal)).close(cx);
             self.ui
-                .label(ids!($modal_status))
+                .label(ids!(modal_status))
                 .set_text(cx, "Modal status: Non-dismissable closed via button");
         }
 
         // SlidePanel tests
-        if self.ui.button(ids!($slide_left_btn)).clicked(actions) {
+        if self.ui.button(ids!(slide_left_btn)).clicked(actions) {
             log!("Toggling left slide panel");
-            self.ui.slide_panel(ids!($left_panel)).toggle(cx);
+            self.ui.slide_panel(ids!(left_panel)).toggle(cx);
         }
-        if self.ui.button(ids!($slide_top_btn)).clicked(actions) {
+        if self.ui.button(ids!(slide_top_btn)).clicked(actions) {
             log!("Toggling top slide panel");
-            self.ui.slide_panel(ids!($top_panel)).toggle(cx);
+            self.ui.slide_panel(ids!(top_panel)).toggle(cx);
         }
-        if self.ui.button(ids!($slide_right_btn)).clicked(actions) {
+        if self.ui.button(ids!(slide_right_btn)).clicked(actions) {
             log!("Toggling right slide panel");
-            self.ui.slide_panel(ids!($right_panel)).toggle(cx);
+            self.ui.slide_panel(ids!(right_panel)).toggle(cx);
         }
     }
 }
@@ -1241,9 +1225,9 @@ impl Widget for NewsListTest {
                 while let Some(item_id) = list.next_visible_item(cx) {
                     // Determine which template to use based on item_id
                     let template = match item_id {
-                        //0 => id!($Header),
-                        //51 => id!($Footer),
-                        _ => id!($Item),
+                        //0 => id!(Header),
+                        //51 => id!(Footer),
+                        _ => id!(Item),
                     };
 
                     let item = list.item(cx, item_id, template);
@@ -1257,8 +1241,8 @@ impl Widget for NewsListTest {
                             2 => "Medium length subtitle text here",
                             _ => "Another item in the list",
                         };
-                        item.label(ids!($title)).set_text(cx, &title);
-                        item.label(ids!($subtitle)).set_text(cx, subtitle);
+                        item.label(ids!(title)).set_text(cx, &title);
+                        item.label(ids!(subtitle)).set_text(cx, subtitle);
                     }
 
                     item.draw_all(cx, &mut Scope::empty());
@@ -1288,7 +1272,7 @@ impl Widget for SelectionTestList {
                 list.set_item_range(cx, 0, 200);
 
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let mut item = list.item(cx, item_id, id!($Item)).as_view();
+                    let mut item = list.item(cx, item_id, id!(Item)).as_view();
 
                     // Generate varied text content for each item
                     let text = match item_id % 10 {
@@ -1338,17 +1322,17 @@ impl Widget for ScrollbarTestList {
                 while let Some(item_id) = list.next_visible_item(cx) {
                     // Cycle through different height templates
                     let (template, height_name) = match item_id % 4 {
-                        0 => (id!($Small), "Small (30px)"),
-                        1 => (id!($Medium), "Medium (60px)"),
-                        2 => (id!($Large), "Large (120px)"),
-                        _ => (id!($XLarge), "XLarge (200px)"),
+                        0 => (id!(Small), "Small (30px)"),
+                        1 => (id!(Medium), "Medium (60px)"),
+                        2 => (id!(Large), "Large (120px)"),
+                        _ => (id!(XLarge), "XLarge (200px)"),
                     };
 
                     let item_widget = list.item(cx, item_id, template);
 
                     // Set the label text
                     let text = format!("Item {} - {}", item_id, height_name);
-                    item_widget.label(ids!($label)).set_text(cx, &text);
+                    item_widget.label(ids!(label)).set_text(cx, &text);
 
                     item_widget.draw_all(cx, &mut Scope::empty());
                 }

@@ -196,19 +196,19 @@ impl FileSystem {
             .map(|ext_str| ext_str.to_lowercase())
         {
             Some(ext) => match ext.as_str() {
-                "mpai" => live_id!($AiChat),
-                _ => live_id!($CodeEditor),
+                "mpai" => live_id!(AiChat),
+                _ => live_id!(CodeEditor),
             },
             _ => {
-                live_id!($CodeEditor)
+                live_id!(CodeEditor)
             }
         }
     }
 
     pub fn get_tab_after_from_path(path: &str) -> LiveId {
         match Self::get_editor_template_from_path(path) {
-            live_id!($AiChat) => live_id!($ai_first),
-            _ => live_id!($edit_first),
+            live_id!(AiChat) => live_id!(ai_first),
+            _ => live_id!(edit_first),
         }
     }
 
@@ -429,7 +429,7 @@ impl FileSystem {
                             match result {
                                 Ok(response) => {
                                     let file_id = LiveId(response.id);
-                                    let dock = ui.dock(ids!($dock));
+                                    let dock = ui.dock(ids!(dock));
                                     for (tab_id, file_id) in &self.tab_id_to_file_node_id {
                                         if response.id == file_id.0 {
                                             dock.redraw_tab(cx, *tab_id);
@@ -540,7 +540,7 @@ impl FileSystem {
     pub fn process_save_response(&mut self, cx: &mut Cx, response: SaveFileResponse) {
         // alright file has been saved
         // now we need to check if a live_design!{} changed or something outside it
-        if Self::get_editor_template_from_path(&response.path) != live_id!($CodeEditor) {
+        if Self::get_editor_template_from_path(&response.path) != live_id!(CodeEditor) {
             return;
         }
 
@@ -589,11 +589,11 @@ impl FileSystem {
         let template = self.get_editor_template_from_file_id(file_id);
 
         match template {
-            Some(live_id!($CodeEditor)) => {
+            Some(live_id!(CodeEditor)) => {
                 self.open_documents
                     .insert(file_id, OpenDocument::CodeLoading(dec));
             }
-            Some(live_id!($AiChat)) => {
+            Some(live_id!(AiChat)) => {
                 self.open_documents
                     .insert(file_id, OpenDocument::AiChatLoading);
             }

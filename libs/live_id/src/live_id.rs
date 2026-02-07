@@ -1,126 +1,45 @@
 #![allow(dead_code)]
 
-use {
-    std::{
-        sync::atomic::{AtomicU64, Ordering},
-        ops::{Index, IndexMut, Deref, DerefMut},
-        collections::{HashMap},
-        sync::Once,
-        sync::Mutex,
-        fmt,
-    }
+use std::{
+    collections::HashMap,
+    fmt,
+    ops::{Deref, DerefMut, Index, IndexMut},
+    sync::atomic::{AtomicU64, Ordering},
+    sync::Mutex,
+    sync::Once,
 };
-
 
 impl LiveIdInterner {
     pub fn add(&mut self, val: &str) {
-        self.id_to_string.insert(LiveId::from_str(val), val.to_string());
+        self.id_to_string
+            .insert(LiveId::from_str(val), val.to_string());
     }
-    
+
     pub fn contains(&mut self, val: &str) -> bool {
         self.id_to_string.contains_key(&LiveId::from_str(val))
     }
-    
+
     pub fn with<F, R>(f: F) -> R
     where
-    F: FnOnce(&mut Self) -> R,
+        F: FnOnce(&mut Self) -> R,
     {
         static IDMAP: Mutex<Option<LiveIdInterner>> = Mutex::new(None);
         static ONCE: Once = Once::new();
-        ONCE.call_once( ||{
+        ONCE.call_once(|| {
             let mut map = LiveIdInterner {
                 //alloc: 0,
-                id_to_string: HashMap::new()
+                id_to_string: HashMap::new(),
             };
             // pre-seed list for debugging purposes
             let fill = [
-                "buffer",
-                "this",
-                "native",
-                "vec2",
-                "assert",
-                "Range",
-                "start",
-                "end",
-                "sin",
-                "ty",
-                "step",
-                "import",
-                "retain",
-                "extend",
-                "push",
-                "pop",
-                "number",
-                "nan",
-                "bool",
-                "nil",
-                "color",
-                "string",
-                "object",
-                "factory",
-                "opcode",
-                "mod",
-                "global",
-                "scope",
-                "fn",
-                "id",
-                "default",
-                "true",
-                "false",
-                "exp",
-                "void",
-                "use",
-                "#",
-                "$",
-                "@",
-                "^",
-                "^=",
-                "|",
-                "||",
-                "|=",
-                "%",
-                "%=",
-                "!=",
-                "!",
-                "&&",
-                "*=",
-                "*",
-                "+=",
-                "+",
-                ",",
-                "-=",
-                "->",
-                "-",
-                "..",
-                "...",
-                "..=",
-                ".",
-                "/=",
-                "/",
-                "::",
-                ":",
-                ";",
-                "<=",
-                "<",
-                "<<",
-                "<<=",
-                "==",
-                "=",
-                ">=",
-                "=>",
-                ">",
-                ">>",
-                ">>=",
-                "?",
-                "tracks",
-                "state",
-                "state_id",
-                "user",
-                "play",
-                "ended",
-                "geom_pos",
-                "geom_id",
-                "geom_uv",
+                "buffer", "this", "native", "vec2", "assert", "Range", "start", "end", "sin", "ty",
+                "step", "import", "retain", "extend", "push", "pop", "number", "nan", "bool",
+                "nil", "color", "string", "object", "factory", "opcode", "mod", "global", "scope",
+                "fn", "id", "default", "true", "false", "exp", "void", "use", "#", "$", "@", "^",
+                "^=", "|", "||", "|=", "%", "%=", "!=", "!", "&&", "*=", "*", "+=", "+", ",", "-=",
+                "->", "-", "..", "...", "..=", ".", "/=", "/", "::", ":", ":=", ";", "<=", "<",
+                "<<", "<<=", "==", "=", ">=", "=>", ">", ">>", ">>=", "?", "tracks", "state",
+                "state_id", "user", "play", "ended", "geom_pos", "geom_id", "geom_uv",
             ];
             for item in &fill {
                 if map.contains(item) {
@@ -140,34 +59,33 @@ impl LiveIdInterner {
 pub struct LiveId(pub u64);
 
 impl LiveId {
-    pub const SEED:u64 = 0xd6e8_feb8_6659_fd93;
-    pub const PREFIXED:u64 = 0x0000_2000_0000_0000;
-    
+    pub const SEED: u64 = 0xd6e8_feb8_6659_fd93;
+
     pub fn empty() -> Self {
-        Self (0)
+        Self(0)
     }
-    pub fn from_lo_hi(lo:u32, hi:u32)->Self{
-        Self( (lo as u64) | ((hi as u64)<<32) )
+    pub fn from_lo_hi(lo: u32, hi: u32) -> Self {
+        Self((lo as u64) | ((hi as u64) << 32))
     }
-    pub fn lo(&self)->u32{
-        (self.0&0xffff_ffff) as u32
+    pub fn lo(&self) -> u32 {
+        (self.0 & 0xffff_ffff) as u32
     }
-    pub fn hi(&self)->u32{
-        (self.0>>32) as u32
+    pub fn hi(&self) -> u32 {
+        (self.0 >> 32) as u32
     }
-    
-    pub fn seeded()->Self{
+
+    pub fn seeded() -> Self {
         Self(Self::SEED)
     }
     /*
     pub fn is_unique(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) == 0 && self.0 != 0
     }
-    
+
     pub fn is_ident(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) != 0
     }*/
-    
+
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
@@ -175,10 +93,10 @@ impl LiveId {
     pub fn get_value(&self) -> u64 {
         self.0
     }
-    
+
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
-    pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize, or:u64) -> Self {
+    pub const fn from_bytes(seed: u64, id_bytes: &[u8], start: usize, end: usize, or: u64) -> Self {
         let mut x = seed;
         let mut i = start;
         while i < end {
@@ -190,44 +108,40 @@ impl LiveId {
             x ^= x >> 32;
             i += 1;
         }
-        Self((x & 0x0000_1fff_ffff_ffff)|or)
+        Self((x & 0x0000_3fff_ffff_ffff) | or)
     }
-    
-    pub fn add(&self, what:u64)->Self{
+
+    pub fn add(&self, what: u64) -> Self {
         Self(self.0 + what)
     }
-    
-    pub fn xor(&self, what:u64)->Self{
-        Self((self.0 ^ what)| 0x8000_0000_0000_0000)
+
+    pub fn xor(&self, what: u64) -> Self {
+        Self((self.0 ^ what) | 0x8000_0000_0000_0000)
     }
-    
-    pub fn sub(&self, what:u64)->Self{
+
+    pub fn sub(&self, what: u64) -> Self {
         Self(self.0 - what)
     }
-        
+
     pub const fn from_str(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
-        if bytes.len() > 0 && bytes[0] == b'$'{
-            Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), Self::PREFIXED)
-        }
-        else{
-            Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), 0)
-        }
+        Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), 0)
     }
-    
-    pub fn is_prefixed(&self)->bool{
-        self.0 & Self::PREFIXED != 0
-    }
-    
-    pub const fn from_bytes_lc(seed:u64, id_bytes: &[u8], start: usize, end: usize, or:u64) -> Self {
+
+    pub const fn from_bytes_lc(
+        seed: u64,
+        id_bytes: &[u8],
+        start: usize,
+        end: usize,
+        or: u64,
+    ) -> Self {
         let mut x = seed;
         let mut i = start;
         while i < end {
             let byte = id_bytes[i];
-            let byte = if byte >= 65 && byte <=90{
+            let byte = if byte >= 65 && byte <= 90 {
                 byte + 32
-            }
-            else{
+            } else {
                 byte
             };
             x = x.overflowing_add(byte as u64).0;
@@ -239,14 +153,14 @@ impl LiveId {
             i += 1;
         }
         // mark high bit as meaning that this is a hash id
-        Self((x & 0x0000_1fff_ffff_ffff)|or)
+        Self((x & 0x0000_3fff_ffff_ffff) | or)
     }
-        
+
     pub const fn from_str_lc(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         Self::from_bytes_lc(Self::SEED, bytes, 0, bytes.len(), 0)
     }
-    
+
     pub const fn str_append(self, id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         Self::from_bytes(self.0, bytes, 0, bytes.len(), 0)
@@ -255,67 +169,63 @@ impl LiveId {
     pub const fn bytes_append(self, bytes: &[u8]) -> Self {
         Self::from_bytes(self.0, bytes, 0, bytes.len(), 0)
     }
-    
+
     pub const fn id_append(self, id: LiveId) -> Self {
         let bytes = id.0.to_be_bytes();
         Self::from_bytes(self.0, &bytes, 0, bytes.len(), 0)
     }
-    
-    pub const fn from_str_num(id_str: &str, num:u64) -> Self {
+
+    pub const fn from_str_num(id_str: &str, num: u64) -> Self {
         let bytes = id_str.as_bytes();
         let id = Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), 0);
-        Self::from_bytes(id.0, &num.to_be_bytes(), 0, 8,0)
+        Self::from_bytes(id.0, &num.to_be_bytes(), 0, 8, 0)
     }
-    
-    pub const fn from_num(seed:u64, num:u64) -> Self {
-        Self::from_bytes(seed, &num.to_be_bytes(), 0, 8,0)
+
+    pub const fn from_num(seed: u64, num: u64) -> Self {
+        Self::from_bytes(seed, &num.to_be_bytes(), 0, 8, 0)
     }
-    
-    pub fn from_str_with_lut(id_str: &str) -> Result<Self,
-    String> {
+
+    pub fn from_str_with_lut(id_str: &str) -> Result<Self, String> {
         let id = Self::from_str(id_str);
-        LiveIdInterner::with( | idmap | {
+        LiveIdInterner::with(|idmap| {
             if let Some(stored) = idmap.id_to_string.get(&id) {
                 if stored != id_str {
-                    return Err(stored.clone())
+                    return Err(stored.clone());
                 }
-            }
-            else {
+            } else {
                 idmap.id_to_string.insert(id, id_str.to_string());
             }
             Ok(id)
         })
     }
-    
-    pub fn from_str_with_intern(id_str: &str, intern:InternLiveId) -> Self{
+
+    pub fn from_str_with_intern(id_str: &str, intern: InternLiveId) -> Self {
         let id = Self::from_str(id_str);
-        if let InternLiveId::Yes = intern{
-            LiveIdInterner::with( | idmap | {idmap.id_to_string.insert(id, id_str.to_string())});
+        if let InternLiveId::Yes = intern {
+            LiveIdInterner::with(|idmap| idmap.id_to_string.insert(id, id_str.to_string()));
         }
         id
     }
-    
-    pub fn from_str_num_with_lut(id_str: &str, num:u64) -> Result<Self,
-    String> {
+
+    pub fn from_str_num_with_lut(id_str: &str, num: u64) -> Result<Self, String> {
         let id = Self::from_str_num(id_str, num);
-        LiveIdInterner::with( | idmap | {
-            idmap.id_to_string.insert(id, format!("{}{}",id_str, num));
+        LiveIdInterner::with(|idmap| {
+            idmap.id_to_string.insert(id, format!("{}{}", id_str, num));
             Ok(id)
         })
     }
-    
+
     pub fn as_string<F, R>(&self, f: F) -> R
-    where F: FnOnce(Option<&str>) -> R
+    where
+        F: FnOnce(Option<&str>) -> R,
     {
-        LiveIdInterner::with( | idmap | {
-            match idmap.id_to_string.get(self){
-                Some(v)=>f(Some(v)),
-                None=>f(None)
-            }
+        LiveIdInterner::with(|idmap| match idmap.id_to_string.get(self) {
+            Some(v) => f(Some(v)),
+            None => f(None),
         })
     }
-    
-    pub fn not_empty(&self)->bool{
+
+    pub fn not_empty(&self) -> bool {
         self.0 != 0
     }
 
@@ -323,14 +233,14 @@ impl LiveId {
         LiveId(UNIQUE_LIVE_ID.fetch_add(1, Ordering::SeqCst))
     }
 }
- 
+
 #[derive(Clone, Copy)]
-pub enum InternLiveId{
+pub enum InternLiveId {
     Yes,
-    No
+    No,
 }
 
-pub (crate) static UNIQUE_LIVE_ID: AtomicU64 = AtomicU64::new(1);
+pub(crate) static UNIQUE_LIVE_ID: AtomicU64 = AtomicU64::new(1);
 /*
 impl Ord for LiveId {
     fn cmp(&self, other: &LiveId) -> cmp::Ordering {
@@ -365,12 +275,11 @@ impl fmt::Display for LiveId {
         //else if self.is_unique(){
         //    write!(f, "UniqueId {}", self.0)
         //}
-        else{
-            self.as_string( | string | {
+        else {
+            self.as_string(|string| {
                 if let Some(id) = string {
                     write!(f, "{}", id)
-                }
-                else {
+                } else {
                     write!(f, "{:016x}", self.0)
                 }
             })
@@ -383,7 +292,6 @@ impl fmt::LowerHex for LiveId {
         fmt::Display::fmt(self, f)
     }
 }
-
 
 pub struct LiveIdInterner {
     //alloc: u64,
@@ -400,7 +308,7 @@ impl std::hash::Hasher for LiveIdHasher {
     fn write(&mut self, _: &[u8]) {
         unreachable!("Invalid use of IdHasher");
     }
-    
+
     fn write_u8(&mut self, _n: u8) {
         unreachable!("Invalid use of IdHasher");
     }
@@ -410,16 +318,16 @@ impl std::hash::Hasher for LiveIdHasher {
     fn write_u32(&mut self, _n: u32) {
         unreachable!("Invalid use of IdHasher");
     }
-    
+
     #[inline(always)]
     fn write_u64(&mut self, n: u64) {
         self.0 = n;
     }
-    
+
     fn write_usize(&mut self, _n: usize) {
         unreachable!("Invalid use of IdHasher");
     }
-    
+
     fn write_i8(&mut self, _n: i8) {
         unreachable!("Invalid use of IdHasher");
     }
@@ -435,7 +343,7 @@ impl std::hash::Hasher for LiveIdHasher {
     fn write_isize(&mut self, _n: isize) {
         unreachable!("Invalid use of IdHasher");
     }
-    
+
     #[inline(always)]
     fn finish(&self) -> u64 {
         self.0
@@ -447,7 +355,7 @@ pub struct LiveIdHasherBuilder {}
 
 impl std::hash::BuildHasher for LiveIdHasherBuilder {
     type Hasher = LiveIdHasher;
-    
+
     #[inline(always)]
     fn build_hasher(&self) -> LiveIdHasher {
         LiveIdHasher::default()
@@ -461,7 +369,9 @@ pub struct LiveIdMap<K, V> {
 }
 
 impl<K, V> Default for LiveIdMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug {
+where
+    K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug,
+{
     fn default() -> Self {
         Self {
             map: HashMap::with_hasher(LiveIdHasherBuilder {}),
@@ -474,7 +384,7 @@ impl<K, V> LiveIdMap<K, V>
 where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
 {
     pub fn new() -> Self {Self::default()}
-    
+
     pub fn alloc_key(&mut self) -> K {
         loop {
             let new_id = LiveId::unique().into();
@@ -484,7 +394,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
             }
         }
     }
-    
+
     pub fn insert_unique(&mut self, value: V) -> K {
         loop {
             let new_id = LiveId::unique().into();
@@ -494,14 +404,14 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
             match self.map.entry(new_id) {
                 Entry::Occupied(_) => continue,
                 Entry::Vacant(v) => {
-                    
+
                     v.insert(value);
                     return new_id
                 }
             }
         }
     }
-    
+
     pub fn insert(&mut self, k: impl Into<K>, value: V) {
         let k = k.into();
         self.alloc_set.remove(&k);
@@ -513,20 +423,27 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
 }
 */
 impl<K, V> Deref for LiveIdMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
+where
+    K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>,
 {
     type Target = HashMap<K, V, LiveIdHasherBuilder>;
-    fn deref(&self) -> &Self::Target {&self.map}
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
 }
 
 impl<K, V> DerefMut for LiveIdMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
+where
+    K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>,
 {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.map}
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.map
+    }
 }
 
 impl<K, V> Index<K> for LiveIdMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
+where
+    K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>,
 {
     type Output = V;
     fn index(&self, index: K) -> &Self::Output {
@@ -535,7 +452,8 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 }
 
 impl<K, V> IndexMut<K> for LiveIdMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
+where
+    K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>,
 {
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
         self.map.get_mut(&index).unwrap()

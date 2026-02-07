@@ -473,13 +473,13 @@ impl ScriptHook for PortalList {
         scope: &mut Scope,
         value: ScriptValue,
     ) {
-        // Collect templates from the object's vec - only prefixed IDs ($name) end up in the vec
+        // Collect templates from the object's vec - only vec key IDs (name) end up in the vec
         // Only collect during template applies (not eval) to avoid storing temporary objects
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 vm.vec_with(obj, |vm, vec| {
                     for kv in vec {
-                        // Templates use prefixed ids ($name) - they end up in the vec
+                        // Templates use vec key ids (name) - they end up in the vec
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 // Root the template object so it survives GC

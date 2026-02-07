@@ -10,7 +10,7 @@ use crate::value::*;
 pub enum ScriptToken {
     End,
     StreamEnd,
-    Identifier { id: LiveId, starts_with_ds: bool },
+    Identifier(LiveId),
     Operator(LiveId),
     Separator(LiveId),
     OpenCurly,
@@ -32,10 +32,10 @@ pub enum ScriptToken {
 }
 
 impl ScriptToken {
-    pub fn identifier(&self) -> (LiveId, bool) {
+    pub fn identifier(&self) -> LiveId {
         match self {
-            ScriptToken::Identifier { id, starts_with_ds } => (*id, *starts_with_ds),
-            _ => (id!(), false),
+            ScriptToken::Identifier(id) => *id,
+            _ => id!(),
         }
     }
     pub fn operator(&self) -> LiveId {
@@ -226,7 +226,7 @@ pub struct ScriptTokenPos {
 enum State {
     #[default]
     Whitespace,
-    Identifier(bool),
+    Identifier,
     Operator,
     RustValue,
     String(bool),
@@ -302,7 +302,7 @@ impl ScriptTokenizer {
             match self.tokens[i].token {
                 ScriptToken::End => print!("End"),
                 ScriptToken::StreamEnd => print!("StreamEnd"),
-                ScriptToken::Identifier { id, .. } => print!("{id}"),
+                ScriptToken::Identifier(id) => print!("{id}"),
                 ScriptToken::Operator(id) => print!("{id}"),
                 ScriptToken::Separator(id) => print!("{id}"),
                 ScriptToken::OpenCurly => print!("{{"),
@@ -450,7 +450,7 @@ impl ScriptTokenizer {
         });
     }
 
-    fn emit_identifier(&mut self, starts_with_ds: bool) {
+    fn emit_identifier(&mut self) {
         let id = match LiveId::from_str_with_lut(&self.temp) {
             Err(str) => {
                 println!(
@@ -465,7 +465,7 @@ impl ScriptTokenizer {
         self.temp.clear();
         self.tokens.push(ScriptTokenPos {
             pos: self.pos - len,
-            token: ScriptToken::Identifier { id, starts_with_ds },
+            token: ScriptToken::Identifier(id),
         });
     }
 
@@ -649,7 +649,7 @@ impl ScriptTokenizer {
                         self.state = State::Number;
                         self.temp.push(c);
                     } else if c == '_' || c == '$' || c.is_alphabetic() {
-                        self.state = State::Identifier(c == '$');
+                        self.state = State::Identifier;
                         self.temp.push(c);
                     } else if c == '#' {
                         self.state = State::Color;
@@ -666,35 +666,35 @@ impl ScriptTokenizer {
                         self.emit_token_here(tok);
                     }
                 }
-                State::Identifier(starts_with_ds) => {
+                State::Identifier => {
                     if c == '_' || c == '$' || c.is_alphanumeric() {
                         self.temp.push(c);
                     } else if c.is_whitespace() {
-                        self.emit_identifier(starts_with_ds);
+                        self.emit_identifier();
                         self.state = State::Whitespace;
                     } else if is_operator(c) {
-                        self.emit_identifier(starts_with_ds);
+                        self.emit_identifier();
                         self.state = State::Operator;
                         self.temp.push(c);
                     } else if is_separator(c) {
-                        self.emit_identifier(starts_with_ds);
+                        self.emit_identifier();
                         self.emit_separator(c);
                         self.state = State::Whitespace;
                     } else if c == '#' {
-                        self.emit_identifier(starts_with_ds);
+                        self.emit_identifier();
                         self.state = State::Color;
                     } else if let Some(tok) = is_block(c) {
-                        self.emit_identifier(starts_with_ds);
+                        self.emit_identifier();
                         self.emit_token_here(tok);
                         self.state = State::Whitespace;
                     } else if c == '"' {
-                        self.emit_identifier(starts_with_ds);
+                        self.emit_identifier();
                         self.state = State::String(true);
                     } else if c == '\'' {
-                        self.emit_identifier(starts_with_ds);
+                        self.emit_identifier();
                         self.state = State::String(false);
                     } else {
-                        self.emit_identifier(starts_with_ds);
+                        self.emit_identifier();
                         self.state = State::Whitespace;
                     }
                 }
@@ -708,7 +708,7 @@ impl ScriptTokenizer {
                             "<" | ">" | "=" | "." | "?" | ":" | "@" |
                             // Double character operators
                             "==" | "!=" | "<=" | ">=" | "&&" | "||" | "|?" |
-                            "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" |
+                            "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | ":=" |
                             "<<" | ">>" | ".." | "->" | ".?" | ">:" | "<:" | "^:" | "+:" | "?=" |
                             "++" | "-:" | "=>" |
                             "/*" | "//" |
@@ -734,6 +734,7 @@ impl ScriptTokenizer {
                             "/" |  // /=, /*, //
                             "%" |  // %=
                             "^" |  // ^=, ^:
+                            ":" |  // :=
                             "." |  // .., .?, ...
                             "?" |  // ?=
                             // Double chars that could become 3-char operators
@@ -772,7 +773,7 @@ impl ScriptTokenizer {
                         self.state = State::Whitespace;
                     } else if c == '_' || c == '$' || c.is_alphabetic() {
                         self.emit_operator();
-                        self.state = State::Identifier(c == '$');
+                        self.state = State::Identifier;
                         self.temp.push(c);
                     } else if c == '#' {
                         self.emit_operator();
@@ -975,7 +976,7 @@ impl ScriptTokenizer {
                         self.state = State::Whitespace
                     } else if c == '$' || c.is_alphabetic() {
                         self.emit_f64();
-                        self.state = State::Identifier(c == '$');
+                        self.state = State::Identifier;
                         self.temp.push(c);
                     } else if c == '#' {
                         self.emit_f64();
@@ -1024,7 +1025,7 @@ impl ScriptTokenizer {
                     } else if c == 'x' && self.temp.len() == 0 { // eat first x
                     } else if c == '_' || c == '$' || c.is_alphabetic() {
                         self.emit_color();
-                        self.state = State::Identifier(c == '$');
+                        self.state = State::Identifier;
                         self.temp.push(c);
                     } else if c == '#' {
                         self.emit_color();
