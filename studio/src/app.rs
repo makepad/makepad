@@ -69,10 +69,10 @@ pub struct App {
 impl App {
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
-            let dock = self.ui.dock(ids!($dock));
+            let dock = self.ui.dock(ids!(dock));
             let tab_id = dock.unique_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
-            let (tab_bar, pos) = dock.find_tab_bar_of_tab(id!($edit_first)).unwrap();
+            let (tab_bar, pos) = dock.find_tab_bar_of_tab(id!(edit_first)).unwrap();
             // lets pick the template
             let template = FileSystem::get_editor_template_from_path(path);
             dock.create_and_select_tab(
@@ -81,7 +81,7 @@ impl App {
                 tab_id,
                 template,
                 "".to_string(),
-                id!($CloseableTab),
+                id!(CloseableTab),
                 Some(pos),
             );
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
@@ -95,7 +95,7 @@ impl App {
                     // lets kill all running processes
                     self.data.build_manager.stop_all_active_builds(cx);
                     // Now we need to apply the saved state
-                    let dock = self.ui.dock(ids!($dock));
+                    let dock = self.ui.dock(ids!(dock));
                     if let Some(mut dock) = dock.borrow_mut() {
                         dock.load_state(cx, state.dock_items);
 
@@ -135,7 +135,7 @@ impl App {
     }
 
     fn save_state(&self, slot: usize) {
-        let dock = self.ui.dock(ids!($dock));
+        let dock = self.ui.dock(ids!(dock));
         let dock_items = dock.clone_state().unwrap();
 
         // lets store the active build ids so we can fire them up again
@@ -244,13 +244,13 @@ impl MatchEvent for App {
     }
 
     fn handle_action(&mut self, cx: &mut Cx, action: &Action) {
-        let dock = self.ui.dock(ids!($dock));
-        let file_tree = self.ui.studio_file_tree(ids!($file_tree));
-        let log_list = self.ui.log_list(ids!($log_list));
-        let run_list = self.ui.view(ids!($run_list_tab));
-        let profiler = self.ui.view(ids!($profiler));
-        let search = self.ui.view(ids!($search));
-        let snapshot = self.ui.snapshot(ids!($snapshot_tab));
+        let dock = self.ui.dock(ids!(dock));
+        let file_tree = self.ui.studio_file_tree(ids!(file_tree));
+        let log_list = self.ui.log_list(ids!(log_list));
+        let run_list = self.ui.view(ids!(run_list_tab));
+        let profiler = self.ui.view(ids!(profiler));
+        let search = self.ui.view(ids!(search));
+        let snapshot = self.ui.snapshot(ids!(snapshot_tab));
 
         match action.cast() {
             AppAction::SwapSelection(ss) => {
@@ -354,7 +354,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!($editor))
+                            .studio_code_editor(ids!(editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -380,7 +380,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!($editor))
+                            .studio_code_editor(ids!(editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -395,7 +395,7 @@ impl MatchEvent for App {
                         let tab_id = dock.unique_id(file_id.0);
                         self.data.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
-                        let (tab_bar, pos) = dock.find_tab_bar_of_tab(id!($edit_first)).unwrap();
+                        let (tab_bar, pos) = dock.find_tab_bar_of_tab(id!(edit_first)).unwrap();
                         let template = FileSystem::get_editor_template_from_path(&jt.file_name);
                         dock.create_and_select_tab(
                             cx,
@@ -403,7 +403,7 @@ impl MatchEvent for App {
                             tab_id,
                             template,
                             "".to_string(),
-                            id!($CloseableTab),
+                            id!(CloseableTab),
                             Some(pos),
                         );
                         // lets scan the entire doc for duplicates
@@ -419,7 +419,7 @@ impl MatchEvent for App {
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         //dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(ids!($editor)).borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(ids!(editor)).borrow_mut() {
                             if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do
                                 session.set_selection(
@@ -457,7 +457,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!($editor))
+                            .studio_code_editor(ids!(editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -605,11 +605,11 @@ impl MatchEvent for App {
                         let panel_id = build_id.add(window_id as u64);
                         if let Some(name) = self.data.build_manager.process_name(build_id) {
                             let (tab_bar_id, pos) = if kind_id == 0 {
-                                dock.find_tab_bar_of_tab(id!($run_first)).unwrap()
+                                dock.find_tab_bar_of_tab(id!(run_first)).unwrap()
                             } else if kind_id == 1 {
-                                dock.find_tab_bar_of_tab(id!($design_first)).unwrap()
+                                dock.find_tab_bar_of_tab(id!(design_first)).unwrap()
                             } else {
-                                dock.find_tab_bar_of_tab(id!($outline_first)).unwrap()
+                                dock.find_tab_bar_of_tab(id!(outline_first)).unwrap()
                             };
 
                             // we might already have it
@@ -619,9 +619,9 @@ impl MatchEvent for App {
                                     cx,
                                     tab_bar_id,
                                     panel_id,
-                                    id!($RunView),
+                                    id!(RunView),
                                     name.clone(),
-                                    id!($CloseableTab),
+                                    id!(CloseableTab),
                                     Some(pos),
                                 )
                                 .unwrap();
@@ -720,7 +720,7 @@ impl MatchEvent for App {
                         .file_system
                         .get_word_under_cursor_for_session(action.path.from_end(1))
                     {
-                        dock.select_tab(cx, id!($search));
+                        dock.select_tab(cx, id!(search));
                         let set = vec![SearchItem {
                             needle: word.clone(),
                             prefixes: Some(vec![
@@ -734,7 +734,7 @@ impl MatchEvent for App {
                             pre_word_boundary: true,
                             post_word_boundary: true,
                         }];
-                        search.text_input(ids!($search_input)).set_text(cx, &word);
+                        search.text_input(ids!(search_input)).set_text(cx, &word);
                         self.data.file_system.search_string(cx, set);
                     }
                 }
@@ -746,14 +746,14 @@ impl MatchEvent for App {
                         .file_system
                         .get_word_under_cursor_for_session(action.path.from_end(1))
                     {
-                        dock.select_tab(cx, id!($search));
+                        dock.select_tab(cx, id!(search));
                         let set = vec![SearchItem {
                             needle: word.clone(),
                             prefixes: None,
                             pre_word_boundary: ke.modifiers.control,
                             post_word_boundary: ke.modifiers.control,
                         }];
-                        search.text_input(ids!($search_input)).set_text(cx, &word);
+                        search.text_input(ids!(search_input)).set_text(cx, &word);
                         self.data.file_system.search_string(cx, set);
                     }
                 }
@@ -816,7 +816,7 @@ impl MatchEvent for App {
                                         drop_event.abs,
                                         *internal_id,
                                         tab_id,
-                                        id!($CloseableTab),
+                                        id!(CloseableTab),
                                     );
                                 }
                             } else {
@@ -836,7 +836,7 @@ impl MatchEvent for App {
                                     tab_id,
                                     template,
                                     "".to_string(),
-                                    id!($CloseableTab),
+                                    id!(CloseableTab),
                                 );
                                 self.data.file_system.ensure_unique_tab_names(cx, &dock)
                             }
@@ -868,8 +868,8 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let file_tree = self.ui.file_tree(ids!($file_tree));
-        let dock = self.ui.dock(ids!($dock));
+        let file_tree = self.ui.file_tree(ids!(file_tree));
+        let dock = self.ui.dock(ids!(dock));
         for action in actions {
             self.handle_action(cx, action);
         }
@@ -886,8 +886,8 @@ impl MatchEvent for App {
         }
 
         // Handle file tree filter
-        let file_tree_filter = self.ui.text_input(ids!($file_tree_filter));
-        let file_tree_view = self.ui.file_tree_view(ids!($file_tree_view));
+        let file_tree_filter = self.ui.text_input(ids!(file_tree_filter));
+        let file_tree_view = self.ui.file_tree_view(ids!(file_tree_view));
         if let Some(filter) = file_tree_filter.changed(&actions) {
             file_tree_view.set_filter(cx, filter, &self.data.file_system);
         }
@@ -912,7 +912,7 @@ impl MatchEvent for App {
                     tab_id,
                     template,
                     "".to_string(),
-                    id!($CloseableTab),
+                    id!(CloseableTab),
                     Some(pos),
                 );
 
@@ -922,15 +922,15 @@ impl MatchEvent for App {
         }
 
         // Handle Stop All button
-        if self.ui.button(ids!($stop_all)).clicked(&actions) {
+        if self.ui.button(ids!(stop_all)).clicked(&actions) {
             self.data.build_manager.stop_all_active_builds(cx);
             // Redraw the run list to update the play/pause button states
-            self.ui.view(ids!($run_list)).redraw(cx);
+            self.ui.view(ids!(run_list)).redraw(cx);
         }
 
         // Handle Tail checkbox for log list
-        let log_list = self.ui.log_list(ids!($log_list));
-        let tail_checkbox = self.ui.check_box(ids!($tail_checkbox));
+        let log_list = self.ui.log_list(ids!(log_list));
+        let tail_checkbox = self.ui.check_box(ids!(tail_checkbox));
         if let Some(tail) = tail_checkbox.changed(&actions) {
             log_list.set_tail(cx, tail);
         }
@@ -940,11 +940,11 @@ impl MatchEvent for App {
         }
 
         // Handle log filter
-        let log_filter = self.ui.text_input(ids!($log_filter));
+        let log_filter = self.ui.text_input(ids!(log_filter));
         if let Some(filter) = log_filter.changed(&actions) {
             log_list.set_filter(cx, filter, &self.data.build_manager.log);
         }
-        if self.ui.button(ids!($clear_filter)).clicked(&actions) {
+        if self.ui.button(ids!(clear_filter)).clicked(&actions) {
             log_filter.set_text(cx, "");
             log_list.set_filter(cx, String::new(), &self.data.build_manager.log);
         }
@@ -989,7 +989,7 @@ impl MatchEvent for App {
                     tab_id,
                     template,
                     "".to_string(),
-                    id!($CloseableTab),
+                    id!(CloseableTab),
                     Some(pos),
                 );
 
@@ -1017,7 +1017,7 @@ impl AppMain for App {
         self.data
             .ai_chat_manager
             .handle_event(cx, event, &mut self.data.file_system);
-        if self.ui.dock(ids!($dock)).check_and_clear_need_save() {
+        if self.ui.dock(ids!(dock)).check_and_clear_need_save() {
             self.save_state(0);
         }
     }

@@ -13,7 +13,7 @@ script_mod! {
     mod.widgets.StudioCodeEditorBase = #(StudioCodeEditor::register_widget(vm))
 
     mod.widgets.StudioCodeEditor = set_type_default() do mod.widgets.StudioCodeEditorBase {
-        $editor: CodeEditor {}
+        editor := CodeEditor {}
     }
 }
 

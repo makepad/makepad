@@ -456,7 +456,7 @@ impl Default for DockItem {
     fn default() -> Self {
         DockItem::Tab {
             name: "Tab".to_string(),
-            template: id!($PermanentTab),
+            template: id!(PermanentTab),
             kind: LiveId(0)
         }
     }
@@ -670,7 +670,7 @@ impl Dock {
 
     pub fn visible_items(&mut self) -> DockVisibleItemIterator<'_> {
         self.dock_item_iter_stack.clear();
-        self.dock_item_iter_stack.push((id!($root), 0));
+        self.dock_item_iter_stack.push((id!(root), 0));
         DockVisibleItemIterator {
             stack: &mut self.dock_item_iter_stack,
             dock_items: &self.dock_items,
@@ -1152,7 +1152,7 @@ impl Widget for Dock {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &self.dock_items, |_, dock_items| {
-            let id = id!($root);
+            let id = id!(root);
             let root_item = dock_items.get(&id);
             vec![DrawStackItem::from_dock_item(id, root_item)]
         }) {

@@ -213,7 +213,7 @@ impl ScriptHeap {
         return NIL;
     }
 
-    fn set_value_prefixed(
+    pub fn set_value_vec(
         &mut self,
         ptr: ScriptObject,
         key: ScriptValue,
@@ -222,7 +222,7 @@ impl ScriptHeap {
     ) -> ScriptValue {
         let object = &mut self.objects[ptr];
         if object.tag.is_vec_frozen() {
-            return script_err_immutable!(trap, "cannot set prefixed key on frozen vec");
+            return script_err_immutable!(trap, "cannot set vec key on frozen vec");
         }
         for kv in object.vec.iter_mut().rev() {
             if kv.key == key {
@@ -338,6 +338,29 @@ impl ScriptHeap {
                     );
                 }
             } else if !object.tag.is_map_add() {
+                // check if the key exists in the vec (for := defined properties)
+                let mut found_in_vec = false;
+                let mut ptr = top_ptr;
+                loop {
+                    let obj = &self.objects[ptr];
+                    for kv in obj.vec.iter().rev() {
+                        if kv.key == key {
+                            found_in_vec = true;
+                            break;
+                        }
+                    }
+                    if found_in_vec {
+                        break;
+                    }
+                    if let Some(next_ptr) = obj.proto.as_object() {
+                        ptr = next_ptr;
+                    } else {
+                        break;
+                    }
+                }
+                if found_in_vec {
+                    return self.set_value_vec(top_ptr, key, value, trap);
+                }
                 return script_err_not_found!(
                     trap,
                     "property {:?} not defined on type{}",
@@ -381,6 +404,14 @@ impl ScriptHeap {
                         );
                     }
                     return self.set_value_shallow(top_ptr, key, value, trap);
+                }
+                // also check vec for := defined properties on non-vec2 objects
+                if !object.tag.is_vec2() {
+                    for kv in object.vec.iter().rev() {
+                        if kv.key == key {
+                            return self.set_value_vec(top_ptr, key, value, trap);
+                        }
+                    }
                 }
                 if let Some(next_ptr) = object.proto.as_object() {
                     ptr = next_ptr
@@ -449,9 +480,6 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         if let Some(key_id) = key.as_id() {
-            if key_id.is_prefixed() {
-                return self.set_value_prefixed(ptr, key, value, trap);
-            }
             let object = &self.objects[ptr];
             if !object.tag.is_deep() {
                 if object.tag.needs_checking() {
@@ -611,14 +639,14 @@ impl ScriptHeap {
         )
     }
 
-    fn value_prefixed(&self, ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+    fn value_vec(&self, ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
         let object = &self.objects[ptr];
         for kv in object.vec.iter().rev() {
             if kv.key == key {
                 return kv.value;
             }
         }
-        script_err_not_found!(trap, "prefixed key {:?} not found in vec", key)
+        script_err_not_found!(trap, "vec key {:?} not found", key)
     }
 
     fn value_deep_map(
@@ -731,14 +759,11 @@ impl ScriptHeap {
     }
 
     pub fn value(&self, ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
-        if key.is_unprefixed_id() {
+        if key.is_id() {
             return self.value_deep(ptr, key, trap);
         }
         if key.is_index() {
             return self.value_index(ptr, key, trap);
-        }
-        if key.is_prefixed_id() {
-            return self.value_prefixed(ptr, key, trap);
         }
         if key.is_string_like() || key.is_object() || key.is_color() || key.is_bool() {
             // scan protochain for object
@@ -935,6 +960,11 @@ impl ScriptHeap {
     pub fn vec_len(&self, ptr: ScriptObject) -> usize {
         let object = &self.objects[ptr];
         object.vec.len()
+    }
+
+    pub fn map_len(&self, ptr: ScriptObject) -> usize {
+        let object = &self.objects[ptr];
+        object.map_len()
     }
 
     pub fn vec_ref(&self, ptr: ScriptObject) -> &[ScriptVecValue] {

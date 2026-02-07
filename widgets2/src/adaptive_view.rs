@@ -1,21 +1,19 @@
 use std::collections::HashMap;
 
-use crate::{
-    makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent, WindowAction
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent, WindowAction};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.AdaptiveViewBase = #(AdaptiveView::register_widget(vm))
-    
+
     mod.widgets.AdaptiveView = set_type_default() do mod.widgets.AdaptiveViewBase{
         width: Fill
         height: Fill
-    
-        $Mobile: mod.widgets.ViewBase{}
-        $Desktop: mod.widgets.ViewBase{}
+
+        Mobile := mod.widgets.ViewBase{}
+        Desktop := mod.widgets.ViewBase{}
     }
 }
 
@@ -65,8 +63,9 @@ script_mod! {
 /// Check out [VariantSelector] for more information on how to define custom selectors, and what information is available to them.
 #[derive(Script, WidgetRegister, WidgetRef)]
 pub struct AdaptiveView {
-    #[source] source: ScriptObjectRef,
-    
+    #[source]
+    source: ScriptObjectRef,
+
     #[rust]
     area: Area,
 
@@ -151,38 +150,55 @@ impl WidgetNode for AdaptiveView {
 
     fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
         if let Some(active_widget) = self.active_widget.as_ref() {
-            active_widget.widget_ref.widget_tree_walk_named(active_widget.template_id, nodes);
+            active_widget
+                .widget_ref
+                .widget_tree_walk_named(active_widget.template_id, nodes);
         }
     }
 }
 
 impl ScriptHook for AdaptiveView {
-    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+    fn on_before_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         if apply.is_reload() {
             self.templates.clear();
         }
     }
 
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
-        // Handle $prop children from the object's vec
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        // Handle vec_key children from the object's vec
         // Only collect during template applies (not eval) to avoid storing temporary objects
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 vm.vec_with(obj, |vm, vec| {
                     for kv in vec {
-                        if kv.key.is_prefixed_id() {  // $prop children
+                        if kv.key.as_id().is_some() {
                             if let Some(id) = kv.key.as_id() {
                                 if let Some(template_obj) = kv.value.as_object() {
-                                    self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    self.templates
+                                        .insert(id, vm.bx.heap.new_object_ref(template_obj));
                                 }
 
-                                if id != id!($Desktop) && id != id!($Mobile) {
+                                if id != id!(Desktop) && id != id!(Mobile) {
                                     self.has_custom_templates = true;
                                 }
 
                                 if let Some(widget_variant) = self.active_widget.as_mut() {
                                     if widget_variant.template_id == id {
-                                        widget_variant.widget_ref.script_apply(vm, apply, scope, kv.value);
+                                        widget_variant
+                                            .widget_ref
+                                            .script_apply(vm, apply, scope, kv.value);
                                     }
                                 }
                             }
@@ -200,7 +216,7 @@ impl ScriptHook for AdaptiveView {
         // If there are no custom templates, create a default widget with the default variant Desktop
         // This is needed so that methods that run before drawing (find_widgets, walk) have something to work with
         if !self.has_custom_templates {
-            let template_ref = self.templates.get(&id!($Desktop)).unwrap();
+            let template_ref = self.templates.get(&id!(Desktop)).unwrap();
             let template_value: ScriptValue = template_ref.as_object().into();
             let widget_ref = WidgetRef::script_from_value_scoped(vm, scope, template_value);
             self.active_widget = Some(WidgetVariant {
@@ -241,7 +257,7 @@ impl Widget for AdaptiveView {
 impl WidgetMatchEvent for AdaptiveView {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         for action in actions {
-            // Window geometry has changed, reapply the selector. 
+            // Window geometry has changed, reapply the selector.
             // Will use the most recent parent size, might be updated on next draw call.
             if let WindowAction::WindowGeomChange(_ce) = action.as_widget_action().cast() {
                 self.apply_selector(cx);
@@ -285,9 +301,7 @@ impl AdaptiveView {
         // Otherwise create a new widget from the template
         let template_ref = self.templates.get(&template_id).unwrap();
         let template_value: ScriptValue = template_ref.as_object().into();
-        let widget_ref = cx.with_vm(|vm| {
-            WidgetRef::script_from_value(vm, template_value)
-        });
+        let widget_ref = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
 
         // Update this widget's walk to match the walk of the active widget,
         // this ensures that the new widget is not affected by `Fill` or `Fit` constraints from this parent.
@@ -332,10 +346,7 @@ impl AdaptiveView {
 impl AdaptiveViewRef {
     /// Set a variant selector for this widget.
     /// The selector is a closure that takes a `DisplayContext` and returns a `LiveId`, corresponding to the template to use.
-    pub fn set_variant_selector(
-        &self,
-        selector: impl FnMut(&mut Cx, &Vec2d) -> LiveId + 'static,
-    ) {
+    pub fn set_variant_selector(&self, selector: impl FnMut(&mut Cx, &Vec2d) -> LiveId + 'static) {
         let Some(mut inner) = self.borrow_mut() else {
             return;
         };

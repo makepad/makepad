@@ -261,41 +261,41 @@ script_mod!{
 
         font_label: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                $chinese: FontMember{res: res.split_crate(
+                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_regular:resources/LXGWWenKaiRegular.ttf"
                     "makepad_fonts_chinese_regular_2:resources/LXGWWenKaiRegular.ttf.2"
                 ) asc: 0.0 desc: 0.0}
-                $emoji: FontMember{res: res.crate("makepad_fonts_emoji:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: res.crate("makepad_fonts_emoji:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
         font_regular: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                $chinese: FontMember{res: res.split_crate(
+                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_regular:resources/LXGWWenKaiRegular.ttf"
                     "makepad_fonts_chinese_regular_2:resources/LXGWWenKaiRegular.ttf.2"
                 ) asc: 0.0 desc: 0.0}
-                $emoji: FontMember{res: res.crate("makepad_fonts_emoji:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: res.crate("makepad_fonts_emoji:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_bold: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                $chinese: FontMember{res: res.split_crate(
+                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_bold:resources/LXGWWenKaiBold.ttf"
                     "makepad_fonts_chinese_bold_2:resources/LXGWWenKaiBold.ttf.2"
                 ) asc: 0.0 desc: 0.0}
-                $emoji: FontMember{res: res.crate("makepad_fonts_emoji:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: res.crate("makepad_fonts_emoji:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_italic: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                $chinese: FontMember{res: res.split_crate(
+                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_regular:resources/LXGWWenKaiRegular.ttf"
                     "makepad_fonts_chinese_regular_2:resources/LXGWWenKaiRegular.ttf.2"
                 ) asc: 0.0 desc: 0.0}
@@ -304,8 +304,8 @@ script_mod!{
         }
         font_bold_italic: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                $chinese: FontMember{res: res.split_crate(
+                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: res.split_crate(
                     "makepad_fonts_chinese_bold:resources/LXGWWenKaiBold.ttf"
                     "makepad_fonts_chinese_bold_2:resources/LXGWWenKaiBold.ttf.2"
                 ) asc: 0.0 desc: 0.0}
@@ -315,13 +315,13 @@ script_mod!{
         font_code: TextStyle{
             font_size: theme.font_size_code
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: res.crate("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.35
         }
         font_icons: TextStyle{
             font_family: FontFamily{
-                $latin: FontMember{res: res.crate("self:resources/fa-solid-900.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: res.crate("self:resources/fa-solid-900.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }

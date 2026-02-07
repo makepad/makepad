@@ -139,7 +139,7 @@ script_mod! {
             margin: theme.mspace_v_1
         }
 
-        $link: mod.widgets.TextFlowLink{}
+        link := mod.widgets.TextFlowLink{}
 
         draw_block +: {
             line_color: theme.color_text

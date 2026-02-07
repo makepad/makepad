@@ -128,7 +128,7 @@ script_mod! {
             margin: theme.mspace_v_1
         }
 
-        $a: mod.widgets.HtmlLink{}
+        a := mod.widgets.HtmlLink{}
 
         draw_block +: {
             line_color: theme.color_label_inner

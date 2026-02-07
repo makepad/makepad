@@ -8,7 +8,7 @@ let MyApp = App{
     $app_bar+:{
         title: "Talk to AI"
     }
-    $body: +{
+    body := +{
         TextInput{
             on_enter: ||{
                 let stream = ai(sself.text)

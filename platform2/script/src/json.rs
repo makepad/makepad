@@ -62,7 +62,7 @@ impl JsonParser {
             }
             State::Root => {
                 match tok {
-                    ScriptToken::Identifier { id, .. } => match id {
+                    ScriptToken::Identifier(id) => match id {
                         id!(true) => self.root = TRUE.into(),
                         id!(false) => self.root = FALSE.into(),
                         id!(null) => self.root = NIL.into(),
@@ -119,7 +119,7 @@ impl JsonParser {
             State::ObjectKey(obj) => {
                 // we require a string or identifier
                 match tok {
-                    ScriptToken::Identifier { id, .. } => {
+                    ScriptToken::Identifier(id) => {
                         self.state.push(State::ObjectColon(obj, id.into()));
                     }
                     ScriptToken::String(v) => {
@@ -200,7 +200,7 @@ impl JsonParser {
             State::ObjectValue(obj, key) => {
                 self.state.push(State::ObjectKey(obj));
                 match tok {
-                    ScriptToken::Identifier { id, .. } => match id {
+                    ScriptToken::Identifier(id) => match id {
                         id!(true) => heap.set_value_def(obj, key, TRUE),
                         id!(false) => heap.set_value_def(obj, key, FALSE),
                         id!(null) => heap.set_value_def(obj, key, NIL),
@@ -263,7 +263,7 @@ impl JsonParser {
                 self.state.push(State::Array(arr));
                 // alright we can parse a value or ]
                 match tok {
-                    ScriptToken::Identifier { id, .. } => match id {
+                    ScriptToken::Identifier(id) => match id {
                         id!(true) => heap.array_push_unchecked(arr, TRUE),
                         id!(false) => heap.array_push_unchecked(arr, FALSE),
                         id!(null) => heap.array_push_unchecked(arr, NIL),

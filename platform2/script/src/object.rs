@@ -691,6 +691,63 @@ impl ScriptObjectData {
         native.add_type_method(
             heap,
             ScriptValueType::REDUX_OBJECT,
+            id!(vec_len),
+            &[],
+            |vm, args| {
+                if let Some(sself) = script_value!(vm, args.self).as_object() {
+                    return vm.bx.heap.vec_len(sself).into();
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "vec_len called on non-object value"
+                )
+            },
+        );
+
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_OBJECT,
+            id!(map_len),
+            &[],
+            |vm, args| {
+                if let Some(sself) = script_value!(vm, args.self).as_object() {
+                    return vm.bx.heap.map_len(sself).into();
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "map_len called on non-object value"
+                )
+            },
+        );
+
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_OBJECT,
+            id!(vec_key),
+            script_args!(index = NIL),
+            |vm, args| {
+                if let Some(sself) = script_value!(vm, args.self).as_object() {
+                    let index = script_value!(vm, args.index);
+                    let idx = index.as_index();
+                    let kv = vm
+                        .bx
+                        .heap
+                        .vec_key_value(sself, idx, vm.bx.threads.cur().trap.pass());
+                    if let Some(id) = kv.key.as_id() {
+                        return id.escape();
+                    }
+                    return kv.key;
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "vec_key called on non-object value"
+                )
+            },
+        );
+
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_OBJECT,
             id!(gc_id),
             &[],
             |vm, args| {

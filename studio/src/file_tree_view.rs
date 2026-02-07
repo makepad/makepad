@@ -1,7 +1,4 @@
-use crate::{
-    file_system::file_system::FileSystem,
-    makepad_widgets::*,
-};
+use crate::{file_system::file_system::FileSystem, makepad_widgets::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -68,7 +65,7 @@ script_mod! {
                 }
             }
         }
-        $flow: TextFlow {
+        flow := TextFlow {
             width: Fill
             height: Fit
         }
@@ -77,7 +74,7 @@ script_mod! {
     mod.widgets.FileFilterList = set_type_default() do mod.widgets.FileFilterListBase {
         height: Fill
         width: Fill
-        $list: PortalList {
+        list := PortalList {
             max_pull_down: 0.
             capture_overload: false
             grab_key_focus: false
@@ -85,8 +82,8 @@ script_mod! {
             height: Fill
             width: Fill
             flow: Down
-            $FilteredFileItem: mod.widgets.FilteredFileItem {}
-            $Empty: mod.widgets.FilteredFileItem {
+            FilteredFileItem := mod.widgets.FilteredFileItem {}
+            Empty := mod.widgets.FilteredFileItem {
                 cursor: MouseCursor.Default
                 width: Fill
                 height: 25
@@ -101,13 +98,13 @@ script_mod! {
         height: Fill
         flow: Down
 
-        $page_flip: PageFlip {
-            active_page: $file_tree
+        page_flip := PageFlip {
+            active_page: @file_tree
             width: Fill
             height: Fill
-            
-            $file_tree: StudioFileTree {}
-            $filter_list: mod.widgets.FileFilterList {}
+
+            file_tree := StudioFileTree {}
+            filter_list := mod.widgets.FileFilterList {}
         }
     }
 }
@@ -142,23 +139,23 @@ fn path_matches_filter(path: &str, filter: &str) -> bool {
     if filter.is_empty() {
         return false;
     }
-    
+
     let filter_lower = filter.to_lowercase();
     let path_lower = path.to_lowercase();
-    
+
     // Direct substring match
     if path_lower.contains(&filter_lower) {
         return true;
     }
-    
+
     // Split filter by '/' and try to match each part in sequence
     let filter_parts: Vec<&str> = filter_lower.split('/').filter(|s| !s.is_empty()).collect();
     let path_parts: Vec<&str> = path_lower.split('/').filter(|s| !s.is_empty()).collect();
-    
+
     if filter_parts.is_empty() {
         return false;
     }
-    
+
     // Try to find all filter parts in the path in order
     let mut path_idx = 0;
     for filter_part in &filter_parts {
@@ -175,18 +172,18 @@ fn path_matches_filter(path: &str, filter: &str) -> bool {
             return false;
         }
     }
-    
+
     true
 }
 
 impl FileFilterList {
     fn rebuild_filtered_files(&mut self, file_system: &FileSystem) {
         self.filtered_files.clear();
-        
+
         if self.filter.is_empty() {
             return;
         }
-        
+
         // Iterate through all files in the file system
         for (path, file_id) in &file_system.path_to_file_node_id {
             // Only include files (not directories)
@@ -199,24 +196,24 @@ impl FileFilterList {
                 }
             }
         }
-        
+
         // Sort by path for consistent ordering
         self.filtered_files.sort_by(|a, b| a.path.cmp(&b.path));
     }
 
     fn draw_filtered_list(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
         list.set_item_range(cx, 0, self.filtered_files.len().max(1));
-        
+
         while let Some(item_id) = list.next_visible_item(cx) {
             if let Some(filtered_file) = self.filtered_files.get(item_id) {
                 let is_even = item_id & 1 == 0;
                 let is_even_f = if is_even { 1.0 } else { 0.0 };
-                
-                let mut item = list.item(cx, item_id, id!($FilteredFileItem)).as_view();
+
+                let mut item = list.item(cx, item_id, id!(FilteredFileItem)).as_view();
                 script_apply_eval!(cx, item, {
                     draw_bg +: {is_even: #(is_even_f)}
                 });
-                
+
                 while let Some(step) = item.draw(cx, &mut Scope::empty()).step() {
                     if let Some(mut tf) = step.as_text_flow().borrow_mut() {
                         tf.draw_text(cx, &filtered_file.path);
@@ -226,7 +223,7 @@ impl FileFilterList {
                 // Empty item when no results
                 let is_even = item_id & 1 == 0;
                 let is_even_f = if is_even { 1.0 } else { 0.0 };
-                let mut item = list.item(cx, item_id, id!($Empty)).as_view();
+                let mut item = list.item(cx, item_id, id!(Empty)).as_view();
                 script_apply_eval!(cx, item, {
                     draw_bg +: {is_even: #(is_even_f)}
                 });
@@ -248,9 +245,9 @@ impl Widget for FileFilterList {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        let filter_list = self.view.portal_list(ids!($list));
+        let filter_list = self.view.portal_list(ids!(list));
         self.view.handle_event(cx, event, scope);
-        
+
         if let Event::Actions(actions) = event {
             if filter_list.any_items_with_actions(&actions) {
                 for (item_id, item) in filter_list.items_with_actions(&actions) {
@@ -312,26 +309,32 @@ impl FileTreeViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             let was_active = inner.filter_active;
             inner.filter_active = !filter.is_empty();
-            
+
             // Switch pages using PageFlip
             if inner.filter_active != was_active {
-                let page_flip = inner.view.page_flip(ids!($page_flip));
+                let page_flip = inner.view.page_flip(ids!(page_flip));
                 if inner.filter_active {
-                    page_flip.set_active_page(cx, id!($filter_list));
+                    page_flip.set_active_page(cx, id!(filter_list));
                 } else {
-                    page_flip.set_active_page(cx, id!($file_tree));
+                    page_flip.set_active_page(cx, id!(file_tree));
                 }
             }
         }
         // Also update the filter list
         if let Some(inner) = self.borrow() {
-            inner.view.file_filter_list(ids!($filter_list)).set_filter(cx, filter, file_system);
+            inner
+                .view
+                .file_filter_list(ids!(filter_list))
+                .set_filter(cx, filter, file_system);
         }
     }
 
     pub fn filter_file_clicked(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(inner) = self.borrow() {
-            return inner.view.file_filter_list(ids!($filter_list)).file_clicked(actions);
+            return inner
+                .view
+                .file_filter_list(ids!(filter_list))
+                .file_clicked(actions);
         }
         None
     }

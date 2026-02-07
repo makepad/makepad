@@ -24,7 +24,7 @@ script_mod! {
             shadow_offset: vec2(0.0, 0.0)
             color: theme.color_fg_app
         }
-        $content: View {
+        content := View {
             height: Fill
             width: Fill
             flow: Right
@@ -216,7 +216,7 @@ script_mod! {
     let CodeEditorContent = View{
         flow: Flow.Down
         DockToolbar{
-            $content +: {
+            content +: {
                 height: Fit width: Fill
                 spacing: theme.space_1
                 flow: Flow.Right
@@ -230,7 +230,7 @@ script_mod! {
                 LinkLabel{width: Fit text: "Docs" url: "https://publish.obsidian.md/makepad-docs"}
             }
         }
-        $editor: StudioCodeEditor{}
+        editor := StudioCodeEditor{}
     }
 
     let AiChatContent = AiChatView{
@@ -243,7 +243,7 @@ script_mod! {
             width: Fill height: Fill
             align: Align{x: 0. y: 0.}
             flow: Flow.Down
-            DockToolbar{$content: DockSettings{}}
+            DockToolbar{content := DockSettings{}}
             View{
                 width: Fill height: Fill
                 align: Align{x: 0.5 y: 0.5}
@@ -258,7 +258,7 @@ script_mod! {
             width: Fill height: Fill
             align: Align{x: 0.5 y: 0.5}
             flow: Flow.Down
-            DockToolbar{$content: DockSettings{}}
+            DockToolbar{content := DockSettings{}}
             View{
                 width: Fill height: Fill
                 align: Align{x: 0.5 y: 0.5}
@@ -272,7 +272,7 @@ script_mod! {
         View{
             width: Fill height: Fill
             flow: Flow.Down
-            DockToolbar{$content: DockSettings{}}
+            DockToolbar{content := DockSettings{}}
             View{
                 width: Fill height: Fill
                 align: Align{x: 0.5 y: 0.5}
@@ -286,7 +286,7 @@ script_mod! {
         View{
             width: Fill height: Fill
             flow: Flow.Down
-            DockToolbar{$content: DockSettings{}}
+            DockToolbar{content := DockSettings{}}
             View{
                 width: Fill height: Fill
                 align: Align{x: 0.5 y: 0.5}
@@ -301,7 +301,7 @@ script_mod! {
             width: Fill height: Fill
             flow: Flow.Down
             DockToolbar{
-                $content +: {
+                content +: {
                     Pbold{
                         width: Fit
                         text: "Run"
@@ -323,11 +323,11 @@ script_mod! {
         margin: 0.
         padding: 0.
         DockToolbar{
-            $content +: {
-                $stop_all: ButtonFlat{text: "Stop All"}
+            content +: {
+                stop_all := ButtonFlat{text: "Stop All"}
             }
         }
-        $run_list: RunList{}
+        run_list := RunList{}
     }
 
     let SnapshotContent = Snapshot{}
@@ -337,37 +337,37 @@ script_mod! {
     let StudioFileTreeContent = View{
         flow: Flow.Down
         DockToolbar{
-            $content +: {
-                $file_tree_filter: TextInputFlat{
+            content +: {
+                file_tree_filter := TextInputFlat{
                     width: Fill
                     empty_text: "Filter"
                 }
             }
         }
-        $file_tree_view: FileTreeView{}
+        file_tree_view := FileTreeView{}
     }
 
     let LogListContent = View{
         flow: Flow.Down
         DockToolbar{
-            $content +: {
+            content +: {
                 align: Align{x: 0. y: 0.5}
-                $tail_checkbox: Toggle{
+                tail_checkbox := Toggle{
                     text: "Tail"
                     active: true
                 }
                 Filler{}
-                $log_filter: TextInputFlat{
+                log_filter := TextInputFlat{
                     width: 200.
                     empty_text: "Filter"
                 }
-                $clear_filter: ButtonFlatter{
+                clear_filter := ButtonFlatter{
                     padding: Inset{left: 4. right: 4.}
                     text: "x"
                 }
             }
         }
-        $log_list: LogList{}
+        log_list := LogList{}
     }
 
     let ProfilerContent = Profiler{
@@ -376,9 +376,9 @@ script_mod! {
 
     mod.widgets.AppUI = Window{
         margin: 5.
-        $caption_bar +: {
+        caption_bar +: {
             margin: Inset{top: 2 left: -190}
-            $caption_label +: {$label +: {text: "Makepad"}}
+            caption_label +: {label +: {text: "Makepad"}}
         }
         window.inner_size: vec2(1600 900)
         show_bg: true
@@ -387,189 +387,175 @@ script_mod! {
                 return theme.color_bg_app
             }
         }
-        $window_menu +: {
-            $main: MenuItem.Main{items: [@app @file @edit @selection @view @run @window @help]}
+        window_menu +: {
+            main := MenuItem.Main{items: [@app @file @edit @selection @view @run @window @help]}
 
-            $app: MenuItem.Sub{name: "Makepad Studio" items: [@about @line @settings @line @quit]}
-            $about: MenuItem.Item{name: "About Makepad Studio" enabled: false}
-            $settings: MenuItem.Item{name: "Settings" enabled: false}
-            $quit: MenuItem.Item{name: "Quit Makepad Studio" key: KeyCode.KeyQ}
+            app := MenuItem.Sub{name: "Makepad Studio" items: [@about @line @settings @line @quit]}
+            about := MenuItem.Item{name: "About Makepad Studio" enabled: false}
+            settings := MenuItem.Item{name: "Settings" enabled: false}
+            quit := MenuItem.Item{name: "Quit Makepad Studio" key: KeyCode.KeyQ}
 
-            $file: MenuItem.Sub{name: "File" items: [@new_file @new_window @line @save_as @line @rename @line @close_editor @close_window]}
-            $new_file: MenuItem.Item{name: "New File" enabled: false shift: true key: KeyCode.KeyN}
-            $new_window: MenuItem.Item{name: "New Window" enabled: false shift: true key: KeyCode.KeyN}
-            $save_as: MenuItem.Item{name: "Save As" enabled: false}
-            $rename: MenuItem.Item{name: "Rename" enabled: false}
-            $close_editor: MenuItem.Item{name: "Close Editor" enabled: false}
-            $close_window: MenuItem.Item{name: "Close Window" enabled: false}
+            file := MenuItem.Sub{name: "File" items: [@new_file @new_window @line @save_as @line @rename @line @close_editor @close_window]}
+            new_file := MenuItem.Item{name: "New File" enabled: false shift: true key: KeyCode.KeyN}
+            new_window := MenuItem.Item{name: "New Window" enabled: false shift: true key: KeyCode.KeyN}
+            save_as := MenuItem.Item{name: "Save As" enabled: false}
+            rename := MenuItem.Item{name: "Rename" enabled: false}
+            close_editor := MenuItem.Item{name: "Close Editor" enabled: false}
+            close_window := MenuItem.Item{name: "Close Window" enabled: false}
 
-            $edit: MenuItem.Sub{name: "Edit" items: [@undo @redo @line @cut @copy @paste @line @find @replace @line @find_in_files @replace_in_files]}
-            $undo: MenuItem.Item{name: "Undo" enabled: false}
-            $redo: MenuItem.Item{name: "Redo" enabled: false}
-            $cut: MenuItem.Item{name: "Cut" enabled: false}
-            $copy: MenuItem.Item{name: "Copy" enabled: false}
-            $paste: MenuItem.Item{name: "Paste" enabled: false}
-            $find: MenuItem.Item{name: "Find" enabled: false}
-            $replace: MenuItem.Item{name: "Replace" enabled: false}
-            $find_in_files: MenuItem.Item{name: "Find in Files" enabled: false}
-            $replace_in_files: MenuItem.Item{name: "Replace in Files" enabled: false}
+            edit := MenuItem.Sub{name: "Edit" items: [@undo @redo @line @cut @copy @paste @line @find @replace @line @find_in_files @replace_in_files]}
+            undo := MenuItem.Item{name: "Undo" enabled: false}
+            redo := MenuItem.Item{name: "Redo" enabled: false}
+            cut := MenuItem.Item{name: "Cut" enabled: false}
+            copy := MenuItem.Item{name: "Copy" enabled: false}
+            paste := MenuItem.Item{name: "Paste" enabled: false}
+            find := MenuItem.Item{name: "Find" enabled: false}
+            replace := MenuItem.Item{name: "Replace" enabled: false}
+            find_in_files := MenuItem.Item{name: "Find in Files" enabled: false}
+            replace_in_files := MenuItem.Item{name: "Replace in Files" enabled: false}
 
-            $selection: MenuItem.Sub{name: "Selection" items: [@select_all]}
-            $select_all: MenuItem.Item{name: "Select All" enabled: false}
+            selection := MenuItem.Sub{name: "Selection" items: [@select_all]}
+            select_all := MenuItem.Item{name: "Select All" enabled: false}
 
-            $view: MenuItem.Sub{name: "View" items: [@zoom_in @zoom_out @fullscreen]}
-            $zoom_in: MenuItem.Item{name: "Zoom In" enabled: false}
-            $zoom_out: MenuItem.Item{name: "Zoom Out" enabled: false}
-            $fullscreen: MenuItem.Item{name: "Enter Full Screen" enabled: false}
+            view := MenuItem.Sub{name: "View" items: [@zoom_in @zoom_out @fullscreen]}
+            zoom_in := MenuItem.Item{name: "Zoom In" enabled: false}
+            zoom_out := MenuItem.Item{name: "Zoom Out" enabled: false}
+            fullscreen := MenuItem.Item{name: "Enter Full Screen" enabled: false}
 
-            $run: MenuItem.Sub{name: "Run" items: [@run_program]}
-            $run_program: MenuItem.Item{name: "Run Program" enabled: false}
+            run := MenuItem.Sub{name: "Run" items: [@run_program]}
+            run_program := MenuItem.Item{name: "Run Program" enabled: false}
 
-            $window: MenuItem.Sub{name: "Window" items: [@minimize @zoom @line @all_to_front]}
-            $minimize: MenuItem.Item{name: "Minimize" enabled: false}
-            $zoom: MenuItem.Item{name: "Zoom" enabled: false}
-            $all_to_front: MenuItem.Item{name: "Bring All to Front" enabled: false}
+            window := MenuItem.Sub{name: "Window" items: [@minimize @zoom @line @all_to_front]}
+            minimize := MenuItem.Item{name: "Minimize" enabled: false}
+            zoom := MenuItem.Item{name: "Zoom" enabled: false}
+            all_to_front := MenuItem.Item{name: "Bring All to Front" enabled: false}
 
-            $help: MenuItem.Sub{name: "Help" items: [@about]}
+            help := MenuItem.Sub{name: "Help" items: [@about]}
 
-            $line: MenuItem.Line
+            line := MenuItem.Line
         }
-        $body +: {
+        body +: {
             padding: 5
-            $dock: DockFlat{
+            dock := DockFlat{
                 width: Fill height: Fill
 
                 tab_bar +: {
-                    $OutlineFirstTab: OutlineFirstTab{}
-                    $EditFirstTab: EditFirstTab{}
-                    $AiFirstTab: AiFirstTab{}
-                    $AiChatTab: AiFirstTab{}
-                    $DesignFirstTab: DesignFirstTab{}
-                    $FilesTab: FilesTab{}
-                    $RunFirstTab: RunFirstTab{}
-                    $RunListTab: RunListTab{}
-                    $SnapshotTab: SnapshotTab{}
-                    $LogTab: LogTab{}
-                    $ProfilerTab: ProfilerTab{}
-                    $SearchTab: SearchTab{}
+                    OutlineFirstTab := OutlineFirstTab{}
+                    EditFirstTab := EditFirstTab{}
+                    AiFirstTab := AiFirstTab{}
+                    AiChatTab := AiFirstTab{}
+                    DesignFirstTab := DesignFirstTab{}
+                    FilesTab := FilesTab{}
+                    RunFirstTab := RunFirstTab{}
+                    RunListTab := RunListTab{}
+                    SnapshotTab := SnapshotTab{}
+                    LogTab := LogTab{}
+                    ProfilerTab := ProfilerTab{}
+                    SearchTab := SearchTab{}
                 }
 
-                $root: DockSplitter{
+                root := DockSplitter{
                     axis: SplitterAxis.Horizontal
                     align: SplitterAlign.FromA(250.0)
-                    a: $file_tree_tabs
-                    b: $split1
-                }
+                    a: @file_tree_tabs
+                    b: @split1                }
 
-                $split1: DockSplitter{
+                split1 := DockSplitter{
                     axis: SplitterAxis.Vertical
                     align: SplitterAlign.FromB(200.0)
-                    a: $edit_tabs
-                    b: $log_tabs
-                }
+                    a: @edit_tabs
+                    b: @log_tabs                }
 
-                $file_tree_tabs: DockTabs{
-                    tabs: [$file_tree_tab $run_list_tab $search]
+                file_tree_tabs := DockTabs{
+                    tabs: [@file_tree_tab @run_list_tab @search]
                     selected: 0
                 }
 
-                $edit_tabs: DockTabs{
-                    tabs: [$run_first $design_first $outline_first $ai_first $edit_first]
+                edit_tabs := DockTabs{
+                    tabs: [@run_first @design_first @outline_first @ai_first @edit_first]
                     selected: 0
                 }
 
-                $log_tabs: DockTabs{
-                    tabs: [$log_list_tab]
+                log_tabs := DockTabs{
+                    tabs: [@log_list_tab]
                     selected: 0
                 }
 
-                $file_tree_tab: DockTab{
+                file_tree_tab := DockTab{
                     name: "Files"
-                    template: $FilesTab
-                    kind: $StudioFileTree
-                }
+                    template: @FilesTab
+                    kind: @StudioFileTree                }
 
-                $edit_first: DockTab{
+                edit_first := DockTab{
                     name: ""
-                    template: $EditFirstTab
-                    kind: $EditFirst
-                }
+                    template: @EditFirstTab
+                    kind: @EditFirst                }
 
-                $log_list_tab: DockTab{
+                log_list_tab := DockTab{
                     name: "Log"
-                    template: $LogTab
-                    kind: $LogList
-                }
+                    template: @LogTab
+                    kind: @LogList                }
 
-                $search: DockTab{
+                search := DockTab{
                     name: "Search"
-                    template: $SearchTab
-                    kind: $Search
-                }
+                    template: @SearchTab
+                    kind: @Search                }
 
-                $run_first: DockTab{
+                run_first := DockTab{
                     name: ""
-                    template: $RunFirstTab
-                    kind: $RunFirst
-                }
+                    template: @RunFirstTab
+                    kind: @RunFirst                }
 
-                $design_first: DockTab{
+                design_first := DockTab{
                     name: ""
-                    template: $DesignFirstTab
-                    kind: $DesignFirst
-                }
+                    template: @DesignFirstTab
+                    kind: @DesignFirst                }
 
-                $ai_first: DockTab{
+                ai_first := DockTab{
                     name: ""
-                    template: $AiFirstTab
-                    kind: $AiFirst
-                }
+                    template: @AiFirstTab
+                    kind: @AiFirst                }
 
-                $ai_chat_tab: DockTab{
+                ai_chat_tab := DockTab{
                     name: "AI Chat"
-                    template: $AiChatTab
-                    kind: $AiChat
-                }
+                    template: @AiChatTab
+                    kind: @AiChat                }
 
-                $outline_first: DockTab{
+                outline_first := DockTab{
                     name: ""
-                    template: $OutlineFirstTab
-                    kind: $OutlineFirst
-                }
+                    template: @OutlineFirstTab
+                    kind: @OutlineFirst                }
 
-                $run_list_tab: DockTab{
+                run_list_tab := DockTab{
                     name: "Run"
-                    template: $RunListTab
-                    kind: $RunList
-                }
+                    template: @RunListTab
+                    kind: @RunList                }
 
-                $snapshot_tab: DockTab{
+                snapshot_tab := DockTab{
                     name: "Snapshot"
-                    template: $SnapshotTab
-                    kind: $Snapshot
-                }
+                    template: @SnapshotTab
+                    kind: @Snapshot                }
 
-                $profiler: DockTab{
+                profiler := DockTab{
                     name: "Profiler"
-                    template: $ProfilerTab
-                    kind: $Profiler
-                }
+                    template: @ProfilerTab
+                    kind: @Profiler                }
 
                 // Content templates (kind)
-                $CodeEditor: CodeEditorContent{}
-                $AiChat: AiChatContent{}
-                $EditFirst: EditFirstContent{}
-                $OutlineFirst: OutlineFirstContent{}
-                $DesignFirst: DesignFirstContent{}
-                $AiFirst: AiFirstContent{}
-                $RunFirst: RunFirstContent{}
-                $RunList: RunListContent{}
-                $Snapshot: SnapshotContent{}
-                $Search: SearchContent{}
-                $RunView: RunViewContent{}
-                $StudioFileTree: StudioFileTreeContent{}
-                $LogList: LogListContent{}
-                $Profiler: ProfilerContent{}
+                CodeEditor := CodeEditorContent{}
+                AiChat := AiChatContent{}
+                EditFirst := EditFirstContent{}
+                OutlineFirst := OutlineFirstContent{}
+                DesignFirst := DesignFirstContent{}
+                AiFirst := AiFirstContent{}
+                RunFirst := RunFirstContent{}
+                RunList := RunListContent{}
+                Snapshot := SnapshotContent{}
+                Search := SearchContent{}
+                RunView := RunViewContent{}
+                StudioFileTree := StudioFileTreeContent{}
+                LogList := LogListContent{}
+                Profiler := ProfilerContent{}
             }
         }
     }

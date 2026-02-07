@@ -78,24 +78,24 @@ script_mod! {
                 }
             }
         }
-        $selectable: TextFlow {
+        selectable := TextFlow {
             width: Fill
             height: Fit
             selectable: true
 
-            $code_view: CodeView {
+            code_view := CodeView {
                 editor +: {
                     margin: Inset{left: 25.}
                 }
             }
 
-            $fold_button: FoldButton {
+            fold_button := FoldButton {
                 animator: Animator {
                     active: {default: @off}
                 }
             }
 
-            $wait_icon: mod.widgets.LogIcon {
+            wait_icon := mod.widgets.LogIcon {
                 draw_bg +: {
                     pixel: fn() {
                         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -112,7 +112,7 @@ script_mod! {
                     }
                 }
             }
-            $log_icon: mod.widgets.LogIcon {
+            log_icon := mod.widgets.LogIcon {
                 draw_bg +: {
                     pixel: fn() {
                         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -126,7 +126,7 @@ script_mod! {
                     }
                 }
             }
-            $error_icon: mod.widgets.LogIcon {
+            error_icon := mod.widgets.LogIcon {
                 draw_bg +: {
                     pixel: fn() {
                         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -142,7 +142,7 @@ script_mod! {
                     }
                 }
             }
-            $warning_icon: mod.widgets.LogIcon {
+            warning_icon := mod.widgets.LogIcon {
                 draw_bg +: {
                     pixel: fn() {
                         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -161,7 +161,7 @@ script_mod! {
                     }
                 }
             }
-            $panic_icon: mod.widgets.LogIcon {
+            panic_icon := mod.widgets.LogIcon {
                 draw_bg +: {
                     pixel: fn() {
                         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -186,7 +186,7 @@ script_mod! {
     mod.widgets.LogList = set_type_default() do mod.widgets.LogListBase {
         height: Fill
         width: Fill
-        $list: PortalList {
+        list := PortalList {
             max_pull_down: 0.
             capture_overload: false
             grab_key_focus: false
@@ -196,12 +196,12 @@ script_mod! {
             height: Fill
             width: Fill
             flow: Down
-            $LogItem: mod.widgets.LogItem {}
-            $Empty: mod.widgets.LogItem {
+            LogItem := mod.widgets.LogItem {}
+            Empty := mod.widgets.LogItem {
                 cursor: MouseCursor.Default
                 width: Fill
                 height: 25
-                $body: P { margin: 0. text: "" }
+                body := P { margin: 0. text: "" }
             }
         }
     }
@@ -282,11 +282,11 @@ impl LogList {
             let is_even = item_id & 1 == 0;
             fn map_level_to_icon(level: LogLevel) -> LiveId {
                 match level {
-                    LogLevel::Warning => id!($warning_icon),
-                    LogLevel::Error => id!($error_icon),
-                    LogLevel::Log => id!($log_icon),
-                    LogLevel::Wait => id!($wait_icon),
-                    LogLevel::Panic => id!($panic_icon),
+                    LogLevel::Warning => id!(warning_icon),
+                    LogLevel::Error => id!(error_icon),
+                    LogLevel::Log => id!(log_icon),
+                    LogLevel::Wait => id!(wait_icon),
+                    LogLevel::Panic => id!(panic_icon),
                 }
             }
             let mut location = String::new();
@@ -300,7 +300,7 @@ impl LogList {
                 } else {
                     ""
                 };
-                let mut item = list.item(cx, item_id, id!($LogItem)).as_view();
+                let mut item = list.item(cx, item_id, id!(LogItem)).as_view();
                 let is_even_f = if is_even { 1.0 } else { 0.0 };
                 script_apply_eval!(cx, item, {
                     draw_bg +: {is_even: #(is_even_f)}
@@ -315,7 +315,7 @@ impl LogList {
                             LogItem::Location(msg) => {
                                 tf.draw_item_counted(cx, map_level_to_icon(msg.level));
                                 let fold_button = if msg.explanation.is_some() {
-                                    tf.draw_item_counted_ref(cx, id!($fold_button))
+                                    tf.draw_item_counted_ref(cx, id!(fold_button))
                                         .as_fold_button()
                                 } else {
                                     Default::default()
@@ -329,7 +329,7 @@ impl LogList {
                                 );
                                 tf.draw_link(
                                     cx,
-                                    id!($link),
+                                    id!(link),
                                     JumpToFileLink {
                                         item_id: log_index.unwrap(),
                                     },
@@ -341,7 +341,7 @@ impl LogList {
                                     let open = fold_button.open_float();
                                     if open > 0.0 {
                                         cx.turtle_new_line();
-                                        let code = tf.item_counted(cx, id!($code_view));
+                                        let code = tf.item_counted(cx, id!(code_view));
                                         code.set_text(cx, explanation);
                                         code.as_code_view()
                                             .borrow_mut()
@@ -358,7 +358,7 @@ impl LogList {
                 }
                 continue;
             }
-            let mut item = list.item(cx, item_id, id!($Empty)).as_view();
+            let mut item = list.item(cx, item_id, id!(Empty)).as_view();
             let is_even_f = if is_even { 1.0 } else { 0.0 };
             script_apply_eval!(cx, item, {
                 draw_bg +: {is_even: #(is_even_f)}
@@ -383,7 +383,7 @@ impl Widget for LogList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let log_list = self.view.portal_list(ids!($list));
+        let log_list = self.view.portal_list(ids!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>().unwrap();
         if let Event::Actions(actions) = event {
@@ -413,7 +413,7 @@ impl Widget for LogList {
 impl LogListRef {
     pub fn reset_scroll(&self, cx: &mut Cx) {
         if let Some(inner) = self.borrow_mut() {
-            let log_list = inner.view.portal_list(ids!($list));
+            let log_list = inner.view.portal_list(ids!(list));
             log_list.set_first_id_and_scroll(0, 0.0);
             log_list.redraw(cx);
         }
@@ -421,7 +421,7 @@ impl LogListRef {
 
     pub fn is_at_end(&self) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.view.portal_list(ids!($list)).is_at_end()
+            inner.view.portal_list(ids!(list)).is_at_end()
         } else {
             false
         }
@@ -429,7 +429,7 @@ impl LogListRef {
 
     pub fn set_tail(&self, cx: &mut Cx, tail: bool) {
         if let Some(inner) = self.borrow() {
-            let list = inner.view.portal_list(ids!($list));
+            let list = inner.view.portal_list(ids!(list));
             list.set_tail_range(tail);
             if tail {
                 list.scroll_to_end(cx);
@@ -439,7 +439,7 @@ impl LogListRef {
 
     pub fn scrolled(&self, actions: &Actions) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.view.portal_list(ids!($list)).scrolled(actions)
+            inner.view.portal_list(ids!(list)).scrolled(actions)
         } else {
             false
         }

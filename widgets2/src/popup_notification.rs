@@ -23,7 +23,7 @@ script_mod!{
             }
         }
         
-        $content: View{
+        content := View{
             flow: Overlay
             width: Fit
             height: Fit

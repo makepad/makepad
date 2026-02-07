@@ -15,8 +15,8 @@ script_mod!{
     mod.widgets.TabBarBase = #(TabBar::register_widget(vm))
     
     mod.widgets.TabBar = set_type_default() do mod.widgets.TabBarBase{
-        $CloseableTab: mod.widgets.Tab{closeable: true}
-        $PermanentTab: mod.widgets.Tab{closeable: false}
+        CloseableTab := mod.widgets.Tab{closeable: true}
+        PermanentTab := mod.widgets.Tab{closeable: false}
 
         width: Fill
         height: max(theme.tab_height, 25.)
@@ -147,13 +147,13 @@ script_mod!{
     mod.widgets.TabBarFlat = mod.widgets.TabBar{
         height: max(theme.tab_flat_height, 25.)
 
-        $CloseableTab: mod.widgets.TabFlat{closeable: true}
-        $PermanentTab: mod.widgets.TabFlat{closeable: false}
+        CloseableTab := mod.widgets.TabFlat{closeable: true}
+        PermanentTab := mod.widgets.TabFlat{closeable: false}
     }
 
     mod.widgets.TabBarGradientX = mod.widgets.TabBar{
-        $CloseableTab: mod.widgets.TabGradientX{closeable: true}
-        $PermanentTab: mod.widgets.TabGradientX{closeable: false}
+        CloseableTab := mod.widgets.TabGradientX{closeable: true}
+        PermanentTab := mod.widgets.TabGradientX{closeable: false}
 
         draw_bg +: {
             gradient_fill_horizontal: 1.0
@@ -166,8 +166,8 @@ script_mod!{
     }
 
     mod.widgets.TabBarGradientY = mod.widgets.TabBar{
-        $CloseableTab: mod.widgets.TabGradientY{closeable: true}
-        $PermanentTab: mod.widgets.TabGradientY{closeable: false}
+        CloseableTab := mod.widgets.TabGradientY{closeable: true}
+        PermanentTab := mod.widgets.TabGradientY{closeable: false}
         draw_bg +: {
             gradient_fill_horizontal: 0.0
             gradient_border_horizontal: 0.0
