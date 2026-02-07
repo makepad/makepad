@@ -101,6 +101,7 @@ impl ScriptToken {
     pub fn as_string(&self) -> Option<ScriptValue> {
         match self {
             ScriptToken::String(v) => Some(*v),
+            ScriptToken::StringUnfinished => Some(ScriptValue::EMPTY_STRING),
             _ => None,
         }
     }
@@ -547,6 +548,22 @@ impl ScriptTokenizer {
                 pos: self.pos,
                 token: ScriptToken::StringUnfinished,
             });
+        }
+    }
+
+    /// If the last token is `StringUnfinished`, intern the unfinished buffer content
+    /// via the heap and return it as a ScriptValue. Does NOT modify the token — the
+    /// tokenizer state remains unchanged for the next `tokenize()` call.
+    /// Used at incremental parsing boundaries so the parser gets the real partial string.
+    pub fn intern_unfinished_string(&mut self, heap: &mut ScriptHeap) -> Option<ScriptValue> {
+        if let Some(ScriptTokenPos {
+            token: ScriptToken::StringUnfinished,
+            ..
+        }) = self.tokens.last()
+        {
+            Some(heap.new_string_from_str(&self.unfinished))
+        } else {
+            None
         }
     }
 

@@ -11,7 +11,7 @@ macro_rules! error {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum State {
     BeginStmt {
         last_was_sep: bool,
@@ -730,6 +730,21 @@ impl Default for ScriptParser {
             nested_patterns: Default::default(),
         }
     }
+}
+
+/// Snapshot of parser state that can be restored for incremental parsing.
+/// Captures the state before auto-close so we can undo those synthetic closings
+/// when more source arrives.
+pub struct ParserCheckpoint {
+    pub opcodes_len: usize,
+    pub source_map_len: usize,
+    pub token_index: u32,
+    state: Vec<State>,
+    destruct_defaults_len: usize,
+    nested_patterns_len: usize,
+    /// The last opcode before the checkpoint, saved because auto-close's
+    /// set_pop_to_me() mutates it in place. Must be restored on continuation.
+    last_opcode: Option<ScriptValue>,
 }
 
 impl ScriptParser {
@@ -3974,6 +3989,9 @@ impl ScriptParser {
         // Auto-close any unclosed proto/object states left on the stack
         // This happens when input is truncated mid-object (e.g. streaming)
         let last_index = self.index.saturating_sub(1);
+        // set_pop_to_me() reads self.index for source map entries, so point it
+        // at the last valid token rather than one-past-end.
+        self.index = last_index;
         while self.state.len() > 0 {
             match self.state.pop().unwrap() {
                 State::EndProto => {
@@ -4034,6 +4052,193 @@ impl ScriptParser {
         }
 
         //println!("{:?}", self.opcodes)
+    }
+
+    /// Save parser state before auto-close, returning a checkpoint that can be
+    /// used to restore state for continuation when more source arrives.
+    /// Call this after the main parse loop but BEFORE auto-close runs.
+    pub fn save_checkpoint(&self) -> ParserCheckpoint {
+        ParserCheckpoint {
+            opcodes_len: self.opcodes.len(),
+            source_map_len: self.source_map.len(),
+            token_index: self.index,
+            state: self.state.clone(),
+            destruct_defaults_len: self.destruct_defaults.len(),
+            nested_patterns_len: self.nested_patterns.len(),
+            last_opcode: self.opcodes.last().copied(),
+        }
+    }
+
+    /// Restore parser state from a checkpoint, undoing any auto-close opcodes
+    /// that were appended after the checkpoint was taken.
+    pub fn restore_checkpoint(&mut self, cp: ParserCheckpoint) {
+        self.opcodes.truncate(cp.opcodes_len);
+        self.source_map.truncate(cp.source_map_len);
+        // Restore the last opcode in case auto-close mutated its POP_TO_ME flag
+        if let Some(saved) = cp.last_opcode {
+            if let Some(last) = self.opcodes.last_mut() {
+                *last = saved;
+            }
+        }
+        self.index = cp.token_index;
+        self.state = cp.state;
+        self.destruct_defaults.truncate(cp.destruct_defaults_len);
+        self.nested_patterns.truncate(cp.nested_patterns_len);
+    }
+
+    /// Parse tokens incrementally: run the main parse loop, then save a checkpoint,
+    /// then auto-close for execution. Returns the checkpoint for later restoration.
+    ///
+    /// `unfinished_string`: if the tokenizer's last token is `StringUnfinished`,
+    /// pass the interned value here so the parser emits the real partial string
+    /// into opcodes (for incremental UI rendering). The tokenizer token is NOT
+    /// modified, preserving its state machine for the next `tokenize()` call.
+    pub fn parse_streaming(
+        &mut self,
+        tokenizer: &ScriptTokenizer,
+        file: &str,
+        offsets: (usize, usize),
+        values: &[ScriptValue],
+        unfinished_string: Option<ScriptValue>,
+    ) -> ParserCheckpoint {
+        self.file = file.to_string();
+        self.line_offset = offsets.0;
+        self.col_offset = offsets.1;
+        let mut steps_zero = 0;
+        let tokens = &tokenizer.tokens;
+        let max_token_index = if tokens.is_empty() {
+            0
+        } else {
+            (tokens.len() - 1) as u32
+        };
+        while self.index < tokens.len() as u32 && self.state.len() > 0 {
+            let tok = if let Some(tok) = tokens.get(self.index as usize) {
+                tok.token.clone()
+            } else {
+                ScriptToken::StreamEnd
+            };
+            // When we hit StringUnfinished: save checkpoint BEFORE it so the
+            // parser re-processes this token next time (with updated content).
+            // Substitute the interned value for the current execution, then
+            // consume remaining tokens and auto-close.
+            if let ScriptToken::StringUnfinished = &tok {
+                let checkpoint_before = self.save_checkpoint();
+                let tok = if let Some(v) = unfinished_string {
+                    ScriptToken::String(v)
+                } else {
+                    tok
+                };
+                let step = self.parse_step(tokenizer, tok, values);
+                self.index += step;
+                // Continue parsing any remaining tokens after the string
+                while self.index < tokens.len() as u32 && self.state.len() > 0 {
+                    let tok2 = if let Some(tok2) = tokens.get(self.index as usize) {
+                        tok2.token.clone()
+                    } else {
+                        ScriptToken::StreamEnd
+                    };
+                    let step2 = self.parse_step(tokenizer, tok2, values);
+                    self.index += step2;
+                }
+                return self.auto_close(checkpoint_before, max_token_index);
+            }
+
+            let step = self.parse_step(tokenizer, tok, values);
+            if step == 0 {
+                steps_zero += 1;
+            } else {
+                steps_zero = 0;
+            }
+            if self.state.len() <= 1 && steps_zero > 1000 {
+                error!(
+                    self,
+                    tokenizer,
+                    "Parser stuck {:?} {} {:?}",
+                    self.state,
+                    step,
+                    tokens[self.index as usize]
+                );
+                break;
+            }
+            self.index += step;
+        }
+
+        // Save checkpoint BEFORE auto-close
+        let checkpoint = self.save_checkpoint();
+        self.auto_close(checkpoint, max_token_index)
+    }
+
+    /// Auto-close any open states for execution, then append a RETURN.
+    /// `max_token_index` is the last valid token index in the tokenizer,
+    /// used to clamp source map entries for synthetic opcodes.
+    /// Returns the checkpoint that was passed in (taken before auto-close).
+    fn auto_close(
+        &mut self,
+        checkpoint: ParserCheckpoint,
+        max_token_index: u32,
+    ) -> ParserCheckpoint {
+        // Use the last consumed token index for synthetic auto-close source map entries,
+        // same as the regular parse() method. Clamp to max_token_index for safety.
+        let last_index = self.index.saturating_sub(1).min(max_token_index);
+        // set_pop_to_me() reads self.index for source map entries, so point it
+        // at the last valid token rather than one-past-end.
+        self.index = last_index;
+        while self.state.len() > 0 {
+            match self.state.pop().unwrap() {
+                State::EndProto => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                }
+                State::EndProtoInherit => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                    self.push_code(Opcode::PROTO_INHERIT_WRITE.into(), last_index);
+                }
+                State::EndScopeInherit => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                    self.push_code(Opcode::SCOPE_INHERIT_WRITE.into(), last_index);
+                }
+                State::EndFieldInherit => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                    self.push_code(Opcode::FIELD_INHERIT_WRITE.into(), last_index);
+                }
+                State::EndIndexInherit => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                    self.push_code(Opcode::INDEX_INHERIT_WRITE.into(), last_index);
+                }
+                State::EndStmt { .. } => {
+                    self.set_pop_to_me();
+                }
+                State::EmitOp { what_op, index } => {
+                    self.push_code(State::operator_to_opcode(what_op), index);
+                }
+                State::EmitUnary { what_op, index } => {
+                    self.push_code(State::operator_to_unary(what_op), index);
+                }
+                _ => {}
+            }
+        }
+
+        if self.has_pop_to_me() {
+            self.clear_pop_to_me();
+            self.push_code(Opcode::RETURN.into(), last_index);
+        } else if self.opcodes.len() > 0 {
+            let needs_nil_return = if let Some(code) = self.code_last() {
+                if let Some((opcode, _)) = code.as_opcode() {
+                    opcode != Opcode::RETURN
+                } else {
+                    true
+                }
+            } else {
+                true
+            };
+            if needs_nil_return {
+                self.push_code(
+                    ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
+                    last_index,
+                );
+            }
+        }
+
+        checkpoint
     }
 
     pub fn dump_opcodes(&self) {

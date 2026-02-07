@@ -25,6 +25,8 @@ struct GeminiCandidate {
     content: Option<GeminiContent>,
     #[rename(finishReason)]
     finish_reason: Option<String>,
+    #[allow(dead_code)]
+    index: Option<u32>,
     #[rename(citationMetadata)]
     #[allow(dead_code)]
     citation_metadata: Option<GeminiCitationMetadata>,
@@ -93,6 +95,9 @@ struct GeminiUsageMetadata {
     #[rename(candidatesTokensDetails)]
     #[allow(dead_code)]
     candidates_tokens_details: Option<Vec<GeminiTokenDetails>>,
+    #[rename(thoughtsTokenCount)]
+    #[allow(dead_code)]
+    thoughts_token_count: Option<u32>,
 }
 
 #[derive(DeJson, Debug)]
@@ -278,7 +283,7 @@ impl GeminiBackend {
                 continue;
             };
 
-            match GeminiResponse::deserialize_json(json_data) {
+            match GeminiResponse::deserialize_json_lenient(json_data) {
                 Ok(response) => {
                     // Check for error
                     if let Some(error) = response.error {
