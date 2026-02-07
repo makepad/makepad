@@ -995,12 +995,15 @@ FileTree{}
 ### Instance vs Uniform
 ```
 draw_bg +: {
-    hover: instance(0.0)      // per-draw-call, animatable
-    color: uniform(#fff)       // shared across all instances
+    hover: instance(0.0)      // per-draw-call, animatable by Animator
+    color: uniform(#fff)       // shared across all instances of this shader variant
     tex: texture_2d(float)     // texture sampler
-    my_var: varying(vec2(0))   // vertex→pixel interpolated
+    my_var: varying(vec2(0))   // vertex→pixel interpolated (set in vertex shader)
 }
 ```
+**When to use each:**
+- `instance()` — state that varies per widget (hover, down, focus, active, disabled), per-widget colors, scale/pan. Driven by the Animator system.
+- `uniform()` — theme constants shared by all instances (border_size, border_radius, theme colors). Cannot be animated.
 
 ### Pixel Shader
 ```
@@ -1021,6 +1024,17 @@ pixel: fn(){
 }
 ```
 Note: `sdf.fill()` / `sdf.stroke()` already premultiply internally, so `return sdf.result` is safe without extra `Pal.premul()`.
+
+**Common pattern — fill + border stroke:**
+```
+pixel: fn() {
+    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+    sdf.box(1. 1. self.rect_size.x - 2. self.rect_size.y - 2. 4.0)
+    sdf.fill_keep(self.color)           // fill the shape, keep it for stroke
+    sdf.stroke(self.border_color, 1.0)  // stroke the same shape's outline
+    return sdf.result
+}
+```
 
 ### SDF Primitives
 ```
@@ -1044,22 +1058,38 @@ sdf.close_path()
 ```
 
 ### SDF Combinators
+
+These operate on the **current** shape and the **previous** shape. Draw two primitives, then combine:
 ```
-sdf.union()
-sdf.intersect()
+sdf.union()        // merge shapes together (min of distances)
+sdf.intersect()    // keep only overlap (max of distances)
+sdf.subtract()     // cut current shape from previous shape
+sdf.gloop(k)       // smooth/gooey union with rounding factor k
+sdf.blend(k)       // linear blend: 0.0 = previous shape, 1.0 = current shape
+```
+Example — ring (circle with hole):
+```
+sdf.circle(cx cy outer_radius)
+sdf.circle(cx cy inner_radius)
 sdf.subtract()
-sdf.gloop(k)     // smooth blend
-sdf.blend(k)
+sdf.fill(#fff)
+```
+Example — blend for toggle animation:
+```
+sdf.circle(x y r)         // ring shape (from subtract above)
+sdf.circle(x y r)         // solid circle
+sdf.blend(self.active)    // animate between ring (0) and solid (1)
 ```
 
 ### SDF Drawing
 ```
-sdf.fill(color)           // fill and reset
-sdf.fill_keep(color)      // fill, keep shape
-sdf.stroke(color width)   // stroke and reset
-sdf.stroke_keep(color w)
-sdf.glow(color width)
-sdf.clear(color)          // clear result
+sdf.fill(color)           // fill and reset shape
+sdf.fill_keep(color)      // fill, keep shape for subsequent stroke
+sdf.stroke(color width)   // stroke and reset shape
+sdf.stroke_keep(color w)  // stroke, keep shape
+sdf.glow(color width)     // additive glow around shape, reset
+sdf.glow_keep(color w)    // additive glow, keep shape
+sdf.clear(color)          // clear result buffer with color
 ```
 
 ### SDF Transforms
@@ -1071,27 +1101,190 @@ sdf.scale(factor cx cy)
 
 ### Built-in Shader Variables
 ```
-self.pos          // vec2: normalized position [0,1]
-self.rect_size    // vec2: pixel size
-self.rect_pos     // vec2: pixel position
-self.dpi_factor   // float
-self.draw_pass.time  // float: elapsed time (for animation)
+self.pos              // vec2: normalized position [0,1] (computed from clipping in vertex shader)
+self.rect_size        // vec2: pixel size of the drawn rect
+self.rect_pos         // vec2: pixel position of the drawn rect
+self.dpi_factor       // float: display DPI factor for high-DPI screens
+self.draw_pass.time   // float: elapsed time in seconds (for continuous animation)
+self.draw_pass.dpi_dilate  // float: DPI dilation factor for pixel-perfect strokes
+self.draw_depth       // float: base depth for z-ordering
+self.draw_zbias       // float: z-bias offset added to depth
+self.geom_pos         // vec2: raw geometry position [0,1] (before clipping)
+```
+
+### Vertex Shader
+
+Most widgets use the default vertex shader from DrawQuad. You can override it for custom geometry expansion (e.g., shadows) or DPI-aware texture coordinates:
+```
+draw_bg +: {
+    // custom varying to pass data from vertex to pixel shader
+    my_scale: varying(vec2(0))
+
+    vertex: fn() {
+        let dpi = self.dpi_factor
+        let ceil_size = ceil(self.rect_size * dpi) / dpi
+        self.my_scale = self.rect_size / ceil_size
+        return self.clip_and_transform_vertex(self.rect_pos self.rect_size)
+    }
+    pixel: fn() {
+        // my_scale is available here, interpolated from vertex
+        return Pal.premul(self.color)
+    }
+}
+```
+`self.clip_and_transform_vertex(rect_pos rect_size)` is the standard helper that handles clipping, view shift (scrolling), and camera projection. Always call it in custom vertex shaders.
+
+### Custom Shader Functions
+
+You can define named functions on a draw shader for reuse:
+```
+draw_bg +: {
+    get_color: fn() {
+        return self.color
+            .mix(self.color_hover, self.hover)
+            .mix(self.color_down, self.down)
+    }
+    pixel: fn() {
+        return Pal.premul(self.get_color())
+    }
+}
+```
+Functions with parameters:
+```
+draw_bg +: {
+    get_color_at: fn(scale: vec2, pan: vec2) {
+        return self.my_texture.sample(self.pos * scale + pan)
+    }
+}
+```
+
+### Mutable Variables
+
+Use `let mut` to declare mutable variables in shader code:
+```
+pixel: fn() {
+    let mut color = self.color
+    if self.hover > 0.5 {
+        color = self.color_hover
+    }
+    return Pal.premul(color)
+}
+```
+
+### Conditionals and Match
+
+Shaders support `if`/`else` and `match` on enum instance variables:
+```
+pixel: fn() {
+    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+    if self.is_vertical > 0.5 {
+        sdf.box(1. self.rect_size.y * self.scroll_pos 8. self.rect_size.y * self.handle_size 2.)
+    } else {
+        sdf.box(self.rect_size.x * self.scroll_pos 1. self.rect_size.x * self.handle_size 8. 2.)
+    }
+    sdf.fill(self.color)
+    return sdf.result
+}
+```
+
+### Texture Sampling
+
+Declare texture samplers and sample them in pixel shaders:
+```
+draw_bg +: {
+    my_tex: texture_2d(float)
+    pixel: fn() {
+        let color = self.my_tex.sample(self.pos)          // standard 2D sampling
+        return Pal.premul(color)
+    }
+}
+```
+Alternative sampling functions:
+```
+sample2d(self.my_tex, uv)        // free-function form of texture sampling
+sample2d_rt(self.image, uv)      // sample from render-target texture (handles Y-flip on some platforms)
 ```
 
 ### Color Operations
 ```
-mix(color1 color2 factor)
-color1.mix(color2 factor)           // chained
-#f00.mix(#0f0 0.5).mix(#00f hover)  // multi-chain
-Pal.premul(color)                    // premultiply alpha — REQUIRED when returning from pixel()!
+mix(color1 color2 factor)                   // linear interpolation (free function)
+color1.mix(color2 factor)                   // method chaining form
+#f00.mix(#0f0 0.5).mix(#00f hover)          // multi-chain for state interpolation
+Pal.premul(color)                           // premultiply alpha — REQUIRED when returning from pixel()!
+Pal.hsv2rgb(vec4(h s v 1.0))               // HSV to RGB conversion
+Pal.rgb2hsv(color)                          // RGB to HSV conversion
+Pal.iq(t a b c d)                           // Inigo Quilez cosine color palette
+Pal.iq0(t) .. Pal.iq7(t)                   // pre-built cosine color palettes
 ```
 ⚠️ Always wrap your final color in `Pal.premul()` when returning from `pixel: fn()` (unless returning `sdf.result` which is already premultiplied).
 
+**Gradient pattern** — use `vec4(-1.0, -1.0, -1.0, -1.0)` as a sentinel for "no gradient", then check with `if self.color_2.x > -0.5`:
+```
+color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))   // sentinel: no gradient
+pixel: fn() {
+    let mut fill = self.color
+    if self.color_2.x > -0.5 {
+        let dither = Math.random_2d(self.pos.xy) * 0.04
+        let dir = self.pos.y + dither
+        fill = mix(self.color, self.color_2, dir)
+    }
+    return Pal.premul(fill)
+}
+```
+
+### SDF Anti-aliasing
+
+The `sdf.aa` field controls anti-aliasing sharpness. Default is computed from viewport. Set higher for sharper edges:
+```
+pixel: fn() {
+    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+    sdf.aa = sdf.aa * 3.0   // sharper edges (useful for small icons)
+    sdf.move_to(c.x - sz, c.y - sz)
+    sdf.line_to(c.x + sz, c.y + sz)
+    sdf.stroke(#fff, 0.5 + 0.5 * self.draw_pass.dpi_dilate)
+    return sdf.result
+}
+```
+
+### SDF fill_premul / fill_keep_premul
+
+When filling with a color that is already premultiplied (e.g., from a texture sample or render target):
+```
+sdf.fill_premul(color)           // fill with premultiplied color, reset shape
+sdf.fill_keep_premul(color)      // fill with premultiplied color, keep shape
+```
+
+### GaussShadow (box shadows)
+```
+GaussShadow.box_shadow(lower upper point sigma)                    // fast rectangular shadow
+GaussShadow.rounded_box_shadow(lower upper point sigma corner)     // rounded rectangle shadow
+```
+Used in shadow view variants (`RectShadowView`, `RoundedShadowView`) to render drop shadows efficiently.
+
 ### Math Utilities
 ```
-Math.random_2d(vec2)    // pseudo-random 0-1
-Math.rotate_2d(v angle) // 2D rotation
-PI                       // 3.14159...
+// Custom Makepad functions
+Math.random_2d(vec2)      // pseudo-random 0-1 from vec2 seed (for dithering)
+Math.rotate_2d(v angle)   // 2D rotation of vector by angle
+
+// Constants
+PI                         // 3.14159...
+E                          // 2.71828...
+TORAD                      // degrees→radians multiplier (0.01745...)
+GOLDEN                     // golden ratio (1.61803...)
+
+// Standard GLSL math (all work on float, vec2, vec3, vec4)
+sin(x) cos(x) tan(x) asin(x) acos(x) atan(y x)
+pow(x y) sqrt(x) exp(x) exp2(x) log(x) log2(x)
+abs(x) sign(x) floor(x) ceil(x) fract(x) mod(x y)
+min(x y) max(x y) clamp(x min max)
+step(edge x) smoothstep(edge0 edge1 x)
+
+// Vector operations
+length(v) distance(a b) dot(a b) cross(a b) normalize(v)
+
+// Fragment-only (for advanced anti-aliasing)
+dFdx(v) dFdy(v)           // partial derivatives (used in text SDF rendering)
 ```
 
 ## Animator
