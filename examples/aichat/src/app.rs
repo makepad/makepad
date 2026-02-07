@@ -125,7 +125,7 @@ script_mod! {
                         }
                         splash_block := SolidView{
                             flow: Overlay
-                            optimize: ViewOptimize.DrawList
+                            new_batch: true
                             width: Fill
                             height: Fit
                             splash_view := Splash {
