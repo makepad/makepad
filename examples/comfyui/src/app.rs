@@ -269,7 +269,10 @@ impl MatchEvent for App{
                 web_socket.queue.clear()
                 
                 let image_prompt = image_prompt.strip_prefix("```json").strip_suffix("```").parse_json();
-                        
+                
+                std.println(image_prompt);
+                
+                
                 std.println("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
                         
                 let prompt_id = comfy_render(image_prompt display model).last()

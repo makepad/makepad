@@ -450,6 +450,12 @@ pub struct App {
     active_backend: Option<BackendType>,
     #[rust]
     history_injected: bool,
+    #[rust]
+    fake_stream_timer: Timer,
+    #[rust]
+    fake_stream_text: String,
+    #[rust]
+    fake_stream_pos: usize,
 }
 
 impl App {
@@ -838,10 +844,37 @@ impl MatchEvent for App {
             self.switch_backend(cx, backend);
             // Set the dropdown to match
             if let Some(idx) = self.index_from_backend_type(backend) {
-                self.ui.drop_down(ids!($backend_dropdown)).set_selected_item(cx, idx);
+                self.ui
+                    .drop_down(ids!($backend_dropdown))
+                    .set_selected_item(cx, idx);
             }
         }
         self.update_status(cx);
+
+        // Fake-stream the last assistant message from history for debugging
+        {
+            let mut data = CHAT_DATA.write().unwrap();
+            // Pop the last assistant message to re-stream it
+            if let Some(last) = data.messages.last() {
+                if last.role == ChatRole::Assistant {
+                    self.fake_stream_text = last.text.clone();
+                    self.fake_stream_pos = 0;
+                    let items_len = data.messages.len(); // streaming item will be at this index
+                    data.messages.pop();
+                    data.streaming_text.clear();
+                    data.is_streaming = true;
+
+                    // Scroll the list to show the streaming item
+                    let chat_list = self.ui.widget(ids!($chat_list));
+                    let list = chat_list.portal_list(ids!($list));
+                    list.set_tail_range(true);
+                    list.set_first_id_and_scroll(items_len.saturating_sub(1), 0.0);
+
+                    self.fake_stream_timer = cx.start_timeout(0.3);
+                    self.ui.redraw(cx);
+                }
+            }
+        }
     }
 }
 
@@ -849,6 +882,55 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+
+        // Handle fake streaming timer
+        if self.fake_stream_timer.is_event(event).is_some() {
+            let chunk_size = 20;
+            let end = (self.fake_stream_pos + chunk_size).min(self.fake_stream_text.len());
+            // Align to char boundary
+            let end = {
+                let mut e = end;
+                while e < self.fake_stream_text.len() && !self.fake_stream_text.is_char_boundary(e)
+                {
+                    e += 1;
+                }
+                e
+            };
+            let chunk = &self.fake_stream_text[self.fake_stream_pos..end];
+            self.fake_stream_pos = end;
+
+            {
+                let mut data = CHAT_DATA.write().unwrap();
+                data.streaming_text.push_str(chunk);
+            }
+
+            if self.fake_stream_pos >= self.fake_stream_text.len() {
+                // Done streaming - finalize the message
+                let mut data = CHAT_DATA.write().unwrap();
+                let text = std::mem::take(&mut data.streaming_text);
+                if !text.is_empty() {
+                    data.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        text,
+                    });
+                }
+                data.is_streaming = false;
+                self.fake_stream_text.clear();
+            } else {
+                // Schedule next tick (~50ms for ~2s total over ~420 chars)
+                self.fake_stream_timer = cx.start_timeout(0.05);
+            }
+
+            // Redraw splash widget if visible
+            let chat_list = self.ui.widget(ids!($chat_list));
+            let list = chat_list.portal_list(ids!($list));
+            let item_id = CHAT_DATA.read().unwrap().messages.len();
+            if let Some((_template, item)) = list.get_item(item_id) {
+                item.clear_query_cache();
+                item.widget(ids!($splash_view)).redraw(cx);
+            }
+            cx.redraw_all();
+        }
 
         // Handle agent events
         if let Some(agent) = &mut self.agent {
@@ -906,8 +988,8 @@ impl AppMain for App {
                         self.ui
                             .label(ids!($status_label))
                             .set_text(cx, &format!("Error: {}", error));
-                            cx.redraw_all();
-                        }
+                        cx.redraw_all();
+                    }
                     AgentEvent::ToolRequest { .. } => {
                         // Not handling tools yet
                     }
