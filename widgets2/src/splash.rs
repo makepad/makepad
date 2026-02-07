@@ -18,7 +18,7 @@ pub struct Splash {
     #[live]
     body: ArcStringMut,
     #[rust]
-    eval_count: u64
+    eval_count: u64,
 }
 
 impl Splash {
@@ -28,7 +28,7 @@ impl Splash {
             let self_id = self as *const Self as u64 + self.eval_count;
             self.eval_count += 1;
             let code = format!("use mod.prelude.widgets.*View{{height:Fit,  {} }};", body);
-           
+
             let script_mod = ScriptMod {
                 cargo_manifest_path: String::new(),
                 module_path: String::new(),
@@ -40,7 +40,11 @@ impl Splash {
             };
             //let view = &mut self.view;
             let body_preview: String = body.chars().take(100).collect();
-            log!("Splash eval_body: body_len={} preview={:?}", body.len(), body_preview);
+            log!(
+                "Splash eval_body: body_len={} preview={:?}",
+                body.len(),
+                body_preview
+            );
             cx.with_vm(|vm| {
                 //let source = view.script_source();
                 let value = vm.eval_with_source(script_mod, NIL.into());
@@ -67,10 +71,14 @@ impl Splash {
                     } else {
                         log!("Splash eval result: value_type={:?}", value.value_type());
                     }
-                    self.view = View::script_from_value(vm, value);
-                    //view.script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
+                    self.view
+                        .script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
                 } else {
-                    log!("Splash eval SKIPPED: is_err={} is_nil={}", value.is_err(), value.is_nil());
+                    log!(
+                        "Splash eval SKIPPED: is_err={} is_nil={}",
+                        value.is_err(),
+                        value.is_nil()
+                    );
                 }
             });
         }

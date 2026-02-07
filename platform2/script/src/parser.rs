@@ -3971,6 +3971,45 @@ impl ScriptParser {
             self.index += step;
         }
 
+        // Auto-close any unclosed proto/object states left on the stack
+        // This happens when input is truncated mid-object (e.g. streaming)
+        let last_index = self.index.saturating_sub(1);
+        while self.state.len() > 0 {
+            match self.state.pop().unwrap() {
+                State::EndProto => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                }
+                State::EndProtoInherit => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                    self.push_code(Opcode::PROTO_INHERIT_WRITE.into(), last_index);
+                }
+                State::EndScopeInherit => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                    self.push_code(Opcode::SCOPE_INHERIT_WRITE.into(), last_index);
+                }
+                State::EndFieldInherit => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                    self.push_code(Opcode::FIELD_INHERIT_WRITE.into(), last_index);
+                }
+                State::EndIndexInherit => {
+                    self.push_code(Opcode::END_PROTO.into(), last_index);
+                    self.push_code(Opcode::INDEX_INHERIT_WRITE.into(), last_index);
+                }
+                State::EndStmt { .. } => {
+                    self.set_pop_to_me();
+                }
+                State::EmitOp { what_op, index } => {
+                    self.push_code(State::operator_to_opcode(what_op), index);
+                }
+                State::EmitUnary { what_op, index } => {
+                    self.push_code(State::operator_to_unary(what_op), index);
+                }
+                _ => {
+                    // Other states (EndExpr, BeginStmt, etc.) - just drop them
+                }
+            }
+        }
+
         // Handle the last value as the script's return value, similar to function blocks
         if self.has_pop_to_me() {
             self.clear_pop_to_me();
