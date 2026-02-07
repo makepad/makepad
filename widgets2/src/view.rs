@@ -101,6 +101,9 @@ pub struct View {
     #[live(false)]
     design_mode: bool,
 
+    #[live(false)]
+    pub debug_stream: bool,
+
     #[rust]
     find_cache: RefCell<SmallVec<[(u64, WidgetSet); 3]>>,
 
@@ -121,7 +124,7 @@ pub struct View {
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
-    children: SmallVec<[(LiveId, WidgetRef); 2]>,
+    pub children: SmallVec<[(LiveId, WidgetRef); 2]>,
     #[rust]
     live_update_order: SmallVec<[LiveId; 1]>,
 
@@ -602,7 +605,9 @@ impl WidgetNode for View {
     fn selection_text_len(&self) -> usize {
         for (_, child) in &self.children {
             let v = child.selection_text_len();
-            if v > 0 { return v; }
+            if v > 0 {
+                return v;
+            }
         }
         0
     }
@@ -637,7 +642,9 @@ impl WidgetNode for View {
     fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
         for (_, child) in &self.children {
             let v = child.selection_get_text_for_range(start, end);
-            if !v.is_empty() { return v; }
+            if !v.is_empty() {
+                return v;
+            }
         }
         String::new()
     }
@@ -645,7 +652,9 @@ impl WidgetNode for View {
     fn selection_get_full_text(&self) -> String {
         for (_, child) in &self.children {
             let v = child.selection_get_full_text();
-            if !v.is_empty() { return v; }
+            if !v.is_empty() {
+                return v;
+            }
         }
         String::new()
     }
@@ -1036,6 +1045,42 @@ impl View {
 
     pub fn debug_print_children(&self) {
         // Debug output removed
+    }
+
+    pub fn debug_props(&self) -> String {
+        format!(
+            "walk=({:?},{:?}) flow={:?} show_bg={} visible={} padding=({},{},{},{}) spacing={:?}",
+            self.walk.width,
+            self.walk.height,
+            self.layout.flow,
+            self.show_bg,
+            self.visible,
+            self.layout.padding.left,
+            self.layout.padding.top,
+            self.layout.padding.right,
+            self.layout.padding.bottom,
+            self.layout.spacing
+        )
+    }
+
+    pub fn debug_dump_tree(&self, depth: usize) -> String {
+        let mut out = String::new();
+        let indent = "  ".repeat(depth);
+        out.push_str(&format!("{}View {{ {} }}\n", indent, self.debug_props()));
+        for (id, child) in &self.children {
+            out.push_str(&format!("{}  [id={:?}] ", indent, id));
+            if let Some(view) = child.borrow_mut::<View>() {
+                out.push_str(&format!("\n{}", view.debug_dump_tree(depth + 2)));
+            } else {
+                let text = child.text();
+                if text.is_empty() {
+                    out.push_str("<widget>\n");
+                } else {
+                    out.push_str(&format!("<widget text={:?}>\n", text));
+                }
+            }
+        }
+        out
     }
 
     pub fn set_key_focus(&self, cx: &mut Cx) {

@@ -941,6 +941,8 @@ impl Widget for TextFlow {
                 if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
                     if self.selection_cursor != idx {
                         self.selection_cursor = idx;
+                        // Propagate selection to child widgets (e.g., CodeView)
+                        self.propagate_selection_to_children();
                         self.redraw(cx);
                     }
                 }
@@ -1145,20 +1147,24 @@ impl TextFlow {
         if self.selectable {
             self.selection_anchor = anchor;
             self.selection_cursor = cursor;
+            self.propagate_selection_to_children();
+        }
+    }
 
-            let start = anchor.min(cursor);
-            let end = anchor.max(cursor);
+    /// Propagate the current selection range to child widgets (e.g., CodeView).
+    /// Called both from external `set_selection` and internal mouse selection handling.
+    fn propagate_selection_to_children(&self) {
+        let start = self.selection_anchor.min(self.selection_cursor);
+        let end = self.selection_anchor.max(self.selection_cursor);
 
-            // Propagate selection to child widgets
-            for (widget, text_start, text_len) in &self.widget_text_entries {
-                let seg_end = text_start + text_len;
-                if start < seg_end && end > *text_start {
-                    let sub_start = start.saturating_sub(*text_start);
-                    let sub_end = (end - text_start).min(*text_len);
-                    widget.selection_set(sub_start, sub_end);
-                } else {
-                    widget.selection_clear();
-                }
+        for (widget, text_start, text_len) in &self.widget_text_entries {
+            let seg_end = text_start + text_len;
+            if start < seg_end && end > *text_start {
+                let sub_start = start.saturating_sub(*text_start);
+                let sub_end = (end - text_start).min(*text_len);
+                widget.selection_set(sub_start, sub_end);
+            } else {
+                widget.selection_clear();
             }
         }
     }

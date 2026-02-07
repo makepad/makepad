@@ -68,7 +68,7 @@ script_mod! {
         ..mod.draw.DrawQuad
         gloopiness: uniform(8.0)
         border_radius: uniform(2.0)
-        focus: uniform(1.0)
+        focus: 1.0
         vertex: fn() {
             let clipped = clamp(
                 self.geom.pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos - vec2(8., 0.),
@@ -292,6 +292,12 @@ pub struct CodeEditor {
 
     #[rust]
     blink_timer: Timer,
+
+    /// When true, force selection to use "focus" color even without key focus.
+    /// Used for cross-child selection where PortalList has key focus but we still
+    /// want to show focused selection colors in child editors.
+    #[rust(false)]
+    external_selection_focus: bool,
 }
 
 pub enum KeepCursorInView {
@@ -652,6 +658,30 @@ impl CodeEditor {
         }
     }
 
+    /// Set external selection focus. When true, the selection will use "focus" colors
+    /// even when this editor doesn't have key focus. Used for cross-child selection
+    /// in PortalList where the list has focus but editors should still show
+    /// focused selection highlights.
+    pub fn set_external_selection_focus(&mut self, cx: &mut Cx, focus: bool) {
+        self.set_external_selection_focus_no_redraw(focus);
+        self.redraw(cx);
+    }
+
+    /// Set external selection focus without triggering a redraw.
+    /// Use this when you know a redraw will happen anyway (e.g., during draw cycle).
+    pub fn set_external_selection_focus_no_redraw(&mut self, focus: bool) {
+        self.external_selection_focus = focus;
+        if focus {
+            // Force selection to use focus color
+            self.draw_selection.focus = 1.0;
+        }
+    }
+
+    /// Check if external selection focus is active
+    pub fn external_selection_focus(&self) -> bool {
+        self.external_selection_focus
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -680,7 +710,11 @@ impl CodeEditor {
         let mut keyboard_moved_cursor = false;
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, ids!(focus.off));
+                // Don't dim selection if external_selection_focus is active
+                // (cross-child selection where PortalList has focus)
+                if !self.external_selection_focus {
+                    self.animator_play(cx, ids!(focus.off));
+                }
             }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -1309,6 +1343,11 @@ impl CodeEditor {
     }
 
     fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
+        // If external_selection_focus is active, ensure selection uses focus color
+        if self.external_selection_focus {
+            self.draw_selection.focus = 1.0;
+        }
+
         let mut active_selection = None;
         let selections = session.selections();
         let mut selections = selections.iter();
@@ -2086,6 +2125,8 @@ struct DrawSelection {
     next_x: f32,
     #[live]
     next_w: f32,
+    #[live(1.0)]
+    focus: f32,
     #[rust]
     prev_prev_rect: Option<Rect>,
     #[rust]

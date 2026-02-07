@@ -94,9 +94,13 @@ impl WidgetNode for CodeView {
             session.set_selection(anchor_pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
             session.move_to(cursor_pos, Affinity::Before, NewGroup::Yes);
         }
+        // When receiving external selection, use focus colors even without key focus
+        self.editor.set_external_selection_focus_no_redraw(true);
     }
 
     fn selection_clear(&mut self) {
+        // Clear external selection focus when selection is cleared
+        self.editor.set_external_selection_focus_no_redraw(false);
         if let Some(session) = &self.session {
             // Extract cursor position, then drop the Ref before mutating
             let pos = {
@@ -118,6 +122,8 @@ impl WidgetNode for CodeView {
             session.set_selection(start, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
             session.move_to(end, Affinity::Before, NewGroup::Yes);
         }
+        // When receiving external selection, use focus colors even without key focus
+        self.editor.set_external_selection_focus_no_redraw(true);
     }
 
     fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
