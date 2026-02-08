@@ -14,6 +14,7 @@ workspace.members = [
     "examples/arracing",
     "examples/splash",
     "examples/scratchpad",
+    "examples/vector",
     "examples/text_flow",
     "examples/teamtalk",
     "examples/websocket_image",

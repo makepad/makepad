@@ -13,6 +13,7 @@ pub mod overlay;
 pub mod shader;
 pub mod text;
 pub mod turtle;
+pub mod vector;
 
 pub use crate::{
     cx_2d::Cx2d,
@@ -23,11 +24,8 @@ pub use crate::{
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
     overlay::Overlay,
     shader::{
-        draw_quad::DrawColor,
-        //draw_shape::{DrawShape, Shape, Fill},
-        draw_quad::DrawQuad,
-        draw_text::DrawText,
-        draw_text::TextStyle,
+        draw_quad::DrawColor, draw_quad::DrawQuad, draw_text::DrawText, draw_text::TextStyle,
+        draw_vector::DrawVector,
     },
     /*
     geometry::{
@@ -35,6 +33,7 @@ pub use crate::{
         GeometryQuad2D,
     },*/
     turtle::{Align, DeferredWalk, Flow, Layout, Metrics, Size, TurtleAlignRange, Walk},
+    vector::{GradientStop, VectorPaint},
 };
 
 #[cfg(feature = "svg")]
@@ -46,6 +45,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::geometry::script_mod(vm);
     crate::shader::draw_quad::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
+    crate::shader::draw_vector::script_mod(vm);
     #[cfg(feature = "svg")]
     crate::shader::draw_svg::script_mod(vm);
     NIL
