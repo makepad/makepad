@@ -4,6 +4,7 @@ use makepad_html::{parse_html, HtmlWalker};
 use makepad_live_id::*;
 
 use crate::animate::{parse_animate_element, parse_animate_transform_element};
+use crate::color::parse_color;
 use crate::document::*;
 use crate::gradient::{parse_linear_gradient, parse_radial_gradient, parse_stop};
 use crate::path::VectorPath;
@@ -97,6 +98,12 @@ fn parse_defs(walker: &mut HtmlWalker, defs: &mut SvgDefs) {
                     parse_symbol(walker, defs);
                     continue;
                 }
+                t if t == live_id!(filter) => {
+                    if let Some(filter) = parse_filter(walker) {
+                        defs.filters.insert(filter.id.clone(), filter);
+                    }
+                    continue;
+                }
                 _ => {
                     walker.jump_to_close();
                 }
@@ -104,6 +111,102 @@ fn parse_defs(walker: &mut HtmlWalker, defs: &mut SvgDefs) {
         }
         walker.walk();
     }
+}
+
+fn parse_filter(walker: &mut HtmlWalker) -> Option<SvgFilter> {
+    let id = walker.find_attr_lc(live_id!(id))?.to_string();
+    let mut effects = Vec::new();
+
+    // State for assembling feGaussianBlur + feOffset + feFlood into a DropShadow
+    let mut blur_std_dev: Option<f32> = None;
+    let mut offset_dx: Option<f32> = None;
+    let mut offset_dy: Option<f32> = None;
+    let mut flood_color: Option<(f32, f32, f32, f32)> = None;
+
+    walker.walk();
+    while !walker.done() {
+        if walker.close_tag_lc() == Some(live_id!(filter)) {
+            break;
+        }
+        if let Some(tag) = walker.open_tag_lc() {
+            match tag {
+                t if t == live_id!(fedropshadow) => {
+                    let dx = walker
+                        .find_attr_lc(live_id!(dx))
+                        .and_then(parse_number)
+                        .unwrap_or(2.0);
+                    let dy = walker
+                        .find_attr_lc(live_id!(dy))
+                        .and_then(parse_number)
+                        .unwrap_or(2.0);
+                    let std_dev = walker
+                        .find_attr_lc(live_id!(stddeviation))
+                        .and_then(parse_number)
+                        .unwrap_or(2.0);
+                    let color = walker
+                        .find_attr_lc(live_id!(flood - color))
+                        .and_then(|s| parse_color(s))
+                        .unwrap_or((0.0, 0.0, 0.0, 1.0));
+                    let opacity = walker
+                        .find_attr_lc(live_id!(flood - opacity))
+                        .and_then(parse_number)
+                        .unwrap_or(1.0);
+                    effects.push(SvgFilterEffect::DropShadow {
+                        dx,
+                        dy,
+                        std_dev,
+                        color: (color.0, color.1, color.2, color.3 * opacity),
+                    });
+                    walker.jump_to_close();
+                }
+                t if t == live_id!(fegaussianblur) => {
+                    blur_std_dev = walker
+                        .find_attr_lc(live_id!(stddeviation))
+                        .and_then(parse_number);
+                    walker.jump_to_close();
+                }
+                t if t == live_id!(feoffset) => {
+                    offset_dx = walker.find_attr_lc(live_id!(dx)).and_then(parse_number);
+                    offset_dy = walker.find_attr_lc(live_id!(dy)).and_then(parse_number);
+                    walker.jump_to_close();
+                }
+                t if t == live_id!(feflood) => {
+                    flood_color = walker
+                        .find_attr_lc(live_id!(flood - color))
+                        .and_then(|s| parse_color(s));
+                    if let Some(opacity) = walker
+                        .find_attr_lc(live_id!(flood - opacity))
+                        .and_then(parse_number)
+                    {
+                        if let Some(ref mut c) = flood_color {
+                            c.3 *= opacity;
+                        }
+                    }
+                    walker.jump_to_close();
+                }
+                _ => {
+                    walker.jump_to_close();
+                }
+            }
+        }
+        walker.walk();
+    }
+
+    // If we collected blur+offset components, assemble into a DropShadow
+    if effects.is_empty() && blur_std_dev.is_some() {
+        effects.push(SvgFilterEffect::DropShadow {
+            dx: offset_dx.unwrap_or(0.0),
+            dy: offset_dy.unwrap_or(0.0),
+            std_dev: blur_std_dev.unwrap_or(2.0),
+            color: flood_color.unwrap_or((0.0, 0.0, 0.0, 0.6)),
+        });
+    }
+
+    if effects.is_empty() {
+        return None;
+    }
+
+    Some(SvgFilter { id, effects })
 }
 
 fn parse_symbol(walker: &mut HtmlWalker, defs: &mut SvgDefs) {

@@ -682,12 +682,22 @@ script_mod! {
         ScrollYView{
             width: Fill height: Fill flow: Down padding: 15 spacing: 12
 
+            Label{text: "App Icon - Drop Shadow + Advanced Gradients" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "SVG filter support: feDropShadow, linear/radial gradients with opacity stops" draw_text.color: #888 draw_text.text_style.font_size: 9}
+            Svg{
+                width: 300 height: 300
+                animating: false
+                draw_svg +: { svg: crate_resource("self:resources/app_icon.svg") }
+            }
+
+            Hr{}
+
             Label{text: "Ocean Dream - Animated SVG + GPU Effects" draw_text.color: #fff draw_text.text_style.font_size: 13}
             Svg{
                 width: 600 height: 450
                 animating: true
                 draw_svg +: {
-                    svg: crate_resource("self:../../examples/vector/resources/ocean_dream.svg")
+                    svg: crate_resource("self:resources/ocean_dream.svg")
 
                     // Hash function for pseudo-random
                     hash21: fn(p: vec2) -> float {
@@ -975,7 +985,7 @@ script_mod! {
             Svg{
                 width: 300 height: 300
                 animating: false
-                draw_svg +: { svg: crate_resource("self:../../examples/vector/resources/tiger.svg") }
+                draw_svg +: { svg: crate_resource("self:resources/tiger.svg") }
             }
 
             Hr{}

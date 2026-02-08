@@ -12,6 +12,9 @@ use crate::units::{parse_length, parse_number};
 pub fn parse_style_from_element(walker: &HtmlWalker, parent_style: &SvgStyle) -> SvgStyle {
     let mut style = parent_style.clone();
 
+    // filter is not inherited per SVG spec
+    style.filter = None;
+
     // First: presentation attributes
     apply_presentation_attrs(walker, &mut style);
 
@@ -82,6 +85,9 @@ fn apply_presentation_attrs(walker: &HtmlWalker, style: &mut SvgStyle) {
             style.shader_id = n;
         }
     }
+    if let Some(v) = walker.find_attr_lc(live_id!(filter)) {
+        style.filter = parse_filter_ref(v);
+    }
 }
 
 fn apply_inline_style(style_str: &str, style: &mut SvgStyle) {
@@ -146,6 +152,9 @@ fn apply_inline_style(style_str: &str, style: &mut SvgStyle) {
                     if let Some(c) = parse_color(value) {
                         style.color = c;
                     }
+                }
+                "filter" => {
+                    style.filter = parse_filter_ref(value);
                 }
                 _ => {}
             }
@@ -215,4 +224,21 @@ fn parse_dasharray(s: &str) -> Option<Vec<f32>> {
     } else {
         Some(dashes)
     }
+}
+
+/// Parse a `filter` attribute value like `url(#shadow)` into just the ID string.
+fn parse_filter_ref(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    if let Some(rest) = s.strip_prefix("url(") {
+        if let Some(inner) = rest.strip_suffix(')') {
+            let inner = inner.trim().trim_matches(|c| c == '\'' || c == '"');
+            if let Some(id) = inner.strip_prefix('#') {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
 }
