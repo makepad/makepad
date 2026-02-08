@@ -76,10 +76,16 @@ script_mod! {
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            // Early clip rejection: scale clip_radius by max svg_scale component
+            // Early clip rejection: merge both clip rects (in transformed space), single check
             let cr = self.geom.clip_radius * max(self.svg_scale.x, self.svg_scale.y);
-            if self.clip_outside(transformed, cr, self.draw_clip) > 0.5
-                || self.clip_outside(shifted, cr, self.draw_list.view_clip) > 0.5 {
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            );
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
                 self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
                 return
             }
