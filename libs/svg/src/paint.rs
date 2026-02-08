@@ -23,7 +23,8 @@ pub enum VectorPaint {
     RadialGradient {
         cx: f32,
         cy: f32,
-        r: f32,
+        rx: f32,
+        ry: f32,
         stops: Vec<GradientStop>,
     },
 }
@@ -52,8 +53,14 @@ impl VectorPaint {
         }
     }
 
-    pub fn radial_gradient(cx: f32, cy: f32, r: f32, stops: Vec<GradientStop>) -> Self {
-        Self::RadialGradient { cx, cy, r, stops }
+    pub fn radial_gradient(cx: f32, cy: f32, rx: f32, ry: f32, stops: Vec<GradientStop>) -> Self {
+        Self::RadialGradient {
+            cx,
+            cy,
+            rx,
+            ry,
+            stops,
+        }
     }
 
     /// Evaluate paint color at a world-space position
@@ -77,15 +84,16 @@ impl VectorPaint {
                 };
                 sample_stops(stops, t)
             }
-            Self::RadialGradient { cx, cy, r, stops } => {
-                let dx = x - cx;
-                let dy = y - cy;
-                let d = (dx * dx + dy * dy).sqrt();
-                let t = if *r > 1e-6 {
-                    (d / r).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
+            Self::RadialGradient {
+                cx,
+                cy,
+                rx,
+                ry,
+                stops,
+            } => {
+                let dx = (x - cx) / rx.max(1e-6);
+                let dy = (y - cy) / ry.max(1e-6);
+                let t = (dx * dx + dy * dy).sqrt().clamp(0.0, 1.0);
                 sample_stops(stops, t)
             }
         }

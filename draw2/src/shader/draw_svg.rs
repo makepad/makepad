@@ -23,6 +23,67 @@ script_mod! {
         // Any non-negative color replaces the SVG color, preserving per-vertex alpha.
         color: vec4(-1.0, -1.0, -1.0, -1.0)
 
+        // GPU-side transform for cached SVG geometry
+        svg_scale: uniform(vec2(1.0, 1.0))
+        svg_offset: uniform(vec2(0.0, 0.0))
+
+        // Animation time in seconds, available for custom shader effects
+        svg_time: uniform(float(0.0))
+
+        vertex: fn() {
+            let pos = vec2(self.geom.x, self.geom.y);
+            // Apply cached SVG transform on GPU
+            let transformed = pos * self.svg_scale + self.svg_offset;
+            self.v_tcoord = vec2(self.geom.u, self.geom.v);
+            self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
+            self.v_color2 = vec4(self.geom.color2_r, self.geom.color2_g, self.geom.color2_b, self.geom.color2_a);
+            self.v_stroke_mult = self.geom.stroke_mult;
+            self.v_stroke_dist = self.geom.stroke_dist;
+            self.v_shape_id = self.geom.shape_id;
+            self.v_param0 = self.geom.param0;
+            self.v_param5 = self.geom.param5;
+            // Transform gradient geometry params by svg_scale/svg_offset
+            let grad_type = self.geom.param0;
+            if grad_type > 0.5 && grad_type < 1.5 {
+                // Linear gradient: p1,p2 = start point, p3,p4 = end point
+                let p0 = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
+                let p1 = vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset;
+                self.v_param1 = p0.x;
+                self.v_param2 = p0.y;
+                self.v_param3 = p1.x;
+                self.v_param4 = p1.y;
+            } else if grad_type > 1.5 {
+                // Radial gradient: p1,p2 = center, p3,p4 = rx, ry
+                let center = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
+                self.v_param1 = center.x;
+                self.v_param2 = center.y;
+                self.v_param3 = self.geom.param3 * self.svg_scale.x;
+                self.v_param4 = self.geom.param4 * self.svg_scale.y;
+            } else if self.geom.shape_id > 0.5 {
+                // Effect shape with bbox in params: transform bbox by svg_scale/svg_offset
+                let bbox_min = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
+                let bbox_max = vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset;
+                self.v_param1 = bbox_min.x;
+                self.v_param2 = bbox_min.y;
+                self.v_param3 = bbox_max.x;
+                self.v_param4 = bbox_max.y;
+            } else {
+                self.v_param1 = self.geom.param1;
+                self.v_param2 = self.geom.param2;
+                self.v_param3 = self.geom.param3;
+                self.v_param4 = self.geom.param4;
+            }
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.draw_call.zbias
+                1.
+            );
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+
         get_color: fn() {
             let base = self.eval_gradient()
             if self.color.x >= 0.0 {
@@ -48,6 +109,14 @@ pub struct DrawSvg {
     content_bounds: (f32, f32, f32, f32), // (min_x, min_y, max_x, max_y)
     #[rust]
     content_size: DVec2,
+    #[rust]
+    cached_verts: Vec<f32>,
+    #[rust]
+    cached_indices: Vec<u32>,
+    #[rust]
+    cache_valid: bool,
+    #[rust]
+    has_animations: bool,
     #[live(true)]
     pub preserve_aspect: bool,
     #[live(1.0)]
@@ -91,15 +160,32 @@ impl DrawSvg {
 
     fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
         let doc = self.svg_doc.take().unwrap();
+
         let (lw, lh) = doc.logical_size();
 
-        // Render SVG at logical size with no offset.
-        // The viewbox transform maps SVG content into (0..lw, 0..lh).
-        self.draw_super.begin();
-        svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
+        if self.has_animations {
+            // Animated SVGs must re-tessellate every frame
+            self.draw_super.begin();
+            svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
+        } else if !self.cache_valid {
+            // Tessellate and cache on first render (or after invalidation)
+            self.draw_super.begin();
+            svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
+            self.cached_verts = self.draw_super.acc_verts.clone();
+            self.cached_indices = self.draw_super.acc_indices.clone();
+            self.cache_valid = true;
+        } else {
+            // Replay cached geometry
+            self.draw_super.begin();
+            self.draw_super
+                .acc_verts
+                .extend_from_slice(&self.cached_verts);
+            self.draw_super
+                .acc_indices
+                .extend_from_slice(&self.cached_indices);
+        }
 
-        // Now transform all vertices from the logical-size coordinate space
-        // to the target rect, mapping the content bounding box to fill the rect.
+        // Compute GPU-side scale + offset from content bounds to target rect
         let (bmin_x, bmin_y, bmax_x, bmax_y) = self.content_bounds;
         let bw = bmax_x - bmin_x;
         let bh = bmax_y - bmin_y;
@@ -108,7 +194,6 @@ impl DrawSvg {
             let tw = rect.size.x as f32;
             let th = rect.size.y as f32;
 
-            // Aspect-aware scale: fit content bounds into target rect
             let (sx, sy) = if self.preserve_aspect {
                 let s = (tw / bw).min(th / bh);
                 (s, s)
@@ -116,17 +201,23 @@ impl DrawSvg {
                 (tw / bw, th / bh)
             };
 
-            // Center within target rect if aspect-preserving leaves slack
             let offset_x = rect.pos.x as f32 + (tw - bw * sx) * 0.5 - bmin_x * sx;
             let offset_y = rect.pos.y as f32 + (th - bh * sy) * 0.5 - bmin_y * sy;
 
-            let stride = 21; // FLOATS_PER_VERTEX
-            let verts = &mut self.draw_super.acc_verts;
-            let num_verts = verts.len() / stride;
-            for i in 0..num_verts {
-                verts[i * stride] = verts[i * stride] * sx + offset_x;
-                verts[i * stride + 1] = verts[i * stride + 1] * sy + offset_y;
-            }
+            // svg_scale at uniform offset 0..1, svg_offset at 2..3, svg_time at 4
+            let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
+            uniforms[0] = sx;
+            uniforms[1] = sy;
+            uniforms[2] = offset_x;
+            uniforms[3] = offset_y;
+            uniforms[4] = time;
+        } else {
+            let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
+            uniforms[0] = 1.0;
+            uniforms[1] = 1.0;
+            uniforms[2] = rect.pos.x as f32;
+            uniforms[3] = rect.pos.y as f32;
+            uniforms[4] = time;
         }
 
         self.draw_super.end(cx);
@@ -204,14 +295,18 @@ impl DrawSvg {
 
         let doc = svg::parse_svg(svg_str);
         self.set_doc_bounds(&doc);
+        self.has_animations = doc.has_animations();
         self.svg_doc = Some(doc);
+        self.cache_valid = false;
     }
 
     pub fn load_from_str(&mut self, svg_str: &str) {
         let doc = svg::parse_svg(svg_str);
         self.set_doc_bounds(&doc);
+        self.has_animations = doc.has_animations();
         self.svg_doc = Some(doc);
         self.svg_loaded = true;
+        self.cache_valid = false;
     }
 
     fn set_doc_bounds(&mut self, doc: &SvgDocument) {

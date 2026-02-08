@@ -1,0 +1,403 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" width="800" height="600">
+  <defs>
+    <!-- Deep ocean background -->
+    <linearGradient id="ocean_bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0a1628"/>
+      <stop offset="30%" stop-color="#0d2847"/>
+      <stop offset="60%" stop-color="#0f3460"/>
+      <stop offset="100%" stop-color="#1a5276"/>
+    </linearGradient>
+
+    <!-- Light rays from surface -->
+    <linearGradient id="ray" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#4fc3f7" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#4fc3f7" stop-opacity="0.0"/>
+    </linearGradient>
+
+    <!-- Jellyfish body glow -->
+    <radialGradient id="jelly_glow1" cx="0.5" cy="0.4" r="0.5">
+      <stop offset="0%" stop-color="#e040fb" stop-opacity="0.9"/>
+      <stop offset="40%" stop-color="#ab47bc" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#7b1fa2" stop-opacity="0.0"/>
+    </radialGradient>
+    <radialGradient id="jelly_glow2" cx="0.5" cy="0.4" r="0.5">
+      <stop offset="0%" stop-color="#26c6da" stop-opacity="0.9"/>
+      <stop offset="40%" stop-color="#0097a7" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#006064" stop-opacity="0.0"/>
+    </radialGradient>
+    <radialGradient id="jelly_glow3" cx="0.5" cy="0.4" r="0.5">
+      <stop offset="0%" stop-color="#ffab40" stop-opacity="0.85"/>
+      <stop offset="40%" stop-color="#ff6d00" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#bf360c" stop-opacity="0.0"/>
+    </radialGradient>
+
+    <!-- Bubble gradient -->
+    <radialGradient id="bubble" cx="0.35" cy="0.3" r="0.5">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.5"/>
+      <stop offset="50%" stop-color="#80deea" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#4dd0e1" stop-opacity="0.05"/>
+    </radialGradient>
+
+    <!-- Bioluminescent plankton -->
+    <radialGradient id="plankton" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#76ff03" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#76ff03" stop-opacity="0.0"/>
+    </radialGradient>
+
+    <!-- Coral gradient -->
+    <linearGradient id="coral1" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#d32f2f"/>
+      <stop offset="50%" stop-color="#ef5350"/>
+      <stop offset="100%" stop-color="#ff8a80"/>
+    </linearGradient>
+    <linearGradient id="coral2" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#f57c00"/>
+      <stop offset="50%" stop-color="#ffb74d"/>
+      <stop offset="100%" stop-color="#ffe0b2"/>
+    </linearGradient>
+    <linearGradient id="coral3" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#7b1fa2"/>
+      <stop offset="40%" stop-color="#ba68c8"/>
+      <stop offset="100%" stop-color="#e1bee7"/>
+    </linearGradient>
+
+    <!-- Sea floor -->
+    <linearGradient id="seafloor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a5276" stop-opacity="0"/>
+      <stop offset="60%" stop-color="#0d2847"/>
+      <stop offset="100%" stop-color="#0a0e1a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Ocean background (shader-id=6: underwater caustics) -->
+  <rect width="800" height="600" fill="url(#ocean_bg)" data-shader-id="6"/>
+
+  <!-- === Light rays from surface (shader-id=5: caustic ripple) === -->
+  <g opacity="0.4">
+    <polygon points="200,-10 280,350 120,350" fill="url(#ray)" data-shader-id="5">
+      <animate attributeName="opacity" values="0.3;0.6;0.3" dur="4s" repeatCount="indefinite"/>
+    </polygon>
+    <polygon points="380,-10 440,300 320,300" fill="url(#ray)" data-shader-id="5">
+      <animate attributeName="opacity" values="0.5;0.2;0.5" dur="5s" repeatCount="indefinite"/>
+    </polygon>
+    <polygon points="550,-10 650,380 450,380" fill="url(#ray)" data-shader-id="5">
+      <animate attributeName="opacity" values="0.2;0.5;0.2" dur="6s" repeatCount="indefinite"/>
+    </polygon>
+    <polygon points="700,-10 760,280 640,280" fill="url(#ray)" data-shader-id="5">
+      <animate attributeName="opacity" values="0.4;0.15;0.4" dur="3.5s" repeatCount="indefinite"/>
+    </polygon>
+  </g>
+
+  <!-- === Bioluminescent particles (shader-id=4: sparkle) === -->
+  <circle cx="120" cy="180" r="3" fill="url(#plankton)" data-shader-id="4">
+    <animate attributeName="opacity" values="0;1;0" dur="3s" repeatCount="indefinite"/>
+    <animate attributeName="cy" values="180;160;180" dur="4s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="340" cy="250" r="2.5" fill="url(#plankton)" data-shader-id="4">
+    <animate attributeName="opacity" values="0.5;0;0.5" dur="2.5s" repeatCount="indefinite"/>
+    <animate attributeName="cy" values="250;235;250" dur="3.5s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="580" cy="200" r="2" fill="url(#plankton)" data-shader-id="4">
+    <animate attributeName="opacity" values="0;0.8;0" dur="4s" repeatCount="indefinite"/>
+    <animate attributeName="cy" values="200;185;200" dur="5s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="670" cy="320" r="3.5" fill="url(#plankton)" data-shader-id="4">
+    <animate attributeName="opacity" values="0.7;0;0.7" dur="3.2s" repeatCount="indefinite"/>
+    <animate attributeName="cy" values="320;300;320" dur="4.2s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="450" cy="150" r="2" fill="url(#plankton)" data-shader-id="4">
+    <animate attributeName="opacity" values="0;1;0.2;1;0" dur="5s" repeatCount="indefinite"/>
+    <animate attributeName="cy" values="150;130;150" dur="6s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="60" cy="380" r="2.5" fill="url(#plankton)" data-shader-id="4">
+    <animate attributeName="opacity" values="0.3;0.9;0.3" dur="2.8s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="750" cy="160" r="1.8" fill="url(#plankton)" data-shader-id="4">
+    <animate attributeName="opacity" values="0;0.7;0" dur="3.6s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- === Jellyfish 1 (large, purple, center) === -->
+  <g>
+    <animateTransform attributeName="transform" type="translate" values="0,0;10,-20;-5,5;0,0" dur="8s" repeatCount="indefinite"/>
+
+    <!-- Glow aura (shader-id=1) -->
+    <circle cx="350" cy="220" r="80" fill="url(#jelly_glow1)" data-shader-id="1">
+      <animate attributeName="r" values="80;90;80" dur="3s" repeatCount="indefinite"/>
+    </circle>
+
+    <!-- Bell (dome) (shader-id=2: iridescent) -->
+    <path d="M300,230 Q300,170 350,160 Q400,170 400,230 Q380,240 350,242 Q320,240 300,230Z" fill="#ce93d8" opacity="0.7" data-shader-id="2">
+      <animate attributeName="opacity" values="0.7;0.5;0.7" dur="3s" repeatCount="indefinite"/>
+      <animate attributeName="d"
+        values="M300,230 Q300,170 350,160 Q400,170 400,230 Q380,240 350,242 Q320,240 300,230Z;
+                M305,228 Q305,175 350,165 Q395,175 395,228 Q378,240 350,243 Q322,240 305,228Z;
+                M300,230 Q300,170 350,160 Q400,170 400,230 Q380,240 350,242 Q320,240 300,230Z"
+        dur="3s" repeatCount="indefinite"/>
+    </path>
+
+    <!-- Inner bell detail -->
+    <path d="M315,225 Q315,185 350,178 Q385,185 385,225 Q372,232 350,233 Q328,232 315,225Z" fill="#f3e5f5" opacity="0.3" data-shader-id="2">
+      <animate attributeName="opacity" values="0.3;0.15;0.3" dur="3s" repeatCount="indefinite"/>
+    </path>
+
+    <!-- Tentacles -->
+    <path d="M320,240 Q315,280 325,310 Q330,340 318,370" stroke="#ce93d8" stroke-width="2" fill="none" opacity="0.6" data-shader-id="7">
+      <animate attributeName="d"
+        values="M320,240 Q315,280 325,310 Q330,340 318,370;
+                M320,240 Q310,275 330,305 Q340,335 322,365;
+                M320,240 Q315,280 325,310 Q330,340 318,370"
+        dur="4s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.6;0.3;0.6" dur="3s" repeatCount="indefinite"/>
+    </path>
+    <path d="M340,242 Q335,285 342,320 Q348,355 335,385" stroke="#ba68c8" stroke-width="1.5" fill="none" opacity="0.5" data-shader-id="7">
+      <animate attributeName="d"
+        values="M340,242 Q335,285 342,320 Q348,355 335,385;
+                M340,242 Q330,280 345,315 Q355,350 340,380;
+                M340,242 Q335,285 342,320 Q348,355 335,385"
+        dur="4.5s" repeatCount="indefinite"/>
+    </path>
+    <path d="M360,242 Q365,285 358,320 Q352,355 365,385" stroke="#ba68c8" stroke-width="1.5" fill="none" opacity="0.5" data-shader-id="7">
+      <animate attributeName="d"
+        values="M360,242 Q365,285 358,320 Q352,355 365,385;
+                M360,242 Q370,280 355,315 Q345,350 360,380;
+                M360,242 Q365,285 358,320 Q352,355 365,385"
+        dur="4.2s" repeatCount="indefinite"/>
+    </path>
+    <path d="M380,240 Q385,280 375,310 Q370,340 382,370" stroke="#ce93d8" stroke-width="2" fill="none" opacity="0.6" data-shader-id="7">
+      <animate attributeName="d"
+        values="M380,240 Q385,280 375,310 Q370,340 382,370;
+                M380,240 Q390,275 370,305 Q360,335 378,365;
+                M380,240 Q385,280 375,310 Q370,340 382,370"
+        dur="3.8s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.6;0.3;0.6" dur="3s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <!-- === Jellyfish 2 (small, cyan, upper right) === -->
+  <g>
+    <animateTransform attributeName="transform" type="translate" values="0,0;-8,-15;4,8;0,0" dur="10s" repeatCount="indefinite"/>
+
+    <circle cx="620" cy="140" r="50" fill="url(#jelly_glow2)" data-shader-id="1">
+      <animate attributeName="r" values="50;58;50" dur="4s" repeatCount="indefinite"/>
+    </circle>
+
+    <path d="M590,148 Q590,108 620,100 Q650,108 650,148 Q640,155 620,156 Q600,155 590,148Z" fill="#80deea" opacity="0.65" data-shader-id="2">
+      <animate attributeName="d"
+        values="M590,148 Q590,108 620,100 Q650,108 650,148 Q640,155 620,156 Q600,155 590,148Z;
+                M593,146 Q593,112 620,104 Q647,112 647,146 Q638,154 620,155 Q602,154 593,146Z;
+                M590,148 Q590,108 620,100 Q650,108 650,148 Q640,155 620,156 Q600,155 590,148Z"
+        dur="4s" repeatCount="indefinite"/>
+    </path>
+    <path d="M600,148 Q600,118 620,112 Q640,118 640,148 Q634,153 620,154 Q606,153 600,148Z" fill="#e0f7fa" opacity="0.25" data-shader-id="2"/>
+
+    <!-- Tentacles -->
+    <path d="M605,156 Q600,185 608,210 Q612,235 602,255" stroke="#80deea" stroke-width="1.5" fill="none" opacity="0.5" data-shader-id="7">
+      <animate attributeName="d"
+        values="M605,156 Q600,185 608,210 Q612,235 602,255;
+                M605,156 Q596,182 612,207 Q618,232 606,252;
+                M605,156 Q600,185 608,210 Q612,235 602,255"
+        dur="5s" repeatCount="indefinite"/>
+    </path>
+    <path d="M620,156 Q618,190 622,220 Q625,250 618,270" stroke="#4dd0e1" stroke-width="1" fill="none" opacity="0.4" data-shader-id="7">
+      <animate attributeName="d"
+        values="M620,156 Q618,190 622,220 Q625,250 618,270;
+                M620,156 Q615,188 625,218 Q630,248 622,268;
+                M620,156 Q618,190 622,220 Q625,250 618,270"
+        dur="4.7s" repeatCount="indefinite"/>
+    </path>
+    <path d="M635,156 Q640,185 632,210 Q628,235 638,255" stroke="#80deea" stroke-width="1.5" fill="none" opacity="0.5" data-shader-id="7">
+      <animate attributeName="d"
+        values="M635,156 Q640,185 632,210 Q628,235 638,255;
+                M635,156 Q644,182 628,207 Q622,232 634,252;
+                M635,156 Q640,185 632,210 Q628,235 638,255"
+        dur="5.3s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <!-- === Jellyfish 3 (tiny, warm, lower left) === -->
+  <g>
+    <animateTransform attributeName="transform" type="translate" values="0,0;6,-10;-3,5;0,0" dur="7s" repeatCount="indefinite"/>
+
+    <circle cx="150" cy="350" r="35" fill="url(#jelly_glow3)" data-shader-id="1">
+      <animate attributeName="r" values="35;40;35" dur="2.5s" repeatCount="indefinite"/>
+    </circle>
+
+    <path d="M125,355 Q125,330 150,325 Q175,330 175,355 Q168,360 150,361 Q132,360 125,355Z" fill="#ffcc80" opacity="0.6" data-shader-id="2">
+      <animate attributeName="d"
+        values="M125,355 Q125,330 150,325 Q175,330 175,355 Q168,360 150,361 Q132,360 125,355Z;
+                M128,353 Q128,333 150,328 Q172,333 172,353 Q166,359 150,360 Q134,359 128,353Z;
+                M125,355 Q125,330 150,325 Q175,330 175,355 Q168,360 150,361 Q132,360 125,355Z"
+        dur="2.5s" repeatCount="indefinite"/>
+    </path>
+
+    <path d="M138,361 Q135,385 140,405 Q143,420 136,435" stroke="#ffcc80" stroke-width="1.2" fill="none" opacity="0.45" data-shader-id="7">
+      <animate attributeName="d"
+        values="M138,361 Q135,385 140,405 Q143,420 136,435;
+                M138,361 Q132,383 142,403 Q148,418 139,433;
+                M138,361 Q135,385 140,405 Q143,420 136,435"
+        dur="3.5s" repeatCount="indefinite"/>
+    </path>
+    <path d="M150,361 Q149,390 152,415 Q154,435 148,450" stroke="#ffab40" stroke-width="1" fill="none" opacity="0.35" data-shader-id="7">
+      <animate attributeName="d"
+        values="M150,361 Q149,390 152,415 Q154,435 148,450;
+                M150,361 Q146,388 154,413 Q158,433 150,448;
+                M150,361 Q149,390 152,415 Q154,435 148,450"
+        dur="3.2s" repeatCount="indefinite"/>
+    </path>
+    <path d="M162,361 Q165,385 160,405 Q157,420 164,435" stroke="#ffcc80" stroke-width="1.2" fill="none" opacity="0.45" data-shader-id="7">
+      <animate attributeName="d"
+        values="M162,361 Q165,385 160,405 Q157,420 164,435;
+                M162,361 Q168,383 158,403 Q152,418 161,433;
+                M162,361 Q165,385 160,405 Q157,420 164,435"
+        dur="3.8s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <!-- === Rising bubbles (shader-id=3: rainbow shimmer) === -->
+  <circle cx="250" cy="500" r="8" fill="url(#bubble)" stroke="#4dd0e1" stroke-width="0.5" stroke-opacity="0.3" data-shader-id="3">
+    <animate attributeName="cy" values="500;-20" dur="12s" repeatCount="indefinite"/>
+    <animate attributeName="r" values="8;12;8" dur="3s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.8;0.4;0.8" dur="4s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="420" cy="550" r="5" fill="url(#bubble)" stroke="#4dd0e1" stroke-width="0.3" stroke-opacity="0.3" data-shader-id="3">
+    <animate attributeName="cy" values="550;-20" dur="15s" repeatCount="indefinite"/>
+    <animate attributeName="r" values="5;7;5" dur="2.5s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="530" cy="480" r="6" fill="url(#bubble)" stroke="#80deea" stroke-width="0.4" stroke-opacity="0.25" data-shader-id="3">
+    <animate attributeName="cy" values="480;-30" dur="10s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.6;0.3;0.6" dur="3s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="680" cy="520" r="4" fill="url(#bubble)" stroke="#4dd0e1" stroke-width="0.3" stroke-opacity="0.2" data-shader-id="3">
+    <animate attributeName="cy" values="520;-10" dur="14s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="100" cy="460" r="10" fill="url(#bubble)" stroke="#80deea" stroke-width="0.5" stroke-opacity="0.2" data-shader-id="3">
+    <animate attributeName="cy" values="460;-30" dur="18s" repeatCount="indefinite"/>
+    <animate attributeName="r" values="10;14;10" dur="4s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="320" cy="530" r="3.5" fill="url(#bubble)" stroke="#4dd0e1" stroke-width="0.3" stroke-opacity="0.3" data-shader-id="3">
+    <animate attributeName="cy" values="530;-10" dur="11s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- === Sea floor and coral === -->
+  <rect x="0" y="480" width="800" height="120" fill="url(#seafloor)"/>
+
+  <!-- Coral formation 1 (red, left) -->
+  <g>
+    <path d="M80,600 Q80,540 95,520 Q105,505 95,480 Q90,465 100,450" stroke="url(#coral1)" stroke-width="6" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M80,600 Q80,540 95,520 Q105,505 95,480 Q90,465 100,450;
+                M80,600 Q82,542 97,522 Q108,507 97,482 Q92,467 103,452;
+                M80,600 Q80,540 95,520 Q105,505 95,480 Q90,465 100,450"
+        dur="5s" repeatCount="indefinite"/>
+    </path>
+    <path d="M95,490 Q110,475 120,460" stroke="url(#coral1)" stroke-width="4" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M95,490 Q110,475 120,460;M97,492 Q113,477 123,462;M95,490 Q110,475 120,460"
+        dur="5s" repeatCount="indefinite"/>
+    </path>
+    <path d="M92,510 Q75,495 65,478" stroke="url(#coral1)" stroke-width="3.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M92,510 Q75,495 65,478;M94,512 Q77,497 67,480;M92,510 Q75,495 65,478"
+        dur="5s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <!-- Coral formation 2 (orange, center-right) -->
+  <g>
+    <path d="M550,600 Q548,555 560,535 Q570,518 562,495 Q558,478 568,458" stroke="url(#coral2)" stroke-width="5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M550,600 Q548,555 560,535 Q570,518 562,495 Q558,478 568,458;
+                M550,600 Q550,557 563,537 Q574,520 565,497 Q561,480 572,460;
+                M550,600 Q548,555 560,535 Q570,518 562,495 Q558,478 568,458"
+        dur="6s" repeatCount="indefinite"/>
+    </path>
+    <path d="M562,505 Q580,490 590,472" stroke="url(#coral2)" stroke-width="3.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M562,505 Q580,490 590,472;M565,507 Q583,492 593,474;M562,505 Q580,490 590,472"
+        dur="6s" repeatCount="indefinite"/>
+    </path>
+    <path d="M558,525 Q540,510 530,492" stroke="url(#coral2)" stroke-width="3" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M558,525 Q540,510 530,492;M560,527 Q542,512 532,494;M558,525 Q540,510 530,492"
+        dur="6s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <!-- Coral formation 3 (purple, far right) -->
+  <g>
+    <path d="M720,600 Q718,565 728,548 Q735,535 730,515 Q726,500 735,485" stroke="url(#coral3)" stroke-width="4.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M720,600 Q718,565 728,548 Q735,535 730,515 Q726,500 735,485;
+                M720,600 Q720,567 731,550 Q738,537 733,517 Q729,502 738,487;
+                M720,600 Q718,565 728,548 Q735,535 730,515 Q726,500 735,485"
+        dur="5.5s" repeatCount="indefinite"/>
+    </path>
+    <path d="M730,525 Q745,512 755,498" stroke="url(#coral3)" stroke-width="3" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M730,525 Q745,512 755,498;M732,527 Q748,514 758,500;M730,525 Q745,512 755,498"
+        dur="5.5s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <!-- Small seaweed tufts -->
+  <path d="M200,600 Q195,570 205,550 Q210,535 200,520" stroke="#2e7d32" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.6">
+    <animate attributeName="d"
+      values="M200,600 Q195,570 205,550 Q210,535 200,520;
+              M200,600 Q198,572 208,552 Q215,537 205,522;
+              M200,600 Q195,570 205,550 Q210,535 200,520"
+      dur="4s" repeatCount="indefinite"/>
+  </path>
+  <path d="M380,600 Q375,575 382,560 Q388,548 380,535" stroke="#388e3c" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.5">
+    <animate attributeName="d"
+      values="M380,600 Q375,575 382,560 Q388,548 380,535;
+              M380,600 Q378,577 385,562 Q392,550 384,537;
+              M380,600 Q375,575 382,560 Q388,548 380,535"
+      dur="4.5s" repeatCount="indefinite"/>
+  </path>
+  <path d="M650,600 Q645,578 652,565 Q658,554 650,540" stroke="#2e7d32" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.5">
+    <animate attributeName="d"
+      values="M650,600 Q645,578 652,565 Q658,554 650,540;
+              M650,600 Q648,580 655,567 Q662,556 654,542;
+              M650,600 Q645,578 652,565 Q658,554 650,540"
+      dur="3.8s" repeatCount="indefinite"/>
+  </path>
+
+  <!-- === Tiny distant fish school (simple dots) === -->
+  <g opacity="0.4">
+    <animateTransform attributeName="transform" type="translate" values="0,0;40,5;80,0;40,-5;0,0" dur="12s" repeatCount="indefinite"/>
+    <circle cx="480" cy="120" r="2.5" fill="#b0bec5"/>
+    <circle cx="490" cy="115" r="2" fill="#90a4ae"/>
+    <circle cx="500" cy="122" r="2.5" fill="#b0bec5"/>
+    <circle cx="495" cy="128" r="2" fill="#90a4ae"/>
+    <circle cx="510" cy="118" r="1.8" fill="#b0bec5"/>
+    <circle cx="505" cy="125" r="2.2" fill="#90a4ae"/>
+    <circle cx="515" cy="123" r="1.5" fill="#b0bec5"/>
+  </g>
+
+  <!-- Second fish school -->
+  <g opacity="0.3">
+    <animateTransform attributeName="transform" type="translate" values="0,0;-30,8;-60,0;-30,-8;0,0" dur="15s" repeatCount="indefinite"/>
+    <circle cx="200" cy="420" r="2" fill="#78909c"/>
+    <circle cx="210" cy="416" r="1.8" fill="#78909c"/>
+    <circle cx="220" cy="422" r="2" fill="#90a4ae"/>
+    <circle cx="215" cy="427" r="1.5" fill="#78909c"/>
+    <circle cx="225" cy="418" r="1.8" fill="#90a4ae"/>
+  </g>
+
+  <!-- === Floating particles / sea snow === -->
+  <circle cx="50" cy="100" r="1" fill="#b0bec5" opacity="0.3">
+    <animate attributeName="cy" values="100;120;100" dur="8s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="180" cy="300" r="0.8" fill="#b0bec5" opacity="0.25">
+    <animate attributeName="cy" values="300;315;300" dur="6s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="400" cy="80" r="1.2" fill="#cfd8dc" opacity="0.2">
+    <animate attributeName="cy" values="80;95;80" dur="7s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="700" cy="400" r="0.8" fill="#b0bec5" opacity="0.3">
+    <animate attributeName="cy" values="400;418;400" dur="9s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="560" cy="350" r="1" fill="#cfd8dc" opacity="0.2">
+    <animate attributeName="cy" values="350;365;350" dur="5.5s" repeatCount="indefinite"/>
+  </circle>
+</svg>

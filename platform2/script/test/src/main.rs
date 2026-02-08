@@ -1280,6 +1280,37 @@ pub fn main() {
                 }
                 return sum
             }
+            // Pattern 16: return from loop
+            ret_from_loop: fn(x: f32) -> f32 {
+                var i = 0f
+                loop {
+                    i += 1f
+                    if i == x { return i }
+                    if i > 100f { break }
+                }
+                return -1f
+            }
+            // Pattern 17: return from while
+            ret_from_while: fn(x: f32) -> f32 {
+                var i = 0f
+                while i < 100f {
+                    i += 1f
+                    if i == x { return i }
+                }
+                return -1f
+            }
+            // Pattern 18: loop with continue and accumulation
+            loop_continue_sum: fn(n: f32) -> f32 {
+                var sum = 0f
+                var i = 0f
+                loop {
+                    i += 1f
+                    if i > n { break }
+                    if i == 3f { continue }
+                    sum += i
+                }
+                return sum
+            }
 
             vertex: fn(){
                 // Vertex buffer access
@@ -1496,6 +1527,73 @@ pub fn main() {
                 var sum2 = 0f
                 for i in 0..2 { for j in 0..3 { sum2 += 1f } }
 
+                // ---- Loop / while / break / continue ----
+                // Basic loop with break
+                var loop_count = 0f
+                loop {
+                    loop_count += 1f
+                    if loop_count >= 5f { break }
+                }
+
+                // While loop (uses LOOP + BREAKIFNOT)
+                var while_count = 0f
+                while while_count < 10f {
+                    while_count += 1f
+                }
+
+                // Loop with continue
+                var cont_sum = 0f
+                var cont_i = 0f
+                loop {
+                    cont_i += 1f
+                    if cont_i > 6f { break }
+                    if cont_i == 3f { continue }
+                    cont_sum += cont_i
+                }
+
+                // Nested loops with break
+                var outer_count = 0f
+                var inner_total = 0f
+                loop {
+                    outer_count += 1f
+                    if outer_count > 3f { break }
+                    var inner_count = 0f
+                    loop {
+                        inner_count += 1f
+                        if inner_count > 2f { break }
+                        inner_total += 1f
+                    }
+                }
+
+                // While with early break
+                var wb = 0f
+                while wb < 100f {
+                    wb += 1f
+                    if wb == 5f { break }
+                }
+
+                // Loop inside for
+                var lif = 0f
+                for i in 0..3 {
+                    var j = 0f
+                    loop {
+                        j += 1f
+                        if j > 2f { break }
+                        lif += 1f
+                    }
+                }
+
+                // For inside loop
+                var fil = 0f
+                var fil_iter = 0f
+                loop {
+                    fil_iter += 1f
+                    if fil_iter > 2f { break }
+                    for i in 0..3 {
+                        fil += 1f
+                    }
+                }
+
                 // ---- Builtin functions ----
                 let ba = 0.5f let bb = 1.0f let bt = 0.5f
                 let br = abs(ba)
@@ -1644,6 +1742,9 @@ pub fn main() {
                 let r13 = self.ret_from_for(5f)
                 let r14 = self.ret_from_nested_for(2f, 3f)
                 let r15 = self.ret_from_for_comp(10f)
+                let r16 = self.ret_from_loop(5f)
+                let r17 = self.ret_from_while(5f)
+                let r18 = self.loop_continue_sum(5f)
 
                 self.pixel = final_col
             }

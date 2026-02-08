@@ -298,13 +298,13 @@ impl DrawVars {
         }
     }
 
-    pub fn set_uniform(&mut self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
+    pub fn set_uniform(&mut self, cx: &Cx, uniform: LiveId, value: &[f32]) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let sh = &cx.draw_shaders[draw_shader_id.index];
             for input in &sh.mapping.dyn_uniforms.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
-                if input.id == uniform[0] {
+                if input.id == uniform {
                     for i in 0..value.len().min(slots) {
                         self.dyn_uniforms[offset + i] = value[i]
                     }

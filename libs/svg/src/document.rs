@@ -143,6 +143,9 @@ pub struct SvgStyle {
     pub stroke_dasharray: Option<Vec<f32>>,
     pub stroke_dashoffset: f32,
     pub opacity: f32,
+    /// Custom shader effect ID, parsed from `data-shader-id` attribute.
+    /// Flows through to `v_shape_id` varying in the GPU shader.
+    pub shader_id: f32,
 }
 
 impl Default for SvgStyle {
@@ -160,6 +163,7 @@ impl Default for SvgStyle {
             stroke_dasharray: None,
             stroke_dashoffset: 0.0,
             opacity: 1.0,
+            shader_id: 0.0,
         }
     }
 }
@@ -283,6 +287,15 @@ pub enum AnimateAttribute {
     StrokeOpacity,
     Transform,
     D, // path data morphing
+    R, // circle/ellipse radius
+    Cx,
+    Cy,
+    Rx,
+    Ry,
+    X,
+    Y,
+    Width,
+    Height,
     Custom(String),
 }
 
@@ -564,6 +577,61 @@ impl SvgDocument {
         bounds.result()
     }
 
+    pub fn has_animations(&self) -> bool {
+        Self::nodes_have_animations(&self.root)
+    }
+
+    fn nodes_have_animations(nodes: &[SvgNode]) -> bool {
+        for node in nodes {
+            match node {
+                SvgNode::Group(g) => {
+                    if !g.animations.is_empty() || !g.animate_transforms.is_empty() {
+                        return true;
+                    }
+                    if Self::nodes_have_animations(&g.children) {
+                        return true;
+                    }
+                }
+                SvgNode::Path(p) => {
+                    if !p.animations.is_empty() || !p.animate_transforms.is_empty() {
+                        return true;
+                    }
+                }
+                SvgNode::Rect(r) => {
+                    if !r.animations.is_empty() || !r.animate_transforms.is_empty() {
+                        return true;
+                    }
+                }
+                SvgNode::Circle(c) => {
+                    if !c.animations.is_empty() || !c.animate_transforms.is_empty() {
+                        return true;
+                    }
+                }
+                SvgNode::Ellipse(e) => {
+                    if !e.animations.is_empty() || !e.animate_transforms.is_empty() {
+                        return true;
+                    }
+                }
+                SvgNode::Line(l) => {
+                    if !l.animations.is_empty() || !l.animate_transforms.is_empty() {
+                        return true;
+                    }
+                }
+                SvgNode::Polyline(p) => {
+                    if !p.animations.is_empty() || !p.animate_transforms.is_empty() {
+                        return true;
+                    }
+                }
+                SvgNode::Polygon(p) => {
+                    if !p.animations.is_empty() || !p.animate_transforms.is_empty() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Like compute_bounds but with a base transform applied first
     /// (e.g. the viewbox transform).
     pub fn compute_bounds_with_transform(
@@ -579,41 +647,41 @@ impl SvgDocument {
         for node in nodes {
             match node {
                 SvgNode::Group(g) => {
-                    let xf = parent_xf.then(&g.transform);
+                    let xf = g.transform.then(parent_xf);
                     Self::bounds_nodes(&g.children, &xf, bounds);
                 }
                 SvgNode::Path(p) => {
-                    let xf = parent_xf.then(&p.transform);
+                    let xf = p.transform.then(parent_xf);
                     Self::bounds_path(&p.path, &xf, bounds);
                 }
                 SvgNode::Rect(r) => {
-                    let xf = parent_xf.then(&r.transform);
+                    let xf = r.transform.then(parent_xf);
                     bounds.add_point_xf(r.x, r.y, &xf);
                     bounds.add_point_xf(r.x + r.width, r.y + r.height, &xf);
                 }
                 SvgNode::Circle(c) => {
-                    let xf = parent_xf.then(&c.transform);
+                    let xf = c.transform.then(parent_xf);
                     bounds.add_point_xf(c.cx - c.r, c.cy - c.r, &xf);
                     bounds.add_point_xf(c.cx + c.r, c.cy + c.r, &xf);
                 }
                 SvgNode::Ellipse(e) => {
-                    let xf = parent_xf.then(&e.transform);
+                    let xf = e.transform.then(parent_xf);
                     bounds.add_point_xf(e.cx - e.rx, e.cy - e.ry, &xf);
                     bounds.add_point_xf(e.cx + e.rx, e.cy + e.ry, &xf);
                 }
                 SvgNode::Line(l) => {
-                    let xf = parent_xf.then(&l.transform);
+                    let xf = l.transform.then(parent_xf);
                     bounds.add_point_xf(l.x1, l.y1, &xf);
                     bounds.add_point_xf(l.x2, l.y2, &xf);
                 }
                 SvgNode::Polyline(p) => {
-                    let xf = parent_xf.then(&p.transform);
+                    let xf = p.transform.then(parent_xf);
                     for &(px, py) in &p.points {
                         bounds.add_point_xf(px, py, &xf);
                     }
                 }
                 SvgNode::Polygon(p) => {
-                    let xf = parent_xf.then(&p.transform);
+                    let xf = p.transform.then(parent_xf);
                     for &(px, py) in &p.points {
                         bounds.add_point_xf(px, py, &xf);
                     }

@@ -14,6 +14,7 @@ script_mod! {
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.VectorVertex, geom.VectorGeom)
+        gradient_texture: texture_2d(float)
 
         v_tcoord: varying(vec2f)
         v_world: varying(vec2f)
@@ -125,6 +126,23 @@ script_mod! {
         // For linear: param1,2 = start point, param3,4 = end point
         // For radial: param1,2 = center, param3 = radius
         // v_color = first stop color, v_color2 = last stop color
+        // Sample gradient color from texture row at parameter t.
+        // v_param5 encodes the row as a normalized V coordinate (0 = no texture, >0 = row).
+        sample_gradient: fn(t: float) -> vec4 {
+            let row_v = self.v_param5;
+            if row_v > 0.0001 {
+                // Inset UV by half-texel to avoid wrapping at edges
+                let tex_size = self.gradient_texture.size();
+                let half_u = 0.5 / tex_size.x;
+                let half_v = 0.5 / tex_size.y;
+                let u = clamp(t, 0.0, 1.0) * (1.0 - 2.0 * half_u) + half_u;
+                let v = clamp(row_v, half_v, 1.0 - half_v);
+                return self.gradient_texture.sample(vec2(u, v))
+            }
+            // Fallback: 2-stop lerp from vertex colors
+            return mix(self.v_color, self.v_color2, t)
+        }
+
         eval_gradient: fn() {
             let grad_type = self.v_param0;
             // solid or shadow: just return baked vertex color
@@ -139,16 +157,19 @@ script_mod! {
                 if len2 > 0.000001 {
                     t = clamp(dot(self.v_world - p0, d) / len2, 0.0, 1.0)
                 }
-                return mix(self.v_color, self.v_color2, t)
+                return self.sample_gradient(t)
             }
-            // radial gradient: t = distance(world, center) / radius
+            // radial gradient: t = elliptical distance from center
+            // param1,2 = center, param3 = rx, param4 = ry
             let center = vec2(self.v_param1, self.v_param2);
-            let radius = self.v_param3;
+            let rx = self.v_param3;
+            let ry = self.v_param4;
+            let d = self.v_world - center;
             var t = 0.0;
-            if radius > 0.000001 {
-                t = clamp(length(self.v_world - center) / radius, 0.0, 1.0)
+            if rx > 0.000001 && ry > 0.000001 {
+                t = clamp(length(vec2(d.x / rx, d.y / ry)), 0.0, 1.0)
             }
-            return mix(self.v_color, self.v_color2, t)
+            return self.sample_gradient(t)
         }
 
         // Override to customize fill/stroke color per pixel.
@@ -244,6 +265,20 @@ pub struct DrawVector {
     pub cur_stroke_mult: f32,
     #[rust]
     pub cur_shape_id: f32,
+    #[rust]
+    pub cur_gradient_row_v: f32,
+    // Effect bounding box (world-space): [min_x, min_y, max_x, max_y]
+    // When set, stored in param1-param4 for solid-painted shapes with shader_id > 0,
+    // enabling the pixel shader to compute proper UV coordinates from v_world.
+    #[rust]
+    pub cur_effect_bbox: Option<[f32; 4]>,
+    // gradient texture: Nx2048 BGRA, one row per gradient
+    #[rust]
+    pub gradient_texture_data: Vec<u32>,
+    #[rust]
+    pub gradient_row_count: usize,
+    #[rust]
+    pub gradient_texture: Option<Texture>,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -316,6 +351,36 @@ impl DrawVector {
     pub fn begin(&mut self) {
         self.acc_verts.clear();
         self.acc_indices.clear();
+        self.gradient_texture_data.clear();
+        self.gradient_row_count = 0;
+        self.cur_gradient_row_v = -1.0; // sentinel: no gradient texture row
+        self.cur_effect_bbox = None;
+    }
+
+    /// Rasterize gradient stops into a new texture row.
+    /// Returns the normalized V coordinate for sampling this row.
+    pub fn add_gradient_row(&mut self, stops: &[GradientStop]) -> f32 {
+        const TEX_WIDTH: usize = 2048;
+        let row = self.gradient_row_count;
+        self.gradient_row_count += 1;
+
+        // Rasterize stops into TEX_WIDTH pixels
+        for i in 0..TEX_WIDTH {
+            let t = i as f32 / (TEX_WIDTH - 1) as f32;
+            let (r, g, b, a) = sample_gradient_stops(stops, t);
+            // Pack as BGRA u32 (premultiplied alpha already in stops)
+            let rb = (b.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+            let rg = (g.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+            let rr = (r.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+            let ra = (a.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+            self.gradient_texture_data
+                .push(rb | (rg << 8) | (rr << 16) | (ra << 24));
+        }
+
+        // Return center of the row in normalized texture V coordinates.
+        // We'll finalize the actual texture height in end().
+        // For now, store the row index; we convert to V in end().
+        row as f32
     }
 
     pub fn stroke(&mut self, stroke_width: f32) {
@@ -435,7 +500,16 @@ impl DrawVector {
         let base = (self.acc_verts.len() / FLOATS_PER_VERTEX) as u32;
         // compute gradient params and endpoint colors from current paint
         let (grad_type, grad_params, color0, color1) = match &self.cur_paint {
-            VectorPaint::Solid { color } => (0.0, [0.0; 4], *color, *color),
+            VectorPaint::Solid { color } => {
+                // For shapes with shader effects, store the world-space bounding box
+                // in param1-param4 so the pixel shader can compute proper UVs.
+                let params = if let Some(bbox) = self.cur_effect_bbox {
+                    bbox
+                } else {
+                    [0.0; 4]
+                };
+                (0.0, params, *color, *color)
+            }
             VectorPaint::LinearGradient {
                 x0,
                 y0,
@@ -455,7 +529,13 @@ impl DrawVector {
                 };
                 (1.0, [*x0, *y0, *x1, *y1], c0, c1)
             }
-            VectorPaint::RadialGradient { cx, cy, r, stops } => {
+            VectorPaint::RadialGradient {
+                cx,
+                cy,
+                rx,
+                ry,
+                stops,
+            } => {
                 let c0 = if !stops.is_empty() {
                     stops[0].color
                 } else {
@@ -466,7 +546,7 @@ impl DrawVector {
                 } else {
                     [1.0; 4]
                 };
-                (2.0, [*cx, *cy, *r, 0.0], c0, c1)
+                (2.0, [*cx, *cy, *rx, *ry], c0, c1)
             }
         };
         for v in verts {
@@ -482,13 +562,13 @@ impl DrawVector {
             self.acc_verts.push(self.cur_stroke_mult);
             self.acc_verts.push(v.stroke_dist);
             self.acc_verts.push(self.cur_shape_id);
-            // params: grad_type, then 4 gradient geometry params, then 0
+            // params: grad_type, then 4 gradient geometry params, then gradient texture row V
             self.acc_verts.push(grad_type);
             self.acc_verts.push(grad_params[0]);
             self.acc_verts.push(grad_params[1]);
             self.acc_verts.push(grad_params[2]);
             self.acc_verts.push(grad_params[3]);
-            self.acc_verts.push(0.0);
+            self.acc_verts.push(self.cur_gradient_row_v);
             // color2 (last stop for gradients)
             self.acc_verts.push(color1[0]);
             self.acc_verts.push(color1[1]);
@@ -505,6 +585,54 @@ impl DrawVector {
         if self.acc_verts.is_empty() || self.acc_indices.is_empty() {
             return;
         }
+
+        // Build and upload gradient texture if we have gradient rows
+        if self.gradient_row_count > 0 {
+            const TEX_WIDTH: usize = 2048;
+            let height = self.gradient_row_count;
+
+            let tex = self.gradient_texture.get_or_insert_with(|| {
+                Texture::new_with_format(
+                    cx.cx.cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        width: TEX_WIDTH,
+                        height,
+                        data: None,
+                        updated: TextureUpdated::Empty,
+                    },
+                )
+            });
+
+            // Update texture format with current dimensions and data
+            let format = tex.get_format(cx.cx.cx);
+            *format = TextureFormat::VecBGRAu8_32 {
+                width: TEX_WIDTH,
+                height,
+                data: Some(std::mem::take(&mut self.gradient_texture_data)),
+                updated: TextureUpdated::Full,
+            };
+
+            self.draw_vars.texture_slots[0] = Some(tex.clone());
+
+            // Convert row indices in param5 to normalized V coordinates.
+            // param5 is at float offset 16 within each FLOATS_PER_VERTEX block.
+            // Non-gradient vertices have param5 = -1.0 (sentinel), gradient vertices
+            // have param5 >= 0.0 (row index).
+            let param5_offset = 16; // x,y,u,v, r,g,b,a, sm,sd,sid, p0,p1,p2,p3,p4,p5 -> p5 is at 16
+            let num_verts = self.acc_verts.len() / FLOATS_PER_VERTEX;
+            for vi in 0..num_verts {
+                let idx = vi * FLOATS_PER_VERTEX + param5_offset;
+                let row_idx = self.acc_verts[idx];
+                if row_idx >= 0.0 {
+                    // Map row index to center of texel in V
+                    self.acc_verts[idx] = (row_idx + 0.5) / height as f32;
+                } else {
+                    // No gradient - set to 0.0 so shader uses 2-stop fallback
+                    self.acc_verts[idx] = 0.0;
+                }
+            }
+        }
+
         let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
         geom.update(cx.cx.cx, self.acc_indices.clone(), self.acc_verts.clone());
         self.draw_vars.geometry_id = Some(geom.geometry_id());
@@ -527,4 +655,42 @@ impl DrawVector {
         draw_fn(self, rect.pos.x as f32, rect.pos.y as f32);
         self.end(cx);
     }
+}
+
+/// Sample multi-stop gradient at parameter t (0..1). Returns (r, g, b, a).
+/// Stops must be sorted by offset. Colors in stops are premultiplied RGBA.
+fn sample_gradient_stops(stops: &[GradientStop], t: f32) -> (f32, f32, f32, f32) {
+    if stops.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    if stops.len() == 1 || t <= stops[0].offset {
+        let c = &stops[0].color;
+        return (c[0], c[1], c[2], c[3]);
+    }
+    let last = stops.len() - 1;
+    if t >= stops[last].offset {
+        let c = &stops[last].color;
+        return (c[0], c[1], c[2], c[3]);
+    }
+    // Find the segment
+    for i in 1..stops.len() {
+        if t <= stops[i].offset {
+            let range = stops[i].offset - stops[i - 1].offset;
+            let seg_t = if range > 1e-6 {
+                (t - stops[i - 1].offset) / range
+            } else {
+                0.0
+            };
+            let a = &stops[i - 1].color;
+            let b = &stops[i].color;
+            return (
+                a[0] + (b[0] - a[0]) * seg_t,
+                a[1] + (b[1] - a[1]) * seg_t,
+                a[2] + (b[2] - a[2]) * seg_t,
+                a[3] + (b[3] - a[3]) * seg_t,
+            );
+        }
+    }
+    let c = &stops[last].color;
+    (c[0], c[1], c[2], c[3])
 }
