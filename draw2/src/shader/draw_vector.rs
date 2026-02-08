@@ -20,7 +20,6 @@ script_mod! {
         v_tcoord: varying(vec2f)
         v_world: varying(vec2f)
         v_color: varying(vec4f)
-        v_color2: varying(vec4f)
         v_stroke_mult: varying(float)
         v_stroke_dist: varying(float)
         v_shape_id: varying(float)
@@ -35,7 +34,6 @@ script_mod! {
             let pos = vec2(self.geom.x, self.geom.y);
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
             self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
-            self.v_color2 = vec4(self.geom.color2_r, self.geom.color2_g, self.geom.color2_b, self.geom.color2_a);
             self.v_stroke_mult = self.geom.stroke_mult;
             self.v_stroke_dist = self.geom.stroke_dist;
             self.v_shape_id = self.geom.shape_id;
@@ -141,7 +139,6 @@ script_mod! {
         // v_param0 encodes gradient type: 0=solid, 1=linear, 2=radial
         // For linear: param1,2 = start point, param3,4 = end point
         // For radial: param1,2 = center, param3 = radius
-        // v_color = first stop color, v_color2 = last stop color
         // Sample gradient color from texture row at parameter t.
         // v_param5 encodes the row as a normalized V coordinate (0 = no texture, >0 = row).
         sample_gradient: fn(t: float) -> vec4 {
@@ -155,8 +152,8 @@ script_mod! {
                 let v = clamp(row_v, half_v, 1.0 - half_v);
                 return self.gradient_texture.sample(vec2(u, v))
             }
-            // Fallback: 2-stop lerp from vertex colors
-            return mix(self.v_color, self.v_color2, t)
+            // No gradient texture row — return solid vertex color
+            return self.v_color
         }
 
         eval_gradient: fn() {
@@ -254,7 +251,7 @@ script_mod! {
     }
 }
 
-const FLOATS_PER_VERTEX: usize = 23; // x,y,u,v, r,g,b,a, stroke_mult, stroke_dist, shape_id, param0-5, color2_r,g,b,a, clip_radius, zbias
+const FLOATS_PER_VERTEX: usize = 19; // x,y,u,v, r,g,b,a, stroke_mult, stroke_dist, shape_id, param0-5, clip_radius, zbias
 
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
@@ -521,13 +518,9 @@ impl DrawVector {
             self.acc_verts.push(hy);
             self.acc_verts.push(corner);
             self.acc_verts.push(blur);
-            // color2 (unused for shadow)
-            self.acc_verts.push(0.0);
-            self.acc_verts.push(0.0);
-            self.acc_verts.push(0.0);
-            self.acc_verts.push(0.0);
             // clip_radius: 0 = don't use for clip rejection on shadow quads
             self.acc_verts.push(0.0);
+            self.acc_verts.push(self.cur_zbias);
         }
         // two triangles
         self.acc_indices.push(base);
@@ -543,8 +536,8 @@ impl DrawVector {
             return;
         }
         let base = (self.acc_verts.len() / FLOATS_PER_VERTEX) as u32;
-        // compute gradient params and endpoint colors from current paint
-        let (grad_type, grad_params, color0, color1) = match &self.cur_paint {
+        // compute gradient params and color from current paint
+        let (grad_type, grad_params, color0) = match &self.cur_paint {
             VectorPaint::Solid { color } => {
                 // For shapes with shader effects, store the world-space bounding box
                 // in param1-param4 so the pixel shader can compute proper UVs.
@@ -553,7 +546,7 @@ impl DrawVector {
                 } else {
                     [0.0; 4]
                 };
-                (0.0, params, *color, *color)
+                (0.0, params, *color)
             }
             VectorPaint::LinearGradient {
                 x0,
@@ -567,12 +560,7 @@ impl DrawVector {
                 } else {
                     [1.0; 4]
                 };
-                let c1 = if !stops.is_empty() {
-                    stops[stops.len() - 1].color
-                } else {
-                    [1.0; 4]
-                };
-                (1.0, [*x0, *y0, *x1, *y1], c0, c1)
+                (1.0, [*x0, *y0, *x1, *y1], c0)
             }
             VectorPaint::RadialGradient {
                 cx,
@@ -586,12 +574,7 @@ impl DrawVector {
                 } else {
                     [1.0; 4]
                 };
-                let c1 = if !stops.is_empty() {
-                    stops[stops.len() - 1].color
-                } else {
-                    [1.0; 4]
-                };
-                (2.0, [*cx, *cy, *rx, *ry], c0, c1)
+                (2.0, [*cx, *cy, *rx, *ry], c0)
             }
         };
         for v in verts {
@@ -614,11 +597,6 @@ impl DrawVector {
             self.acc_verts.push(grad_params[2]);
             self.acc_verts.push(grad_params[3]);
             self.acc_verts.push(self.cur_gradient_row_v);
-            // color2 (last stop for gradients)
-            self.acc_verts.push(color1[0]);
-            self.acc_verts.push(color1[1]);
-            self.acc_verts.push(color1[2]);
-            self.acc_verts.push(color1[3]);
             self.acc_verts.push(v.clip_radius);
             self.acc_verts.push(self.cur_zbias);
         }

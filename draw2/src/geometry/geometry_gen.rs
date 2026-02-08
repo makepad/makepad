@@ -43,15 +43,6 @@ pub struct VectorVertex {
     pub param4: f32,
     #[live]
     pub param5: f32,
-    // second color for gradient endpoint (color at t=1)
-    #[live]
-    pub color2_r: f32,
-    #[live]
-    pub color2_g: f32,
-    #[live]
-    pub color2_b: f32,
-    #[live]
-    pub color2_a: f32,
     // max distance from this vertex to any other vertex it shares a triangle with
     #[live]
     pub clip_radius: f32,
@@ -112,7 +103,6 @@ impl GeometryGen {
                 1.0, 1.0, 1.0, 1.0, // color r,g,b,a
                 1e6, 0.0, 0.0, // stroke_mult, stroke_dist, shape_id
                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // param0-5
-                0.0, 0.0, 0.0, 0.0, // color2 r,g,b,a
                 0.0, // clip_radius
                 0.0, // zbias
             ]);
