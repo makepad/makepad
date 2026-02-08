@@ -72,6 +72,11 @@ fn apply_presentation_attrs(walker: &HtmlWalker, style: &mut SvgStyle) {
     if let Some(v) = walker.find_attr_lc(live_id!(fill - rule)) {
         style.fill_rule = parse_fill_rule(v);
     }
+    if let Some(v) = walker.find_attr_lc(live_id!(color)) {
+        if let Some(c) = parse_color(v) {
+            style.color = c;
+        }
+    }
     if let Some(v) = walker.find_attr_lc(live_id!(data - shader - id)) {
         if let Some(n) = parse_number(v) {
             style.shader_id = n;
@@ -137,6 +142,11 @@ fn apply_inline_style(style_str: &str, style: &mut SvgStyle) {
                 "fill-rule" => {
                     style.fill_rule = parse_fill_rule(value);
                 }
+                "color" => {
+                    if let Some(c) = parse_color(value) {
+                        style.color = c;
+                    }
+                }
                 _ => {}
             }
         }
@@ -147,6 +157,9 @@ pub fn parse_svg_paint(s: &str) -> SvgPaint {
     let s = s.trim();
     if s.eq_ignore_ascii_case("none") {
         return SvgPaint::None;
+    }
+    if s.eq_ignore_ascii_case("currentColor") {
+        return SvgPaint::CurrentColor;
     }
     // url(#id) reference for gradients
     if let Some(rest) = s.strip_prefix("url(") {

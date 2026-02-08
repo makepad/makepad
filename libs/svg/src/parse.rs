@@ -93,12 +93,60 @@ fn parse_defs(walker: &mut HtmlWalker, defs: &mut SvgDefs) {
                     }
                     continue;
                 }
+                t if t == live_id!(symbol) => {
+                    parse_symbol(walker, defs);
+                    continue;
+                }
                 _ => {
                     walker.jump_to_close();
                 }
             }
         }
         walker.walk();
+    }
+}
+
+fn parse_symbol(walker: &mut HtmlWalker, defs: &mut SvgDefs) {
+    let id = walker.find_attr_lc(live_id!(id)).map(|s| s.to_string());
+    let viewbox = walker
+        .find_attr_lc(live_id!(viewbox))
+        .and_then(parse_viewbox);
+    let default_style = SvgStyle::default();
+    let mut children = Vec::new();
+
+    walker.walk();
+    while !walker.done() {
+        if walker.close_tag_lc() == Some(live_id!(symbol)) {
+            walker.walk();
+            if let Some(id) = id {
+                defs.symbols.insert(
+                    id.clone(),
+                    SvgSymbol {
+                        id,
+                        viewbox,
+                        children,
+                    },
+                );
+            }
+            return;
+        }
+        if walker.open_tag_lc().is_some() {
+            if let Some(node) = parse_node(walker, &default_style) {
+                children.push(node);
+                continue;
+            }
+        }
+        walker.walk();
+    }
+    if let Some(id) = id {
+        defs.symbols.insert(
+            id.clone(),
+            SvgSymbol {
+                id,
+                viewbox,
+                children,
+            },
+        );
     }
 }
 
@@ -131,6 +179,7 @@ fn parse_node(walker: &mut HtmlWalker, parent_style: &SvgStyle) -> Option<SvgNod
         t if t == live_id!(line) => Some(parse_line(walker, parent_style)),
         t if t == live_id!(polyline) => Some(parse_polyline(walker, parent_style)),
         t if t == live_id!(polygon) => Some(parse_polygon(walker, parent_style)),
+        t if t == live_id!(use) => Some(parse_use(walker, parent_style)),
         _ => {
             walker.jump_to_close();
             walker.walk();
@@ -471,4 +520,49 @@ fn parse_polygon(walker: &mut HtmlWalker, parent_style: &SvgStyle) -> SvgNode {
     );
     walker.walk();
     SvgNode::Polygon(poly)
+}
+
+fn parse_use(walker: &mut HtmlWalker, parent_style: &SvgStyle) -> SvgNode {
+    let style = parse_style_from_element(walker, parent_style);
+    let (id, transform) = parse_common_attrs(walker);
+    let x = walker
+        .find_attr_lc(live_id!(x))
+        .and_then(parse_number)
+        .unwrap_or(0.0);
+    let y = walker
+        .find_attr_lc(live_id!(y))
+        .and_then(parse_number)
+        .unwrap_or(0.0);
+    let width = walker.find_attr_lc(live_id!(width)).and_then(parse_length);
+    let height = walker.find_attr_lc(live_id!(height)).and_then(parse_length);
+
+    // SVG <use> href can be href="..." or xlink:href="..."
+    let href = walker
+        .find_attr_lc(live_id!(href))
+        .or_else(|| walker.find_attr_lc(live_id!(xlink:href)))
+        .unwrap_or("")
+        .trim_start_matches('#')
+        .to_string();
+
+    let mut svg_use = SvgUse {
+        id,
+        href,
+        x,
+        y,
+        width,
+        height,
+        style,
+        transform,
+        animations: Vec::new(),
+        animate_transforms: Vec::new(),
+    };
+
+    parse_child_animations(
+        walker,
+        live_id!(use),
+        &mut svg_use.animations,
+        &mut svg_use.animate_transforms,
+    );
+    walker.walk();
+    SvgNode::Use(svg_use)
 }
