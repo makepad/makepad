@@ -102,12 +102,21 @@ fn u8_from_hex2(s: &str) -> Option<u8> {
     Some(hi * 16 + lo)
 }
 
-fn split_components(s: &str) -> Vec<&str> {
-    // Split on comma or whitespace
-    s.split(|c: char| c == ',' || c == '/')
+/// Split color function arguments into up to 4 components, no heap allocation.
+/// Returns (array, count).
+fn split_components(s: &str) -> ([&str; 4], usize) {
+    let mut parts = [""; 4];
+    let mut count = 0;
+    for p in s
+        .split(|c: char| c == ',' || c == '/')
         .flat_map(|p| p.split_whitespace())
-        .filter(|p| !p.is_empty())
-        .collect()
+    {
+        if !p.is_empty() && count < 4 {
+            parts[count] = p;
+            count += 1;
+        }
+    }
+    (parts, count)
 }
 
 fn parse_color_component(s: &str) -> Option<f32> {
@@ -135,14 +144,14 @@ fn parse_alpha_component(s: &str) -> Option<f32> {
 }
 
 fn parse_rgb_func(s: &str) -> Option<(f32, f32, f32, f32)> {
-    let parts = split_components(s);
-    if parts.len() < 3 {
+    let (parts, count) = split_components(s);
+    if count < 3 {
         return None;
     }
     let r = parse_color_component(parts[0])?;
     let g = parse_color_component(parts[1])?;
     let b = parse_color_component(parts[2])?;
-    let a = if parts.len() >= 4 {
+    let a = if count >= 4 {
         parse_alpha_component(parts[3])?
     } else {
         1.0
@@ -151,8 +160,8 @@ fn parse_rgb_func(s: &str) -> Option<(f32, f32, f32, f32)> {
 }
 
 fn parse_rgba_func(s: &str) -> Option<(f32, f32, f32, f32)> {
-    let parts = split_components(s);
-    if parts.len() < 4 {
+    let (parts, count) = split_components(s);
+    if count < 4 {
         return None;
     }
     let r = parse_color_component(parts[0])?;
@@ -199,15 +208,15 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
 }
 
 fn parse_hsl_func(s: &str) -> Option<(f32, f32, f32, f32)> {
-    let parts = split_components(s);
-    if parts.len() < 3 {
+    let (parts, count) = split_components(s);
+    if count < 3 {
         return None;
     }
     let h = parts[0].trim_end_matches("deg").parse::<f32>().ok()? / 360.0;
     let s_val = parts[1].trim_end_matches('%').parse::<f32>().ok()? / 100.0;
     let l = parts[2].trim_end_matches('%').parse::<f32>().ok()? / 100.0;
     let (r, g, b) = hsl_to_rgb(h, s_val, l);
-    let a = if parts.len() >= 4 {
+    let a = if count >= 4 {
         parse_alpha_component(parts[3])?
     } else {
         1.0
@@ -216,8 +225,8 @@ fn parse_hsl_func(s: &str) -> Option<(f32, f32, f32, f32)> {
 }
 
 fn parse_hsla_func(s: &str) -> Option<(f32, f32, f32, f32)> {
-    let parts = split_components(s);
-    if parts.len() < 4 {
+    let (parts, count) = split_components(s);
+    if count < 4 {
         return None;
     }
     let h = parts[0].trim_end_matches("deg").parse::<f32>().ok()? / 360.0;
