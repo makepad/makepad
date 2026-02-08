@@ -31,27 +31,9 @@ impl CxScriptResources {
     pub fn get_data(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
         let resources = self.resources.borrow();
         if let Some(res) = resources.iter().find(|v| v.handle == handle) {
-            match &res.data {
-                CxScriptResourceData::Loaded(data) => return Some(data.clone()),
-                CxScriptResourceData::NotLoaded => {
-                    println!(
-                        "get_data: handle {:?} path={:?} NOT YET LOADED",
-                        handle, res.abs_path
-                    );
-                }
-                CxScriptResourceData::Error(e) => {
-                    println!(
-                        "get_data: handle {:?} path={:?} ERROR: {}",
-                        handle, res.abs_path, e
-                    );
-                }
+            if let CxScriptResourceData::Loaded(data) = &res.data {
+                return Some(data.clone());
             }
-        } else {
-            println!(
-                "get_data: handle {:?} NOT FOUND in resources list ({} entries)",
-                handle,
-                resources.len()
-            );
         }
         None
     }
@@ -61,20 +43,14 @@ impl CxScriptResources {
         let mut resources = self.resources.borrow_mut();
         for res in resources.iter_mut() {
             if matches!(res.data, CxScriptResourceData::NotLoaded) {
-                println!(
-                    "load_all_resources: loading {:?} handle={:?}",
-                    res.abs_path, res.handle
-                );
                 match File::open(&res.abs_path) {
                     Ok(mut file) => {
                         let mut data = Vec::new();
                         match file.read_to_end(&mut data) {
                             Ok(_) => {
-                                println!("  -> loaded {} bytes", data.len());
                                 res.data = CxScriptResourceData::Loaded(Rc::new(data));
                             }
                             Err(e) => {
-                                println!("  -> read error: {}", e);
                                 res.data = CxScriptResourceData::Error(format!(
                                     "Failed to read file: {}",
                                     e
@@ -83,7 +59,6 @@ impl CxScriptResources {
                         }
                     }
                     Err(e) => {
-                        println!("  -> open error: {}", e);
                         res.data =
                             CxScriptResourceData::Error(format!("Failed to open file: {}", e));
                     }
