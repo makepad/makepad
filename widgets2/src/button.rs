@@ -5,7 +5,6 @@ use crate::{
     animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
 };
 
-#[cfg(feature = "svg")]
 use crate::makepad_draw::DrawSvg;
 
 script_mod!{
@@ -364,7 +363,6 @@ pub struct Button {
     draw_bg: DrawQuad,
     #[live]
     draw_text: DrawText,
-    #[cfg(feature = "svg")]
     #[live]
     draw_icon: DrawSvg,
     #[live]
@@ -499,7 +497,6 @@ impl Widget for Button {
         }
 
         self.draw_bg.begin(cx, walk, self.layout);
-        #[cfg(feature = "svg")]
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
@@ -522,7 +519,6 @@ impl Button {
         
     pub fn draw_button(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
-        #[cfg(feature = "svg")]
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), label);
