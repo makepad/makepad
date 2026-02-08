@@ -40,10 +40,6 @@ version = "1.5"
 path = "../bytemuck-1.25.0"
 features = ["extern_crate_alloc"]
 
-[dependencies.core_maths]
-version = "0.1.0"
-path = "../core_maths-0.1.1"
-
 [dependencies.makepad-error-log]
 version = "1.0.0"
 path = "../error_log"
@@ -60,7 +56,6 @@ features = [
     "apple-layout",
     "variable-fonts",
     "glyph-names",
-    "no-std-float",
 ]
 default-features = false
 
