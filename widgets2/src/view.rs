@@ -392,7 +392,7 @@ impl ViewRef {
         }
     }
 
-    pub fn set_uniform(&self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
+    pub fn set_uniform(&self, cx: &Cx, uniform: LiveId, value: &[f32]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.set_uniform(cx, uniform, value);
         }
@@ -465,7 +465,7 @@ impl ViewSet {
         }
     }
 
-    pub fn set_uniform(&self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
+    pub fn set_uniform(&self, cx: &Cx, uniform: LiveId, value: &[f32]) {
         for item in self.iter() {
             item.set_uniform(cx, uniform, value)
         }
@@ -973,10 +973,10 @@ impl Widget for View {
                         let texture_cache = self.texture_cache.as_mut().unwrap();
                         cx.end_pass(&texture_cache.pass);
                         /*if cache.pass.id_equals(4){
-                            self.draw_bg.draw_vars.set_uniform(cx, ids!(marked),&[1.0]);
+                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[1.0]);
                         }
                         else{
-                            self.draw_bg.draw_vars.set_uniform(cx, ids!(marked),&[0.0]);
+                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[0.0]);
                         }*/
                         self.draw_bg
                             .draw_vars

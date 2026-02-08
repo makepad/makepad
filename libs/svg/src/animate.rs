@@ -24,6 +24,15 @@ pub fn parse_animate_element(walker: &HtmlWalker) -> SvgAnimate {
             "stroke-opacity" => AnimateAttribute::StrokeOpacity,
             "transform" => AnimateAttribute::Transform,
             "d" => AnimateAttribute::D,
+            "r" => AnimateAttribute::R,
+            "cx" => AnimateAttribute::Cx,
+            "cy" => AnimateAttribute::Cy,
+            "rx" => AnimateAttribute::Rx,
+            "ry" => AnimateAttribute::Ry,
+            "x" => AnimateAttribute::X,
+            "y" => AnimateAttribute::Y,
+            "width" => AnimateAttribute::Width,
+            "height" => AnimateAttribute::Height,
             other => AnimateAttribute::Custom(other.to_string()),
         };
     }
