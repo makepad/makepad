@@ -385,7 +385,6 @@ impl ImageRef {
     }
     
     /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
-    #[cfg(feature = "jpg")]
     pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.lazy_create_image_cache(cx);
@@ -396,7 +395,6 @@ impl ImageRef {
     }
     
     /// Loads a PNG into this `ImageRef` by decoding the given encoded PNG `data`.
-    #[cfg(feature = "png")]
     pub fn load_png_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.lazy_create_image_cache(cx);
