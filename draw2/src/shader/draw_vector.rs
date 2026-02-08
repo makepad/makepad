@@ -31,17 +31,6 @@ script_mod! {
         v_param4: varying(float)
         v_param5: varying(float)
 
-        // Check if a circle (center, radius) is entirely outside a clip rect (x_min, y_min, x_max, y_max).
-        // Returns 1.0 if entirely outside, 0.0 if possibly inside.
-        clip_outside: fn(center: vec2, radius: float, clip: vec4) -> float {
-            if radius < 0.5 { return 0.0 }
-            if center.x + radius < clip.x { return 1.0 }
-            if center.y + radius < clip.y { return 1.0 }
-            if center.x - radius > clip.z { return 1.0 }
-            if center.y - radius > clip.w { return 1.0 }
-            return 0.0
-        }
-
         vertex: fn() {
             let pos = vec2(self.geom.x, self.geom.y);
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
@@ -59,12 +48,16 @@ script_mod! {
             let shifted = pos + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            // Early clip rejection: if this vertex's entire triangle neighbourhood
-            // is outside both clip rects, emit a degenerate triangle
+            // Early clip rejection: merge both clip rects (in local space), single check
             let cr = self.geom.clip_radius;
-            let local = pos;
-            if self.clip_outside(local, cr, self.draw_clip) > 0.5
-                || self.clip_outside(shifted, cr, self.draw_list.view_clip) > 0.5 {
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            );
+            if pos.x + cr < clip.x || pos.y + cr < clip.y
+                || pos.x - cr > clip.z || pos.y - cr > clip.w {
                 self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
                 return
             }
@@ -213,18 +206,16 @@ script_mod! {
         // --- Core pixel shader (usually don't override this) ---
 
         pixel: fn(){
-            // Clip against draw_clip (local space) and view_clip (shifted space)
+            // Clip against merged draw_clip + view_clip (in local space)
             let local = self.v_world - self.draw_list.view_shift;
-            if local.x < self.draw_clip.x
-                || local.y < self.draw_clip.y
-                || local.x > self.draw_clip.z
-                || local.y > self.draw_clip.w {
-                return vec4(0.0, 0.0, 0.0, 0.0)
-            }
-            if self.v_world.x < self.draw_list.view_clip.x
-                || self.v_world.y < self.draw_list.view_clip.y
-                || self.v_world.x > self.draw_list.view_clip.z
-                || self.v_world.y > self.draw_list.view_clip.w {
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            );
+            if local.x < clip.x || local.y < clip.y
+                || local.x > clip.z || local.y > clip.w {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
             // geometry shadow mode: stroke_mult == -2.0
