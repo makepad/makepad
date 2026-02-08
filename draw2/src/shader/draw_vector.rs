@@ -169,12 +169,20 @@ script_mod! {
         // --- Core pixel shader (usually don't override this) ---
 
         pixel: fn(){
-            //if self.v_world.x < self.draw_clip.x
-            //    || self.v_world.y < self.draw_clip.y
-            //    || self.v_world.x > self.draw_clip.z
-            //    || self.v_world.y > self.draw_clip.w {
-            //    discard()
-            //}
+            // Clip against draw_clip (local space) and view_clip (shifted space)
+            let local = self.v_world - self.draw_list.view_shift;
+            if local.x < self.draw_clip.x
+                || local.y < self.draw_clip.y
+                || local.x > self.draw_clip.z
+                || local.y > self.draw_clip.w {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+            if self.v_world.x < self.draw_list.view_clip.x
+                || self.v_world.y < self.draw_list.view_clip.y
+                || self.v_world.x > self.draw_list.view_clip.z
+                || self.v_world.y > self.draw_list.view_clip.w {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
             // geometry shadow mode: stroke_mult == -2.0
             // v interpolates 1.0 (edge) to 0.0 (3*blur out), stroke_dist = blur
             if self.v_stroke_mult < -1.5 {
