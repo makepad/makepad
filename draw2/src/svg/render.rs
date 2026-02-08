@@ -5,7 +5,7 @@ use makepad_svg::animate::{
 };
 use makepad_svg::document::*;
 use makepad_svg::units::viewbox_transform;
-use makepad_svg::{GradientStop, VectorPaint, VectorPath};
+use makepad_svg::{VectorPaint, VectorPath};
 use std::collections::HashMap;
 
 /// Pre-built gradient texture row mapping: gradient ID -> row index (as f32).
@@ -535,8 +535,7 @@ fn set_paint(
 }
 
 fn gradient_to_vector_paint(grad: &SvgGradient, xf: &Transform2d, bbox: &LocalBbox) -> VectorPaint {
-    let stops: Vec<GradientStop> = grad.stops.iter().map(|s| s.clone()).collect();
-    if stops.is_empty() {
+    if grad.stops.is_empty() {
         return VectorPaint::solid(0.0, 0.0, 0.0, 1.0);
     }
 
@@ -558,7 +557,7 @@ fn gradient_to_vector_paint(grad: &SvgGradient, xf: &Transform2d, bbox: &LocalBb
                 y0: y0w,
                 x1: x1w,
                 y1: y1w,
-                stops,
+                stops: grad.stops.clone(),
             }
         }
         GradientKind::Radial => {
@@ -581,7 +580,7 @@ fn gradient_to_vector_paint(grad: &SvgGradient, xf: &Transform2d, bbox: &LocalBb
                 cy: cyw,
                 rx: r * sx,
                 ry: r * sy,
-                stops,
+                stops: grad.stops.clone(),
             }
         }
     }
@@ -683,16 +682,77 @@ fn emit_rounded_rect(
     r: f32,
     xf: &Transform2d,
 ) {
-    // Build in local space, then transform each point
-    let mut local_path = VectorPath::new();
-    local_path.rounded_rect(x, y, w, h, r);
-    emit_path(dv, &local_path, xf);
+    use std::f32::consts::PI;
+    let r = r.min(w * 0.5).min(h * 0.5);
+    if r < 0.1 {
+        emit_rect(dv, x, y, w, h, xf);
+        return;
+    }
+    // Emit rounded rect directly, transforming each point
+    let (tx, ty) = xf.apply(x + r, y);
+    dv.move_to(tx, ty);
+    let (tx, ty) = xf.apply(x + w - r, y);
+    dv.line_to(tx, ty);
+    emit_arc(dv, x + w - r, y + r, r, r, -PI * 0.5, PI * 0.5, xf);
+    let (tx, ty) = xf.apply(x + w, y + h - r);
+    dv.line_to(tx, ty);
+    emit_arc(dv, x + w - r, y + h - r, r, r, 0.0, PI * 0.5, xf);
+    let (tx, ty) = xf.apply(x + r, y + h);
+    dv.line_to(tx, ty);
+    emit_arc(dv, x + r, y + h - r, r, r, PI * 0.5, PI * 0.5, xf);
+    let (tx, ty) = xf.apply(x, y + r);
+    dv.line_to(tx, ty);
+    emit_arc(dv, x + r, y + r, r, r, PI, PI * 0.5, xf);
+    dv.close();
 }
 
 fn emit_ellipse(dv: &mut DrawVector, cx: f32, cy: f32, rx: f32, ry: f32, xf: &Transform2d) {
-    let mut local_path = VectorPath::new();
-    local_path.ellipse(cx, cy, rx, ry);
-    emit_path(dv, &local_path, xf);
+    use std::f32::consts::PI;
+    let (tx, ty) = xf.apply(cx + rx, cy);
+    dv.move_to(tx, ty);
+    emit_arc(dv, cx, cy, rx, ry, 0.0, PI * 2.0, xf);
+    dv.close();
+}
+
+/// Emit arc bezier segments directly to DrawVector, transforming each control point.
+fn emit_arc(
+    dv: &mut DrawVector,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    start: f32,
+    sweep: f32,
+    xf: &Transform2d,
+) {
+    use std::f32::consts::PI;
+    let n = ((sweep.abs() / (PI * 0.5)).ceil() as usize).max(1);
+    let sweep_per = sweep / n as f32;
+    let k = (4.0 / 3.0) * (sweep_per / 4.0).tan();
+    for i in 0..n {
+        let a0 = start + sweep_per * i as f32;
+        let a1 = a0 + sweep_per;
+        let (s0, c0) = a0.sin_cos();
+        let (s1, c1) = a1.sin_cos();
+        let x0 = cx + c0 * rx;
+        let y0 = cy + s0 * ry;
+        let x1 = cx + c1 * rx;
+        let y1 = cy + s1 * ry;
+        let dx0 = -s0 * rx;
+        let dy0 = c0 * ry;
+        let dx1 = -s1 * rx;
+        let dy1 = c1 * ry;
+        if i == 0 {
+            // first arc point is already emitted by caller (move_to or line_to)
+        } else {
+            let (tx, ty) = xf.apply(x0, y0);
+            dv.line_to(tx, ty);
+        }
+        let (tcx1, tcy1) = xf.apply(x0 + dx0 * k, y0 + dy0 * k);
+        let (tcx2, tcy2) = xf.apply(x1 - dx1 * k, y1 - dy1 * k);
+        let (tx1, ty1) = xf.apply(x1, y1);
+        dv.bezier_to(tcx1, tcy1, tcx2, tcy2, tx1, ty1);
+    }
 }
 
 fn emit_points(dv: &mut DrawVector, points: &[(f32, f32)], close: bool, xf: &Transform2d) {
