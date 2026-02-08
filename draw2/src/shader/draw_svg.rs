@@ -93,7 +93,7 @@ script_mod! {
             let world = self.draw_list.view_transform * vec4(
                 shifted.x
                 shifted.y
-                self.draw_depth + self.draw_call.zbias
+                self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
@@ -128,6 +128,10 @@ pub struct DrawSvg {
     cached_verts: Vec<f32>,
     #[rust]
     cached_indices: Vec<u32>,
+    #[rust]
+    cached_gradient_data: Vec<u32>,
+    #[rust]
+    cached_gradient_row_count: usize,
     #[rust]
     cache_valid: bool,
     #[rust]
@@ -188,9 +192,11 @@ impl DrawSvg {
             svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
             self.cached_verts = self.draw_super.acc_verts.clone();
             self.cached_indices = self.draw_super.acc_indices.clone();
+            self.cached_gradient_data = self.draw_super.gradient_texture_data.clone();
+            self.cached_gradient_row_count = self.draw_super.gradient_row_count;
             self.cache_valid = true;
         } else {
-            // Replay cached geometry
+            // Replay cached geometry and gradient texture data
             self.draw_super.begin();
             self.draw_super
                 .acc_verts
@@ -198,6 +204,10 @@ impl DrawSvg {
             self.draw_super
                 .acc_indices
                 .extend_from_slice(&self.cached_indices);
+            self.draw_super
+                .gradient_texture_data
+                .extend_from_slice(&self.cached_gradient_data);
+            self.draw_super.gradient_row_count = self.cached_gradient_row_count;
         }
 
         // Compute GPU-side scale + offset from content bounds to target rect

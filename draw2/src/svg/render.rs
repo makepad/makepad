@@ -8,6 +8,9 @@ use makepad_svg::units::viewbox_transform;
 use makepad_svg::{VectorPaint, VectorPath};
 use std::collections::HashMap;
 
+// Re-import path commands for shadow offset manipulation
+use makepad_svg::path::PathCmd;
+
 /// Pre-built gradient texture row mapping: gradient ID -> row index (as f32).
 struct GradientMap {
     rows: HashMap<String, f32>,
@@ -37,11 +40,16 @@ pub fn render_svg(
         offset
     };
 
-    // Pre-build gradient texture rows for all gradients in defs
+    // Pre-build gradient texture rows for all gradients in defs.
+    // Sort by ID so row assignment is deterministic across runs
+    // (HashMap iteration order is randomized in Rust).
     let mut grad_map = GradientMap {
         rows: HashMap::new(),
     };
-    for (id, grad) in &doc.defs.gradients {
+    let mut sorted_grad_ids: Vec<&String> = doc.defs.gradients.keys().collect();
+    sorted_grad_ids.sort();
+    for id in sorted_grad_ids {
+        let grad = &doc.defs.gradients[id];
         if !grad.stops.is_empty() {
             let row_idx = dv.add_gradient_row(&grad.stops);
             grad_map.rows.insert(id.clone(), row_idx);
@@ -507,6 +515,59 @@ fn emit_shape(
     bbox: &LocalBbox,
     grad_map: &GradientMap,
 ) {
+    // Emit drop shadow geometry before the main shape
+    if let Some(ref filter_id) = style.filter {
+        if let Some(filter) = defs.filters.get(filter_id) {
+            for effect in &filter.effects {
+                match effect {
+                    SvgFilterEffect::DropShadow {
+                        dx,
+                        dy,
+                        std_dev,
+                        color,
+                    } => {
+                        // Scale offset and blur by the transform
+                        let scale = xf.scale_factor();
+                        let sdx = dx * scale;
+                        let sdy = dy * scale;
+                        let sblur = std_dev * scale;
+
+                        let saved_paint = dv.cur_paint.clone();
+                        let a = color.3 * style.opacity;
+                        dv.set_color(color.0, color.1, color.2, a); // VectorPaint::solid() will premultiply
+
+                        // Build the shape path, then offset all vertices for shadow
+                        build_path(dv);
+                        // Offset all path points by scaled dx, dy
+                        for cmd in &mut dv.path.cmds {
+                            match cmd {
+                                PathCmd::MoveTo(x, y) => {
+                                    *x += sdx;
+                                    *y += sdy;
+                                }
+                                PathCmd::LineTo(x, y) => {
+                                    *x += sdx;
+                                    *y += sdy;
+                                }
+                                PathCmd::BezierTo(cx1, cy1, cx2, cy2, x, y) => {
+                                    *cx1 += sdx;
+                                    *cy1 += sdy;
+                                    *cx2 += sdx;
+                                    *cy2 += sdy;
+                                    *x += sdx;
+                                    *y += sdy;
+                                }
+                                _ => {}
+                            }
+                        }
+                        dv.shape_shadow(sblur.max(0.5));
+                        dv.cur_paint = saved_paint;
+                    }
+                }
+            }
+        }
+    }
+
     let opacity = style.opacity;
     dv.set_shape_id(style.shader_id);
 
@@ -591,7 +652,7 @@ fn set_paint(
         SvgPaint::None => {}
         SvgPaint::Color(r, g, b, a) => {
             let a = a * alpha;
-            dv.set_color(*r * a, *g * a, *b * a, a); // premultiplied
+            dv.set_color(*r, *g, *b, a); // VectorPaint::solid() will premultiply
             dv.cur_gradient_row_v = -1.0;
         }
         SvgPaint::GradientRef(id) => {
@@ -668,8 +729,6 @@ fn gradient_to_vector_paint(grad: &SvgGradient, xf: &Transform2d, bbox: &LocalBb
         }
     }
 }
-
-use makepad_svg::path::PathCmd;
 
 fn path_bbox(path: &VectorPath) -> LocalBbox {
     let mut min_x = f32::MAX;

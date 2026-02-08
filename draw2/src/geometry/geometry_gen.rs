@@ -55,6 +55,9 @@ pub struct VectorVertex {
     // max distance from this vertex to any other vertex it shares a triangle with
     #[live]
     pub clip_radius: f32,
+    // per-shape z-bias for painter's algorithm ordering
+    #[live]
+    pub zbias: f32,
 }
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
@@ -102,7 +105,7 @@ impl GeometryGen {
     /// Placeholder single-triangle geometry for vector drawing (overridden at draw time)
     pub fn from_triangle_2d() -> GeometryGen {
         let mut g = Self::default();
-        // 3 vertices with full VectorVertex stride (22 floats each)
+        // 3 vertices with full VectorVertex stride (23 floats each)
         for _ in 0..3 {
             g.vertices.extend_from_slice(&[
                 0.0, 0.0, 0.5, 1.0, // x, y, u, v
@@ -111,6 +114,7 @@ impl GeometryGen {
                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // param0-5
                 0.0, 0.0, 0.0, 0.0, // color2 r,g,b,a
                 0.0, // clip_radius
+                0.0, // zbias
             ]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
