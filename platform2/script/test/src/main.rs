@@ -1312,6 +1312,45 @@ pub fn main() {
                 return sum
             }
 
+            // ---- Void return tests (fn() with return inside if) ----
+            // Pattern 19: void fn with early return in if (no else)
+            void_ret_if: fn(x: f32) {
+                if x > 0f { return }
+                self.v_intensity = x
+            }
+            // Pattern 20: void fn with return in if/else
+            void_ret_if_else: fn(x: f32) {
+                if x > 0f {
+                    self.v_intensity = 1f
+                    return
+                } else {
+                    self.v_intensity = 0f
+                    return
+                }
+            }
+            // Pattern 21: void fn with multiple early returns
+            void_ret_multi: fn(x: f32) {
+                if x < -10f { return }
+                if x < 0f { return }
+                self.v_intensity = x
+            }
+            // Pattern 22: void fn with || condition and return
+            void_ret_or_cond: fn(x: f32, y: f32) {
+                if x > 0f || y > 0f {
+                    return
+                }
+                self.v_intensity = x + y
+            }
+            // Pattern 23: helper fn returning float, called from void context with ||
+            check_outside: fn(center: vec2, radius: f32, clip: vec4) -> f32 {
+                if radius < 0.5f { return 0f }
+                if center.x + radius < clip.x { return 1f }
+                if center.y + radius < clip.y { return 1f }
+                if center.x - radius > clip.z { return 1f }
+                if center.y - radius > clip.w { return 1f }
+                return 0f
+            }
+
             vertex: fn(){
                 // Vertex buffer access
                 let pos = self.vtx.pos
@@ -1331,6 +1370,13 @@ pub fn main() {
                 self.v_normal = normal
                 let world_pos = pos.xyz + vec3(offset.x, offset.y, 0f)
                 self.v_world_pos = world_pos
+
+                // ---- Void return test: simplest case ----
+                if scale > 0.5f {
+                    self.vertex_pos = vec4(0f, 0f, 0f, 0f)
+                    return
+                }
+
                 self.vertex_pos = vec4(world_pos * mvp, 1f)
             }
 

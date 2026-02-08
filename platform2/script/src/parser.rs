@@ -209,6 +209,7 @@ enum State {
     },
     EmitReturn {
         index: u32,
+        code_len_before: u32,
     },
     EmitBreak {
         index: u32,
@@ -2662,8 +2663,20 @@ impl ScriptParser {
                 self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
                 return 0;
             }
-            State::EmitReturn { index } => {
-                self.push_code(Opcode::RETURN.into(), index);
+            State::EmitReturn {
+                index,
+                code_len_before,
+            } => {
+                if self.code_len() as u32 == code_len_before {
+                    // No expression was parsed after `return` — bare void return
+                    self.push_code(
+                        ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
+                        index,
+                    );
+                } else {
+                    // Expression was parsed — return with value
+                    self.push_code(Opcode::RETURN.into(), index);
+                }
                 return 0;
             }
             State::EmitBreak { index } => {
@@ -3310,7 +3323,11 @@ impl ScriptParser {
                     return 1;
                 }
                 if id == id!(return) {
-                    self.state.push(State::EmitReturn { index: self.index });
+                    let code_len_before = self.code_len() as u32;
+                    self.state.push(State::EmitReturn {
+                        index: self.index,
+                        code_len_before,
+                    });
                     self.state.push(State::BeginExpr { required: false });
                     return 1;
                 }

@@ -281,85 +281,177 @@
   <!-- === Sea floor and coral === -->
   <rect x="0" y="480" width="800" height="120" fill="url(#seafloor)"/>
 
-  <!-- Coral formation 1 (red, left) -->
+  <!-- Coral formation 1 (red, left) - main trunk + 5 branches -->
   <g>
+    <!-- Main trunk -->
     <path d="M80,600 Q80,540 95,520 Q105,505 95,480 Q90,465 100,450" stroke="url(#coral1)" stroke-width="6" fill="none" stroke-linecap="round">
       <animate attributeName="d"
         values="M80,600 Q80,540 95,520 Q105,505 95,480 Q90,465 100,450;
-                M80,600 Q82,542 97,522 Q108,507 97,482 Q92,467 103,452;
+                M80,600 Q86,542 102,524 Q114,508 100,484 Q93,468 108,454;
+                M80,600 Q74,538 88,516 Q96,502 90,476 Q87,462 92,446;
                 M80,600 Q80,540 95,520 Q105,505 95,480 Q90,465 100,450"
         dur="5s" repeatCount="indefinite"/>
     </path>
+    <!-- Right branch high -->
     <path d="M95,490 Q110,475 120,460" stroke="url(#coral1)" stroke-width="4" fill="none" stroke-linecap="round">
       <animate attributeName="d"
-        values="M95,490 Q110,475 120,460;M97,492 Q113,477 123,462;M95,490 Q110,475 120,460"
+        values="M95,490 Q110,475 120,460;M100,492 Q118,478 130,464;M90,488 Q102,472 110,456;M95,490 Q110,475 120,460"
         dur="5s" repeatCount="indefinite"/>
     </path>
+    <!-- Left branch -->
     <path d="M92,510 Q75,495 65,478" stroke="url(#coral1)" stroke-width="3.5" fill="none" stroke-linecap="round">
       <animate attributeName="d"
-        values="M92,510 Q75,495 65,478;M94,512 Q77,497 67,480;M92,510 Q75,495 65,478"
+        values="M92,510 Q75,495 65,478;M96,512 Q82,498 74,482;M88,508 Q68,492 56,474;M92,510 Q75,495 65,478"
+        dur="5s" repeatCount="indefinite"/>
+    </path>
+    <!-- Right branch low -->
+    <path d="M90,535 Q108,525 122,510 Q132,498 140,482" stroke="url(#coral1)" stroke-width="3" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M90,535 Q108,525 122,510 Q132,498 140,482;
+                M94,537 Q114,528 130,514 Q140,502 150,488;
+                M86,533 Q102,522 114,506 Q124,494 130,476;
+                M90,535 Q108,525 122,510 Q132,498 140,482"
+        dur="5.3s" repeatCount="indefinite"/>
+    </path>
+    <!-- Left branch low -->
+    <path d="M82,555 Q65,545 50,530 Q40,518 35,502" stroke="url(#coral1)" stroke-width="2.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M82,555 Q65,545 50,530 Q40,518 35,502;
+                M85,557 Q72,548 60,535 Q50,524 48,508;
+                M79,553 Q58,542 40,525 Q30,512 22,496;
+                M82,555 Q65,545 50,530 Q40,518 35,502"
+        dur="4.7s" repeatCount="indefinite"/>
+    </path>
+    <!-- Tip fork -->
+    <path d="M100,450 Q108,438 118,430" stroke="url(#coral1)" stroke-width="2.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M100,450 Q108,438 118,430;M108,454 Q118,442 130,436;M92,446 Q98,434 106,424;M100,450 Q108,438 118,430"
         dur="5s" repeatCount="indefinite"/>
     </path>
   </g>
 
-  <!-- Coral formation 2 (orange, center-right) -->
+  <!-- Coral formation 2 (orange, center-right) - main trunk + 5 branches -->
   <g>
+    <!-- Main trunk -->
     <path d="M550,600 Q548,555 560,535 Q570,518 562,495 Q558,478 568,458" stroke="url(#coral2)" stroke-width="5" fill="none" stroke-linecap="round">
       <animate attributeName="d"
         values="M550,600 Q548,555 560,535 Q570,518 562,495 Q558,478 568,458;
-                M550,600 Q550,557 563,537 Q574,520 565,497 Q561,480 572,460;
+                M550,600 Q554,558 568,540 Q580,524 570,500 Q564,484 578,464;
+                M550,600 Q542,552 552,530 Q560,512 554,490 Q552,472 558,452;
                 M550,600 Q548,555 560,535 Q570,518 562,495 Q558,478 568,458"
         dur="6s" repeatCount="indefinite"/>
     </path>
+    <!-- Right branch high -->
     <path d="M562,505 Q580,490 590,472" stroke="url(#coral2)" stroke-width="3.5" fill="none" stroke-linecap="round">
       <animate attributeName="d"
-        values="M562,505 Q580,490 590,472;M565,507 Q583,492 593,474;M562,505 Q580,490 590,472"
+        values="M562,505 Q580,490 590,472;M570,509 Q590,496 602,480;M554,501 Q570,484 578,464;M562,505 Q580,490 590,472"
         dur="6s" repeatCount="indefinite"/>
     </path>
+    <!-- Left branch -->
     <path d="M558,525 Q540,510 530,492" stroke="url(#coral2)" stroke-width="3" fill="none" stroke-linecap="round">
       <animate attributeName="d"
-        values="M558,525 Q540,510 530,492;M560,527 Q542,512 532,494;M558,525 Q540,510 530,492"
+        values="M558,525 Q540,510 530,492;M562,528 Q548,514 540,498;M554,522 Q532,506 520,486;M558,525 Q540,510 530,492"
+        dur="6s" repeatCount="indefinite"/>
+    </path>
+    <!-- Right branch low -->
+    <path d="M555,555 Q575,545 592,530 Q604,518 612,500" stroke="url(#coral2)" stroke-width="3" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M555,555 Q575,545 592,530 Q604,518 612,500;
+                M559,558 Q582,550 602,536 Q616,524 626,508;
+                M551,552 Q568,540 582,524 Q592,512 598,492;
+                M555,555 Q575,545 592,530 Q604,518 612,500"
+        dur="6.3s" repeatCount="indefinite"/>
+    </path>
+    <!-- Left branch low -->
+    <path d="M552,570 Q535,558 518,542 Q506,528 500,510" stroke="url(#coral2)" stroke-width="2.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M552,570 Q535,558 518,542 Q506,528 500,510;
+                M555,573 Q542,562 528,548 Q518,536 514,518;
+                M549,567 Q528,554 508,536 Q494,520 486,502;
+                M552,570 Q535,558 518,542 Q506,528 500,510"
+        dur="5.7s" repeatCount="indefinite"/>
+    </path>
+    <!-- Tip fork -->
+    <path d="M568,458 Q575,444 585,435" stroke="url(#coral2)" stroke-width="2.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M568,458 Q575,444 585,435;M578,464 Q588,452 600,444;M558,452 Q562,436 570,426;M568,458 Q575,444 585,435"
         dur="6s" repeatCount="indefinite"/>
     </path>
   </g>
 
-  <!-- Coral formation 3 (purple, far right) -->
+  <!-- Coral formation 3 (purple, far right) - main trunk + 4 branches -->
   <g>
+    <!-- Main trunk -->
     <path d="M720,600 Q718,565 728,548 Q735,535 730,515 Q726,500 735,485" stroke="url(#coral3)" stroke-width="4.5" fill="none" stroke-linecap="round">
       <animate attributeName="d"
         values="M720,600 Q718,565 728,548 Q735,535 730,515 Q726,500 735,485;
-                M720,600 Q720,567 731,550 Q738,537 733,517 Q729,502 738,487;
+                M720,600 Q724,568 736,552 Q744,540 738,520 Q732,506 744,490;
+                M720,600 Q712,562 720,544 Q726,530 722,510 Q720,494 726,480;
                 M720,600 Q718,565 728,548 Q735,535 730,515 Q726,500 735,485"
         dur="5.5s" repeatCount="indefinite"/>
     </path>
+    <!-- Right branch -->
     <path d="M730,525 Q745,512 755,498" stroke="url(#coral3)" stroke-width="3" fill="none" stroke-linecap="round">
       <animate attributeName="d"
-        values="M730,525 Q745,512 755,498;M732,527 Q748,514 758,500;M730,525 Q745,512 755,498"
+        values="M730,525 Q745,512 755,498;M738,529 Q756,518 768,506;M722,521 Q734,506 742,490;M730,525 Q745,512 755,498"
+        dur="5.5s" repeatCount="indefinite"/>
+    </path>
+    <!-- Left branch -->
+    <path d="M726,540 Q710,528 700,512" stroke="url(#coral3)" stroke-width="2.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M726,540 Q710,528 700,512;M730,543 Q718,532 710,518;M722,537 Q702,524 690,506;M726,540 Q710,528 700,512"
+        dur="5.5s" repeatCount="indefinite"/>
+    </path>
+    <!-- Right branch low -->
+    <path d="M722,565 Q740,555 752,540 Q760,528 765,512" stroke="url(#coral3)" stroke-width="2.5" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M722,565 Q740,555 752,540 Q760,528 765,512;
+                M726,568 Q748,560 762,546 Q772,536 780,520;
+                M718,562 Q732,550 742,534 Q748,520 750,504;
+                M722,565 Q740,555 752,540 Q760,528 765,512"
+        dur="5.8s" repeatCount="indefinite"/>
+    </path>
+    <!-- Tip fork -->
+    <path d="M735,485 Q742,472 752,465" stroke="url(#coral3)" stroke-width="2" fill="none" stroke-linecap="round">
+      <animate attributeName="d"
+        values="M735,485 Q742,472 752,465;M744,490 Q754,478 766,472;M726,480 Q730,466 738,458;M735,485 Q742,472 752,465"
         dur="5.5s" repeatCount="indefinite"/>
     </path>
   </g>
 
-  <!-- Small seaweed tufts -->
+  <!-- Small seaweed tufts (more sway) -->
   <path d="M200,600 Q195,570 205,550 Q210,535 200,520" stroke="#2e7d32" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.6">
     <animate attributeName="d"
       values="M200,600 Q195,570 205,550 Q210,535 200,520;
-              M200,600 Q198,572 208,552 Q215,537 205,522;
+              M200,600 Q202,574 215,555 Q222,540 215,526;
+              M200,600 Q188,566 195,545 Q198,530 185,514;
               M200,600 Q195,570 205,550 Q210,535 200,520"
       dur="4s" repeatCount="indefinite"/>
   </path>
   <path d="M380,600 Q375,575 382,560 Q388,548 380,535" stroke="#388e3c" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.5">
     <animate attributeName="d"
       values="M380,600 Q375,575 382,560 Q388,548 380,535;
-              M380,600 Q378,577 385,562 Q392,550 384,537;
+              M380,600 Q382,578 392,564 Q400,553 395,540;
+              M380,600 Q368,572 372,556 Q376,543 365,530;
               M380,600 Q375,575 382,560 Q388,548 380,535"
       dur="4.5s" repeatCount="indefinite"/>
   </path>
   <path d="M650,600 Q645,578 652,565 Q658,554 650,540" stroke="#2e7d32" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.5">
     <animate attributeName="d"
       values="M650,600 Q645,578 652,565 Q658,554 650,540;
-              M650,600 Q648,580 655,567 Q662,556 654,542;
+              M650,600 Q652,582 662,570 Q670,560 665,546;
+              M650,600 Q638,574 642,560 Q646,548 635,534;
               M650,600 Q645,578 652,565 Q658,554 650,540"
       dur="3.8s" repeatCount="indefinite"/>
+  </path>
+  <!-- Extra seaweed tuft -->
+  <path d="M450,600 Q445,572 455,555 Q462,540 454,522" stroke="#33691e" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.5">
+    <animate attributeName="d"
+      values="M450,600 Q445,572 455,555 Q462,540 454,522;
+              M450,600 Q452,576 465,560 Q474,546 468,528;
+              M450,600 Q438,568 445,550 Q450,534 440,516;
+              M450,600 Q445,572 455,555 Q462,540 454,522"
+      dur="4.2s" repeatCount="indefinite"/>
   </path>
 
   <!-- === Tiny distant fish school (simple dots) === -->
