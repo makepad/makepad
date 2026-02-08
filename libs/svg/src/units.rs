@@ -1,5 +1,5 @@
 /// SVG unit/length parser and viewBox coordinate resolver.
-use super::document::ViewBox;
+use crate::document::ViewBox;
 
 pub fn parse_length(s: &str) -> Option<f32> {
     let s = s.trim();

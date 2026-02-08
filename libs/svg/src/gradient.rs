@@ -2,11 +2,11 @@
 use makepad_html::HtmlWalker;
 use makepad_live_id::*;
 
-use super::color::parse_color;
-use super::document::{GradientUnits, SpreadMethod, SvgGradient};
-use super::transform::parse_transform;
-use super::units::parse_number;
-use crate::vector::GradientStop;
+use crate::color::parse_color;
+use crate::document::{GradientUnits, SpreadMethod, SvgGradient};
+use crate::transform::parse_transform;
+use crate::units::parse_number;
+use crate::paint::GradientStop;
 
 pub fn parse_linear_gradient(walker: &HtmlWalker) -> (Option<String>, SvgGradient) {
     let mut grad = SvgGradient::new_linear();
