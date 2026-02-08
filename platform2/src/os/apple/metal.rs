@@ -21,7 +21,7 @@ use {
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     std::fmt::Write,
-    std::sync::{Arc, Condvar, Mutex},
+    std::sync::Mutex,
     std::time::Instant,
 };
 
@@ -40,8 +40,6 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32,
         encoder: ObjcId,
-        command_buffer: ObjcId,
-        gpu_read_guards: &mut Vec<MetalRwLockGpuReadGuard>,
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
@@ -74,8 +72,6 @@ impl Cx {
                     zbias,
                     zbias_step,
                     encoder,
-                    command_buffer,
-                    gpu_read_guards,
                     metal_cx,
                 );
             } else {
@@ -100,10 +96,9 @@ impl Cx {
 
                 if debug_dump {
                     println!(
-                        "  [item {}] instance_dirty={} buffer_index={} instances_len={}",
+                        "  [item {}] instance_dirty={} instances_len={}",
                         draw_item_id,
                         draw_call.instance_dirty,
-                        draw_item.os.instance_buffer.index,
                         draw_item.instances.as_ref().map(|i| i.len()).unwrap_or(0),
                     );
                 }
@@ -112,20 +107,10 @@ impl Cx {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
                     self.os.bytes_written += draw_item.instances.as_ref().unwrap().len() * 4;
-                    draw_item.os.instance_buffer.next();
                     draw_item
                         .os
                         .instance_buffer
-                        .get_mut()
-                        .cpu_write()
                         .update(metal_cx, &draw_item.instances.as_ref().unwrap());
-
-                    if debug_dump {
-                        println!(
-                            "    -> advanced to buffer_index={}",
-                            draw_item.os.instance_buffer.index
-                        );
-                    }
                 }
 
                 // update the zbias uniform if we have it.
@@ -157,19 +142,10 @@ impl Cx {
                 let geometry = &mut self.geometries[geometry_id];
 
                 if geometry.dirty {
-                    geometry.os.index_buffer.next();
-                    geometry
-                        .os
-                        .index_buffer
-                        .get_mut()
-                        .cpu_write()
-                        .update(metal_cx, &geometry.indices);
-                    geometry.os.vertex_buffer.next();
+                    geometry.os.index_buffer.update(metal_cx, &geometry.indices);
                     geometry
                         .os
                         .vertex_buffer
-                        .get_mut()
-                        .cpu_write()
                         .update(metal_cx, &geometry.vertices);
                     geometry.dirty = false;
                 }
@@ -184,7 +160,7 @@ impl Cx {
                     );
                 }
 
-                if let Some(inner) = geometry.os.vertex_buffer.get().cpu_read().inner.as_ref() {
+                if let Some(inner) = geometry.os.vertex_buffer.inner.as_ref() {
                     unsafe {
                         msg_send![
                             encoder,
@@ -197,7 +173,7 @@ impl Cx {
                     crate::error!("Drawing error: vertex_buffer None")
                 }
 
-                if let Some(inner) = draw_item.os.instance_buffer.get().cpu_read().inner.as_ref() {
+                if let Some(inner) = draw_item.os.instance_buffer.inner.as_ref() {
                     unsafe {
                         msg_send![
                             encoder,
@@ -319,7 +295,7 @@ impl Cx {
                 }
 
                 self.os.draw_calls_done += 1;
-                if let Some(inner) = geometry.os.index_buffer.get().cpu_read().inner.as_ref() {
+                if let Some(inner) = geometry.os.index_buffer.inner.as_ref() {
                     let () = unsafe {
                         msg_send![
                             encoder,
@@ -334,10 +310,6 @@ impl Cx {
                 } else {
                     crate::error!("Drawing error: index_buffer None")
                 }
-
-                gpu_read_guards.push(draw_item.os.instance_buffer.get().gpu_read());
-                gpu_read_guards.push(geometry.os.vertex_buffer.get().gpu_read());
-                gpu_read_guards.push(geometry.os.index_buffer.get().gpu_read());
             }
         }
     }
@@ -664,7 +636,6 @@ impl Cx {
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
-        let mut gpu_read_guards = Vec::new();
 
         self.render_view(
             draw_pass_id,
@@ -672,8 +643,6 @@ impl Cx {
             &mut zbias,
             zbias_step,
             encoder,
-            command_buffer,
-            &mut gpu_read_guards,
             &metal_cx,
         );
 
@@ -693,10 +662,10 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
+                self.commit_command_buffer(screenshot, None, command_buffer);
             }
             DrawPassMode::Texture => {
-                self.commit_command_buffer(None, None, command_buffer, gpu_read_guards);
+                self.commit_command_buffer(None, None, command_buffer);
             }
             DrawPassMode::StdinMain(stdin_frame, kind_id) => {
                 let main_texture = &self.passes[draw_pass_id].color_textures[0];
@@ -714,12 +683,7 @@ impl Cx {
                 } else {
                     None
                 };
-                self.commit_command_buffer(
-                    screenshot,
-                    Some(stdin_frame),
-                    command_buffer,
-                    gpu_read_guards,
-                );
+                self.commit_command_buffer(screenshot, Some(stdin_frame), command_buffer);
             }
             DrawPassMode::Drawable(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
@@ -733,7 +697,7 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
+                self.commit_command_buffer(screenshot, None, command_buffer);
             }
             DrawPassMode::Resizing(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
@@ -746,7 +710,7 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
+                self.commit_command_buffer(screenshot, None, command_buffer);
                 let () = unsafe { msg_send![command_buffer, waitUntilScheduled] };
                 let () = unsafe { msg_send![drawable, present] };
             }
@@ -817,9 +781,7 @@ impl Cx {
         screenshot_info: Option<ScreenshotInfo>,
         stdin_frame: Option<PresentableDraw>,
         command_buffer: ObjcId,
-        gpu_read_guards: Vec<MetalRwLockGpuReadGuard>,
     ) {
-        let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let screenshot_info = Mutex::new(screenshot_info);
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
@@ -867,8 +829,6 @@ impl Cx {
                     Cx::send_studio_message(AppToStudio::GPUSample(GPUSample{
                         start, end
                     }));
-
-                    drop(gpu_read_guards.lock().unwrap().take().unwrap());
                 })
             ]
         };
@@ -1315,34 +1275,13 @@ impl CxOsDrawShader {
 
 #[derive(Default)]
 pub struct CxOsDrawCall {
-    //pub uni_dr: MetalBuffer,
-    instance_buffer: MetalBufferQueue,
+    instance_buffer: MetalBuffer,
 }
 
 #[derive(Default)]
 pub struct CxOsGeometry {
-    vertex_buffer: MetalBufferQueue,
-    index_buffer: MetalBufferQueue,
-}
-
-#[derive(Default)]
-struct MetalBufferQueue {
-    queue: [MetalRwLock<MetalBuffer>; 3],
-    index: usize,
-}
-
-impl MetalBufferQueue {
-    fn get(&self) -> &MetalRwLock<MetalBuffer> {
-        &self.queue[self.index]
-    }
-
-    fn get_mut(&mut self) -> &mut MetalRwLock<MetalBuffer> {
-        &mut self.queue[self.index]
-    }
-
-    fn next(&mut self) {
-        self.index = (self.index + 1) % self.queue.len();
-    }
+    vertex_buffer: MetalBuffer,
+    index_buffer: MetalBuffer,
 }
 
 #[derive(Default)]
@@ -1351,51 +1290,29 @@ struct MetalBuffer {
 }
 
 impl MetalBuffer {
-    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T])
-    where
-        T: std::fmt::Debug,
-    {
+    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
         let len = data.len() * std::mem::size_of::<T>();
         if len == 0 {
             self.inner = None;
             return;
         }
-        if self.inner.as_ref().map_or(0, |inner| inner.len) < len {
-            self.inner = Some(MetalBufferInner {
-                len,
-                buffer: RcObjcId::from_owned(
-                    NonNull::new(unsafe {
-                        msg_send![
-                            metal_cx.device,
-                            newBufferWithLength: len as u64
-                            options: nil
-                        ]
-                    })
-                    .unwrap(),
-                ),
-            });
-        }
-        let inner = self.inner.as_ref().unwrap();
-        unsafe {
-            let contents: *mut u8 = msg_send![inner.buffer.as_id(), contents];
-
-            //println!("Buffer write {} buf {} data {:?}", command_buffer as *const _ as u64, inner.buffer.as_id() as *const _ as u64, data);
-
-            std::ptr::copy(data.as_ptr() as *const u8, contents, len);
-            /*
-            let _: () = msg_send![
-                inner.buffer.as_id(),
-                didModifyRange: NSRange {
-                    location: 0,
-                    length: len as u64
-                }
-            ];*/
-        }
+        self.inner = Some(MetalBufferInner {
+            buffer: RcObjcId::from_owned(
+                NonNull::new(unsafe {
+                    msg_send![
+                        metal_cx.device,
+                        newBufferWithBytes: data.as_ptr() as *const std::ffi::c_void
+                        length: len as u64
+                        options: nil
+                    ]
+                })
+                .unwrap(),
+            ),
+        });
     }
 }
 
 struct MetalBufferInner {
-    len: usize,
     buffer: RcObjcId,
 }
 
@@ -1803,54 +1720,6 @@ impl CxTexture {
                 .unwrap(),
             );
             self.os.texture = Some(texture);
-        }
-    }
-}
-
-#[derive(Default)]
-struct MetalRwLock<T> {
-    inner: Arc<MetalRwLockInner>,
-    value: T,
-}
-
-impl<T> MetalRwLock<T> {
-    fn cpu_read(&self) -> &T {
-        &self.value
-    }
-
-    fn gpu_read(&self) -> MetalRwLockGpuReadGuard {
-        let mut reader_count = self.inner.reader_count.lock().unwrap();
-        *reader_count += 1;
-        MetalRwLockGpuReadGuard {
-            inner: self.inner.clone(),
-        }
-    }
-
-    fn cpu_write(&mut self) -> &mut T {
-        let mut reader_count = self.inner.reader_count.lock().unwrap();
-        while *reader_count != 0 {
-            reader_count = self.inner.condvar.wait(reader_count).unwrap();
-        }
-        &mut self.value
-    }
-}
-
-#[derive(Default)]
-struct MetalRwLockInner {
-    reader_count: Mutex<usize>,
-    condvar: Condvar,
-}
-
-struct MetalRwLockGpuReadGuard {
-    inner: Arc<MetalRwLockInner>,
-}
-
-impl Drop for MetalRwLockGpuReadGuard {
-    fn drop(&mut self) {
-        let mut reader_count = self.inner.reader_count.lock().unwrap();
-        *reader_count -= 1;
-        if *reader_count == 0 {
-            self.inner.condvar.notify_one();
         }
     }
 }
