@@ -1,6 +1,3 @@
-#[cfg(not(feature = "std"))]
-use core_maths::CoreFloat;
-
 use super::buffer::hb_buffer_t;
 use super::hb_font_t;
 use super::ot_shape_plan::hb_ot_shape_plan_t;

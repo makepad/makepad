@@ -1,6 +1,3 @@
-#[cfg(not(feature = "std"))]
-use core_maths::CoreFloat;
-
 use crate::hb::paint_extents::hb_paint_extents_context_t;
 use ttf_parser::gdef::GlyphClass;
 use ttf_parser::opentype_layout::LayoutTable;
