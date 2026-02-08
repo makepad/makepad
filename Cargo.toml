@@ -23,8 +23,8 @@ workspace.members = [
     "examples/xr_net",
     "examples/comfyui",
     "examples/aichat",
-    "libs/math_widget",
-    "libs/svg",
+    #"libs/math_widget",  # removed: depends on old widgets crate
+    #"libs/svg",  # removed: old resvg-based SVG, replaced by draw2/src/svg
     "platform2/script/test",
     "studio",
     "studio/ai",

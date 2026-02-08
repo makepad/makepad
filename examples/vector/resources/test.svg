@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 500" width="600" height="500">
+  <defs>
+    <!-- Linear gradient -->
+    <linearGradient id="grad1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3498db"/>
+      <stop offset="50%" stop-color="#2ecc71"/>
+      <stop offset="100%" stop-color="#e74c3c"/>
+    </linearGradient>
+
+    <!-- Radial gradient -->
+    <radialGradient id="grad2" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#f1c40f"/>
+      <stop offset="100%" stop-color="#e67e22" stop-opacity="0.6"/>
+    </radialGradient>
+
+    <!-- Gradient with href inheritance -->
+    <linearGradient id="grad3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#9b59b6"/>
+      <stop offset="100%" stop-color="#2c3e50"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 1. Basic shapes with solid fills -->
+  <rect x="20" y="20" width="160" height="100" rx="12" fill="#2c3e50"/>
+  <rect x="30" y="30" width="140" height="80" rx="8" fill="none" stroke="#ecf0f1" stroke-width="2"/>
+
+  <!-- 2. Circle with radial gradient -->
+  <circle cx="280" cy="70" r="50" fill="url(#grad2)"/>
+
+  <!-- 3. Ellipse with stroke -->
+  <ellipse cx="430" cy="70" rx="70" ry="40" fill="none" stroke="#e74c3c" stroke-width="3" stroke-dasharray="10,5"/>
+
+  <!-- 4. Linear gradient rectangle -->
+  <rect x="20" y="150" width="200" height="80" rx="6" fill="url(#grad1)"/>
+
+  <!-- 5. Complex path (heart shape) -->
+  <path d="M300,180 C300,170 280,150 260,150 C230,150 230,180 230,180 C230,210 260,230 300,260 C340,230 370,210 370,180 C370,180 370,150 340,150 C320,150 300,170 300,180 Z"
+        fill="#e74c3c" fill-opacity="0.85"/>
+
+  <!-- 6. Star using polygon points -->
+  <polygon points="530,140 545,185 595,185 555,210 570,255 530,230 490,255 505,210 465,185 515,185"
+           fill="url(#grad3)" stroke="#f39c12" stroke-width="2"/>
+
+  <!-- 7. Path with cubic beziers (wave) -->
+  <path d="M20,290 C60,250 100,330 140,290 C180,250 220,330 260,290 C300,250 340,330 380,290"
+        fill="none" stroke="#1abc9c" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- 8. Polyline -->
+  <polyline points="400,280 430,250 460,300 490,260 520,310 550,270 580,290"
+            fill="none" stroke="#3498db" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- 9. Group with transform -->
+  <g transform="translate(100,350)" opacity="0.9">
+    <rect x="0" y="0" width="120" height="80" rx="10" fill="#8e44ad"/>
+    <circle cx="60" cy="40" r="25" fill="#f39c12"/>
+    <line x1="35" y1="40" x2="85" y2="40" stroke="white" stroke-width="2"/>
+    <line x1="60" y1="15" x2="60" y2="65" stroke="white" stroke-width="2"/>
+  </g>
+
+  <!-- 10. Nested group with rotation -->
+  <g transform="translate(350,390)">
+    <g transform="rotate(15)">
+      <rect x="-40" y="-25" width="80" height="50" rx="5" fill="none" stroke="#2ecc71" stroke-width="2"/>
+    </g>
+    <g transform="rotate(-15)">
+      <rect x="-40" y="-25" width="80" height="50" rx="5" fill="none" stroke="#e74c3c" stroke-width="2"/>
+    </g>
+    <circle cx="0" cy="0" r="8" fill="#f1c40f"/>
+  </g>
+
+  <!-- 11. Path with arcs (rounded corner shape) -->
+  <path d="M500,340 L560,340 A20,20 0 0 1 580,360 L580,420 A20,20 0 0 1 560,440 L500,440 A20,20 0 0 1 480,420 L480,360 A20,20 0 0 1 500,340 Z"
+        fill="#16a085" stroke="#1abc9c" stroke-width="2"/>
+
+  <!-- 12. Path with quadratic beziers -->
+  <path d="M20,460 Q80,420 140,460 Q200,500 260,460 Q320,420 380,460"
+        fill="none" stroke="#9b59b6" stroke-width="2.5"/>
+
+  <!-- 13. Inline style attribute -->
+  <rect x="400" y="450" width="180" height="35" rx="17"
+        style="fill: #2c3e50; stroke: #ecf0f1; stroke-width: 1.5; opacity: 0.8"/>
+
+  <!-- 14. Animated circle (color pulse) -->
+  <circle cx="530" cy="70" r="30" fill="#e74c3c">
+    <animate attributeName="fill" values="#e74c3c;#3498db;#2ecc71;#e74c3c" dur="3s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" from="1" to="0.4" dur="1.5s" repeatCount="indefinite" fill="freeze"/>
+  </circle>
+
+  <!-- 15. Animated transform (rotating square) -->
+  <rect x="-20" y="-20" width="40" height="40" fill="#f39c12" transform="translate(530, 390)">
+    <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="4s" repeatCount="indefinite"/>
+  </rect>
+</svg>
