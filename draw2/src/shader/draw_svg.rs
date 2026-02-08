@@ -17,15 +17,14 @@ script_mod! {
     mod.draw.DrawSvg = mod.std.set_type_default() do #(DrawSvg::script_shader(vm)){
         ..mod.draw.DrawVector
 
-        // Tint color: vec4(-1,-1,-1,-1) means "use original SVG colors"
+        // color: vec4(-1,-1,-1,-1) means "use original SVG colors"
         // Any non-negative color replaces the SVG color, preserving per-vertex alpha.
-        tint: vec4(-1.0, -1.0, -1.0, -1.0)
+        color: vec4(-1.0, -1.0, -1.0, -1.0)
 
         get_color: fn() {
             let base = self.eval_gradient()
-            if self.tint.x >= 0.0 {
-                // Tint mode: replace color with tint, keep alpha from SVG
-                return vec4(self.tint.rgb * self.tint.a * base.a, self.tint.a * base.a)
+            if self.color.x >= 0.0 {
+                return vec4(self.color.rgb * self.color.a * base.a, self.color.a * base.a)
             }
             return base
         }
@@ -43,67 +42,82 @@ pub struct DrawSvg {
     svg_loaded: bool,
     #[rust]
     svg_size: DVec2,
+    #[rust]
+    svg_bounds_origin: (f32, f32),
     #[live(true)]
     pub preserve_aspect: bool,
     #[deref]
     pub draw_super: DrawVector,
     #[live(vec4(-1.0, -1.0, -1.0, -1.0))]
-    pub tint: Vec4f,
+    pub color: Vec4f,
 }
 
 impl DrawSvg {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
         self.load_svg(cx);
-        let Some(ref doc) = self.svg_doc else {
+        if self.svg_doc.is_none() {
             return Rect::default();
-        };
-
+        }
         let walk = self.resolve_walk(walk);
         let rect = cx.walk_turtle(walk);
-        let ox = rect.pos.x as f32;
-        let oy = rect.pos.y as f32;
-        let w = rect.size.x as f32;
-        let h = rect.size.y as f32;
-
-        self.draw_super.begin();
-        svg::render_svg(&mut self.draw_super, doc, ox, oy, w, h, 0.0);
-        self.draw_super.end(cx);
-
+        self.render_to_rect(cx, &rect, 0.0);
         rect
     }
 
     pub fn draw_walk_time(&mut self, cx: &mut Cx2d, walk: Walk, time: f32) -> Rect {
         self.load_svg(cx);
-        let Some(ref doc) = self.svg_doc else {
+        if self.svg_doc.is_none() {
             return Rect::default();
-        };
-
+        }
         let walk = self.resolve_walk(walk);
         let rect = cx.walk_turtle(walk);
-        let ox = rect.pos.x as f32;
-        let oy = rect.pos.y as f32;
-        let w = rect.size.x as f32;
-        let h = rect.size.y as f32;
-
-        self.draw_super.begin();
-        svg::render_svg(&mut self.draw_super, doc, ox, oy, w, h, time);
-        self.draw_super.end(cx);
-
+        self.render_to_rect(cx, &rect, time);
         rect
     }
 
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
         self.load_svg(cx);
-        let Some(ref doc) = self.svg_doc else { return };
+        if self.svg_doc.is_none() {
+            return;
+        };
+        self.render_to_rect(cx, &rect, 0.0);
+    }
 
-        let ox = rect.pos.x as f32;
-        let oy = rect.pos.y as f32;
+    fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
+        let doc = self.svg_doc.take().unwrap();
         let w = rect.size.x as f32;
         let h = rect.size.y as f32;
 
+        // Render SVG at origin (0,0) so geometry is in SVG-local space
         self.draw_super.begin();
-        svg::render_svg(&mut self.draw_super, doc, ox, oy, w, h, 0.0);
+        svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, w, h, time);
+
+        // Shift all vertex positions from SVG space to the target rect,
+        // accounting for the content bounds origin
+        let (bx, by) = self.svg_bounds_origin;
+        let sx = if self.svg_size.x > 0.0 {
+            w / self.svg_size.x as f32
+        } else {
+            1.0
+        };
+        let sy = if self.svg_size.y > 0.0 {
+            h / self.svg_size.y as f32
+        } else {
+            1.0
+        };
+        let shift_x = rect.pos.x as f32 - bx * sx;
+        let shift_y = rect.pos.y as f32 - by * sy;
+
+        let stride = 21; // FLOATS_PER_VERTEX
+        let verts = &mut self.draw_super.acc_verts;
+        let num_verts = verts.len() / stride;
+        for i in 0..num_verts {
+            verts[i * stride] += shift_x;
+            verts[i * stride + 1] += shift_y;
+        }
+
         self.draw_super.end(cx);
+        self.svg_doc = Some(doc);
     }
 
     fn resolve_walk(&self, walk: Walk) -> Walk {
@@ -153,18 +167,42 @@ impl DrawSvg {
         self.svg_loaded = true;
 
         let Some(ref handle_ref) = self.svg else {
+            // Only log for DrawSvg that is NOT a sub-field of button/icon (too noisy)
             return;
         };
 
         let handle = handle_ref.as_handle();
+        log!(
+            "DrawSvg::load_svg - handle: {:?} svg_size: {:?}",
+            handle,
+            self.svg_size
+        );
 
         let data = if let Some(data) = cx.get_resource(handle) {
+            log!(
+                "DrawSvg::load_svg - handle {:?} found immediately, len: {}",
+                handle,
+                data.len()
+            );
             data
         } else {
             cx.script_data.resources.load_all_resources();
             match cx.get_resource(handle) {
-                Some(data) => data,
-                None => return,
+                Some(data) => {
+                    log!(
+                        "DrawSvg::load_svg - handle {:?} found after load_all, len: {}",
+                        handle,
+                        data.len()
+                    );
+                    data
+                }
+                None => {
+                    log!(
+                        "DrawSvg::load_svg - handle {:?} NOT FOUND after load_all",
+                        handle
+                    );
+                    return;
+                }
             }
         };
 
@@ -174,17 +212,28 @@ impl DrawSvg {
         };
 
         let doc = svg::parse_svg(svg_str);
-        let (w, h) = doc.logical_size();
-        self.svg_size = dvec2(w as f64, h as f64);
+        self.set_doc_bounds(&doc);
         self.svg_doc = Some(doc);
     }
 
     pub fn load_from_str(&mut self, svg_str: &str) {
         let doc = svg::parse_svg(svg_str);
-        let (w, h) = doc.logical_size();
-        self.svg_size = dvec2(w as f64, h as f64);
+        self.set_doc_bounds(&doc);
         self.svg_doc = Some(doc);
         self.svg_loaded = true;
+    }
+
+    fn set_doc_bounds(&mut self, doc: &SvgDocument) {
+        if let Some((min_x, min_y, max_x, max_y)) = doc.compute_bounds() {
+            let w = max_x - min_x;
+            let h = max_y - min_y;
+            self.svg_size = dvec2(w as f64, h as f64);
+            self.svg_bounds_origin = (min_x, min_y);
+        } else {
+            let (w, h) = doc.logical_size();
+            self.svg_size = dvec2(w as f64, h as f64);
+            self.svg_bounds_origin = (0.0, 0.0);
+        }
     }
 
     pub fn svg_size(&self) -> Option<DVec2> {

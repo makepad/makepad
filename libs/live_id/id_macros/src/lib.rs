@@ -14,7 +14,8 @@ fn eat_ident(parser: &mut TokenParser) -> Option<String> {
 }
 
 fn parse_single_token(item: TokenStream) -> String {
-    item.to_string()
+    let s = item.to_string();
+    s.replace(' ', "")
 }
 
 #[proc_macro]

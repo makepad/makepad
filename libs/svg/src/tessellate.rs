@@ -663,7 +663,8 @@ impl Tessellator {
         indices.push(vi + 2);
     }
 
-    /// Generate fill geometry (convex fan + AA fringe). Returns (vertices, indices).
+    /// Generate fill geometry (monotone sweep-line triangulation + AA fringe).
+    /// Returns (vertices, indices).
     pub fn fill(
         &mut self,
         aa: f32,
@@ -681,26 +682,21 @@ impl Tessellator {
             if count < 3 {
                 continue;
             }
-            // convex fan at original path positions (fully opaque)
+            // Emit vertices for this subpath
             let base = verts.len() as u32;
             for j in 0..count {
                 let pt = self.points[first + j];
                 verts.push(VVertex::new(pt.x, pt.y, 0.5, 1.0));
             }
-            for j in 2..count as u32 {
-                indices.push(base);
-                indices.push(base + j - 1);
-                indices.push(base + j);
-            }
+            // Triangulate using monotone sweep-line decomposition
+            fill_tessellate(&self.points[first..first + count], base, &mut indices);
+
             // AA fringe: from path edge (opaque) outward (transparent)
-            // dm points inward for CCW, so -dm is outward
             if woff > 0.0 {
                 let fringe_base = verts.len() as u32;
                 for j in 0..count {
                     let p1 = self.points[first + j];
-                    // inner: at path edge (opaque)
                     verts.push(VVertex::new(p1.x, p1.y, 0.5, 1.0));
-                    // outer: pushed outward by -dm*aa (transparent)
                     verts.push(VVertex::new(
                         p1.x - p1.dmx * woff * 2.0,
                         p1.y - p1.dmy * woff * 2.0,
@@ -708,7 +704,6 @@ impl Tessellator {
                         1.0,
                     ));
                 }
-                // stitch fringe strip
                 for j in 0..count as u32 {
                     let j1 = if j + 1 < count as u32 { j + 1 } else { 0 };
                     let a = fringe_base + j * 2;
@@ -806,4 +801,649 @@ fn poly_area(pts: &[VPoint]) -> f32 {
             - (pts[i - 1].x - pts[0].x) * (pts[i].y - pts[0].y);
     }
     area * 0.5
+}
+
+// ---- Sweep-line monotone polygon tessellator (ported from bender) ----
+// Correctly triangulates concave (and self-intersecting) polygons using
+// sweep-line decomposition into monotone sub-polygons, then triangulating each.
+
+/// Tessellate a closed polygon given as a slice of VPoints.
+/// `base` is the vertex index offset added to all emitted triangle indices.
+fn fill_tessellate(pts: &[VPoint], base: u32, indices: &mut Vec<u32>) {
+    let n = pts.len();
+    if n < 3 {
+        return;
+    }
+
+    // Build edges from the closed polygon
+    let mut tess = SweepTessellator::new();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let start = FPoint::new(pts[i].x, pts[i].y);
+        let end = FPoint::new(pts[j].x, pts[j].y);
+        tess.push_edge(start, end);
+    }
+
+    // Run sweep and collect triangles
+    let tri = tess.tessellate(pts, base);
+    indices.extend_from_slice(&tri);
+}
+
+// Minimal 2D point for the tessellator
+#[derive(Clone, Copy, Debug)]
+struct FPoint {
+    x: f32,
+    y: f32,
+}
+
+impl FPoint {
+    fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+impl PartialEq for FPoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+
+impl PartialOrd for FPoint {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare y first (sweep direction), then x
+        match self.y.partial_cmp(&other.y) {
+            Some(std::cmp::Ordering::Equal) => self.x.partial_cmp(&other.x),
+            ord => ord,
+        }
+    }
+}
+
+// Line segment for sweep-line
+#[derive(Clone, Copy, Debug)]
+struct FSegment {
+    start: FPoint,
+    end: FPoint,
+}
+
+impl FSegment {
+    fn new(start: FPoint, end: FPoint) -> Self {
+        Self { start, end }
+    }
+
+    // Returns ordering of point relative to segment: Less = right, Greater = left, Equal = on
+    fn compare_to_point(&self, p: FPoint) -> std::cmp::Ordering {
+        let c =
+            (p.x - self.start.x) * (self.end.y - p.y) - (p.y - self.start.y) * (self.end.x - p.x);
+        if c > 0.0 {
+            std::cmp::Ordering::Greater
+        } else if c < 0.0 {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    }
+}
+
+// Parity tracking for even-odd fill rule
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FParity {
+    Even,
+    Odd,
+}
+
+impl FParity {
+    fn is_interior(self) -> bool {
+        self == FParity::Odd
+    }
+}
+
+impl std::ops::Add for FParity {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        match (self, other) {
+            (FParity::Even, FParity::Even) | (FParity::Odd, FParity::Odd) => FParity::Even,
+            _ => FParity::Odd,
+        }
+    }
+}
+
+// Events for the sweep line
+#[derive(Clone, Copy, Debug)]
+struct SweepEvent {
+    vertex: FPoint,
+    pending_edge: Option<SweepPendingEdge>,
+}
+
+impl PartialEq for SweepEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.vertex == other.vertex
+    }
+}
+impl Eq for SweepEvent {}
+
+impl PartialOrd for SweepEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SweepEvent {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse order for min-heap behavior with BinaryHeap (which is max-heap)
+        other
+            .vertex
+            .partial_cmp(&self.vertex)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SweepPendingEdge {
+    parity: FParity,
+    end: FPoint,
+}
+
+impl SweepPendingEdge {
+    fn to_segment(self, start: FPoint) -> FSegment {
+        FSegment::new(start, self.end)
+    }
+
+    fn compare(&self, other: &Self, start: FPoint) -> std::cmp::Ordering {
+        if self
+            .end
+            .partial_cmp(&other.end)
+            .map_or(false, |o| o != std::cmp::Ordering::Greater)
+        {
+            other.to_segment(start).compare_to_point(self.end).reverse()
+        } else {
+            self.to_segment(start).compare_to_point(other.end)
+        }
+    }
+
+    fn overlaps(&self, other: &Self, start: FPoint) -> bool {
+        self.compare(other, start) == std::cmp::Ordering::Equal
+    }
+
+    fn splice(&mut self, mut other: Self) -> Option<SweepEvent> {
+        if other
+            .end
+            .partial_cmp(&self.end)
+            .map_or(false, |o| o != std::cmp::Ordering::Greater)
+        {
+            std::mem::swap(self, &mut other);
+        }
+        self.parity = self.parity + other.parity;
+        if self.end == other.end {
+            return None;
+        }
+        Some(SweepEvent {
+            vertex: self.end,
+            pending_edge: Some(other),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SweepActiveEdge {
+    is_temporary: bool,
+    parity: FParity,
+    start_index: u32,
+    edge: FSegment,
+    upper_region_parity: FParity,
+    lower_mono: Option<usize>,
+    upper_mono: Option<usize>,
+}
+
+impl SweepActiveEdge {
+    fn split(&mut self, vertex: FPoint) -> Option<SweepPendingEdge> {
+        let end = self.edge.end;
+        if vertex == end {
+            return None;
+        }
+        self.edge = FSegment::new(self.edge.start, vertex);
+        Some(SweepPendingEdge {
+            parity: self.parity,
+            end,
+        })
+    }
+}
+
+// Monotone polygon tessellator
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MonoSide {
+    Lower,
+    Upper,
+}
+
+#[derive(Clone, Debug)]
+struct MonoVertex {
+    index: u32,
+    pos: FPoint,
+}
+
+#[derive(Clone, Debug)]
+struct MonoPoly {
+    side: MonoSide,
+    stack: Vec<MonoVertex>,
+}
+
+impl MonoPoly {
+    fn new() -> Self {
+        Self {
+            side: MonoSide::Lower,
+            stack: Vec::new(),
+        }
+    }
+
+    fn start(&mut self, index: u32, pos: FPoint) {
+        self.stack.clear();
+        self.stack.push(MonoVertex { index, pos });
+    }
+
+    fn finish(&mut self, index: u32, out: &mut Vec<u32>) {
+        let mut v1 = self.stack.pop().unwrap();
+        while let Some(v0) = self.stack.pop() {
+            out.push(v0.index);
+            out.push(v1.index);
+            out.push(index);
+            v1 = v0;
+        }
+    }
+
+    fn push_vertex(&mut self, side: MonoSide, index: u32, pos: FPoint, out: &mut Vec<u32>) {
+        if side == self.side {
+            let mut v1 = self.stack.pop().unwrap();
+            loop {
+                let v0 = if let Some(v0) = self.stack.last() {
+                    v0.clone()
+                } else {
+                    break;
+                };
+                let seg = FSegment::new(v0.pos, pos);
+                let cmp = seg.compare_to_point(v1.pos);
+                match (cmp, side) {
+                    (std::cmp::Ordering::Less, MonoSide::Lower) => break,
+                    (std::cmp::Ordering::Equal, _) => break,
+                    (std::cmp::Ordering::Greater, MonoSide::Upper) => break,
+                    _ => (),
+                }
+                self.stack.pop();
+                out.push(v0.index);
+                out.push(v1.index);
+                out.push(index);
+                v1 = v0;
+            }
+            self.stack.push(v1);
+            self.stack.push(MonoVertex { index, pos });
+        } else {
+            let vertex = self.stack.pop().unwrap();
+            let mut v1 = vertex.clone();
+            while let Some(v0) = self.stack.pop() {
+                out.push(v0.index);
+                out.push(v1.index);
+                out.push(index);
+                v1 = v0;
+            }
+            self.stack.push(vertex);
+            self.stack.push(MonoVertex { index, pos });
+            self.side = side;
+        }
+    }
+}
+
+// Simple arena for monotone polygons
+struct MonoArena {
+    polys: Vec<Option<MonoPoly>>,
+    free: Vec<usize>,
+    pool: Vec<MonoPoly>,
+}
+
+impl MonoArena {
+    fn new() -> Self {
+        Self {
+            polys: Vec::new(),
+            free: Vec::new(),
+            pool: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, poly: MonoPoly) -> usize {
+        if let Some(idx) = self.free.pop() {
+            self.polys[idx] = Some(poly);
+            idx
+        } else {
+            let idx = self.polys.len();
+            self.polys.push(Some(poly));
+            idx
+        }
+    }
+
+    fn remove(&mut self, idx: usize) -> MonoPoly {
+        let poly = self.polys[idx].take().unwrap();
+        self.free.push(idx);
+        poly
+    }
+
+    fn get_mut(&mut self, idx: usize) -> &mut MonoPoly {
+        self.polys[idx].as_mut().unwrap()
+    }
+
+    fn start_mono(&mut self, index: u32, pos: FPoint) -> usize {
+        let mut poly = self.pool.pop().unwrap_or_else(MonoPoly::new);
+        poly.start(index, pos);
+        self.insert(poly)
+    }
+
+    fn finish_mono(&mut self, idx: usize, index: u32, out: &mut Vec<u32>) {
+        let mut poly = self.remove(idx);
+        poly.finish(index, out);
+        self.pool.push(poly);
+    }
+}
+
+// The main sweep-line tessellator
+struct SweepTessellator {
+    active_edges: Vec<SweepActiveEdge>,
+    event_queue: std::collections::BinaryHeap<SweepEvent>,
+    mono_arena: MonoArena,
+}
+
+impl SweepTessellator {
+    fn new() -> Self {
+        Self {
+            active_edges: Vec::new(),
+            event_queue: std::collections::BinaryHeap::new(),
+            mono_arena: MonoArena::new(),
+        }
+    }
+
+    fn push_edge(&mut self, start: FPoint, end: FPoint) {
+        if start == end {
+            return;
+        }
+        let (start, end) = if start.partial_cmp(&end) == Some(std::cmp::Ordering::Less) {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        self.event_queue.push(SweepEvent {
+            vertex: start,
+            pending_edge: Some(SweepPendingEdge {
+                parity: FParity::Odd,
+                end,
+            }),
+        });
+        self.event_queue.push(SweepEvent {
+            vertex: end,
+            pending_edge: None,
+        });
+    }
+
+    fn tessellate(mut self, pts: &[VPoint], base: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut pending = Vec::new();
+        let mut left_edges = Vec::new();
+
+        // Map from FPoint positions to vertex indices
+        // We need to find the vertex index for each event point
+        while let Some(vertex) = self.pop_events(&mut pending) {
+            // Find vertex index — search pts for matching position
+            let vi = Self::find_vertex_index(pts, vertex, base);
+            self.handle_vertex(vertex, vi, &mut pending, &mut left_edges, &mut out);
+            pending.clear();
+            left_edges.clear();
+        }
+        out
+    }
+
+    fn find_vertex_index(pts: &[VPoint], fp: FPoint, base: u32) -> u32 {
+        // Find closest matching vertex
+        let mut best = 0u32;
+        let mut best_dist = f32::MAX;
+        for (i, pt) in pts.iter().enumerate() {
+            let dx = pt.x - fp.x;
+            let dy = pt.y - fp.y;
+            let d = dx * dx + dy * dy;
+            if d < best_dist {
+                best_dist = d;
+                best = i as u32;
+                if d == 0.0 {
+                    break;
+                }
+            }
+        }
+        base + best
+    }
+
+    fn pop_events(&mut self, pending: &mut Vec<SweepPendingEdge>) -> Option<FPoint> {
+        let event = self.event_queue.pop()?;
+        if let Some(pe) = event.pending_edge {
+            pending.push(pe);
+        }
+        loop {
+            let next = if let Some(next) = self.event_queue.peek() {
+                if next.vertex == event.vertex {
+                    next.clone()
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            };
+            self.event_queue.pop();
+            if let Some(pe) = next.pending_edge {
+                pending.push(pe);
+            }
+        }
+        Some(event.vertex)
+    }
+
+    fn handle_vertex(
+        &mut self,
+        vertex: FPoint,
+        vi: u32,
+        pending: &mut Vec<SweepPendingEdge>,
+        left_edges: &mut Vec<SweepActiveEdge>,
+        out: &mut Vec<u32>,
+    ) {
+        let mut incident_range = self.find_incident_range(vertex);
+        self.fix_temporary_edges(vertex, &mut incident_range);
+        let incident_start = incident_range.start;
+
+        // Remove incident edges and collect split pending edges
+        for mut ae in self.active_edges.drain(incident_range.clone()) {
+            if let Some(pe) = ae.split(vertex) {
+                pending.push(pe);
+            }
+            left_edges.push(ae);
+        }
+
+        // Sort and splice pending edges
+        pending.sort_by(|a, b| a.compare(b, vertex));
+        let mut write = 0;
+        for read in 1..pending.len() {
+            let pe1 = pending[read];
+            if pending[write].overlaps(&pe1, vertex) {
+                if let Some(ev) = pending[write].splice(pe1) {
+                    self.event_queue.push(ev);
+                }
+            } else {
+                write += 1;
+                pending[write] = pe1;
+            }
+        }
+        if !pending.is_empty() {
+            pending.truncate(write + 1);
+        }
+
+        // Determine lower/upper monotone polygons from left edges
+        let (lower_mono, upper_mono) = if left_edges.is_empty() {
+            self.connect_left_vertex(incident_start)
+        } else {
+            self.finish_left_monos(vi, left_edges, out)
+        };
+
+        if let Some(lm) = lower_mono {
+            self.mono_arena
+                .get_mut(lm)
+                .push_vertex(MonoSide::Upper, vi, vertex, out);
+        }
+        if let Some(um) = upper_mono {
+            self.mono_arena
+                .get_mut(um)
+                .push_vertex(MonoSide::Lower, vi, vertex, out);
+        }
+
+        if pending.is_empty() {
+            self.connect_right_vertex(vi, vertex, incident_start, lower_mono, upper_mono);
+        } else {
+            self.create_right_edges(vi, vertex, incident_start, pending, lower_mono, upper_mono);
+        }
+    }
+
+    fn find_incident_range(&self, vertex: FPoint) -> std::ops::Range<usize> {
+        let start = self
+            .active_edges
+            .iter()
+            .position(|ae| ae.edge.compare_to_point(vertex) != std::cmp::Ordering::Less)
+            .unwrap_or(self.active_edges.len());
+        let end = self
+            .active_edges
+            .iter()
+            .rposition(|ae| ae.edge.compare_to_point(vertex) != std::cmp::Ordering::Greater)
+            .map_or(0, |i| i + 1);
+        start..end
+    }
+
+    fn fix_temporary_edges(&mut self, vertex: FPoint, range: &mut std::ops::Range<usize>) {
+        while range.start > 0 && self.active_edges[range.start - 1].is_temporary {
+            range.start -= 1;
+            self.active_edges[range.start].split(vertex);
+        }
+        while range.end < self.active_edges.len() && self.active_edges[range.end].is_temporary {
+            self.active_edges[range.end].split(vertex);
+            range.end += 1;
+        }
+    }
+
+    fn last_lower_parity(&self, incident_start: usize) -> FParity {
+        if incident_start == 0 {
+            FParity::Even
+        } else {
+            self.active_edges[incident_start - 1].upper_region_parity
+        }
+    }
+
+    fn connect_left_vertex(&mut self, incident_start: usize) -> (Option<usize>, Option<usize>) {
+        if !self.last_lower_parity(incident_start).is_interior() {
+            return (None, None);
+        }
+        let ae0 = self.active_edges[incident_start - 1];
+        let ae1 = self.active_edges[incident_start];
+        if ae0.edge.start.partial_cmp(&ae1.edge.start) != Some(std::cmp::Ordering::Greater) {
+            let um = self.mono_arena.start_mono(ae1.start_index, ae1.edge.start);
+            let old = self.active_edges[incident_start].lower_mono.replace(um);
+            (old, Some(um))
+        } else {
+            let lm = self.mono_arena.start_mono(ae0.start_index, ae0.edge.start);
+            let old = self.active_edges[incident_start - 1].upper_mono.replace(lm);
+            (Some(lm), old)
+        }
+    }
+
+    fn finish_left_monos(
+        &mut self,
+        vi: u32,
+        left_edges: &[SweepActiveEdge],
+        out: &mut Vec<u32>,
+    ) -> (Option<usize>, Option<usize>) {
+        for le in &left_edges[..left_edges.len() - 1] {
+            if le.upper_region_parity.is_interior() {
+                if let Some(um) = le.upper_mono {
+                    self.mono_arena.finish_mono(um, vi, out);
+                }
+            }
+        }
+        (
+            left_edges.first().unwrap().lower_mono,
+            left_edges.last().unwrap().upper_mono,
+        )
+    }
+
+    fn connect_right_vertex(
+        &mut self,
+        vi: u32,
+        vertex: FPoint,
+        incident_start: usize,
+        lower_mono: Option<usize>,
+        upper_mono: Option<usize>,
+    ) {
+        let lower_parity = self.last_lower_parity(incident_start);
+        if !lower_parity.is_interior() {
+            return;
+        }
+        let end_point = {
+            let e0 = self.active_edges[incident_start - 1].edge.end;
+            let e1 = self.active_edges[incident_start].edge.end;
+            if e0.partial_cmp(&e1) != Some(std::cmp::Ordering::Greater) {
+                e0
+            } else {
+                e1
+            }
+        };
+        self.active_edges.insert(
+            incident_start,
+            SweepActiveEdge {
+                is_temporary: true,
+                parity: FParity::Even,
+                start_index: vi,
+                edge: FSegment::new(vertex, end_point),
+                upper_region_parity: lower_parity,
+                lower_mono,
+                upper_mono,
+            },
+        );
+    }
+
+    fn create_right_edges(
+        &mut self,
+        vi: u32,
+        vertex: FPoint,
+        incident_start: usize,
+        pending: &[SweepPendingEdge],
+        mut lower_mono: Option<usize>,
+        upper_mono: Option<usize>,
+    ) {
+        let mut lower_parity = self.last_lower_parity(incident_start);
+        let new_edges: Vec<SweepActiveEdge> = pending
+            .iter()
+            .enumerate()
+            .map(|(i, pe)| {
+                let upper_parity = lower_parity + pe.parity;
+                let um = if upper_parity.is_interior() {
+                    if i == pending.len() - 1 {
+                        upper_mono
+                    } else {
+                        Some(self.mono_arena.start_mono(vi, vertex))
+                    }
+                } else {
+                    None
+                };
+                let ae = SweepActiveEdge {
+                    is_temporary: false,
+                    parity: pe.parity,
+                    start_index: vi,
+                    edge: pe.to_segment(vertex),
+                    upper_region_parity: upper_parity,
+                    lower_mono,
+                    upper_mono: um,
+                };
+                lower_parity = upper_parity;
+                lower_mono = um;
+                ae
+            })
+            .collect();
+        self.active_edges
+            .splice(incident_start..incident_start, new_edges);
+    }
 }

@@ -231,7 +231,7 @@ script_mod! {
                 icon_walk: Walk{width: 32 height: 32}
             }
             Icon{
-                draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_search.svg")
+                draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_select.svg")
                 draw_icon.color: #f80
                 icon_walk: Walk{width: 32 height: 32}
             }
@@ -675,7 +675,7 @@ script_mod! {
         }
     }
 
-    // Media tab - images, spinners, custom draws
+    // Media tab - images, spinners, custom draws, SVGs
     let TabMedia = SolidView{
         width: Fill height: Fill
         draw_bg.color: #333
@@ -684,6 +684,32 @@ script_mod! {
 
             Label{text: "Images" draw_text.color: #fff draw_text.text_style.font_size: 13}
             test_image := Image{width: 180 height: 120 fit: ImageFit.Stretch}
+
+            Hr{}
+
+            Label{text: "SVG Icons" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            View{width: Fill height: Fit flow: Right spacing: 15 align: Align{y: 0.5}}
+            Svg{
+                width: 32 height: 32
+                draw_svg +: { svg: crate_resource("self:../../widgets2/resources/icons/icon_file.svg") }
+            }
+            Svg{
+                width: 32 height: 32
+                draw_svg +: { svg: crate_resource("self:../../widgets2/resources/icons/icon_folder.svg") }
+            }
+            Svg{
+                width: 32 height: 32
+                draw_svg +: { svg: crate_resource("self:../../widgets2/resources/icons/icon_select.svg") }
+            }
+
+            Hr{}
+
+            Label{text: "SVG Tiger" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Svg{
+                width: 300 height: 300
+                animating: false
+                draw_svg +: { svg: crate_resource("self:../../examples/vector/resources/tiger.svg") }
+            }
 
             Hr{}
 
@@ -838,7 +864,7 @@ script_mod! {
 
         // Center panel - content widgets
         center_tabs := DockTabs{
-            tabs: [@markup_tab, @buttons_tab, @media_tab, @modal_tab, @lists_tab]
+            tabs: [@media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
             selected: 0
             closable: true
         }

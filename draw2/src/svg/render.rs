@@ -335,12 +335,16 @@ fn emit_shape(
             let stroke_alpha = style.stroke_opacity * opacity;
             set_paint(dv, paint, defs, stroke_alpha, xf);
             let w = style.stroke_width * xf.scale_factor();
+            // Scale AA fringe relative to stroke width so thin strokes
+            // aren't dominated by the AA expansion. Clamp to at most
+            // the stroke width, with a minimum for visible AA on thick strokes.
+            let aa = w.min(1.0);
             dv.stroke_opts(
                 w,
                 style.stroke_linecap,
                 style.stroke_linejoin,
                 style.stroke_miterlimit,
-                1.0,
+                aa,
             );
             dv.path.clear();
         }
