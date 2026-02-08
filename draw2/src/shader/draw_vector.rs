@@ -1,4 +1,5 @@
 use crate::{cx_2d::*, draw_list_2d::ManyInstances, makepad_platform::*, turtle::*, vector::*};
+use makepad_svg::tessellate::compute_clip_radii;
 
 script_mod! {
     use mod.pod.*
@@ -30,6 +31,17 @@ script_mod! {
         v_param4: varying(float)
         v_param5: varying(float)
 
+        // Check if a circle (center, radius) is entirely outside a clip rect (x_min, y_min, x_max, y_max).
+        // Returns 1.0 if entirely outside, 0.0 if possibly inside.
+        clip_outside: fn(center: vec2, radius: float, clip: vec4) -> float {
+            if radius < 0.5 { return 0.0 }
+            if center.x + radius < clip.x { return 1.0 }
+            if center.y + radius < clip.y { return 1.0 }
+            if center.x - radius > clip.z { return 1.0 }
+            if center.y - radius > clip.w { return 1.0 }
+            return 0.0
+        }
+
         vertex: fn() {
             let pos = vec2(self.geom.x, self.geom.y);
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
@@ -46,6 +58,17 @@ script_mod! {
             self.v_param5 = self.geom.param5;
             let shifted = pos + self.draw_list.view_shift;
             self.v_world = shifted;
+
+            // Early clip rejection: if this vertex's entire triangle neighbourhood
+            // is outside both clip rects, emit a degenerate triangle
+            let cr = self.geom.clip_radius;
+            let local = pos;
+            if self.clip_outside(local, cr, self.draw_clip) > 0.5
+                || self.clip_outside(shifted, cr, self.draw_list.view_clip) > 0.5 {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
             let world = self.draw_list.view_transform * vec4(
                 shifted.x
                 shifted.y
@@ -240,7 +263,7 @@ script_mod! {
     }
 }
 
-const FLOATS_PER_VERTEX: usize = 21; // x,y,u,v, r,g,b,a, stroke_mult, stroke_dist, shape_id, param0-5, color2_r,g,b,a
+const FLOATS_PER_VERTEX: usize = 22; // x,y,u,v, r,g,b,a, stroke_mult, stroke_dist, shape_id, param0-5, color2_r,g,b,a, clip_radius
 
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
@@ -396,7 +419,8 @@ impl DrawVector {
         aa: f32,
     ) {
         self.tess.flatten(&self.path, 0.25);
-        let (verts, indices) = self.tess.stroke(stroke_width, cap, join, miter_limit, aa);
+        let (mut verts, indices) = self.tess.stroke(stroke_width, cap, join, miter_limit, aa);
+        compute_clip_radii(&mut verts, &indices);
         let sm = if aa > 0.0 {
             (stroke_width * 0.5 + aa * 0.5) / aa
         } else {
@@ -413,7 +437,8 @@ impl DrawVector {
 
     pub fn fill_opts(&mut self, join: LineJoin, miter_limit: f32, aa: f32) {
         self.tess.flatten(&self.path, 0.25);
-        let (verts, indices) = self.tess.fill(aa, join, miter_limit);
+        let (mut verts, indices) = self.tess.fill(aa, join, miter_limit);
+        compute_clip_radii(&mut verts, &indices);
         self.cur_stroke_mult = 1e6;
         self.append_geometry(&verts, &indices);
         self.path.clear();
@@ -425,7 +450,8 @@ impl DrawVector {
     pub fn shape_shadow(&mut self, blur: f32) {
         self.tess.flatten(&self.path, 0.25);
         // Bevel joins prevent miter spikes at sharp corners
-        let (verts, indices) = self.tess.fill_shadow(blur, LineJoin::Bevel, 1.0);
+        let (mut verts, indices) = self.tess.fill_shadow(blur, LineJoin::Bevel, 1.0);
+        compute_clip_radii(&mut verts, &indices);
         self.cur_stroke_mult = -2.0; // sentinel for geometry shadow mode
         self.append_geometry(&verts, &indices);
         self.path.clear();
@@ -482,6 +508,8 @@ impl DrawVector {
             self.acc_verts.push(0.0);
             self.acc_verts.push(0.0);
             self.acc_verts.push(0.0);
+            self.acc_verts.push(0.0);
+            // clip_radius: 0 = don't use for clip rejection on shadow quads
             self.acc_verts.push(0.0);
         }
         // two triangles
@@ -574,6 +602,7 @@ impl DrawVector {
             self.acc_verts.push(color1[1]);
             self.acc_verts.push(color1[2]);
             self.acc_verts.push(color1[3]);
+            self.acc_verts.push(v.clip_radius);
         }
         for &i in indices {
             self.acc_indices.push(base + i);

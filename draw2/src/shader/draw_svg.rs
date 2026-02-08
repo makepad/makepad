@@ -75,6 +75,15 @@ script_mod! {
             }
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
+
+            // Early clip rejection: scale clip_radius by max svg_scale component
+            let cr = self.geom.clip_radius * max(self.svg_scale.x, self.svg_scale.y);
+            if self.clip_outside(transformed, cr, self.draw_clip) > 0.5
+                || self.clip_outside(shifted, cr, self.draw_list.view_clip) > 0.5 {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
             let world = self.draw_list.view_transform * vec4(
                 shifted.x
                 shifted.y
