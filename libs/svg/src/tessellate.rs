@@ -1,4 +1,4 @@
-use crate::vector::path::*;
+use crate::path::*;
 use std::f32::consts::PI;
 
 // Output vertex: position + texcoord for AA + distance along stroke

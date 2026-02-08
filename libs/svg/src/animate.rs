@@ -3,11 +3,11 @@
 use makepad_html::HtmlWalker;
 use makepad_live_id::*;
 
-use super::color::parse_color;
-use super::document::*;
-use super::path_data::parse_path_data;
-use super::units::{parse_duration, parse_number};
-use crate::vector::VectorPath;
+use crate::color::parse_color;
+use crate::document::*;
+use crate::path::VectorPath;
+use crate::path_data::parse_path_data;
+use crate::units::{parse_duration, parse_number};
 
 // ---- Parsing ----
 
@@ -442,7 +442,7 @@ pub fn eval_path_animation(anim: &SvgAnimate, time: f32) -> Option<VectorPath> {
 /// Linearly interpolate two VectorPaths command-by-command.
 /// If they have different numbers of commands, uses path_a as fallback.
 fn lerp_paths(a: &VectorPath, b: &VectorPath, t: f32) -> VectorPath {
-    use crate::vector::path::PathCmd;
+    use crate::path::PathCmd;
 
     let mut result = VectorPath::new();
     let len = a.cmds.len().min(b.cmds.len());

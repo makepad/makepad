@@ -1,11 +1,11 @@
-use super::animate::{
+use crate::shader::draw_vector::DrawVector;
+/// SVG renderer: walks an SvgDocument and emits DrawVector calls.
+use makepad_svg::animate::{
     eval_color_animation, eval_float_animation, eval_path_animation, eval_transform_animation,
 };
-/// SVG renderer: walks an SvgDocument and emits DrawVector calls.
-use super::document::*;
-use super::units::viewbox_transform;
-use crate::shader::draw_vector::DrawVector;
-use crate::vector::{GradientStop, VectorPaint, VectorPath};
+use makepad_svg::document::*;
+use makepad_svg::units::viewbox_transform;
+use makepad_svg::{GradientStop, VectorPaint, VectorPath};
 
 pub fn render_svg(
     dv: &mut DrawVector,
@@ -394,7 +394,7 @@ fn gradient_to_vector_paint(grad: &SvgGradient, xf: &Transform2d) -> VectorPaint
     }
 }
 
-use crate::vector::path::PathCmd;
+use makepad_svg::path::PathCmd;
 
 fn emit_path(dv: &mut DrawVector, path: &VectorPath, xf: &Transform2d) {
     for cmd in &path.cmds {

@@ -1,4 +1,5 @@
-use crate::vector::{FillRule, GradientStop, LineCap, LineJoin, VectorPath};
+use crate::path::{FillRule, LineCap, LineJoin, VectorPath};
+use crate::paint::GradientStop;
 use std::collections::HashMap;
 
 // ---- Transform ----

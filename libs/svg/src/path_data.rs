@@ -1,7 +1,7 @@
 /// SVG path "d" attribute parser.
 /// Parses M/L/H/V/C/S/Q/T/A/Z commands into VectorPath calls.
 /// All relative commands converted to absolute. Arcs converted to cubic beziers.
-use crate::vector::VectorPath;
+use crate::path::VectorPath;
 use std::f32::consts::PI;
 
 pub fn parse_path_data(d: &str, path: &mut VectorPath) {
