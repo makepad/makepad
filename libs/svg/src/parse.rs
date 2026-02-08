@@ -6,11 +6,11 @@ use makepad_live_id::*;
 use crate::animate::{parse_animate_element, parse_animate_transform_element};
 use crate::document::*;
 use crate::gradient::{parse_linear_gradient, parse_radial_gradient, parse_stop};
+use crate::path::VectorPath;
 use crate::path_data::parse_path_data;
 use crate::style::parse_style_from_element;
 use crate::transform::parse_transform;
 use crate::units::{parse_length, parse_number, parse_points, parse_viewbox};
-use crate::path::VectorPath;
 
 pub fn parse_svg(svg_str: &str) -> SvgDocument {
     let mut errors = None;

@@ -1,5 +1,5 @@
-use crate::path::{FillRule, LineCap, LineJoin, VectorPath};
 use crate::paint::GradientStop;
+use crate::path::{FillRule, LineCap, LineJoin, VectorPath};
 use std::collections::HashMap;
 
 // ---- Transform ----
@@ -148,7 +148,7 @@ pub struct SvgStyle {
 impl Default for SvgStyle {
     fn default() -> Self {
         Self {
-            fill: Some(SvgPaint::Color(0.0, 0.0, 0.0, 1.0)), // SVG default fill is black
+            fill: Some(SvgPaint::Color(1.0, 1.0, 1.0, 1.0)), // default fill white for dark UI
             fill_opacity: 1.0,
             fill_rule: FillRule::NonZero,
             stroke: None,
@@ -555,10 +555,120 @@ impl SvgDocument {
         (300.0, 150.0) // SVG default
     }
 
+    /// Compute the actual bounding box of all geometry in the document
+    /// by walking all nodes and applying their transforms to path control points.
+    /// Returns (min_x, min_y, max_x, max_y), or None if no geometry.
+    pub fn compute_bounds(&self) -> Option<(f32, f32, f32, f32)> {
+        let mut bounds = BoundsAccum::new();
+        Self::bounds_nodes(&self.root, &Transform2d::identity(), &mut bounds);
+        bounds.result()
+    }
+
+    fn bounds_nodes(nodes: &[SvgNode], parent_xf: &Transform2d, bounds: &mut BoundsAccum) {
+        for node in nodes {
+            match node {
+                SvgNode::Group(g) => {
+                    let xf = parent_xf.then(&g.transform);
+                    Self::bounds_nodes(&g.children, &xf, bounds);
+                }
+                SvgNode::Path(p) => {
+                    let xf = parent_xf.then(&p.transform);
+                    Self::bounds_path(&p.path, &xf, bounds);
+                }
+                SvgNode::Rect(r) => {
+                    let xf = parent_xf.then(&r.transform);
+                    bounds.add_point_xf(r.x, r.y, &xf);
+                    bounds.add_point_xf(r.x + r.width, r.y + r.height, &xf);
+                }
+                SvgNode::Circle(c) => {
+                    let xf = parent_xf.then(&c.transform);
+                    bounds.add_point_xf(c.cx - c.r, c.cy - c.r, &xf);
+                    bounds.add_point_xf(c.cx + c.r, c.cy + c.r, &xf);
+                }
+                SvgNode::Ellipse(e) => {
+                    let xf = parent_xf.then(&e.transform);
+                    bounds.add_point_xf(e.cx - e.rx, e.cy - e.ry, &xf);
+                    bounds.add_point_xf(e.cx + e.rx, e.cy + e.ry, &xf);
+                }
+                SvgNode::Line(l) => {
+                    let xf = parent_xf.then(&l.transform);
+                    bounds.add_point_xf(l.x1, l.y1, &xf);
+                    bounds.add_point_xf(l.x2, l.y2, &xf);
+                }
+                SvgNode::Polyline(p) => {
+                    let xf = parent_xf.then(&p.transform);
+                    for &(px, py) in &p.points {
+                        bounds.add_point_xf(px, py, &xf);
+                    }
+                }
+                SvgNode::Polygon(p) => {
+                    let xf = parent_xf.then(&p.transform);
+                    for &(px, py) in &p.points {
+                        bounds.add_point_xf(px, py, &xf);
+                    }
+                }
+            }
+        }
+    }
+
+    fn bounds_path(path: &VectorPath, xf: &Transform2d, bounds: &mut BoundsAccum) {
+        use crate::path::PathCmd;
+        for cmd in &path.cmds {
+            match cmd {
+                PathCmd::MoveTo(x, y) | PathCmd::LineTo(x, y) => {
+                    bounds.add_point_xf(*x, *y, xf);
+                }
+                PathCmd::BezierTo(cx1, cy1, cx2, cy2, x, y) => {
+                    bounds.add_point_xf(*cx1, *cy1, xf);
+                    bounds.add_point_xf(*cx2, *cy2, xf);
+                    bounds.add_point_xf(*x, *y, xf);
+                }
+                PathCmd::Close | PathCmd::Winding(_) => {}
+            }
+        }
+    }
+
     pub fn resolve_gradient_hrefs(&mut self) {
         let grad_clone = self.defs.gradients.clone();
         for grad in self.defs.gradients.values_mut() {
             grad.resolve_href(&grad_clone);
+        }
+    }
+}
+
+struct BoundsAccum {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+    has_points: bool,
+}
+
+impl BoundsAccum {
+    fn new() -> Self {
+        Self {
+            min_x: f32::MAX,
+            min_y: f32::MAX,
+            max_x: f32::MIN,
+            max_y: f32::MIN,
+            has_points: false,
+        }
+    }
+
+    fn add_point_xf(&mut self, x: f32, y: f32, xf: &Transform2d) {
+        let (tx, ty) = xf.apply(x, y);
+        self.min_x = self.min_x.min(tx);
+        self.min_y = self.min_y.min(ty);
+        self.max_x = self.max_x.max(tx);
+        self.max_y = self.max_y.max(ty);
+        self.has_points = true;
+    }
+
+    fn result(&self) -> Option<(f32, f32, f32, f32)> {
+        if self.has_points {
+            Some((self.min_x, self.min_y, self.max_x, self.max_y))
+        } else {
+            None
         }
     }
 }

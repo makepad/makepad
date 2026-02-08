@@ -5,8 +5,8 @@ use makepad_live_id::*;
 
 use crate::color::parse_color;
 use crate::document::{SvgPaint, SvgStyle};
-use crate::units::{parse_length, parse_number};
 use crate::path::{FillRule, LineCap, LineJoin};
+use crate::units::{parse_length, parse_number};
 
 /// Parse style from element attributes. Inline `style` attribute overrides presentation attributes.
 pub fn parse_style_from_element(walker: &HtmlWalker, parent_style: &SvgStyle) -> SvgStyle {
@@ -35,8 +35,6 @@ fn apply_presentation_attrs(walker: &HtmlWalker, style: &mut SvgStyle) {
             style.opacity = n.clamp(0.0, 1.0);
         }
     }
-    // fill-opacity and stroke-opacity use hyphens which LiveId can't match with find_attr_lc.
-    // We handle them via inline style or via the alias scan below.
     if let Some(v) = walker.find_attr_lc(live_id!(fill - opacity)) {
         if let Some(n) = parse_number(v) {
             style.fill_opacity = n.clamp(0.0, 1.0);
