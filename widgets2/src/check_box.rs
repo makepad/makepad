@@ -5,7 +5,6 @@ use crate::{
     widget::*,
 };
 
-#[cfg(feature = "svg")]
 use crate::makepad_draw::DrawSvg;
 
 script_mod! {
@@ -384,7 +383,6 @@ pub struct CheckBox {
     #[live]
     draw_text: DrawText,
 
-    #[cfg(feature = "svg")]
     #[live]
     draw_icon: DrawSvg,
 
@@ -426,7 +424,6 @@ impl CheckBox {
     pub fn draw_check_box(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
 
-        #[cfg(feature = "svg")]
         self.draw_icon.draw_walk(cx, self.icon_walk);
 
         self.draw_text

@@ -11,6 +11,7 @@ pub mod match_event;
 pub mod nav;
 pub mod overlay;
 pub mod shader;
+pub mod svg;
 pub mod text;
 pub mod turtle;
 pub mod vector;
@@ -36,7 +37,6 @@ pub use crate::{
     vector::{GradientStop, VectorPaint},
 };
 
-#[cfg(feature = "svg")]
 pub use crate::shader::draw_svg::DrawSvg;
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
@@ -46,7 +46,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::draw_quad::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
     crate::shader::draw_vector::script_mod(vm);
-    #[cfg(feature = "svg")]
     crate::shader::draw_svg::script_mod(vm);
     NIL
 }

@@ -5,7 +5,6 @@ use crate::{
     animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
 };
 
-#[cfg(feature = "svg")]
 use crate::makepad_draw::DrawSvg;
 
 script_mod!{
@@ -315,7 +314,6 @@ pub struct RadioButton {
     
     #[redraw] #[live] draw_bg: DrawQuad,
     #[live] draw_text: DrawText,
-    #[cfg(feature = "svg")]
     #[live] draw_icon: DrawSvg,
     
     #[live] text: ArcStringMut,
@@ -331,7 +329,6 @@ impl RadioButton {
     
     pub fn draw_radio_button(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        #[cfg(feature = "svg")]
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);

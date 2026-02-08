@@ -5,7 +5,6 @@ use crate::{
     animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
 };
 
-#[cfg(feature = "svg")]
 use crate::makepad_draw::DrawSvg;
 
 script_mod!{
@@ -266,7 +265,6 @@ pub struct Tab {
     #[rust] is_dragging: bool,
     
     #[live] draw_bg: DrawQuad,
-    #[cfg(feature = "svg")]
     #[live] draw_icon: DrawSvg,
     #[live] draw_text: DrawText,
     #[live] icon_walk: Walk,
@@ -310,7 +308,6 @@ impl Tab {
             self.close_button.draw(cx);
         }
         
-        #[cfg(feature = "svg")]
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
