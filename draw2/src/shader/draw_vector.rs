@@ -291,6 +291,10 @@ pub struct DrawVector {
     // enabling the pixel shader to compute proper UV coordinates from v_world.
     #[rust]
     pub cur_effect_bbox: Option<[f32; 4]>,
+    /// Inherited CSS `color` override from a `<use>` element. When set,
+    /// `currentColor` paint values inside symbols resolve to this color.
+    #[rust]
+    pub cur_use_color: Option<(f32, f32, f32, f32)>,
     // gradient texture: Nx2048 BGRA, one row per gradient
     #[rust]
     pub gradient_texture_data: Vec<u32>,
@@ -374,6 +378,7 @@ impl DrawVector {
         self.gradient_row_count = 0;
         self.cur_gradient_row_v = -1.0; // sentinel: no gradient texture row
         self.cur_effect_bbox = None;
+        self.cur_use_color = None;
     }
 
     /// Rasterize gradient stops into a new texture row.

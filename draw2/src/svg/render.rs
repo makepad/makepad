@@ -69,6 +69,7 @@ fn render_nodes(
             SvgNode::Line(line) => render_line(dv, line, defs, parent_xf, time, grad_map),
             SvgNode::Polyline(poly) => render_polyline(dv, poly, defs, parent_xf, time, grad_map),
             SvgNode::Polygon(poly) => render_polygon(dv, poly, defs, parent_xf, time, grad_map),
+            SvgNode::Use(use_node) => render_use(dv, use_node, defs, parent_xf, time, grad_map),
         }
     }
 }
@@ -93,6 +94,64 @@ fn render_group(
 
     let xf = local_xf.then(parent_xf);
     render_nodes(dv, &group.children, defs, &xf, time, grad_map);
+}
+
+fn render_use(
+    dv: &mut DrawVector,
+    use_node: &SvgUse,
+    defs: &SvgDefs,
+    parent_xf: &Transform2d,
+    time: f32,
+    grad_map: &GradientMap,
+) {
+    let symbol = match defs.symbols.get(&use_node.href) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Build transform: parent * use.transform * translate(x,y) * viewbox_fit
+    let mut local_xf = use_node.transform.clone();
+    for at in &use_node.animate_transforms {
+        if let Some(anim_xf) = eval_transform_animation(at, time) {
+            local_xf = anim_xf.then(&local_xf);
+        }
+    }
+
+    // Apply x/y offset
+    let offset = Transform2d::translate(use_node.x, use_node.y);
+    local_xf = offset.then(&local_xf);
+
+    // If the symbol has a viewBox and the <use> specifies width/height,
+    // apply a viewbox-to-viewport transform
+    if let Some(ref vb) = symbol.viewbox {
+        let w = use_node.width.unwrap_or(vb.width);
+        let h = use_node.height.unwrap_or(vb.height);
+        let (sx, sy, tx, ty) = viewbox_transform(vb, w, h);
+        let vb_xf = Transform2d {
+            a: sx,
+            c: 0.0,
+            e: tx,
+            b: 0.0,
+            d: sy,
+            f: ty,
+        };
+        local_xf = vb_xf.then(&local_xf);
+    }
+
+    let xf = local_xf.then(parent_xf);
+
+    // Propagate the <use> element's `color` property into the symbol children
+    // so that `currentColor` paint values resolve to it.
+    let prev_use_color = dv.cur_use_color;
+    let use_color = use_node.style.color;
+    // Only override if the <use> element explicitly set a color (non-default-black)
+    if use_color != (0.0, 0.0, 0.0, 1.0) || prev_use_color.is_some() {
+        dv.cur_use_color = Some(use_color);
+    }
+
+    render_nodes(dv, &symbol.children, defs, &xf, time, grad_map);
+
+    dv.cur_use_color = prev_use_color;
 }
 
 fn apply_animated_style(style: &SvgStyle, animations: &[SvgAnimate], time: f32) -> SvgStyle {
@@ -465,8 +524,22 @@ fn emit_shape(
         dv.cur_effect_bbox = Some([wmin_x, wmin_y, wmax_x, wmax_y]);
     }
 
+    // Resolve currentColor: prefer the <use> element's color override, then the style's own color
+    let current_color = dv.cur_use_color.unwrap_or(style.color);
+    let resolved_cc = SvgPaint::Color(
+        current_color.0,
+        current_color.1,
+        current_color.2,
+        current_color.3,
+    );
+
     // Fill
     if let Some(ref paint) = style.fill {
+        let paint = if matches!(paint, SvgPaint::CurrentColor) {
+            &resolved_cc
+        } else {
+            paint
+        };
         if !matches!(paint, SvgPaint::None) {
             build_path(dv);
             let fill_alpha = style.fill_opacity * opacity;
@@ -479,6 +552,11 @@ fn emit_shape(
 
     // Stroke
     if let Some(ref paint) = style.stroke {
+        let paint = if matches!(paint, SvgPaint::CurrentColor) {
+            &resolved_cc
+        } else {
+            paint
+        };
         if !matches!(paint, SvgPaint::None) && style.stroke_width > 0.0 {
             build_path(dv);
             let stroke_alpha = style.stroke_opacity * opacity;
@@ -530,6 +608,11 @@ fn set_paint(
                 dv.set_color(0.0, 0.0, 0.0, alpha); // fallback black
                 dv.cur_gradient_row_v = -1.0;
             }
+        }
+        SvgPaint::CurrentColor => {
+            // Should already be resolved by emit_shape; fallback to black
+            dv.set_color(0.0, 0.0, 0.0, alpha);
+            dv.cur_gradient_row_v = -1.0;
         }
     }
 }

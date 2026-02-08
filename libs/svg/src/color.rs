@@ -5,8 +5,12 @@ pub fn parse_color(s: &str) -> Option<(f32, f32, f32, f32)> {
     if s.eq_ignore_ascii_case("none") || s.eq_ignore_ascii_case("transparent") {
         return None;
     }
-    if s.eq_ignore_ascii_case("currentColor") || s.eq_ignore_ascii_case("inherit") {
+    if s.eq_ignore_ascii_case("inherit") {
         return Some((0.0, 0.0, 0.0, 1.0)); // fallback to black
+    }
+    // currentColor is NOT resolved here; callers should check for it before calling parse_color.
+    if s.eq_ignore_ascii_case("currentColor") {
+        return None;
     }
     if let Some(hex) = s.strip_prefix('#') {
         return parse_hex(hex);
