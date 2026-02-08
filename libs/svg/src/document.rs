@@ -564,6 +564,17 @@ impl SvgDocument {
         bounds.result()
     }
 
+    /// Like compute_bounds but with a base transform applied first
+    /// (e.g. the viewbox transform).
+    pub fn compute_bounds_with_transform(
+        &self,
+        base_xf: &Transform2d,
+    ) -> Option<(f32, f32, f32, f32)> {
+        let mut bounds = BoundsAccum::new();
+        Self::bounds_nodes(&self.root, base_xf, &mut bounds);
+        bounds.result()
+    }
+
     fn bounds_nodes(nodes: &[SvgNode], parent_xf: &Transform2d, bounds: &mut BoundsAccum) {
         for node in nodes {
             match node {
