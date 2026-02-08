@@ -172,37 +172,14 @@ impl DrawSvg {
         };
 
         let handle = handle_ref.as_handle();
-        log!(
-            "DrawSvg::load_svg - handle: {:?} svg_size: {:?}",
-            handle,
-            self.svg_size
-        );
 
         let data = if let Some(data) = cx.get_resource(handle) {
-            log!(
-                "DrawSvg::load_svg - handle {:?} found immediately, len: {}",
-                handle,
-                data.len()
-            );
             data
         } else {
             cx.script_data.resources.load_all_resources();
             match cx.get_resource(handle) {
-                Some(data) => {
-                    log!(
-                        "DrawSvg::load_svg - handle {:?} found after load_all, len: {}",
-                        handle,
-                        data.len()
-                    );
-                    data
-                }
-                None => {
-                    log!(
-                        "DrawSvg::load_svg - handle {:?} NOT FOUND after load_all",
-                        handle
-                    );
-                    return;
-                }
+                Some(data) => data,
+                None => return,
             }
         };
 
