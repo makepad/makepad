@@ -21,11 +21,11 @@ pub mod widget;
 pub mod widget_match_event;
 
 // Modules ordered to match script_mod calls
+pub mod rubber_view;
 pub mod scroll_bar;
 pub mod scroll_bars;
 pub mod view;
 pub mod view_ui;
-pub mod rubber_view;
 
 pub mod button;
 pub mod check_box;
@@ -74,6 +74,7 @@ pub mod html;
 pub mod markdown;
 
 pub mod splash;
+pub mod svg;
 
 // Touch gesture support (used by expandable_panel)
 pub mod touch_gesture;
@@ -154,6 +155,7 @@ pub use crate::{
     radio_button::*,
     root::*,
 
+    rubber_view::*,
     // Ordered to match script_mod calls
     scroll_bar::ScrollBar,
     scroll_bars::ScrollBars,
@@ -177,7 +179,6 @@ pub use crate::{
     turtle_step::*,
 
     view::*,
-    rubber_view::*,
     widget::{
         CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
         WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
@@ -196,6 +197,8 @@ pub use crate::html::*;
 pub use crate::markdown::*;
 
 pub use crate::splash::*;
+
+pub use crate::svg::*;
 
 #[cfg(target_os = "android")]
 pub use crate::video::*;
@@ -300,6 +303,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::markdown::script_mod(vm);
 
     crate::splash::script_mod(vm);
+    crate::svg::script_mod(vm);
 
     // make the prelude.widgetst with all our components
 

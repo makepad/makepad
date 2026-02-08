@@ -169,12 +169,12 @@ script_mod! {
         // --- Core pixel shader (usually don't override this) ---
 
         pixel: fn(){
-            if self.v_world.x < self.draw_clip.x
-                || self.v_world.y < self.draw_clip.y
-                || self.v_world.x > self.draw_clip.z
-                || self.v_world.y > self.draw_clip.w {
-                discard()
-            }
+            //if self.v_world.x < self.draw_clip.x
+            //    || self.v_world.y < self.draw_clip.y
+            //    || self.v_world.x > self.draw_clip.z
+            //    || self.v_world.y > self.draw_clip.w {
+            //    discard()
+            //}
             // geometry shadow mode: stroke_mult == -2.0
             // v interpolates 1.0 (edge) to 0.0 (3*blur out), stroke_dist = blur
             if self.v_stroke_mult < -1.5 {
@@ -218,22 +218,6 @@ const FLOATS_PER_VERTEX: usize = 21; // x,y,u,v, r,g,b,a, stroke_mult, stroke_di
 pub struct DrawVector {
     #[rust]
     pub many_instances: Option<ManyInstances>,
-    #[deref]
-    pub draw_vars: DrawVars,
-    #[live]
-    pub rect_pos: Vec2f,
-    #[live]
-    pub rect_size: Vec2f,
-    #[live]
-    pub draw_clip: Vec4f,
-    #[live(1.0)]
-    pub draw_depth: f32,
-    #[live]
-    pub pad1: f32,
-    #[live]
-    pub pad2: f32,
-    #[live]
-    pub pad3: f32,
     #[rust]
     pub geometry: Option<Geometry>,
     #[rust]
@@ -252,6 +236,22 @@ pub struct DrawVector {
     pub cur_stroke_mult: f32,
     #[rust]
     pub cur_shape_id: f32,
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub rect_pos: Vec2f,
+    #[live]
+    pub rect_size: Vec2f,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub pad1: f32,
+    #[live]
+    pub pad2: f32,
+    #[live]
+    pub pad3: f32,
 }
 
 impl DrawVector {
