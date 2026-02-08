@@ -36,7 +36,6 @@ script_mod! {
             let transformed = pos * self.svg_scale + self.svg_offset;
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
             self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
-            self.v_color2 = vec4(self.geom.color2_r, self.geom.color2_g, self.geom.color2_b, self.geom.color2_a);
             self.v_stroke_mult = self.geom.stroke_mult;
             self.v_stroke_dist = self.geom.stroke_dist;
             self.v_shape_id = self.geom.shape_id;
