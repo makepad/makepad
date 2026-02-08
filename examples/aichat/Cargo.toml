@@ -7,6 +7,6 @@ description = "AI Chat example demonstrating makepad-ai library"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-makepad-widgets2 = { path = "../../widgets2", features = ["markdown"] }
+makepad-widgets2 = { path = "../../widgets2" }
 makepad-code-editor2 = { path = "../../code_editor2" }
 makepad-ai = { path = "../../studio/ai" }
