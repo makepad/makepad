@@ -682,24 +682,41 @@ impl Tessellator {
             if count < 3 {
                 continue;
             }
-            // Emit vertices for this subpath
+            // Emit vertices for this subpath, contracted inward by woff
+            // so the solid fill body stays inside the true path boundary.
             let base = verts.len() as u32;
             for j in 0..count {
                 let pt = self.points[first + j];
-                verts.push(VVertex::new(pt.x, pt.y, 0.5, 1.0));
+                verts.push(VVertex::new(
+                    pt.x + pt.dmx * woff,
+                    pt.y + pt.dmy * woff,
+                    0.5,
+                    1.0,
+                ));
             }
             // Triangulate using monotone sweep-line decomposition
             fill_tessellate(&self.points[first..first + count], base, &mut indices);
 
-            // AA fringe: from path edge (opaque) outward (transparent)
+            // AA fringe: from contracted edge (opaque) outward to the
+            // original path position (transparent). The fill body is
+            // inset by woff, the fringe covers the remaining edge with
+            // a smooth alpha falloff, and the total extent matches the
+            // true path boundary exactly — no outward inflation.
             if woff > 0.0 {
                 let fringe_base = verts.len() as u32;
                 for j in 0..count {
                     let p1 = self.points[first + j];
-                    verts.push(VVertex::new(p1.x, p1.y, 0.5, 1.0));
+                    // inner: contracted position (opaque)
                     verts.push(VVertex::new(
-                        p1.x - p1.dmx * woff * 2.0,
-                        p1.y - p1.dmy * woff * 2.0,
+                        p1.x + p1.dmx * woff,
+                        p1.y + p1.dmy * woff,
+                        0.5,
+                        1.0,
+                    ));
+                    // outer: original path position (transparent)
+                    verts.push(VVertex::new(
+                        p1.x - p1.dmx * woff,
+                        p1.y - p1.dmy * woff,
                         0.0,
                         1.0,
                     ));
