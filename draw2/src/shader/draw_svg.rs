@@ -5,6 +5,8 @@ use crate::{
     svg::{self, SvgDocument},
     turtle::*,
 };
+use makepad_svg::document::Transform2d;
+use makepad_svg::units::viewbox_transform;
 
 script_mod! {
     use mod.pod.*
@@ -40,12 +42,16 @@ pub struct DrawSvg {
     svg_doc: Option<SvgDocument>,
     #[rust]
     svg_loaded: bool,
+    // Content bounding box after viewbox transform at 1:1 scale.
+    // This is the actual extent of rendered geometry.
     #[rust]
-    svg_size: DVec2,
+    content_bounds: (f32, f32, f32, f32), // (min_x, min_y, max_x, max_y)
     #[rust]
-    svg_bounds_origin: (f32, f32),
+    content_size: DVec2,
     #[live(true)]
     pub preserve_aspect: bool,
+    #[live(1.0)]
+    pub scale: f64,
     #[deref]
     pub draw_super: DrawVector,
     #[live(vec4(-1.0, -1.0, -1.0, -1.0))]
@@ -85,35 +91,42 @@ impl DrawSvg {
 
     fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
         let doc = self.svg_doc.take().unwrap();
-        let w = rect.size.x as f32;
-        let h = rect.size.y as f32;
+        let (lw, lh) = doc.logical_size();
 
-        // Render SVG at origin (0,0) so geometry is in SVG-local space
+        // Render SVG at logical size with no offset.
+        // The viewbox transform maps SVG content into (0..lw, 0..lh).
         self.draw_super.begin();
-        svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, w, h, time);
+        svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
 
-        // Shift all vertex positions from SVG space to the target rect,
-        // accounting for the content bounds origin
-        let (bx, by) = self.svg_bounds_origin;
-        let sx = if self.svg_size.x > 0.0 {
-            w / self.svg_size.x as f32
-        } else {
-            1.0
-        };
-        let sy = if self.svg_size.y > 0.0 {
-            h / self.svg_size.y as f32
-        } else {
-            1.0
-        };
-        let shift_x = rect.pos.x as f32 - bx * sx;
-        let shift_y = rect.pos.y as f32 - by * sy;
+        // Now transform all vertices from the logical-size coordinate space
+        // to the target rect, mapping the content bounding box to fill the rect.
+        let (bmin_x, bmin_y, bmax_x, bmax_y) = self.content_bounds;
+        let bw = bmax_x - bmin_x;
+        let bh = bmax_y - bmin_y;
 
-        let stride = 21; // FLOATS_PER_VERTEX
-        let verts = &mut self.draw_super.acc_verts;
-        let num_verts = verts.len() / stride;
-        for i in 0..num_verts {
-            verts[i * stride] += shift_x;
-            verts[i * stride + 1] += shift_y;
+        if bw > 0.0 && bh > 0.0 {
+            let tw = rect.size.x as f32;
+            let th = rect.size.y as f32;
+
+            // Aspect-aware scale: fit content bounds into target rect
+            let (sx, sy) = if self.preserve_aspect {
+                let s = (tw / bw).min(th / bh);
+                (s, s)
+            } else {
+                (tw / bw, th / bh)
+            };
+
+            // Center within target rect if aspect-preserving leaves slack
+            let offset_x = rect.pos.x as f32 + (tw - bw * sx) * 0.5 - bmin_x * sx;
+            let offset_y = rect.pos.y as f32 + (th - bh * sy) * 0.5 - bmin_y * sy;
+
+            let stride = 21; // FLOATS_PER_VERTEX
+            let verts = &mut self.draw_super.acc_verts;
+            let num_verts = verts.len() / stride;
+            for i in 0..num_verts {
+                verts[i * stride] = verts[i * stride] * sx + offset_x;
+                verts[i * stride + 1] = verts[i * stride + 1] * sy + offset_y;
+            }
         }
 
         self.draw_super.end(cx);
@@ -121,25 +134,27 @@ impl DrawSvg {
     }
 
     fn resolve_walk(&self, walk: Walk) -> Walk {
-        if self.svg_size.x <= 0.0 || self.svg_size.y <= 0.0 {
+        let sw = self.content_size.x * self.scale;
+        let sh = self.content_size.y * self.scale;
+        if sw <= 0.0 || sh <= 0.0 {
             return walk;
         }
 
         if self.preserve_aspect {
-            let svg_aspect = self.svg_size.x / self.svg_size.y;
+            let aspect = sw / sh;
             match (walk.width, walk.height) {
                 (Size::Fit { .. }, Size::Fit { .. }) => Walk {
-                    width: Size::Fixed(self.svg_size.x),
-                    height: Size::Fixed(self.svg_size.y),
+                    width: Size::Fixed(sw),
+                    height: Size::Fixed(sh),
                     ..walk
                 },
                 (Size::Fixed(w), Size::Fit { .. }) => Walk {
                     width: Size::Fixed(w),
-                    height: Size::Fixed(w / svg_aspect),
+                    height: Size::Fixed(w / aspect),
                     ..walk
                 },
                 (Size::Fit { .. }, Size::Fixed(h)) => Walk {
-                    width: Size::Fixed(h * svg_aspect),
+                    width: Size::Fixed(h * aspect),
                     height: Size::Fixed(h),
                     ..walk
                 },
@@ -148,11 +163,11 @@ impl DrawSvg {
         } else {
             Walk {
                 width: match walk.width {
-                    Size::Fit { .. } => Size::Fixed(self.svg_size.x),
+                    Size::Fit { .. } => Size::Fixed(sw),
                     other => other,
                 },
                 height: match walk.height {
-                    Size::Fit { .. } => Size::Fixed(self.svg_size.y),
+                    Size::Fit { .. } => Size::Fixed(sh),
                     other => other,
                 },
                 ..walk
@@ -167,7 +182,6 @@ impl DrawSvg {
         self.svg_loaded = true;
 
         let Some(ref handle_ref) = self.svg else {
-            // Only log for DrawSvg that is NOT a sub-field of button/icon (too noisy)
             return;
         };
 
@@ -201,21 +215,37 @@ impl DrawSvg {
     }
 
     fn set_doc_bounds(&mut self, doc: &SvgDocument) {
-        if let Some((min_x, min_y, max_x, max_y)) = doc.compute_bounds() {
+        // Compute the viewbox transform at 1:1 logical size
+        let (lw, lh) = doc.logical_size();
+        let base_xf = if let Some(ref vb) = doc.viewbox {
+            let (sx, sy, tx, ty) = viewbox_transform(vb, lw, lh);
+            Transform2d {
+                a: sx,
+                c: 0.0,
+                e: tx,
+                b: 0.0,
+                d: sy,
+                f: ty,
+            }
+        } else {
+            Transform2d::identity()
+        };
+
+        // Compute content bounds with viewbox transform applied
+        if let Some((min_x, min_y, max_x, max_y)) = doc.compute_bounds_with_transform(&base_xf) {
+            self.content_bounds = (min_x, min_y, max_x, max_y);
             let w = max_x - min_x;
             let h = max_y - min_y;
-            self.svg_size = dvec2(w as f64, h as f64);
-            self.svg_bounds_origin = (min_x, min_y);
+            self.content_size = dvec2(w as f64, h as f64);
         } else {
-            let (w, h) = doc.logical_size();
-            self.svg_size = dvec2(w as f64, h as f64);
-            self.svg_bounds_origin = (0.0, 0.0);
+            self.content_bounds = (0.0, 0.0, lw, lh);
+            self.content_size = dvec2(lw as f64, lh as f64);
         }
     }
 
     pub fn svg_size(&self) -> Option<DVec2> {
         if self.svg_doc.is_some() {
-            Some(self.svg_size)
+            Some(self.content_size)
         } else {
             None
         }
