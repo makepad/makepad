@@ -276,6 +276,11 @@ pub struct DrawVector {
     pub path: VectorPath,
     #[rust]
     pub tess: Tessellator,
+    // reusable scratch buffers for tessellation output
+    #[rust]
+    tess_verts: Vec<VVertex>,
+    #[rust]
+    tess_indices: Vec<u32>,
     // accumulated geometry for the entire picture
     #[rust]
     pub acc_verts: Vec<f32>,
@@ -419,15 +424,20 @@ impl DrawVector {
         aa: f32,
     ) {
         self.tess.flatten(&self.path, 0.25);
-        let (mut verts, indices) = self.tess.stroke(stroke_width, cap, join, miter_limit, aa);
-        compute_clip_radii(&mut verts, &indices);
+        let mut tv = std::mem::take(&mut self.tess_verts);
+        let mut ti = std::mem::take(&mut self.tess_indices);
+        self.tess
+            .stroke(stroke_width, cap, join, miter_limit, aa, &mut tv, &mut ti);
+        compute_clip_radii(&mut tv, &ti);
         let sm = if aa > 0.0 {
             (stroke_width * 0.5 + aa * 0.5) / aa
         } else {
             1e6
         };
         self.cur_stroke_mult = sm;
-        self.append_geometry(&verts, &indices);
+        self.append_geometry(&tv, &ti);
+        self.tess_verts = tv;
+        self.tess_indices = ti;
         self.path.clear();
     }
 
@@ -437,10 +447,14 @@ impl DrawVector {
 
     pub fn fill_opts(&mut self, join: LineJoin, miter_limit: f32, aa: f32) {
         self.tess.flatten(&self.path, 0.25);
-        let (mut verts, indices) = self.tess.fill(aa, join, miter_limit);
-        compute_clip_radii(&mut verts, &indices);
+        let mut tv = std::mem::take(&mut self.tess_verts);
+        let mut ti = std::mem::take(&mut self.tess_indices);
+        self.tess.fill(aa, join, miter_limit, &mut tv, &mut ti);
+        compute_clip_radii(&mut tv, &ti);
         self.cur_stroke_mult = 1e6;
-        self.append_geometry(&verts, &indices);
+        self.append_geometry(&tv, &ti);
+        self.tess_verts = tv;
+        self.tess_indices = ti;
         self.path.clear();
     }
 
@@ -449,11 +463,15 @@ impl DrawVector {
     /// Build your path first, then call shape_shadow(blur).
     pub fn shape_shadow(&mut self, blur: f32) {
         self.tess.flatten(&self.path, 0.25);
-        // Bevel joins prevent miter spikes at sharp corners
-        let (mut verts, indices) = self.tess.fill_shadow(blur, LineJoin::Bevel, 1.0);
-        compute_clip_radii(&mut verts, &indices);
+        let mut tv = std::mem::take(&mut self.tess_verts);
+        let mut ti = std::mem::take(&mut self.tess_indices);
+        self.tess
+            .fill_shadow(blur, LineJoin::Bevel, 1.0, &mut tv, &mut ti);
+        compute_clip_radii(&mut tv, &ti);
         self.cur_stroke_mult = -2.0; // sentinel for geometry shadow mode
-        self.append_geometry(&verts, &indices);
+        self.append_geometry(&tv, &ti);
+        self.tess_verts = tv;
+        self.tess_indices = ti;
         self.path.clear();
     }
 

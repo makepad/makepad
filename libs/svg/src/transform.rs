@@ -47,10 +47,10 @@ pub fn parse_transform(s: &str) -> Transform2d {
             pos += 1;
         } // skip ')'
 
-        let args = parse_args(args_str);
+        let (args, nargs) = parse_args(args_str);
 
         let t = match name {
-            "matrix" if args.len() >= 6 => Transform2d {
+            "matrix" if nargs >= 6 => Transform2d {
                 a: args[0],
                 c: args[2],
                 e: args[4],
@@ -58,19 +58,19 @@ pub fn parse_transform(s: &str) -> Transform2d {
                 d: args[3],
                 f: args[5],
             },
-            "translate" if args.len() >= 1 => {
+            "translate" if nargs >= 1 => {
                 let tx = args[0];
-                let ty = if args.len() >= 2 { args[1] } else { 0.0 };
+                let ty = if nargs >= 2 { args[1] } else { 0.0 };
                 Transform2d::translate(tx, ty)
             }
-            "scale" if args.len() >= 1 => {
+            "scale" if nargs >= 1 => {
                 let sx = args[0];
-                let sy = if args.len() >= 2 { args[1] } else { sx };
+                let sy = if nargs >= 2 { args[1] } else { sx };
                 Transform2d::scale(sx, sy)
             }
-            "rotate" if args.len() >= 1 => {
+            "rotate" if nargs >= 1 => {
                 let angle = args[0] * std::f32::consts::PI / 180.0;
-                if args.len() >= 3 {
+                if nargs >= 3 {
                     let cx = args[1];
                     let cy = args[2];
                     // rotate(a, cx, cy) = translate(cx,cy) rotate(a) translate(-cx,-cy)
@@ -81,12 +81,8 @@ pub fn parse_transform(s: &str) -> Transform2d {
                     Transform2d::rotate(angle)
                 }
             }
-            "skewX" if args.len() >= 1 => {
-                Transform2d::skew_x(args[0] * std::f32::consts::PI / 180.0)
-            }
-            "skewY" if args.len() >= 1 => {
-                Transform2d::skew_y(args[0] * std::f32::consts::PI / 180.0)
-            }
+            "skewX" if nargs >= 1 => Transform2d::skew_x(args[0] * std::f32::consts::PI / 180.0),
+            "skewY" if nargs >= 1 => Transform2d::skew_y(args[0] * std::f32::consts::PI / 180.0),
             _ => Transform2d::identity(),
         };
 
@@ -96,9 +92,19 @@ pub fn parse_transform(s: &str) -> Transform2d {
     result
 }
 
-fn parse_args(s: &str) -> Vec<f32> {
-    s.split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| p.parse::<f32>().ok())
-        .collect()
+/// Parse up to 6 float arguments (matrix has 6), no heap allocation.
+fn parse_args(s: &str) -> ([f32; 6], usize) {
+    let mut args = [0.0f32; 6];
+    let mut count = 0;
+    for p in s.split(|c: char| c == ',' || c.is_whitespace()) {
+        if !p.is_empty() {
+            if let Ok(v) = p.parse::<f32>() {
+                if count < 6 {
+                    args[count] = v;
+                    count += 1;
+                }
+            }
+        }
+    }
+    (args, count)
 }

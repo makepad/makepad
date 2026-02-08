@@ -271,14 +271,21 @@ impl<'a> PathDataParser<'a> {
 
     fn cmd_cubic(&mut self, is_rel: bool, path: &mut VectorPath) {
         while self.at_number_start() {
-            let nums: Vec<Option<f32>> = (0..6).map(|_| self.parse_number()).collect();
-            if nums.iter().all(|n| n.is_some()) {
-                let mut x1 = nums[0].unwrap();
-                let mut y1 = nums[1].unwrap();
-                let mut x2 = nums[2].unwrap();
-                let mut y2 = nums[3].unwrap();
-                let mut x = nums[4].unwrap();
-                let mut y = nums[5].unwrap();
+            if let (
+                Some(mut x1),
+                Some(mut y1),
+                Some(mut x2),
+                Some(mut y2),
+                Some(mut x),
+                Some(mut y),
+            ) = (
+                self.parse_number(),
+                self.parse_number(),
+                self.parse_number(),
+                self.parse_number(),
+                self.parse_number(),
+                self.parse_number(),
+            ) {
                 if is_rel {
                     x1 += self.cx;
                     y1 += self.cy;
@@ -301,12 +308,12 @@ impl<'a> PathDataParser<'a> {
 
     fn cmd_smooth_cubic(&mut self, is_rel: bool, path: &mut VectorPath) {
         while self.at_number_start() {
-            let nums: Vec<Option<f32>> = (0..4).map(|_| self.parse_number()).collect();
-            if nums.iter().all(|n| n.is_some()) {
-                let mut x2 = nums[0].unwrap();
-                let mut y2 = nums[1].unwrap();
-                let mut x = nums[2].unwrap();
-                let mut y = nums[3].unwrap();
+            if let (Some(mut x2), Some(mut y2), Some(mut x), Some(mut y)) = (
+                self.parse_number(),
+                self.parse_number(),
+                self.parse_number(),
+                self.parse_number(),
+            ) {
                 if is_rel {
                     x2 += self.cx;
                     y2 += self.cy;
@@ -330,12 +337,12 @@ impl<'a> PathDataParser<'a> {
 
     fn cmd_quadratic(&mut self, is_rel: bool, path: &mut VectorPath) {
         while self.at_number_start() {
-            let nums: Vec<Option<f32>> = (0..4).map(|_| self.parse_number()).collect();
-            if nums.iter().all(|n| n.is_some()) {
-                let mut qx = nums[0].unwrap();
-                let mut qy = nums[1].unwrap();
-                let mut x = nums[2].unwrap();
-                let mut y = nums[3].unwrap();
+            if let (Some(mut qx), Some(mut qy), Some(mut x), Some(mut y)) = (
+                self.parse_number(),
+                self.parse_number(),
+                self.parse_number(),
+                self.parse_number(),
+            ) {
                 if is_rel {
                     qx += self.cx;
                     qy += self.cy;

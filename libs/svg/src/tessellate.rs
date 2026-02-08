@@ -59,6 +59,7 @@ const PT_INNERBEVEL: u8 = 8;
 pub struct Tessellator {
     points: Vec<VPoint>,
     paths: Vec<SubPath>,
+    cum_dists: Vec<f32>,
 }
 
 #[derive(Debug)]
@@ -320,7 +321,7 @@ impl Tessellator {
         }
     }
 
-    /// Generate stroke geometry. Returns (vertices, indices).
+    /// Generate stroke geometry into the provided vecs (clears them first).
     pub fn stroke(
         &mut self,
         w: f32,
@@ -328,11 +329,13 @@ impl Tessellator {
         line_join: LineJoin,
         miter_limit: f32,
         aa: f32,
-    ) -> (Vec<VVertex>, Vec<u32>) {
+        verts: &mut Vec<VVertex>,
+        indices: &mut Vec<u32>,
+    ) {
         let hw = w * 0.5 + aa * 0.5;
         self.calculate_joins(hw, line_join, miter_limit);
-        let mut verts = Vec::new();
-        let mut indices = Vec::new();
+        verts.clear();
+        indices.clear();
         let (u0, u1) = if aa > 0.0 { (0.0, 1.0) } else { (0.5, 0.5) };
         for pi in 0..self.paths.len() {
             let sp = &self.paths[pi];
@@ -344,12 +347,13 @@ impl Tessellator {
             let is_loop = sp.closed;
             let base = verts.len() as u32;
             // compute cumulative distances for stroke_dist
-            let mut cum_dists = vec![0.0f32; count];
+            self.cum_dists.clear();
+            self.cum_dists.resize(count, 0.0);
             {
                 let mut d = 0.0f32;
                 for j in 1..count {
                     d += self.points[first + j - 1].len;
-                    cum_dists[j] = d;
+                    self.cum_dists[j] = d;
                 }
             }
             // caps for open paths
@@ -371,17 +375,7 @@ impl Tessellator {
                 };
                 let p0 = self.points[first];
                 self.emit_cap_start(
-                    &mut verts,
-                    &mut indices,
-                    p0.x,
-                    p0.y,
-                    ndx,
-                    ndy,
-                    hw,
-                    aa,
-                    u0,
-                    u1,
-                    line_cap,
+                    verts, indices, p0.x, p0.y, ndx, ndy, hw, aa, u0, u1, line_cap,
                 );
                 // stamp stroke_dist=0 on cap verts
                 let cap_end = verts.len();
@@ -395,11 +389,11 @@ impl Tessellator {
                 let j0 = if j == 0 { count - 1 } else { j - 1 };
                 let p0 = self.points[first + j0];
                 let p1 = self.points[first + j];
-                let dist = cum_dists[j];
+                let dist = self.cum_dists[j];
                 let flags = p1.flags;
                 if (flags & (PT_BEVEL | PT_INNERBEVEL)) != 0 {
                     let vi_before = verts.len();
-                    self.emit_bevel_join(&mut verts, &mut indices, p0, p1, hw, hw, u0, u1);
+                    self.emit_bevel_join(verts, indices, p0, p1, hw, hw, u0, u1);
                     for v in &mut verts[vi_before..] {
                         v.stroke_dist = dist;
                     }
@@ -447,19 +441,9 @@ impl Tessellator {
                 };
                 let vi_before = verts.len();
                 self.emit_cap_end(
-                    &mut verts,
-                    &mut indices,
-                    p1.x,
-                    p1.y,
-                    ndx,
-                    ndy,
-                    hw,
-                    aa,
-                    u0,
-                    u1,
-                    line_cap,
+                    verts, indices, p1.x, p1.y, ndx, ndy, hw, aa, u0, u1, line_cap,
                 );
-                let total_dist = cum_dists[count - 1];
+                let total_dist = self.cum_dists[count - 1];
                 for v in &mut verts[vi_before..] {
                     v.stroke_dist = total_dist;
                 }
@@ -476,7 +460,6 @@ impl Tessellator {
                 }
             }
         }
-        (verts, indices)
     }
 
     fn emit_cap_start(
@@ -741,18 +724,19 @@ impl Tessellator {
         indices.push(vi + 2);
     }
 
-    /// Generate fill geometry (monotone sweep-line triangulation + AA fringe).
-    /// Returns (vertices, indices).
+    /// Generate fill geometry into the provided vecs (clears them first).
     pub fn fill(
         &mut self,
         aa: f32,
         line_join: LineJoin,
         miter_limit: f32,
-    ) -> (Vec<VVertex>, Vec<u32>) {
+        verts: &mut Vec<VVertex>,
+        indices: &mut Vec<u32>,
+    ) {
         let woff = aa * 0.5;
         self.calculate_joins(woff, line_join, miter_limit);
-        let mut verts = Vec::new();
-        let mut indices = Vec::new();
+        verts.clear();
+        indices.clear();
         for pi in 0..self.paths.len() {
             let sp = &self.paths[pi];
             let first = sp.first;
@@ -773,7 +757,7 @@ impl Tessellator {
                 ));
             }
             // Triangulate using monotone sweep-line decomposition
-            fill_tessellate(&self.points[first..first + count], base, &mut indices);
+            fill_tessellate(&self.points[first..first + count], base, indices);
 
             // AA fringe: from contracted edge (opaque) outward to the
             // original path position (transparent). The fill body is
@@ -812,7 +796,6 @@ impl Tessellator {
                 }
             }
         }
-        (verts, indices)
     }
 
     /// Generate shadow geometry for arbitrary filled shapes.
@@ -824,11 +807,13 @@ impl Tessellator {
         blur: f32,
         line_join: LineJoin,
         miter_limit: f32,
-    ) -> (Vec<VVertex>, Vec<u32>) {
+        verts: &mut Vec<VVertex>,
+        indices: &mut Vec<u32>,
+    ) {
         let expand = blur * 3.0;
         self.calculate_joins(expand, line_join, miter_limit);
-        let mut verts = Vec::new();
-        let mut indices = Vec::new();
+        verts.clear();
+        indices.clear();
         for pi in 0..self.paths.len() {
             let sp = &self.paths[pi];
             let first = sp.first;
@@ -884,7 +869,6 @@ impl Tessellator {
                 indices.push(b);
             }
         }
-        (verts, indices)
     }
 }
 

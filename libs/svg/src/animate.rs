@@ -161,13 +161,18 @@ fn parse_repeat_count(s: &str) -> RepeatCount {
 fn parse_key_splines(s: &str) -> Vec<[f32; 4]> {
     s.split(';')
         .filter_map(|seg| {
-            let nums: Vec<f32> = seg
-                .split(|c: char| c == ',' || c.is_whitespace())
-                .filter(|p| !p.is_empty())
-                .filter_map(|p| p.parse::<f32>().ok())
-                .collect();
-            if nums.len() == 4 {
-                Some([nums[0], nums[1], nums[2], nums[3]])
+            let mut vals = [0.0f32; 4];
+            let mut count = 0;
+            for p in seg.split(|c: char| c == ',' || c.is_whitespace()) {
+                if !p.is_empty() {
+                    if count < 4 {
+                        vals[count] = p.parse::<f32>().ok()?;
+                        count += 1;
+                    }
+                }
+            }
+            if count == 4 {
+                Some(vals)
             } else {
                 None
             }
@@ -278,9 +283,18 @@ pub fn eval_color_animation(anim: &SvgAnimate, time: f32) -> Option<(f32, f32, f
     let local = animation_local_time(anim.begin, anim.dur, &anim.repeat_count, &anim.fill, time)?;
     let progress = animation_progress(local, anim.dur);
 
-    // Build value list
-    let values: Vec<(f32, f32, f32, f32)> = if let Some(ref vals) = anim.values {
-        vals.iter().filter_map(|s| parse_color(s)).collect()
+    if let Some(ref vals) = anim.values {
+        let num_values = vals.len();
+        if num_values == 0 {
+            return None;
+        }
+        if num_values == 1 {
+            return parse_color(&vals[0]);
+        }
+        let (ia, ib, t) = interpolate_values_index(progress, num_values, anim.key_times.as_deref());
+        let ca = parse_color(&vals[ia]).unwrap_or((0.0, 0.0, 0.0, 1.0));
+        let cb = parse_color(&vals[ib]).unwrap_or((0.0, 0.0, 0.0, 1.0));
+        Some(lerp_color(ca, cb, t))
     } else {
         let from = anim
             .from
@@ -292,18 +306,8 @@ pub fn eval_color_animation(anim: &SvgAnimate, time: f32) -> Option<(f32, f32, f
             .as_ref()
             .and_then(|s| parse_color(s))
             .unwrap_or((0.0, 0.0, 0.0, 1.0));
-        vec![from, to]
-    };
-
-    if values.is_empty() {
-        return None;
+        Some(lerp_color(from, to, progress))
     }
-    if values.len() == 1 {
-        return Some(values[0]);
-    }
-
-    let (ia, ib, t) = interpolate_values_index(progress, values.len(), anim.key_times.as_deref());
-    Some(lerp_color(values[ia], values[ib], t))
 }
 
 /// Evaluate a float animation at a given time (for opacity, stroke-width, etc).
@@ -311,8 +315,18 @@ pub fn eval_float_animation(anim: &SvgAnimate, time: f32) -> Option<f32> {
     let local = animation_local_time(anim.begin, anim.dur, &anim.repeat_count, &anim.fill, time)?;
     let progress = animation_progress(local, anim.dur);
 
-    let values: Vec<f32> = if let Some(ref vals) = anim.values {
-        vals.iter().filter_map(|s| parse_number(s)).collect()
+    if let Some(ref vals) = anim.values {
+        let num_values = vals.len();
+        if num_values == 0 {
+            return None;
+        }
+        if num_values == 1 {
+            return parse_number(&vals[0]);
+        }
+        let (ia, ib, t) = interpolate_values_index(progress, num_values, anim.key_times.as_deref());
+        let va = parse_number(&vals[ia]).unwrap_or(0.0);
+        let vb = parse_number(&vals[ib]).unwrap_or(0.0);
+        Some(lerp_f32(va, vb, t))
     } else {
         let from = anim
             .from
@@ -324,18 +338,8 @@ pub fn eval_float_animation(anim: &SvgAnimate, time: f32) -> Option<f32> {
             .as_ref()
             .and_then(|s| parse_number(s))
             .unwrap_or(0.0);
-        vec![from, to]
-    };
-
-    if values.is_empty() {
-        return None;
+        Some(lerp_f32(from, to, progress))
     }
-    if values.len() == 1 {
-        return Some(values[0]);
-    }
-
-    let (ia, ib, t) = interpolate_values_index(progress, values.len(), anim.key_times.as_deref());
-    Some(lerp_f32(values[ia], values[ib], t))
 }
 
 /// Evaluate a transform animation at a given time.
@@ -343,45 +347,60 @@ pub fn eval_transform_animation(anim: &SvgAnimateTransform, time: f32) -> Option
     let local = animation_local_time(anim.begin, anim.dur, &anim.repeat_count, &anim.fill, time)?;
     let progress = animation_progress(local, anim.dur);
 
-    let values: Vec<Vec<f32>> = if let Some(ref vals) = anim.values {
-        vals.iter().map(|s| parse_number_list(s)).collect()
+    if let Some(ref vals) = anim.values {
+        let num_values = vals.len();
+        if num_values == 0 {
+            return None;
+        }
+        if num_values == 1 {
+            let (nums, count) = parse_number_list(&vals[0]);
+            return Some(numbers_to_transform(&anim.kind, &nums[..count]));
+        }
+        let (ia, ib, t) = interpolate_values_index(progress, num_values, anim.key_times.as_deref());
+        let (va, va_count) = parse_number_list(&vals[ia]);
+        let (vb, vb_count) = parse_number_list(&vals[ib]);
+        let count = va_count.min(vb_count);
+        let mut interpolated = [0.0f32; 3];
+        for i in 0..count {
+            interpolated[i] = lerp_f32(va[i], vb[i], t);
+        }
+        Some(numbers_to_transform(&anim.kind, &interpolated[..count]))
     } else {
-        let from = anim
+        let (from, from_count) = anim
             .from
             .as_ref()
             .map(|s| parse_number_list(s))
-            .unwrap_or_default();
-        let to = anim
+            .unwrap_or(([0.0; 3], 0));
+        let (to, to_count) = anim
             .to
             .as_ref()
             .map(|s| parse_number_list(s))
-            .unwrap_or_default();
-        vec![from, to]
-    };
-
-    if values.is_empty() {
-        return None;
+            .unwrap_or(([0.0; 3], 0));
+        let count = from_count.min(to_count);
+        if count == 0 {
+            return None;
+        }
+        let mut interpolated = [0.0f32; 3];
+        for i in 0..count {
+            interpolated[i] = lerp_f32(from[i], to[i], progress);
+        }
+        Some(numbers_to_transform(&anim.kind, &interpolated[..count]))
     }
-    if values.len() == 1 {
-        return Some(numbers_to_transform(&anim.kind, &values[0]));
-    }
-
-    let (ia, ib, t) = interpolate_values_index(progress, values.len(), anim.key_times.as_deref());
-    let va = &values[ia];
-    let vb = &values[ib];
-    let interpolated: Vec<f32> = va
-        .iter()
-        .zip(vb.iter())
-        .map(|(a, b)| lerp_f32(*a, *b, t))
-        .collect();
-    Some(numbers_to_transform(&anim.kind, &interpolated))
 }
 
-fn parse_number_list(s: &str) -> Vec<f32> {
-    s.split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| p.parse::<f32>().ok())
-        .collect()
+/// Parse up to 3 floats from a space/comma-separated string (transform values have at most 3: e.g. rotate angle cx cy).
+fn parse_number_list(s: &str) -> ([f32; 3], usize) {
+    let mut vals = [0.0f32; 3];
+    let mut count = 0;
+    for p in s.split(|c: char| c == ',' || c.is_whitespace()) {
+        if !p.is_empty() && count < 3 {
+            if let Ok(v) = p.parse::<f32>() {
+                vals[count] = v;
+                count += 1;
+            }
+        }
+    }
+    (vals, count)
 }
 
 fn numbers_to_transform(kind: &AnimateTransformType, nums: &[f32]) -> Transform2d {

@@ -44,17 +44,22 @@ pub fn parse_number(s: &str) -> Option<f32> {
 }
 
 pub fn parse_viewbox(s: &str) -> Option<ViewBox> {
-    let parts: Vec<f32> = s
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| p.parse::<f32>().ok())
-        .collect();
-    if parts.len() == 4 {
+    let mut vals = [0.0f32; 4];
+    let mut count = 0;
+    for p in s.split(|c: char| c == ',' || c.is_whitespace()) {
+        if !p.is_empty() {
+            if count < 4 {
+                vals[count] = p.parse::<f32>().ok()?;
+                count += 1;
+            }
+        }
+    }
+    if count == 4 {
         Some(ViewBox {
-            x: parts[0],
-            y: parts[1],
-            width: parts[2],
-            height: parts[3],
+            x: vals[0],
+            y: vals[1],
+            width: vals[2],
+            height: vals[3],
         })
     } else {
         None
@@ -62,15 +67,15 @@ pub fn parse_viewbox(s: &str) -> Option<ViewBox> {
 }
 
 pub fn parse_points(s: &str) -> Vec<(f32, f32)> {
-    let nums: Vec<f32> = s
+    let mut result = Vec::new();
+    let mut iter = s
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|p| !p.is_empty())
-        .filter_map(|p| p.parse::<f32>().ok())
-        .collect();
-    nums.chunks(2)
-        .filter(|c| c.len() == 2)
-        .map(|c| (c[0], c[1]))
-        .collect()
+        .filter_map(|p| p.parse::<f32>().ok());
+    while let (Some(x), Some(y)) = (iter.next(), iter.next()) {
+        result.push((x, y));
+    }
+    result
 }
 
 /// Compute the transform from viewBox coordinates to a target (w, h) viewport.
