@@ -21,11 +21,11 @@ script_mod! {
                 window.inner_size: vec2(1200, 800)
                 pass.clear_color: vec4(0.12, 0.12, 0.15, 1.0)
                 body +: {
-                    tiger := Svg{
+                    jellyfish := Svg{
                         width: Fill
                         height: Fill
                         animating: true
-                        draw_svg +: { svg: crate_resource("self://resources/tiger.svg") }
+                        draw_svg +: { svg: crate_resource("self://resources/jellyfish_instances.svg") }
                     }
                 }
             }

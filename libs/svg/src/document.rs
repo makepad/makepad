@@ -119,6 +119,8 @@ pub enum SvgPaint {
     None,
     Color(f32, f32, f32, f32),
     GradientRef(String),
+    /// SVG `currentColor` keyword: resolves to the inherited `color` property at render time.
+    CurrentColor,
 }
 
 impl Default for SvgPaint {
@@ -143,6 +145,8 @@ pub struct SvgStyle {
     pub stroke_dasharray: Option<Vec<f32>>,
     pub stroke_dashoffset: f32,
     pub opacity: f32,
+    /// CSS `color` property (inherited). Used to resolve `currentColor` paint values.
+    pub color: (f32, f32, f32, f32),
     /// Custom shader effect ID, parsed from `data-shader-id` attribute.
     /// Flows through to `v_shape_id` varying in the GPU shader.
     pub shader_id: f32,
@@ -163,6 +167,7 @@ impl Default for SvgStyle {
             stroke_dasharray: None,
             stroke_dashoffset: 0.0,
             opacity: 1.0,
+            color: (0.0, 0.0, 0.0, 1.0), // CSS default: black
             shader_id: 0.0,
         }
     }
@@ -506,6 +511,20 @@ pub struct SvgPolygon {
 }
 
 #[derive(Clone, Debug)]
+pub struct SvgUse {
+    pub id: Option<String>,
+    pub href: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub style: SvgStyle,
+    pub transform: Transform2d,
+    pub animations: Vec<SvgAnimate>,
+    pub animate_transforms: Vec<SvgAnimateTransform>,
+}
+
+#[derive(Clone, Debug)]
 pub enum SvgNode {
     Group(SvgGroup),
     Path(SvgPath),
@@ -515,6 +534,7 @@ pub enum SvgNode {
     Line(SvgLine),
     Polyline(SvgPolyline),
     Polygon(SvgPolygon),
+    Use(SvgUse),
 }
 
 // ---- Defs ----
@@ -522,6 +542,15 @@ pub enum SvgNode {
 #[derive(Clone, Debug, Default)]
 pub struct SvgDefs {
     pub gradients: HashMap<String, SvgGradient>,
+    pub symbols: HashMap<String, SvgSymbol>,
+}
+
+/// An SVG `<symbol>` element: a reusable group of nodes with an optional viewBox.
+#[derive(Clone, Debug)]
+pub struct SvgSymbol {
+    pub id: String,
+    pub viewbox: Option<ViewBox>,
+    pub children: Vec<SvgNode>,
 }
 
 // ---- ViewBox ----
@@ -627,6 +656,11 @@ impl SvgDocument {
                         return true;
                     }
                 }
+                SvgNode::Use(u) => {
+                    if !u.animations.is_empty() || !u.animate_transforms.is_empty() {
+                        return true;
+                    }
+                }
             }
         }
         false
@@ -685,6 +719,9 @@ impl SvgDocument {
                     for &(px, py) in &p.points {
                         bounds.add_point_xf(px, py, &xf);
                     }
+                }
+                SvgNode::Use(_) => {
+                    // Use nodes resolved at render time; skip for bounds
                 }
             }
         }
