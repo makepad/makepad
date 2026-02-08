@@ -1,7 +1,3 @@
-pub mod paint;
-pub mod path;
-pub mod tessellate;
-
-pub use paint::*;
-pub use path::*;
-pub use tessellate::*;
+pub use makepad_svg::paint::*;
+pub use makepad_svg::path::*;
+pub use makepad_svg::tessellate::*;

@@ -3,10 +3,10 @@
 use makepad_html::HtmlWalker;
 use makepad_live_id::*;
 
-use super::color::parse_color;
-use super::document::{SvgPaint, SvgStyle};
-use super::units::{parse_length, parse_number};
-use crate::vector::{FillRule, LineCap, LineJoin};
+use crate::color::parse_color;
+use crate::document::{SvgPaint, SvgStyle};
+use crate::units::{parse_length, parse_number};
+use crate::path::{FillRule, LineCap, LineJoin};
 
 /// Parse style from element attributes. Inline `style` attribute overrides presentation attributes.
 pub fn parse_style_from_element(walker: &HtmlWalker, parent_style: &SvgStyle) -> SvgStyle {

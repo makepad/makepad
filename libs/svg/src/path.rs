@@ -27,7 +27,7 @@ pub enum LineJoin {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum PathCmd {
+pub enum PathCmd {
     MoveTo(f32, f32),
     LineTo(f32, f32),
     BezierTo(f32, f32, f32, f32, f32, f32),
@@ -37,7 +37,7 @@ pub(crate) enum PathCmd {
 
 #[derive(Default, Clone, Debug)]
 pub struct VectorPath {
-    pub(crate) cmds: Vec<PathCmd>,
+    pub cmds: Vec<PathCmd>,
 }
 
 impl VectorPath {

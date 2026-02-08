@@ -11,7 +11,7 @@ metadata.makepad-auto-version = "4ghwd5Pq8xlLJrln_NpXXshbpeE="
 
 [dependencies]
 makepad-platform2 = { path = "../platform2", version = "2.0.0" }
-makepad-html ={ path = "../libs/html", version = "1.0.0" }
+makepad-svg = { path = "../libs/svg", version = "1.0.0" }
 makepad-live-id = { path = "../libs/live_id", version = "1.0.0" }
 
 rustybuzz = { version = "0.18.0", path = "../libs/rustybuzz-0.18.0" }

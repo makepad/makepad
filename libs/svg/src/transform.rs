@@ -1,6 +1,6 @@
 /// SVG transform attribute parser.
 /// Handles: matrix(), translate(), scale(), rotate(), skewX(), skewY() and chaining.
-use super::document::Transform2d;
+use crate::document::Transform2d;
 
 pub fn parse_transform(s: &str) -> Transform2d {
     let mut result = Transform2d::identity();

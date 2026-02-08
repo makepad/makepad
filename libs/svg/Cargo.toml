@@ -1,8 +1,13 @@
 [package]
-name = "svg"
-version = "0.1.0"
-edition = "2024"
+name = "makepad-svg"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "SVG parsing, vector path/paint types, and tessellation for Makepad"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
-resvg = { path = "../resvg-0.43.0", version = "0.43.0" }
+makepad-html = { path = "../html", version = "1.0.0" }
+makepad-live-id = { path = "../live_id", version = "1.0.0" }
