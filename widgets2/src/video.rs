@@ -662,11 +662,9 @@ impl Video {
             let handle = handle_ref.as_handle();
             if let Some(data) = cx.get_resource(handle) {
                 // Try to load as PNG first, then JPG
-                #[cfg(feature = "png")]
                 if self.load_png_from_data(cx, &data, 0).is_ok() {
                     return;
                 }
-                #[cfg(feature = "jpg")]
                 if self.load_jpg_from_data(cx, &data, 0).is_ok() {
                     return;
                 }

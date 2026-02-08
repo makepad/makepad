@@ -3,14 +3,12 @@ use {
         geom::{Point, Rect, Size},
         image::{Bgra, SubimageMut},
     },
-    rustybuzz as rustybuzz,
+    rustybuzz,
     rustybuzz::ttf_parser,
 };
 
-#[cfg(feature = "png")]
-use makepad_zune_png::PngDecoder;
-#[cfg(feature = "png")]
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
+use makepad_zune_png::PngDecoder;
 
 #[derive(Clone, Debug)]
 pub struct GlyphRasterImage<'a> {
@@ -48,74 +46,68 @@ impl<'a> GlyphRasterImage<'a> {
         self.dpxs_per_em
     }
 
-    #[cfg(feature = "png")]
     pub fn decode_size(&self) -> Size<usize> {
         match self.format {
             Format::Png => self.decode_size_png(),
         }
     }
 
-    #[cfg(not(feature = "png"))]
-    pub fn decode_size(&self) -> Size<usize> {
-        // Without PNG support, return zero size
-        let _ = self.data;
-        Size { width: 0, height: 0 }
-    }
-
-    #[cfg(feature = "png")]
     fn decode_size_png(&self) -> Size<usize> {
         let cursor = ZCursor::new(self.data);
         let mut decoder = PngDecoder::new(cursor);
         if decoder.decode_headers().is_err() {
-            return Size { width: 0, height: 0 };
+            return Size {
+                width: 0,
+                height: 0,
+            };
         }
-        decoder.dimensions()
-            .map(|(w, h)| Size { width: w, height: h })
-            .unwrap_or(Size { width: 0, height: 0 })
+        decoder
+            .dimensions()
+            .map(|(w, h)| Size {
+                width: w,
+                height: h,
+            })
+            .unwrap_or(Size {
+                width: 0,
+                height: 0,
+            })
     }
 
-    #[cfg(feature = "png")]
     pub fn decode(&self, image: &mut SubimageMut<Bgra>) {
         match self.format {
             Format::Png => self.decode_png(image),
         }
     }
 
-    #[cfg(not(feature = "png"))]
-    pub fn decode(&self, _image: &mut SubimageMut<Bgra>) {
-        // PNG decoding not available without the png feature
-    }
-
-    #[cfg(feature = "png")]
     fn decode_png(&self, image: &mut SubimageMut<Bgra>) {
         let cursor = ZCursor::new(self.data);
         let mut decoder = PngDecoder::new(cursor);
         if decoder.decode_headers().is_err() {
             return;
         }
-        
+
         let (width, height) = match decoder.dimensions() {
             Some(dims) => dims,
             None => return,
         };
-        
+
         let colorspace = match decoder.colorspace() {
             Some(cs) => cs,
             None => return,
         };
-        
+
         let decoded = match decoder.decode() {
             Ok(d) => d,
             Err(_) => return,
         };
-        
+
         let buffer = match decoded.u8() {
             Some(b) => b,
             None => return,
         };
-        
+
         let num_components = colorspace.num_components();
-        
+
         match num_components {
             4 => {
                 // RGBA

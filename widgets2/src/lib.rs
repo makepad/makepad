@@ -6,13 +6,10 @@ pub use makepad_draw2 as makepad_draw;
 pub use makepad_platform::log;
 pub use makepad_platform::makepad_script;
 
-#[cfg(feature = "html")]
 pub use makepad_html;
 
-#[cfg(feature = "jpg")]
 pub use makepad_zune_jpeg;
 
-#[cfg(feature = "png")]
 pub use makepad_zune_png;
 
 // Core modules (used internally first)
@@ -73,9 +70,7 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 
-#[cfg(feature = "html")]
 pub mod html;
-#[cfg(feature = "markdown")]
 pub mod markdown;
 
 pub mod splash;
@@ -196,10 +191,8 @@ pub use crate::{
     window_menu::*,
 };
 
-#[cfg(feature = "html")]
 pub use crate::html::*;
 
-#[cfg(feature = "markdown")]
 pub use crate::markdown::*;
 
 pub use crate::splash::*;
@@ -303,9 +296,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::slides_view::script_mod(vm);
     crate::slide_panel::script_mod(vm);
 
-    #[cfg(feature = "html")]
     crate::html::script_mod(vm);
-    #[cfg(feature = "markdown")]
     crate::markdown::script_mod(vm);
 
     crate::splash::script_mod(vm);

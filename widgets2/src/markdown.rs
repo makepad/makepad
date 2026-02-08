@@ -3,7 +3,6 @@ use crate::{
     widget::*, WidgetMatchEvent,
 };
 
-#[cfg(feature = "markdown")]
 use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 script_mod! {
@@ -235,7 +234,6 @@ script_mod! {
 }
 
 /// The state of a list at a given nesting level.
-#[cfg(feature = "markdown")]
 struct ListState {
     // Current item number for ordered lists.
     current_number: u64,
@@ -284,12 +282,7 @@ impl Widget for Markdown {
         self.auto_id = 0;
 
         self.begin(cx, walk);
-        #[cfg(feature = "markdown")]
         self.process_markdown_doc(cx);
-        #[cfg(not(feature = "markdown"))]
-        {
-            self.text_flow.draw_text(cx, "Markdown feature not enabled");
-        }
         self.end(cx);
 
         DrawStep::done()
@@ -308,7 +301,6 @@ impl Widget for Markdown {
 }
 
 impl Markdown {
-    #[cfg(feature = "markdown")]
     fn process_markdown_doc(&mut self, cx: &mut Cx2d) {
         let tf = &mut self.text_flow;
         // Track state for nested formatting
