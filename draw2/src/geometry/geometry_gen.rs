@@ -1,29 +1,81 @@
-
-use {
-    crate::{
-        makepad_platform::*,
-    },
-};
+use crate::makepad_platform::*;
 
 #[derive(Clone, Script, ScriptHook)]
-pub struct QuadVertex{
-    #[live] pub pos: Vec2f
+pub struct QuadVertex {
+    #[live]
+    pub pos: Vec2f,
 }
 
-pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{
+#[derive(Clone, Script, ScriptHook)]
+pub struct VectorVertex {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    #[live]
+    pub u: f32,
+    #[live]
+    pub v: f32,
+    #[live]
+    pub color_r: f32,
+    #[live]
+    pub color_g: f32,
+    #[live]
+    pub color_b: f32,
+    #[live]
+    pub color_a: f32,
+    #[live]
+    pub stroke_mult: f32,
+    #[live]
+    pub stroke_dist: f32,
+    #[live]
+    pub shape_id: f32,
+    // dual-purpose params: shadow (stroke_mult == -1) or gradient (param0 > 0)
+    #[live]
+    pub param0: f32,
+    #[live]
+    pub param1: f32,
+    #[live]
+    pub param2: f32,
+    #[live]
+    pub param3: f32,
+    #[live]
+    pub param4: f32,
+    #[live]
+    pub param5: f32,
+    // second color for gradient endpoint (color at t=1)
+    #[live]
+    pub color2_r: f32,
+    #[live]
+    pub color2_g: f32,
+    #[live]
+    pub color2_b: f32,
+    #[live]
+    pub color2_a: f32,
+}
+
+pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     let geom = vm.new_module(id!(geom));
     // lets make a Quad geometry here
     set_script_value_to_pod!(vm, geom.QuadVertex);
     // now lets also build a quad vertexbuffer
-    let gen = GeometryGen::from_quad_2d(0.,0.,1.,1.).into_geometry(vm.cx_mut()).into_script_handle(vm);
+    let gen = GeometryGen::from_quad_2d(0., 0., 1., 1.)
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
     set_script_value!(vm, geom.QuadGeom = gen);
+    // Vector geometry: vertex type + placeholder geom (overridden at draw time)
+    set_script_value_to_pod!(vm, geom.VectorVertex);
+    let vgen = GeometryGen::from_triangle_2d()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.VectorGeom = vgen);
     NIL
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GeometryGen {
     pub vertices: Vec<f32>, // vec4 pos, vec3 normal, vec2 uv
-    pub indices: Vec<u32>
+    pub indices: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -34,14 +86,25 @@ pub enum GeometryAxis {
 }
 
 impl GeometryGen {
-    
-    pub fn update_geometry(self, cx:&mut Cx, geometry:&Geometry){
+    pub fn update_geometry(self, cx: &mut Cx, geometry: &Geometry) {
         geometry.update(cx, self.indices, self.vertices);
     }
-    
-    pub fn into_geometry(self, cx:&mut Cx)->Geometry{
+
+    pub fn into_geometry(self, cx: &mut Cx) -> Geometry {
         let g = Geometry::new(cx);
         g.update(cx, self.indices, self.vertices);
+        g
+    }
+
+    /// Placeholder single-triangle geometry for vector drawing (overridden at draw time)
+    pub fn from_triangle_2d() -> GeometryGen {
+        let mut g = Self::default();
+        // 3 vertices: x,y,u,v, r,g,b,a, stroke_mult (9 floats each)
+        for _ in 0..3 {
+            g.vertices
+                .extend_from_slice(&[0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1e6]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
         g
     }
 
@@ -50,20 +113,27 @@ impl GeometryGen {
         g.add_quad_2d(x1, y1, x2, y2);
         g
     }
-    
+
     pub fn from_cube_3d(
         width: f32,
         height: f32,
         depth: f32,
         width_segments: usize,
         height_segments: usize,
-        depth_segments: usize
+        depth_segments: usize,
     ) -> GeometryGen {
         let mut g = Self::default();
-        g.add_cube_3d(width, height, depth, width_segments, height_segments, depth_segments);
+        g.add_cube_3d(
+            width,
+            height,
+            depth,
+            width_segments,
+            height_segments,
+            depth_segments,
+        );
         g
     }
-    
+
     // requires pos:vec2 normalized layout
     pub fn add_quad_2d(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
         let vertex_offset = self.vertices.len() as u32;
@@ -82,7 +152,7 @@ impl GeometryGen {
         self.indices.push(vertex_offset + 3);
         self.indices.push(vertex_offset + 0);
     }
-    
+
     // requires pos:vec3, id:float, normal:vec3, uv:vec2 layout
     pub fn add_cube_3d(
         &mut self,
@@ -91,17 +161,88 @@ impl GeometryGen {
         depth: f32,
         width_segments: usize,
         height_segments: usize,
-        depth_segments: usize
+        depth_segments: usize,
     ) {
-        self.add_plane_3d(GeometryAxis::Z, GeometryAxis::Y, GeometryAxis::X, -1.0, -1.0, depth, height, width, depth_segments, height_segments, 0.0);
-        self.add_plane_3d(GeometryAxis::Z, GeometryAxis::Y, GeometryAxis::X, 1.0, -1.0, depth, height, -width, depth_segments, height_segments, 1.0);
-        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Z, GeometryAxis::Y, 1.0, 1.0, width, depth, height, width_segments, depth_segments, 2.0);
-        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Z, GeometryAxis::Y, 1.0, -1.0, width, depth, -height, width_segments, depth_segments, 3.0);
-        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Y, GeometryAxis::Z, 1.0, -1.0, width, height, depth, width_segments, height_segments, 4.0);
-        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Y, GeometryAxis::Z, -1.0, -1.0, width, height, -depth, width_segments, height_segments, 5.0);
+        self.add_plane_3d(
+            GeometryAxis::Z,
+            GeometryAxis::Y,
+            GeometryAxis::X,
+            -1.0,
+            -1.0,
+            depth,
+            height,
+            width,
+            depth_segments,
+            height_segments,
+            0.0,
+        );
+        self.add_plane_3d(
+            GeometryAxis::Z,
+            GeometryAxis::Y,
+            GeometryAxis::X,
+            1.0,
+            -1.0,
+            depth,
+            height,
+            -width,
+            depth_segments,
+            height_segments,
+            1.0,
+        );
+        self.add_plane_3d(
+            GeometryAxis::X,
+            GeometryAxis::Z,
+            GeometryAxis::Y,
+            1.0,
+            1.0,
+            width,
+            depth,
+            height,
+            width_segments,
+            depth_segments,
+            2.0,
+        );
+        self.add_plane_3d(
+            GeometryAxis::X,
+            GeometryAxis::Z,
+            GeometryAxis::Y,
+            1.0,
+            -1.0,
+            width,
+            depth,
+            -height,
+            width_segments,
+            depth_segments,
+            3.0,
+        );
+        self.add_plane_3d(
+            GeometryAxis::X,
+            GeometryAxis::Y,
+            GeometryAxis::Z,
+            1.0,
+            -1.0,
+            width,
+            height,
+            depth,
+            width_segments,
+            height_segments,
+            4.0,
+        );
+        self.add_plane_3d(
+            GeometryAxis::X,
+            GeometryAxis::Y,
+            GeometryAxis::Z,
+            -1.0,
+            -1.0,
+            width,
+            height,
+            -depth,
+            width_segments,
+            height_segments,
+            5.0,
+        );
     }
-    
-    
+
     // requires pos:vec3, id:float, normal:vec3, uv:vec2 layout
     pub fn add_plane_3d(
         &mut self,
@@ -115,7 +256,7 @@ impl GeometryGen {
         depth: f32,
         grid_x: usize,
         grid_y: usize,
-        id: f32
+        id: f32,
     ) {
         let segment_width = width / (grid_x as f32);
         let segment_height = height / (grid_y as f32);
@@ -124,36 +265,35 @@ impl GeometryGen {
         let depth_half = depth / 2.0;
         let grid_x1 = grid_x + 1;
         let grid_y1 = grid_y + 1;
-        
+
         let vertex_offset = self.vertices.len() / 9;
-        
+
         for iy in 0..grid_y1 {
             let y = (iy as f32) * segment_height - height_half;
-            
+
             for ix in 0..grid_x1 {
-                
                 let x = (ix as f32) * segment_width - width_half;
                 let off = self.vertices.len();
                 self.vertices.push(0.0);
                 self.vertices.push(0.0);
                 self.vertices.push(0.0);
-                
+
                 self.vertices[off + u as usize] = x * udir;
                 self.vertices[off + v as usize] = y * vdir;
                 self.vertices[off + w as usize] = depth_half;
-                
+
                 self.vertices.push(id);
                 let off = self.vertices.len();
                 self.vertices.push(0.0);
                 self.vertices.push(0.0);
                 self.vertices.push(0.0);
-                self.vertices[off + w as usize] = if depth > 0.0 {1.0} else {-1.0};
-                
+                self.vertices[off + w as usize] = if depth > 0.0 { 1.0 } else { -1.0 };
+
                 self.vertices.push((ix as f32) / (grid_x as f32));
                 self.vertices.push(1.0 - (iy as f32) / (grid_y as f32));
             }
         }
-        
+
         for iy in 0..grid_y {
             for ix in 0..grid_x {
                 let a = vertex_offset + ix + grid_x1 * iy;

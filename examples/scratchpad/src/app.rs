@@ -43,7 +43,7 @@ script_mod! {
             text := Label{text: "" draw_text.color: #888888 draw_text.text_style.font_size: 9}
         }
     }
-
+    let Tasks =["A", "B", "C"]
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
@@ -79,19 +79,20 @@ script_mod! {
                             width: Fill height: Fit
                             flow: Down spacing: 0
                             new_batch: true
-
-                            TodoItem{label.text: "Buy groceries" tag.text.text: "errands"}
-                            TodoItem{label.text: "Fix login bug" tag.text.text: "urgent"}
-                            TodoItem{label.text: "Write unit tests" tag.text.text: "dev"}
-                            TodoItem{label.text: "Call the dentist" tag.text.text: "personal"}
+                            render: |view| {
+                                for task in tasks{
+                                    TodoItem{label.text: task}
+                                }
+                            }
                         }
                         
                         new_task := TextInput{
                             on_return: |text|{
-                                task_view.append(TodoItem{label.text: text})
+                                tasks.push(text)
+                                // lets regenerate something
+                                mod.ui.regen(@task_view)
                             }
                         }
-                        
                     }
                 }
             }
