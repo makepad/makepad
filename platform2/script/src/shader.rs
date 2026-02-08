@@ -26,7 +26,13 @@ fn write_shader_float(out: &mut String, v: f64) {
     if abs_v != 0.0 && (abs_v >= 1e15 || abs_v < 1e-6) {
         write!(out, "{:e}", v).ok();
     } else {
+        let start = out.len();
         write!(out, "{}", v).ok();
+        // Ensure there's always a decimal point so that appending 'f' produces valid Metal/GLSL
+        // (e.g. "1" -> "1.0" so we get "1.0f" not "1f")
+        if !out[start..].contains('.') && !out[start..].contains('e') {
+            out.push_str(".0");
+        }
     }
 }
 
@@ -1380,28 +1386,11 @@ impl ShaderFnCompiler {
             Opcode::FOR_3 => {
                 script_err_shader!(self.trap, "FOR_3: `for i, k, v in obj` iteration not supported in shaders, use `for i in 0..n`");
             }
-            Opcode::LOOP => {
-                script_err_not_impl!(
-                    self.trap,
-                    "LOOP: infinite `loop {{}}` not supported in shaders, use `for i in 0..n`"
-                );
-            }
+            Opcode::LOOP => self.handle_loop(),
             Opcode::FOR_END => self.handle_for_end(),
-            Opcode::BREAK => {
-                script_err_not_impl!(self.trap, "BREAK: `break` not yet supported in shaders");
-            }
-            Opcode::BREAKIFNOT => {
-                script_err_not_impl!(
-                    self.trap,
-                    "BREAKIFNOT: conditional `break` not yet supported in shaders"
-                );
-            }
-            Opcode::CONTINUE => {
-                script_err_not_impl!(
-                    self.trap,
-                    "CONTINUE: `continue` not yet supported in shaders"
-                );
-            }
+            Opcode::BREAK => self.handle_break(),
+            Opcode::BREAKIFNOT => self.handle_breakifnot(),
+            Opcode::CONTINUE => self.handle_continue(),
             // Range
             Opcode::RANGE => self.handle_range(vm),
             // Is
@@ -1463,7 +1452,10 @@ impl ShaderFnCompiler {
         }
         if let Some(me) = self.mes.last_mut() {
             match me {
-                ShaderMe::FnBody { .. } | ShaderMe::ForLoop { .. } | ShaderMe::IfBody { .. } => {
+                ShaderMe::FnBody { .. }
+                | ShaderMe::ForLoop { .. }
+                | ShaderMe::LoopBody
+                | ShaderMe::IfBody { .. } => {
                     let (_ty, s) = self.stack.pop(self.trap.pass());
                     self.out.push_str(&s);
                     self.out.push_str(";\n");

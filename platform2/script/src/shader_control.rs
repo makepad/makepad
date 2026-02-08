@@ -550,15 +550,37 @@ impl ShaderFnCompiler {
 
     pub(crate) fn handle_for_end(&mut self) {
         if let Some(me) = self.mes.pop() {
-            if let ShaderMe::ForLoop { .. } = me {
-                self.out.push_str("}\n");
-                self.shader_scope.exit_scope();
-            } else {
-                script_err_unexpected!(self.trap, "unexpected in shader control");
+            match me {
+                ShaderMe::ForLoop { .. } | ShaderMe::LoopBody => {
+                    self.out.push_str("}\n");
+                    self.shader_scope.exit_scope();
+                }
+                _ => {
+                    script_err_unexpected!(self.trap, "unexpected in shader control");
+                }
             }
         } else {
             script_err_unexpected!(self.trap, "unexpected in shader control");
         }
+    }
+
+    pub(crate) fn handle_loop(&mut self) {
+        self.shader_scope.enter_scope();
+        self.out.push_str("while(true){\n");
+        self.mes.push(ShaderMe::LoopBody);
+    }
+
+    pub(crate) fn handle_break(&mut self) {
+        self.out.push_str("break;\n");
+    }
+
+    pub(crate) fn handle_breakifnot(&mut self) {
+        let (_ty, cond_s) = self.stack.pop(self.trap.pass());
+        write!(self.out, "if(!({cond_s})){{break;}}\n").ok();
+    }
+
+    pub(crate) fn handle_continue(&mut self) {
+        self.out.push_str("continue;\n");
     }
 
     pub(crate) fn handle_range(&mut self, vm: &mut ScriptVm) {

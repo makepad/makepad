@@ -72,6 +72,11 @@ fn apply_presentation_attrs(walker: &HtmlWalker, style: &mut SvgStyle) {
     if let Some(v) = walker.find_attr_lc(live_id!(fill - rule)) {
         style.fill_rule = parse_fill_rule(v);
     }
+    if let Some(v) = walker.find_attr_lc(live_id!(data - shader - id)) {
+        if let Some(n) = parse_number(v) {
+            style.shader_id = n;
+        }
+    }
 }
 
 fn apply_inline_style(style_str: &str, style: &mut SvgStyle) {
