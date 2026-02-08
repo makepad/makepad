@@ -39,7 +39,6 @@ script_mod! {
 
 // ---- Helpers ----
 
-/// Extract f32 from a ScriptValue that may be stored as f64, f32, u40, or bool.
 fn sv_f32(v: &ScriptValue) -> Option<f32> {
     v.as_number().map(|n| n as f32)
 }
@@ -52,7 +51,7 @@ fn color_u32_to_rgba(c: u32) -> (f32, f32, f32, f32) {
     (r, g, b, a)
 }
 
-fn script_value_to_anim_string(vm: &mut ScriptVm, v: &ScriptValue) -> String {
+fn sv_to_anim_string(vm: &mut ScriptVm, v: &ScriptValue) -> String {
     if v.is_nil() {
         return String::new();
     }
@@ -79,6 +78,24 @@ fn script_value_to_anim_string(vm: &mut ScriptVm, v: &ScriptValue) -> String {
     String::new()
 }
 
+fn sv_opt_str(v: &ScriptValue) -> Option<String> {
+    if v.is_nil() {
+        return None;
+    }
+    sv_f32(v).map(|f| format!("{}", f))
+}
+
+fn sv_opt_str_vec(v: &[ScriptValue]) -> Option<Vec<String>> {
+    if v.is_empty() {
+        return None;
+    }
+    Some(
+        v.iter()
+            .filter_map(|v| sv_f32(v).map(|f| format!("{}", f)))
+            .collect(),
+    )
+}
+
 fn resolve_paint(
     vm: &mut ScriptVm,
     value: &ScriptValue,
@@ -89,10 +106,7 @@ fn resolve_paint(
         return None;
     }
     if let Some(b) = value.as_bool() {
-        if !b {
-            return Some(SvgPaint::None);
-        }
-        return None;
+        return if !b { Some(SvgPaint::None) } else { None };
     }
     if let Some(c) = value.as_color() {
         let (r, g, b, a) = color_u32_to_rgba(c);
@@ -116,13 +130,11 @@ fn resolve_paint(
 }
 
 fn is_tween(vm: &ScriptVm, value: &ScriptValue) -> bool {
-    if let Some(obj) = value.as_object() {
+    value.as_object().map_or(false, |obj| {
         vm.bx
             .heap
             .type_matches_id(obj, VectorTween::script_type_id_static())
-    } else {
-        false
-    }
+    })
 }
 
 fn resolve_repeat(v: &ScriptValue) -> RepeatCount {
@@ -139,26 +151,19 @@ fn resolve_repeat(v: &ScriptValue) -> RepeatCount {
     }
 }
 
-/// Resolve a ScriptValue `transform` field into static Transform2d + animated transforms.
-/// The value can be nil, a single transform object, or an array of transform objects.
 fn resolve_transform(
     vm: &mut ScriptVm,
     value: &ScriptValue,
 ) -> (Transform2d, Vec<SvgAnimateTransform>) {
     let mut xf = Transform2d::identity();
     let mut anims = Vec::new();
-
     if value.is_nil() {
         return (xf, anims);
     }
-
-    // Single object
     if let Some(obj) = value.as_object() {
         resolve_one_transform(vm, obj, *value, &mut xf, &mut anims);
         return (xf, anims);
     }
-
-    // Array of objects
     if let Some(arr) = value.as_array() {
         let len = vm.bx.heap.array_len(arr);
         for i in 0..len {
@@ -168,7 +173,6 @@ fn resolve_transform(
             }
         }
     }
-
     (xf, anims)
 }
 
@@ -183,7 +187,6 @@ fn resolve_one_transform(
         return;
     };
     let deg_to_rad = std::f32::consts::PI / 180.0;
-
     if tid == VectorRotate::script_type_id_static() {
         let t = VectorRotate::script_from_value(vm, value);
         if t.dur > 0.0 {
@@ -224,7 +227,7 @@ fn resolve_one_transform(
     }
 }
 
-fn resolve_stroke_linecap(vm: &ScriptVm, v: &ScriptValue) -> LineCap {
+fn resolve_linecap(vm: &ScriptVm, v: &ScriptValue) -> LineCap {
     vm.bx
         .heap
         .string_with(*v, |_, s| match s {
@@ -235,7 +238,7 @@ fn resolve_stroke_linecap(vm: &ScriptVm, v: &ScriptValue) -> LineCap {
         .unwrap_or(LineCap::Butt)
 }
 
-fn resolve_stroke_linejoin(vm: &ScriptVm, v: &ScriptValue) -> LineJoin {
+fn resolve_linejoin(vm: &ScriptVm, v: &ScriptValue) -> LineJoin {
     vm.bx
         .heap
         .string_with(*v, |_, s| match s {
@@ -271,7 +274,17 @@ fn resolve_filter(
     None
 }
 
-/// Build SvgStyle + collect animations from fill/stroke/opacity Tween values.
+fn is_transform_type(vm: &ScriptVm, obj: ScriptObject) -> bool {
+    let Some(tid) = vm.bx.heap.object_type_id(obj) else {
+        return false;
+    };
+    tid == VectorTranslate::script_type_id_static()
+        || tid == VectorScale::script_type_id_static()
+        || tid == VectorRotate::script_type_id_static()
+        || tid == VectorSkewX::script_type_id_static()
+        || tid == VectorSkewY::script_type_id_static()
+}
+
 fn build_style(
     vm: &mut ScriptVm,
     fill: &ScriptValue,
@@ -289,56 +302,54 @@ fn build_style(
     anims: &mut Vec<SvgAnimate>,
 ) -> SvgStyle {
     let mut style = SvgStyle::default();
-
-    // Fill — color, gradient, false (none), or Tween
     if is_tween(vm, fill) {
-        let tween = VectorTween::script_from_value(vm, *fill);
-        anims.push(tween.to_svg_animate(vm, AnimateAttribute::Fill));
+        anims.push(
+            VectorTween::script_from_value(vm, *fill).to_svg_animate(vm, AnimateAttribute::Fill),
+        );
     } else if let Some(p) = resolve_paint(vm, fill, defs, gc) {
         style.fill = Some(p);
     }
-
-    // Stroke
     if is_tween(vm, stroke) {
-        let tween = VectorTween::script_from_value(vm, *stroke);
-        anims.push(tween.to_svg_animate(vm, AnimateAttribute::Stroke));
+        anims.push(
+            VectorTween::script_from_value(vm, *stroke)
+                .to_svg_animate(vm, AnimateAttribute::Stroke),
+        );
     } else if let Some(p) = resolve_paint(vm, stroke, defs, gc) {
         style.stroke = Some(p);
     }
-
-    // Stroke width
     if is_tween(vm, stroke_width) {
-        let tween = VectorTween::script_from_value(vm, *stroke_width);
-        anims.push(tween.to_svg_animate(vm, AnimateAttribute::StrokeWidth));
+        anims.push(
+            VectorTween::script_from_value(vm, *stroke_width)
+                .to_svg_animate(vm, AnimateAttribute::StrokeWidth),
+        );
     } else {
         style.stroke_width = sv_f32(stroke_width).unwrap_or(0.0);
     }
-
-    // Stroke opacity
     if is_tween(vm, stroke_opacity) {
-        let tween = VectorTween::script_from_value(vm, *stroke_opacity);
-        anims.push(tween.to_svg_animate(vm, AnimateAttribute::StrokeOpacity));
+        anims.push(
+            VectorTween::script_from_value(vm, *stroke_opacity)
+                .to_svg_animate(vm, AnimateAttribute::StrokeOpacity),
+        );
     } else {
         style.stroke_opacity = sv_f32(stroke_opacity).unwrap_or(1.0);
     }
-
-    // Opacity
     if is_tween(vm, opacity) {
-        let tween = VectorTween::script_from_value(vm, *opacity);
-        anims.push(tween.to_svg_animate(vm, AnimateAttribute::Opacity));
+        anims.push(
+            VectorTween::script_from_value(vm, *opacity)
+                .to_svg_animate(vm, AnimateAttribute::Opacity),
+        );
     } else {
         style.opacity = sv_f32(opacity).unwrap_or(1.0);
     }
-
     style.fill_opacity = fill_opacity.unwrap_or(1.0);
-    style.stroke_linecap = resolve_stroke_linecap(vm, stroke_linecap);
-    style.stroke_linejoin = resolve_stroke_linejoin(vm, stroke_linejoin);
+    style.stroke_linecap = resolve_linecap(vm, stroke_linecap);
+    style.stroke_linejoin = resolve_linejoin(vm, stroke_linejoin);
     style.filter = resolve_filter(vm, filter, defs, gc);
     style.shader_id = shader_id;
     style
 }
 
-// ---- VectorStop ----
+// ---- Data types ----
 
 #[derive(Script, ScriptHook, Default)]
 pub struct VectorStop {
@@ -354,11 +365,11 @@ pub struct VectorStop {
 
 impl VectorStop {
     fn to_gradient_stop(&self) -> GradientStop {
-        let (r, g, b, a) = if let Some(c) = self.color.as_color() {
-            color_u32_to_rgba(c)
-        } else {
-            (0.0, 0.0, 0.0, 1.0)
-        };
+        let (r, g, b, a) = self
+            .color
+            .as_color()
+            .map(color_u32_to_rgba)
+            .unwrap_or((0.0, 0.0, 0.0, 1.0));
         let fa = a * self.opacity;
         GradientStop {
             offset: self.offset,
@@ -366,8 +377,6 @@ impl VectorStop {
         }
     }
 }
-
-// ---- VectorTween (inline on properties) ----
 
 #[derive(Script, ScriptHook, Default)]
 pub struct VectorTween {
@@ -393,19 +402,18 @@ pub struct VectorTween {
 
 impl VectorTween {
     fn to_svg_animate(&self, vm: &mut ScriptVm, attr: AnimateAttribute) -> SvgAnimate {
-        let from_str = script_value_to_anim_string(vm, &self.from);
-        let to_str = script_value_to_anim_string(vm, &self.to);
-        let values_strs: Option<Vec<String>> = if !self.values.is_empty() {
+        let from_str = sv_to_anim_string(vm, &self.from);
+        let to_str = sv_to_anim_string(vm, &self.to);
+        let values_strs = if !self.values.is_empty() {
             Some(
                 self.values
                     .iter()
-                    .map(|v| script_value_to_anim_string(vm, v))
+                    .map(|v| sv_to_anim_string(vm, v))
                     .collect(),
             )
         } else {
             None
         };
-
         let calc_mode = vm
             .bx
             .heap
@@ -416,7 +424,6 @@ impl VectorTween {
                 _ => AnimateCalcMode::Linear,
             })
             .unwrap_or(AnimateCalcMode::Linear);
-
         let fill = vm
             .bx
             .heap
@@ -425,7 +432,6 @@ impl VectorTween {
                 _ => AnimateFill::Remove,
             })
             .unwrap_or(AnimateFill::Remove);
-
         SvgAnimate {
             attribute: attr,
             from: if from_str.is_empty() {
@@ -450,19 +456,50 @@ impl VectorTween {
     }
 }
 
-// ---- Transform types (static + animated, used on `transform:` property) ----
+#[derive(Script, ScriptHook, Default)]
+pub struct VectorDropShadow {
+    #[source]
+    source: ScriptObjectRef,
+    #[live]
+    pub dx: f32,
+    #[live]
+    pub dy: f32,
+    #[live]
+    pub blur: f32,
+    #[live]
+    pub color: ScriptValue,
+    #[live(1.0)]
+    pub opacity: f32,
+}
+
+impl VectorDropShadow {
+    fn to_svg_filter_effect(&self) -> SvgFilterEffect {
+        let (r, g, b, a) = self
+            .color
+            .as_color()
+            .map(color_u32_to_rgba)
+            .unwrap_or((0.0, 0.0, 0.0, 1.0));
+        SvgFilterEffect::DropShadow {
+            dx: self.dx,
+            dy: self.dy,
+            std_dev: self.blur,
+            color: (r, g, b, a * self.opacity),
+        }
+    }
+}
+
+// ---- Transform types ----
 
 #[derive(Script, ScriptHook, Default)]
 pub struct VectorRotate {
     #[source]
     source: ScriptObjectRef,
     #[live]
-    pub deg: ScriptValue, // static angle
+    pub deg: ScriptValue,
     #[live]
     pub cx: f32,
     #[live]
     pub cy: f32,
-    // animation fields
     #[live]
     pub from: ScriptValue,
     #[live]
@@ -499,10 +536,9 @@ pub struct VectorScale {
     #[source]
     source: ScriptObjectRef,
     #[live]
-    pub x: ScriptValue, // static sx
+    pub x: ScriptValue,
     #[live]
-    pub y: ScriptValue, // static sy
-    // animation fields
+    pub y: ScriptValue,
     #[live]
     pub from: ScriptValue,
     #[live]
@@ -539,10 +575,9 @@ pub struct VectorTranslate {
     #[source]
     source: ScriptObjectRef,
     #[live]
-    pub x: ScriptValue, // static tx
+    pub x: ScriptValue,
     #[live]
-    pub y: ScriptValue, // static ty
-    // animation fields
+    pub y: ScriptValue,
     #[live]
     pub from: ScriptValue,
     #[live]
@@ -580,7 +615,6 @@ pub struct VectorSkewX {
     source: ScriptObjectRef,
     #[live]
     pub deg: ScriptValue,
-    // animation fields
     #[live]
     pub from: ScriptValue,
     #[live]
@@ -618,7 +652,6 @@ pub struct VectorSkewY {
     source: ScriptObjectRef,
     #[live]
     pub deg: ScriptValue,
-    // animation fields
     #[live]
     pub from: ScriptValue,
     #[live]
@@ -650,67 +683,6 @@ impl VectorSkewY {
     }
 }
 
-fn sv_opt_str(v: &ScriptValue) -> Option<String> {
-    if v.is_nil() {
-        return None;
-    }
-    if let Some(f) = sv_f32(v) {
-        return Some(format!("{}", f));
-    }
-    None
-}
-
-fn sv_opt_str_vec(v: &[ScriptValue]) -> Option<Vec<String>> {
-    if v.is_empty() {
-        return None;
-    }
-    Some(
-        v.iter()
-            .filter_map(|v| {
-                if let Some(f) = sv_f32(v) {
-                    Some(format!("{}", f))
-                } else {
-                    None
-                }
-            })
-            .collect(),
-    )
-}
-
-// ---- VectorDropShadow ----
-
-#[derive(Script, ScriptHook, Default)]
-pub struct VectorDropShadow {
-    #[source]
-    source: ScriptObjectRef,
-    #[live]
-    pub dx: f32,
-    #[live]
-    pub dy: f32,
-    #[live]
-    pub blur: f32,
-    #[live]
-    pub color: ScriptValue,
-    #[live(1.0)]
-    pub opacity: f32,
-}
-
-impl VectorDropShadow {
-    fn to_svg_filter_effect(&self) -> SvgFilterEffect {
-        let (r, g, b, a) = if let Some(c) = self.color.as_color() {
-            color_u32_to_rgba(c)
-        } else {
-            (0.0, 0.0, 0.0, 1.0)
-        };
-        SvgFilterEffect::DropShadow {
-            dx: self.dx,
-            dy: self.dy,
-            std_dev: self.blur,
-            color: (r, g, b, a * self.opacity),
-        }
-    }
-}
-
 // ---- Shape types ----
 
 #[derive(Script, ScriptHook, Default)]
@@ -718,7 +690,7 @@ pub struct VectorPathShape {
     #[source]
     source: ScriptObjectRef,
     #[live]
-    pub d: ScriptValue, // string or Tween
+    pub d: ScriptValue,
     #[live]
     pub fill: ScriptValue,
     #[live]
@@ -762,7 +734,6 @@ impl VectorPathShape {
             gc,
             &mut anims,
         );
-
         let mut path = VectorPath::new();
         if is_tween(vm, &self.d) {
             let tween = VectorTween::script_from_value(vm, self.d);
@@ -780,7 +751,6 @@ impl VectorPathShape {
                 parse_path_data(s, &mut path);
             });
         }
-
         let (xf, at) = resolve_transform(vm, &self.transform);
         SvgNode::Path(SvgPath {
             id: None,
@@ -852,8 +822,6 @@ impl VectorRect {
             gc,
             &mut anims,
         );
-
-        // Geometry tweens
         for (val, attr) in [
             (&self.x, AnimateAttribute::X),
             (&self.y, AnimateAttribute::Y),
@@ -861,11 +829,9 @@ impl VectorRect {
             (&self.h, AnimateAttribute::Height),
         ] {
             if is_tween(vm, val) {
-                let tween = VectorTween::script_from_value(vm, *val);
-                anims.push(tween.to_svg_animate(vm, attr));
+                anims.push(VectorTween::script_from_value(vm, *val).to_svg_animate(vm, attr));
             }
         }
-
         let (xf, at) = resolve_transform(vm, &self.transform);
         SvgNode::Rect(SvgRect {
             id: None,
@@ -936,18 +902,15 @@ impl VectorCircle {
             gc,
             &mut anims,
         );
-
         for (val, attr) in [
             (&self.cx, AnimateAttribute::Cx),
             (&self.cy, AnimateAttribute::Cy),
             (&self.r, AnimateAttribute::R),
         ] {
             if is_tween(vm, val) {
-                let tween = VectorTween::script_from_value(vm, *val);
-                anims.push(tween.to_svg_animate(vm, attr));
+                anims.push(VectorTween::script_from_value(vm, *val).to_svg_animate(vm, attr));
             }
         }
-
         let (xf, at) = resolve_transform(vm, &self.transform);
         SvgNode::Circle(SvgCircle {
             id: None,
@@ -1300,20 +1263,8 @@ impl ScriptHook for VectorGroup {
     }
 }
 
-fn is_transform_type(vm: &ScriptVm, obj: ScriptObject) -> bool {
-    let Some(tid) = vm.bx.heap.object_type_id(obj) else {
-        return false;
-    };
-    tid == VectorTranslate::script_type_id_static()
-        || tid == VectorScale::script_type_id_static()
-        || tid == VectorRotate::script_type_id_static()
-        || tid == VectorSkewX::script_type_id_static()
-        || tid == VectorSkewY::script_type_id_static()
-}
-
 impl VectorGroup {
     fn to_svg_node(&self, vm: &mut ScriptVm, defs: &mut SvgDefs, gc: &mut usize) -> SvgNode {
-        // Dispatch children now, using parent's defs/gc so IDs don't collide
         let mut children = Vec::new();
         for cv in &self.child_values {
             if let Some(val_obj) = cv.as_object() {
@@ -1322,7 +1273,6 @@ impl VectorGroup {
                 }
             }
         }
-
         let mut anims = Vec::new();
         let style = build_style(
             vm,
@@ -1341,13 +1291,11 @@ impl VectorGroup {
             &mut anims,
         );
         let (mut xf, mut at) = resolve_transform(vm, &self.transform);
-        // Compose any extra transform children from the vec
         for extra in &self.extra_transforms {
             if let Some(obj) = extra.as_object() {
                 resolve_one_transform(vm, obj, *extra, &mut xf, &mut at);
             }
         }
-
         SvgNode::Group(SvgGroup {
             id: None,
             style,
@@ -1399,8 +1347,7 @@ impl ScriptHook for VectorGradient {
                             .heap
                             .type_matches_id(val_obj, VectorStop::script_type_id_static())
                         {
-                            let stop = VectorStop::script_from_value(vm, kv.value);
-                            self.stops.push(stop);
+                            self.stops.push(VectorStop::script_from_value(vm, kv.value));
                         }
                     }
                 }
@@ -1416,7 +1363,6 @@ impl VectorGradient {
         grad.y1 = self.y1;
         grad.x2 = self.x2;
         grad.y2 = self.y2;
-        // units and spread are ScriptValue strings — just check inline
         grad.stops = self.stops.iter().map(|s| s.to_gradient_stop()).collect();
         grad
     }
@@ -1464,8 +1410,7 @@ impl ScriptHook for VectorRadGradient {
                             .heap
                             .type_matches_id(val_obj, VectorStop::script_type_id_static())
                         {
-                            let stop = VectorStop::script_from_value(vm, kv.value);
-                            self.stops.push(stop);
+                            self.stops.push(VectorStop::script_from_value(vm, kv.value));
                         }
                     }
                 }
@@ -1513,8 +1458,10 @@ impl ScriptHook for VectorFilter {
                             .heap
                             .type_matches_id(val_obj, VectorDropShadow::script_type_id_static())
                         {
-                            let ds = VectorDropShadow::script_from_value(vm, kv.value);
-                            self.effects.push(ds.to_svg_filter_effect());
+                            self.effects.push(
+                                VectorDropShadow::script_from_value(vm, kv.value)
+                                    .to_svg_filter_effect(),
+                            );
                         }
                     }
                 }
@@ -1524,7 +1471,6 @@ impl ScriptHook for VectorFilter {
 }
 
 impl VectorFilter {
-    #[allow(dead_code)]
     fn to_svg_filter(&self, id: String) -> SvgFilter {
         SvgFilter {
             id,
@@ -1545,8 +1491,7 @@ fn dispatch_shape(
     let tid = vm.bx.heap.object_type_id(val_obj)?;
     macro_rules! shape {
         ($T:ty) => {{
-            let s = <$T>::script_from_value(vm, value);
-            Some(s.to_svg_node(vm, defs, gc))
+            Some(<$T>::script_from_value(vm, value).to_svg_node(vm, defs, gc))
         }};
     }
     match tid {
@@ -1628,7 +1573,6 @@ impl ScriptHook for Vector {
             self.doc.width = Some(self.viewbox.z);
             self.doc.height = Some(self.viewbox.w);
         }
-
         let mut gc = 0usize;
         if let Some(obj) = value.as_object() {
             vm.vec_with(obj, |vm, vec| {
@@ -1643,10 +1587,8 @@ impl ScriptHook for Vector {
                 }
             });
         }
-
         self.has_animations = self.doc.has_animations();
         self.draw_svg.set_doc_bounds(&self.doc);
-        // When viewbox is set, use it as the content bounds instead of computed geometry bounds
         if let Some(ref vb) = self.doc.viewbox {
             self.draw_svg.content_bounds = (vb.x, vb.y, vb.x + vb.width, vb.y + vb.height);
             self.draw_svg.content_size = dvec2(vb.width as f64, vb.height as f64);
@@ -1673,13 +1615,11 @@ impl Widget for Vector {
         if self.doc.root.is_empty() {
             return DrawStep::done();
         }
-
         let sw = self.draw_svg.content_size.x;
         let sh = self.draw_svg.content_size.y;
         if sw <= 0.0 || sh <= 0.0 {
             return DrawStep::done();
         }
-
         let walk = Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
@@ -1693,15 +1633,11 @@ impl Widget for Vector {
             },
             metrics: walk.metrics,
         };
-
         let rect = cx.walk_turtle(walk);
-
-        // Inject our doc into DrawSvg, render, then take it back
         self.draw_svg.svg_doc = Some(std::mem::take(&mut self.doc));
         self.draw_svg.has_animations = self.has_animations;
         self.draw_svg.render_to_rect(cx, &rect, self.time as f32);
         self.doc = self.draw_svg.svg_doc.take().unwrap_or_default();
-
         DrawStep::done()
     }
 }
