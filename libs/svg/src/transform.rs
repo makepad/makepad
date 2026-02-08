@@ -86,7 +86,7 @@ pub fn parse_transform(s: &str) -> Transform2d {
             _ => Transform2d::identity(),
         };
 
-        result = result.then(&t);
+        result = t.then(&result);
     }
 
     result

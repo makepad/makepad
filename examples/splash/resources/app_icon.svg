@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <filter id="icon_shadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+    <filter id="kb_shadow">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+
+    <!-- Dark glass background -->
+    <linearGradient id="glass_bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#556677" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#334455" stop-opacity="0.35"/>
+    </linearGradient>
+    <linearGradient id="glass_border" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="40%" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.2"/>
+    </linearGradient>
+    <linearGradient id="glass_spec" x1="0.1" y1="0" x2="0.7" y2="0.8">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="0.02"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.0"/>
+    </linearGradient>
+
+    <!-- Brain glow: radial gradient behind brain, no filter -->
+    <radialGradient id="brain_glow_grad" cx="0.5" cy="0.45" r="0.45">
+      <stop offset="0%" stop-color="#4466ee" stop-opacity="0.4"/>
+      <stop offset="45%" stop-color="#4466dd" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#4466dd" stop-opacity="0.0"/>
+    </radialGradient>
+
+    <!-- Brain stroke gradient -->
+    <linearGradient id="brain_grad" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#77ccff"/>
+      <stop offset="40%" stop-color="#7799ee"/>
+      <stop offset="75%" stop-color="#8866dd"/>
+      <stop offset="100%" stop-color="#9944cc"/>
+    </linearGradient>
+    <linearGradient id="fold_grad" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#aaddff"/>
+      <stop offset="100%" stop-color="#bb99ee"/>
+    </linearGradient>
+
+    <!-- Keyboard -->
+    <linearGradient id="kb_grad" x1="0" y1="0.5" x2="1" y2="0.5">
+      <stop offset="0%" stop-color="#9955ee"/>
+      <stop offset="50%" stop-color="#6688ff"/>
+      <stop offset="100%" stop-color="#44ddcc"/>
+    </linearGradient>
+    <linearGradient id="kb_body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8855dd" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#44aacc" stop-opacity="0.3"/>
+    </linearGradient>
+
+    <!-- Stem -->
+    <linearGradient id="stem_grad" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#7799dd"/>
+      <stop offset="100%" stop-color="#44cccc"/>
+    </linearGradient>
+  </defs>
+
+  <!-- GLASS BACKGROUND -->
+  <rect x="16" y="16" width="224" height="224" rx="44" ry="44"
+        fill="#445" fill-opacity="0.35" filter="url(#icon_shadow)"/>
+  <rect x="16" y="16" width="224" height="224" rx="44" ry="44"
+        fill="url(#glass_bg)"/>
+  <rect x="16" y="16" width="224" height="224" rx="44" ry="44"
+        fill="none" stroke="url(#glass_border)" stroke-width="1.5"/>
+
+  <!-- Glass specular -->
+  <path d="M60 16 C35.7 16 16 35.7 16 60 L16 105 Q55 55 160 30 L190 16 Z"
+        fill="url(#glass_spec)"/>
+
+  <!-- BRAIN GLOW - radial gradient circle, no filter needed -->
+  <circle cx="128" cy="95" r="80" fill="url(#brain_glow_grad)"/>
+
+  <!-- BRAIN - original Tabler paths, transform to position on card -->
+  <!-- Brain in 24x24: center ~(12, 11), want center at (128, 95) -->
+  <!-- scale 7.6: 12*7.6=91.2  11*7.6=83.6 -->
+  <!-- translate: (128-91.2, 95-83.6) = (36.8, 11.4) -->
+  <g transform="translate(36.8, 11.4) scale(7.6)">
+    <!-- Right hemisphere bottom -->
+    <path d="M15.5 13a3.5 3.5 0 0 0 -3.5 3.5v1a3.5 3.5 0 0 0 7 0v-1.8"
+          fill="none" stroke="url(#brain_grad)" stroke-width="0.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Left hemisphere bottom -->
+    <path d="M8.5 13a3.5 3.5 0 0 1 3.5 3.5v1a3.5 3.5 0 0 1 -7 0v-1.8"
+          fill="none" stroke="url(#brain_grad)" stroke-width="0.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Right outer lobe -->
+    <path d="M17.5 16a3.5 3.5 0 0 0 0 -7h-.5"
+          fill="none" stroke="url(#brain_grad)" stroke-width="0.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Right top -->
+    <path d="M19 9.3v-2.8a3.5 3.5 0 0 0 -7 0"
+          fill="none" stroke="url(#brain_grad)" stroke-width="0.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Left outer lobe -->
+    <path d="M6.5 16a3.5 3.5 0 0 1 0 -7h.5"
+          fill="none" stroke="url(#brain_grad)" stroke-width="0.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Left top + central stem -->
+    <path d="M5 9.3v-2.8a3.5 3.5 0 0 1 7 0v10"
+          fill="none" stroke="url(#brain_grad)" stroke-width="0.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Inner fold / sulcus -->
+    <path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4"
+          fill="none" stroke="url(#fold_grad)" stroke-width="0.28" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.5"/>
+  </g>
+
+  <!-- STEM - straight down from brain to keyboard -->
+  <path d="M128 148 L128 178"
+        fill="none" stroke="url(#stem_grad)" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- KEYBOARD -->
+  <g filter="url(#kb_shadow)">
+    <rect x="64" y="185" width="128" height="38" rx="7" ry="7" fill="url(#kb_body)"/>
+    <rect x="64" y="185" width="128" height="38" rx="7" ry="7" fill="none" stroke="url(#kb_grad)" stroke-width="1.2"/>
+
+    <!-- Row 1 -->
+    <rect x="73" y="190" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="85" y="190" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="97" y="190" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="109" y="190" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="121" y="190" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="133" y="190" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="145" y="190" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="157" y="190" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="169" y="190" width="15" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.18"/>
+
+    <!-- Row 2 -->
+    <rect x="76" y="199" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.15"/>
+    <rect x="88" y="199" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.15"/>
+    <rect x="100" y="199" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.15"/>
+    <rect x="112" y="199" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.15"/>
+    <rect x="124" y="199" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.15"/>
+    <rect x="136" y="199" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.15"/>
+    <rect x="148" y="199" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.15"/>
+    <rect x="160" y="199" width="24" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.15"/>
+
+    <!-- Row 3 -->
+    <rect x="73" y="208" width="12" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.12"/>
+    <rect x="88" y="208" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.12"/>
+    <rect x="100" y="208" width="50" height="6" rx="2" ry="2" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="153" y="208" width="9" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.12"/>
+    <rect x="165" y="208" width="19" height="6" rx="1" ry="1" fill="#ffffff" fill-opacity="0.12"/>
+  </g>
+</svg>

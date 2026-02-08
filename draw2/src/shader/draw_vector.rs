@@ -65,7 +65,7 @@ script_mod! {
             let world = self.draw_list.view_transform * vec4(
                 shifted.x
                 shifted.y
-                self.draw_depth + self.draw_call.zbias
+                self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
@@ -254,7 +254,7 @@ script_mod! {
     }
 }
 
-const FLOATS_PER_VERTEX: usize = 22; // x,y,u,v, r,g,b,a, stroke_mult, stroke_dist, shape_id, param0-5, color2_r,g,b,a, clip_radius
+const FLOATS_PER_VERTEX: usize = 23; // x,y,u,v, r,g,b,a, stroke_mult, stroke_dist, shape_id, param0-5, color2_r,g,b,a, clip_radius, zbias
 
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
@@ -284,6 +284,8 @@ pub struct DrawVector {
     pub cur_stroke_mult: f32,
     #[rust]
     pub cur_shape_id: f32,
+    #[rust]
+    pub cur_zbias: f32,
     #[rust]
     pub cur_gradient_row_v: f32,
     // Effect bounding box (world-space): [min_x, min_y, max_x, max_y]
@@ -377,6 +379,7 @@ impl DrawVector {
         self.gradient_texture_data.clear();
         self.gradient_row_count = 0;
         self.cur_gradient_row_v = -1.0; // sentinel: no gradient texture row
+        self.cur_zbias = 0.0;
         self.cur_effect_bbox = None;
         self.cur_use_color = None;
     }
@@ -617,10 +620,12 @@ impl DrawVector {
             self.acc_verts.push(color1[2]);
             self.acc_verts.push(color1[3]);
             self.acc_verts.push(v.clip_radius);
+            self.acc_verts.push(self.cur_zbias);
         }
         for &i in indices {
             self.acc_indices.push(base + i);
         }
+        self.cur_zbias += 0.000001;
     }
 
     /// Flush accumulated geometry as a single draw call

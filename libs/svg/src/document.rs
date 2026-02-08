@@ -150,6 +150,8 @@ pub struct SvgStyle {
     /// Custom shader effect ID, parsed from `data-shader-id` attribute.
     /// Flows through to `v_shape_id` varying in the GPU shader.
     pub shader_id: f32,
+    /// Reference to a `<filter>` definition (e.g. `url(#shadow)`).
+    pub filter: Option<String>,
 }
 
 impl Default for SvgStyle {
@@ -169,6 +171,7 @@ impl Default for SvgStyle {
             opacity: 1.0,
             color: (0.0, 0.0, 0.0, 1.0), // CSS default: black
             shader_id: 0.0,
+            filter: None,
         }
     }
 }
@@ -537,12 +540,34 @@ pub enum SvgNode {
     Use(SvgUse),
 }
 
+// ---- Filter ----
+
+/// A simplified SVG filter that supports drop shadow effects.
+/// Covers both `<feDropShadow>` shorthand and the equivalent
+/// `<feGaussianBlur>` + `<feOffset>` + `<feFlood>` combination.
+#[derive(Clone, Debug)]
+pub struct SvgFilter {
+    pub id: String,
+    pub effects: Vec<SvgFilterEffect>,
+}
+
+#[derive(Clone, Debug)]
+pub enum SvgFilterEffect {
+    DropShadow {
+        dx: f32,
+        dy: f32,
+        std_dev: f32,
+        color: (f32, f32, f32, f32), // RGBA
+    },
+}
+
 // ---- Defs ----
 
 #[derive(Clone, Debug, Default)]
 pub struct SvgDefs {
     pub gradients: HashMap<String, SvgGradient>,
     pub symbols: HashMap<String, SvgSymbol>,
+    pub filters: HashMap<String, SvgFilter>,
 }
 
 /// An SVG `<symbol>` element: a reusable group of nodes with an optional viewBox.
