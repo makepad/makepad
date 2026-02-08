@@ -9,6 +9,9 @@ pub struct VVertex {
     pub u: f32,
     pub v: f32,
     pub stroke_dist: f32,
+    /// Maximum distance from this vertex to any other vertex it shares a triangle with.
+    /// Used for early clip rejection in the vertex shader.
+    pub clip_radius: f32,
 }
 
 impl VVertex {
@@ -19,6 +22,7 @@ impl VVertex {
             u,
             v,
             stroke_dist: 0.0,
+            clip_radius: 0.0,
         }
     }
     fn with_dist(x: f32, y: f32, u: f32, v: f32, stroke_dist: f32) -> Self {
@@ -28,6 +32,7 @@ impl VVertex {
             u,
             v,
             stroke_dist,
+            clip_radius: 0.0,
         }
     }
 }
@@ -349,17 +354,35 @@ impl Tessellator {
             }
             // caps for open paths
             if !is_loop {
-                let p0 = self.points[first];
-                let p1 = self.points[first + 1];
-                let dx = p1.x - p0.x;
-                let dy = p1.y - p0.y;
-                let len = (dx * dx + dy * dy).sqrt();
-                let (ndx, ndy) = if len > 1e-6 {
-                    (dx / len, dy / len)
-                } else {
-                    (0.0, 0.0)
+                // Find a valid (non-degenerate) direction at the start of the path
+                // by walking forward until we find two points far enough apart.
+                let (ndx, ndy) = {
+                    let mut dir = (0.0f32, 0.0f32);
+                    for j in 1..count {
+                        let dx = self.points[first + j].x - self.points[first].x;
+                        let dy = self.points[first + j].y - self.points[first].y;
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len > 1e-6 {
+                            dir = (dx / len, dy / len);
+                            break;
+                        }
+                    }
+                    dir
                 };
-                self.emit_cap_start(&mut verts, p0.x, p0.y, ndx, ndy, hw, aa, u0, u1, line_cap);
+                let p0 = self.points[first];
+                self.emit_cap_start(
+                    &mut verts,
+                    &mut indices,
+                    p0.x,
+                    p0.y,
+                    ndx,
+                    ndy,
+                    hw,
+                    aa,
+                    u0,
+                    u1,
+                    line_cap,
+                );
                 // stamp stroke_dist=0 on cap verts
                 let cap_end = verts.len();
                 for v in &mut verts[base as usize..cap_end] {
@@ -407,16 +430,20 @@ impl Tessellator {
                 }
             }
             if !is_loop {
-                // end cap
-                let p0 = self.points[first + count - 2];
+                // end cap: find a valid direction by walking backward from the end
                 let p1 = self.points[first + count - 1];
-                let dx = p1.x - p0.x;
-                let dy = p1.y - p0.y;
-                let len = (dx * dx + dy * dy).sqrt();
-                let (ndx, ndy) = if len > 1e-6 {
-                    (dx / len, dy / len)
-                } else {
-                    (0.0, 0.0)
+                let (ndx, ndy) = {
+                    let mut dir = (0.0f32, 0.0f32);
+                    for j in (0..count - 1).rev() {
+                        let dx = p1.x - self.points[first + j].x;
+                        let dy = p1.y - self.points[first + j].y;
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len > 1e-6 {
+                            dir = (dx / len, dy / len);
+                            break;
+                        }
+                    }
+                    dir
                 };
                 let vi_before = verts.len();
                 self.emit_cap_end(
@@ -455,6 +482,7 @@ impl Tessellator {
     fn emit_cap_start(
         &self,
         verts: &mut Vec<VVertex>,
+        indices: &mut Vec<u32>,
         px: f32,
         py: f32,
         dx: f32,
@@ -501,7 +529,12 @@ impl Tessellator {
                 verts.push(VVertex::new(px - dlx * w, py - dly * w, u1, 1.0));
             }
             LineCap::Round => {
+                // Emit a triangle fan from center to arc points, then
+                // end with the (left, right) pair for the stroke body.
                 let ncap = ((w * PI).ceil() as usize).max(2).min(32);
+                let center_vi = verts.len() as u32;
+                verts.push(VVertex::new(px, py, 0.5, 1.0));
+                // Arc vertices from +left through back to -left
                 for i in 0..ncap {
                     let a = i as f32 / (ncap - 1) as f32 * PI;
                     let ax = a.cos() * w;
@@ -512,10 +545,28 @@ impl Tessellator {
                         u0,
                         1.0,
                     ));
-                    verts.push(VVertex::new(px, py, 0.5, 1.0));
                 }
+                // Fan triangles: center + consecutive arc points
+                let arc_start = center_vi + 1;
+                for i in 0..(ncap as u32 - 1) {
+                    indices.push(center_vi);
+                    indices.push(arc_start + i);
+                    indices.push(arc_start + i + 1);
+                }
+                // Final pair for body stitching: (left_edge, right_edge)
                 verts.push(VVertex::new(px + dlx * w, py + dly * w, u0, 1.0));
                 verts.push(VVertex::new(px - dlx * w, py - dly * w, u1, 1.0));
+                // Connect last arc point to the left edge, and first arc point to the right edge
+                let left_vi = verts.len() as u32 - 2;
+                let right_vi = verts.len() as u32 - 1;
+                // Left edge triangle: center, first arc point (at +left side), left_edge
+                indices.push(center_vi);
+                indices.push(arc_start);
+                indices.push(left_vi);
+                // Right edge triangle: center, last arc point (at -left side), right_edge
+                indices.push(center_vi);
+                indices.push(arc_start + ncap as u32 - 1);
+                indices.push(right_vi);
             }
         }
     }
@@ -572,13 +623,26 @@ impl Tessellator {
             }
             LineCap::Round => {
                 let ncap = ((w * PI).ceil() as usize).max(2).min(32);
+                // Connect body's last pair to the (left, right) pair
                 verts.push(VVertex::new(px + dlx * w, py + dly * w, u0, 1.0));
                 verts.push(VVertex::new(px - dlx * w, py - dly * w, u1, 1.0));
+                if vi >= 2 {
+                    indices.push(vi - 2);
+                    indices.push(vi - 1);
+                    indices.push(vi);
+                    indices.push(vi - 1);
+                    indices.push(vi + 1);
+                    indices.push(vi);
+                }
+                // Center vertex for fan
+                let center_vi = verts.len() as u32;
+                verts.push(VVertex::new(px, py, 0.5, 1.0));
+                // Arc vertices from +left through front to -left
+                let arc_start = center_vi + 1;
                 for i in 0..ncap {
                     let a = i as f32 / (ncap - 1) as f32 * PI;
                     let ax = a.cos() * w;
                     let ay = a.sin() * w;
-                    verts.push(VVertex::new(px, py, 0.5, 1.0));
                     verts.push(VVertex::new(
                         px - dlx * ax + dx * ay,
                         py - dly * ax + dy * ay,
@@ -586,9 +650,23 @@ impl Tessellator {
                         1.0,
                     ));
                 }
+                // Fan triangles: center + consecutive arc points
+                for i in 0..(ncap as u32 - 1) {
+                    indices.push(center_vi);
+                    indices.push(arc_start + i);
+                    indices.push(arc_start + i + 1);
+                }
+                // Connect left_edge to first arc, right_edge to last arc
+                indices.push(center_vi);
+                indices.push(vi);
+                indices.push(arc_start);
+                indices.push(center_vi);
+                indices.push(arc_start + ncap as u32 - 1);
+                indices.push(vi + 1);
+                return;
             }
         }
-        // connect cap end to previous pair
+        // connect cap end to previous pair (Butt/Square only)
         if vi >= 2 {
             indices.push(vi - 2);
             indices.push(vi - 1);
@@ -597,7 +675,7 @@ impl Tessellator {
             indices.push(vi + 1);
             indices.push(vi);
         }
-        // stitch cap triangles
+        // stitch cap triangles (Butt/Square: simple quad strip)
         let n = (verts.len() as u32 - vi) / 2;
         for i in 1..n {
             let a = vi + (i - 1) * 2;
@@ -807,6 +885,48 @@ impl Tessellator {
             }
         }
         (verts, indices)
+    }
+}
+
+/// Compute per-vertex clip_radius from the triangle index buffer.
+/// For each vertex, this is the maximum distance to any other vertex
+/// it shares a triangle with. This allows the vertex shader to skip
+/// triangles that are entirely outside the clip rect.
+pub fn compute_clip_radii(verts: &mut [VVertex], indices: &[u32]) {
+    // Process triangles: for each triangle (a, b, c), update each vertex's
+    // clip_radius to be the max distance to any other vertex in that triangle.
+    let mut i = 0;
+    while i + 2 < indices.len() {
+        let ia = indices[i] as usize;
+        let ib = indices[i + 1] as usize;
+        let ic = indices[i + 2] as usize;
+        if ia < verts.len() && ib < verts.len() && ic < verts.len() {
+            let ax = verts[ia].x;
+            let ay = verts[ia].y;
+            let bx = verts[ib].x;
+            let by = verts[ib].y;
+            let cx = verts[ic].x;
+            let cy = verts[ic].y;
+
+            let dab = ((ax - bx) * (ax - bx) + (ay - by) * (ay - by)).sqrt();
+            let dac = ((ax - cx) * (ax - cx) + (ay - cy) * (ay - cy)).sqrt();
+            let dbc = ((bx - cx) * (bx - cx) + (by - cy) * (by - cy)).sqrt();
+
+            let ra = dab.max(dac);
+            let rb = dab.max(dbc);
+            let rc = dac.max(dbc);
+
+            if ra > verts[ia].clip_radius {
+                verts[ia].clip_radius = ra;
+            }
+            if rb > verts[ib].clip_radius {
+                verts[ib].clip_radius = rb;
+            }
+            if rc > verts[ic].clip_radius {
+                verts[ic].clip_radius = rc;
+            }
+        }
+        i += 3;
     }
 }
 
