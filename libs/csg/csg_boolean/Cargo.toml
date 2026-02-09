@@ -8,7 +8,7 @@ edition = "2021"
 [features]
 default = ["threads"]
 nightly = ["makepad-csg-math/nightly"]
-threads = []
+threads = ["makepad-csg-math/threads"]
 
 [dependencies]
 makepad-csg-math = { path = "../csg_math" }

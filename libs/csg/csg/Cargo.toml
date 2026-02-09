@@ -8,10 +8,11 @@ edition = "2021"
 [features]
 default = ["threads"]
 nightly = ["makepad-csg-boolean/nightly", "makepad-csg-math/nightly", "makepad-csg-mesh/nightly"]
-threads = ["makepad-csg-boolean/threads"]
+threads = ["makepad-csg-boolean/threads", "makepad-csg-sdf/threads"]
 
 [dependencies]
 makepad-csg-math = { path = "../csg_math" }
 makepad-csg-mesh = { path = "../csg_mesh" }
 makepad-csg-boolean = { path = "../csg_boolean", default-features = false }
 makepad-csg-primitives = { path = "../csg_primitives" }
+makepad-csg-sdf = { path = "../csg_sdf", default-features = false }

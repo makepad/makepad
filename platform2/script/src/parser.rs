@@ -844,6 +844,11 @@ impl ScriptParser {
         match self.state.pop().unwrap() {
             State::ForIdent { idents, index } => {
                 // we push k and v
+                // allow optional parens: `for (x, y) in z` is identical to `for x, y in z`
+                if tok.is_open_round() || tok.is_close_round() {
+                    self.state.push(State::ForIdent { idents, index });
+                    return 1;
+                }
                 if id.not_empty() {
                     if id == id!(in) {
                         // alright we move on to parsing the range expr
@@ -862,7 +867,7 @@ impl ScriptParser {
                         return 0;
                     }
                 }
-                if op == id!(,) {
+                if sep == id!(,) {
                     // eat the commas
                     self.state.push(State::ForIdent { idents, index });
                     return 1;
