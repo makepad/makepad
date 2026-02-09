@@ -7,5 +7,6 @@ edition = "2021"
 
 [features]
 nightly = []
+threads = []
 
 [dependencies]

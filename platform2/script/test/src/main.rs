@@ -639,6 +639,66 @@ pub fn main() {
         }
         test_for_destructuring()
 
+        // for (v, i) in — parenthesized style (identical to for v, i in)
+        fn test_for_paren_style() {
+            let arr = [10, 20, 30]
+            let obj = {a := 1, b := 2, c := 3}
+
+            // for (v) in array — single binding with parens
+            let values1 = []
+            for (v) in arr { values1.push(v) }
+            assert(values1 == [10 20 30])
+
+            // for (i, v) in array — two bindings with parens
+            let indices2 = []
+            let values2 = []
+            for (i, v) in arr {
+                indices2.push(i)
+                values2.push(v)
+            }
+            assert(indices2 == [0 1 2])
+            assert(values2 == [10 20 30])
+
+            // for (k, v) in object — two bindings with parens
+            let keys3 = []
+            let values3 = []
+            for (k, v) in obj {
+                keys3.push(k)
+                values3.push(v)
+            }
+            assert(keys3.len() == 3)
+            assert(values3 == [1 2 3])
+
+            // for (i, k, v) in object — three bindings with parens
+            let indices4 = []
+            let keys4 = []
+            let values4 = []
+            for (i, k, v) in obj {
+                indices4.push(i)
+                keys4.push(k)
+                values4.push(v)
+            }
+            assert(indices4 == [0 1 2])
+            assert(keys4.len() == 3)
+            assert(values4 == [1 2 3])
+
+            // for (i) in range — single binding with parens
+            let sum5 = 0
+            for (i) in 0..5 { sum5 += 1 }
+            assert(sum5 == 5)
+
+            // for (i, v) in range — two bindings with parens
+            let indices6 = []
+            let values6 = []
+            for (i, v) in 0..3 {
+                indices6.push(i)
+                values6.push(v)
+            }
+            assert(indices6 == [0 1 2])
+            assert(values6 == [0 1 2])
+        }
+        test_for_paren_style()
+
         // for loop return tests
 
         fn test_for_return(x) {
