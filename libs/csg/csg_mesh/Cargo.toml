@@ -5,5 +5,8 @@ edition = "2021"
 
 [workspace]
 
+[features]
+nightly = ["makepad-csg-math/nightly"]
+
 [dependencies]
 makepad-csg-math = { path = "../csg_math" }

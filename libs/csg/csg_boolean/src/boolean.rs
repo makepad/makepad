@@ -11,6 +11,7 @@
 
 use crate::classify::{classify_triangles, point_inside_mesh, TriLocation};
 use crate::corefine::corefine;
+use makepad_csg_math::Vec3d;
 use makepad_csg_mesh::mesh::TriMesh;
 
 /// Boolean operation type.
@@ -191,8 +192,6 @@ pub fn intersection(mesh_a: &TriMesh, mesh_b: &TriMesh) -> TriMesh {
 // (not at an endpoint). If so, split that triangle into two by inserting
 // the vertex.
 
-use makepad_csg_math::Vec3d;
-
 /// Fix T-junctions in a welded mesh by splitting triangles at vertices
 /// that lie on their edges.
 fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64) {
@@ -207,13 +206,42 @@ fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64) {
 }
 
 /// Single pass of T-junction fixing. Returns true if any splits were made.
+///
+/// Uses a spatial grid to avoid O(n*m) brute-force vertex-edge checks.
+/// Each vertex is inserted into a grid cell; for each triangle edge, only
+/// vertices in nearby cells are tested.
 fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64) -> bool {
     let num_verts = mesh.vertices.len();
+    let num_tris = mesh.triangles.len();
+    if num_tris == 0 || num_verts == 0 {
+        return false;
+    }
+
+    // Choose cell size based on mesh extent so we get ~10-50 vertices per cell,
+    // not based on tolerance (which would create a huge grid for tiny tolerances).
+    let bbox = mesh.bounding_box();
+    let extent = (bbox.max - bbox.min).length();
+    // Target: cube root of num_verts cells per axis gives ~1 vert/cell.
+    // Use a bit larger to reduce misses.
+    let cells_per_axis = (num_verts as f64).cbrt().max(4.0);
+    let cell = (extent / cells_per_axis).max(tol * 2.0);
+    let inv_cell = 1.0 / cell;
+
+    let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<u32>> =
+        std::collections::HashMap::new();
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        let cx = (v.x * inv_cell).floor() as i64;
+        let cy = (v.y * inv_cell).floor() as i64;
+        let cz = (v.z * inv_cell).floor() as i64;
+        grid.entry((cx, cy, cz)).or_default().push(i as u32);
+    }
+
+    // For each triangle edge, query nearby vertices from the grid.
     let mut new_triangles: Vec<[u32; 3]> = Vec::new();
-    let mut removed: Vec<bool> = vec![false; mesh.triangles.len()];
+    let mut removed = vec![false; num_tris];
     let mut any_split = false;
 
-    for ti in 0..mesh.triangles.len() {
+    for ti in 0..num_tris {
         if removed[ti] {
             continue;
         }
@@ -222,33 +250,51 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64) -> bool {
         let vb = mesh.vertices[ib as usize];
         let vc = mesh.vertices[ic as usize];
 
-        // Check each edge for T-junction vertices
         let edges = [
-            (ia, ib, ic, va, vb, vc),
-            (ib, ic, ia, vb, vc, va),
-            (ic, ia, ib, vc, va, vb),
+            (ia, ib, ic, va, vb),
+            (ib, ic, ia, vb, vc),
+            (ic, ia, ib, vc, va),
         ];
 
         let mut split_found = false;
-        for &(e0, e1, opp, v0, v1, _vopp) in &edges {
+        for &(e0, e1, opp, v0, v1) in &edges {
             if split_found {
                 break;
             }
-            // Find a vertex on edge e0->e1
-            for vi in 0..num_verts {
-                let vi32 = vi as u32;
-                if vi32 == e0 || vi32 == e1 || vi32 == opp {
-                    continue;
-                }
-                let vp = mesh.vertices[vi];
-                if point_on_edge(vp, v0, v1, tol) {
-                    // Split triangle into two: (e0, vi, opp) and (vi, e1, opp)
-                    removed[ti] = true;
-                    new_triangles.push([e0, vi32, opp]);
-                    new_triangles.push([vi32, e1, opp]);
-                    split_found = true;
-                    any_split = true;
-                    break;
+            // Compute AABB of edge expanded by tolerance, query grid cells
+            let min_x = v0.x.min(v1.x) - tol;
+            let min_y = v0.y.min(v1.y) - tol;
+            let min_z = v0.z.min(v1.z) - tol;
+            let max_x = v0.x.max(v1.x) + tol;
+            let max_y = v0.y.max(v1.y) + tol;
+            let max_z = v0.z.max(v1.z) + tol;
+
+            let c_min_x = (min_x * inv_cell).floor() as i64;
+            let c_min_y = (min_y * inv_cell).floor() as i64;
+            let c_min_z = (min_z * inv_cell).floor() as i64;
+            let c_max_x = (max_x * inv_cell).floor() as i64;
+            let c_max_y = (max_y * inv_cell).floor() as i64;
+            let c_max_z = (max_z * inv_cell).floor() as i64;
+
+            'edge_search: for gx in c_min_x..=c_max_x {
+                for gy in c_min_y..=c_max_y {
+                    for gz in c_min_z..=c_max_z {
+                        if let Some(bucket) = grid.get(&(gx, gy, gz)) {
+                            for &vi32 in bucket {
+                                if vi32 == e0 || vi32 == e1 || vi32 == opp {
+                                    continue;
+                                }
+                                if point_on_edge(mesh.vertices[vi32 as usize], v0, v1, tol) {
+                                    removed[ti] = true;
+                                    new_triangles.push([e0, vi32, opp]);
+                                    new_triangles.push([vi32, e1, opp]);
+                                    split_found = true;
+                                    any_split = true;
+                                    break 'edge_search;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -258,7 +304,6 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64) -> bool {
         return false;
     }
 
-    // Rebuild triangle list
     let old_tris = std::mem::take(&mut mesh.triangles);
     for (i, tri) in old_tris.into_iter().enumerate() {
         if !removed[i] {

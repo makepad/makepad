@@ -8,10 +8,15 @@
 // 1. For each triangle, shoot a ray from its centroid and count crossings
 //    with the other mesh.
 // 2. Odd crossings = inside, even crossings = outside.
-// 3. Use adjacency propagation to speed up: only classify one "seed" triangle
-//    per connected component, then propagate through edge-adjacency.
+//
+// Optimizations:
+// - SIMD batched ray-triangle intersection (4 triangles per SIMD op)
+// - Thread pool for parallel classification (opt-out via `threads` feature)
 
-use makepad_csg_math::{dvec3, Vec3d};
+use std::sync::Arc;
+
+use crate::thread_pool;
+use makepad_csg_math::{batch_ray_triangle_count, dvec3, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 
 /// Classification of a triangle relative to another solid.
@@ -22,6 +27,14 @@ pub enum TriLocation {
     OnBoundary,
 }
 
+/// Work item for parallel classification.
+#[derive(Clone, Copy)]
+struct ClassifyWork {
+    centroid: Vec3d,
+    normal: Vec3d,
+    is_boundary: bool,
+}
+
 /// Classify all triangles of mesh A as inside/outside mesh B using ray casting.
 ///
 /// For boundary triangles, we test both sides (+normal and -normal) to detect:
@@ -29,114 +42,105 @@ pub enum TriLocation {
 /// - Coplanar overlapping faces: both sides report inside → OnBoundary
 ///   (kept from mesh A only to avoid double-counting)
 /// - Faces outside the other mesh: neither side inside → Outside
+///
+/// Uses the thread pool to classify triangles in parallel when enabled.
 pub fn classify_triangles(
     mesh_to_classify: &TriMesh,
     other_mesh: &TriMesh,
     on_boundary: &[bool],
 ) -> Vec<TriLocation> {
-    let mut result = vec![TriLocation::Outside; mesh_to_classify.triangle_count()];
+    let n = mesh_to_classify.triangle_count();
+    if n == 0 {
+        return Vec::new();
+    }
 
-    for ti in 0..mesh_to_classify.triangle_count() {
-        let centroid = tri_centroid(mesh_to_classify, ti);
+    // Pre-collect other mesh's triangles for batch ray testing
+    let other_tris: Arc<[(Vec3d, Vec3d, Vec3d)]> = (0..other_mesh.triangle_count())
+        .map(|i| other_mesh.triangle_vertices(i))
+        .collect::<Vec<_>>()
+        .into();
 
-        if on_boundary[ti] {
-            let normal = mesh_to_classify.triangle_normal(ti);
-            let eps = 1e-6;
-            let inside_point = centroid - normal * eps;
-            let outside_point = centroid + normal * eps;
-            let interior_in = point_inside_mesh(inside_point, other_mesh);
-            let exterior_in = point_inside_mesh(outside_point, other_mesh);
+    // Pre-compute work items
+    let work: Vec<ClassifyWork> = (0..n)
+        .map(|ti| ClassifyWork {
+            centroid: tri_centroid(mesh_to_classify, ti),
+            normal: mesh_to_classify.triangle_normal(ti),
+            is_boundary: on_boundary[ti],
+        })
+        .collect();
 
-            result[ti] = if interior_in && exterior_in {
-                // Both sides inside: face lies within/on the other mesh's surface.
-                // This happens when the face is on a shared plane that sits
-                // inside the other solid's volume (e.g., B's -X face at x=0
-                // which is inside A). Mark as OnBoundary for dedup.
-                TriLocation::OnBoundary
-            } else if interior_in {
-                // Only interior is inside: standard overlapping boundary face
+    // Parallel classification — Arc is cloned cheaply per thread.
+    thread_pool::parallel_map(&work, move |chunk: &[ClassifyWork]| {
+        chunk
+            .iter()
+            .map(|w| classify_one(w.centroid, w.normal, w.is_boundary, &other_tris))
+            .collect()
+    })
+}
+
+/// Classify a single triangle given its centroid, normal, and boundary status.
+fn classify_one(
+    centroid: Vec3d,
+    normal: Vec3d,
+    is_boundary: bool,
+    other_tris: &[(Vec3d, Vec3d, Vec3d)],
+) -> TriLocation {
+    if is_boundary {
+        let eps = 1e-6;
+        let inside_point = centroid - normal * eps;
+        let outside_point = centroid + normal * eps;
+        let interior_in = point_inside_mesh_batch(inside_point, other_tris);
+        let exterior_in = point_inside_mesh_batch(outside_point, other_tris);
+
+        if interior_in && exterior_in {
+            TriLocation::OnBoundary
+        } else if interior_in {
+            TriLocation::Inside
+        } else {
+            TriLocation::Outside
+        }
+    } else {
+        let inside = point_inside_mesh_batch(centroid, other_tris);
+        if inside {
+            TriLocation::Inside
+        } else {
+            let inward = centroid - normal * 1e-6;
+            if point_inside_mesh_batch(inward, other_tris) {
                 TriLocation::Inside
             } else {
                 TriLocation::Outside
-            };
-        } else {
-            // For non-boundary faces, test the centroid. If the centroid lies
-            // exactly on the other mesh's surface, ray casting may be inconsistent.
-            // Test a point slightly behind the face (interior side) as well.
-            let inside = point_inside_mesh(centroid, other_mesh);
-            result[ti] = if inside {
-                TriLocation::Inside
-            } else {
-                // Double-check: nudge inward to handle surface-coincident faces
-                let normal = mesh_to_classify.triangle_normal(ti);
-                let inward = centroid - normal * 1e-6;
-                if point_inside_mesh(inward, other_mesh) {
-                    TriLocation::Inside
-                } else {
-                    TriLocation::Outside
-                }
-            };
+            }
         }
     }
-
-    result
 }
 
 /// Test if a point is inside a closed triangle mesh using ray casting.
-/// Uses multiple ray directions to avoid edge/vertex degeneracies.
+/// Uses SIMD-batched ray-triangle intersection and multiple ray directions.
 pub fn point_inside_mesh(point: Vec3d, mesh: &TriMesh) -> bool {
-    // Try multiple non-axis-aligned ray directions to avoid degeneracies
-    // where the ray passes exactly through an edge or vertex.
+    let tris: Vec<(Vec3d, Vec3d, Vec3d)> = (0..mesh.triangle_count())
+        .map(|i| mesh.triangle_vertices(i))
+        .collect();
+    point_inside_mesh_batch(point, &tris)
+}
+
+/// Test if a point is inside a mesh given pre-collected triangles.
+/// Uses SIMD-batched ray-triangle intersection with majority vote.
+fn point_inside_mesh_batch(point: Vec3d, tris: &[(Vec3d, Vec3d, Vec3d)]) -> bool {
     let directions = [
-        dvec3(0.8726, 0.3517, 0.1943),  // arbitrary direction 1
-        dvec3(-0.4123, 0.7891, 0.2345), // arbitrary direction 2
-        dvec3(0.1234, -0.5678, 0.8901), // arbitrary direction 3
+        dvec3(0.8726, 0.3517, 0.1943),
+        dvec3(-0.4123, 0.7891, 0.2345),
+        dvec3(0.1234, -0.5678, 0.8901),
     ];
 
-    // Use majority vote across directions
     let mut inside_votes = 0u32;
     for &ray_dir in &directions {
-        let mut crossings = 0u32;
-        for ti in 0..mesh.triangle_count() {
-            let (v0, v1, v2) = mesh.triangle_vertices(ti);
-            if ray_intersects_triangle(point, ray_dir, v0, v1, v2) {
-                crossings += 1;
-            }
-        }
+        let crossings = batch_ray_triangle_count(point, ray_dir, tris);
         if crossings % 2 == 1 {
             inside_votes += 1;
         }
     }
 
-    inside_votes >= 2 // majority vote
-}
-
-/// Moller-Trumbore ray-triangle intersection test.
-fn ray_intersects_triangle(origin: Vec3d, dir: Vec3d, v0: Vec3d, v1: Vec3d, v2: Vec3d) -> bool {
-    let edge1 = v1 - v0;
-    let edge2 = v2 - v0;
-    let h = dir.cross(edge2);
-    let a = edge1.dot(h);
-
-    if a.abs() < 1e-12 {
-        return false; // Ray parallel to triangle
-    }
-
-    let f = 1.0 / a;
-    let s = origin - v0;
-    let u = f * s.dot(h);
-    if u < 0.0 || u > 1.0 {
-        return false;
-    }
-
-    let q = s.cross(edge1);
-    let v = f * dir.dot(q);
-    if v < 0.0 || u + v > 1.0 {
-        return false;
-    }
-
-    let t = f * edge2.dot(q);
-    t > 1e-10 // Only count forward intersections (with small epsilon to avoid self-intersection)
+    inside_votes >= 2
 }
 
 fn tri_centroid(mesh: &TriMesh, ti: usize) -> Vec3d {
@@ -182,7 +186,6 @@ mod tests {
         let on_boundary = vec![false; cube_a.triangle_count()];
         let classes = classify_triangles(&cube_a, &cube_b, &on_boundary);
 
-        // All triangles of A should be outside B
         for &c in &classes {
             assert_eq!(c, TriLocation::Outside);
         }
@@ -190,7 +193,6 @@ mod tests {
 
     #[test]
     fn test_classify_fully_inside() {
-        // Small cube inside a big cube
         let mut small_cube = make_unit_cube();
         small_cube.transform(Mat4d::scale_uniform(0.1));
 
@@ -199,7 +201,6 @@ mod tests {
         let on_boundary = vec![false; small_cube.triangle_count()];
         let classes = classify_triangles(&small_cube, &big_cube, &on_boundary);
 
-        // All triangles of small cube should be inside big cube
         for &c in &classes {
             assert_eq!(
                 c,
@@ -215,22 +216,12 @@ mod tests {
         let v1 = dvec3(1.0, -1.0, 1.0);
         let v2 = dvec3(0.0, 1.0, 1.0);
 
-        // Ray from origin along +Z
-        assert!(ray_intersects_triangle(
-            dvec3(0.0, 0.0, 0.0),
-            dvec3(0.0, 0.0, 1.0),
-            v0,
-            v1,
-            v2
-        ));
+        let tris = vec![(v0, v1, v2)];
 
-        // Ray missing the triangle
-        assert!(!ray_intersects_triangle(
-            dvec3(5.0, 0.0, 0.0),
-            dvec3(0.0, 0.0, 1.0),
-            v0,
-            v1,
-            v2
-        ));
+        let crossings = batch_ray_triangle_count(dvec3(0.0, 0.0, 0.0), dvec3(0.0, 0.0, 1.0), &tris);
+        assert_eq!(crossings, 1);
+
+        let crossings = batch_ray_triangle_count(dvec3(5.0, 0.0, 0.0), dvec3(0.0, 0.0, 1.0), &tris);
+        assert_eq!(crossings, 0);
     }
 }
