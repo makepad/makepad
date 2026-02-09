@@ -1723,6 +1723,152 @@ RectShadowView{
 }
 ```
 
+## HTTP Requests (`net.http_request`)
+
+Make async HTTP requests from script. Responses arrive via callbacks.
+
+### GET request
+```
+let req = net.HttpRequest{
+    url: "https://html.duckduckgo.com/html/?q=rust+programming"
+    method: net.HttpMethod.GET
+    headers: {"User-Agent": "MakepadApp/1.0"}
+}
+net.http_request(req) do net.HttpEvents{
+    on_response: |res| {
+        let text = res.body.to_string()       // body as string
+        let json = res.body.parse_json()      // or parse as JSON
+        // res.status_code                    // HTTP status (200, 404, etc.)
+    }
+    on_error: |e| {
+        // e.message                          // error description
+    }
+}
+```
+
+### POST request with JSON body
+```
+let req = net.HttpRequest{
+    url: "https://api.example.com/data"
+    method: net.HttpMethod.POST
+    headers: {"Content-Type": "application/json"}
+    body: {key: "value" count: 42}.to_json()
+}
+net.http_request(req) do net.HttpEvents{
+    on_response: |res| { /* ... */ }
+    on_error: |e| { /* ... */ }
+}
+```
+
+### Streaming response
+```
+let req = net.HttpRequest{
+    url: "https://api.example.com/stream"
+    method: net.HttpMethod.POST
+    is_streaming: true
+    body: {stream: true}.to_json()
+}
+var total = ""
+net.http_request(req) do net.HttpEvents{
+    on_stream: |res| {
+        total += res.body.to_string()         // called per chunk
+    }
+    on_complete: |res| {
+        // stream finished, total has all data
+    }
+    on_error: |e| { /* ... */ }
+}
+```
+
+### HttpMethod values
+`net.HttpMethod.GET`, `POST`, `PUT`, `DELETE`, `HEAD`, `PATCH`, `OPTIONS`
+
+### Cookie-free search endpoints
+DuckDuckGo provides HTML endpoints that return static HTML — no cookies, no JS, no API key:
+- `https://html.duckduckgo.com/html/?q=QUERY` — div-based, CSS classes for results
+- `https://lite.duckduckgo.com/lite/?q=QUERY` — table-based, ~10kB compressed
+
+Both require a `User-Agent` header. Results can be parsed with `parse_html()`.
+
+---
+
+## HTML Parsing (`parse_html`)
+
+Parse an HTML string and query it with CSS-like selectors. Call `.parse_html()` on any string.
+
+### Basic usage
+```
+let html = "<div class='box' id='main'><p>Hello</p><p class='bold'>World</p></div>"
+let doc = html.parse_html()
+```
+
+### Querying elements
+```
+doc.query("p")                // all <p> elements (returns html handle)
+doc.query("p[0]")             // first <p> element
+doc.query("#main")            // element with id "main"
+doc.query("p.bold")           // <p> with class "bold"
+doc.query("div > p")          // direct children
+doc.query("div p")            // descendants
+doc.query("div > *")          // all direct children (wildcard)
+doc.query("div").query("p")   // chained queries
+```
+
+### Extracting data
+```
+doc.query("p[0]").text         // text content: "Hello"
+doc.query("div@class")        // attribute value: "box"
+doc.query("div@id")           // attribute value: "main"
+doc.query("p.text")           // array of text from all <p>: ["Hello", "World"]
+doc.query("p@class")          // array of class attrs from all <p>
+```
+
+### Properties on html handles
+```
+handle.length                  // number of matched elements
+handle.text                    // text content (concatenated)
+handle.html                    // reconstructed HTML string
+handle.attr("name")            // attribute value (string or nil)
+handle.array()                 // convert to array of element handles
+```
+
+### Iterating results
+```
+let items = doc.query("a.result__a").array()
+for item, i in items {
+    let title = item.text
+    let href = item.attr("href")
+    // ... use title and href
+}
+```
+
+### Full example: search DuckDuckGo and parse results
+```
+fn do_search(query) {
+    let req = net.HttpRequest{
+        url: "https://html.duckduckgo.com/html/?q=" + query
+        method: net.HttpMethod.GET
+        headers: {"User-Agent": "MakepadApp/1.0"}
+    }
+    net.http_request(req) do net.HttpEvents{
+        on_response: |res| {
+            let doc = res.body.to_string().parse_html()
+            let links = doc.query("a.result__a").array()
+            let snippets = doc.query("a.result__snippet").array()
+            for link, i in links {
+                let title = link.text
+                let url = link.attr("href")
+                let snippet = if i < snippets.len() snippets[i].text else ""
+                // ... build result list
+            }
+        }
+        on_error: |e| { /* handle error */ }
+    }
+}
+```
+
+---
+
 ## Notes
 
 - **⛔ Default text color is WHITE.** For light/white themes, set `draw_text.color` to a dark color (e.g. `#222`, `#333`) on ALL text elements. Otherwise text is invisible (white-on-white).

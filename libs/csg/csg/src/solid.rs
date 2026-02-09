@@ -12,6 +12,7 @@ use makepad_csg_math::{dvec3, BBox3d, Mat4d, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 use makepad_csg_mesh::validate::{validate_mesh, MeshReport};
 use makepad_csg_mesh::volume::{mesh_centroid, mesh_surface_area, mesh_volume};
+use makepad_csg_sdf::Sdf3;
 
 #[derive(Clone, Debug)]
 pub struct Solid {
@@ -166,6 +167,24 @@ impl Solid {
     pub fn rotate_extrude(profile: &[[f64; 2]], angle_degrees: f64, segments: u32) -> Solid {
         Solid {
             mesh: makepad_csg_primitives::rotate_extrude(profile, angle_degrees, segments),
+        }
+    }
+
+    // --- SDF meshing ---
+
+    /// Create a Solid from a signed distance field via dual contouring.
+    ///
+    /// - `sdf`: any type implementing `Sdf3`
+    /// - `min`, `max`: bounding box for the meshing volume
+    /// - `depth`: octree depth (6-8 typical; higher = more triangles/detail)
+    pub fn from_sdf(
+        sdf: impl Sdf3 + Send + Sync + 'static,
+        min: Vec3d,
+        max: Vec3d,
+        depth: usize,
+    ) -> Solid {
+        Solid {
+            mesh: makepad_csg_sdf::sdf_to_mesh(sdf, min, max, depth),
         }
     }
 

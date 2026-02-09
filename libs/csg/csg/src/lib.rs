@@ -13,3 +13,39 @@ pub use solid::{difference_all, intersection_all, union_all, Solid};
 pub use makepad_csg_math::{dvec3, BBox3d, Mat4d, Vec3d};
 pub use makepad_csg_mesh::mesh::TriMesh;
 pub use makepad_csg_mesh::validate::MeshReport;
+
+// Re-export SDF types
+pub use makepad_csg_sdf::{
+    sdf_to_mesh,
+    Sdf3,
+    SdfBlobChain,
+    SdfBox,
+    SdfCappedCone,
+    SdfCapsule,
+    SdfCylinder,
+    SdfDifference,
+    SdfEllipsoid,
+    SdfHexPrism,
+    SdfIntersection,
+    SdfOctahedron,
+    SdfOnion,
+    SdfPlane,
+    SdfRound,
+    SdfRoundedBox,
+    SdfRoundedCone,
+    SdfRoundedCylinder,
+    SdfScale,
+    SdfSmoothDifference,
+    SdfSmoothIntersection,
+    SdfSmoothUnion,
+    // Primitives
+    SdfSphere,
+    SdfTorus,
+    // Transforms & modifiers
+    SdfTranslate,
+    SdfTriPrism,
+    // Combinators
+    SdfUnion,
+    // Warping
+    SdfWarp,
+};
