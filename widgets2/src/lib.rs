@@ -75,6 +75,7 @@ pub mod markdown;
 
 pub mod splash;
 pub mod svg;
+pub mod vector;
 
 // Touch gesture support (used by expandable_panel)
 pub mod touch_gesture;
@@ -199,6 +200,7 @@ pub use crate::markdown::*;
 pub use crate::splash::*;
 
 pub use crate::svg::*;
+pub use crate::vector::*;
 
 #[cfg(target_os = "android")]
 pub use crate::video::*;
@@ -304,6 +306,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
     crate::splash::script_mod(vm);
     crate::svg::script_mod(vm);
+    crate::vector::script_mod(vm);
 
     // make the prelude.widgetst with all our components
 

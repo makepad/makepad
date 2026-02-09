@@ -675,6 +675,176 @@ script_mod! {
         }
     }
 
+    // Vector tab - SVG examples recreated in Splash Vector syntax
+    // These should look identical to the SVG versions in the Media tab
+
+    // Shared gradients for app_icon
+    let glass_bg = Gradient{x1: 0 y1: 0 x2: 1 y2: 1
+        Stop{offset: 0 color: #x556677 opacity: 0.45}
+        Stop{offset: 1 color: #x334455 opacity: 0.35}
+    }
+    let glass_border = Gradient{x1: 0 y1: 0 x2: 1 y2: 1
+        Stop{offset: 0 color: #xffffff opacity: 0.35}
+        Stop{offset: 0.4 color: #xffffff opacity: 0.08}
+        Stop{offset: 1 color: #xffffff opacity: 0.2}
+    }
+    let glass_spec = Gradient{x1: 0.1 y1: 0 x2: 0.7 y2: 0.8
+        Stop{offset: 0 color: #xffffff opacity: 0.14}
+        Stop{offset: 0.5 color: #xffffff opacity: 0.02}
+        Stop{offset: 1 color: #xffffff opacity: 0.0}
+    }
+    let brain_glow_grad = RadGradient{cx: 0.5 cy: 0.45 r: 0.45
+        Stop{offset: 0 color: #x4466ee opacity: 0.4}
+        Stop{offset: 0.45 color: #x4466dd opacity: 0.15}
+        Stop{offset: 1 color: #x4466dd opacity: 0.0}
+    }
+    let brain_grad = Gradient{x1: 0.5 y1: 0 x2: 0.5 y2: 1
+        Stop{offset: 0 color: #x77ccff}
+        Stop{offset: 0.4 color: #x7799ee}
+        Stop{offset: 0.75 color: #x8866dd}
+        Stop{offset: 1 color: #x9944cc}
+    }
+    let fold_grad = Gradient{x1: 0.5 y1: 0 x2: 0.5 y2: 1
+        Stop{offset: 0 color: #xaaddff}
+        Stop{offset: 1 color: #xbb99ee}
+    }
+    let kb_grad = Gradient{x1: 0 y1: 0.5 x2: 1 y2: 0.5
+        Stop{offset: 0 color: #x9955ee}
+        Stop{offset: 0.5 color: #x6688ff}
+        Stop{offset: 1 color: #x44ddcc}
+    }
+    let kb_body = Gradient{x1: 0 y1: 0 x2: 1 y2: 1
+        Stop{offset: 0 color: #x8855dd opacity: 0.45}
+        Stop{offset: 1 color: #x44aacc opacity: 0.3}
+    }
+    let stem_grad = Gradient{x1: 0.5 y1: 0 x2: 0.5 y2: 1
+        Stop{offset: 0 color: #x7799dd}
+        Stop{offset: 1 color: #x44cccc}
+    }
+
+    // Filters for app_icon
+    let icon_shadow = Filter{
+        DropShadow{dx: 0 dy: 4 blur: 6 color: #x000000 opacity: 0.5}
+    }
+    let kb_shadow = Filter{
+        DropShadow{dx: 0 dy: 1 blur: 2 color: #x000000 opacity: 0.3}
+    }
+
+    let TabVector = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+
+            Label{text: "SVG Icons - Splash Vector" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "icon_file, icon_folder, icon_select recreated in Splash" draw_text.color: #888 draw_text.text_style.font_size: 10}
+
+            View{width: Fill height: Fit flow: Right spacing: 15 align: Align{y: 0.5}}
+
+            // icon_file.svg (49x49)
+            Vector{width: 32 height: 32 viewbox: vec4(0 0 49 49)
+                Path{d: "M12.069,11.678c0,-2.23 1.813,-4.043 4.043,-4.043l10.107,0l0,8.086c0,1.118 0.903,2.021 2.021,2.021l8.086,0l0,18.193c0,2.23 -1.813,4.043 -4.043,4.043l-16.171,0c-2.23,0 -4.043,-1.813 -4.043,-4.043l0,-24.257Zm24.257,4.043l-8.086,0l0,-8.086l8.086,8.086Z"}
+            }
+
+            // icon_folder.svg (49x49)
+            Vector{width: 32 height: 32 viewbox: vec4(0 0 49 49)
+                Path{d: "M11.884,37.957l24.257,0c2.23,0 4.043,-1.813 4.043,-4.043l0,-16.172c0,-2.23 -1.813,-4.042 -4.043,-4.042l-10.107,0c-0.638,0 -1.238,-0.297 -1.617,-0.809l-1.213,-1.617c-0.765,-1.017 -1.965,-1.617 -3.235,-1.617l-8.085,0c-2.23,0 -4.043,1.813 -4.043,4.043l0,20.214c0,2.23 1.813,4.043 4.043,4.043Z"}
+            }
+
+            // icon_select.svg (48x49)
+            Vector{width: 32 height: 32 viewbox: vec4(0 0 48 49)
+                Path{d: "M33.21,28.207l-6.865,0l3.562,8.807c0.259,0.582 0,1.295 -0.583,1.554l-3.173,1.36c-0.583,0.259 -1.295,-0.065 -1.554,-0.648l-3.432,-8.354l-5.569,5.764c-0.777,0.777 -1.943,0.194 -1.943,-0.842l0,-27.781c0,-1.101 1.23,-1.619 1.943,-0.842l18.391,18.909c0.777,0.777 0.194,2.073 -0.777,2.073Z"}
+            }
+
+            Hr{}
+
+            Label{text: "App Icon - Splash Vector" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "app_icon.svg with gradients, filters, groups, transforms" draw_text.color: #888 draw_text.text_style.font_size: 10}
+
+            // app_icon.svg (256x256)
+            Vector{width: 300 height: 300 viewbox: vec4(0 0 256 256)
+
+                // Glass background
+                Rect{x: 16 y: 16 w: 224 h: 224 rx: 44 ry: 44
+                    fill: #x444455 fill_opacity: 0.35 filter: icon_shadow}
+                Rect{x: 16 y: 16 w: 224 h: 224 rx: 44 ry: 44
+                    fill: glass_bg}
+                Rect{x: 16 y: 16 w: 224 h: 224 rx: 44 ry: 44
+                    fill: false stroke: glass_border stroke_width: 1.5}
+
+                // Glass specular
+                Path{d: "M60 16 C35.7 16 16 35.7 16 60 L16 105 Q55 55 160 30 L190 16 Z"
+                    fill: glass_spec}
+
+                // Brain glow
+                Circle{cx: 128 cy: 95 r: 80 fill: brain_glow_grad}
+
+                // Brain paths
+                Group{transform: [Translate{x: 36.8 y: 11.4} Scale{x: 7.6 y: 7.6}]
+                    Path{d: "M15.5 13a3.5 3.5 0 0 0 -3.5 3.5v1a3.5 3.5 0 0 0 7 0v-1.8"
+                        fill: false stroke: brain_grad stroke_width: 0.35
+                        stroke_linecap: "round" stroke_linejoin: "round"}
+                    Path{d: "M8.5 13a3.5 3.5 0 0 1 3.5 3.5v1a3.5 3.5 0 0 1 -7 0v-1.8"
+                        fill: false stroke: brain_grad stroke_width: 0.35
+                        stroke_linecap: "round" stroke_linejoin: "round"}
+                    Path{d: "M17.5 16a3.5 3.5 0 0 0 0 -7h-.5"
+                        fill: false stroke: brain_grad stroke_width: 0.35
+                        stroke_linecap: "round" stroke_linejoin: "round"}
+                    Path{d: "M19 9.3v-2.8a3.5 3.5 0 0 0 -7 0"
+                        fill: false stroke: brain_grad stroke_width: 0.35
+                        stroke_linecap: "round" stroke_linejoin: "round"}
+                    Path{d: "M6.5 16a3.5 3.5 0 0 1 0 -7h.5"
+                        fill: false stroke: brain_grad stroke_width: 0.35
+                        stroke_linecap: "round" stroke_linejoin: "round"}
+                    Path{d: "M5 9.3v-2.8a3.5 3.5 0 0 1 7 0v10"
+                        fill: false stroke: brain_grad stroke_width: 0.35
+                        stroke_linecap: "round" stroke_linejoin: "round"}
+                    Path{d: "M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4"
+                        fill: false stroke: fold_grad stroke_width: 0.28
+                        stroke_linecap: "round" stroke_linejoin: "round" stroke_opacity: 0.5}
+                }
+
+                // Stem
+                Path{d: "M128 148 L128 178"
+                    fill: false stroke: stem_grad stroke_width: 2.5 stroke_linecap: "round"}
+
+                // Keyboard
+                Group{filter: kb_shadow}
+                Rect{x: 64 y: 185 w: 128 h: 38 rx: 7 ry: 7 fill: kb_body}
+                Rect{x: 64 y: 185 w: 128 h: 38 rx: 7 ry: 7
+                    fill: false stroke: kb_grad stroke_width: 1.2}
+
+                // Keyboard Row 1
+                Rect{x: 73 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 85 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 97 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 109 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 121 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 133 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 145 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 157 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 169 y: 190 w: 15 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+
+                // Keyboard Row 2
+                Rect{x: 76 y: 199 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.15}
+                Rect{x: 88 y: 199 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.15}
+                Rect{x: 100 y: 199 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.15}
+                Rect{x: 112 y: 199 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.15}
+                Rect{x: 124 y: 199 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.15}
+                Rect{x: 136 y: 199 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.15}
+                Rect{x: 148 y: 199 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.15}
+                Rect{x: 160 y: 199 w: 24 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.15}
+
+                // Keyboard Row 3
+                Rect{x: 73 y: 208 w: 12 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.12}
+                Rect{x: 88 y: 208 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.12}
+                Rect{x: 100 y: 208 w: 50 h: 6 rx: 2 ry: 2 fill: #xffffff fill_opacity: 0.18}
+                Rect{x: 153 y: 208 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.12}
+                Rect{x: 165 y: 208 w: 19 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.12}
+            }
+        }
+    }
+
     // Media tab - images, spinners, custom draws, SVGs
     let TabMedia = SolidView{
         width: Fill height: Fill
@@ -1141,7 +1311,7 @@ script_mod! {
 
         // Center panel - content widgets
         center_tabs := DockTabs{
-            tabs: [@media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
+            tabs: [@vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
             selected: 0
             closable: true
         }
@@ -1166,6 +1336,11 @@ script_mod! {
             kind: @TabSelectionTest        }
 
         // Individual tabs
+        vector_tab := DockTab{
+            name: "Vector"
+            template: @CloseableTab
+            kind: @TabVector        }
+
         buttons_tab := DockTab{
             name: "Buttons"
             template: @CloseableTab
@@ -1237,6 +1412,7 @@ script_mod! {
             kind: @TabModal        }
 
         // Content templates by widget type
+        TabVector := TabVector{}
         TabScrollbarTest := TabScrollbarTest{}
         TabSelectionTest := TabSelectionTest{}
         TabButtons := TabButtons{}

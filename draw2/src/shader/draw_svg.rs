@@ -114,27 +114,27 @@ pub struct DrawSvg {
     #[live]
     pub svg: Option<ScriptHandleRef>,
     #[rust]
-    svg_doc: Option<SvgDocument>,
+    pub svg_doc: Option<SvgDocument>,
     #[rust]
-    svg_loaded: bool,
+    pub svg_loaded: bool,
     // Content bounding box after viewbox transform at 1:1 scale.
     // This is the actual extent of rendered geometry.
     #[rust]
-    content_bounds: (f32, f32, f32, f32), // (min_x, min_y, max_x, max_y)
+    pub content_bounds: (f32, f32, f32, f32), // (min_x, min_y, max_x, max_y)
     #[rust]
-    content_size: DVec2,
+    pub content_size: DVec2,
     #[rust]
-    cached_verts: Vec<f32>,
+    pub cached_verts: Vec<f32>,
     #[rust]
-    cached_indices: Vec<u32>,
+    pub cached_indices: Vec<u32>,
     #[rust]
-    cached_gradient_data: Vec<u32>,
+    pub cached_gradient_data: Vec<u32>,
     #[rust]
-    cached_gradient_row_count: usize,
+    pub cached_gradient_row_count: usize,
     #[rust]
-    cache_valid: bool,
+    pub cache_valid: bool,
     #[rust]
-    has_animations: bool,
+    pub has_animations: bool,
     #[live(true)]
     pub preserve_aspect: bool,
     #[live(1.0)]
@@ -176,7 +176,7 @@ impl DrawSvg {
         self.render_to_rect(cx, &rect, 0.0);
     }
 
-    fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
+    pub fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
         let doc = self.svg_doc.take().unwrap();
 
         let (lw, lh) = doc.logical_size();
@@ -333,7 +333,7 @@ impl DrawSvg {
         self.cache_valid = false;
     }
 
-    fn set_doc_bounds(&mut self, doc: &SvgDocument) {
+    pub fn set_doc_bounds(&mut self, doc: &SvgDocument) {
         // Compute the viewbox transform at 1:1 logical size
         let (lw, lh) = doc.logical_size();
         let base_xf = if let Some(ref vb) = doc.viewbox {
