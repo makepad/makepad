@@ -83,6 +83,75 @@ impl AabbTree {
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
+
+    /// Count the number of triangles intersected by a ray, using BVH traversal.
+    ///
+    /// `origin`: ray origin
+    /// `dir`: ray direction (need not be normalized)
+    /// `triangles`: the triangle vertex data indexed by `tri_idx` in leaves
+    ///
+    /// Returns the number of forward-hitting triangles (t > epsilon).
+    /// This replaces the brute-force O(n) scan with O(log n) average.
+    pub fn ray_cast_count(
+        &self,
+        origin: Vec3d,
+        dir: Vec3d,
+        triangles: &[(Vec3d, Vec3d, Vec3d)],
+    ) -> u32 {
+        if self.root == u32::MAX {
+            return 0;
+        }
+        let inv_dir = Vec3d::new(1.0 / dir.x, 1.0 / dir.y, 1.0 / dir.z);
+        let mut count = 0u32;
+        // Use an explicit stack to avoid recursion overhead.
+        let mut stack = Vec::with_capacity(64);
+        stack.push(self.root);
+        while let Some(idx) = stack.pop() {
+            let node = &self.nodes[idx as usize];
+            if !node.bbox.ray_intersects(origin, inv_dir) {
+                continue;
+            }
+            if node.is_leaf() {
+                let (v0, v1, v2) = triangles[node.tri_idx as usize];
+                if ray_intersects_triangle(origin, dir, v0, v1, v2) {
+                    count += 1;
+                }
+            } else {
+                stack.push(node.left);
+                stack.push(node.right);
+            }
+        }
+        count
+    }
+}
+
+/// Moller-Trumbore ray-triangle intersection (scalar, forward hits only).
+#[inline]
+fn ray_intersects_triangle(origin: Vec3d, dir: Vec3d, v0: Vec3d, v1: Vec3d, v2: Vec3d) -> bool {
+    let edge1 = v1 - v0;
+    let edge2 = v2 - v0;
+    let h = dir.cross(edge2);
+    let a = edge1.dot(h);
+
+    if a.abs() < 1e-12 {
+        return false;
+    }
+
+    let f = 1.0 / a;
+    let s = origin - v0;
+    let u = f * s.dot(h);
+    if u < 0.0 || u > 1.0 {
+        return false;
+    }
+
+    let q = s.cross(edge1);
+    let v = f * dir.dot(q);
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+
+    let t = f * edge2.dot(q);
+    t > 1e-10
 }
 
 fn build_recursive(
