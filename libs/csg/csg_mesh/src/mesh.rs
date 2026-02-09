@@ -74,10 +74,9 @@ impl TriMesh {
     }
 
     /// Apply a transform to all vertices.
+    /// Uses SIMD-batched transform when the `nightly` feature is enabled.
     pub fn transform(&mut self, mat: Mat4d) {
-        for v in &mut self.vertices {
-            *v = mat.transform_point(*v);
-        }
+        makepad_csg_math::batch_transform_points(&mut self.vertices, &mat);
     }
 
     /// Append another mesh into this one.
@@ -91,25 +90,53 @@ impl TriMesh {
 
     /// Merge vertices that are closer than tolerance.
     /// Reindexes all triangles. Removes degenerate triangles.
+    /// Uses a spatial hash grid for O(n) average-case performance.
     pub fn weld_vertices(&mut self, tolerance: f64) {
-        let tol_sq = tolerance * tolerance;
         let n = self.vertices.len();
+        if n == 0 {
+            return;
+        }
+        let tol_sq = tolerance * tolerance;
+        // Cell size slightly larger than tolerance so that any two points within
+        // tolerance must land in the same cell or adjacent cells.
+        let cell = tolerance * 1.01;
+        let inv_cell = 1.0 / cell;
+
+        // Spatial hash grid: maps cell coordinate to list of (new_vert_index, position).
+        let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<(u32, Vec3d)>> =
+            std::collections::HashMap::new();
         let mut remap = vec![0u32; n];
         let mut new_verts: Vec<Vec3d> = Vec::new();
 
         for i in 0..n {
             let vi = self.vertices[i];
+            let cx = (vi.x * inv_cell).floor() as i64;
+            let cy = (vi.y * inv_cell).floor() as i64;
+            let cz = (vi.z * inv_cell).floor() as i64;
+
+            // Search this cell and 26 neighbors (3x3x3 neighborhood)
             let mut found = false;
-            for (j, &nv) in new_verts.iter().enumerate() {
-                if vi.distance_sq(nv) < tol_sq {
-                    remap[i] = j as u32;
-                    found = true;
-                    break;
+            'search: for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        let key = (cx + dx, cy + dy, cz + dz);
+                        if let Some(bucket) = grid.get(&key) {
+                            for &(idx, nv) in bucket {
+                                if vi.distance_sq(nv) < tol_sq {
+                                    remap[i] = idx;
+                                    found = true;
+                                    break 'search;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if !found {
-                remap[i] = new_verts.len() as u32;
+                let idx = new_verts.len() as u32;
+                remap[i] = idx;
                 new_verts.push(vi);
+                grid.entry((cx, cy, cz)).or_default().push((idx, vi));
             }
         }
 

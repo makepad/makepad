@@ -87,7 +87,7 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
     // creating sliver triangles and non-manifold edges. We cache each
     // (edge, other_triangle) intersection so it's computed exactly once.
     let mut segments: Vec<IntersectionSegment> = Vec::new();
-    let mut shared_verts: Vec<Vec3d> = Vec::new();
+    let mut shared_vert_grid = VertexGrid::new(1e-10);
     let mut edge_cache: HashMap<EdgeIsect, Vec3d> = HashMap::new();
 
     for &(ai, bi) in &pairs {
@@ -107,8 +107,8 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
                     if p0.distance(p1) < 1e-12 {
                         continue;
                     }
-                    let v0_idx = add_shared_vert(&mut shared_verts, p0, 1e-10);
-                    let v1_idx = add_shared_vert(&mut shared_verts, p1, 1e-10);
+                    let v0_idx = shared_vert_grid.add(p0);
+                    let v1_idx = shared_vert_grid.add(p1);
                     if v0_idx != v1_idx {
                         segments.push(IntersectionSegment {
                             tri_a: ai,
@@ -131,8 +131,8 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
                 if p0.distance(p1) < 1e-12 {
                     continue;
                 }
-                let v0_idx = add_shared_vert(&mut shared_verts, p0, 1e-10);
-                let v1_idx = add_shared_vert(&mut shared_verts, p1, 1e-10);
+                let v0_idx = shared_vert_grid.add(p0);
+                let v1_idx = shared_vert_grid.add(p1);
                 if v0_idx != v1_idx {
                     segments.push(IntersectionSegment {
                         tri_a: ai,
@@ -157,6 +157,7 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
     }
 
     // Step 5: Re-triangulate affected triangles
+    let shared_verts = shared_vert_grid.into_verts();
     let (result_a, origin_a, boundary_a) =
         retriangulate_mesh(mesh_a, &segments, &tri_a_segments, &shared_verts, true);
     let (result_b, origin_b, boundary_b) =
@@ -172,17 +173,55 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
     }
 }
 
-/// Add a vertex to the shared pool, merging with existing if within tolerance.
-fn add_shared_vert(verts: &mut Vec<Vec3d>, p: Vec3d, tolerance: f64) -> u32 {
-    let tol_sq = tolerance * tolerance;
-    for (i, &v) in verts.iter().enumerate() {
-        if v.distance_sq(p) < tol_sq {
-            return i as u32;
+/// Spatial hash grid for fast vertex deduplication during corefinement.
+struct VertexGrid {
+    verts: Vec<Vec3d>,
+    grid: HashMap<(i64, i64, i64), Vec<u32>>,
+    inv_cell: f64,
+    tol_sq: f64,
+}
+
+impl VertexGrid {
+    fn new(tolerance: f64) -> Self {
+        let cell = tolerance * 2.0;
+        VertexGrid {
+            verts: Vec::new(),
+            grid: HashMap::new(),
+            inv_cell: 1.0 / cell,
+            tol_sq: tolerance * tolerance,
         }
     }
-    let idx = verts.len() as u32;
-    verts.push(p);
-    idx
+
+    /// Add a vertex, merging with existing if within tolerance. Returns index.
+    fn add(&mut self, p: Vec3d) -> u32 {
+        let cx = (p.x * self.inv_cell).floor() as i64;
+        let cy = (p.y * self.inv_cell).floor() as i64;
+        let cz = (p.z * self.inv_cell).floor() as i64;
+
+        // Search 3x3x3 neighborhood
+        for dx in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dz in -1i64..=1 {
+                    if let Some(bucket) = self.grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                        for &idx in bucket {
+                            if self.verts[idx as usize].distance_sq(p) < self.tol_sq {
+                                return idx;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let idx = self.verts.len() as u32;
+        self.verts.push(p);
+        self.grid.entry((cx, cy, cz)).or_default().push(idx);
+        idx
+    }
+
+    fn into_verts(self) -> Vec<Vec3d> {
+        self.verts
+    }
 }
 
 /// Re-triangulate a mesh, splitting triangles that are intersected.

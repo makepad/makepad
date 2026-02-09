@@ -8,6 +8,7 @@ pub mod boolean;
 pub mod cdt;
 pub mod classify;
 pub mod corefine;
+pub mod thread_pool;
 pub mod tri_tri;
 
 pub use aabb_tree::AabbTree;
