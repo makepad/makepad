@@ -441,11 +441,27 @@ impl DrawVector {
         self.fill_opts(LineJoin::Miter, 4.0, 1.0);
     }
 
+    /// Fill with GPU-expandable fringe encoding (used by DrawSvg cache remapping).
+    pub fn fill_gpu(&mut self) {
+        self.fill_opts_mode(LineJoin::Miter, 4.0, 1.0, true);
+    }
+
     pub fn fill_opts(&mut self, join: LineJoin, miter_limit: f32, aa: f32) {
+        self.fill_opts_mode(join, miter_limit, aa, false);
+    }
+
+    fn fill_opts_mode(
+        &mut self,
+        join: LineJoin,
+        miter_limit: f32,
+        aa: f32,
+        gpu_expand_fill: bool,
+    ) {
         self.tess.flatten(&self.path, 0.25);
         let mut tv = std::mem::take(&mut self.tess_verts);
         let mut ti = std::mem::take(&mut self.tess_indices);
-        self.tess.fill(aa, join, miter_limit, &mut tv, &mut ti);
+        self.tess
+            .fill(aa, join, miter_limit, gpu_expand_fill, &mut tv, &mut ti);
         compute_clip_radii(&mut tv, &ti);
         self.cur_stroke_mult = 1e6;
         self.append_geometry(&tv, &ti);

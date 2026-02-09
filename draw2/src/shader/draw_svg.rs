@@ -31,7 +31,32 @@ script_mod! {
         svg_time: uniform(float(0.0))
 
         vertex: fn() {
-            let pos = vec2(self.geom.x, self.geom.y);
+            var pos = vec2(self.geom.x, self.geom.y);
+            // Fill fringe outer vertices (u=0, stroke_mult>1e5) have
+            // the outward normal stored in (v, stroke_dist). Expand
+            // them so the fringe is ~1px wide on screen regardless of
+            // svg_scale. We keep the edge centered like NanoVG:
+            // fill/body verts move inward by 0.5px, outer fringe verts
+            // move outward by 0.5px.
+            if self.geom.stroke_mult > 1e5 {
+                let normal = vec2(self.geom.v, self.geom.stroke_dist);
+                let nlen = length(normal);
+                if nlen > 0.0001 {
+                    let un = normal / nlen;
+                    // Convert screen px into local-space distance along un.
+                    let screen_scale = length(vec2(un.x * self.svg_scale.x, un.y * self.svg_scale.y));
+                    if screen_scale > 0.0001 {
+                        let half_px = 0.5 / screen_scale;
+                        if self.geom.u < 0.25 {
+                            // transparent outer fringe vertex
+                            pos = pos + un * half_px;
+                        } else if self.geom.u > 0.25 {
+                            // opaque edge/body vertex
+                            pos = pos - un * half_px;
+                        }
+                    }
+                }
+            }
             // Apply cached SVG transform on GPU
             let transformed = pos * self.svg_scale + self.svg_offset;
             self.v_tcoord = vec2(self.geom.u, self.geom.v);

@@ -46,12 +46,18 @@ features = ["example_generated"]
 
 [features]
 example_generated = []
-serde = []
+serde = ["dep:serde_core"]
 std = []
+rustc-dep-of-std = []
 
 [lib]
 name = "bitflags"
 path = "src/lib.rs"
+
+[dependencies.serde_core]
+version = "1.0"
+optional = true
+default-features = false
 
 [dependencies.arbitrary]
 version = "1.0"

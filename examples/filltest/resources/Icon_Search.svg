@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 256 256" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <rect id="Icon_Search" x="0" y="0" width="256" height="256" style="fill:none;"/>
+    <g id="Icon_Search1" serif:id="Icon_Search">
+        <g transform="matrix(1.27803,0,0,1.27803,-63.2676,-74.4848)">
+            <path d="M175.332,202.502C163.398,210.826 148.889,215.71 133.249,215.71C92.582,215.71 59.565,182.693 59.565,142.026C59.565,101.359 92.582,68.342 133.249,68.342C173.916,68.342 206.933,101.359 206.933,142.026C206.933,157.666 202.049,172.175 193.725,184.109L239.75,230.135L221.358,248.527L175.332,202.502ZM133.249,91.353C105.282,91.353 82.576,114.059 82.576,142.026C82.576,169.993 105.282,192.699 133.249,192.699C161.216,192.699 183.922,169.993 183.922,142.026C183.922,114.059 161.216,91.353 133.249,91.353Z"/>
+        </g>
+    </g>
+</svg>

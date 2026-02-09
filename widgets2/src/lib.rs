@@ -73,6 +73,7 @@ pub mod tab_close_button;
 pub mod html;
 pub mod markdown;
 
+pub mod math_view;
 pub mod splash;
 pub mod svg;
 pub mod vector;
@@ -197,6 +198,8 @@ pub use crate::html::*;
 
 pub use crate::markdown::*;
 
+pub use crate::math_view::*;
+
 pub use crate::splash::*;
 
 pub use crate::svg::*;
@@ -307,6 +310,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::splash::script_mod(vm);
     crate::svg::script_mod(vm);
     crate::vector::script_mod(vm);
+    crate::math_view::script_mod(vm);
 
     // make the prelude.widgetst with all our components
 
