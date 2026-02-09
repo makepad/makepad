@@ -5,6 +5,11 @@ edition = "2021"
 
 [workspace]
 
+[features]
+default = ["threads"]
+nightly = ["makepad-csg-math/nightly"]
+threads = []
+
 [dependencies]
 makepad-csg-math = { path = "../csg_math" }
 makepad-csg-mesh = { path = "../csg_mesh" }

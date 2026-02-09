@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "nightly", feature(portable_simd))]
+
 pub mod bbox;
 pub mod mat4;
 pub mod plane;
