@@ -1802,6 +1802,343 @@ pub fn main() {
     vm.eval(code);
 
     // ========================================
+    // Regex tests
+    // ========================================
+    let regex_test = script! {
+        use mod.std.assert
+        use mod.std.regex
+
+        // ============================================================
+        // REGEX CONSTRUCTOR & TYPE CHECKS
+        // ============================================================
+
+        // Basic construction
+        let re = regex("hello", "")
+        assert(re.is_regex())
+        assert(!re.is_string())
+        assert(!re.is_number())
+
+        // Construction with flags
+        let re_g = regex("abc", "g")
+        assert(re_g.is_regex())
+        assert(re_g.global == true)
+        let re_no_g = regex("abc", "")
+        assert(re_no_g.global == false)
+
+        // Source property returns the pattern
+        let re = regex("foo.*bar", "gi")
+        assert(re.source == "foo.*bar")
+
+        // Interning: same pattern + flags returns same object
+        let r1 = regex("test", "g")
+        let r2 = regex("test", "g")
+        assert(r1 === r2)
+
+        // Different flags = different object
+        let r3 = regex("test", "")
+        assert(r1 !== r3)
+
+        // Different pattern = different object
+        let r4 = regex("other", "g")
+        assert(r1 !== r4)
+
+        // ============================================================
+        // REGEX.TEST()
+        // ============================================================
+
+        let re = regex("hello", "")
+        assert(re.test("hello world") == true)
+        assert(re.test("goodbye world") == false)
+
+        // Case insensitive flag
+        let re_i = regex("hello", "i")
+        assert(re_i.test("HELLO WORLD") == true)
+        assert(re_i.test("Hello") == true)
+
+        // Pattern with special regex chars
+        let re_digits = regex("[0-9]+", "")
+        assert(re_digits.test("abc123") == true)
+        assert(re_digits.test("abcdef") == false)
+
+        // Anchored patterns
+        let re_start = regex("^hello", "")
+        assert(re_start.test("hello world") == true)
+        assert(re_start.test("say hello") == false)
+
+        let re_end = regex("world$", "")
+        assert(re_end.test("hello world") == true)
+        assert(re_end.test("world hello") == false)
+
+        // Dot matches any non-newline by default
+        let re_dot = regex("a.b", "")
+        assert(re_dot.test("axb") == true)
+        assert(re_dot.test("a\nb") == false)
+
+        // With 's' flag, dot matches newlines too
+        let re_dot_s = regex("a.b", "s")
+        assert(re_dot_s.test("a\nb") == true)
+
+        // ============================================================
+        // REGEX.EXEC()
+        // ============================================================
+
+        let re = regex("(\\w+)@(\\w+)", "")
+        let result = re.exec("user@host")
+        assert(result != nil)
+        assert(result.value == "user@host")
+        assert(result.index == 0)
+        assert(result.captures[0] == "user@host")
+        assert(result.captures[1] == "user")
+        assert(result.captures[2] == "host")
+
+        // No match returns nil
+        let re2 = regex("xyz", "")
+        assert(re2.exec("abc") == nil)
+
+        // Exec with match not at start
+        let re3 = regex("(\\d+)", "")
+        let r3 = re3.exec("abc123def")
+        assert(r3 != nil)
+        assert(r3.value == "123")
+        assert(r3.index == 3)
+
+        // ============================================================
+        // STRING.SEARCH()
+        // ============================================================
+
+        // Search with regex
+        let re = regex("\\d+", "")
+        assert("abc123def".search(re) == 3)
+        assert("abcdef".search(re) == -1)
+
+        // Search with string
+        assert("hello world".search("world") == 6)
+        assert("hello world".search("xyz") == -1)
+
+        // Search finds first occurrence
+        let re = regex("o", "")
+        assert("fooboo".search(re) == 1)
+
+        // ============================================================
+        // STRING.MATCH_STR() - non-global regex
+        // ============================================================
+
+        // Non-global regex returns detail object
+        let re = regex("(\\d{2})-(\\d{2})", "")
+        let m = "date: 12-25 end".match_str(re)
+        assert(m != nil)
+        assert(m.value == "12-25")
+        assert(m.index == 6)
+        assert(m.captures[0] == "12-25")
+        assert(m.captures[1] == "12")
+        assert(m.captures[2] == "25")
+
+        // No match returns nil
+        assert("no numbers".match_str(re) == nil)
+
+        // ============================================================
+        // STRING.MATCH_STR() - global regex
+        // ============================================================
+
+        // Global regex returns array of matched strings
+        let re_g = regex("\\d+", "g")
+        let matches = "a1b22c333".match_str(re_g)
+        assert(matches[0] == "1")
+        assert(matches[1] == "22")
+        assert(matches[2] == "333")
+
+        // Global with no matches returns empty-ish (array with no elements)
+        let re_g2 = regex("xyz", "g")
+        let matches2 = "hello world".match_str(re_g2)
+
+        // ============================================================
+        // STRING.MATCH_STR() - string pattern
+        // ============================================================
+
+        let m = "hello world hello".match_str("world")
+        assert(m != nil)
+        assert(m.value == "world")
+        assert(m.index == 6)
+
+        assert("hello".match_str("xyz") == nil)
+
+        // ============================================================
+        // STRING.MATCH_ALL()
+        // ============================================================
+
+        let re = regex("(\\w+)=(\\w+)", "g")
+        let results = "a=1 b=2 c=3".match_all(re)
+        assert(results[0].value == "a=1")
+        assert(results[0].index == 0)
+        assert(results[0].captures[1] == "a")
+        assert(results[0].captures[2] == "1")
+        assert(results[1].value == "b=2")
+        assert(results[1].index == 4)
+        assert(results[2].value == "c=3")
+        assert(results[2].index == 8)
+        assert(results[2].captures[1] == "c")
+        assert(results[2].captures[2] == "3")
+
+        // match_all with no captures
+        let re2 = regex("\\d+", "g")
+        let r2 = "x10y20z30".match_all(re2)
+        assert(r2[0].value == "10")
+        assert(r2[1].value == "20")
+        assert(r2[2].value == "30")
+
+        // ============================================================
+        // STRING.SPLIT() with regex
+        // ============================================================
+
+        // Simple split
+        let re = regex("[,;]", "")
+        let parts = "a,b;c,d".split(re)
+        assert(parts[0] == "a")
+        assert(parts[1] == "b")
+        assert(parts[2] == "c")
+        assert(parts[3] == "d")
+
+        // Split by whitespace
+        let re_ws = regex("\\s+", "")
+        let words = "hello   world\tfoo".split(re_ws)
+        assert(words[0] == "hello")
+        assert(words[1] == "world")
+        assert(words[2] == "foo")
+
+        // Split with capture groups (captured text included in result)
+        let re_cap = regex("([-])", "")
+        let parts = "a-b-c".split(re_cap)
+        assert(parts[0] == "a")
+        assert(parts[1] == "-")
+        assert(parts[2] == "b")
+        assert(parts[3] == "-")
+        assert(parts[4] == "c")
+
+        // Split with string (existing behavior still works)
+        let parts = "a,b,c".split(",")
+        assert(parts[0] == "a")
+        assert(parts[1] == "b")
+        assert(parts[2] == "c")
+
+        // ============================================================
+        // STRING.REPLACE() with regex
+        // ============================================================
+
+        // Simple replacement (non-global = first only)
+        let re = regex("\\d+", "")
+        let result = "abc123def456".replace(re, "NUM")
+        assert(result == "abcNUMdef456")
+
+        // Global replacement
+        let re_g = regex("\\d+", "g")
+        let result = "abc123def456".replace(re_g, "NUM")
+        assert(result == "abcNUMdefNUM")
+
+        // $& in replacement = whole match
+        let re = regex("\\w+", "g")
+        let result = "hello world".replace(re, "[$&]")
+        assert(result == "[hello] [world]")
+
+        // $1, $2 capture group references
+        let re = regex("(\\w+)@(\\w+)", "g")
+        let result = "user@host admin@server".replace(re, "$1 at $2")
+        assert(result == "user at host admin at server")
+
+        // $$ = literal $
+        let re = regex("price", "")
+        let result = "the price is".replace(re, "$$5")
+        assert(result == "the $5 is")
+
+        // Replace with string (existing behavior)
+        let result = "hello world".replace("world", "earth")
+        assert(result == "hello earth")
+
+        // String replace only replaces first occurrence
+        let result = "aaa".replace("a", "b")
+        assert(result == "baa")
+
+        // ============================================================
+        // EDGE CASES
+        // ============================================================
+
+        // Empty pattern regex
+        let re_empty = regex("", "g")
+        let result = "abc".split(re_empty)
+        // Empty regex matches between every char
+
+        // Regex with alternation
+        let re_alt = regex("cat|dog", "g")
+        assert(re_alt.test("I have a cat") == true)
+        assert(re_alt.test("I have a dog") == true)
+        assert(re_alt.test("I have a bird") == false)
+        let result = "my cat and dog".replace(re_alt, "pet")
+        assert(result == "my pet and pet")
+
+        // Regex with quantifiers
+        let re = regex("a{2,4}", "")
+        assert(re.test("aa") == true)
+        assert(re.test("aaaa") == true)
+        assert(re.test("a") == false)
+
+        // Regex with character classes
+        let re = regex("[a-z]+", "")
+        assert(re.test("hello") == true)
+        assert(re.test("123") == false)
+
+        // Nested groups
+        let re = regex("((\\d+)-(\\d+))", "")
+        let m = re.exec("test 42-99 end")
+        assert(m != nil)
+        assert(m.value == "42-99")
+        assert(m.captures[1] == "42-99")
+        assert(m.captures[2] == "42")
+        assert(m.captures[3] == "99")
+
+        // Replace with no matches = original string
+        let re = regex("xyz", "g")
+        let result = "hello world".replace(re, "!")
+        assert(result == "hello world")
+
+        // Search/match on empty string
+        let re = regex(".*", "")
+        assert("".search(re) == 0)
+
+        // Multiple regex operations on same string
+        let text = "The quick brown fox jumps over the lazy dog"
+        let re_word = regex("\\w+", "g")
+        let words = text.match_str(re_word)
+
+        let re_o = regex("o", "g")
+        let o_matches = text.match_all(re_o)
+        assert(o_matches[0].value == "o")
+
+        let idx = text.search(regex("fox", ""))
+        assert(idx == 16)
+
+        // ============================================================
+        // GC INTERACTION
+        // ============================================================
+        // Create regex objects in a loop, ensure GC doesn't break things
+        for i in 0..100 {
+            let re = regex("test" + i, "")
+            let result = re.test("test50")
+        }
+
+        // Interned regex survives GC
+        let re_before = regex("survivor", "g")
+        // Create garbage
+        for i in 0..200 {
+            let garbage = {x: i, y: [1 2 3]}
+        }
+        // Regex should still work
+        assert(re_before.test("find the survivor here") == true)
+        assert(re_before.source == "survivor")
+    };
+
+    vm.eval(regex_test);
+    println!("Regex tests passed");
+
+    // ========================================
     // GC stress test - separate code block
     // ========================================
     let gc_test = script! {

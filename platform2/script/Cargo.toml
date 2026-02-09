@@ -19,3 +19,5 @@ makepad-math = {path = "../../libs/math", version = "1.0.0" }
 makepad-live-id = {path = "../../libs/live_id", version = "1.0.0" }
 makepad-script-derive = {path = "./derive", version = "1.0.0" }
 smallvec = { version = "1.15", path = "../../libs/smallvec-1.15.1" }
+makepad-regex = {path = "../../libs/regex", version = "0.1.0" }
+makepad-html = {path = "../../libs/html", version = "1.0.0" }

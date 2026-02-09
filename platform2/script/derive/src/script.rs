@@ -159,11 +159,6 @@ fn token_parser_to_whitespace_matching_string(
             }
         }
 
-        #[cfg(not(lines))]
-        #[allow(clippy::ptr_arg)]
-        fn delta_whitespace(_now: Lc, _needed: Lc, _out: &mut String) {}
-
-        #[cfg(lines)]
         fn delta_whitespace(now: Lc, needed: Lc, out: &mut String) {
             if now.line == needed.line {
                 for _ in now.column..needed.column {
@@ -218,38 +213,6 @@ fn token_parser_to_whitespace_matching_string(
                 out.push(ge);
             } else {
                 if let Some(tt) = &parser.current {
-                    #[cfg(not(lines))]
-                    {
-                        fn is_ident(tt: &TokenTree) -> bool {
-                            if let TokenTree::Ident(_) = tt {
-                                return true;
-                            }
-                            false
-                        }
-
-                        fn is_string_lit(tt: &TokenTree) -> bool {
-                            if let TokenTree::Literal(lit) = tt {
-                                if let Some('"') = lit.to_string().chars().next() {
-                                    return true;
-                                }
-                            }
-                            false
-                        }
-
-                        fn is_punct(tt: &TokenTree) -> bool {
-                            if let TokenTree::Punct(_) = tt {
-                                return true;
-                            }
-                            false
-                        }
-                        if let Some(last_tt) = &last_tt {
-                            if !((is_ident(last_tt) && is_string_lit(tt)) || is_punct(last_tt)) {
-                                out.push(' ');
-                            }
-                        }
-                        last_tt = Some(tt.clone());
-                    };
-                    #[cfg(lines)]
                     {
                         last_tt = Some(tt.clone());
                         let start = lc_from_start(span);
@@ -266,38 +229,4 @@ fn token_parser_to_whitespace_matching_string(
     }
 }
 
-// Span fallback API
-
 use proc_macro::TokenTree;
-
-#[cfg(not(lines))]
-#[allow(dead_code)]
-struct SpanFallbackApiInfo {
-    line: usize,
-    column: usize,
-}
-
-#[cfg(not(lines))]
-#[allow(dead_code)]
-impl SpanFallbackApiInfo {
-    fn line(&self) -> usize {
-        self.line
-    }
-    fn column(&self) -> usize {
-        self.column
-    }
-}
-
-#[cfg(not(lines))]
-#[allow(dead_code)]
-trait SpanFallbackApi {
-    fn start(&self) -> SpanFallbackApiInfo {
-        SpanFallbackApiInfo { line: 1, column: 1 }
-    }
-    fn end(&self) -> SpanFallbackApiInfo {
-        SpanFallbackApiInfo { line: 1, column: 1 }
-    }
-}
-
-#[cfg(not(lines))]
-impl SpanFallbackApi for Span {}
