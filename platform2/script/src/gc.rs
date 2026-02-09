@@ -5,6 +5,7 @@ use crate::heap::*;
 use crate::makepad_error_log::*;
 
 use crate::object::*;
+use crate::regex::*;
 use crate::thread::*;
 use crate::trap::*;
 use crate::value::*;
@@ -22,6 +23,7 @@ pub struct ScriptHeapGcLast {
     pub arrays: usize,
     pub pods: usize,
     pub handles: usize,
+    pub regexes: usize,
 }
 
 /// Lightweight mark item for GC work list - just the reference, no debug info
@@ -48,6 +50,10 @@ macro_rules! queue_static_val {
             if let Some(handle_data) = $self.handles[ptr].as_mut() {
                 handle_data.tag.set_static();
             }
+        } else if let Some(ptr) = $val.as_regex() {
+            if let Some(regex_data) = $self.regexes[ptr].as_mut() {
+                regex_data.tag.set_static();
+            }
         }
     };
 }
@@ -72,6 +78,10 @@ macro_rules! set_static_val {
         } else if let Some(ptr) = $val.as_handle() {
             if let Some(handle_data) = $self.handles[ptr].as_mut() {
                 handle_data.tag.set_static();
+            }
+        } else if let Some(ptr) = $val.as_regex() {
+            if let Some(regex_data) = $self.regexes[ptr].as_mut() {
+                regex_data.tag.set_static();
             }
         }
     };
@@ -255,6 +265,12 @@ impl ScriptHeap {
                                 }
                             }
                         }
+                    } else if let Some(ptr) = val.as_regex() {
+                        if let Some(regex_data) = self.regexes[ptr].as_mut() {
+                            if !regex_data.tag.is_static() {
+                                regex_data.tag.set_mark();
+                            }
+                        }
                     }
                 }
 
@@ -316,6 +332,12 @@ impl ScriptHeap {
                     if !handle_data.tag.is_static() {
                         handle_data.tag.set_mark();
                     }
+                }
+            }
+        } else if let Some(ptr) = val.as_regex() {
+            if let Some(regex_data) = self.regexes[ptr].as_mut() {
+                if !regex_data.tag.is_static() {
+                    regex_data.tag.set_mark();
                 }
             }
         }
@@ -463,6 +485,7 @@ impl ScriptHeap {
         let (mut str_static, mut str_alive, mut str_removed) = (0usize, 0usize, 0usize);
         let (mut hdl_static, mut hdl_alive, mut hdl_removed) = (0usize, 0usize, 0usize);
         let (mut pod_static, mut pod_alive, mut pod_removed) = (0usize, 0usize, 0usize);
+        let (mut rex_static, mut rex_alive, mut rex_removed) = (0usize, 0usize, 0usize);
 
         for i in 1..self.objects.len() {
             let obj = &mut self.objects.get_at_mut(i);
@@ -585,16 +608,42 @@ impl ScriptHeap {
             }
         }
 
+        for i in 1..self.regexes.len() {
+            if let Some(re) = &mut self.regexes.get_at_mut(i) {
+                if re.tag.is_static() {
+                    rex_static += 1;
+                    continue;
+                }
+                if !re.tag.is_marked() {
+                    // Build the intern key to remove from intern table
+                    let key = RegexInternKey {
+                        pattern: re.pattern.clone(),
+                        flags: re.flags,
+                    };
+                    self.regex_intern.remove(&key);
+                    self.regexes.set_at(i, None);
+                    self.regexes.free_slot(i as u32);
+                    let new_gen = self.regexes.generation(i);
+                    self.regexes_free.push(ScriptRegex::new(i as u32, new_gen));
+                    rex_removed += 1;
+                } else {
+                    rex_alive += 1;
+                    re.tag.clear_mark();
+                }
+            }
+        }
+
         // Print compact GC stats: S=static A=alive R=removed
         let elapsed_us = start.elapsed().as_micros();
         if log_stats {
-            log!("GC {}us: obj[S:{} A:{} R:{}] arr[S:{} A:{} R:{}] str[S:{} A:{} R:{}] hdl[S:{} A:{} R:{}] pod[S:{} A:{} R:{}]",
+            log!("GC {}us: obj[S:{} A:{} R:{}] arr[S:{} A:{} R:{}] str[S:{} A:{} R:{}] hdl[S:{} A:{} R:{}] pod[S:{} A:{} R:{}] rex[S:{} A:{} R:{}]",
                 elapsed_us,
                 obj_static, obj_alive, obj_removed,
                 arr_static, arr_alive, arr_removed,
                 str_static, str_alive, str_removed,
                 hdl_static, hdl_alive, hdl_removed,
-                pod_static, pod_alive, pod_removed);
+                pod_static, pod_alive, pod_removed,
+                rex_static, rex_alive, rex_removed);
         }
 
         // Record heap statistics after GC for triggering next cycle
@@ -604,6 +653,7 @@ impl ScriptHeap {
             arrays: self.arrays.len() - self.arrays_free.len(),
             pods: self.pods.len() - self.pods_free.len(),
             handles: self.handles.len() - self.handles_free.len(),
+            regexes: self.regexes.len() - self.regexes_free.len(),
         };
     }
 
@@ -645,6 +695,12 @@ impl ScriptHeap {
             return true;
         }
         if handles >= MIN_HANDLES && handles >= self.gc_last.handles * GROWTH_FACTOR {
+            return true;
+        }
+
+        // Regexes are interned so unlikely to grow fast, but check anyway
+        let regexes = self.regexes.len() - self.regexes_free.len();
+        if regexes >= MIN_HANDLES && regexes >= self.gc_last.regexes * GROWTH_FACTOR {
             return true;
         }
 

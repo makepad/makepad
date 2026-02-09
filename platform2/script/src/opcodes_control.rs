@@ -242,6 +242,7 @@ impl<'a> ScriptVm<'a> {
                     }
                 }
                 ScriptValueType::ARRAY => id == id!(array).into(),
+                ScriptValueType::REGEX => id == id!(regex).into(),
                 _ if ty.to_redux() == ScriptValueType::REDUX_STRING => id == id!(string).into(),
                 _ if ty.to_redux() == ScriptValueType::REDUX_ID => id == id!(id).into(),
                 _ => false,

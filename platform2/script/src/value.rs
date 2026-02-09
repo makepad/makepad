@@ -340,6 +340,56 @@ impl From<ScriptValue> for ScriptHandle {
     }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ScriptRegex {
+    pub(crate) index: u32,
+    #[cfg(feature = "check_gen")]
+    pub(crate) generation: Generation,
+}
+
+impl ScriptRegex {
+    #[cfg(feature = "check_gen")]
+    pub const fn new(index: u32, generation: Generation) -> Self {
+        Self { index, generation }
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn new(index: u32, _generation: Generation) -> Self {
+        Self { index }
+    }
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+    #[cfg(feature = "check_gen")]
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub fn generation(&self) -> Generation {
+        ()
+    }
+}
+
+impl GenRef for ScriptRegex {
+    #[inline]
+    fn index(&self) -> u32 {
+        self.index
+    }
+    #[inline]
+    fn generation(&self) -> Generation {
+        self.generation()
+    }
+    #[inline]
+    fn new(index: u32, generation: Generation) -> Self {
+        Self::new(index, generation)
+    }
+}
+
+impl From<ScriptRegex> for ScriptValue {
+    fn from(v: ScriptRegex) -> Self {
+        ScriptValue::from_regex(v)
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ScriptString {
     pub index: u32,
@@ -520,21 +570,22 @@ impl ScriptValueType {
     pub const ARRAY: Self = Self(11);
     pub const POD_TYPE: Self = Self(12);
     pub const POD: Self = Self(13);
-    pub const OPCODE: Self = Self(14);
-    pub const STRING: Self = Self(15);
-    pub const ERROR: Self = Self(16);
+    pub const REGEX: Self = Self(14);
+    pub const OPCODE: Self = Self(15);
+    pub const STRING: Self = Self(16);
+    pub const ERROR: Self = Self(17);
 
-    pub const REDUX_MARKER: Self = Self(17);
+    pub const REDUX_MARKER: Self = Self(18);
 
-    pub const INLINE_STRING_0: Self = Self(17);
-    pub const INLINE_STRING_1: Self = Self(18);
-    pub const INLINE_STRING_2: Self = Self(19);
-    pub const INLINE_STRING_3: Self = Self(20);
-    pub const INLINE_STRING_4: Self = Self(21);
-    pub const INLINE_STRING_5: Self = Self(22);
-    pub const INLINE_STRING_END: Self = Self(23);
+    pub const INLINE_STRING_0: Self = Self(18);
+    pub const INLINE_STRING_1: Self = Self(19);
+    pub const INLINE_STRING_2: Self = Self(20);
+    pub const INLINE_STRING_3: Self = Self(21);
+    pub const INLINE_STRING_4: Self = Self(22);
+    pub const INLINE_STRING_5: Self = Self(23);
+    pub const INLINE_STRING_END: Self = Self(24);
 
-    pub const ERR_FIRST: Self = Self(23);
+    pub const ERR_FIRST: Self = Self(24);
     // Consolidated error types (19 total, down from 56)
     pub const ERR_NOT_FOUND: Self = Self(Self::ERR_FIRST.0 + 0); // lookup failures (property, field, variable, name, index)
     pub const ERR_TYPE_MISMATCH: Self = Self(Self::ERR_FIRST.0 + 1); // wrong type for operation
@@ -571,11 +622,12 @@ impl ScriptValueType {
     pub const REDUX_ARRAY: ScriptTypeRedux = ScriptTypeRedux(11);
     pub const REDUX_POD: ScriptTypeRedux = ScriptTypeRedux(12);
     pub const REDUX_POD_TYPE: ScriptTypeRedux = ScriptTypeRedux(13);
-    pub const REDUX_OPCODE: ScriptTypeRedux = ScriptTypeRedux(14);
-    pub const REDUX_STRING: ScriptTypeRedux = ScriptTypeRedux(15);
-    pub const REDUX_ERR: ScriptTypeRedux = ScriptTypeRedux(16);
-    pub const REDUX_ID: ScriptTypeRedux = ScriptTypeRedux(17);
-    pub const REDUX_HANDLE_FIRST: ScriptTypeRedux = ScriptTypeRedux(18);
+    pub const REDUX_REGEX: ScriptTypeRedux = ScriptTypeRedux(14);
+    pub const REDUX_OPCODE: ScriptTypeRedux = ScriptTypeRedux(15);
+    pub const REDUX_STRING: ScriptTypeRedux = ScriptTypeRedux(16);
+    pub const REDUX_ERR: ScriptTypeRedux = ScriptTypeRedux(17);
+    pub const REDUX_ID: ScriptTypeRedux = ScriptTypeRedux(18);
+    pub const REDUX_HANDLE_FIRST: ScriptTypeRedux = ScriptTypeRedux(19);
 
     pub const fn to_u64(&self) -> u64 {
         ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000
@@ -631,6 +683,7 @@ impl fmt::Display for ScriptValueType {
             Self::ARRAY => write!(f, "array"),
             Self::POD => write!(f, "pod"),
             Self::POD_TYPE => write!(f, "type"),
+            Self::REGEX => write!(f, "regex"),
             Self::OPCODE => write!(f, "opcode"),
             // Inline strings all display as "string"
             Self::INLINE_STRING_0
@@ -711,6 +764,7 @@ impl ScriptValue {
     pub const TYPE_ARRAY: u64 = ScriptValueType::ARRAY.to_u64();
     pub const TYPE_POD: u64 = ScriptValueType::POD.to_u64();
     pub const TYPE_POD_TYPE: u64 = ScriptValueType::POD_TYPE.to_u64();
+    pub const TYPE_REGEX: u64 = ScriptValueType::REGEX.to_u64();
 
     pub const TYPE_INLINE_STRING_0: u64 = ScriptValueType::INLINE_STRING_0.to_u64();
     pub const TYPE_INLINE_STRING_1: u64 = ScriptValueType::INLINE_STRING_1.to_u64();
@@ -1289,6 +1343,42 @@ impl ScriptValue {
         self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
     }
 
+    // regex
+    // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
+
+    #[cfg(feature = "check_gen")]
+    pub const fn from_regex(ptr: ScriptRegex) -> Self {
+        Self(ptr.index as u64 | ((ptr.generation as u64) << 32) | Self::TYPE_REGEX)
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn from_regex(ptr: ScriptRegex) -> Self {
+        Self(ptr.index as u64 | Self::TYPE_REGEX)
+    }
+
+    #[cfg(feature = "check_gen")]
+    pub const fn as_regex(&self) -> Option<ScriptRegex> {
+        if self.is_regex() {
+            return Some(ScriptRegex {
+                index: (self.0 & 0xffff_ffff) as u32,
+                generation: ((self.0 >> 32) & 0xff) as Generation,
+            });
+        }
+        None
+    }
+    #[cfg(not(feature = "check_gen"))]
+    pub const fn as_regex(&self) -> Option<ScriptRegex> {
+        if self.is_regex() {
+            return Some(ScriptRegex {
+                index: (self.0 & 0xffff_ffff) as u32,
+            });
+        }
+        None
+    }
+
+    pub const fn is_regex(&self) -> bool {
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_REGEX
+    }
+
     // string
     // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
 
@@ -1472,6 +1562,9 @@ impl fmt::Display for ScriptValue {
         }
         if let Some(ptr) = self.as_array() {
             return write!(f, "[ScriptArray:{}]", ptr.index);
+        }
+        if let Some(ptr) = self.as_regex() {
+            return write!(f, "[ScriptRegex:{}]", ptr.index);
         }
         if let Some(ptr) = self.as_handle() {
             return write!(f, "[ScriptHandle:{}]", ptr.index);
