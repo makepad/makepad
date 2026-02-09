@@ -92,6 +92,24 @@ impl BBox3d {
         }
     }
 
+    /// Test if a ray (origin + t*dir, t >= 0) intersects this AABB.
+    /// Returns true if the ray hits the box at any non-negative t.
+    /// Uses the slab method.
+    #[inline]
+    pub fn ray_intersects(self, origin: Vec3d, inv_dir: Vec3d) -> bool {
+        let t1x = (self.min.x - origin.x) * inv_dir.x;
+        let t2x = (self.max.x - origin.x) * inv_dir.x;
+        let t1y = (self.min.y - origin.y) * inv_dir.y;
+        let t2y = (self.max.y - origin.y) * inv_dir.y;
+        let t1z = (self.min.z - origin.z) * inv_dir.z;
+        let t2z = (self.max.z - origin.z) * inv_dir.z;
+
+        let tmin = t1x.min(t2x).max(t1y.min(t2y)).max(t1z.min(t2z));
+        let tmax = t1x.max(t2x).min(t1y.max(t2y)).min(t1z.max(t2z));
+
+        tmax >= tmin.max(0.0)
+    }
+
     /// Longest axis index (0=x, 1=y, 2=z).
     pub fn longest_axis(self) -> usize {
         let s = self.size();
