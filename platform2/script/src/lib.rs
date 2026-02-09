@@ -9,6 +9,7 @@ pub mod colorhex;
 pub mod gen_index;
 pub mod heap;
 pub mod mod_gc;
+pub mod mod_html;
 pub mod mod_math;
 pub mod mod_pod;
 pub mod mod_regex;
