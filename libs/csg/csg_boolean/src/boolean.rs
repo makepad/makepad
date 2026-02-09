@@ -25,18 +25,12 @@ pub enum BoolOp {
 
 /// Perform a boolean operation on two triangle meshes.
 pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
-    let t_total = std::time::Instant::now();
-
     // Step 1: Corefine both meshes
-    let t0 = std::time::Instant::now();
     let coref = corefine(mesh_a, mesh_b);
-    let corefine_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     // Step 2: Classify triangles
-    let t0 = std::time::Instant::now();
     let class_a = classify_triangles(&coref.mesh_a, &coref.mesh_b, &coref.on_boundary_a);
     let class_b = classify_triangles(&coref.mesh_b, &coref.mesh_a, &coref.on_boundary_b);
-    let classify_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     // Step 3: Select faces based on operation
     //
@@ -48,7 +42,6 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
     // mesh. Both meshes contribute them, causing double-counting. We detect
     // these by checking if +normal is outside the other mesh (surface face)
     // vs inside (interior face). Surface-coplanar Inside faces from B are dropped.
-    let t0 = std::time::Instant::now();
 
     // Build acceleration structures once for point-in-mesh queries during selection.
     let mb_clone = coref.mesh_b.clone();
@@ -159,15 +152,10 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
         }
     }
 
-    let select_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
     // Weld near-coincident vertices from independent intersection computations.
-    let t0 = std::time::Instant::now();
     result.weld_vertices(1e-4);
-    let weld_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     // Fix T-junctions iteratively.
-    let t0 = std::time::Instant::now();
     for _ in 0..5 {
         let before = result.triangles.len();
         fix_mesh_t_junctions(&mut result, 1e-4);
@@ -176,7 +164,6 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
         }
         result.weld_vertices(1e-4);
     }
-    let tjunc_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     // Final cleanup: remove sliver triangles from floating-point imprecision.
     // Uses minimum altitude criterion: h_min = 2*area / max_edge.
@@ -184,13 +171,7 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
     // base=10 → altitude=4e-6). Real thin triangles from small overlaps or
     // slight radius differences have altitudes >= ~1e-3. Threshold 1e-4 is
     // well within this gap.
-    let t0 = std::time::Instant::now();
     remove_degenerate_triangles(&mut result, 1e-4);
-    result.weld_vertices(1e-4);
-    let cleanup_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-    let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("[mesh_boolean] corefine={corefine_ms:.2}ms classify={classify_ms:.2}ms select={select_ms:.2}ms weld={weld_ms:.2}ms tjunc={tjunc_ms:.2}ms cleanup={cleanup_ms:.2}ms total={total_ms:.2}ms");
 
     result
 }

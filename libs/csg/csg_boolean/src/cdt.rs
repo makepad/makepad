@@ -14,6 +14,7 @@
 // and the specific shared edge.
 
 use makepad_csg_math::{in_circle, orient2d};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Point2 {
@@ -245,25 +246,21 @@ impl CDT {
             }
         }
 
-        // Fix adjacency for internal edges between new triangles
-        // edge 0 of tri i (to_i -> p): twin is edge 1 of some tri j (p -> from_j) where from_j == to_i
-        // edge 1 of tri i (p -> from_i): twin is edge 0 of some tri j (to_j -> p) where to_j == from_i
+        // Fix adjacency for internal edges between new triangles.
+        // Build lookup: from_vertex → boundary index (O(n) instead of O(n^2)).
+        // edge 0 of tri i (to_i -> p): twin is edge 1 of tri j where from_j == to_i
+        let mut from_to_idx: HashMap<u32, usize> = HashMap::with_capacity(n_new);
+        for i in 0..n_new {
+            let from_i = boundary[i].0;
+            from_to_idx.insert(from_i, i);
+        }
         for i in 0..n_new {
             let ti = new_tris[i];
             let to_i = boundary[i].1;
-            let from_i = boundary[i].0;
-
-            for j in 0..n_new {
-                if i == j {
-                    continue;
-                }
+            if let Some(&j) = from_to_idx.get(&to_i) {
                 let tj = new_tris[j];
-
-                // edge 0 of ti matches edge 1 of tj if from_j == to_i
-                if boundary[j].0 == to_i {
-                    self.adj[ti * 3] = (tj * 3 + 1) as u32;
-                    self.adj[tj * 3 + 1] = (ti * 3) as u32;
-                }
+                self.adj[ti * 3] = (tj * 3 + 1) as u32;
+                self.adj[tj * 3 + 1] = (ti * 3) as u32;
             }
         }
     }
@@ -283,6 +280,60 @@ impl CDT {
     }
 
     fn find_containing_triangle(&self, p: Point2) -> Option<usize> {
+        // Walk towards p using adjacency. O(sqrt(n)) expected vs O(n) scan.
+        // Find any non-deleted triangle to start from.
+        let mut t = 0;
+        while t < self.num_tris() && self.is_deleted(t) {
+            t += 1;
+        }
+        if t >= self.num_tris() {
+            return None;
+        }
+
+        let max_steps = self.num_tris() * 2;
+        for _ in 0..max_steps {
+            if self.is_deleted(t) {
+                // Fallback to linear scan if walk hits deleted triangle
+                return self.find_containing_triangle_linear(p);
+            }
+            let [a, b, c] = self.tri_verts(t);
+            let pa = self.pt(a);
+            let pb = self.pt(b);
+            let pc = self.pt(c);
+            let d0 = orient2d(pa.x, pa.y, pb.x, pb.y, p.x, p.y);
+            let d1 = orient2d(pb.x, pb.y, pc.x, pc.y, p.x, p.y);
+            let d2 = orient2d(pc.x, pc.y, pa.x, pa.y, p.x, p.y);
+
+            // Check if p is inside this triangle (works for both CCW and CW)
+            if !(d0 < 0.0 || d1 < 0.0 || d2 < 0.0) && (d0 > 0.0 || d1 > 0.0 || d2 > 0.0) {
+                return Some(t);
+            }
+            if !(d0 > 0.0 || d1 > 0.0 || d2 > 0.0) && (d0 < 0.0 || d1 < 0.0 || d2 < 0.0) {
+                return Some(t);
+            }
+
+            // Walk towards the most negative edge
+            let ds = [d0, d1, d2];
+            let min_edge = if ds[0] <= ds[1] && ds[0] <= ds[2] {
+                0
+            } else if ds[1] <= ds[2] {
+                1
+            } else {
+                2
+            };
+
+            let twin = self.adj[t * 3 + min_edge];
+            if twin == NONE {
+                // Boundary — fallback to linear scan
+                return self.find_containing_triangle_linear(p);
+            }
+            t = (twin / 3) as usize;
+        }
+
+        self.find_containing_triangle_linear(p)
+    }
+
+    fn find_containing_triangle_linear(&self, p: Point2) -> Option<usize> {
         for t in 0..self.num_tris() {
             if self.is_deleted(t) {
                 continue;
@@ -295,11 +346,9 @@ impl CDT {
             let d1 = orient2d(pb.x, pb.y, pc.x, pc.y, p.x, p.y);
             let d2 = orient2d(pc.x, pc.y, pa.x, pa.y, p.x, p.y);
             if !(d0 < 0.0 || d1 < 0.0 || d2 < 0.0) && (d0 > 0.0 || d1 > 0.0 || d2 > 0.0) {
-                // All non-negative and at least one positive: inside or on edge, CCW
                 return Some(t);
             }
             if !(d0 > 0.0 || d1 > 0.0 || d2 > 0.0) && (d0 < 0.0 || d1 < 0.0 || d2 < 0.0) {
-                // All non-positive and at least one negative: inside or on edge, CW
                 return Some(t);
             }
         }
