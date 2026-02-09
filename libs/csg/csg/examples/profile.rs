@@ -13,8 +13,7 @@ fn main() {
 
     profile_primitives();
     profile_transforms();
-    profile_booleans_bsp();
-    profile_booleans_corefine();
+    profile_booleans();
     profile_stl_io();
     profile_complex_workflows();
 }
@@ -90,8 +89,8 @@ fn profile_transforms() {
     println!();
 }
 
-fn profile_booleans_bsp() {
-    println!("--- BSP Booleans ---");
+fn profile_booleans() {
+    println!("--- Boolean Operations ---");
 
     // Low poly
     let a = Solid::cube(2.0, 2.0, 2.0, true);
@@ -101,7 +100,7 @@ fn profile_booleans_bsp() {
     bench("  difference", || a.difference(&b));
     bench("  intersection", || a.intersection(&b));
 
-    // cube-sphere (the previously-hanging case)
+    // cube-sphere
     let s = Solid::sphere(1.5, 16, 8);
     println!("  cube-sphere (12+{} tris):", s.triangle_count());
     bench("  union", || a.union(&s));
@@ -130,43 +129,16 @@ fn profile_booleans_bsp() {
     bench("  union", || s1.union(&s2));
     bench("  difference", || s1.difference(&s2));
 
-    println!();
-}
-
-fn profile_booleans_corefine() {
-    println!("--- Corefinement Booleans ---");
-
-    let a = Solid::cube(2.0, 2.0, 2.0, true);
-    let b = Solid::cube(2.0, 2.0, 2.0, true).translate(1.0, 0.0, 0.0);
-    println!("  cube-cube (12+12 tris):");
-    bench("  union", || a.union_corefine(&b));
-    bench("  difference", || a.difference_corefine(&b));
-    bench("  intersection", || a.intersection_corefine(&b));
-
-    let s = Solid::sphere(1.5, 16, 8);
-    println!("  cube-sphere (12+{} tris):", s.triangle_count());
-    bench("  union", || a.union_corefine(&s));
-    bench("  difference", || a.difference_corefine(&s));
-
-    let c1 = Solid::cylinder(1.0, 2.0, 32, true);
-    let c2 = Solid::cylinder(0.5, 3.0, 32, true).rotate_x(90.0);
+    // High poly
+    let s3 = Solid::sphere(1.5, 64, 32);
+    let s4 = Solid::sphere(1.5, 64, 32).translate(1.5, 0.0, 0.0);
     println!(
-        "  cylinder-cylinder ({}+{} tris):",
-        c1.triangle_count(),
-        c2.triangle_count()
+        "  sphere-sphere hi ({}+{} tris):",
+        s3.triangle_count(),
+        s4.triangle_count()
     );
-    bench("  union", || c1.union_corefine(&c2));
-    bench("  difference", || c1.difference_corefine(&c2));
-
-    let s1 = Solid::sphere(1.5, 32, 16);
-    let s2 = Solid::sphere(1.5, 32, 16).translate(1.5, 0.0, 0.0);
-    println!(
-        "  sphere-sphere ({}+{} tris):",
-        s1.triangle_count(),
-        s2.triangle_count()
-    );
-    bench("  union", || s1.union_corefine(&s2));
-    bench("  difference", || s1.difference_corefine(&s2));
+    bench("  union", || s3.union(&s4));
+    bench("  difference", || s3.difference(&s4));
 
     println!();
 }
