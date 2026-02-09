@@ -120,7 +120,13 @@ pub fn main() {
                 obj,
                 id_lut!(return_handle),
                 script_args_def!(o = 1.0),
-                move |_vm, _args| return ScriptHandle::ZERO.into(),
+                move |vm, _args| {
+                    struct DummyHandle;
+                    impl ScriptHandleGc for DummyHandle {
+                        fn gc(&mut self) {}
+                    }
+                    vm.bx.heap.new_handle(ht, Box::new(DummyHandle)).into()
+                },
             );
         }
     }
@@ -2137,6 +2143,73 @@ pub fn main() {
 
     vm.eval(regex_test);
     println!("Regex tests passed");
+
+    // ========================================
+    // HTML parse + query tests
+    // ========================================
+    let html_test = script! {
+        use mod.std.assert
+        let html = "<div class='container' id='main'><p>Hello</p><p class='bold'>World</p><span>!</span></div>"
+        let doc = html.parse_html()
+        assert(doc.length == 1)
+        let ps = doc.query("p")
+        assert(ps.length == 2)
+        let first_p = doc.query("p[0]")
+        assert(first_p.text == "Hello")
+        let second_p = doc.query("p[1]")
+        assert(second_p.text == "World")
+        assert(doc.query("span").text == "!")
+        assert(doc.query("div@class") == "container")
+        assert(doc.query("div@id") == "main")
+        assert(doc.query("p.bold").length == 1)
+        assert(doc.query("p.bold").text == "World")
+        let texts = doc.query("p.text")
+        assert(texts.len() == 2)
+        assert(texts[0] == "Hello")
+        assert(texts[1] == "World")
+        let attrs = doc.query("p@class")
+        assert(attrs.len() == 2)
+        let items = doc.query("p").array()
+        assert(items.len() == 2)
+        assert(items[0].text == "Hello")
+        assert(items[1].text == "World")
+        let chained = doc.query("div").query("p")
+        assert(chained.length == 2)
+        let child = doc.query("div > p")
+        assert(child.length == 2)
+        let nested = "<ul><li><a href='http://x'>Link1</a></li><li><a href='http://y'>Link2</a></li></ul>"
+        let ndoc = nested.parse_html()
+        assert(ndoc.query("a").length == 2)
+        assert(ndoc.query("a@href").len() == 2)
+        assert(ndoc.query("a@href")[0] == "http://x")
+        assert(ndoc.query("a[0]").text == "Link1")
+        assert(ndoc.query("li > a").length == 2)
+        assert(ndoc.query("ul a").length == 2)
+        let deep = "<div><div><p>Deep</p></div></div>"
+        let ddoc = deep.parse_html()
+        assert(ddoc.query("div p").length == 1)
+        assert(ddoc.query("div p").text == "Deep")
+        assert(ddoc.query("div > p").length == 1)
+        assert(ddoc.query("div > div > p").length == 1)
+        let empty = "<div></div>".parse_html()
+        assert(empty.query("p").length == 0)
+        assert(empty.query("p").text == "")
+        let multi = "<p>A</p><p>B</p><p>C</p>".parse_html()
+        assert(multi.length == 3)
+        assert(multi.query("p").length == 3)
+        assert(multi.query("p[2]").text == "C")
+        let wild = "<div><p>X</p><span>Y</span></div>".parse_html()
+        assert(wild.query("div > *").length == 2)
+        let by_id = "<div><p id='target'>Found</p><p>Other</p></div>".parse_html()
+        assert(by_id.query("#target").length == 1)
+        assert(by_id.query("#target").text == "Found")
+        assert(by_id.query("p#target").text == "Found")
+        let with_attr = doc.attr("class")
+        assert(with_attr == "container")
+    };
+
+    vm.eval(html_test);
+    println!("HTML tests passed");
 
     // ========================================
     // GC stress test - separate code block
