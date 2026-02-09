@@ -5,6 +5,7 @@ use crate::handle::*;
 use crate::makepad_live_id::*;
 use crate::object::*;
 use crate::pod::*;
+use crate::regex::*;
 use crate::string::*;
 use crate::traits::*;
 use crate::trap::*;
@@ -50,6 +51,10 @@ pub struct ScriptHeap {
 
     pub(crate) handles: GenVec<Option<ScriptHandleData>>,
     pub(crate) handles_free: Vec<ScriptHandle>,
+
+    pub(crate) regex_intern: HashMap<RegexInternKey, ScriptRegex>,
+    pub(crate) regexes: GenVec<Option<ScriptRegexData>>,
+    pub(crate) regexes_free: Vec<ScriptRegex>,
 }
 
 impl ScriptHeap {
@@ -59,6 +64,7 @@ impl ScriptHeap {
         let mut pods = GenVec::new();
         let mut handles = GenVec::new();
         let mut strings = GenVec::new();
+        let mut regexes = GenVec::new();
 
         // Push slot 0 for each (reserved/null slot)
         objects.push(Default::default());
@@ -66,6 +72,7 @@ impl ScriptHeap {
         pods.push(Default::default());
         handles.push(None);
         strings.push(None); // slot 0 for strings too
+        regexes.push(None); // slot 0 for regexes too
 
         let mut v = Self {
             root_objects: Default::default(),
@@ -75,6 +82,7 @@ impl ScriptHeap {
             pods,
             handles,
             strings,
+            regexes,
             ..Default::default()
         };
         // Initialize slot 0 (reserved null slot) - use get_at_mut for internal init

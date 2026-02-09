@@ -5,6 +5,7 @@ use crate::makepad_live_id::*;
 use crate::mod_gc::*;
 use crate::mod_math::*;
 use crate::mod_pod::*;
+use crate::mod_regex::*;
 use crate::mod_shader::*;
 use crate::mod_std::*;
 use crate::native::*;
@@ -918,6 +919,7 @@ impl ScriptVmBase {
         let mut native = ScriptNative::new(&mut heap);
         define_math_module(&mut heap, &mut native);
         define_std_module(&mut heap, &mut native);
+        define_regex_module(&mut heap, &mut native);
         define_shader_module(&mut heap, &mut native);
         define_gc_module(&mut heap, &mut native);
         let pod_builtins = define_pod_module(&mut heap, &mut native);
