@@ -74,8 +74,8 @@ script_mod! {
                         }
 
                         Hr{}
-
-                        task_view := View{
+                        
+                        task_view := React{
                             width: Fill height: Fit
                             flow: Down spacing: 0
                             new_batch: true

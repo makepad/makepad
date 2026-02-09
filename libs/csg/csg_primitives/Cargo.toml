@@ -1,0 +1,10 @@
+[package]
+name = "makepad-csg-primitives"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+makepad-csg-math = { path = "../csg_math" }
+makepad-csg-mesh = { path = "../csg_mesh" }
