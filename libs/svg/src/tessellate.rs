@@ -68,11 +68,32 @@ struct SubPath {
     count: usize,
     closed: bool,
     winding: Winding,
+    has_explicit_winding: bool,
     convex: bool,
     nbevel: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FillRule {
+    EvenOdd,
+    NonZero,
+}
+
 impl Tessellator {
+    /// Bounding box of flattened points: (min_x, min_y, max_x, max_y).
+    /// Call after `flatten()`.
+    pub fn bounds(&self) -> (f32, f32, f32, f32) {
+        let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
+        let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
+        for pt in &self.points {
+            min_x = min_x.min(pt.x);
+            min_y = min_y.min(pt.y);
+            max_x = max_x.max(pt.x);
+            max_y = max_y.max(pt.y);
+        }
+        (min_x, min_y, max_x, max_y)
+    }
+
     pub fn flatten(&mut self, path: &VectorPath, tess_tol: f32) {
         self.points.clear();
         self.paths.clear();
@@ -85,6 +106,7 @@ impl Tessellator {
                         count: 0,
                         closed: false,
                         winding: Winding::CCW,
+                        has_explicit_winding: false,
                         convex: false,
                         nbevel: 0,
                     });
@@ -108,6 +130,7 @@ impl Tessellator {
                 PathCmd::Winding(w) => {
                     if let Some(p) = self.paths.last_mut() {
                         p.winding = w;
+                        p.has_explicit_winding = true;
                     }
                 }
             }
@@ -228,15 +251,17 @@ impl Tessellator {
             // ensure correct winding
             if count > 2 {
                 let area = poly_area(&self.points[first..first + count]);
-                match p.winding {
-                    Winding::CCW => {
-                        if area < 0.0 {
-                            self.points[first..first + count].reverse();
+                if p.has_explicit_winding {
+                    match p.winding {
+                        Winding::CCW => {
+                            if area < 0.0 {
+                                self.points[first..first + count].reverse();
+                            }
                         }
-                    }
-                    Winding::CW => {
-                        if area > 0.0 {
-                            self.points[first..first + count].reverse();
+                        Winding::CW => {
+                            if area > 0.0 {
+                                self.points[first..first + count].reverse();
+                            }
                         }
                     }
                 }
@@ -730,6 +755,7 @@ impl Tessellator {
         aa: f32,
         line_join: LineJoin,
         miter_limit: f32,
+        gpu_expand_fill: bool,
         verts: &mut Vec<VVertex>,
         indices: &mut Vec<u32>,
     ) {
@@ -737,51 +763,197 @@ impl Tessellator {
         self.calculate_joins(woff, line_join, miter_limit);
         verts.clear();
         indices.clear();
+
+        // Collect valid subpaths (>= 3 points) with per-contour AA side sign.
+        // sign > 0: fill side is along +dmx/+dmy, sign < 0: fill side is along -dmx/-dmy.
+        // We derive this from a non-zero fill test around each contour edge.
+        let mut valid_paths: Vec<(usize, usize, f32)> = Vec::new();
         for pi in 0..self.paths.len() {
             let sp = &self.paths[pi];
-            let first = sp.first;
-            let count = sp.count;
-            if count < 3 {
-                continue;
+            if sp.count >= 3 {
+                valid_paths.push((sp.first, sp.count, 1.0));
             }
-            // Emit vertices for this subpath, contracted inward by woff
-            // so the solid fill body stays inside the true path boundary.
-            let base = verts.len() as u32;
+        }
+
+        if valid_paths.is_empty() {
+            return;
+        }
+
+        let fill_rule = if self
+            .paths
+            .iter()
+            .any(|sp| sp.count >= 3 && sp.has_explicit_winding)
+        {
+            FillRule::NonZero
+        } else {
+            FillRule::EvenOdd
+        };
+        let body_inset_woff = if matches!(fill_rule, FillRule::EvenOdd) {
+            // Implicit font-like outlines are fragile under inward body shrink.
+            // Keep body on-edge and let the fringe provide AA falloff.
+            0.0
+        } else {
+            woff
+        };
+
+        // Determine fill-side sign per contour by sampling both sides of contour edges.
+        // This avoids corner-miter ambiguity on sharp/reflex vertices.
+        for i in 0..valid_paths.len() {
+            let (first, count, _) = valid_paths[i];
+            let mut sign = 1.0f32;
+            let mut found = false;
+
+            for j in 0..count {
+                let j1 = (j + 1) % count;
+                let p0 = self.points[first + j];
+                let p1 = self.points[first + j1];
+                let mut ex = p1.x - p0.x;
+                let mut ey = p1.y - p0.y;
+                let e2 = ex * ex + ey * ey;
+                if e2 <= 1e-12 {
+                    continue;
+                }
+
+                let inv_e = 1.0 / e2.sqrt();
+                ex *= inv_e;
+                ey *= inv_e;
+                let nx = ey;
+                let ny = -ex;
+                let mx = (p0.x + p1.x) * 0.5;
+                let my = (p0.y + p1.y) * 0.5;
+                let local_len = p0.len.max(p1.len);
+                let base_eps = (local_len * 1e-3).max(1e-4);
+                let eps_scales = [1.0f32, 4.0, 16.0];
+
+                for s in eps_scales {
+                    let eps = base_eps * s;
+                    let plus_filled =
+                        point_in_fill_rule(mx + nx * eps, my + ny * eps, &self.points, &valid_paths, fill_rule);
+                    let minus_filled =
+                        point_in_fill_rule(mx - nx * eps, my - ny * eps, &self.points, &valid_paths, fill_rule);
+
+                    if plus_filled != minus_filled {
+                        sign = if plus_filled { 1.0 } else { -1.0 };
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+
+            if !found {
+                // Fallback to contour orientation if local fill-side probe was inconclusive.
+                let area = poly_area(&self.points[first..first + count]);
+                sign = if area >= 0.0 { 1.0 } else { -1.0 };
+            }
+            valid_paths[i].2 = sign;
+        }
+
+        // Emit fill body vertices.
+        // In regular mode we inset by woff like NanoVG. In GPU-expand mode
+        // we keep vertices on the edge and let the vertex shader place them.
+        let fill_base = verts.len() as u32;
+        for &(first, count, sign) in &valid_paths {
             for j in 0..count {
                 let pt = self.points[first + j];
-                verts.push(VVertex::new(
-                    pt.x + pt.dmx * woff,
-                    pt.y + pt.dmy * woff,
-                    0.5,
-                    1.0,
-                ));
-            }
-            // Triangulate using monotone sweep-line decomposition
-            fill_tessellate(&self.points[first..first + count], base, indices);
-
-            // AA fringe: from contracted edge (opaque) outward to the
-            // original path position (transparent). The fill body is
-            // inset by woff, the fringe covers the remaining edge with
-            // a smooth alpha falloff, and the total extent matches the
-            // true path boundary exactly — no outward inflation.
-            if woff > 0.0 {
-                let fringe_base = verts.len() as u32;
-                for j in 0..count {
-                    let p1 = self.points[first + j];
-                    // inner: contracted position (opaque)
+                if gpu_expand_fill {
+                    let nx = -pt.dmx * sign;
+                    let ny = -pt.dmy * sign;
+                    verts.push(VVertex {
+                        x: pt.x,
+                        y: pt.y,
+                        u: 0.5,
+                        v: nx,
+                        stroke_dist: ny,
+                        clip_radius: 0.0,
+                    });
+                } else {
                     verts.push(VVertex::new(
-                        p1.x + p1.dmx * woff,
-                        p1.y + p1.dmy * woff,
+                        pt.x + pt.dmx * body_inset_woff * sign,
+                        pt.y + pt.dmy * body_inset_woff * sign,
                         0.5,
                         1.0,
                     ));
-                    // outer: original path position (transparent)
-                    verts.push(VVertex::new(
-                        p1.x - p1.dmx * woff,
-                        p1.y - p1.dmy * woff,
-                        0.0,
-                        1.0,
-                    ));
+                }
+            }
+        }
+
+        // Feed edges from ALL subpaths into a single sweep-line tessellator.
+        // Regions are classified with the non-zero winding rule.
+        {
+            let all_fill_verts = &verts[fill_base as usize..];
+            let mut tess = SweepTessellator::new(fill_rule);
+            let mut offset = 0usize;
+            for &(_first, count, _) in &valid_paths {
+                for i in 0..count {
+                    let j = (i + 1) % count;
+                    let vi = &all_fill_verts[offset + i];
+                    let vj = &all_fill_verts[offset + j];
+                    let i_index = fill_base + (offset + i) as u32;
+                    let j_index = fill_base + (offset + j) as u32;
+                    // Preserve original contour order for non-zero winding.
+                    tess.push_edge(
+                        FPoint::new(vi.x, vi.y),
+                        i_index,
+                        FPoint::new(vj.x, vj.y),
+                        j_index,
+                    );
+                }
+                offset += count;
+            }
+            let tri = tess.tessellate_vverts();
+            indices.extend_from_slice(&tri);
+        }
+
+        // AA fringe: inner vertex at body edge (opaque, u=0.5),
+        // outer vertex also at body edge but tagged with the outward
+        // normal in (v, stroke_dist) so the vertex shader can expand
+        // it to the correct screen-space width.
+        if woff > 0.0 {
+            for &(first, count, sign) in &valid_paths {
+                let fringe_base = verts.len() as u32;
+                for j in 0..count {
+                    let p1 = self.points[first + j];
+                    if gpu_expand_fill {
+                        // Anchor both fringe vertices at the edge and encode
+                        // outward normal for GPU-side fringe placement.
+                        let bx = p1.x;
+                        let by = p1.y;
+                        let nx = -p1.dmx * sign;
+                        let ny = -p1.dmy * sign;
+                        verts.push(VVertex {
+                            x: bx,
+                            y: by,
+                            u: 0.5,
+                            v: nx,
+                            stroke_dist: ny,
+                            clip_radius: 0.0,
+                        });
+                        verts.push(VVertex {
+                            x: bx,
+                            y: by,
+                            u: 0.0,
+                            v: nx,
+                            stroke_dist: ny,
+                            clip_radius: 0.0,
+                        });
+                    } else {
+                        // Classic NanoVG-style physical fringe geometry.
+                        verts.push(VVertex::new(
+                            p1.x + p1.dmx * body_inset_woff * sign,
+                            p1.y + p1.dmy * body_inset_woff * sign,
+                            0.5,
+                            1.0,
+                        ));
+                        verts.push(VVertex::new(
+                            p1.x - p1.dmx * woff * sign,
+                            p1.y - p1.dmy * woff * sign,
+                            0.0,
+                            1.0,
+                        ));
+                    }
                 }
                 for j in 0..count as u32 {
                     let j1 = if j + 1 < count as u32 { j + 1 } else { 0 };
@@ -924,31 +1096,55 @@ fn poly_area(pts: &[VPoint]) -> f32 {
     area * 0.5
 }
 
+fn contour_winding_at_point(px: f32, py: f32, pts: &[VPoint], first: usize, count: usize) -> i32 {
+    if count < 3 {
+        return 0;
+    }
+    let mut winding = 0i32;
+    for i in 0..count {
+        let j = (i + 1) % count;
+        let x0 = pts[first + i].x;
+        let y0 = pts[first + i].y;
+        let x1 = pts[first + j].x;
+        let y1 = pts[first + j].y;
+
+        if y0 <= py {
+            if y1 > py {
+                let is_left = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
+                if is_left > 0.0 {
+                    winding += 1;
+                }
+            }
+        } else if y1 <= py {
+            let is_left = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
+            if is_left < 0.0 {
+                winding -= 1;
+            }
+        }
+    }
+    winding
+}
+
+fn point_in_fill_rule(
+    px: f32,
+    py: f32,
+    pts: &[VPoint],
+    contours: &[(usize, usize, f32)],
+    fill_rule: FillRule,
+) -> bool {
+    let mut winding = 0i32;
+    for &(first, count, _) in contours {
+        winding += contour_winding_at_point(px, py, pts, first, count);
+    }
+    match fill_rule {
+        FillRule::NonZero => winding != 0,
+        FillRule::EvenOdd => (winding & 1) != 0,
+    }
+}
+
 // ---- Sweep-line monotone polygon tessellator (ported from bender) ----
 // Correctly triangulates concave (and self-intersecting) polygons using
 // sweep-line decomposition into monotone sub-polygons, then triangulating each.
-
-/// Tessellate a closed polygon given as a slice of VPoints.
-/// `base` is the vertex index offset added to all emitted triangle indices.
-fn fill_tessellate(pts: &[VPoint], base: u32, indices: &mut Vec<u32>) {
-    let n = pts.len();
-    if n < 3 {
-        return;
-    }
-
-    // Build edges from the closed polygon
-    let mut tess = SweepTessellator::new();
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let start = FPoint::new(pts[i].x, pts[i].y);
-        let end = FPoint::new(pts[j].x, pts[j].y);
-        tess.push_edge(start, end);
-    }
-
-    // Run sweep and collect triangles
-    let tri = tess.tessellate(pts, base);
-    indices.extend_from_slice(&tri);
-}
 
 // Minimal 2D point for the tessellator
 #[derive(Clone, Copy, Debug)]
@@ -971,9 +1167,9 @@ impl PartialEq for FPoint {
 
 impl PartialOrd for FPoint {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        // Compare y first (sweep direction), then x
-        match self.y.partial_cmp(&other.y) {
-            Some(std::cmp::Ordering::Equal) => self.x.partial_cmp(&other.x),
+        // Match bender geometry Point ordering: x first, then y.
+        match self.x.partial_cmp(&other.x) {
+            Some(std::cmp::Ordering::Equal) => self.y.partial_cmp(&other.y),
             ord => ord,
         }
     }
@@ -1005,26 +1201,20 @@ impl FSegment {
     }
 }
 
-// Parity tracking for even-odd fill rule
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum FParity {
-    Even,
-    Odd,
+// Running winding accumulation for non-zero fill rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FWinding(i32);
+
+impl FWinding {
+    const ZERO: Self = Self(0);
+    const POS: Self = Self(1);
+    const NEG: Self = Self(-1);
 }
 
-impl FParity {
-    fn is_interior(self) -> bool {
-        self == FParity::Odd
-    }
-}
-
-impl std::ops::Add for FParity {
+impl std::ops::Add for FWinding {
     type Output = Self;
     fn add(self, other: Self) -> Self {
-        match (self, other) {
-            (FParity::Even, FParity::Even) | (FParity::Odd, FParity::Odd) => FParity::Even,
-            _ => FParity::Odd,
-        }
+        Self(self.0 + other.0)
     }
 }
 
@@ -1032,6 +1222,7 @@ impl std::ops::Add for FParity {
 #[derive(Clone, Copy, Debug)]
 struct SweepEvent {
     vertex: FPoint,
+    vertex_index: u32,
     pending_edge: Option<SweepPendingEdge>,
 }
 
@@ -1060,8 +1251,9 @@ impl Ord for SweepEvent {
 
 #[derive(Clone, Copy, Debug)]
 struct SweepPendingEdge {
-    parity: FParity,
+    winding: FWinding,
     end: FPoint,
+    end_index: u32,
 }
 
 impl SweepPendingEdge {
@@ -1093,12 +1285,13 @@ impl SweepPendingEdge {
         {
             std::mem::swap(self, &mut other);
         }
-        self.parity = self.parity + other.parity;
+        self.winding = self.winding + other.winding;
         if self.end == other.end {
             return None;
         }
         Some(SweepEvent {
             vertex: self.end,
+            vertex_index: self.end_index,
             pending_edge: Some(other),
         })
     }
@@ -1107,10 +1300,11 @@ impl SweepPendingEdge {
 #[derive(Clone, Copy, Debug)]
 struct SweepActiveEdge {
     is_temporary: bool,
-    parity: FParity,
+    winding: FWinding,
     start_index: u32,
+    end_index: u32,
     edge: FSegment,
-    upper_region_parity: FParity,
+    upper_region_winding: FWinding,
     lower_mono: Option<usize>,
     upper_mono: Option<usize>,
 }
@@ -1123,8 +1317,9 @@ impl SweepActiveEdge {
         }
         self.edge = FSegment::new(self.edge.start, vertex);
         Some(SweepPendingEdge {
-            parity: self.parity,
+            winding: self.winding,
             end,
+            end_index: self.end_index,
         })
     }
 }
@@ -1264,52 +1459,64 @@ impl MonoArena {
 
 // The main sweep-line tessellator
 struct SweepTessellator {
+    fill_rule: FillRule,
     active_edges: Vec<SweepActiveEdge>,
     event_queue: std::collections::BinaryHeap<SweepEvent>,
     mono_arena: MonoArena,
 }
 
 impl SweepTessellator {
-    fn new() -> Self {
+    fn new(fill_rule: FillRule) -> Self {
         Self {
+            fill_rule,
             active_edges: Vec::new(),
             event_queue: std::collections::BinaryHeap::new(),
             mono_arena: MonoArena::new(),
         }
     }
 
-    fn push_edge(&mut self, start: FPoint, end: FPoint) {
+    fn push_edge(&mut self, start: FPoint, start_index: u32, end: FPoint, end_index: u32) {
         if start == end {
             return;
         }
-        let (start, end) = if start.partial_cmp(&end) == Some(std::cmp::Ordering::Less) {
-            (start, end)
-        } else {
-            (end, start)
+        let (start, start_index, end, end_index, winding) = match self.fill_rule {
+            FillRule::NonZero => {
+                if start.partial_cmp(&end) == Some(std::cmp::Ordering::Less) {
+                    (start, start_index, end, end_index, FWinding::POS)
+                } else {
+                    (end, end_index, start, start_index, FWinding::NEG)
+                }
+            }
+            FillRule::EvenOdd => {
+                if start.partial_cmp(&end) == Some(std::cmp::Ordering::Less) {
+                    (start, start_index, end, end_index, FWinding::POS)
+                } else {
+                    (end, end_index, start, start_index, FWinding::POS)
+                }
+            }
         };
         self.event_queue.push(SweepEvent {
             vertex: start,
+            vertex_index: start_index,
             pending_edge: Some(SweepPendingEdge {
-                parity: FParity::Odd,
+                winding,
                 end,
+                end_index,
             }),
         });
         self.event_queue.push(SweepEvent {
             vertex: end,
+            vertex_index: end_index,
             pending_edge: None,
         });
     }
 
-    fn tessellate(mut self, pts: &[VPoint], base: u32) -> Vec<u32> {
+    fn tessellate_vverts(mut self) -> Vec<u32> {
         let mut out = Vec::new();
         let mut pending = Vec::new();
         let mut left_edges = Vec::new();
 
-        // Map from FPoint positions to vertex indices
-        // We need to find the vertex index for each event point
-        while let Some(vertex) = self.pop_events(&mut pending) {
-            // Find vertex index — search pts for matching position
-            let vi = Self::find_vertex_index(pts, vertex, base);
+        while let Some((vertex, vi)) = self.pop_events(&mut pending) {
             self.handle_vertex(vertex, vi, &mut pending, &mut left_edges, &mut out);
             pending.clear();
             left_edges.clear();
@@ -1317,27 +1524,9 @@ impl SweepTessellator {
         out
     }
 
-    fn find_vertex_index(pts: &[VPoint], fp: FPoint, base: u32) -> u32 {
-        // Find closest matching vertex
-        let mut best = 0u32;
-        let mut best_dist = f32::MAX;
-        for (i, pt) in pts.iter().enumerate() {
-            let dx = pt.x - fp.x;
-            let dy = pt.y - fp.y;
-            let d = dx * dx + dy * dy;
-            if d < best_dist {
-                best_dist = d;
-                best = i as u32;
-                if d == 0.0 {
-                    break;
-                }
-            }
-        }
-        base + best
-    }
-
-    fn pop_events(&mut self, pending: &mut Vec<SweepPendingEdge>) -> Option<FPoint> {
+    fn pop_events(&mut self, pending: &mut Vec<SweepPendingEdge>) -> Option<(FPoint, u32)> {
         let event = self.event_queue.pop()?;
+        let mut vertex_index = event.vertex_index;
         if let Some(pe) = event.pending_edge {
             pending.push(pe);
         }
@@ -1352,11 +1541,12 @@ impl SweepTessellator {
                 break;
             };
             self.event_queue.pop();
+            vertex_index = vertex_index.min(next.vertex_index);
             if let Some(pe) = next.pending_edge {
                 pending.push(pe);
             }
         }
-        Some(event.vertex)
+        Some((event.vertex, vertex_index))
     }
 
     fn handle_vertex(
@@ -1447,16 +1637,23 @@ impl SweepTessellator {
         }
     }
 
-    fn last_lower_parity(&self, incident_start: usize) -> FParity {
+    fn last_lower_winding(&self, incident_start: usize) -> FWinding {
         if incident_start == 0 {
-            FParity::Even
+            FWinding::ZERO
         } else {
-            self.active_edges[incident_start - 1].upper_region_parity
+            self.active_edges[incident_start - 1].upper_region_winding
+        }
+    }
+
+    fn region_is_interior(&self, winding: FWinding) -> bool {
+        match self.fill_rule {
+            FillRule::NonZero => winding.0 != 0,
+            FillRule::EvenOdd => (winding.0 & 1) != 0,
         }
     }
 
     fn connect_left_vertex(&mut self, incident_start: usize) -> (Option<usize>, Option<usize>) {
-        if !self.last_lower_parity(incident_start).is_interior() {
+        if !self.region_is_interior(self.last_lower_winding(incident_start)) {
             return (None, None);
         }
         let ae0 = self.active_edges[incident_start - 1];
@@ -1479,7 +1676,7 @@ impl SweepTessellator {
         out: &mut Vec<u32>,
     ) -> (Option<usize>, Option<usize>) {
         for le in &left_edges[..left_edges.len() - 1] {
-            if le.upper_region_parity.is_interior() {
+            if self.region_is_interior(le.upper_region_winding) {
                 if let Some(um) = le.upper_mono {
                     self.mono_arena.finish_mono(um, vi, out);
                 }
@@ -1499,27 +1696,28 @@ impl SweepTessellator {
         lower_mono: Option<usize>,
         upper_mono: Option<usize>,
     ) {
-        let lower_parity = self.last_lower_parity(incident_start);
-        if !lower_parity.is_interior() {
+        let lower_winding = self.last_lower_winding(incident_start);
+        if !self.region_is_interior(lower_winding) {
             return;
         }
         let end_point = {
-            let e0 = self.active_edges[incident_start - 1].edge.end;
-            let e1 = self.active_edges[incident_start].edge.end;
-            if e0.partial_cmp(&e1) != Some(std::cmp::Ordering::Greater) {
-                e0
+            let ae0 = self.active_edges[incident_start - 1];
+            let ae1 = self.active_edges[incident_start];
+            if ae0.edge.end.partial_cmp(&ae1.edge.end) != Some(std::cmp::Ordering::Greater) {
+                (ae0.edge.end, ae0.end_index)
             } else {
-                e1
+                (ae1.edge.end, ae1.end_index)
             }
         };
         self.active_edges.insert(
             incident_start,
             SweepActiveEdge {
                 is_temporary: true,
-                parity: FParity::Even,
+                winding: FWinding::ZERO,
                 start_index: vi,
-                edge: FSegment::new(vertex, end_point),
-                upper_region_parity: lower_parity,
+                end_index: end_point.1,
+                edge: FSegment::new(vertex, end_point.0),
+                upper_region_winding: lower_winding,
                 lower_mono,
                 upper_mono,
             },
@@ -1535,13 +1733,13 @@ impl SweepTessellator {
         mut lower_mono: Option<usize>,
         upper_mono: Option<usize>,
     ) {
-        let mut lower_parity = self.last_lower_parity(incident_start);
+        let mut lower_winding = self.last_lower_winding(incident_start);
         let new_edges: Vec<SweepActiveEdge> = pending
             .iter()
             .enumerate()
             .map(|(i, pe)| {
-                let upper_parity = lower_parity + pe.parity;
-                let um = if upper_parity.is_interior() {
+                let upper_winding = lower_winding + pe.winding;
+                let um = if self.region_is_interior(upper_winding) {
                     if i == pending.len() - 1 {
                         upper_mono
                     } else {
@@ -1552,14 +1750,15 @@ impl SweepTessellator {
                 };
                 let ae = SweepActiveEdge {
                     is_temporary: false,
-                    parity: pe.parity,
+                    winding: pe.winding,
                     start_index: vi,
+                    end_index: pe.end_index,
                     edge: pe.to_segment(vertex),
-                    upper_region_parity: upper_parity,
+                    upper_region_winding: upper_winding,
                     lower_mono,
                     upper_mono: um,
                 };
-                lower_parity = upper_parity;
+                lower_winding = upper_winding;
                 lower_mono = um;
                 ae
             })

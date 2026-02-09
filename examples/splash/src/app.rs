@@ -7,7 +7,6 @@ app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
-
     let TestDraw = #(TestDraw::register_widget(vm)) {
         width: 250
         height: 150
@@ -675,6 +674,60 @@ script_mod! {
         }
     }
 
+    // ===========================================
+    // MATH VIEW TAB - LaTeX math rendering
+    // ===========================================
+
+    let TabMathView = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+
+            Label{text: "MathView - LaTeX Rendering" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "LaTeX equations rendered via Typst" draw_text.color: #888 draw_text.text_style.font_size: 10}
+
+            Hr{}
+
+            Label{text: "Quadratic Formula" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            MathView{text: "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}" font_size: 14.0}
+
+            Hr{}
+
+            Label{text: "Euler's Identity" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            MathView{text: "e^{i\\pi} + 1 = 0" font_size: 16.0}
+
+            Hr{}
+
+            Label{text: "Integral" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            MathView{text: "\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}" font_size: 14.0}
+
+            Hr{}
+
+            Label{text: "Matrix" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            MathView{text: "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}" font_size: 14.0}
+
+            Hr{}
+
+            Label{text: "Sum" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            MathView{text: "\\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6}" font_size: 14.0}
+
+            Hr{}
+
+            Label{text: "Maxwell's Equations" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            MathView{text: "\\nabla \\times \\mathbf{E} = -\\frac{\\partial \\mathbf{B}}{\\partial t}" font_size: 14.0}
+
+            Hr{}
+
+            Label{text: "Different Sizes" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+            View{width: Fill height: Fit flow: Right spacing: 15 align: Align{y: 0.5}}
+            MathView{text: "\\alpha + \\beta" font_size: 8.0}
+            MathView{text: "\\alpha + \\beta" font_size: 12.0}
+            MathView{text: "\\alpha + \\beta" font_size: 18.0}
+            MathView{text: "\\alpha + \\beta" font_size: 24.0}
+        }
+    }
+
     // Vector tab - SVG examples recreated in Splash Vector syntax
     // These should look identical to the SVG versions in the Media tab
 
@@ -1311,7 +1364,7 @@ script_mod! {
 
         // Center panel - content widgets
         center_tabs := DockTabs{
-            tabs: [@vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
+            tabs: [@math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
             selected: 0
             closable: true
         }
@@ -1336,6 +1389,11 @@ script_mod! {
             kind: @TabSelectionTest        }
 
         // Individual tabs
+        math_tab := DockTab{
+            name: "Math"
+            template: @CloseableTab
+            kind: @TabMathView        }
+
         vector_tab := DockTab{
             name: "Vector"
             template: @CloseableTab
@@ -1412,6 +1470,7 @@ script_mod! {
             kind: @TabModal        }
 
         // Content templates by widget type
+        TabMathView := TabMathView{}
         TabVector := TabVector{}
         TabScrollbarTest := TabScrollbarTest{}
         TabSelectionTest := TabSelectionTest{}
