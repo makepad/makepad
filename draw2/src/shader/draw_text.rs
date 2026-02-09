@@ -58,6 +58,8 @@ script_mod! {
         geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
 
         color: #fff
+        sdf_sharpness: 1.0
+        sdf_luma_bias: 0.03
 
         pos: varying(vec2f)
         t: varying(vec2f)
@@ -86,10 +88,22 @@ script_mod! {
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
         }
 
-        sdf: fn(scale, p) {
+        sdf: fn(scale, p, color) {
             let s = self.grayscale_texture.sample(p).x;
-            // 1.1 factor to compensate for text being magically too dark after the fontstack refactor
-            return clamp(((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5)*1.1, 0.0, 1.0)
+            // Convert sampled SDF to coverage (0..1). scale is source texels per screen pixel.
+            let safe_scale = max(scale, 0.0001);
+            var a = clamp(
+                (s - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
+                0.0,
+                1.0,
+            );
+            // Polarity compensation:
+            // dark text on light backgrounds usually appears softer than the inverse,
+            // so we bias coverage slightly by text luminance.
+            let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+            let bias = (0.5 - luma) * self.sdf_luma_bias;
+            a = clamp(a - bias, 0.0, 1.0);
+            return a
         }
 
         get_color: fn() {
@@ -104,12 +118,18 @@ script_mod! {
             let dxt = length(dFdx(self.t))
             let dyt = length(dFdy(self.t))
             if self.texture_index == 0 {
-                let scale = (dxt + dyt) * self.grayscale_texture.size().x * 0.5
-                let s = self.sdf(scale, self.t.xy)
                 let c = self.get_color()
+                let scale = (dxt + dyt) * self.grayscale_texture.size().x * 0.5
+                let tex_size = self.grayscale_texture.size()
+                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
+                let s = self.sdf(scale, p, c)
                 return s * vec4(c.rgb * c.a, c.a)
             } else {
-                let c = self.color_texture.sample(self.t)
+                let tex_size = self.color_texture.size()
+                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
+                let c = self.color_texture.sample(p)
                 return vec4(c.rgb * c.a, c.a)
             }
         }
@@ -154,6 +174,10 @@ pub struct DrawText {
     pub char_index: f32,
     #[live(vec4(1., 1., 1., 1.))]
     pub color: Vec4f,
+    #[live(1.0)]
+    pub sdf_sharpness: f32,
+    #[live(0.03)]
+    pub sdf_luma_bias: f32,
     #[live]
     pub t_min: Vec2f,
     #[live]

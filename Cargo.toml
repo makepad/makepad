@@ -13,6 +13,7 @@ workspace.members = [
     "examples/web_cam",
     "examples/arracing",
     "examples/splash",
+    "examples/filltest",
     "examples/scratchpad",
     "examples/vector",
     "examples/text_flow",
@@ -24,6 +25,7 @@ workspace.members = [
     "examples/comfyui",
     "examples/aichat",
     #"libs/math_widget",  # removed: depends on old widgets crate
+    "libs/latex_math",
     "libs/regex",
     "libs/svg",
     "platform2/script/test",

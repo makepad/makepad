@@ -125,7 +125,7 @@ fn build_alien(t: &Instant) -> Solid {
     // ================================================================
     timed(t, "  Building blobby eyes...");
     let eye_y = head_pos.y + 0.8;
-    let eye_z = head_pos.z + head_r * 0.55;
+    let eye_z = head_pos.z + head_r * 0.85;
     let eye_gloop = 0.3;
 
     // Left eye: ellipsoidal bulge + pupil sphere
@@ -144,8 +144,8 @@ fn build_alien(t: &Instant) -> Solid {
         .add(SdfSph::new(dvec3(-1.8, eye_y + 0.1, eye_z + 0.5), 0.4));
 
     // Mesh the eyes
-    let eye_bounds_min = dvec3(-4.0, eye_y - 2.0, eye_z - 2.0);
-    let eye_bounds_max = dvec3(4.0, eye_y + 2.0, eye_z + 2.0);
+    let eye_bounds_min = dvec3(-4.0, eye_y - 2.0, eye_z - 2.5);
+    let eye_bounds_max = dvec3(4.0, eye_y + 2.0, eye_z + 2.5);
     let left_eye_solid = Solid::from_sdf(left_eye, eye_bounds_min, eye_bounds_max, 6);
     let right_eye_solid = Solid::from_sdf(right_eye, eye_bounds_min, eye_bounds_max, 6);
     timed(
@@ -376,12 +376,12 @@ fn build_alien(t: &Instant) -> Solid {
     // MOUTH + NOSTRILS + BELLY BUTTON (carved out as before)
     // ================================================================
     let mouth_y = head_pos.y - 2.0;
-    let mouth_z = head_pos.z + head_r * 0.6;
+    let mouth_z = head_pos.z + head_r * 0.9;
     let mouth = Solid::sphere(1.2, seg, 8)
         .scale(1.8, 0.35, 0.6)
         .translate(0.0, mouth_y, mouth_z);
     let nostril_y = head_pos.y - 1.0;
-    let nostril_z = head_pos.z + head_r * 0.85;
+    let nostril_z = head_pos.z + head_r * 1.0;
     let nostril_l = Solid::sphere(0.2, 8, 6).translate(0.35, nostril_y, nostril_z);
     let nostril_r = Solid::sphere(0.2, 8, 6).translate(-0.35, nostril_y, nostril_z);
     let belly_button =
