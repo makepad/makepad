@@ -110,6 +110,11 @@ pub fn cp_brotli(source_path: &PathBuf, dest_path: &PathBuf, exec: bool, compres
         
 pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, String> {
     let build_crate = get_build_crate_from_args(args) ?;
+    let bin_name = if let Ok(bin_name) = get_binary_name_from_args(args) {
+        bin_name
+    } else {
+        build_crate
+    };
     
     let base_args = &[
         "run",
@@ -225,7 +230,7 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
         }            
     }
     let wasm_source = if config.bindgen {
-        shell(build_dir.as_path(), "wasm-bindgen", &[&format!("{build_crate}.wasm"), "--out-dir=.", "--out-name=bindgen", "--target=web", "--no-typescript", ])?;
+        shell(build_dir.as_path(), "wasm-bindgen", &[&format!("{bin_name}.wasm"), "--out-dir=.", "--out-name=bindgen", "--target=web", "--no-typescript", ])?;
         let jsfile = build_dir.join("bindgen.js");
         let patched = std::fs::read_to_string(&jsfile).map_err(|e| format!("Unable to find wasm-bidngen generated file {e:?}"))?
             .replace("import * as __wbg_star0 from 'env';", "")
@@ -239,10 +244,10 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
 
         build_dir.join("bindgen_bg.wasm")
     } else {
-        build_dir.join(format!("{}.wasm", build_crate))
+        build_dir.join(format!("{}.wasm", bin_name))
     };
 
-    let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
+    let wasm_dest = app_dir.join(format!("{}.wasm", bin_name));
     if config.strip{
         if let Ok(data) = fs::read(&wasm_source) {
             if let Ok(strip) = wasm_strip_debug(&data) {
