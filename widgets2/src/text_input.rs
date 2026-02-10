@@ -11,6 +11,7 @@ use {
             },
             *,
         },
+        makepad_script::{ScriptFnRef, ScriptRefOptionExt},
         widget::*,
     },
     std::rc::Rc,
@@ -521,6 +522,11 @@ pub struct TextInput {
     /// IME composition tracking - byte length of current composition
     #[rust]
     composition_length: usize,
+
+    #[live]
+    on_change: Option<ScriptFnRef>,
+    #[live]
+    on_return: Option<ScriptFnRef>,
 }
 
 impl ScriptHook for TextInput {
@@ -532,6 +538,38 @@ impl ScriptHook for TextInput {
 }
 
 impl TextInput {
+    fn emit_change(&mut self, cx: &mut Cx, uid: WidgetUid, path: &HeapLiveIdPath) {
+        cx.widget_action(uid, path, TextInputAction::Changed(self.text.clone()));
+        if let Some(handler) = self.on_change.as_object() {
+            let text = self.text.clone();
+            cx.with_vm(|vm| {
+                let str_val = vm.bx.heap.new_string_from_str(&text);
+                vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+            });
+        }
+    }
+
+    fn emit_return(
+        &mut self,
+        cx: &mut Cx,
+        uid: WidgetUid,
+        path: &HeapLiveIdPath,
+        mods: KeyModifiers,
+    ) {
+        cx.widget_action(
+            uid,
+            path,
+            TextInputAction::Returned(self.text.clone(), mods),
+        );
+        if let Some(handler) = self.on_return.as_object() {
+            let text = self.text.clone();
+            cx.with_vm(|vm| {
+                let str_val = vm.bx.heap.new_string_from_str(&text);
+                vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+            });
+        }
+    }
+
     pub fn is_password(&self) -> bool {
         self.is_password
     }
@@ -1513,11 +1551,7 @@ impl Widget for TextInput {
                 ..
             }) => {
                 cx.hide_text_ime();
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Returned(self.text.clone(), mods),
-                );
+                self.emit_return(cx, uid, &scope.path, mods);
             }
 
             Hit::KeyDown(KeyEvent {
@@ -1542,11 +1576,7 @@ impl Widget for TextInput {
                     },
                 );
                 self.draw_bg.redraw(cx);
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Changed(self.text.clone()),
-                );
+                self.emit_change(cx, uid, &scope.path);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -1568,11 +1598,7 @@ impl Widget for TextInput {
                     },
                 );
                 self.draw_bg.redraw(cx);
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Changed(self.text.clone()),
-                );
+                self.emit_change(cx, uid, &scope.path);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
@@ -1594,11 +1620,7 @@ impl Widget for TextInput {
                     },
                 );
                 self.draw_bg.redraw(cx);
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Changed(self.text.clone()),
-                );
+                self.emit_change(cx, uid, &scope.path);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -1609,11 +1631,7 @@ impl Widget for TextInput {
                     return;
                 }
                 self.draw_bg.redraw(cx);
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Changed(self.text.clone()),
-                );
+                self.emit_change(cx, uid, &scope.path);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -1624,11 +1642,7 @@ impl Widget for TextInput {
                     return;
                 }
                 self.draw_bg.redraw(cx);
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Changed(self.text.clone()),
-                );
+                self.emit_change(cx, uid, &scope.path);
             }
             Hit::TextInput(TextInputEvent {
                 input,
@@ -1652,11 +1666,7 @@ impl Widget for TextInput {
                         );
                         self.composition_length = 0;
                         self.draw_bg.redraw(cx);
-                        cx.widget_action(
-                            uid,
-                            &scope.path,
-                            TextInputAction::Changed(self.text.clone()),
-                        );
+                        self.emit_change(cx, uid, &scope.path);
                     }
                     return;
                 }
@@ -1722,11 +1732,7 @@ impl Widget for TextInput {
                 }
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Changed(self.text.clone()),
-                );
+                self.emit_change(cx, uid, &scope.path);
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
                 // iOS autocorrect sends range replacement events
@@ -1760,11 +1766,7 @@ impl Widget for TextInput {
 
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Changed(self.text.clone()),
-                );
+                self.emit_change(cx, uid, &scope.path);
             }
             Hit::TextCopy(event) => {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());
@@ -1783,11 +1785,7 @@ impl Widget for TextInput {
                         },
                     );
                     self.draw_bg.redraw(cx);
-                    cx.widget_action(
-                        uid,
-                        &scope.path,
-                        TextInputAction::Changed(self.text.clone()),
-                    );
+                    self.emit_change(cx, uid, &scope.path);
                 }
             }
             Hit::KeyDown(event) => {

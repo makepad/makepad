@@ -9,14 +9,8 @@ use super::{
     sdfer,
     sdfer::Sdfer,
 };
-use std::{
-    collections::HashSet,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::collections::HashSet;
 //use std::{fs::File, io::BufWriter, path::Path, slice};
-
-static GLYPH_GEN_CUMULATIVE_US: AtomicU64 = AtomicU64::new(0);
-static GLYPH_GEN_CUMULATIVE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub struct Rasterizer {
@@ -112,13 +106,6 @@ impl Rasterizer {
             return;
         }
         if !self.is_valid_msdf_upgrade(rect, &job.pixels) {
-            println!(
-                "glyph-gen reject mode=msdf-async reason=validation font={:?} glyph={} size={}x{}",
-                job.key.font_id,
-                job.key.glyph_id,
-                job.key.size.width,
-                job.key.size.height
-            );
             self.outline_msdf_failed.insert(job.key);
             return;
         }
@@ -267,13 +254,6 @@ impl Rasterizer {
         let atlas_image_bounds = match self.atlas.get_or_allocate_glyph_image(key.clone())? {
             GlyphImage::Cached(rect) => rect,
             GlyphImage::Allocated(mut slot) => {
-                let start = std::time::Instant::now();
-                println!(
-                    "glyph-gen start mode=sdf font={:?} glyph={} dpxs_per_em={:.2}",
-                    font.id(),
-                    glyph_id,
-                    dpxs_per_em
-                );
                 let mut coverage = Image::new(atlas_image_size);
                 outline.rasterize(
                     dpxs_per_em,
@@ -293,21 +273,6 @@ impl Rasterizer {
                 }
                 self.outline_msdf_ready.remove(&key);
                 self.outline_msdf_failed.remove(&key);
-                let elapsed_us = start.elapsed().as_micros() as u64;
-                let cumulative_us = GLYPH_GEN_CUMULATIVE_US
-                    .fetch_add(elapsed_us, Ordering::Relaxed)
-                    .saturating_add(elapsed_us);
-                let cumulative_count = GLYPH_GEN_CUMULATIVE_COUNT
-                    .fetch_add(1, Ordering::Relaxed)
-                    .saturating_add(1);
-                println!(
-                        "glyph-gen end mode=sdf font={:?} glyph={} elapsed_us={} cumulative_us={} cumulative_count={}",
-                        font.id(),
-                        glyph_id,
-                        elapsed_us,
-                        cumulative_us,
-                        cumulative_count
-                    );
                 slot.bounds()
             }
         };
@@ -333,19 +298,9 @@ impl Rasterizer {
         let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
         let complexity = estimate_outline_complexity(&outline);
         if !is_msdf_complexity_acceptable(self.msdf_complexity, complexity) {
-            println!(
-                "glyph-gen route mode=msdf->sdf reason=complexity font={:?} glyph={} outline_commands={} estimated_segments={} max_commands={} max_segments={}",
-                font.id(),
-                glyph_id,
-                complexity.outline_commands,
-                complexity.estimated_segments,
-                self.msdf_complexity.max_outline_commands,
-                self.msdf_complexity.max_estimated_segments
-            );
             return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
         }
-        let resolution_choice = choose_msdf_resolution(self.msdf_resolution, &outline, dpxs_per_em);
-        let dpxs_per_em = resolution_choice.selected_dpxs_per_em;
+        let dpxs_per_em = choose_msdf_resolution(self.msdf_resolution, &outline, dpxs_per_em);
         let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
         let atlas_image_padding = self.msdfer.settings().padding;
         let key = GlyphImageKey {
@@ -374,18 +329,6 @@ impl Rasterizer {
         let sdf_glyph = self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em)?;
         if !self.outline_msdf_ready.contains(&key) && self.outline_msdf_pending.insert(key.clone())
         {
-            println!(
-                "glyph-gen queue mode=msdf font={:?} glyph={} requested_dpxs_per_em={:.2} base_dpxs_per_em={:.2} selected_dpxs_per_em={:.2} required_dpxs_per_em={:.2} min_feature_ems={:.6}",
-                font.id(),
-                glyph_id,
-                resolution_choice.requested_dpxs_per_em,
-                resolution_choice.base_dpxs_per_em,
-                dpxs_per_em,
-                resolution_choice.required_dpxs_per_em,
-                resolution_choice
-                    .min_feature_ems
-                    .unwrap_or(self.msdf_resolution.min_feature_floor_ems)
-            );
             self.queued_msdf_jobs.push(QueuedMsdfJob {
                 key,
                 outline,
@@ -413,31 +356,9 @@ impl Rasterizer {
         })? {
             GlyphImage::Cached(rect) => rect,
             GlyphImage::Allocated(mut image) => {
-                let start = std::time::Instant::now();
-                println!(
-                    "glyph-gen start mode=color font={:?} glyph={} dpxs_per_em={:.2}",
-                    font.id(),
-                    glyph_id,
-                    dpxs_per_em
-                );
                 let size = image.size();
                 image = image.subimage_mut(Rect::from(size).unpad(PADDING));
                 raster_image.decode(&mut image);
-                let elapsed_us = start.elapsed().as_micros() as u64;
-                let cumulative_us = GLYPH_GEN_CUMULATIVE_US
-                    .fetch_add(elapsed_us, Ordering::Relaxed)
-                    .saturating_add(elapsed_us);
-                let cumulative_count = GLYPH_GEN_CUMULATIVE_COUNT
-                    .fetch_add(1, Ordering::Relaxed)
-                    .saturating_add(1);
-                println!(
-                        "glyph-gen end mode=color font={:?} glyph={} elapsed_us={} cumulative_us={} cumulative_count={}",
-                        font.id(),
-                        glyph_id,
-                        elapsed_us,
-                        cumulative_us,
-                        cumulative_count
-                    );
                 image.bounds()
             }
         };
@@ -572,20 +493,11 @@ fn is_msdf_complexity_acceptable(
         && complexity.estimated_segments <= settings.max_estimated_segments
 }
 
-#[derive(Clone, Copy, Debug)]
-struct MsdfResolutionChoice {
-    requested_dpxs_per_em: f32,
-    base_dpxs_per_em: f32,
-    selected_dpxs_per_em: f32,
-    required_dpxs_per_em: f32,
-    min_feature_ems: Option<f32>,
-}
-
 fn choose_msdf_resolution(
     settings: MsdfResolutionSettings,
     outline: &GlyphOutline,
     requested_dpxs_per_em: f32,
-) -> MsdfResolutionChoice {
+) -> f32 {
     let min_dpxs = settings.min_dpxs_per_em.max(1.0);
     let base_dpxs = settings.base_dpxs_per_em.max(min_dpxs);
     let max_dpxs = settings.max_dpxs_per_em.max(base_dpxs);
@@ -604,14 +516,7 @@ fn choose_msdf_resolution(
     let mut selected = required.min(max_dpxs);
     selected = quantize_up(selected, settings.dpx_quantum.max(0.0));
     selected = selected.clamp(base, max_dpxs);
-
-    MsdfResolutionChoice {
-        requested_dpxs_per_em,
-        base_dpxs_per_em: base,
-        selected_dpxs_per_em: selected,
-        required_dpxs_per_em: required,
-        min_feature_ems: min_feature,
-    }
+    selected
 }
 
 fn estimate_outline_min_feature_ems(outline: &GlyphOutline) -> Option<f32> {

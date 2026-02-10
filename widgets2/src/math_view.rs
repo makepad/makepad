@@ -1,13 +1,9 @@
 use crate::*;
-use makepad_draw::text::{
-    font::Font,
-    font_family::FontFamilyId,
-    geom::Point as TextPoint,
-    glyph_outline::Command as OutlineCommand,
-    rasterizer::RasterizedGlyph,
+use makepad_draw::{
+    shader::draw_glyph::GlyphShapeId,
+    text::{font::Font, font_family::FontFamilyId, glyph_outline::Command as OutlineCommand},
 };
 use makepad_latex_math::{self as latex_math, LayoutGlyph, LayoutItem, LayoutRule, MathStyle};
-use std::rc::Rc;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -22,10 +18,15 @@ script_mod! {
         color: #fff
         font_size: 11.0
         baseline_offset: -2.0
-        sdf_fallback_font_size: 22.0
+        draw_glyph +: {
+            aa_2x2: 1.0
+            aa_4x4: 1.0
+            aa_pad_px: 1.0
+            axis_relief: 0.65
+            stem_darken: 0.25
+            stem_darken_max: 0.025
+        }
         draw_text +: {
-            sdf_sharpness: 1.0
-            sdf_luma_bias: 0.0
             text_style: TextStyle{
                 font_family: FontFamily{
                     latin := FontMember{res: crate_resource("self:resources/NewCMMath-Regular.otf") asc: 0.0 desc: 0.0}
@@ -37,6 +38,13 @@ script_mod! {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MathComponent {
+    shape_id: GlyphShapeId,
+    origin: Vec2f,
+    size: Vec2f,
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct MathView {
     #[source]
@@ -45,8 +53,7 @@ pub struct MathView {
     walk: Walk,
     #[redraw]
     #[live]
-    draw_vector: DrawVector,
-    #[redraw]
+    draw_glyph: DrawGlyph,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -57,8 +64,6 @@ pub struct MathView {
     font_size: f64,
     #[live(-2.0)]
     baseline_offset: f64,
-    #[live(12.0)]
-    sdf_fallback_font_size: f64,
     #[rust]
     old_text: String,
     #[rust]
@@ -66,9 +71,9 @@ pub struct MathView {
     #[rust]
     old_font_family_id: Option<FontFamilyId>,
     #[rust]
-    layout_font: Option<Rc<Font>>,
-    #[rust]
     layout_cache: Option<latex_math::LayoutOutput>,
+    #[rust]
+    components: Vec<MathComponent>,
 }
 
 impl Widget for MathView {
@@ -77,9 +82,8 @@ impl Widget for MathView {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, mut walk: Walk) -> DrawStep {
         self.compile_math(cx);
 
-        let (layout, font) = match (&self.layout_cache, &self.layout_font) {
-            (Some(layout), Some(font)) => (layout.clone(), font.clone()),
-            _ => return DrawStep::done(),
+        let Some(layout) = self.layout_cache.as_ref() else {
+            return DrawStep::done();
         };
 
         let w = layout.width;
@@ -88,66 +92,28 @@ impl Widget for MathView {
         walk.height = Size::Fixed(h as f64);
         walk.margin.top += self.baseline_offset;
 
-        let rect = cx.walk_turtle(walk);
-        let ox = rect.pos.x as f32;
-        let oy = rect.pos.y as f32;
-        let base_y = oy + layout.ascent;
-        let scale = 1.0f32;
+        let bounds = cx.walk_turtle(walk);
         let color = self.color;
-        let sdf_threshold = self.sdf_fallback_font_size as f32;
 
-        self.draw_vector.begin();
-        self.draw_vector
-            .set_color(color.x, color.y, color.z, color.w);
-
-        let mut sdf_glyphs: Vec<(TextPoint<f32>, f32, RasterizedGlyph)> = Vec::new();
-
-        for item in &layout.items {
-            match item {
-                LayoutItem::Glyph(glyph) => {
-                    let glyph_font_size = glyph.size * scale;
-                    if glyph_font_size <= sdf_threshold {
-                        let dpxs_per_em = glyph_font_size * cx.current_dpi_factor() as f32;
-                        if let Some(rasterized) = font.rasterize_glyph(glyph.glyph_id, dpxs_per_em)
-                        {
-                            let origin =
-                                TextPoint::new(ox + glyph.x * scale, base_y + glyph.y * scale);
-                            sdf_glyphs.push((origin, glyph_font_size, rasterized));
-                        } else {
-                            render_glyph_vector(
-                                &mut self.draw_vector,
-                                &font,
-                                glyph,
-                                ox,
-                                base_y,
-                                scale,
-                            );
-                        }
-                    } else {
-                        render_glyph_vector(&mut self.draw_vector, &font, glyph, ox, base_y, scale);
-                    }
-                }
-                LayoutItem::Rule(rule) => {
-                    render_rule(&mut self.draw_vector, rule, ox, base_y, scale);
-                }
-                LayoutItem::Rect(rect) => {
-                    let rx = ox + rect.x * scale;
-                    let ry = base_y + rect.y * scale;
-                    let rw = rect.width * scale;
-                    let rh = rect.height * scale;
-                    self.draw_vector.rect(rx, ry, rw, rh);
-                    self.draw_vector.fill();
-                }
+        for component in &self.components {
+            let mut layers = {
+                let Some(shape) = self.draw_glyph.shape(component.shape_id) else {
+                    continue;
+                };
+                shape.layers.clone()
+            };
+            for layer in &mut layers {
+                layer.color = vec4(color.x, color.y, color.z, color.w * layer.color.w);
             }
-        }
-
-        self.draw_vector.end(cx);
-
-        if !sdf_glyphs.is_empty() {
-            self.draw_text.draw_rasterized_glyphs_abs(
+            self.draw_glyph.draw_layers_abs(
                 cx,
-                &sdf_glyphs,
-                vec4(color.x, color.y, color.z, color.w),
+                rect(
+                    bounds.pos.x + component.origin.x as f64,
+                    bounds.pos.y + component.origin.y as f64,
+                    component.size.x as f64,
+                    component.size.y as f64,
+                ),
+                &layers,
             );
         }
 
@@ -176,7 +142,8 @@ impl MathView {
 
         if self.text.is_empty() {
             self.layout_cache = None;
-            self.layout_font = None;
+            self.components.clear();
+            self.draw_glyph.clear_shapes();
             return;
         }
 
@@ -188,49 +155,87 @@ impl MathView {
 
         let Some(layout_font) = layout_font else {
             self.layout_cache = None;
-            self.layout_font = None;
+            self.components.clear();
+            self.draw_glyph.clear_shapes();
             return;
         };
 
         let nodes = latex_math::parse(&self.text);
         let layout_size = self.font_size as f32 * 1.75;
-        self.layout_cache = latex_math::layout(
+        let Some(layout) = latex_math::layout(
             &nodes,
             layout_font.data().as_slice(),
             layout_size,
             MathStyle::Display,
-        );
-        self.layout_font = Some(layout_font);
+        ) else {
+            self.layout_cache = None;
+            self.components.clear();
+            self.draw_glyph.clear_shapes();
+            return;
+        };
+
+        self.draw_glyph.clear_shapes();
+        let mut components = Vec::new();
+        for item in &layout.items {
+            match item {
+                LayoutItem::Glyph(glyph) => {
+                    if let Some(shape_id) =
+                        build_glyph_shape(&mut self.draw_glyph, layout_font.as_ref(), glyph, layout.ascent)
+                    {
+                        push_component(&self.draw_glyph, shape_id, &mut components);
+                    }
+                }
+                LayoutItem::Rule(rule) => {
+                    if let Some(shape_id) = build_rule_shape(&mut self.draw_glyph, rule, layout.ascent)
+                    {
+                        push_component(&self.draw_glyph, shape_id, &mut components);
+                    }
+                }
+                LayoutItem::Rect(rect) => {
+                    if let Some(shape_id) = build_rect_shape(
+                        &mut self.draw_glyph,
+                        rect.x,
+                        layout.ascent + rect.y,
+                        rect.width,
+                        rect.height,
+                    ) {
+                        push_component(&self.draw_glyph, shape_id, &mut components);
+                    }
+                }
+            }
+        }
+
+        self.layout_cache = Some(layout);
+        self.components = components;
     }
 }
 
-fn render_glyph_vector(
-    dv: &mut DrawVector,
+fn build_glyph_shape(
+    dg: &mut DrawGlyph,
     font: &Font,
     glyph: &LayoutGlyph,
-    ox: f32,
-    base_y: f32,
-    scale: f32,
-) {
-    let glyph_x = ox + glyph.x * scale;
-    let glyph_y = base_y + glyph.y * scale;
-    let font_scale = glyph.size / font.units_per_em() * scale;
-    let fill_aa = (font_scale * 24.0).clamp(0.2, 1.0);
+    layout_ascent: f32,
+) -> Option<GlyphShapeId> {
+    let glyph_x = glyph.x;
+    let glyph_y = layout_ascent + glyph.y;
+    let font_scale = glyph.size / font.units_per_em();
 
     let Some(outline) = font.glyph_outline(glyph.glyph_id) else {
-        return;
+        return None;
     };
 
+    dg.begin_shape();
+    dg.set_color(1.0, 1.0, 1.0, 1.0);
     for command in outline.commands() {
         match command {
             OutlineCommand::MoveTo(p) => {
-                dv.move_to(glyph_x + p.x * font_scale, glyph_y - p.y * font_scale);
+                dg.move_to(glyph_x + p.x * font_scale, glyph_y - p.y * font_scale);
             }
             OutlineCommand::LineTo(p) => {
-                dv.line_to(glyph_x + p.x * font_scale, glyph_y - p.y * font_scale);
+                dg.line_to(glyph_x + p.x * font_scale, glyph_y - p.y * font_scale);
             }
             OutlineCommand::QuadTo(c, p) => {
-                dv.quad_to(
+                dg.quad_to(
                     glyph_x + c.x * font_scale,
                     glyph_y - c.y * font_scale,
                     glyph_x + p.x * font_scale,
@@ -238,7 +243,7 @@ fn render_glyph_vector(
                 );
             }
             OutlineCommand::CurveTo(c1, c2, p) => {
-                dv.bezier_to(
+                dg.bezier_to(
                     glyph_x + c1.x * font_scale,
                     glyph_y - c1.y * font_scale,
                     glyph_x + c2.x * font_scale,
@@ -248,19 +253,39 @@ fn render_glyph_vector(
                 );
             }
             OutlineCommand::Close => {
-                dv.close();
+                dg.close();
             }
         }
     }
-
-    dv.fill_opts(crate::makepad_draw::vector::LineJoin::Miter, 4.0, fill_aa);
+    dg.fill_layer();
+    dg.commit_shape(Some(0))
 }
 
-fn render_rule(dv: &mut DrawVector, rule: &LayoutRule, ox: f32, base_y: f32, scale: f32) {
-    let rx = ox + rule.x * scale;
-    let ry = base_y + rule.y * scale;
-    let rw = rule.width * scale;
-    let rh = rule.height * scale;
-    dv.rect(rx, ry, rw, rh);
-    dv.fill();
+fn build_rule_shape(dg: &mut DrawGlyph, rule: &LayoutRule, layout_ascent: f32) -> Option<GlyphShapeId> {
+    build_rect_shape(
+        dg,
+        rule.x,
+        layout_ascent + rule.y,
+        rule.width,
+        rule.height,
+    )
+}
+
+fn build_rect_shape(dg: &mut DrawGlyph, x: f32, y: f32, w: f32, h: f32) -> Option<GlyphShapeId> {
+    dg.begin_shape();
+    dg.set_color(1.0, 1.0, 1.0, 1.0);
+    dg.rect(x, y, w, h);
+    dg.fill_layer();
+    dg.commit_shape(Some(0))
+}
+
+fn push_component(dg: &DrawGlyph, shape_id: GlyphShapeId, components: &mut Vec<MathComponent>) {
+    let Some(shape) = dg.shape(shape_id) else {
+        return;
+    };
+    components.push(MathComponent {
+        shape_id,
+        origin: shape.origin,
+        size: shape.size,
+    });
 }

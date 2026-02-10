@@ -324,6 +324,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 ..mod.sdf,
                 theme:mod.theme,
                 draw:mod.draw,
+                net:mod.net,
                 ..mod.animator,
                 ..mod.animator.Play,
                 ..mod.animator.Ease,
