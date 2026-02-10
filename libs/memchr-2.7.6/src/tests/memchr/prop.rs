@@ -254,10 +254,7 @@ macro_rules! define_memchr_quickcheck {
 // Return a vector with the concatenation of the fronts and the reverse of the
 // backs.
 #[cfg(not(miri))]
-pub(crate) fn double_ended_take<I, J>(
-    mut iter: I,
-    take_side: J,
-) -> alloc::vec::Vec<I::Item>
+pub(crate) fn double_ended_take<I, J>(mut iter: I, take_side: J) -> alloc::vec::Vec<I::Item>
 where
     I: DoubleEndedIterator,
     J: Iterator<Item = bool>,
@@ -292,7 +289,11 @@ pub(crate) fn naive1_iter<'a>(
     n1: u8,
     haystack: &'a [u8],
 ) -> impl DoubleEndedIterator<Item = usize> + 'a {
-    haystack.iter().enumerate().filter(move |&(_, &b)| b == n1).map(|t| t.0)
+    haystack
+        .iter()
+        .enumerate()
+        .filter(move |&(_, &b)| b == n1)
+        .map(|t| t.0)
 }
 
 #[cfg(not(miri))]

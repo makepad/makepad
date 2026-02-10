@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,23 +8,23 @@ live_design!{
 
     pub DemoView = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/view.md") } 
+            <Markdown> { body: dep("crate://self/resources/view.md") }
         }
         demos = {
             <H4> { text: "View" }
             <View> {
-                width: Fit, height: Fit, 
+                width: Fit, height: Fit,
                 padding: <THEME_MSPACE_2> {},
                 align: { x: 0.5, y: 0.5 }
                 <Label> { text: "<View>" }
             }
-            
+
             <Hr> {}
             <H4> { text: "Style Templates" }
             <UIZooRowH> {
                 flow: Right { wrap: true }
                 <SolidView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
                     draw_bg: { color: (THEME_COLOR_INSET) }
@@ -50,7 +48,7 @@ live_design!{
 
 
                 <RectView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
                     draw_bg: {
@@ -63,7 +61,7 @@ live_design!{
                 }
 
                 <RectShadowView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -80,7 +78,7 @@ live_design!{
                 }
 
                 <RoundedShadowView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -98,7 +96,7 @@ live_design!{
                 }
 
                 <RoundedView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -114,7 +112,7 @@ live_design!{
                 }
 
                 <RoundedXView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -130,7 +128,7 @@ live_design!{
                 }
 
                 <RoundedYView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -146,7 +144,7 @@ live_design!{
                 }
 
                 <RoundedAllView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -162,7 +160,7 @@ live_design!{
                 }
 
                 <GradientXView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -176,7 +174,7 @@ live_design!{
                 }
 
                 <GradientYView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -195,7 +193,7 @@ live_design!{
             <UIZooRowH> {
                 flow: Right { wrap: true }
                 <CircleView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: 15.,
                     align: { x: 0.5, y: 0.5 }
 
@@ -211,7 +209,7 @@ live_design!{
                 }
 
                 <HexagonView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
@@ -221,7 +219,7 @@ live_design!{
                         border_color: #F
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                         border_radius: vec2(0.0, 0.0)
-        
+
                     }
 
                     <Label> { text: "<HexagonView>" }
@@ -233,13 +231,13 @@ live_design!{
             <UIZooRowH> {
                 flow: Right { wrap: true }
                 <CachedView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     <View> {
                         width: Fit, height: Fit,
-                        show_bg: true, 
+                        show_bg: true,
                         draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedView>" }
@@ -248,7 +246,7 @@ live_design!{
                 }
 
                 <CachedRoundedView> {
-                    width: Fit, height: Fit, 
+                    width: Fit, height: Fit,
                     padding: 0.,
                     align: { x: 0.5, y: 0.5 }
                     draw_bg: {
@@ -261,7 +259,7 @@ live_design!{
                     <View> {
                         width: Fit, height: Fit,
                         padding: <THEME_MSPACE_2> {},
-                        show_bg: true, 
+                        show_bg: true,
                         draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedRoundedView>" }
@@ -270,14 +268,14 @@ live_design!{
                 }
 
                 <CachedScrollXY> {
-                    width: 100, height: 100, 
+                    width: 100, height: 100,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
 
                     <View> {
                         width: 400., height: 400.,
                         flow: Down,
-                        show_bg: true, 
+                        show_bg: true,
                         draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
@@ -297,14 +295,14 @@ live_design!{
                 }
 
                 <CachedScrollX> {
-                    width: 100, height: 100, 
+                    width: 100, height: 100,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
 
                     <View> {
                         width: 400., height: 400.,
                         flow: Down,
-                        show_bg: true, 
+                        show_bg: true,
                         draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
@@ -324,14 +322,14 @@ live_design!{
                 }
 
                 <CachedScrollY> {
-                    width: 100, height: 100, 
+                    width: 100, height: 100,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
 
                     <View> {
                         width: 400., height: 400.,
                         flow: Down,
-                        show_bg: true, 
+                        show_bg: true,
                         draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
@@ -351,7 +349,7 @@ live_design!{
                 }
 
                 <ScrollXYView> {
-                    width: 100, height: 100, 
+                    width: 100, height: 100,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
                     show_bg: true,
@@ -362,7 +360,7 @@ live_design!{
                     <View> {
                         width: 400., height: 400.,
                         flow: Down,
-                        show_bg: true, 
+                        show_bg: true,
                         draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
@@ -382,7 +380,7 @@ live_design!{
                 }
 
                 <ScrollXView> {
-                    width: 100, height: 100, 
+                    width: 100, height: 100,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
                     show_bg: true,
@@ -393,7 +391,7 @@ live_design!{
                     <View> {
                         width: 400., height: 400.,
                         flow: Down,
-                        show_bg: true, 
+                        show_bg: true,
                         draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
@@ -413,7 +411,7 @@ live_design!{
                 }
 
                 <ScrollYView> {
-                    width: 100, height: 100, 
+                    width: 100, height: 100,
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
                     show_bg: true,
@@ -424,7 +422,7 @@ live_design!{
                     <View> {
                         width: 400., height: 400.,
                         flow: Down,
-                        show_bg: true, 
+                        show_bg: true,
                         draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }

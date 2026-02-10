@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoRotary = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/rotary.md") } 
+            <Markdown> { body: dep("crate://self/resources/rotary.md") }
         }
         demos = {
             <H4> { text: "<Rotary>"}
@@ -164,7 +162,7 @@ live_design!{
                         width: Fill
                     }
 
-                    text_input:{ 
+                    text_input:{
                         width: Fit
                     }
 
@@ -191,7 +189,7 @@ live_design!{
                         val_size: 20.
 
                         color_dither: 1.,
-                        
+
                         color: (THEME_COLOR_INSET)
                         color_hover: (THEME_COLOR_INSET_HOVER)
                         color_focus: (THEME_COLOR_INSET_FOCUS)

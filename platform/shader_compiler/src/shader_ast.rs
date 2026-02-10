@@ -1,17 +1,17 @@
 use {
+    makepad_live_compiler::makepad_math::*,
+    makepad_live_compiler::*,
+    makepad_live_id::*,
     std::{
         cell::{Cell, RefCell},
-        collections::HashMap,
-        collections::BTreeSet,
         collections::BTreeMap,
+        collections::BTreeSet,
+        collections::HashMap,
         fmt,
-        rc::Rc,
         ops::Deref,
-        ops::DerefMut
+        ops::DerefMut,
+        rc::Rc,
     },
-    makepad_live_id::*,
-    makepad_live_compiler::*,
-    makepad_live_compiler::makepad_math::*,
 };
 //use crate::shaderregistry::ShaderResourceId;
 
@@ -19,18 +19,45 @@ use {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct FnPtr(pub LivePtr);
-impl Deref for FnPtr {type Target = LivePtr; fn deref(&self) -> &Self::Target {&self.0}}
-impl DerefMut for FnPtr {fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}}
+impl Deref for FnPtr {
+    type Target = LivePtr;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for FnPtr {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct StructPtr(pub LivePtr);
-impl Deref for StructPtr {type Target = LivePtr; fn deref(&self) -> &Self::Target {&self.0}}
-impl DerefMut for StructPtr {fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}}
+impl Deref for StructPtr {
+    type Target = LivePtr;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for StructPtr {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct DrawShaderPtr(pub LivePtr);
-impl Deref for DrawShaderPtr {type Target = LivePtr; fn deref(&self) -> &Self::Target {&self.0}}
-impl DerefMut for DrawShaderPtr {fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}}
+impl Deref for DrawShaderPtr {
+    type Target = LivePtr;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for DrawShaderPtr {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 //#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 //pub struct ConstPtr(pub LivePtr);
@@ -39,32 +66,50 @@ impl DerefMut for DrawShaderPtr {fn deref_mut(&mut self) -> &mut Self::Target {&
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ValuePtr(pub LivePtr);
-impl Deref for ValuePtr {type Target = LivePtr; fn deref(&self) -> &Self::Target {&self.0}}
-impl DerefMut for ValuePtr {fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}}
+impl Deref for ValuePtr {
+    type Target = LivePtr;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for ValuePtr {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct VarDefPtr(pub LivePtr);
-impl Deref for VarDefPtr {type Target = LivePtr; fn deref(&self) -> &Self::Target {&self.0}}
-impl DerefMut for VarDefPtr {fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}}
+impl Deref for VarDefPtr {
+    type Target = LivePtr;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for VarDefPtr {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Clone, Default, Debug)]
 pub struct ConstTableItem {
     pub offset: usize,
-    pub slots: usize
+    pub slots: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct ConstTableSpan {
     pub token_id: LiveTokenId,
     pub offset: usize,
-    pub slots: usize
+    pub slots: usize,
 }
 
 #[derive(Clone, Default, Debug)]
 pub struct DrawShaderConstTable {
     pub table: Vec<f32>,
     pub offsets: BTreeMap<FnPtr, usize>,
-    pub table_index: BTreeMap<LiveTokenId, ConstTableItem>
+    pub table_index: BTreeMap<LiveTokenId, ConstTableItem>,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -83,13 +128,13 @@ pub struct DrawShaderDef {
     pub enums: Vec<LiveType>,
     // analysis results:
     //pub all_const_refs: RefCell<BTreeSet<ConstPtr>>,
-    pub all_live_refs: RefCell<BTreeMap<ValuePtr, Ty >>,
-    pub all_fns: RefCell<Vec<FnPtr >>,
-    pub vertex_fns: RefCell<Vec<FnPtr >>,
-    pub pixel_fns: RefCell<Vec<FnPtr >>,
-    pub all_structs: RefCell<Vec<StructPtr >>,
-    pub vertex_structs: RefCell<Vec<StructPtr >>,
-    pub pixel_structs: RefCell<Vec<StructPtr >>,
+    pub all_live_refs: RefCell<BTreeMap<ValuePtr, Ty>>,
+    pub all_fns: RefCell<Vec<FnPtr>>,
+    pub vertex_fns: RefCell<Vec<FnPtr>>,
+    pub pixel_fns: RefCell<Vec<FnPtr>>,
+    pub all_structs: RefCell<Vec<StructPtr>>,
+    pub vertex_structs: RefCell<Vec<StructPtr>>,
+    pub pixel_structs: RefCell<Vec<StructPtr>>,
     pub uses_time: Cell<bool>,
     pub ignore_idents: Vec<Ident>,
     // ok these 2 things dont belong here
@@ -97,13 +142,12 @@ pub struct DrawShaderDef {
     //pub var_inputs: RefCell<DrawShaderVarInputs>
 }
 
-
 #[derive(Clone, Debug)]
 pub struct DrawShaderFieldDef {
     pub span: TokenSpan,
     pub ident: Ident,
     pub ty_expr: TyExpr,
-    pub kind: DrawShaderFieldKind
+    pub kind: DrawShaderFieldKind,
 }
 
 /*
@@ -113,16 +157,14 @@ pub enum DrawShaderInputType {
     ShaderResourceId(ShaderResourceId)
 }*/
 
-
-
 #[derive(Clone, Debug)]
 pub enum DrawShaderFieldKind {
     Geometry {
-        is_used_in_pixel_shader: Cell<bool >,
+        is_used_in_pixel_shader: Cell<bool>,
         var_def_ptr: Option<VarDefPtr>,
     },
     Instance {
-        is_used_in_pixel_shader: Cell<bool >,
+        is_used_in_pixel_shader: Cell<bool>,
         live_field_kind: LiveFieldKind,
         var_def_ptr: Option<VarDefPtr>,
         //input_type: DrawShaderInputType,
@@ -138,7 +180,7 @@ pub enum DrawShaderFieldKind {
     },
     Varying {
         var_def_ptr: VarDefPtr,
-    }
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -160,18 +202,14 @@ pub struct ConstDef {
 #[derive(Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd, Debug)]
 pub enum FnSelfKind {
     Struct(StructPtr),
-    DrawShader(DrawShaderPtr)
+    DrawShader(DrawShaderPtr),
 }
 
 impl FnSelfKind {
     pub fn to_ty_expr_kind(self) -> TyExprKind {
         match self {
-            FnSelfKind::DrawShader(shader_ptr) => {
-                TyExprKind::DrawShader(shader_ptr)
-            },
-            FnSelfKind::Struct(struct_ptr) => {
-                TyExprKind::Struct(struct_ptr)
-            },
+            FnSelfKind::DrawShader(shader_ptr) => TyExprKind::DrawShader(shader_ptr),
+            FnSelfKind::Struct(struct_ptr) => TyExprKind::Struct(struct_ptr),
         }
     }
 }
@@ -189,39 +227,38 @@ pub enum HiddenArgKind {
 #[derive(Clone, Debug)]
 pub struct FnDef {
     pub fn_ptr: FnPtr,
-    
+
     pub ident: Ident,
-    
+
     pub self_kind: Option<FnSelfKind>,
     pub has_return: Cell<bool>,
-    
-    pub callees: RefCell<Option<BTreeSet<FnPtr >> >,
-    pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
+
+    pub callees: RefCell<Option<BTreeSet<FnPtr>>>,
+    pub builtin_deps: RefCell<Option<BTreeSet<Ident>>>,
     // pub closure_deps: RefCell<Option<BTreeSet<Ident >> >,
-    
+
     // the const table (per function)
-    pub const_table: RefCell<Option<Vec<f32 >> >,
-    pub const_table_spans: RefCell<Option<Vec<ConstTableSpan >> >,
-    
-    pub hidden_args: RefCell<Option<BTreeSet<HiddenArgKind >> >,
-    pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
+    pub const_table: RefCell<Option<Vec<f32>>>,
+    pub const_table_spans: RefCell<Option<Vec<ConstTableSpan>>>,
+
+    pub hidden_args: RefCell<Option<BTreeSet<HiddenArgKind>>>,
+    pub draw_shader_refs: RefCell<Option<BTreeSet<Ident>>>,
     //pub const_refs: RefCell<Option<BTreeSet<ConstPtr >> >,
-    pub live_refs: RefCell<Option<BTreeMap<ValuePtr, Ty >> >,
-    
-    pub struct_refs: RefCell<Option<BTreeSet<StructPtr >> >,
-    pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
-    
+    pub live_refs: RefCell<Option<BTreeMap<ValuePtr, Ty>>>,
+
+    pub struct_refs: RefCell<Option<BTreeSet<StructPtr>>>,
+    pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>)>>>,
+
     pub closure_defs: Vec<ClosureDef>,
-    pub closure_sites: RefCell<Option<Vec<ClosureSite >> >,
-    
+    pub closure_sites: RefCell<Option<Vec<ClosureSite>>>,
+
     // base
     pub span: TokenSpan,
-    pub return_ty: RefCell<Option<Ty >>,
+    pub return_ty: RefCell<Option<Ty>>,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
     pub block: Block,
 }
-
 
 #[derive(Clone, Debug, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ClosureDefIndex(pub usize);
@@ -230,41 +267,42 @@ pub struct ClosureDefIndex(pub usize);
 pub struct ClosureParam {
     pub span: TokenSpan,
     pub ident: Ident,
-    pub shadow: Cell<Option<ScopeSymShadow >>
+    pub shadow: Cell<Option<ScopeSymShadow>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ClosureDef {
     pub span: TokenSpan,
-    pub closed_over_syms: RefCell<Option<Vec<Sym >> >,
+    pub closed_over_syms: RefCell<Option<Vec<Sym>>>,
     pub params: Vec<ClosureParam>,
-    pub kind: ClosureDefKind
+    pub kind: ClosureDefKind,
 }
 
 #[derive(Clone, Debug)]
 pub enum ClosureDefKind {
     Expr(Expr),
-    Block(Block)
+    Block(Block),
 }
 
 #[derive(Clone, Debug)]
-pub struct ClosureSite { //
+pub struct ClosureSite {
+    //
     pub call_to: FnPtr,
     pub all_closed_over: BTreeSet<Sym>,
-    pub closure_args: Vec<ClosureSiteArg>
+    pub closure_args: Vec<ClosureSiteArg>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClosureSiteArg {
     pub param_index: usize,
-    pub closure_def_index: ClosureDefIndex
+    pub closure_def_index: ClosureDefIndex,
 }
 
 #[derive(Clone, Debug)]
 pub struct StructDef {
     pub span: TokenSpan,
     //pub ident: Ident,
-    pub struct_refs: RefCell<Option<BTreeSet<StructPtr >> >,
+    pub struct_refs: RefCell<Option<BTreeSet<StructPtr>>>,
     pub fields: Vec<StructFieldDef>,
     pub methods: Vec<FnPtr>,
 }
@@ -279,18 +317,16 @@ pub struct StructFieldDef {
 
 impl StructDef {
     pub fn find_field(&self, ident: Ident) -> Option<&StructFieldDef> {
-        self.fields.iter().find( | field | field.ident == ident)
+        self.fields.iter().find(|field| field.ident == ident)
     }
-    
 }
-
 
 #[derive(Clone, Debug)]
 pub struct Param {
     pub span: TokenSpan,
     pub is_inout: bool,
     pub ident: Ident,
-    pub shadow: Cell<Option<ScopeSymShadow >>,
+    pub shadow: Cell<Option<ScopeSymShadow>>,
     pub ty_expr: TyExpr,
 }
 
@@ -319,18 +355,18 @@ pub enum Stmt {
         span: TokenSpan,
         expr: Expr,
         block_if_true: Box<Block>,
-        block_if_false: Option<Box<Block >>,
+        block_if_false: Option<Box<Block>>,
     },
     Match {
         span: TokenSpan,
         expr: Expr,
         matches: Vec<Match>,
     },
-    
+
     Let {
         span: TokenSpan,
-        ty: RefCell<Option<Ty >>,
-        shadow: Cell<Option<ScopeSymShadow >>,
+        ty: RefCell<Option<Ty>>,
+        shadow: Cell<Option<ScopeSymShadow>>,
         ident: Ident,
         ty_expr: Option<TyExpr>,
         expr: Option<Expr>,
@@ -354,16 +390,16 @@ pub struct Match {
     pub span: TokenSpan,
     pub enum_name: Ident,
     pub enum_variant: Ident,
-    pub enum_value: Cell<Option<usize >>,
-    pub block: Block
+    pub enum_value: Cell<Option<usize>>,
+    pub block: Block,
 }
 
 #[derive(Clone, Debug)]
 pub struct Expr {
     pub span: TokenSpan,
-    pub ty: RefCell<Option<Ty >>,
-    pub const_val: RefCell<Option<Option<Val >> >,
-    pub const_index: Cell<Option<usize >>,
+    pub ty: RefCell<Option<Ty>>,
+    pub const_val: RefCell<Option<Option<Val>>>,
+    pub const_index: Cell<Option<usize>>,
     pub kind: ExprKind,
 }
 
@@ -399,16 +435,17 @@ pub enum ExprKind {
     MethodCall {
         span: TokenSpan,
         ident: Ident,
-        closure_site_index: Cell<Option<usize >>,
+        closure_site_index: Cell<Option<usize>>,
         arg_exprs: Vec<Expr>,
     },
-    PlainCall { // not very pretty but otherwise closures cannot override a normal fn
+    PlainCall {
+        // not very pretty but otherwise closures cannot override a normal fn
         // possible solution is to capture it in a refcell sub-enum.
         span: TokenSpan,
         fn_ptr: Option<FnPtr>,
         ident: Option<Ident>,
-        param_index: Cell<Option<usize >>, // used by the closure case
-        closure_site_index: Cell<Option<usize >>, // used by the plain fn case
+        param_index: Cell<Option<usize>>, // used by the closure case
+        closure_site_index: Cell<Option<usize>>, // used by the plain fn case
         arg_exprs: Vec<Expr>,
     },
     BuiltinCall {
@@ -425,12 +462,12 @@ pub enum ExprKind {
     StructCons {
         struct_ptr: StructPtr,
         span: TokenSpan,
-        args: Vec<(Ident, Expr)>
+        args: Vec<(Ident, Expr)>,
     },
     Var {
         span: TokenSpan,
         ident: Option<Ident>,
-        kind: Cell<Option<VarKind >>,
+        kind: Cell<Option<VarKind>>,
         var_resolve: VarResolve,
         //ident_path: IdentPath,
     },
@@ -441,29 +478,33 @@ pub enum ExprKind {
 }
 
 pub enum PlainCallType {
-    Plain {
-        
-    }
+    Plain {},
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarResolve {
     NotFound,
     Function(FnPtr),
-    LiveValue(ValuePtr, TyLit)
+    LiveValue(ValuePtr, TyLit),
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarKind {
-    Local {ident: Ident, shadow: ScopeSymShadow},
-    MutLocal {ident: Ident, shadow: ScopeSymShadow},
-    LiveValue(ValuePtr)
+    Local {
+        ident: Ident,
+        shadow: ScopeSymShadow,
+    },
+    MutLocal {
+        ident: Ident,
+        shadow: ScopeSymShadow,
+    },
+    LiveValue(ValuePtr),
 }
 
 #[derive(Clone, Debug)]
 pub struct TyExpr {
     pub span: TokenSpan,
-    pub ty: RefCell<Option<Ty >>,
+    pub ty: RefCell<Option<Ty>>,
     pub kind: TyExprKind,
 }
 
@@ -480,16 +521,14 @@ pub enum TyExprKind {
         ty_lit: TyLit,
     },
     ClosureDecl {
-        return_ty: RefCell<Option<Ty >>,
-        return_ty_expr: Box<Option<TyExpr >>,
-        params: Vec<Param>
+        return_ty: RefCell<Option<Ty>>,
+        return_ty_expr: Box<Option<TyExpr>>,
+        params: Vec<Param>,
     },
 }
 
-
 #[derive(Clone, Copy)]
-pub enum MacroCallAnalysis {
-}
+pub enum MacroCallAnalysis {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BinOp {
@@ -511,8 +550,6 @@ pub enum BinOp {
     Mul,
     Div,
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum UnOp {
@@ -540,16 +577,15 @@ pub enum ShaderTy {
     Mat4f,
     Texture2D,
     TextureOES,
-    Array {elem_ty: Rc<ShaderTy>, len: usize},
+    Array { elem_ty: Rc<ShaderTy>, len: usize },
     Struct(StructPtr),
     Enum(LiveType),
     DrawShader(DrawShaderPtr),
     ClosureDef(ClosureDefIndex),
-    ClosureDecl
+    ClosureDecl,
 }
 
 pub type Ty = ShaderTy;
-
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum TyLit {
@@ -588,14 +624,13 @@ pub enum Val {
     Vec4f(Vec4f),
 }
 
-
 pub type Scope = HashMap<Ident, ScopeSym>;
 
 #[derive(Clone, Debug)]
 pub struct Scopes {
     pub scopes: Vec<Scope>,
-    pub closure_scopes: RefCell<HashMap<ClosureDefIndex, Vec<Scope >> >,
-    pub closure_sites: RefCell<Vec<ClosureSite >>,
+    pub closure_scopes: RefCell<HashMap<ClosureDefIndex, Vec<Scope>>>,
+    pub closure_sites: RefCell<Vec<ClosureSite>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -613,7 +648,7 @@ pub struct ScopeSym {
     pub span: TokenSpan,
     pub sym: Sym,
     pub referenced: Cell<bool>,
-    pub kind: ScopeSymKind
+    pub kind: ScopeSymKind,
 }
 
 #[derive(Clone, Debug)]
@@ -623,8 +658,8 @@ pub enum ScopeSymKind {
     Closure {
         return_ty: Ty,
         param_index: usize,
-        params: Vec<Param>
-    }
+        params: Vec<Param>,
+    },
 }
 
 impl Scopes {
@@ -635,27 +670,29 @@ impl Scopes {
             scopes: Vec::new(),
         }
     }
-    
+
     pub fn find_sym_on_scopes(&self, ident: Ident, _span: TokenSpan) -> Option<&ScopeSym> {
-        let ret = self.scopes.iter().rev().find_map( | scope | scope.get(&ident));
+        let ret = self.scopes.iter().rev().find_map(|scope| scope.get(&ident));
         if ret.is_some() {
-            return Some(ret.unwrap())
+            return Some(ret.unwrap());
         }
-        return None
+        return None;
     }
-    
+
     pub fn capture_closure_scope(&self, index: ClosureDefIndex) {
-        self.closure_scopes.borrow_mut().insert(index, self.scopes.clone());
+        self.closure_scopes
+            .borrow_mut()
+            .insert(index, self.scopes.clone());
     }
-    
+
     pub fn push_scope(&mut self) {
         self.scopes.push(Scope::new())
     }
-    
+
     pub fn pop_scope(&mut self) {
         self.scopes.pop().unwrap();
     }
-    
+
     pub fn clear_referenced_syms(&self) {
         for scope in self.scopes.iter().rev() {
             for (_, sym) in scope {
@@ -663,7 +700,7 @@ impl Scopes {
             }
         }
     }
-    
+
     pub fn all_referenced_syms(&self) -> Vec<Sym> {
         let mut ret = Vec::new();
         for scope in self.scopes.iter().rev() {
@@ -675,32 +712,35 @@ impl Scopes {
         }
         ret
     }
-    
-    pub fn insert_sym(&mut self, span: TokenSpan, ident: Ident, ty: Ty, sym_kind: ScopeSymKind) -> ScopeSymShadow {
-        
+
+    pub fn insert_sym(
+        &mut self,
+        span: TokenSpan,
+        ident: Ident,
+        ty: Ty,
+        sym_kind: ScopeSymKind,
+    ) -> ScopeSymShadow {
         if let Some(item) = self.scopes.last_mut().unwrap().get_mut(&ident) {
             item.sym.shadow = ScopeSymShadow(item.sym.shadow.0 + 1);
             item.kind = sym_kind;
             item.sym.shadow
-        }
-        else {
+        } else {
             // find it anyway
-            let shadow = if let Some(ret) = self.scopes.iter().rev().find_map( | scope | scope.get(&ident)) {
-                ScopeSymShadow(ret.sym.shadow.0 + 1)
-            }
-            else {
-                ScopeSymShadow(0)
-            };
-            self.scopes.last_mut().unwrap().insert(ident, ScopeSym {
-                sym: Sym {
-                    ty,
-                    ident,
-                    shadow,
+            let shadow =
+                if let Some(ret) = self.scopes.iter().rev().find_map(|scope| scope.get(&ident)) {
+                    ScopeSymShadow(ret.sym.shadow.0 + 1)
+                } else {
+                    ScopeSymShadow(0)
+                };
+            self.scopes.last_mut().unwrap().insert(
+                ident,
+                ScopeSym {
+                    sym: Sym { ty, ident, shadow },
+                    span,
+                    referenced: Cell::new(false),
+                    kind: sym_kind,
                 },
-                span,
-                referenced: Cell::new(false),
-                kind: sym_kind
-            });
+            );
             shadow
         }
     }
@@ -709,16 +749,13 @@ impl Scopes {
 #[derive(Clone, Copy, Ord, PartialOrd, Default, Eq, Hash, PartialEq)]
 pub struct Ident(pub LiveId);
 
-
 impl StructDef {
     pub fn init_analysis(&self) {
         *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
     }
 }
 
-
 impl FnDef {
-    
     pub fn new(
         fn_ptr: FnPtr,
         span: TokenSpan,
@@ -727,7 +764,7 @@ impl FnDef {
         params: Vec<Param>,
         return_ty_expr: Option<TyExpr>,
         block: Block,
-        closure_defs: Vec<ClosureDef>
+        closure_defs: Vec<ClosureDef>,
     ) -> Self {
         FnDef {
             fn_ptr,
@@ -752,7 +789,7 @@ impl FnDef {
             const_table_spans: RefCell::new(None),
         }
     }
-    
+
     pub fn init_analysis(&self) {
         *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
         *self.callees.borrow_mut() = Some(BTreeSet::new());
@@ -764,36 +801,28 @@ impl FnDef {
         *self.const_table.borrow_mut() = Some(Vec::new());
         *self.const_table_spans.borrow_mut() = Some(Vec::new());
     }
-    
+
     pub fn has_closure_args(&self) -> bool {
         for param in &self.params {
-            if let TyExprKind::ClosureDecl {..} = &param.ty_expr.kind {
-                return true
+            if let TyExprKind::ClosureDecl { .. } = &param.ty_expr.kind {
+                return true;
             }
         }
-        return false
+        return false;
     }
 }
 
 impl DrawShaderDef {
-    
     pub fn find_field(&self, ident: Ident) -> Option<&DrawShaderFieldDef> {
-        self.fields.iter().find( | decl | {
-            decl.ident == ident
-        })
+        self.fields.iter().find(|decl| decl.ident == ident)
     }
-    
-    pub fn fields_as_uniform_blocks(&self) -> BTreeMap<Ident, Vec<(usize, Ident) >> {
+
+    pub fn fields_as_uniform_blocks(&self) -> BTreeMap<Ident, Vec<(usize, Ident)>> {
         let mut uniform_blocks = BTreeMap::new();
         for (field_index, field) in self.fields.iter().enumerate() {
             match &field.kind {
-                DrawShaderFieldKind::Uniform {
-                    block_ident,
-                    ..
-                } => {
-                    let uniform_block = uniform_blocks
-                        .entry(*block_ident)
-                        .or_insert(Vec::new());
+                DrawShaderFieldKind::Uniform { block_ident, .. } => {
+                    let uniform_block = uniform_blocks.entry(*block_ident).or_insert(Vec::new());
                     uniform_block.push((field_index, field.ident));
                 }
                 _ => {}
@@ -801,62 +830,57 @@ impl DrawShaderDef {
         }
         uniform_blocks
     }
-    
+
     pub fn add_uniform(&mut self, id: LiveId, block: LiveId, ty: Ty, span: TokenSpan) {
-        self.fields.push(
-            DrawShaderFieldDef {
-                kind: DrawShaderFieldKind::Uniform {
-                    block_ident: Ident(block),
-                    var_def_ptr: None
-                },
-                span,
-                ident: Ident(id),
-                ty_expr: ty.to_ty_expr(),
-            }
-        )
+        self.fields.push(DrawShaderFieldDef {
+            kind: DrawShaderFieldKind::Uniform {
+                block_ident: Ident(block),
+                var_def_ptr: None,
+            },
+            span,
+            ident: Ident(id),
+            ty_expr: ty.to_ty_expr(),
+        })
     }
-    
-    pub fn add_instance(&mut self, id: LiveId, ty: Ty, span: TokenSpan, live_field_kind: LiveFieldKind) {
-        self.fields.push(
-            DrawShaderFieldDef {
-                kind: DrawShaderFieldKind::Instance {
-                    live_field_kind,
-                    is_used_in_pixel_shader: Cell::new(false),
-                    var_def_ptr: None
-                },
-                span,
-                ident: Ident(id),
-                ty_expr: ty.to_ty_expr(),
-            }
-        )
+
+    pub fn add_instance(
+        &mut self,
+        id: LiveId,
+        ty: Ty,
+        span: TokenSpan,
+        live_field_kind: LiveFieldKind,
+    ) {
+        self.fields.push(DrawShaderFieldDef {
+            kind: DrawShaderFieldKind::Instance {
+                live_field_kind,
+                is_used_in_pixel_shader: Cell::new(false),
+                var_def_ptr: None,
+            },
+            span,
+            ident: Ident(id),
+            ty_expr: ty.to_ty_expr(),
+        })
     }
-    
+
     pub fn add_geometry(&mut self, id: LiveId, ty: Ty, span: TokenSpan) {
-        self.fields.push(
-            DrawShaderFieldDef {
-                kind: DrawShaderFieldKind::Geometry {
-                    is_used_in_pixel_shader: Cell::new(false),
-                    var_def_ptr: None
-                },
-                span,
-                ident: Ident(id),
-                ty_expr: ty.to_ty_expr(),
-            }
-        )
+        self.fields.push(DrawShaderFieldDef {
+            kind: DrawShaderFieldKind::Geometry {
+                is_used_in_pixel_shader: Cell::new(false),
+                var_def_ptr: None,
+            },
+            span,
+            ident: Ident(id),
+            ty_expr: ty.to_ty_expr(),
+        })
     }
-    
-    
+
     pub fn add_texture(&mut self, id: LiveId, ty: Ty, span: TokenSpan) {
-        self.fields.push(
-            DrawShaderFieldDef {
-                kind: DrawShaderFieldKind::Texture {
-                    var_def_ptr: None
-                },
-                span,
-                ident: Ident(id),
-                ty_expr: ty.to_ty_expr(),
-            }
-        )
+        self.fields.push(DrawShaderFieldDef {
+            kind: DrawShaderFieldKind::Texture { var_def_ptr: None },
+            span,
+            ident: Ident(id),
+            ty_expr: ty.to_ty_expr(),
+        })
     }
 }
 
@@ -871,21 +895,21 @@ impl BinOp {
             _ => None,
         }
     }
-    
+
     pub fn from_or_op(token: LiveToken) -> Option<BinOp> {
         match token {
             LiveToken::Punct(live_id!( ||)) => Some(BinOp::Or),
             _ => None,
         }
     }
-    
+
     pub fn from_and_op(token: LiveToken) -> Option<BinOp> {
         match token {
             LiveToken::Punct(live_id!( &&)) => Some(BinOp::And),
             _ => None,
         }
     }
-    
+
     pub fn from_eq_op(token: LiveToken) -> Option<BinOp> {
         match token {
             LiveToken::Punct(live_id!( ==)) => Some(BinOp::Eq),
@@ -893,7 +917,7 @@ impl BinOp {
             _ => None,
         }
     }
-    
+
     pub fn from_rel_op(token: LiveToken) -> Option<BinOp> {
         match token {
             LiveToken::Punct(live_id!(<)) => Some(BinOp::Lt),
@@ -903,7 +927,7 @@ impl BinOp {
             _ => None,
         }
     }
-    
+
     pub fn from_add_op(token: LiveToken) -> Option<BinOp> {
         match token {
             LiveToken::Punct(live_id!( +)) => Some(BinOp::Add),
@@ -911,7 +935,7 @@ impl BinOp {
             _ => None,
         }
     }
-    
+
     pub fn from_mul_op(token: LiveToken) -> Option<BinOp> {
         match token {
             LiveToken::Punct(live_id!(*)) => Some(BinOp::Mul),
@@ -972,9 +996,7 @@ impl fmt::Display for UnOp {
     }
 }
 
-
 impl Ty {
-    
     pub fn maybe_ty_lit(&self) -> Option<TyLit> {
         match self {
             Ty::Void => None,
@@ -995,44 +1017,44 @@ impl Ty {
             Ty::Mat4f => Some(TyLit::Mat4f),
             Ty::Texture2D => Some(TyLit::Bool),
             Ty::TextureOES => Some(TyLit::Bool),
-            Ty::Array {..} => None,
+            Ty::Array { .. } => None,
             Ty::Struct(_) => None,
             Ty::Enum(_) => None,
             Ty::DrawShader(_) => None,
             Ty::ClosureDecl => None,
-            Ty::ClosureDef {..} => None
+            Ty::ClosureDef { .. } => None,
         }
     }
-    
+
     pub fn is_scalar(&self) -> bool {
         match self {
             Ty::Bool | Ty::Int | Ty::Float => true,
             _ => false,
         }
     }
-    
+
     pub fn is_vector(&self) -> bool {
         match self {
             Ty::Bvec2
-                | Ty::Bvec3
-                | Ty::Bvec4
-                | Ty::Ivec2
-                | Ty::Ivec3
-                | Ty::Ivec4
-                | Ty::Vec2f
-                | Ty::Vec3f
-                | Ty::Vec4f => true,
+            | Ty::Bvec3
+            | Ty::Bvec4
+            | Ty::Ivec2
+            | Ty::Ivec3
+            | Ty::Ivec4
+            | Ty::Vec2f
+            | Ty::Vec3f
+            | Ty::Vec4f => true,
             _ => false,
         }
     }
-    
+
     pub fn is_matrix(&self) -> bool {
         match self {
             Ty::Mat2 | Ty::Mat3 | Ty::Mat4f => true,
             _ => false,
         }
     }
-    
+
     pub fn slots(&self) -> usize {
         match self {
             Ty::Void => 0,
@@ -1042,58 +1064,84 @@ impl Ty {
             Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4f | Ty::Mat2 => 4,
             Ty::Mat3 => 9,
             Ty::Mat4f => 16,
-            Ty::Texture2D {..} => panic!(),
-            Ty::TextureOES {..} => panic!(),
-            Ty::Array {elem_ty, len} => elem_ty.slots() * len,
+            Ty::Texture2D { .. } => panic!(),
+            Ty::TextureOES { .. } => panic!(),
+            Ty::Array { elem_ty, len } => elem_ty.slots() * len,
             Ty::Enum(_) => 1,
             Ty::Struct(_) => panic!(),
             Ty::DrawShader(_) => panic!(),
             Ty::ClosureDecl => panic!(),
-            Ty::ClosureDef {..} => panic!(),
+            Ty::ClosureDef { .. } => panic!(),
         }
     }
-    
+
     pub fn to_ty_expr(&self) -> TyExpr {
         TyExpr {
             ty: RefCell::new(None),
             span: TokenSpan::default(),
             kind: match self {
                 Ty::Void => panic!(),
-                Ty::Bool => TyExprKind::Lit {ty_lit: TyLit::Bool},
-                Ty::Int => TyExprKind::Lit {ty_lit: TyLit::Int},
-                Ty::Float => TyExprKind::Lit {ty_lit: TyLit::Float},
-                Ty::Bvec2 => TyExprKind::Lit {ty_lit: TyLit::Bvec2},
-                Ty::Bvec3 => TyExprKind::Lit {ty_lit: TyLit::Bvec3},
-                Ty::Bvec4 => TyExprKind::Lit {ty_lit: TyLit::Bvec4},
-                Ty::Ivec2 => TyExprKind::Lit {ty_lit: TyLit::Ivec2},
-                Ty::Ivec3 => TyExprKind::Lit {ty_lit: TyLit::Ivec3},
-                Ty::Ivec4 => TyExprKind::Lit {ty_lit: TyLit::Ivec4},
-                Ty::Vec2f => TyExprKind::Lit {ty_lit: TyLit::Vec2f},
-                Ty::Vec3f => TyExprKind::Lit {ty_lit: TyLit::Vec3f},
-                Ty::Vec4f => TyExprKind::Lit {ty_lit: TyLit::Vec4f},
-                Ty::Mat2 => TyExprKind::Lit {ty_lit: TyLit::Mat2},
-                Ty::Mat3 => TyExprKind::Lit {ty_lit: TyLit::Mat3},
-                Ty::Mat4f => TyExprKind::Lit {ty_lit: TyLit::Mat4f},
-                Ty::Texture2D => TyExprKind::Lit {ty_lit: TyLit::Texture2D},
-                Ty::TextureOES => TyExprKind::Lit {ty_lit: TyLit::TextureOES},
-                Ty::Array {elem_ty, len} => {
-                    TyExprKind::Array {
-                        elem_ty_expr: Box::new(elem_ty.to_ty_expr()),
-                        len: *len as u32
-                    }
-                }
-                Ty::Struct(struct_node_ptr) => {
-                    TyExprKind::Struct(*struct_node_ptr)
-                }
+                Ty::Bool => TyExprKind::Lit {
+                    ty_lit: TyLit::Bool,
+                },
+                Ty::Int => TyExprKind::Lit { ty_lit: TyLit::Int },
+                Ty::Float => TyExprKind::Lit {
+                    ty_lit: TyLit::Float,
+                },
+                Ty::Bvec2 => TyExprKind::Lit {
+                    ty_lit: TyLit::Bvec2,
+                },
+                Ty::Bvec3 => TyExprKind::Lit {
+                    ty_lit: TyLit::Bvec3,
+                },
+                Ty::Bvec4 => TyExprKind::Lit {
+                    ty_lit: TyLit::Bvec4,
+                },
+                Ty::Ivec2 => TyExprKind::Lit {
+                    ty_lit: TyLit::Ivec2,
+                },
+                Ty::Ivec3 => TyExprKind::Lit {
+                    ty_lit: TyLit::Ivec3,
+                },
+                Ty::Ivec4 => TyExprKind::Lit {
+                    ty_lit: TyLit::Ivec4,
+                },
+                Ty::Vec2f => TyExprKind::Lit {
+                    ty_lit: TyLit::Vec2f,
+                },
+                Ty::Vec3f => TyExprKind::Lit {
+                    ty_lit: TyLit::Vec3f,
+                },
+                Ty::Vec4f => TyExprKind::Lit {
+                    ty_lit: TyLit::Vec4f,
+                },
+                Ty::Mat2 => TyExprKind::Lit {
+                    ty_lit: TyLit::Mat2,
+                },
+                Ty::Mat3 => TyExprKind::Lit {
+                    ty_lit: TyLit::Mat3,
+                },
+                Ty::Mat4f => TyExprKind::Lit {
+                    ty_lit: TyLit::Mat4f,
+                },
+                Ty::Texture2D => TyExprKind::Lit {
+                    ty_lit: TyLit::Texture2D,
+                },
+                Ty::TextureOES => TyExprKind::Lit {
+                    ty_lit: TyLit::TextureOES,
+                },
+                Ty::Array { elem_ty, len } => TyExprKind::Array {
+                    elem_ty_expr: Box::new(elem_ty.to_ty_expr()),
+                    len: *len as u32,
+                },
+                Ty::Struct(struct_node_ptr) => TyExprKind::Struct(*struct_node_ptr),
                 Ty::DrawShader(draw_shader_node_ptr) => {
                     TyExprKind::DrawShader(*draw_shader_node_ptr)
-                },
-                Ty::Enum(live_type) => {
-                    TyExprKind::Enum(*live_type)
-                },
+                }
+                Ty::Enum(live_type) => TyExprKind::Enum(*live_type),
                 Ty::ClosureDef(_) => panic!(),
-                Ty::ClosureDecl => panic!()
-            }
+                Ty::ClosureDecl => panic!(),
+            },
         }
     }
     /*
@@ -1108,11 +1156,10 @@ impl Ty {
             _ => None
         }
     }*/
-    
-    pub fn from_live_value(value:&LiveValue, origin:LiveNodeOrigin) -> Result<Self,
-    LiveError> {
+
+    pub fn from_live_value(value: &LiveValue, origin: LiveNodeOrigin) -> Result<Self, LiveError> {
         Ok(match value {
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!()
             }
             LiveValue::Id(id) => match id {
@@ -1128,10 +1175,10 @@ impl Ty {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         message: format!("Id does not resolve to a shader type {}", id),
-                        span: origin.token_id().unwrap().into()
+                        span: origin.token_id().unwrap().into(),
                     })
                 }
-            }
+            },
             LiveValue::Bool(_) => Self::Int,
             LiveValue::Int64(_) => Self::Int,
             LiveValue::Float32(_) => Self::Float,
@@ -1140,28 +1187,29 @@ impl Ty {
             LiveValue::Vec2f(_) => Self::Vec2f,
             LiveValue::Vec3f(_) => Self::Vec3f,
             LiveValue::Vec4f(_) => Self::Vec4f,
-            _ => return Err(LiveError {
-                origin: live_error_origin!(),
-                message: format!("Live value {:?} does not resolve to a shader type", value),
-                span: origin.token_id().unwrap().into()
-            })
+            _ => {
+                return Err(LiveError {
+                    origin: live_error_origin!(),
+                    message: format!("Live value {:?} does not resolve to a shader type", value),
+                    span: origin.token_id().unwrap().into(),
+                })
+            }
         })
     }
-    
-    pub fn from_live_node(live_registry: &LiveRegistry, index: usize, nodes: &[LiveNode]) -> Result<Self,
-    LiveError> {
+
+    pub fn from_live_node(
+        live_registry: &LiveRegistry,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> Result<Self, LiveError> {
         match &nodes[index].value {
-            LiveValue::Expr {..} => {
-                match live_eval_value(live_registry, &mut (index + 1), nodes, nodes){
-                    Ok(v)=>{
-                        return Self::from_live_value(&v, nodes[index].origin)
-                    }
-                    Err(v)=>{
-                        return Err(v)
-                    }
+            LiveValue::Expr { .. } => {
+                match live_eval_value(live_registry, &mut (index + 1), nodes, nodes) {
+                    Ok(v) => return Self::from_live_value(&v, nodes[index].origin),
+                    Err(v) => return Err(v),
                 }
             }
-            v=>{
+            v => {
                 return Self::from_live_value(v, nodes[index].origin);
             }
         }
@@ -1189,12 +1237,12 @@ impl fmt::Display for Ty {
             Ty::Mat4f => write!(f, "mat4"),
             Ty::Texture2D => write!(f, "texture2D"),
             Ty::TextureOES => write!(f, "textureOES"),
-            Ty::Array {elem_ty, len} => write!(f, "{}[{}]", elem_ty, len),
+            Ty::Array { elem_ty, len } => write!(f, "{}[{}]", elem_ty, len),
             Ty::Struct(struct_ptr) => write!(f, "Struct:{:?}", struct_ptr),
             Ty::DrawShader(shader_ptr) => write!(f, "DrawShader:{:?}", shader_ptr),
             Ty::Enum(_) => write!(f, "Enum"),
             Ty::ClosureDecl => write!(f, "ClosureDecl"),
-            Ty::ClosureDef {..} => write!(f, "ClosureDef"),
+            Ty::ClosureDef { .. } => write!(f, "ClosureDef"),
         }
     }
 }
@@ -1218,10 +1266,10 @@ impl TyLit {
             live_id!(ivec3) => Some(TyLit::Ivec4),
             live_id!(ivec4) => Some(TyLit::Ivec4),
             live_id!(texture2D) => Some(TyLit::Texture2D),
-            _ => None
+            _ => None,
         }
     }
-    
+
     pub fn to_ty(self) -> Ty {
         match self {
             TyLit::Bool => Ty::Bool,
@@ -1243,7 +1291,6 @@ impl TyLit {
             TyLit::TextureOES => Ty::TextureOES,
         }
     }
-    
 }
 
 impl fmt::Display for TyLit {
@@ -1274,33 +1321,32 @@ impl fmt::Display for TyLit {
     }
 }
 
-
 impl Lit {
     pub fn to_ty(self) -> Ty {
         match self {
             Lit::Bool(_) => Ty::Bool,
             Lit::Int(_) => Ty::Int,
             Lit::Float(_) => Ty::Float,
-            Lit::Color(_) => Ty::Vec4f
+            Lit::Color(_) => Ty::Vec4f,
         }
     }
-    
+
     pub fn to_val(self) -> Val {
         match self {
             Lit::Bool(v) => Val::Bool(v),
             Lit::Int(v) => Val::Int(v),
             Lit::Float(v) => Val::Float(v),
-            Lit::Color(v) => Val::Vec4f(Vec4f::from_u32(v))
+            Lit::Color(v) => Val::Vec4f(Vec4f::from_u32(v)),
         }
     }
-    
+
     pub fn from_token(token: &LiveToken) -> Option<Lit> {
         match token {
             LiveToken::Bool(v) => Some(Lit::Bool(*v)),
             LiveToken::Int(v) => Some(Lit::Int(*v as i32)),
             LiveToken::Float(v) => Some(Lit::Float(*v as f32)),
             LiveToken::Color(v) => Some(Lit::Color(*v)),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -1326,10 +1372,10 @@ impl fmt::Display for Lit {
     }
 }
 
-
 impl Ident {
-    pub fn to_id(self) -> LiveId {self.0}
-    
+    pub fn to_id(self) -> LiveId {
+        self.0
+    }
 }
 
 impl fmt::Debug for Ident {
@@ -1347,22 +1393,21 @@ impl fmt::Display for Ident {
 #[derive(Clone, Default, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct IdentPath {
     pub segs: [LiveId; 6],
-    pub len: usize
+    pub len: usize,
 }
 
 impl IdentPath {
-    
     pub fn len(&self) -> usize {
         self.len
     }
-    
+
     pub fn push(&mut self, ident: Ident) -> bool {
         if self.len >= self.segs.len() {
-            return false
+            return false;
         }
         self.segs[self.len] = ident.0;
         self.len += 1;
-        return true
+        return true;
     }
 }
 
@@ -1397,7 +1442,7 @@ impl Val {
             _ => None,
         }
     }
-    
+
     pub fn to_int(&self) -> Option<i32> {
         match *self {
             Val::Int(val) => Some(val),

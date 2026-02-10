@@ -3,7 +3,7 @@ use crate::makepad_platform::*;
 live_design! {
     link theme_desktop_skeleton;
     use link::shaders::*;
-    
+
     // GLOBAL PARAMETERS
     pub THEME_SPACE_FACTOR = 10. // Increase for a less dense layout
     pub THEME_CORNER_RADIUS = 2.5
@@ -15,7 +15,7 @@ live_design! {
     pub THEME_SPACE_2 = 6.
     pub THEME_SPACE_3 = 9.
 
-    pub THEME_MSPACE_1 = {top: 3., right: 3., bottom: 3., left: 3.} 
+    pub THEME_MSPACE_1 = {top: 3., right: 3., bottom: 3., left: 3.}
     pub THEME_MSPACE_H_1 = {top: 0., right: 3., bottom: 0., left: 3.}
     pub THEME_MSPACE_V_1 = {top: 3., right: 0., bottom: 3., left: 0.}
     pub THEME_MSPACE_2 = {top: 6., right: 6., bottom: 6., left: 6.}
@@ -29,7 +29,7 @@ live_design! {
     pub THEME_DATA_ICON_WIDTH = 15.5;
     pub THEME_DATA_ICON_HEIGHT = 21.5;
 
-    pub THEME_CONTAINER_CORNER_RADIUS = 5. 
+    pub THEME_CONTAINER_CORNER_RADIUS = 5.
     pub THEME_TEXTSELECTION_CORNER_RADIUS = 12.5
     pub THEME_TAB_HEIGHT = 38.
     pub THEME_TAB_FLAT_HEIGHT = 33.
@@ -218,7 +218,7 @@ live_design! {
     pub THEME_COLOR_VAL_1_FOCUS = #6
     pub THEME_COLOR_VAL_1_DRAG = #6
     pub THEME_COLOR_VAL_1_DISABLED = #00000000
-    
+
     pub THEME_COLOR_VAL_2 = #3
     pub THEME_COLOR_VAL_2_HOVER = #4
     pub THEME_COLOR_VAL_2_FOCUS = #4
@@ -263,7 +263,7 @@ live_design! {
             chinese = font(
                 "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
                 "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
+                0.0,
                 0.0)
             emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
@@ -275,7 +275,7 @@ live_design! {
             chinese = font(
                 "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
                 "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
+                0.0,
                 0.0)
             emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
@@ -287,7 +287,7 @@ live_design! {
             chinese = font(
                 "crate://makepad_fonts_chinese_bold/resources/LXGWWenKaiBold.ttf",
                 "crate://makepad_fonts_chinese_bold_2/resources/LXGWWenKaiBold.ttf.2",
-                0.0, 
+                0.0,
                 0.0)
             emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
@@ -299,7 +299,7 @@ live_design! {
             chinese = font(
                 "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
                 "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
+                0.0,
                 0.0)
         },
         line_spacing: 1.2
@@ -310,7 +310,7 @@ live_design! {
             chinese = font(
                 "crate://makepad_fonts_chinese_bold/resources/LXGWWenKaiBold.ttf",
                 "crate://makepad_fonts_chinese_bold_2/resources/LXGWWenKaiBold.ttf.2",
-                0.0, 
+                0.0,
                 0.0)
         },
         line_spacing: 1.2

@@ -1,11 +1,10 @@
-
 use crate::formats::gray::Gray_v08;
-use crate::{Abgr, Argb, Bgr, Bgra, Grb, Rgb, Rgba, alt::GrayAlpha};
+use crate::{alt::GrayAlpha, Abgr, Argb, Bgr, Bgra, Grb, Rgb, Rgba};
 
-#[cfg(feature = "unstable-experimental")]
-use crate::GrayA;
 #[cfg(feature = "unstable-experimental")]
 use crate::formats::gray::Gray_v09;
+#[cfg(feature = "unstable-experimental")]
+use crate::GrayA;
 
 macro_rules! tuple_conversion {
     ($name:ident, 1, [$($bit:tt:$num:tt),*]) => {
@@ -56,13 +55,11 @@ macro_rules! tuple_conversion {
     };
 }
 
-
 tuple_conversion!(Rgb, 3, [r:0, g:1, b:2]);
 tuple_conversion!(Bgr, 3, [b:0, g:1, r:2]);
 tuple_conversion!(Grb, 3, [g:0, r:1, b:2]);
 #[cfg(feature = "unstable-experimental")]
 tuple_conversion!(Gray_v09, 1, [v:0]);
-
 
 tuple_conversion!(Rgba, 4, [r:0, g:1, b:2, a:3]);
 tuple_conversion!(Argb, 4, [a:0, r:1, g:2, b:3]);
@@ -76,10 +73,35 @@ tuple_conversion!(GrayAlpha, 2, [0:0, 1:1]);
 
 #[test]
 fn converts() {
-    assert_eq!((1,2,3), Rgb {r:1u8,g:2,b:3}.into());
-    assert_eq!(Rgb {r:1u8,g:2,b:3}, (1,2,3).into());
-    assert_eq!((1,2,3,4), Rgba {r:1,g:2,b:3,a:4}.into());
-    assert_eq!(Rgba {r:1u8,g:2,b:3,a:4}, (1,2,3,4).into());
-    assert_eq!(Bgra {r:1u8,g:2,b:3,a:4}, (3,2,1,4).into());
-    assert_eq!(Bgr {r:1u8,g:2,b:3}, (3,2,1).into());
+    assert_eq!((1, 2, 3), Rgb { r: 1u8, g: 2, b: 3 }.into());
+    assert_eq!(Rgb { r: 1u8, g: 2, b: 3 }, (1, 2, 3).into());
+    assert_eq!(
+        (1, 2, 3, 4),
+        Rgba {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 4
+        }
+        .into()
+    );
+    assert_eq!(
+        Rgba {
+            r: 1u8,
+            g: 2,
+            b: 3,
+            a: 4
+        },
+        (1, 2, 3, 4).into()
+    );
+    assert_eq!(
+        Bgra {
+            r: 1u8,
+            g: 2,
+            b: 3,
+            a: 4
+        },
+        (3, 2, 1, 4).into()
+    );
+    assert_eq!(Bgr { r: 1u8, g: 2, b: 3 }, (3, 2, 1).into());
 }

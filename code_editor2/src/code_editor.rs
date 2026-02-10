@@ -1372,7 +1372,11 @@ impl CodeEditor {
         .draw_selection_layer(cx, session)
     }
 
-    pub(crate) fn pick(&self, session: &CodeSession, position: Vec2d) -> ((Position, Affinity), bool) {
+    pub(crate) fn pick(
+        &self,
+        session: &CodeSession,
+        position: Vec2d,
+    ) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
 
         if position.y < 0.0 {

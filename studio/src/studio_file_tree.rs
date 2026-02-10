@@ -1,8 +1,4 @@
-use crate::{
-    app::AppData,
-    makepad_widgets::file_tree::FileTree,
-    makepad_widgets::*,
-};
+use crate::{app::AppData, makepad_widgets::file_tree::FileTree, makepad_widgets::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*

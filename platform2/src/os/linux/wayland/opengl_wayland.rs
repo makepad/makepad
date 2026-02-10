@@ -1,18 +1,20 @@
 use std::fs::File;
 use std::os::fd::AsFd;
 
+use crate::egl_sys::{EGLNativeWindowType, EGLSurface, NativeWindowType};
+use crate::makepad_math::Vec2d;
+use tempfile;
 use wayland_client::protocol::__interfaces::WL_OUTPUT_INTERFACE;
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Proxy, QueueHandle};
 use wayland_egl::WlEglSurface;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1;
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
+use wayland_protocols::xdg::decoration::zv1::client::{
+    zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
+};
 use wayland_protocols::xdg::shell;
-use tempfile;
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
-use wayland_protocols::xdg::decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
-use crate::egl_sys::{EGLNativeWindowType, EGLSurface, NativeWindowType};
-use crate::makepad_math::Vec2d;
 
 use crate::opengl_cx::OpenglCx;
 use crate::wayland::wayland_state::WaylandState;
@@ -66,7 +68,8 @@ impl WaylandWindow {
         }
         base_surface.commit();
 
-        let wl_egl_surface = WlEglSurface::new(base_surface.id(), inner_size.x as i32, inner_size.y as i32).unwrap();
+        let wl_egl_surface =
+            WlEglSurface::new(base_surface.id(), inner_size.x as i32, inner_size.y as i32).unwrap();
         let egl_surface = unsafe {
             (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(
                 opengl_cx.egl_display,
@@ -88,7 +91,7 @@ impl WaylandWindow {
             inner_size: inner_size,
             outer_size: inner_size,
             dpi_factor: 1.0,
-            position: position
+            position: position,
         };
         Self {
             base_surface,
@@ -106,14 +109,13 @@ impl WaylandWindow {
     pub fn resize_buffers(&mut self) -> bool {
         let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
-            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
+            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor,
         };
         if self.cal_size != cal_size {
             self.cal_size = cal_size;
             // resize the framebuffer
             true
-        }
-        else {
+        } else {
             false
         }
     }

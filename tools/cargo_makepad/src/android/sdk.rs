@@ -2,22 +2,19 @@
 
 use makepad_miniz::zip_file::*;
 use std::{
-    path::Path,
     fs::{File, OpenOptions},
-    io::{Write, Read, Seek},
+    io::{Read, Seek, Write},
+    path::Path,
 };
 
-use crate::{
-    android::*,
-    makepad_shell::*,
-};
+use crate::{android::*, makepad_shell::*};
 
-pub struct AndroidSDKUrls{
+pub struct AndroidSDKUrls {
     pub sdk_version: usize,
     pub sdk_extension: &'static str,
     pub platform: &'static str,
     pub build_tools_version: &'static str,
-    
+
     pub platform_dl: &'static str,
     pub build_tools_macos: &'static str,
     pub build_tools_linux: &'static str,
@@ -34,21 +31,23 @@ pub struct AndroidSDKUrls{
 pub const BUILD_TOOLS_DIR: &str = "build-tools";
 pub const PLATFORMS_DIR: &str = "platforms";
 
-pub const ANDROID_SDK_URLS_33:AndroidSDKUrls = AndroidSDKUrls{
+pub const ANDROID_SDK_URLS_33: AndroidSDKUrls = AndroidSDKUrls {
     sdk_version: 33,
-    build_tools_version:  "33.0.1",
+    build_tools_version: "33.0.1",
     sdk_extension: "ext4",
     platform: "android-33-ext4",
     ndk_version_full: "25.2.9519653",
-    
-    
-    platform_dl:  "https://dl.google.com/android/repository/platform-33-ext4_r01.zip",
-    build_tools_macos:"https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip",
+
+    platform_dl: "https://dl.google.com/android/repository/platform-33-ext4_r01.zip",
+    build_tools_macos: "https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip",
     build_tools_linux: "https://dl.google.com/android/repository/build-tools_r33.0.1-linux.zip",
     build_tools_windows: "https://dl.google.com/android/repository/build-tools_r33.0.1-windows.zip",
-    platform_tools_macos: "https://dl.google.com/android/repository/platform-tools_r33.0.3-darwin.zip",
-    platform_tools_linux: "https://dl.google.com/android/repository/platform-tools_r33.0.3-linux.zip",
-    platform_tools_windows: "https://dl.google.com/android/repository/platform-tools_r33.0.3-windows.zip",
+    platform_tools_macos:
+        "https://dl.google.com/android/repository/platform-tools_r33.0.3-darwin.zip",
+    platform_tools_linux:
+        "https://dl.google.com/android/repository/platform-tools_r33.0.3-linux.zip",
+    platform_tools_windows:
+        "https://dl.google.com/android/repository/platform-tools_r33.0.3-windows.zip",
     ndk_macos: "https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg",
     ndk_linux: "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip",
     ndk_windows: "https://dl.google.com/android/repository/android-ndk-r25c-windows.zip",
@@ -63,202 +62,349 @@ fn url_file_name(url: &str) -> &str {
     url.rsplit_once('/').unwrap().1
 }
 
-pub fn rustup_toolchain_install(targets:&[AndroidTarget]) -> Result<(), String> {
+pub fn rustup_toolchain_install(targets: &[AndroidTarget]) -> Result<(), String> {
     println!("Installing Rust toolchains for android");
     println!("Installing nightly");
-    shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
-        "install",
-        "nightly"
-    ]) ?;
-    for target in targets{
+    shell_env(
+        &[],
+        &std::env::current_dir().unwrap(),
+        "rustup",
+        &["install", "nightly"],
+    )?;
+    for target in targets {
         let toolchain = target.toolchain();
         println!("Installing rust nightly for {}", toolchain);
-        shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
-            "target",
-            "add",
-            toolchain,
-            "--toolchain",
-            "nightly"
-        ]) ?;
+        shell_env(
+            &[],
+            &std::env::current_dir().unwrap(),
+            "rustup",
+            &["target", "add", toolchain, "--toolchain", "nightly"],
+        )?;
     }
     Ok(())
 }
 
-pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], urls:&AndroidSDKUrls) -> Result<(), String> {
+pub fn download_sdk(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    _args: &[String],
+    urls: &AndroidSDKUrls,
+) -> Result<(), String> {
     // get current working directory
     let src_dir = &sdk_dir.join("sources");
-    mkdir(src_dir) ?;
-    
+    mkdir(src_dir)?;
+
     fn curl(step: usize, src_dir: &Path, url: &str) -> Result<(), String> {
         //let https = HttpsConnection::connect("https://makepad.dev","https");
         println!("{step}/5: Downloading: {}", url);
-        shell(src_dir, "curl", &[url, "-#", "--output", src_dir.join(url_file_name(url)).to_str().unwrap()]) ?;
+        shell(
+            src_dir,
+            "curl",
+            &[
+                url,
+                "-#",
+                "--output",
+                src_dir.join(url_file_name(url)).to_str().unwrap(),
+            ],
+        )?;
         Ok(())
     }
-    curl(1, src_dir, urls.platform_dl) ?;
+    curl(1, src_dir, urls.platform_dl)?;
     match host_os {
         HostOs::WindowsX64 => {
-            curl(2, src_dir, urls.build_tools_windows) ?;
-            curl(3, src_dir, urls.platform_tools_windows) ?;
-            curl(4, src_dir, urls.ndk_windows) ?;
-            curl(5, src_dir, URL_OPENJDK_17_0_2_WINDOWS_X64) ?;
+            curl(2, src_dir, urls.build_tools_windows)?;
+            curl(3, src_dir, urls.platform_tools_windows)?;
+            curl(4, src_dir, urls.ndk_windows)?;
+            curl(5, src_dir, URL_OPENJDK_17_0_2_WINDOWS_X64)?;
         }
         HostOs::MacosX64 | HostOs::MacosAarch64 => {
-            curl(2, src_dir, urls.build_tools_macos) ?;
-            curl(3, src_dir, urls.platform_tools_macos) ?;
-            curl(4, src_dir, urls.ndk_macos) ?;
+            curl(2, src_dir, urls.build_tools_macos)?;
+            curl(3, src_dir, urls.platform_tools_macos)?;
+            curl(4, src_dir, urls.ndk_macos)?;
             if host_os == HostOs::MacosX64 {
-                curl(5, src_dir, URL_OPENJDK_17_0_2_MACOS_X64) ?;
-            }
-            else {
-                curl(5, src_dir, URL_OPENJDK_17_0_2_MACOS_AARCH64) ?;
+                curl(5, src_dir, URL_OPENJDK_17_0_2_MACOS_X64)?;
+            } else {
+                curl(5, src_dir, URL_OPENJDK_17_0_2_MACOS_AARCH64)?;
             }
         }
         HostOs::LinuxX64 => {
-            curl(2, src_dir, urls.build_tools_linux) ?;
-            curl(3, src_dir, urls.platform_tools_linux) ?;
-            curl(4, src_dir, urls.ndk_linux) ?;
-            curl(5, src_dir, URL_OPENJDK_17_0_2_LINUX_X64) ?;
+            curl(2, src_dir, urls.build_tools_linux)?;
+            curl(3, src_dir, urls.platform_tools_linux)?;
+            curl(4, src_dir, urls.ndk_linux)?;
+            curl(5, src_dir, URL_OPENJDK_17_0_2_LINUX_X64)?;
         }
-        HostOs::Unsupported => panic!()
+        HostOs::Unsupported => panic!(),
     }
     // alright lets parse the sdk_path option
     Ok(())
 }
 
-pub fn remove_sdk_sources(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) -> Result<(), String> {
+pub fn remove_sdk_sources(
+    sdk_dir: &Path,
+    _host_os: HostOs,
+    _args: &[String],
+) -> Result<(), String> {
     let src_dir = &sdk_dir.join("sources");
-    rmdir(src_dir) 
+    rmdir(src_dir)
 }
 
-pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[AndroidTarget], urls:&AndroidSDKUrls) -> Result<(), String> {
+pub fn expand_sdk(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    args: &[String],
+    _targets: &[AndroidTarget],
+    urls: &AndroidSDKUrls,
+) -> Result<(), String> {
     let full_ndk = !args.contains(&String::from("--strip-ndk"));
     let src_dir = &sdk_dir.join("sources");
-    
-    fn unzip(step: usize, src_dir: &Path, sdk_dir: &Path, url: &str, files: &[(&str, bool)]) -> Result<(), String> {
+
+    fn unzip(
+        step: usize,
+        src_dir: &Path,
+        sdk_dir: &Path,
+        url: &str,
+        files: &[(&str, bool)],
+    ) -> Result<(), String> {
         let url_file_name = url_file_name(url);
         println!("{step}/5: Unzipping: {}", url_file_name);
         let mut zip_file = File::open(src_dir.join(url_file_name))
-            .map_err( | _ | format!("Cant open file {url_file_name}")) ?;
-        
+            .map_err(|_| format!("Cant open file {url_file_name}"))?;
+
         // Hahahah i parsed my own zipfile. That was easier than using someones bad abstraction.
         let directory = zip_read_central_directory(&mut zip_file)
-            .map_err( | e | format!("Can't read zipfile {url_file_name} {:?}", e)) ?;
+            .map_err(|e| format!("Can't read zipfile {url_file_name} {:?}", e))?;
         //for file in &directory.file_headers{
         //    println!("{}", file.file_name);
         //}
         #[allow(unused)]
-        fn extract_file(directory: &ZipCentralDirectory, zip_file: &mut File, file_name: &str, output_file: &Path, exec: bool) -> Result<(), String> {
-            if let Some(file_header) = directory.file_headers.iter().find( | v | v.file_name == file_name) {
-                let is_symlink = (file_header.external_file_attributes >> 16) & 0o120000 == 0o120000;
-                
-                let data = file_header.extract(zip_file).map_err( | e | {
-                    format!("Can't extract file from {file_name} {:?}", e)
-                }) ?;
-                
-                mkdir(output_file.parent().unwrap()) ?;
-                
+        fn extract_file(
+            directory: &ZipCentralDirectory,
+            zip_file: &mut File,
+            file_name: &str,
+            output_file: &Path,
+            exec: bool,
+        ) -> Result<(), String> {
+            if let Some(file_header) = directory
+                .file_headers
+                .iter()
+                .find(|v| v.file_name == file_name)
+            {
+                let is_symlink =
+                    (file_header.external_file_attributes >> 16) & 0o120000 == 0o120000;
+
+                let data = file_header
+                    .extract(zip_file)
+                    .map_err(|e| format!("Can't extract file from {file_name} {:?}", e))?;
+
+                mkdir(output_file.parent().unwrap())?;
+
                 if is_symlink {
                     let link_to = std::str::from_utf8(&data).unwrap().to_string();
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
                     use std::os::unix::fs::symlink;
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
                     symlink(link_to, output_file);
-                }
-                else {
+                } else {
                     let mut output = File::create(output_file)
-                        .map_err( | _ | format!("Cant open output file {:?}", output_file)) ?;
-                    
-                    output.write(&data)
-                        .map_err( | _ | format!("Cant write output file {:?}", output_file)) ?;
-                    
+                        .map_err(|_| format!("Cant open output file {:?}", output_file))?;
+
+                    output
+                        .write(&data)
+                        .map_err(|_| format!("Cant write output file {:?}", output_file))?;
+
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
                     if exec {
                         use std::os::unix::fs::PermissionsExt;
                         std::fs::set_permissions(output_file, PermissionsExt::from_mode(0o744))
-                            .map_err( | _ | format!("Cant set exec permissions {:?}", output_file)) ?;
+                            .map_err(|_| format!("Cant set exec permissions {:?}", output_file))?;
                     }
                 }
-                
+
                 Ok(())
-            }
-            else {
-                
+            } else {
                 Err(format!("File not found in zip {}", file_name))
             }
         }
         // ok so
         for (file_path, exec) in files {
-            let (source_path, dest_path) = if let Some((a, b)) = file_path.split_once('|') {(a, b)}else {(*file_path, *file_path)};
-            extract_file(&directory, &mut zip_file, source_path, &sdk_dir.join(dest_path), *exec) ?;
+            let (source_path, dest_path) = if let Some((a, b)) = file_path.split_once('|') {
+                (a, b)
+            } else {
+                (*file_path, *file_path)
+            };
+            extract_file(
+                &directory,
+                &mut zip_file,
+                source_path,
+                &sdk_dir.join(dest_path),
+                *exec,
+            )?;
         }
         Ok(())
     }
-    
-    
-    fn untar(step: usize, src_dir: &Path, sdk_dir: &Path, url: &str, files: &[(&str, bool)]) -> Result<(), String> {
+
+    fn untar(
+        step: usize,
+        src_dir: &Path,
+        sdk_dir: &Path,
+        url: &str,
+        files: &[(&str, bool)],
+    ) -> Result<(), String> {
         let url_file_name = url_file_name(url);
         println!("{step}/5: Untarring: {}", url_file_name);
-        shell(src_dir, "tar", &["-xf", src_dir.join(url_file_name).to_str().unwrap()]) ?;
-        
+        shell(
+            src_dir,
+            "tar",
+            &["-xf", src_dir.join(url_file_name).to_str().unwrap()],
+        )?;
+
         for (file_path, exec) in files {
-            let (source_path, dest_path) = if let Some((a, b)) = file_path.split_once('|') {(a, b)}else {(*file_path, *file_path)};
-            cp(&src_dir.join(source_path), &sdk_dir.join(dest_path), *exec) ?;
+            let (source_path, dest_path) = if let Some((a, b)) = file_path.split_once('|') {
+                (a, b)
+            } else {
+                (*file_path, *file_path)
+            };
+            cp(&src_dir.join(source_path), &sdk_dir.join(dest_path), *exec)?;
         }
         Ok(())
     }
-    
-    fn dmg_extract(step: usize, src_dir: &Path, sdk_dir: &Path, url: &str, files: &[(&str, bool)], full_ndk: bool) -> Result<(), String> {
+
+    fn dmg_extract(
+        step: usize,
+        src_dir: &Path,
+        sdk_dir: &Path,
+        url: &str,
+        files: &[(&str, bool)],
+        full_ndk: bool,
+    ) -> Result<(), String> {
         let url_file_name = url_file_name(url);
-        println!("{step}/5: Mounting and extracting {} dmg: {}", if full_ndk { "full" } else { "partial" }, url_file_name);
-        
+        println!(
+            "{step}/5: Mounting and extracting {} dmg: {}",
+            if full_ndk { "full" } else { "partial" },
+            url_file_name
+        );
+
         let mount_point = &src_dir.join(&format!("mount_{url_file_name}"));
-        mkdir(mount_point) ?;
-        
-        shell(src_dir, "hdiutil", &["attach", "-quiet", "-mountpoint", mount_point.to_str().unwrap(), src_dir.join(url_file_name).to_str().unwrap()]) ?;
-        
+        mkdir(mount_point)?;
+
+        shell(
+            src_dir,
+            "hdiutil",
+            &[
+                "attach",
+                "-quiet",
+                "-mountpoint",
+                mount_point.to_str().unwrap(),
+                src_dir.join(url_file_name).to_str().unwrap(),
+            ],
+        )?;
+
         for (file_path, exec) in files {
-            let (source_path, dest_path) = if let Some((a, b)) = file_path.split_once('|') {(a, b)}else {(*file_path, *file_path)};
+            let (source_path, dest_path) = if let Some((a, b)) = file_path.split_once('|') {
+                (a, b)
+            } else {
+                (*file_path, *file_path)
+            };
             let copy_fn = if full_ndk { shell::cp_all } else { shell::cp };
-            copy_fn(&mount_point.join(source_path), &sdk_dir.join(dest_path), *exec) ?;
+            copy_fn(
+                &mount_point.join(source_path),
+                &sdk_dir.join(dest_path),
+                *exec,
+            )?;
         }
-        shell(sdk_dir, "umount", &[mount_point.to_str().unwrap()]) ?;
+        shell(sdk_dir, "umount", &[mount_point.to_str().unwrap()])?;
         Ok(())
     }
-    
+
     fn copy_map(base_in: &str, base_out: &str, file: &str) -> String {
         // allow an empty path to be properly passed in for either base.
         fn separator(base: &str) -> &str {
-            if base.is_empty() { "" } else { "/" }
+            if base.is_empty() {
+                ""
+            } else {
+                "/"
+            }
         }
-        
+
         let sep_in = separator(base_in);
         let sep_out = separator(base_out);
         format!("{base_in}{sep_in}{file}|{base_out}{sep_out}{file}")
     }
-    
+
     let ANDROID_PLATFORM = urls.platform;
     let ANDROID_BUILD_TOOLS_VERSION = urls.build_tools_version;
     let NDK_VERSION_FULL = urls.ndk_version_full;
-    
+
     match host_os {
         HostOs::WindowsX64 => {
-            unzip(1, src_dir, sdk_dir, urls.platform_dl, &[
-                (&copy_map("", PLATFORMS_DIR, &format!("{ANDROID_PLATFORM}/android.jar")), false),
-            ]) ?;
-            unzip(2, src_dir, sdk_dir, urls.build_tools_windows, &[
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "aapt.exe"), false),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "zipalign.exe"), false),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/apksigner.jar"), false),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/d8.jar"), false),
-            ]) ?;
-            unzip(3, src_dir, sdk_dir, urls.platform_tools_windows, &[
-                ("platform-tools/adb.exe", false),
-                ("platform-tools/AdbWinApi.dll", false),
-                ("platform-tools/AdbWinUsbApi.dll", false),
-            ]) ?;
+            unzip(
+                1,
+                src_dir,
+                sdk_dir,
+                urls.platform_dl,
+                &[(
+                    &copy_map(
+                        "",
+                        PLATFORMS_DIR,
+                        &format!("{ANDROID_PLATFORM}/android.jar"),
+                    ),
+                    false,
+                )],
+            )?;
+            unzip(
+                2,
+                src_dir,
+                sdk_dir,
+                urls.build_tools_windows,
+                &[
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "aapt.exe",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "zipalign.exe",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "lib/apksigner.jar",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "lib/d8.jar",
+                        ),
+                        false,
+                    ),
+                ],
+            )?;
+            unzip(
+                3,
+                src_dir,
+                sdk_dir,
+                urls.platform_tools_windows,
+                &[
+                    ("platform-tools/adb.exe", false),
+                    ("platform-tools/AdbWinApi.dll", false),
+                    ("platform-tools/AdbWinUsbApi.dll", false),
+                ],
+            )?;
             const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64";
-            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64");
+            let NDK_OUT =
+                &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64");
 
             // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
             // and then copy that directory it into the proper `NDK_OUT` directory location.
@@ -278,8 +424,9 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[A
                     "-o", // overwrite existing files
                     src_dir.join(url_file_name).to_str().unwrap(),
                     &format!("{NDK_IN}/**/*"),
-                    "-d", src_dir.to_str().unwrap(),
-                ]
+                    "-d",
+                    src_dir.to_str().unwrap(),
+                ],
             );
             if unzip_result.is_ok() {
                 shell(
@@ -291,8 +438,9 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[A
                         "--preserve",
                         src_dir.join(NDK_IN).to_str().unwrap(),
                         ndk_out_path.parent().unwrap().to_str().unwrap(),
-                    ]
-                ).unwrap();
+                    ],
+                )
+                .unwrap();
             } else {
                 // If `unzip` failed, we're running on a true Windows shell (cmd, powershell),
                 // so we instead use `tar` (which is the BSD version of tar) to extract the zip file.
@@ -304,12 +452,16 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[A
                     &[
                         "-x",
                         "-z",
-                        "-f", src_dir.join(url_file_name).to_str().unwrap(),
-                        "--strip-components", &num_path_components.to_string(),
-                        "-C", ndk_out_path.to_str().unwrap(),
+                        "-f",
+                        src_dir.join(url_file_name).to_str().unwrap(),
+                        "--strip-components",
+                        &num_path_components.to_string(),
+                        "-C",
+                        ndk_out_path.to_str().unwrap(),
                         NDK_IN,
-                    ]
-                ).unwrap();
+                    ],
+                )
+                .unwrap();
             }
             /*
             else {
@@ -364,7 +516,8 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[A
 
                 // Read the file into a String
                 let mut ndk_cmd_data = String::new();
-                ndk_cmd.read_to_string(&mut ndk_cmd_data)
+                ndk_cmd
+                    .read_to_string(&mut ndk_cmd_data)
                     .map_err(|_| format!("Can't read file {:?}", cmd_file_path))?;
 
                 // Replace occurrences of `"%1"` with `%1`
@@ -372,119 +525,331 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[A
 
                 // Write the modified String back to the file
                 ndk_cmd.set_len(0).map_err(|_| "failed to truncate")?; // Truncate the file
-                ndk_cmd.seek(std::io::SeekFrom::Start(0)).map_err(|_| "failed to seek")?; // Reset the cursor position
-                ndk_cmd.write_all(ndk_cmd_data_modified.as_bytes())
+                ndk_cmd
+                    .seek(std::io::SeekFrom::Start(0))
+                    .map_err(|_| "failed to seek")?; // Reset the cursor position
+                ndk_cmd
+                    .write_all(ndk_cmd_data_modified.as_bytes())
                     .map_err(|_| format!("Can't write to file {:?}", cmd_file_path))?;
             }
 
-            
             const JDK_IN: &str = "jdk-17.0.2";
             const JDK_OUT: &str = "openjdk";
-            unzip(5, src_dir, sdk_dir, URL_OPENJDK_17_0_2_WINDOWS_X64, &[
-                (&copy_map(JDK_IN, JDK_OUT, "bin/java.exe"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/jar.exe"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/javac.exe"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/jli.dll"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/java.dll"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/jimage.dll"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/zip.dll"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/net.dll"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/nio.dll"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/verify.dll"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/server/jvm.dll"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/modules"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/tzmappings"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/tzdb.dat"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/java.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/java.security"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_local.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_US_export.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_local.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_US_export.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/exempt_local.policy"), false),
-            ]) ?;
+            unzip(
+                5,
+                src_dir,
+                sdk_dir,
+                URL_OPENJDK_17_0_2_WINDOWS_X64,
+                &[
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/java.exe"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/jar.exe"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/javac.exe"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/jli.dll"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/java.dll"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/jimage.dll"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/zip.dll"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/net.dll"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/nio.dll"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/verify.dll"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/server/jvm.dll"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/modules"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/tzmappings"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/tzdb.dat"), false),
+                    (
+                        &copy_map(JDK_IN, JDK_OUT, "conf/security/java.policy"),
+                        false,
+                    ),
+                    (
+                        &copy_map(JDK_IN, JDK_OUT, "conf/security/java.security"),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/unlimited/default_local.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/unlimited/default_US_export.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/default_local.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/default_US_export.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/exempt_local.policy",
+                        ),
+                        false,
+                    ),
+                ],
+            )?;
         }
         HostOs::MacosX64 | HostOs::MacosAarch64 => {
-            unzip(1, src_dir, sdk_dir, urls.platform_dl, &[
-                (&copy_map("", PLATFORMS_DIR, &format!("{ANDROID_PLATFORM}/android.jar")), false),
-            ]) ?;
-            unzip(2, src_dir, sdk_dir, urls.build_tools_macos, &[
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "aapt"), true),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "zipalign"), true),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/apksigner.jar"), false),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/d8.jar"), false),
-            ]) ?;
-            unzip(3, src_dir, sdk_dir, urls.platform_tools_macos, &[
-                ("platform-tools/adb", true),
-            ]) ?;
-            const NDK_IN: &str = "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64";
+            unzip(
+                1,
+                src_dir,
+                sdk_dir,
+                urls.platform_dl,
+                &[(
+                    &copy_map(
+                        "",
+                        PLATFORMS_DIR,
+                        &format!("{ANDROID_PLATFORM}/android.jar"),
+                    ),
+                    false,
+                )],
+            )?;
+            unzip(
+                2,
+                src_dir,
+                sdk_dir,
+                urls.build_tools_macos,
+                &[
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "aapt",
+                        ),
+                        true,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "zipalign",
+                        ),
+                        true,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "lib/apksigner.jar",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "lib/d8.jar",
+                        ),
+                        false,
+                    ),
+                ],
+            )?;
+            unzip(
+                3,
+                src_dir,
+                sdk_dir,
+                urls.platform_tools_macos,
+                &[("platform-tools/adb", true)],
+            )?;
+            const NDK_IN: &str =
+                "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64";
             let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64");
-            
+
             let toolchain_dir = copy_map(NDK_IN, NDK_OUT, "");
-            let files = [ (toolchain_dir.as_str(), false) ];
-            dmg_extract(4, src_dir, sdk_dir, urls.ndk_macos, &files, full_ndk) ?;
+            let files = [(toolchain_dir.as_str(), false)];
+            dmg_extract(4, src_dir, sdk_dir, urls.ndk_macos, &files, full_ndk)?;
             // We copied over the entire contents of `toolchains/llvm/prebuilt/darwin-x86_64`,
             // but we still need to make the files in `bin` actually executable.
-            #[cfg(any(target_os = "macos", target_os = "linux"))] {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            {
                 use std::os::unix::fs::PermissionsExt;
                 let bin_dir = sdk_dir.join(NDK_OUT).join("bin");
                 std::fs::read_dir(bin_dir)
                     .expect("failed to read NDK `bin/` dir: {bin_dir:?}")
-                    .filter_map(|r| r.ok().and_then(|entry| {
-                        let path = entry.path();
-                        path.is_file().then_some(path)
-                    }))
-                    .for_each(|bin_file|
+                    .filter_map(|r| {
+                        r.ok().and_then(|entry| {
+                            let path = entry.path();
+                            path.is_file().then_some(path)
+                        })
+                    })
+                    .for_each(|bin_file| {
                         std::fs::set_permissions(&bin_file, PermissionsExt::from_mode(0o744))
                             .expect("failed to set exec permissions on {bin_file:?}")
-                    );
+                    });
             }
-            
+
             const JDK_IN: &str = "jdk-17.0.2.jdk/Contents/Home";
             const JDK_OUT: &str = "openjdk";
-            untar(5, src_dir, sdk_dir, if host_os == HostOs::MacosX64 {URL_OPENJDK_17_0_2_MACOS_X64}else {URL_OPENJDK_17_0_2_MACOS_AARCH64}, &[
-                (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/javac"), true),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libjli.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjsig.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjvm.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/modules"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/tzdb.dat"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libjava.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libjimage.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libnet.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libnio.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libverify.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libzip.dylib"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/java.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/java.security"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_local.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_US_export.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_local.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_US_export.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/exempt_local.policy"), false),
-            ]) ?;
+            untar(
+                5,
+                src_dir,
+                sdk_dir,
+                if host_os == HostOs::MacosX64 {
+                    URL_OPENJDK_17_0_2_MACOS_X64
+                } else {
+                    URL_OPENJDK_17_0_2_MACOS_AARCH64
+                },
+                &[
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/javac"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libjli.dylib"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
+                    (
+                        &copy_map(JDK_IN, JDK_OUT, "lib/server/libjsig.dylib"),
+                        false,
+                    ),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjvm.dylib"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/modules"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/tzdb.dat"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libjava.dylib"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libjimage.dylib"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libnet.dylib"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libnio.dylib"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libverify.dylib"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libzip.dylib"), false),
+                    (
+                        &copy_map(JDK_IN, JDK_OUT, "conf/security/java.policy"),
+                        false,
+                    ),
+                    (
+                        &copy_map(JDK_IN, JDK_OUT, "conf/security/java.security"),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/unlimited/default_local.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/unlimited/default_US_export.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/default_local.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/default_US_export.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/exempt_local.policy",
+                        ),
+                        false,
+                    ),
+                ],
+            )?;
         }
         HostOs::LinuxX64 => {
-            unzip(1, src_dir, sdk_dir, urls.platform_dl, &[
-                (&copy_map("", PLATFORMS_DIR, &format!("{ANDROID_PLATFORM}/android.jar")), false),
-            ]) ?;
-            unzip(2, src_dir, sdk_dir, urls.build_tools_linux, &[
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "aapt"), true),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib64/libc++.so"), true),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "zipalign"), true),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/apksigner.jar"), false),
-                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/d8.jar"), false),
-            ]) ?;
-            unzip(3, src_dir, sdk_dir, urls.platform_tools_linux, &[
-                ("platform-tools/adb", true),
-            ]) ?;
+            unzip(
+                1,
+                src_dir,
+                sdk_dir,
+                urls.platform_dl,
+                &[(
+                    &copy_map(
+                        "",
+                        PLATFORMS_DIR,
+                        &format!("{ANDROID_PLATFORM}/android.jar"),
+                    ),
+                    false,
+                )],
+            )?;
+            unzip(
+                2,
+                src_dir,
+                sdk_dir,
+                urls.build_tools_linux,
+                &[
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "aapt",
+                        ),
+                        true,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "lib64/libc++.so",
+                        ),
+                        true,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "zipalign",
+                        ),
+                        true,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "lib/apksigner.jar",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "lib/d8.jar",
+                        ),
+                        false,
+                    ),
+                ],
+            )?;
+            unzip(
+                3,
+                src_dir,
+                sdk_dir,
+                urls.platform_tools_linux,
+                &[("platform-tools/adb", true)],
+            )?;
             const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64";
             let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64");
-            
+
             // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
             // and then copy that directory it into the proper `NDK_OUT` directory location.
             let cwd = std::env::current_dir().unwrap();
@@ -500,9 +865,11 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[A
                     "-o", // overwrite existing files
                     src_dir.join(url_file_name).to_str().unwrap(),
                     &format!("{NDK_IN}/*"),
-                    "-d", src_dir.to_str().unwrap(),
-                ]
-            ).unwrap();
+                    "-d",
+                    src_dir.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
             shell(
                 &cwd,
                 "cp",
@@ -512,38 +879,85 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[A
                     "--preserve",
                     src_dir.join(NDK_IN).to_str().unwrap(),
                     ndk_out_path.parent().unwrap().to_str().unwrap(),
-                ]
-            ).unwrap();
-            
+                ],
+            )
+            .unwrap();
+
             const JDK_IN: &str = "jdk-17.0.2";
             const JDK_OUT: &str = "openjdk";
-            untar(5, src_dir, sdk_dir, URL_OPENJDK_17_0_2_LINUX_X64, &[
-                (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
-                (&copy_map(JDK_IN, JDK_OUT, "bin/javac"), true),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libjli.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjsig.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjvm.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/modules"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/tzdb.dat"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libjava.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libjimage.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libnet.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libnio.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libverify.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "lib/libzip.so"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/java.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/java.security"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_local.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_US_export.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_local.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_US_export.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/exempt_local.policy"), false),
-            ]) ?;
+            untar(
+                5,
+                src_dir,
+                sdk_dir,
+                URL_OPENJDK_17_0_2_LINUX_X64,
+                &[
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/javac"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libjli.so"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjsig.so"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjvm.so"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/modules"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/tzdb.dat"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libjava.so"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libjimage.so"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libnet.so"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libnio.so"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libverify.so"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "lib/libzip.so"), false),
+                    (
+                        &copy_map(JDK_IN, JDK_OUT, "conf/security/java.policy"),
+                        false,
+                    ),
+                    (
+                        &copy_map(JDK_IN, JDK_OUT, "conf/security/java.security"),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/unlimited/default_local.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/unlimited/default_US_export.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/default_local.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/default_US_export.policy",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            JDK_IN,
+                            JDK_OUT,
+                            "conf/security/policy/limited/exempt_local.policy",
+                        ),
+                        false,
+                    ),
+                ],
+            )?;
         }
-        HostOs::Unsupported => panic!()
+        HostOs::Unsupported => panic!(),
     }
     Ok(())
 }
-

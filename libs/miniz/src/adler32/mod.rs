@@ -172,4 +172,3 @@ pub fn adler32_slice(data: &[u8]) -> u32 {
     h.write_slice(data);
     h.checksum()
 }
-

@@ -1,11 +1,11 @@
-use crate::makepad_micro_serde::*;
 use crate::makepad_live_id::*;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use crate::makepad_micro_serde::*;
 use std::collections::BTreeMap;
 use std::str;
+use std::sync::mpsc::{channel, Receiver, Sender};
 
 #[derive(Clone, Debug)]
-pub struct NetworkResponseItem{
+pub struct NetworkResponseItem {
     pub request_id: LiveId,
     pub response: NetworkResponse,
 }
@@ -13,20 +13,19 @@ pub struct NetworkResponseItem{
 pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 
 #[derive(Clone, Debug)]
-pub struct HttpError{
+pub struct HttpError {
     pub message: String,
-    pub metadata_id: LiveId
-}
-
-
-#[derive(Clone, Debug)]
-pub struct HttpProgress{
-    pub loaded:u64, 
-    pub total:u64,
+    pub metadata_id: LiveId,
 }
 
 #[derive(Clone, Debug)]
-pub enum NetworkResponse{
+pub struct HttpProgress {
+    pub loaded: u64,
+    pub total: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum NetworkResponse {
     HttpRequestError(HttpError),
     HttpResponse(HttpResponse),
     HttpStreamResponse(HttpResponse),
@@ -41,7 +40,7 @@ pub struct NetworkResponseIter<I> {
 /*
 impl<I> Iterator for NetworkResponseIter<I> where I: Iterator {
     type Item = I::Item;
-    
+
     fn next(&mut self) -> Option<I::Item> {
         match &mut self.iter{
             None=>None,
@@ -58,10 +57,7 @@ pub struct NetworkResponseChannel {
 impl Default for NetworkResponseChannel {
     fn default() -> Self {
         let (sender, receiver) = channel();
-        Self {
-            sender,
-            receiver
-        }
+        Self { sender, receiver }
     }
 }
 
@@ -74,11 +70,11 @@ pub struct HttpRequest {
     pub headers: BTreeMap<String, Vec<String>>,
     pub ignore_ssl_cert: bool,
     pub is_streaming: bool,
-    pub body: Option<Vec<u8>>, 
+    pub body: Option<Vec<u8>>,
 }
 */
 
-#[derive(PartialEq, Debug,  Default)]
+#[derive(PartialEq, Debug, Default)]
 pub struct HttpRequest {
     pub metadata_id: LiveId,
     pub url: String,
@@ -86,11 +82,11 @@ pub struct HttpRequest {
     pub headers: BTreeMap<String, Vec<String>>,
     pub ignore_ssl_cert: bool,
     pub is_streaming: bool,
-    pub body: Option<Vec<u8>>, 
+    pub body: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
-pub struct SplitUrl<'a>{
+pub struct SplitUrl<'a> {
     pub proto: &'a str,
     pub host: &'a str,
     pub port: &'a str,
@@ -98,7 +94,7 @@ pub struct SplitUrl<'a>{
     pub hash: &'a str,
 }
 
-impl HttpRequest { 
+impl HttpRequest {
     pub fn new(url: String, method: HttpMethod) -> Self {
         HttpRequest {
             metadata_id: LiveId(0),
@@ -107,46 +103,49 @@ impl HttpRequest {
             is_streaming: false,
             ignore_ssl_cert: false,
             headers: BTreeMap::new(),
-            body: None
+            body: None,
         }
     }
 
-    pub fn split_url(&self)->SplitUrl<'_>{
+    pub fn split_url(&self) -> SplitUrl<'_> {
         let (proto, rest) = self.url.split_once("://").unwrap_or((&self.url, "http://"));
-        let (host, port, rest) = if let Some((host, rest)) = rest.split_once(":"){
+        let (host, port, rest) = if let Some((host, rest)) = rest.split_once(":") {
             let (port, rest) = rest.split_once("/").unwrap_or((rest, ""));
             (host, port, rest)
-        }
-        else{
+        } else {
             let (host, rest) = rest.split_once("/").unwrap_or((rest, ""));
-            (host,match proto{
-                "http"|"ws"=>"80",
-                "https"|"wss"=>"443",
-                _=>"80"
-            },rest)
+            (
+                host,
+                match proto {
+                    "http" | "ws" => "80",
+                    "https" | "wss" => "443",
+                    _ => "80",
+                },
+                rest,
+            )
         };
         let (file, hash) = rest.split_once("#").unwrap_or((rest, ""));
-        return SplitUrl{
+        return SplitUrl {
             proto,
             host,
             port,
-            file, 
-            hash
-        }
+            file,
+            hash,
+        };
     }
-    
-    pub fn set_ignore_ssl_cert(&mut self){
+
+    pub fn set_ignore_ssl_cert(&mut self) {
         self.ignore_ssl_cert = true
     }
-    
-    pub fn set_is_streaming(&mut self){
+
+    pub fn set_is_streaming(&mut self) {
         self.is_streaming = true
     }
-    
-    pub fn set_metadata_id(&mut self, id: LiveId){
+
+    pub fn set_metadata_id(&mut self, id: LiveId) {
         self.metadata_id = id;
     }
-    
+
     pub fn set_header(&mut self, name: String, value: String) {
         let entry = self.headers.entry(name).or_insert(Vec::new());
         entry.push(value);
@@ -169,9 +168,9 @@ impl HttpRequest {
     }
 
     pub fn set_json_body<T: SerJson>(&mut self, body: T) {
-       let json_body = body.serialize_json();
-       let serialized_body = json_body.into_bytes();
-       self.body = Some(serialized_body); 
+        let json_body = body.serialize_json();
+        let serialized_body = json_body.into_bytes();
+        self.body = Some(serialized_body);
     }
 
     pub fn set_string_body(&mut self, body: String) {
@@ -188,12 +187,17 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
-    pub fn new(metadata_id: LiveId, status_code: u16, string_headers: String, body: Option<Vec<u8>>) -> Self {
+    pub fn new(
+        metadata_id: LiveId,
+        status_code: u16,
+        string_headers: String,
+        body: Option<Vec<u8>>,
+    ) -> Self {
         HttpResponse {
             metadata_id,
             status_code,
             headers: HttpResponse::parse_headers(string_headers),
-            body
+            body,
         }
     }
 
@@ -208,23 +212,23 @@ impl HttpResponse {
 
     pub fn get_string_body(&self) -> Option<String> {
         if let Some(body) = self.body.as_ref() {
-            if let Ok(utf8) = String::from_utf8(body.to_vec()){
-                return Some(utf8)
+            if let Ok(utf8) = String::from_utf8(body.to_vec()) {
+                return Some(utf8);
             }
         }
         None
     }
 
     // Todo: a more generic function that supports serialization into rust structs from other MIME types
-    pub fn get_json_body<T: DeJson>(&self) -> Result<T, DeJsonErr> { 
+    pub fn get_json_body<T: DeJson>(&self) -> Result<T, DeJsonErr> {
         if let Some(body) = self.body.as_ref() {
             let json = str::from_utf8(&body).unwrap();
             DeJson::deserialize_json(&json)
         } else {
-            Err(DeJsonErr{
-                msg:"No body present".to_string(),
-                line:0,
-                col:0
+            Err(DeJsonErr {
+                msg: "No body present".to_string(),
+                line: 0,
+                col: 0,
             })
         }
     }
@@ -245,7 +249,7 @@ impl HttpResponse {
 }
 
 #[derive(PartialEq, Debug, Default)]
-pub enum HttpMethod{
+pub enum HttpMethod {
     #[default]
     GET,
     HEAD,
@@ -255,7 +259,7 @@ pub enum HttpMethod{
     CONNECT,
     OPTIONS,
     TRACE,
-    PATCH
+    PATCH,
 }
 
 impl HttpMethod {

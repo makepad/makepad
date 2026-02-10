@@ -1,14 +1,7 @@
-use crate::{
-    Area,
-    Cx,
-    Event,
-    Hit,
-    MouseCursor,
-    NextFrame,
-};
+use crate::{Area, Cx, Event, Hit, MouseCursor, NextFrame};
 
 #[derive(Clone, Copy, Debug)]
-struct ScrollSample{
+struct ScrollSample {
     abs: f64,
     time: f64,
 }
@@ -24,9 +17,16 @@ pub enum ScrollMode {
 enum ScrollState {
     #[default]
     Stopped,
-    Drag{samples:Vec<ScrollSample>},
-    Flick {delta: f64, next_frame: NextFrame},
-    Pulldown {next_frame: NextFrame},
+    Drag {
+        samples: Vec<ScrollSample>,
+    },
+    Flick {
+        delta: f64,
+        next_frame: NextFrame,
+    },
+    Pulldown {
+        next_frame: NextFrame,
+    },
 }
 
 #[derive(Default, PartialEq)]
@@ -85,7 +85,7 @@ impl TouchGesture {
         self.max_scrolled_at = max_offset;
         self.scrolled_at = self.scrolled_at.clamp(
             self.min_scrolled_at - self.pulldown_maximum,
-            self.max_scrolled_at + self.pulldown_maximum
+            self.max_scrolled_at + self.pulldown_maximum,
         );
     }
 
@@ -97,14 +97,14 @@ impl TouchGesture {
     pub fn is_stopped(&self) -> bool {
         match self.scroll_state {
             ScrollState::Stopped => true,
-            _ => false
+            _ => false,
         }
     }
 
     pub fn is_dragging(&self) -> bool {
         match self.scroll_state {
-            ScrollState::Drag {..} => true,
-            _ => false
+            ScrollState::Drag { .. } => true,
+            _ => false,
         }
     }
 
@@ -113,12 +113,14 @@ impl TouchGesture {
         let needs_pulldown = self.needs_pulldown();
 
         match &mut self.scroll_state {
-            ScrollState::Flick {delta, next_frame} => {
+            ScrollState::Flick { delta, next_frame } => {
                 if let Some(_) = next_frame.is_event(event) {
                     *delta = *delta * self.flick_scroll_decay;
                     if needs_pulldown_when_flicking {
-                        self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
-                        return TouchMotionChange::ScrollStateChanged
+                        self.scroll_state = ScrollState::Pulldown {
+                            next_frame: cx.new_next_frame(),
+                        };
+                        return TouchMotionChange::ScrollStateChanged;
                     } else if delta.abs() > self.flick_scroll_minimum {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
@@ -126,128 +128,133 @@ impl TouchGesture {
                         let new_offset = self.scrolled_at - delta;
                         self.scrolled_at = new_offset.clamp(
                             self.min_scrolled_at - self.pulldown_maximum,
-                            self.max_scrolled_at + self.pulldown_maximum
+                            self.max_scrolled_at + self.pulldown_maximum,
                         );
 
-                        return TouchMotionChange::ScrolledAtChanged
+                        return TouchMotionChange::ScrolledAtChanged;
                     } else {
                         if needs_pulldown {
-                            self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
+                            self.scroll_state = ScrollState::Pulldown {
+                                next_frame: cx.new_next_frame(),
+                            };
                         } else {
                             self.scroll_state = ScrollState::Stopped;
                         }
 
-                        return TouchMotionChange::ScrollStateChanged
+                        return TouchMotionChange::ScrollStateChanged;
                     }
                 }
             }
-            ScrollState::Pulldown {next_frame} => {
+            ScrollState::Pulldown { next_frame } => {
                 if let Some(_) = next_frame.is_event(event) {
                     if self.scrolled_at < self.min_scrolled_at {
                         self.scrolled_at += (self.min_scrolled_at - self.scrolled_at) * 0.1;
                         if self.min_scrolled_at - self.scrolled_at < 1.0 {
                             self.scrolled_at = self.min_scrolled_at + 0.5;
-                        }
-                        else {
+                        } else {
                             *next_frame = cx.new_next_frame();
                         }
 
-                        return TouchMotionChange::ScrolledAtChanged
-                    }
-                    else if self.scrolled_at > self.max_scrolled_at {
+                        return TouchMotionChange::ScrolledAtChanged;
+                    } else if self.scrolled_at > self.max_scrolled_at {
                         self.scrolled_at -= (self.scrolled_at - self.max_scrolled_at) * 0.1;
                         if self.scrolled_at - self.max_scrolled_at < 1.0 {
                             self.scrolled_at = self.max_scrolled_at - 0.5;
 
-                            return TouchMotionChange::ScrolledAtChanged
-                        }
-                        else {
+                            return TouchMotionChange::ScrolledAtChanged;
+                        } else {
                             *next_frame = cx.new_next_frame();
                         }
 
-                        return TouchMotionChange::ScrolledAtChanged
-                    }
-                    else {
+                        return TouchMotionChange::ScrolledAtChanged;
+                    } else {
                         self.scroll_state = ScrollState::Stopped;
-                        return TouchMotionChange::ScrollStateChanged
+                        return TouchMotionChange::ScrollStateChanged;
                     }
                 }
             }
-            _=>()
+            _ => (),
         }
 
         match event.hits_with_capture_overload(cx, area, true) {
             Hit::FingerDown(e) => {
                 self.scroll_state = ScrollState::Drag {
-                    samples: vec![ScrollSample{abs: e.abs.y, time: e.time}]
+                    samples: vec![ScrollSample {
+                        abs: e.abs.y,
+                        time: e.time,
+                    }],
                 };
 
-                return TouchMotionChange::ScrollStateChanged
+                return TouchMotionChange::ScrollStateChanged;
             }
             Hit::FingerMove(e) => {
                 cx.set_cursor(MouseCursor::Default);
                 match &mut self.scroll_state {
-                    ScrollState::Drag {samples}=>{
+                    ScrollState::Drag { samples } => {
                         let new_abs = e.abs.y;
                         let old_sample = *samples.last().unwrap();
-                        samples.push(ScrollSample{abs: new_abs, time: e.time});
+                        samples.push(ScrollSample {
+                            abs: new_abs,
+                            time: e.time,
+                        });
                         if samples.len() > 4 {
                             samples.remove(0);
                         }
                         let new_offset = self.scrolled_at + old_sample.abs - new_abs;
                         self.scrolled_at = new_offset.clamp(
                             self.min_scrolled_at - self.pulldown_maximum,
-                            self.max_scrolled_at + self.pulldown_maximum
+                            self.max_scrolled_at + self.pulldown_maximum,
                         );
 
-                        return TouchMotionChange::ScrolledAtChanged
+                        return TouchMotionChange::ScrolledAtChanged;
                     }
-                    _=>()
+                    _ => (),
                 }
             }
-            Hit::FingerUp(_e) => {
-                match &mut self.scroll_state {
-                    ScrollState::Drag {samples} => {
-                        match self.scroll_mode {
-                            ScrollMode::Swipe => {
-                                let mut last = None;
-                                let mut scaled_delta = 0.0;
-                                let mut total_delta = 0.0;
-                                for sample in samples.iter().rev() {
-                                    if last.is_none() {
-                                        last = Some(sample);
-                                    }
-                                    else {
-                                        total_delta += last.unwrap().abs - sample.abs;
-                                        scaled_delta += (last.unwrap().abs - sample.abs)/ (last.unwrap().time - sample.time)
-                                    }
-                                }
-                                scaled_delta *= self.flick_scroll_scaling;
-
-                                if self.needs_pulldown() {
-                                    self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
-                                }
-                                else if total_delta.abs() > 10.0 && scaled_delta.abs() > self.flick_scroll_minimum {
-                                    self.scroll_state = ScrollState::Flick {
-                                        delta: scaled_delta.min(self.flick_scroll_maximum).max(-self.flick_scroll_maximum),
-                                        next_frame: cx.new_next_frame()
-                                    };
-                                } else {
-                                    self.scroll_state = ScrollState::Stopped;
-                                }
-
-                                return TouchMotionChange::ScrollStateChanged
-                            }
-                            ScrollMode::DragAndDrop => {
-                                self.scroll_state = ScrollState::Stopped;
-                                return TouchMotionChange::ScrollStateChanged
+            Hit::FingerUp(_e) => match &mut self.scroll_state {
+                ScrollState::Drag { samples } => match self.scroll_mode {
+                    ScrollMode::Swipe => {
+                        let mut last = None;
+                        let mut scaled_delta = 0.0;
+                        let mut total_delta = 0.0;
+                        for sample in samples.iter().rev() {
+                            if last.is_none() {
+                                last = Some(sample);
+                            } else {
+                                total_delta += last.unwrap().abs - sample.abs;
+                                scaled_delta += (last.unwrap().abs - sample.abs)
+                                    / (last.unwrap().time - sample.time)
                             }
                         }
+                        scaled_delta *= self.flick_scroll_scaling;
+
+                        if self.needs_pulldown() {
+                            self.scroll_state = ScrollState::Pulldown {
+                                next_frame: cx.new_next_frame(),
+                            };
+                        } else if total_delta.abs() > 10.0
+                            && scaled_delta.abs() > self.flick_scroll_minimum
+                        {
+                            self.scroll_state = ScrollState::Flick {
+                                delta: scaled_delta
+                                    .min(self.flick_scroll_maximum)
+                                    .max(-self.flick_scroll_maximum),
+                                next_frame: cx.new_next_frame(),
+                            };
+                        } else {
+                            self.scroll_state = ScrollState::Stopped;
+                        }
+
+                        return TouchMotionChange::ScrollStateChanged;
                     }
-                    _=>()
-                }
-            }
-            _ => ()
+                    ScrollMode::DragAndDrop => {
+                        self.scroll_state = ScrollState::Stopped;
+                        return TouchMotionChange::ScrollStateChanged;
+                    }
+                },
+                _ => (),
+            },
+            _ => (),
         }
 
         TouchMotionChange::None
@@ -258,8 +265,8 @@ impl TouchGesture {
     }
 
     fn needs_pulldown_when_flicking(&self) -> bool {
-        self.scrolled_at - 0.5 < self.min_scrolled_at - self.pulldown_maximum ||
-            self.scrolled_at + 0.5 > self.max_scrolled_at + self.pulldown_maximum
+        self.scrolled_at - 0.5 < self.min_scrolled_at - self.pulldown_maximum
+            || self.scrolled_at + 0.5 > self.max_scrolled_at + self.pulldown_maximum
     }
 }
 
@@ -267,7 +274,7 @@ impl TouchMotionChange {
     pub fn has_changed(&self) -> bool {
         match self {
             TouchMotionChange::None => false,
-            _ => true
+            _ => true,
         }
     }
 }

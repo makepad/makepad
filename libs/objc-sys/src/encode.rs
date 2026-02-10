@@ -1,8 +1,8 @@
+use malloc_buf::MallocBuffer;
 use std::ffi::CStr;
 use std::fmt;
 use std::os::raw::{c_char, c_void};
 use std::str;
-use malloc_buf::MallocBuffer;
 
 use runtime::{Class, Object, Sel};
 
@@ -26,7 +26,7 @@ enum Code {
     Slice(&'static str),
     Owned(String),
     Inline(u8, [u8; CODE_INLINE_CAP]),
-    Malloc(MallocBuffer<u8>)
+    Malloc(MallocBuffer<u8>),
 }
 
 /// An Objective-C type encoding.
@@ -52,9 +52,7 @@ impl Encoding {
             Code::Inline(len, ref bytes) => unsafe {
                 str::from_utf8_unchecked(&bytes[..len as usize])
             },
-            Code::Malloc(ref buf) => unsafe {
-                str::from_utf8_unchecked(&buf[..buf.len() - 1])
-            },
+            Code::Malloc(ref buf) => unsafe { str::from_utf8_unchecked(&buf[..buf.len() - 1]) },
         }
     }
 }
@@ -85,18 +83,24 @@ impl fmt::Debug for Encoding {
 }
 
 pub fn from_static_str(code: &'static str) -> Encoding {
-    Encoding { code: Code::Slice(code) }
+    Encoding {
+        code: Code::Slice(code),
+    }
 }
 
 pub fn from_str(code: &str) -> Encoding {
     if code.len() > CODE_INLINE_CAP {
-        Encoding { code: Code::Owned(code.to_owned()) }
+        Encoding {
+            code: Code::Owned(code.to_owned()),
+        }
     } else {
         let mut bytes = [0; CODE_INLINE_CAP];
         for (dst, byte) in bytes.iter_mut().zip(code.bytes()) {
             *dst = byte;
         }
-        Encoding { code: Code::Inline(code.len() as u8, bytes) }
+        Encoding {
+            code: Code::Inline(code.len() as u8, bytes),
+        }
     }
 }
 
@@ -105,7 +109,9 @@ pub unsafe fn from_malloc_str(ptr: *mut c_char) -> Encoding {
     let bytes = s.to_bytes_with_nul();
     assert!(str::from_utf8(bytes).is_ok());
     let buf = MallocBuffer::new(ptr as *mut u8, bytes.len()).unwrap();
-    Encoding { code: Code::Malloc(buf) }
+    Encoding {
+        code: Code::Malloc(buf),
+    }
 }
 
 /// Types that have an Objective-C type encoding.
@@ -148,18 +154,26 @@ encode_impls!(
 
 unsafe impl Encode for isize {
     #[cfg(target_pointer_width = "32")]
-    fn encode() -> Encoding { i32::encode() }
+    fn encode() -> Encoding {
+        i32::encode()
+    }
 
     #[cfg(target_pointer_width = "64")]
-    fn encode() -> Encoding { i64::encode() }
+    fn encode() -> Encoding {
+        i64::encode()
+    }
 }
 
 unsafe impl Encode for usize {
     #[cfg(target_pointer_width = "32")]
-    fn encode() -> Encoding { u32::encode() }
+    fn encode() -> Encoding {
+        u32::encode()
+    }
 
     #[cfg(target_pointer_width = "64")]
-    fn encode() -> Encoding { u64::encode() }
+    fn encode() -> Encoding {
+        u64::encode()
+    }
 }
 
 macro_rules! encode_message_impl {

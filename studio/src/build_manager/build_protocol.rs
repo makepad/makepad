@@ -1,6 +1,6 @@
 use crate::{
-    makepad_code_editor::text::Position, makepad_live_id::LiveId, makepad_platform::log::LogLevel,
-    makepad_micro_serde::*,
+    makepad_code_editor::text::Position, makepad_live_id::LiveId, makepad_micro_serde::*,
+    makepad_platform::log::LogLevel,
 };
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, SerRon, DeRon)]
@@ -96,7 +96,7 @@ impl BuildTarget {
         }) as usize
     }
     pub fn from_id(tgt: usize) -> Self {
-        match tgt as u64{
+        match tgt as u64 {
             Self::RELEASE => Self::Release,
             Self::DEBUG => Self::Debug,
             Self::RELEASE_STUDIO => Self::ReleaseStudio,
@@ -158,7 +158,7 @@ pub struct LogItemLocation {
     pub start: Position,
     pub end: Position,
     pub message: String,
-    pub explanation: Option<String>
+    pub explanation: Option<String>,
 }
 
 #[derive(Clone, Debug)]

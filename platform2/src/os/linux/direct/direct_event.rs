@@ -1,15 +1,5 @@
-use {
-    crate::{
-        event::{
-            MouseDownEvent,
-            MouseUpEvent,
-            MouseMoveEvent,
-            ScrollEvent,
-            KeyEvent,
-            TextInputEvent,
-            TimerEvent,
-        },
-    }
+use crate::event::{
+    KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent, TextInputEvent, TimerEvent,
 };
 
 #[derive(Debug)]

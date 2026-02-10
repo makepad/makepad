@@ -1,180 +1,162 @@
-pub use makepad_draw::makepad_platform;
-pub use makepad_draw;
-pub use makepad_html;
 pub use makepad_derive_widget;
-pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
+pub use makepad_draw;
+pub use makepad_draw::makepad_platform;
+pub use makepad_draw::*;
+pub use makepad_html;
 pub use makepad_platform::log;
 pub use makepad_zune_jpeg;
 pub use makepad_zune_png;
 
 pub mod button;
 pub mod cached_widget;
-pub mod label;
+pub mod check_box;
+pub mod desktop_button;
+pub mod dock;
+pub mod drop_down;
+pub mod expandable_panel;
+pub mod fold_button;
+pub mod fold_header;
+pub mod html;
+pub mod icon;
 pub mod image;
 pub mod image_blend;
-pub mod icon;
+pub mod label;
 pub mod link_label;
-pub mod drop_down;
+pub mod loading_spinner;
+pub mod markdown;
+pub mod modal;
+pub mod multi_image;
+pub mod multi_window;
 pub mod popup_menu;
-pub mod check_box;
+pub mod popup_notification;
+pub mod portal_list;
+pub mod portal_list2;
 pub mod radio_button;
-pub mod text_input;
-pub mod slider;
 pub mod scroll_bar;
 pub mod scroll_bars;
+pub mod scroll_shadow;
+pub mod slider;
 pub mod splitter;
-pub mod vectorline;
-pub mod fold_header;
-pub mod fold_button;
-pub mod multi_window;
-pub mod dock;
+pub mod stack_navigation;
 pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
-pub mod portal_list;
-pub mod portal_list2;
-pub mod stack_navigation;
-pub mod expandable_panel;
-pub mod desktop_button;
-pub mod window;
-pub mod scroll_shadow;
-pub mod window_menu;
-pub mod html;
-pub mod markdown;
 pub mod text_flow;
-pub mod multi_image;
-pub mod modal;
+pub mod text_input;
 pub mod tooltip;
-pub mod popup_notification;
-pub mod loading_spinner;
+pub mod vectorline;
 pub mod web_view;
+pub mod window;
+pub mod window_menu;
 
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
-pub mod video;
+pub mod color_picker;
+pub mod file_tree;
+pub mod flat_list;
+pub mod keyboard_view;
+pub mod page_flip;
+pub mod root;
 pub mod rotated_image;
 pub mod slide_panel;
-pub mod page_flip;
-pub mod keyboard_view;
-pub mod flat_list;
-pub mod file_tree;
 pub mod slides_view;
-pub mod color_picker;
-pub mod root;
+pub mod video;
 
 pub mod debug_view;
-pub mod performance_view;
 pub mod nav_control;
+pub mod performance_view;
 
-pub mod view;
 pub mod adaptive_view;
+pub mod command_text_input;
+pub mod toggle_panel;
+pub mod view;
 pub mod view_ui;
 pub mod widget;
 pub mod widget_match_event;
-pub mod toggle_panel;
-pub mod command_text_input;
 
 pub mod touch_gesture;
 
 #[macro_use]
 pub mod data_binding;
 
-pub mod theme_desktop_skeleton;
+pub mod bare_step;
+pub mod image_cache;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
+pub mod theme_desktop_skeleton;
 pub mod theme_mobile_dark;
 pub mod theme_mobile_light;
-pub mod image_cache;
-pub mod bare_step;
 pub mod turtle_step;
 
 pub mod designer;
-pub mod designer_dummy;
-pub mod designer_theme;
-pub mod designer_outline_tree;
-pub mod designer_view;
-pub mod designer_outline;
 pub mod designer_data;
+pub mod designer_dummy;
+pub mod designer_outline;
+pub mod designer_outline_tree;
+pub mod designer_theme;
 pub mod designer_toolbox;
+pub mod designer_view;
 
 pub mod defer_with_redraw;
 
 pub use crate::{
-    data_binding::{DataBindingStore, DataBindingMap},
+    adaptive_view::*,
     button::*,
     cached_widget::*,
-    view::*,
-    adaptive_view::*,
+    check_box::*,
+    command_text_input::*,
+    data_binding::{DataBindingMap, DataBindingStore},
+    defer_with_redraw::*,
+    dock::*,
+    drop_down::*,
+    expandable_panel::*,
+    flat_list::*,
+    fold_button::*,
+    html::*,
+    icon::*,
     image::*,
     image_blend::*,
-    icon::*,
     label::*,
-    slider::*,
-    root::*,
-    text_flow::*,
-    markdown::*,
-    html::*,
-    check_box::*,
-    drop_down::*,
-    modal::*,
-    tooltip::*,
-    popup_notification::*,
-    video::*,
-    radio_button::*,
-    text_input::*,
     link_label::*,
+    markdown::*,
+    modal::*,
+    multi_window::*,
+    page_flip::*,
+    popup_notification::*,
     portal_list::*,
     portal_list2::*,
-    flat_list::*,
-    page_flip::*,
+    radio_button::*,
+    root::*,
+    scroll_bar::ScrollBar,
+    scroll_bars::ScrollBars,
+    scroll_shadow::DrawScrollShadow,
     slide_panel::*,
-    fold_button::*,
-    dock::*,
+    slider::*,
+    slides_view::SlidesView,
     stack_navigation::*,
-    expandable_panel::*,
-    command_text_input::*,
-    window::*,
-    multi_window::*,
-    web_view::*,
-    scroll_bars::{ScrollBars},
-    scroll_shadow::{DrawScrollShadow},
-    scroll_bar::{ScrollBar},
-    slides_view::{SlidesView},
-    widget_match_event::WidgetMatchEvent,
+    text_flow::*,
+    text_input::*,
     toggle_panel::*,
-    defer_with_redraw::*,
+    tooltip::*,
+    video::*,
+    view::*,
+    web_view::*,
     widget::{
-        WidgetSet,
-        WidgetUid,
-        DrawStep,
-        DrawStepApi,
-        CreateAt,
-        WidgetCache,
-        WidgetActionCxExt,
-        WidgetActionsApi,
-        WidgetActionTrait,
-        WidgetAction,
-        WidgetActionCast,
-        WidgetActionOptionApi,
-        OptionWidgetRefExt,
-        WidgetRef,
-        Widget,
-        WidgetNode,
-        WidgetRegistry,
-        WidgetFactory,
-        WidgetSetIterator,
-        DrawStateWrap,
-    }
+        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
+        WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
+        WidgetActionsApi, WidgetCache, WidgetFactory, WidgetNode, WidgetRef, WidgetRegistry,
+        WidgetSet, WidgetSetIterator, WidgetUid,
+    },
+    widget_match_event::WidgetMatchEvent,
+    window::*,
 };
-
 
 pub fn live_design(cx: &mut Cx) {
     cx.link(live_id!(theme), live_id!(theme_desktop_dark));
     if cx.in_makepad_studio() {
         cx.link(live_id!(designer), live_id!(designer_real));
-    }
-    else{
+    } else {
         cx.link(live_id!(designer), live_id!(designer_dummy));
     }
     makepad_fonts_emoji::live_design(cx);
@@ -249,7 +231,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::command_text_input::live_design(cx);
     crate::loading_spinner::live_design(cx);
     crate::web_view::live_design(cx);
-        
+
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
     crate::designer_dummy::live_design(cx);

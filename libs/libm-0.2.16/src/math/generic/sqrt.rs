@@ -42,7 +42,7 @@
 //! computed at the same time, i.e. there is no need to calculate `1/sqrt(x)` and invert it.
 
 use crate::support::{
-    CastFrom, CastInto, DInt, Float, FpResult, HInt, Int, IntTy, MinInt, Round, Status, cold_path,
+    cold_path, CastFrom, CastInto, DInt, Float, FpResult, HInt, Int, IntTy, MinInt, Round, Status,
 };
 
 #[inline]

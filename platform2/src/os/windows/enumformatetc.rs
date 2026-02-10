@@ -2,25 +2,15 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 use {
-    std::cell::RefCell,
-    crate::{
-        windows::{
-            core::implement,
-            core,
-            Win32::{
-                System::Com::{
-                    FORMATETC,
-                    IEnumFORMATETC,
-                    IEnumFORMATETC_Impl
-                },
-                Foundation::{
-                    S_OK,
-                    S_FALSE,
-                    E_UNEXPECTED,
-                },
-            },
+    crate::windows::{
+        core,
+        core::implement,
+        Win32::{
+            Foundation::{E_UNEXPECTED, S_FALSE, S_OK},
+            System::Com::{IEnumFORMATETC, IEnumFORMATETC_Impl, FORMATETC},
         },
     },
+    std::cell::RefCell,
 };
 /*
 // This is a reimplementation of windows-rs IEnumFORMATETC which allows to return a HRESULT instead of a Result<()> for the Next() method, to return S_FALSE (which is a success) when no more items are available in the enumeration
@@ -172,23 +162,23 @@ implement_com!{
     }
 }*/
 
-
 // IEnumFORMATETC implementation for EnumFormatEtc, which hosts a list of FORMATETCs that can be queried by COM and DoDragDrop
 
 impl IEnumFORMATETC_Impl for EnumFormatEtc {
-
     fn Next(&self, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> core::HRESULT {
-
         // get reference to slice from rgelt pointer
-        let out_formats = unsafe { std::slice::from_raw_parts_mut(rgelt,256) };  // rgelt actually points to an array of FORMATETCs
+        let out_formats = unsafe { std::slice::from_raw_parts_mut(rgelt, 256) }; // rgelt actually points to an array of FORMATETCs
 
         // figure out how many formats are still remaining and need to be copied
         let n_avail = self.formats.len() - *self.index.borrow();
-        let n = if celt as usize > n_avail { n_avail } else { celt as usize };
+        let n = if celt as usize > n_avail {
+            n_avail
+        } else {
+            celt as usize
+        };
 
         // if anything needs to be copied
         if n > 0 {
-
             // return number of formats that were copied in pceltfetched
             if pceltfetched != std::ptr::null_mut() {
                 unsafe { *pceltfetched = n as u32 };
@@ -203,10 +193,7 @@ impl IEnumFORMATETC_Impl for EnumFormatEtc {
             *self.index.borrow_mut() += n;
 
             S_OK
-        }
-
-        else {
-
+        } else {
             // return zero in pceltfetched
             if pceltfetched != std::ptr::null_mut() {
                 unsafe { *pceltfetched = 0 };
@@ -217,10 +204,13 @@ impl IEnumFORMATETC_Impl for EnumFormatEtc {
     }
 
     fn Skip(&self, celt: u32) -> core::Result<()> {
-
         // figure out how many formats are still remaining and need to be skipped
         let n_avail = self.formats.len() - *self.index.borrow();
-        let n = if celt as usize > n_avail { n_avail } else { celt as usize };
+        let n = if celt as usize > n_avail {
+            n_avail
+        } else {
+            celt as usize
+        };
 
         // skip the formats
         if n > 0 {
@@ -231,7 +221,6 @@ impl IEnumFORMATETC_Impl for EnumFormatEtc {
     }
 
     fn Reset(&self) -> core::Result<()> {
-
         // reset the iterator
         self.index.replace(0);
 
@@ -239,7 +228,6 @@ impl IEnumFORMATETC_Impl for EnumFormatEtc {
     }
 
     fn Clone(&self) -> core::Result<IEnumFORMATETC> {
-
         // nope.
         Err(E_UNEXPECTED.into())
     }

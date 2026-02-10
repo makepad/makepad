@@ -22,12 +22,12 @@ use crate::enums::{FilterMethod, InterlaceMethod, PngChunkType, PngColor};
 use crate::error::PngDecodeErrors;
 use crate::error::PngDecodeErrors::GenericStatic;
 use crate::filters::de_filter::{
-    handle_avg, handle_avg_first, handle_paeth, handle_paeth_first, handle_sub, handle_up
+    handle_avg, handle_avg_first, handle_paeth, handle_paeth_first, handle_sub, handle_up,
 };
 use crate::options::default_chunk_handler;
 use crate::utils::{
     add_alpha, convert_be_to_target_endian_u16, convert_u16_to_u8_slice, expand_bits_to_byte,
-    expand_palette, expand_trns, is_le
+    expand_palette, expand_trns, is_le,
 };
 
 /// A palette entry.
@@ -36,10 +36,10 @@ use crate::utils::{
 /// chunk and pLTE chunk.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct PLTEEntry {
-    pub red:   u8,
+    pub red: u8,
     pub green: u8,
-    pub blue:  u8,
-    pub alpha: u8
+    pub blue: u8,
+    pub alpha: u8,
 }
 
 impl Default for PLTEEntry {
@@ -47,20 +47,20 @@ impl Default for PLTEEntry {
         // but a tRNS chunk may contain fewer values than there are palette entries.
         // In this case, the alpha value for all remaining palette entries is assumed to be 255
         PLTEEntry {
-            red:   0,
+            red: 0,
             green: 0,
-            blue:  0,
-            alpha: 255
+            blue: 0,
+            alpha: 255,
         }
     }
 }
 
 #[derive(Copy, Clone)]
 pub(crate) struct PngChunk {
-    pub length:     usize,
+    pub length: usize,
     pub chunk_type: PngChunkType,
-    pub chunk:      [u8; 4],
-    pub crc:        u32
+    pub chunk: [u8; 4],
+    pub crc: u32,
 }
 
 /// Time information data
@@ -68,12 +68,12 @@ pub(crate) struct PngChunk {
 /// Extracted from tIME chunk
 #[derive(Debug, Default, Copy, Clone)]
 pub struct TimeInfo {
-    pub year:   u16,
-    pub month:  u8,
-    pub day:    u8,
-    pub hour:   u8,
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
     pub minute: u8,
-    pub second: u8
+    pub second: u8,
 }
 
 /// iTXt details
@@ -84,7 +84,7 @@ pub struct TimeInfo {
 #[derive(Clone)]
 pub struct ItxtChunk {
     pub keyword: Vec<u8>,
-    pub text:    Vec<u8>
+    pub text: Vec<u8>,
 }
 
 /// tEXt chunk details
@@ -95,7 +95,7 @@ pub struct ItxtChunk {
 #[derive(Clone)]
 pub struct TextChunk {
     pub keyword: Vec<u8>,
-    pub text:    Vec<u8>
+    pub text: Vec<u8>,
 }
 
 /// zTxt details
@@ -105,7 +105,7 @@ pub struct TextChunk {
 pub struct ZtxtChunk {
     pub keyword: Vec<u8>,
     /// Uncompressed text
-    pub text:    Vec<u8>
+    pub text: Vec<u8>,
 }
 
 /// Represents PNG information that can be extracted
@@ -113,33 +113,33 @@ pub struct ZtxtChunk {
 #[derive(Default, Clone)]
 pub struct PngInfo {
     /// Image width
-    pub width:                usize,
+    pub width: usize,
     /// Image height
-    pub height:               usize,
+    pub height: usize,
     /// Image gamma
-    pub gamma:                Option<f32>,
+    pub gamma: Option<f32>,
     /// Image interlace method
-    pub interlace_method:     InterlaceMethod,
+    pub interlace_method: InterlaceMethod,
     /// Image time info
-    pub time_info:            Option<TimeInfo>,
+    pub time_info: Option<TimeInfo>,
     /// Image exif data
-    pub exif:                 Option<Vec<u8>>,
+    pub exif: Option<Vec<u8>>,
     /// Icc profile
-    pub icc_profile:          Option<Vec<u8>>,
+    pub icc_profile: Option<Vec<u8>>,
     /// UTF-8 encoded text chunk
-    pub itxt_chunk:           Vec<ItxtChunk>,
+    pub itxt_chunk: Vec<ItxtChunk>,
     /// ztxt chunk
-    pub ztxt_chunk:           Vec<ZtxtChunk>,
+    pub ztxt_chunk: Vec<ZtxtChunk>,
     /// tEXt chunk
-    pub text_chunk:           Vec<TextChunk>,
+    pub text_chunk: Vec<TextChunk>,
     // no need to expose these ones
-    pub(crate) depth:         u8,
+    pub(crate) depth: u8,
     // use bit_depth
-    pub(crate) color:         PngColor,
+    pub(crate) color: PngColor,
     // use get_colorspace
-    pub(crate) component:     u8,
+    pub(crate) component: u8,
     // use get_colorspace().num_components()
-    pub(crate) filter_method: FilterMethod // for internal use,no need to expose
+    pub(crate) filter_method: FilterMethod, // for internal use,no need to expose
 }
 
 /// A PNG decoder instance.
@@ -158,21 +158,21 @@ pub struct PngInfo {
 /// To get extra details such as exif data and ICC profile if present, use [`get_info`](PngDecoder::info)
 /// and access the relevant fields exposed
 pub struct PngDecoder<T> {
-    pub(crate) stream:                  ZReader<T>,
-    pub(crate) options:                 DecoderOptions,
-    pub(crate) png_info:                PngInfo,
-    pub(crate) palette:                 Vec<PLTEEntry>,
-    pub(crate) frames:                  Vec<SingleFrame>,
-    pub(crate) actl_info:               Option<ActlChunk>,
-    pub(crate) previous_stride:         Vec<u8>,
-    pub(crate) trns_bytes:              [u16; 4],
-    pub(crate) seen_hdr:                bool,
-    pub(crate) seen_ptle:               bool,
-    pub(crate) seen_headers:            bool,
-    pub(crate) seen_trns:               bool,
-    pub(crate) seen_iend:               bool,
-    pub(crate) current_frame:           usize,
-    pub(crate) called_from_decode_into: bool
+    pub(crate) stream: ZReader<T>,
+    pub(crate) options: DecoderOptions,
+    pub(crate) png_info: PngInfo,
+    pub(crate) palette: Vec<PLTEEntry>,
+    pub(crate) frames: Vec<SingleFrame>,
+    pub(crate) actl_info: Option<ActlChunk>,
+    pub(crate) previous_stride: Vec<u8>,
+    pub(crate) trns_bytes: [u16; 4],
+    pub(crate) seen_hdr: bool,
+    pub(crate) seen_ptle: bool,
+    pub(crate) seen_headers: bool,
+    pub(crate) seen_trns: bool,
+    pub(crate) seen_iend: bool,
+    pub(crate) current_frame: usize,
+    pub(crate) called_from_decode_into: bool,
 }
 
 impl<T: ZByteReaderTrait> PngDecoder<T> {
@@ -203,21 +203,21 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
     #[allow(unused_mut, clippy::redundant_field_names)]
     pub fn new_with_options(data: T, options: DecoderOptions) -> PngDecoder<T> {
         PngDecoder {
-            seen_hdr:                false,
-            stream:                  ZReader::new(data),
-            options:                 options,
-            palette:                 Vec::new(),
-            png_info:                PngInfo::default(),
-            actl_info:               None,
-            previous_stride:         vec![],
-            frames:                  vec![],
-            seen_ptle:               false,
-            seen_trns:               false,
-            seen_headers:            false,
-            seen_iend:               false,
-            trns_bytes:              [0; 4],
-            current_frame:           0,
-            called_from_decode_into: true
+            seen_hdr: false,
+            stream: ZReader::new(data),
+            options: options,
+            palette: Vec::new(),
+            png_info: PngInfo::default(),
+            actl_info: None,
+            previous_stride: vec![],
+            frames: vec![],
+            seen_ptle: false,
+            seen_trns: false,
+            seen_headers: false,
+            seen_iend: false,
+            trns_bytes: [0; 4],
+            current_frame: 0,
+            called_from_decode_into: true,
         }
     }
 
@@ -252,7 +252,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
         match self.png_info.depth {
             1 | 2 | 4 | 8 => Some(BitDepth::Eight),
             16 => Some(BitDepth::Sixteen),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
     /// Get image colorspace
@@ -275,7 +275,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
             return match self.png_info.color {
                 PngColor::Luma | PngColor::LumaA => Some(ColorSpace::LumaA),
                 PngColor::Palette | PngColor::RGB | PngColor::RGBA => Some(ColorSpace::RGBA),
-                PngColor::Unknown => unreachable!()
+                PngColor::Unknown => unreachable!(),
             };
         }
         if !self.seen_trns {
@@ -285,7 +285,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                 PngColor::LumaA => Some(ColorSpace::LumaA),
                 PngColor::RGB => Some(ColorSpace::RGB),
                 PngColor::RGBA => Some(ColorSpace::RGBA),
-                PngColor::Unknown => unreachable!()
+                PngColor::Unknown => unreachable!(),
             }
         } else {
             // for tRNS chunks, RGB=>RGBA
@@ -296,7 +296,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                 PngColor::Luma => Some(ColorSpace::LumaA),
                 PngColor::LumaA => Some(ColorSpace::LumaA),
                 PngColor::RGBA => Some(ColorSpace::RGBA),
-                _ => unreachable!()
+                _ => unreachable!(),
             }
         }
     }
@@ -350,7 +350,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
             b"zTXt" => PngChunkType::zTXt,
             b"tEXt" => PngChunkType::tEXt,
             b"fdAT" => PngChunkType::fdAT,
-            _ => PngChunkType::unkn
+            _ => PngChunkType::unkn,
         };
 
         if self.options.png_get_confirm_crc() {
@@ -377,7 +377,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
             length: chunk_length,
             chunk: chunk_type_int,
             chunk_type,
-            crc
+            crc,
         })
     }
 
@@ -400,7 +400,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
             // check if first chunk is ihdr here
             if self.stream.peek_at(4, 4)? != b"IHDR" {
                 return Err(PngDecodeErrors::GenericStatic(
-                    "First chunk not IHDR, Corrupt PNG"
+                    "First chunk not IHDR, Corrupt PNG",
                 ));
             }
         }
@@ -465,7 +465,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                 self.parse_fctl(header)?;
             }
             PngChunkType::IEND => self.seen_iend = true,
-            _ => default_chunk_handler(header.length, header.chunk, &mut self.stream, header.crc)?
+            _ => default_chunk_handler(header.length, header.chunk, &mut self.stream, header.crc)?,
         }
 
         if !self.seen_hdr {
@@ -498,7 +498,11 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
         }
 
         let info = &self.png_info;
-        let bytes = if info.depth == 16 && !self.options.png_get_strip_to_8bit() { 2 } else { 1 };
+        let bytes = if info.depth == 16 && !self.options.png_get_strip_to_8bit() {
+            2
+        } else {
+            1
+        };
 
         let out_n = self.colorspace()?.num_components();
         let dims = self.dimensions().unwrap();
@@ -549,7 +553,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
             None
         }
     }
-    
+
     /// Get APNG animation control information if available
     ///
     /// # Returns
@@ -558,7 +562,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
     pub const fn actl_info(&self) -> Option<&crate::apng::ActlChunk> {
         self.actl_info.as_ref()
     }
-    
+
     /// Get a mutable reference to the decoder options
     /// for the decoder instance
     ///
@@ -642,7 +646,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
         let image_len = self
             .inner_buffer_size()
             .ok_or(PngDecodeErrors::GenericStatic(
-                "Output buffer size overflowed a usize (corrupt png?)"
+                "Output buffer size overflowed a usize (corrupt png?)",
             ))?;
 
         if out.len() < image_len {
@@ -760,7 +764,11 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
     }
 
     fn decode_interlaced(
-        &mut self, deflate_data: &[u8], out: &mut [u8], info: &PngInfo, frame_info: &FrameInfo
+        &mut self,
+        deflate_data: &[u8],
+        out: &mut [u8],
+        info: &PngInfo,
+        frame_info: &FrameInfo,
     ) -> Result<(), PngDecodeErrors> {
         const XORIG: [usize; 7] = [0, 4, 0, 2, 0, 1, 0];
         const YORIG: [usize; 7] = [0, 0, 4, 0, 2, 0, 1];
@@ -939,7 +947,12 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
     /// away from this method to the caller of this method
     #[allow(clippy::manual_memcpy, clippy::comparison_chain)]
     fn create_png_image_raw(
-        &mut self, deflate_data: &[u8], width: usize, height: usize, out: &mut [u8], info: &PngInfo
+        &mut self,
+        deflate_data: &[u8],
+        width: usize,
+        height: usize,
+        out: &mut [u8],
+        info: &PngInfo,
     ) -> Result<(), PngDecodeErrors> {
         let use_sse4 = self.options.use_sse41();
         let use_sse2 = self.options.use_sse2();
@@ -1076,7 +1089,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
 
                 FilterMethod::AvgFirst => handle_avg_first(raw, current, components),
 
-                FilterMethod::Unknown => unreachable!()
+                FilterMethod::Unknown => unreachable!(),
             }
 
             if will_post_process && i > 0 {
@@ -1100,7 +1113,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                             n_components,
                             self.seen_ptle,
                             to_filter_row,
-                            &mut self.previous_stride
+                            &mut self.previous_stride,
                         )
                     } else {
                         // no extra transform, just depth upscaling, so let's
@@ -1116,7 +1129,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                             n_components,
                             self.seen_ptle,
                             &self.previous_stride,
-                            to_filter_row
+                            to_filter_row,
                         )
                     }
                 } else {
@@ -1135,7 +1148,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                             to_filter_row,
                             info.color,
                             self.trns_bytes,
-                            info.depth
+                            info.depth,
                         );
                     } else if info.depth == 16 {
                         // Tested by test_palette_trns_16bit.
@@ -1144,7 +1157,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                             to_filter_row,
                             info.color,
                             self.trns_bytes,
-                            info.depth
+                            info.depth,
                         );
                     }
                 }
@@ -1182,7 +1195,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                         &self.previous_stride,
                         to_filter_row,
                         self.png_info.color,
-                        self.depth().unwrap()
+                        self.depth().unwrap(),
                     );
                 }
             }
@@ -1206,7 +1219,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                             n_components,
                             self.seen_ptle,
                             to_filter_row,
-                            &mut self.previous_stride
+                            &mut self.previous_stride,
                         )
                     } else {
                         // no extra transform, just depth upscaling, so let's
@@ -1222,7 +1235,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                             n_components,
                             self.seen_ptle,
                             &self.previous_stride,
-                            to_filter_row
+                            to_filter_row,
                         )
                     }
                 } else {
@@ -1240,7 +1253,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                             to_filter_row,
                             info.color,
                             self.trns_bytes,
-                            info.depth
+                            info.depth,
                         );
                     } else if info.depth == 16 {
                         // Tested by test_palette_trns_16bit.
@@ -1249,7 +1262,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                             to_filter_row,
                             info.color,
                             self.trns_bytes,
-                            info.depth
+                            info.depth,
                         );
                     }
                 }
@@ -1270,7 +1283,7 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
                         &self.previous_stride,
                         to_filter_row,
                         self.png_info.color,
-                        self.depth().unwrap()
+                        self.depth().unwrap(),
                     );
                 }
             }
@@ -1311,7 +1324,8 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
             .set_limit(size_hint + 4 * (self.png_info.height))
             .set_confirm_checksum(self.options.inflate_get_confirm_adler());
 
-        let mut decoder = makepad_zune_inflate::DeflateDecoder::new_with_options(&flat_data.fdat, option);
+        let mut decoder =
+            makepad_zune_inflate::DeflateDecoder::new_with_options(&flat_data.fdat, option);
 
         decoder
             .decode_zlib()

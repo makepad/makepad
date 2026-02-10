@@ -3,6 +3,11 @@ use crate::makepad_draw::vector::{
     Tessellator, VVertex, VectorPath, VectorRenderParams, VECTOR_ZBIAS_STEP,
 };
 use crate::makepad_platform::makepad_micro_serde::*;
+use crate::map_leaflet::{build_polyline_parts, LeafletBounds, LeafletPoint};
+use crate::map_style::{
+    fill_color_for_tags, stroke_style_for_tags, CompiledMapTheme, MapThemeStyle, StrokePassStyle,
+    StrokeStyle,
+};
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent};
 use flate2::read::{GzDecoder, ZlibDecoder};
 use makepad_mbtile_reader::MbtilesReader;
@@ -26,8 +31,14 @@ const MAX_LOCAL_TILE_BATCH: usize = 10;
 const LABEL_COLLISION_PADDING: f64 = 4.0;
 const LABEL_VIEW_MARGIN: f64 = 72.0;
 const LABEL_MIN_PATH_PIXELS: f64 = 24.0;
-const ROAD_CLIP_PADDING: f32 = 16.0;
-const ROAD_SMOOTH_FACTOR: f32 = 0.5;
+const ROAD_CLIP_PADDING: f32 = 8.0;
+const ROAD_SMOOTH_FACTOR: f32 = 0.0;
+const ROAD_CENTER_OVERLAY_WIDTH_SCALE: f32 = 0.84;
+const ROAD_CENTER_OVERLAY_MIN_WIDTH: f32 = 0.45;
+const EARCUT_MAX_RINGS: usize = 500;
+const POLYGON_AREA_EPSILON: f64 = 1e-2;
+const MVT_INTERNAL_FEATURE_KEY: &str = "__mp_feature";
+const MVT_INTERNAL_RING_INDEX_KEY: &str = "__mp_ring";
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -189,6 +200,98 @@ script_mod! {
         dark_theme: false
         use_network: false
         use_local_mbtiles: true
+        style_light: mod.widgets.MapThemeStyle{
+            background: #xddd7cc
+            status_text: #xdee9f4
+            label: #x000000
+
+            mod.widgets.MapFillRule{group: "building" color: #xc6c0b5}
+            mod.widgets.MapFillRule{group: "water" color: #x9ecff2}
+            mod.widgets.MapFillRule{group: "landuse" value: "residential" color: #xe9e4dc}
+            mod.widgets.MapFillRule{group: "landuse" value: "commercial" color: #xe1dbd2}
+            mod.widgets.MapFillRule{group: "landuse" value: "retail" color: #xe1dbd2}
+            mod.widgets.MapFillRule{group: "landuse" value: "industrial" color: #xd6d1cb}
+            mod.widgets.MapFillRule{group: "landuse" value: "forest" color: #xc4deb0}
+            mod.widgets.MapFillRule{group: "landuse" value: "grass" color: #xd4e5bf}
+            mod.widgets.MapFillRule{group: "landuse" value: "meadow" color: #xd4e5bf}
+            mod.widgets.MapFillRule{group: "landuse" value: "farmland" color: #xd4e5bf}
+            mod.widgets.MapFillRule{group: "landuse" value: "*" color: #xe5dfd6}
+            mod.widgets.MapFillRule{group: "leisure" value: "park" color: #xc5e2b6}
+            mod.widgets.MapFillRule{group: "leisure" value: "garden" color: #xc5e2b6}
+            mod.widgets.MapFillRule{group: "leisure" value: "golf_course" color: #xc5e2b6}
+            mod.widgets.MapFillRule{group: "leisure" value: "pitch" color: #xb8db9f}
+            mod.widgets.MapFillRule{group: "leisure" value: "*" color: #xd1e8bf}
+
+            mod.widgets.MapRoadRule{kind: "motorway" sort_rank: 700 casing_color: #xc38d49 casing_width: 3.9 center_color: #xe2ad65 center_width: 3.0}
+            mod.widgets.MapRoadRule{kind: "trunk" sort_rank: 640 casing_color: #xc59f5f casing_width: 3.5 center_color: #xe8c17e center_width: 2.7}
+            mod.widgets.MapRoadRule{kind: "primary" sort_rank: 560 casing_color: #xc6b181 casing_width: 3.1 center_color: #xf0d39c center_width: 2.35}
+            mod.widgets.MapRoadRule{kind: "secondary" sort_rank: 470 casing_color: #xd0c8b6 casing_width: 2.75 center_color: #xf4e4c4 center_width: 2.0}
+            mod.widgets.MapRoadRule{kind: "busway" sort_rank: 470 casing_color: #xd0c8b6 casing_width: 2.75 center_color: #xf4e4c4 center_width: 2.0}
+            mod.widgets.MapRoadRule{kind: "tertiary" sort_rank: 390 casing_color: #xc6c0b3 casing_width: 2.4 center_color: #xf5ebd8 center_width: 1.7}
+            mod.widgets.MapRoadRule{kind: "residential" sort_rank: 310 casing_color: #xc2bcae casing_width: 2.0 center_color: #xfefefd center_width: 1.35}
+            mod.widgets.MapRoadRule{kind: "unclassified" sort_rank: 310 casing_color: #xc2bcae casing_width: 2.0 center_color: #xfefefd center_width: 1.35}
+            mod.widgets.MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #xc2bcae casing_width: 2.0 center_color: #xfefefd center_width: 1.35}
+            mod.widgets.MapRoadRule{kind: "service" sort_rank: 240 casing_color: #xc5bfb2 casing_width: 1.75 center_color: #xf6f2ea center_width: 1.1}
+            mod.widgets.MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #xc5bfb2 casing_width: 1.75 center_color: #xf6f2ea center_width: 1.1}
+            mod.widgets.MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "path" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "steps" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "track" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "*" sort_rank: 280 casing_color: #xc3bcaf casing_width: 1.9 center_color: #xf5f1e9 center_width: 1.2}
+
+            mod.widgets.MapWaterwayRule{kind: "river" sort_rank: 140 casing_color: #x4a8fc3 casing_width: 1.83 center_color: #x73b5e4 center_width: 1.55}
+            mod.widgets.MapWaterwayRule{kind: "canal" sort_rank: 140 casing_color: #x4a8fc3 casing_width: 1.5 center_color: #x73b5e4 center_width: 1.22}
+            mod.widgets.MapWaterwayRule{kind: "stream" sort_rank: 140 casing_color: #x4a8fc3 casing_width: 1.18 center_color: #x73b5e4 center_width: 0.9}
+            mod.widgets.MapWaterwayRule{kind: "*" sort_rank: 140 casing_color: #x4a8fc3 casing_width: 1.1 center_color: #x73b5e4 center_width: 0.82}
+            mod.widgets.MapRailRule{sort_rank: 180 casing_color: #xb7b2a9 casing_width: 0.96 center_color: #x8f8a81 center_width: 0.62 center_shape_id: 10.0}
+        }
+        style_dark: mod.widgets.MapThemeStyle{
+            background: #x161b22
+            status_text: #xb2c7d8
+            label: #xe5eaf1
+
+            mod.widgets.MapFillRule{group: "building" color: #x383d46}
+            mod.widgets.MapFillRule{group: "water" color: #x204f74}
+            mod.widgets.MapFillRule{group: "landuse" value: "residential" color: #x2a2f36}
+            mod.widgets.MapFillRule{group: "landuse" value: "commercial" color: #x30343b}
+            mod.widgets.MapFillRule{group: "landuse" value: "retail" color: #x30343b}
+            mod.widgets.MapFillRule{group: "landuse" value: "industrial" color: #x282c32}
+            mod.widgets.MapFillRule{group: "landuse" value: "forest" color: #x243629}
+            mod.widgets.MapFillRule{group: "landuse" value: "grass" color: #x2a3c2d}
+            mod.widgets.MapFillRule{group: "landuse" value: "meadow" color: #x2a3c2d}
+            mod.widgets.MapFillRule{group: "landuse" value: "farmland" color: #x2a3c2d}
+            mod.widgets.MapFillRule{group: "landuse" value: "*" color: #x2d3239}
+            mod.widgets.MapFillRule{group: "leisure" value: "park" color: #x2f4a34}
+            mod.widgets.MapFillRule{group: "leisure" value: "garden" color: #x2f4a34}
+            mod.widgets.MapFillRule{group: "leisure" value: "golf_course" color: #x2f4a34}
+            mod.widgets.MapFillRule{group: "leisure" value: "pitch" color: #x32553a}
+            mod.widgets.MapFillRule{group: "leisure" value: "*" color: #x2b4230}
+
+            mod.widgets.MapRoadRule{kind: "motorway" sort_rank: 700 casing_color: #x8f6937 casing_width: 3.9 center_color: #xd29b54 center_width: 3.0}
+            mod.widgets.MapRoadRule{kind: "trunk" sort_rank: 640 casing_color: #x8c7141 casing_width: 3.5 center_color: #xc8a561 center_width: 2.7}
+            mod.widgets.MapRoadRule{kind: "primary" sort_rank: 560 casing_color: #x706857 casing_width: 3.1 center_color: #xb9aa86 center_width: 2.35}
+            mod.widgets.MapRoadRule{kind: "secondary" sort_rank: 470 casing_color: #x556170 casing_width: 2.75 center_color: #x95a1b1 center_width: 2.0}
+            mod.widgets.MapRoadRule{kind: "busway" sort_rank: 470 casing_color: #x556170 casing_width: 2.75 center_color: #x95a1b1 center_width: 2.0}
+            mod.widgets.MapRoadRule{kind: "tertiary" sort_rank: 390 casing_color: #x4b5765 casing_width: 2.4 center_color: #x7d899a center_width: 1.7}
+            mod.widgets.MapRoadRule{kind: "residential" sort_rank: 310 casing_color: #x404a57 casing_width: 2.0 center_color: #x677383 center_width: 1.35}
+            mod.widgets.MapRoadRule{kind: "unclassified" sort_rank: 310 casing_color: #x404a57 casing_width: 2.0 center_color: #x677383 center_width: 1.35}
+            mod.widgets.MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #x404a57 casing_width: 2.0 center_color: #x677383 center_width: 1.35}
+            mod.widgets.MapRoadRule{kind: "service" sort_rank: 240 casing_color: #x3e4753 casing_width: 1.75 center_color: #x5e6a79 center_width: 1.1}
+            mod.widgets.MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x3e4753 casing_width: 1.75 center_color: #x5e6a79 center_width: 1.1}
+            mod.widgets.MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "footway" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "path" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "steps" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "track" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
+            mod.widgets.MapRoadRule{kind: "*" sort_rank: 280 casing_color: #x404a57 casing_width: 1.9 center_color: #x606c7b center_width: 1.2}
+
+            mod.widgets.MapWaterwayRule{kind: "river" sort_rank: 140 casing_color: #x2f6188 casing_width: 1.83 center_color: #x4f93c8 center_width: 1.55}
+            mod.widgets.MapWaterwayRule{kind: "canal" sort_rank: 140 casing_color: #x2f6188 casing_width: 1.5 center_color: #x4f93c8 center_width: 1.22}
+            mod.widgets.MapWaterwayRule{kind: "stream" sort_rank: 140 casing_color: #x2f6188 casing_width: 1.18 center_color: #x4f93c8 center_width: 0.9}
+            mod.widgets.MapWaterwayRule{kind: "*" sort_rank: 140 casing_color: #x2f6188 casing_width: 1.1 center_color: #x4f93c8 center_width: 0.82}
+            mod.widgets.MapRailRule{sort_rank: 180 casing_color: #x3f4650 casing_width: 0.96 center_color: #x707783 center_width: 0.62 center_shape_id: 10.0}
+        }
 
         draw_bg +: {
             color: #xddd7cc
@@ -434,6 +537,10 @@ pub struct MapView {
     max_zoom: f64,
     #[live(false)]
     dark_theme: bool,
+    #[live]
+    style_light: MapThemeStyle,
+    #[live]
+    style_dark: MapThemeStyle,
     #[live(true)]
     use_network: bool,
     #[live(true)]
@@ -473,6 +580,10 @@ pub struct MapView {
     applied_dark_theme: Option<bool>,
     #[rust]
     style_epoch: u64,
+    #[rust]
+    compiled_style_light: CompiledMapTheme,
+    #[rust]
+    compiled_style_dark: CompiledMapTheme,
 }
 
 impl ScriptHook for MapView {
@@ -493,12 +604,17 @@ impl ScriptHook for MapView {
         self.center_norm = lon_lat_to_normalized(self.center_lon, self.center_lat);
         self.wrap_and_clamp_center();
         self.normalize_source_mode();
+        let previous_light_style = self.compiled_style_light.clone();
+        let previous_dark_style = self.compiled_style_dark.clone();
+        self.rebuild_compiled_styles();
+        let styles_changed = previous_light_style != self.compiled_style_light
+            || previous_dark_style != self.compiled_style_dark;
         if self.style_epoch == 0 {
             self.style_epoch = 1;
         }
 
         let theme_changed = self.applied_dark_theme != Some(self.dark_theme);
-        if theme_changed {
+        if theme_changed || styles_changed {
             self.apply_theme_change();
             self.applied_dark_theme = Some(self.dark_theme);
         } else {
@@ -712,6 +828,19 @@ impl WidgetMatchEvent for MapView {
 }
 
 impl MapView {
+    fn rebuild_compiled_styles(&mut self) {
+        self.compiled_style_light = self.style_light.compile();
+        self.compiled_style_dark = self.style_dark.compile();
+    }
+
+    fn active_style(&self) -> &CompiledMapTheme {
+        if self.dark_theme {
+            &self.compiled_style_dark
+        } else {
+            &self.compiled_style_light
+        }
+    }
+
     fn normalize_source_mode(&mut self) {
         if self.use_local_mbtiles && self.use_network {
             log!(
@@ -749,10 +878,13 @@ impl MapView {
     }
 
     fn apply_theme_palette(&mut self) {
-        let palette = map_theme_palette(self.dark_theme);
-        self.draw_bg.color = palette.background;
-        self.draw_label.draw_super.color = palette.label;
-        self.draw_text.color = palette.status_text;
+        let (background, label, status_text) = {
+            let style = self.active_style();
+            (style.background, style.label, style.status_text)
+        };
+        self.draw_bg.color = background;
+        self.draw_label.draw_super.color = label;
+        self.draw_text.color = status_text;
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
@@ -968,14 +1100,14 @@ impl MapView {
         let mbtiles_path = LOCAL_MBTILES_PATH.to_string();
         let cache_dir = TILE_CACHE_DIR.to_string();
         let style_epoch = self.style_epoch;
-        let dark_theme = self.dark_theme;
+        let theme_style = self.active_style().clone();
 
         cx.spawn_thread(move || {
             let result = load_local_tile_batch(
                 Path::new(&mbtiles_path),
                 Path::new(&cache_dir),
                 &requested,
-                dark_theme,
+                &theme_style,
             );
             match result {
                 Ok(loaded) => {
@@ -1321,7 +1453,7 @@ impl MapView {
     }
 
     fn build_tile_buffers(&self, tile_key: TileKey, body: &str) -> Result<TileBuffers, String> {
-        build_tile_buffers_from_body(tile_key, body, self.dark_theme)
+        build_tile_buffers_from_body(tile_key, body, self.active_style())
     }
 
     fn place_and_draw_labels(
@@ -1733,33 +1865,6 @@ fn hex_to_premul_rgba(hex: u32, alpha: f32) -> [f32; 4] {
     [r * alpha, g * alpha, b * alpha, alpha]
 }
 
-#[derive(Clone, Copy)]
-struct MapThemePalette {
-    background: Vec4f,
-    status_text: Vec4f,
-    label: Vec4f,
-}
-
-fn rgb_hex_to_vec4f(hex: u32) -> Vec4f {
-    Vec4f::from_u32((hex << 8) | 0xff)
-}
-
-fn map_theme_palette(dark_theme: bool) -> MapThemePalette {
-    if dark_theme {
-        MapThemePalette {
-            background: rgb_hex_to_vec4f(0x161b22),
-            status_text: rgb_hex_to_vec4f(0xb2c7d8),
-            label: rgb_hex_to_vec4f(0xe5eaf1),
-        }
-    } else {
-        MapThemePalette {
-            background: rgb_hex_to_vec4f(0xddd7cc),
-            status_text: rgb_hex_to_vec4f(0xdee9f4),
-            label: rgb_hex_to_vec4f(0x000000),
-        }
-    }
-}
-
 fn simplify_label_path(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
     if points.len() <= 256 {
         return points.to_vec();
@@ -2014,45 +2119,216 @@ fn extract_way_label(tags: &HashMap<String, String>, points: &[(f32, f32)]) -> O
     })
 }
 
-#[derive(Clone, Copy, Debug)]
-struct StrokePassStyle {
-    color: u32,
-    width: f32,
-    shape_id: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct StrokeStyle {
-    sort_rank: i16,
-    casing: Option<StrokePassStyle>,
-    center: StrokePassStyle,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct StrokeMergeKey {
-    sort_rank: i16,
-    center_color: u32,
-    center_width_q: u16,
-    center_shape_id_q: u8,
-    has_casing: bool,
-    casing_color: u32,
-    casing_width_q: u16,
-    casing_shape_id_q: u8,
-}
-
-#[derive(Clone, Debug)]
-struct StrokePreparedSegment {
-    style: StrokeStyle,
-    merge_key: StrokeMergeKey,
-    node_ids: Vec<i64>,
-    points: Vec<(f32, f32)>,
-}
-
 #[derive(Clone, Debug)]
 struct StrokeDrawJob {
     sort_rank: i16,
     style: StrokeStyle,
+    center_overlay: bool,
     points: Vec<(f32, f32)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct StrokePassKey {
+    color: u32,
+    width_bits: u32,
+    shape_id_bits: u32,
+}
+
+impl From<StrokePassStyle> for StrokePassKey {
+    fn from(value: StrokePassStyle) -> Self {
+        Self {
+            color: value.color,
+            width_bits: value.width.to_bits(),
+            shape_id_bits: value.shape_id.to_bits(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct StrokeStyleKey {
+    sort_rank: i16,
+    casing: Option<StrokePassKey>,
+    center: StrokePassKey,
+}
+
+impl From<StrokeStyle> for StrokeStyleKey {
+    fn from(value: StrokeStyle) -> Self {
+        Self {
+            sort_rank: value.sort_rank,
+            casing: value.casing.map(StrokePassKey::from),
+            center: StrokePassKey::from(value.center),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct StrokeEndpointKey {
+    x: i32,
+    y: i32,
+}
+
+fn stroke_endpoint_key(point: (f32, f32)) -> StrokeEndpointKey {
+    const SCALE: f32 = 16.0;
+    StrokeEndpointKey {
+        x: (point.0 * SCALE).round() as i32,
+        y: (point.1 * SCALE).round() as i32,
+    }
+}
+
+fn merge_stroke_polylines(polylines: &[Vec<(f32, f32)>]) -> Vec<Vec<(f32, f32)>> {
+    if polylines.is_empty() {
+        return Vec::new();
+    }
+
+    let lines = polylines
+        .iter()
+        .filter(|line| line.len() >= 2)
+        .cloned()
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut endpoint_index = HashMap::<StrokeEndpointKey, Vec<(usize, bool)>>::new();
+    for (line_index, line) in lines.iter().enumerate() {
+        let start_key = stroke_endpoint_key(line[0]);
+        let end_key = stroke_endpoint_key(line[line.len() - 1]);
+        endpoint_index
+            .entry(start_key)
+            .or_default()
+            .push((line_index, true));
+        endpoint_index
+            .entry(end_key)
+            .or_default()
+            .push((line_index, false));
+    }
+
+    fn extend_chain_forward(
+        chain: &mut Vec<(f32, f32)>,
+        lines: &[Vec<(f32, f32)>],
+        endpoint_index: &HashMap<StrokeEndpointKey, Vec<(usize, bool)>>,
+        used: &mut [bool],
+        mut current_line: usize,
+        mut at_start: bool,
+    ) {
+        loop {
+            let Some(&end_point) = chain.last() else {
+                return;
+            };
+            let key = stroke_endpoint_key(end_point);
+            let Some(connections) = endpoint_index.get(&key) else {
+                return;
+            };
+            if connections.len() != 2 {
+                return;
+            }
+
+            let mut next: Option<(usize, bool)> = None;
+            for &(line_index, line_at_start) in connections {
+                if line_index == current_line {
+                    continue;
+                }
+                if used[line_index] {
+                    continue;
+                }
+                if next.is_some() {
+                    return;
+                }
+                next = Some((line_index, line_at_start));
+            }
+            let Some((next_line, next_starts_here)) = next else {
+                return;
+            };
+
+            let oriented = if next_starts_here {
+                lines[next_line].clone()
+            } else {
+                let mut reversed = lines[next_line].clone();
+                reversed.reverse();
+                reversed
+            };
+            if oriented.len() < 2 {
+                used[next_line] = true;
+                current_line = next_line;
+                at_start = !next_starts_here;
+                continue;
+            }
+
+            let skip = usize::from(chain.last().copied() == oriented.first().copied());
+            chain.extend_from_slice(&oriented[skip..]);
+
+            used[next_line] = true;
+            current_line = next_line;
+            at_start = !next_starts_here;
+
+            // Prevent accidental self-loop extension when reversing through the same endpoint.
+            if at_start && chain.len() > 2 && chain.first().copied() == chain.last().copied() {
+                return;
+            }
+        }
+    }
+
+    fn emit_chain_if_needed(
+        line_index: usize,
+        lines: &[Vec<(f32, f32)>],
+        endpoint_index: &HashMap<StrokeEndpointKey, Vec<(usize, bool)>>,
+        used: &mut [bool],
+        merged: &mut Vec<Vec<(f32, f32)>>,
+    ) {
+        if used[line_index] {
+            return;
+        }
+        let mut chain = lines[line_index].clone();
+        if chain.len() < 2 {
+            used[line_index] = true;
+            return;
+        }
+        used[line_index] = true;
+
+        extend_chain_forward(
+            &mut chain,
+            lines,
+            endpoint_index,
+            used,
+            line_index,
+            false,
+        );
+
+        chain.reverse();
+        extend_chain_forward(&mut chain, lines, endpoint_index, used, line_index, true);
+        chain.reverse();
+
+        if chain.len() >= 2 {
+            merged.push(chain);
+        }
+    }
+
+    let mut used = vec![false; lines.len()];
+    let mut merged = Vec::<Vec<(f32, f32)>>::new();
+
+    for line_index in 0..lines.len() {
+        if used[line_index] {
+            continue;
+        }
+
+        let line = &lines[line_index];
+        let start_degree = endpoint_index
+            .get(&stroke_endpoint_key(line[0]))
+            .map_or(0, Vec::len);
+        let end_degree = endpoint_index
+            .get(&stroke_endpoint_key(line[line.len() - 1]))
+            .map_or(0, Vec::len);
+
+        if start_degree != 2 || end_degree != 2 {
+            emit_chain_if_needed(line_index, &lines, &endpoint_index, &mut used, &mut merged);
+        }
+    }
+
+    for line_index in 0..lines.len() {
+        emit_chain_if_needed(line_index, &lines, &endpoint_index, &mut used, &mut merged);
+    }
+
+    merged
 }
 
 fn append_stroke_pass(
@@ -2064,6 +2340,7 @@ fn append_stroke_pass(
     stroke_vertices: &mut Vec<f32>,
     stroke_indices: &mut Vec<u32>,
     pass: StrokePassStyle,
+    line_cap: LineCap,
     stroke_zbias: &mut f32,
 ) {
     let stroke_points = expand_polyline_endpoints(points, pass.width);
@@ -2074,8 +2351,8 @@ fn append_stroke_pass(
         tess_verts,
         tess_indices,
         pass.width,
-        LineCap::Butt,
-        LineJoin::Miter,
+        line_cap,
+        LineJoin::Round,
         4.0,
         1.0,
     );
@@ -2099,444 +2376,6 @@ fn expand_polyline_endpoints(points: &[(f32, f32)], _stroke_width: f32) -> Vec<(
     points.to_vec()
 }
 
-fn quantize_stroke_width(width: f32) -> u16 {
-    (width.max(0.0) * 256.0).round().clamp(0.0, u16::MAX as f32) as u16
-}
-
-fn quantize_shape_id(shape_id: f32) -> u8 {
-    shape_id.round().clamp(0.0, 255.0) as u8
-}
-
-fn stroke_style_merge_key(style: StrokeStyle) -> StrokeMergeKey {
-    let (has_casing, casing_color, casing_width_q) = if let Some(casing) = style.casing {
-        (true, casing.color, quantize_stroke_width(casing.width))
-    } else {
-        (false, 0, 0)
-    };
-    StrokeMergeKey {
-        sort_rank: style.sort_rank,
-        center_color: style.center.color,
-        center_width_q: quantize_stroke_width(style.center.width),
-        center_shape_id_q: quantize_shape_id(style.center.shape_id),
-        has_casing,
-        casing_color,
-        casing_width_q,
-        casing_shape_id_q: style.casing.map_or(0, |c| quantize_shape_id(c.shape_id)),
-    }
-}
-
-fn normalize_dir2(dx: f64, dy: f64) -> Option<(f64, f64)> {
-    let len2 = dx * dx + dy * dy;
-    if len2 <= 1e-12 {
-        return None;
-    }
-    let inv = len2.sqrt().recip();
-    Some((dx * inv, dy * inv))
-}
-
-fn chain_out_dir(points: &[(f32, f32)], at_start: bool) -> Option<(f64, f64)> {
-    if points.len() < 2 {
-        return None;
-    }
-    if at_start {
-        normalize_dir2(
-            points[0].0 as f64 - points[1].0 as f64,
-            points[0].1 as f64 - points[1].1 as f64,
-        )
-    } else {
-        let n = points.len();
-        normalize_dir2(
-            points[n - 1].0 as f64 - points[n - 2].0 as f64,
-            points[n - 1].1 as f64 - points[n - 2].1 as f64,
-        )
-    }
-}
-
-fn segment_outgoing_dir_from_node(
-    segment: &StrokePreparedSegment,
-    node_id: i64,
-) -> Option<(bool, (f64, f64))> {
-    if segment.points.len() < 2 || segment.node_ids.len() < 2 {
-        return None;
-    }
-    let first = segment.node_ids[0];
-    let last = *segment.node_ids.last()?;
-    if node_id == first {
-        let dx = segment.points[1].0 as f64 - segment.points[0].0 as f64;
-        let dy = segment.points[1].1 as f64 - segment.points[0].1 as f64;
-        return normalize_dir2(dx, dy).map(|dir| (true, dir));
-    }
-    if node_id == last {
-        let n = segment.points.len();
-        let dx = segment.points[n - 2].0 as f64 - segment.points[n - 1].0 as f64;
-        let dy = segment.points[n - 2].1 as f64 - segment.points[n - 1].1 as f64;
-        return normalize_dir2(dx, dy).map(|dir| (false, dir));
-    }
-    None
-}
-
-fn choose_straight_continuation(
-    node_to_segments: &HashMap<i64, Vec<usize>>,
-    segments: &[StrokePreparedSegment],
-    used: &HashSet<usize>,
-    node_id: i64,
-    current_dir: (f64, f64),
-) -> Option<(usize, bool)> {
-    let candidates = node_to_segments.get(&node_id)?;
-    let mut best: Option<(usize, bool, f64)> = None;
-    let mut second_score = f64::NEG_INFINITY;
-
-    for &segment_index in candidates {
-        if used.contains(&segment_index) {
-            continue;
-        }
-        let segment = &segments[segment_index];
-        let Some((at_start, candidate_dir)) = segment_outgoing_dir_from_node(segment, node_id)
-        else {
-            continue;
-        };
-        let score = current_dir.0 * candidate_dir.0 + current_dir.1 * candidate_dir.1;
-        if let Some((_, _, best_score)) = best {
-            if score > best_score {
-                second_score = best_score;
-                best = Some((segment_index, at_start, score));
-            } else if score > second_score {
-                second_score = score;
-            }
-        } else {
-            best = Some((segment_index, at_start, score));
-        }
-    }
-
-    let (segment_index, at_start, best_score) = best?;
-    if best_score < 0.55 {
-        return None;
-    }
-    if second_score > best_score - 0.08 && best_score < 0.97 {
-        return None;
-    }
-    Some((segment_index, at_start))
-}
-
-fn merge_stroke_segments(
-    segments: &[StrokePreparedSegment],
-    group_indices: &[usize],
-) -> Vec<Vec<(f32, f32)>> {
-    if group_indices.is_empty() {
-        return Vec::new();
-    }
-
-    let mut node_to_segments = HashMap::<i64, Vec<usize>>::new();
-    for &segment_index in group_indices {
-        let segment = &segments[segment_index];
-        if segment.node_ids.len() < 2 || segment.points.len() < 2 {
-            continue;
-        }
-        let first = segment.node_ids[0];
-        let last = *segment.node_ids.last().unwrap_or(&first);
-        node_to_segments
-            .entry(first)
-            .or_default()
-            .push(segment_index);
-        if last != first {
-            node_to_segments
-                .entry(last)
-                .or_default()
-                .push(segment_index);
-        }
-    }
-
-    let mut used = HashSet::<usize>::new();
-    let mut merged = Vec::<Vec<(f32, f32)>>::new();
-
-    for &seed_index in group_indices {
-        if used.contains(&seed_index) {
-            continue;
-        }
-        let seed = &segments[seed_index];
-        if seed.node_ids.len() < 2 || seed.points.len() < 2 {
-            continue;
-        }
-
-        used.insert(seed_index);
-        let mut chain_points = seed.points.clone();
-        let mut start_node = seed.node_ids[0];
-        let mut end_node = *seed.node_ids.last().unwrap_or(&start_node);
-
-        loop {
-            let Some(current_dir) = chain_out_dir(&chain_points, false) else {
-                break;
-            };
-            let Some((next_index, next_at_start)) = choose_straight_continuation(
-                &node_to_segments,
-                segments,
-                &used,
-                end_node,
-                current_dir,
-            ) else {
-                break;
-            };
-
-            used.insert(next_index);
-            let next = &segments[next_index];
-            if next_at_start {
-                if next.points.len() > 1 {
-                    chain_points.extend_from_slice(&next.points[1..]);
-                    if let Some(&node) = next.node_ids.last() {
-                        end_node = node;
-                    }
-                }
-            } else if next.points.len() > 1 {
-                for point in next.points[..next.points.len() - 1].iter().rev() {
-                    chain_points.push(*point);
-                }
-                end_node = next.node_ids[0];
-            }
-        }
-
-        loop {
-            let Some(current_dir) = chain_out_dir(&chain_points, true) else {
-                break;
-            };
-            let Some((next_index, next_at_start)) = choose_straight_continuation(
-                &node_to_segments,
-                segments,
-                &used,
-                start_node,
-                current_dir,
-            ) else {
-                break;
-            };
-
-            used.insert(next_index);
-            let next = &segments[next_index];
-            let mut prefix = Vec::<(f32, f32)>::new();
-            if next_at_start {
-                if next.points.len() > 1 {
-                    for point in next.points[..next.points.len() - 1].iter().rev() {
-                        prefix.push(*point);
-                    }
-                    if let Some(&node) = next.node_ids.last() {
-                        start_node = node;
-                    }
-                }
-            } else if next.points.len() > 1 {
-                prefix.extend_from_slice(&next.points[..next.points.len() - 1]);
-                start_node = next.node_ids[0];
-            }
-
-            if !prefix.is_empty() {
-                prefix.extend_from_slice(&chain_points);
-                chain_points = prefix;
-            }
-        }
-
-        if chain_points.len() >= 2 {
-            merged.push(chain_points);
-        }
-    }
-
-    let base_width = segments[group_indices[0]].style.center.width;
-    let max_gap = (base_width * 0.85).clamp(0.75, 2.2);
-    merge_nearby_chains(merged, max_gap)
-}
-
-fn point_distance_sq(a: (f32, f32), b: (f32, f32)) -> f64 {
-    let dx = a.0 as f64 - b.0 as f64;
-    let dy = a.1 as f64 - b.1 as f64;
-    dx * dx + dy * dy
-}
-
-fn chain_endpoint_dir(points: &[(f32, f32)], at_start: bool) -> Option<(f64, f64)> {
-    if points.len() < 2 {
-        return None;
-    }
-    if at_start {
-        normalize_dir2(
-            points[1].0 as f64 - points[0].0 as f64,
-            points[1].1 as f64 - points[0].1 as f64,
-        )
-    } else {
-        let n = points.len();
-        normalize_dir2(
-            points[n - 2].0 as f64 - points[n - 1].0 as f64,
-            points[n - 2].1 as f64 - points[n - 1].1 as f64,
-        )
-    }
-}
-
-fn choose_nearby_chain_continuation(
-    chains: &[Vec<(f32, f32)>],
-    used: &[bool],
-    anchor: (f32, f32),
-    current_dir: (f64, f64),
-    max_gap_sq: f64,
-) -> Option<(usize, bool)> {
-    let mut best: Option<(usize, bool, f64, f64)> = None;
-    let mut second_score = f64::NEG_INFINITY;
-
-    for (index, chain) in chains.iter().enumerate() {
-        if used[index] || chain.len() < 2 {
-            continue;
-        }
-
-        let start = chain[0];
-        let start_dist_sq = point_distance_sq(anchor, start);
-        if start_dist_sq <= max_gap_sq {
-            if let Some(dir) = chain_endpoint_dir(chain, true) {
-                let score = current_dir.0 * dir.0 + current_dir.1 * dir.1;
-                if let Some((_, _, best_score, best_dist_sq)) = best {
-                    if score > best_score + 1e-6
-                        || ((score - best_score).abs() <= 1e-6 && start_dist_sq < best_dist_sq)
-                    {
-                        second_score = best_score.max(second_score);
-                        best = Some((index, true, score, start_dist_sq));
-                    } else if score > second_score {
-                        second_score = score;
-                    }
-                } else {
-                    best = Some((index, true, score, start_dist_sq));
-                }
-            }
-        }
-
-        let end = chain[chain.len() - 1];
-        let end_dist_sq = point_distance_sq(anchor, end);
-        if end_dist_sq <= max_gap_sq {
-            if let Some(dir) = chain_endpoint_dir(chain, false) {
-                let score = current_dir.0 * dir.0 + current_dir.1 * dir.1;
-                if let Some((_, _, best_score, best_dist_sq)) = best {
-                    if score > best_score + 1e-6
-                        || ((score - best_score).abs() <= 1e-6 && end_dist_sq < best_dist_sq)
-                    {
-                        second_score = best_score.max(second_score);
-                        best = Some((index, false, score, end_dist_sq));
-                    } else if score > second_score {
-                        second_score = score;
-                    }
-                } else {
-                    best = Some((index, false, score, end_dist_sq));
-                }
-            }
-        }
-    }
-
-    let (index, at_start, best_score, _) = best?;
-    if best_score < 0.62 {
-        return None;
-    }
-    if second_score > best_score - 0.06 && best_score < 0.95 {
-        return None;
-    }
-    Some((index, at_start))
-}
-
-fn append_chain_points(
-    chain: &mut Vec<(f32, f32)>,
-    candidate: &[(f32, f32)],
-    candidate_at_start: bool,
-) {
-    if candidate.len() < 2 || chain.is_empty() {
-        return;
-    }
-    let end = *chain.last().unwrap_or(&candidate[0]);
-    if candidate_at_start {
-        if !approx_eq_point(end, candidate[0]) {
-            chain.push(candidate[0]);
-        }
-        chain.extend_from_slice(&candidate[1..]);
-    } else {
-        let n = candidate.len();
-        if !approx_eq_point(end, candidate[n - 1]) {
-            chain.push(candidate[n - 1]);
-        }
-        for point in candidate[..n - 1].iter().rev() {
-            chain.push(*point);
-        }
-    }
-}
-
-fn prepend_chain_points(
-    chain: &mut Vec<(f32, f32)>,
-    candidate: &[(f32, f32)],
-    candidate_at_start: bool,
-) {
-    if candidate.len() < 2 || chain.is_empty() {
-        return;
-    }
-    let start = chain[0];
-    let mut prefix = Vec::<(f32, f32)>::with_capacity(candidate.len());
-    if candidate_at_start {
-        for point in candidate.iter().rev() {
-            prefix.push(*point);
-        }
-    } else {
-        prefix.extend_from_slice(candidate);
-    }
-    if prefix
-        .last()
-        .is_some_and(|last| approx_eq_point(*last, start))
-    {
-        prefix.pop();
-    }
-    if prefix.is_empty() {
-        return;
-    }
-    prefix.extend_from_slice(chain);
-    *chain = prefix;
-}
-
-fn merge_nearby_chains(chains: Vec<Vec<(f32, f32)>>, max_gap: f32) -> Vec<Vec<(f32, f32)>> {
-    if chains.len() <= 1 {
-        return chains;
-    }
-    let max_gap_sq = (max_gap as f64) * (max_gap as f64);
-    let mut used = vec![false; chains.len()];
-    let mut out = Vec::<Vec<(f32, f32)>>::new();
-
-    for seed_index in 0..chains.len() {
-        if used[seed_index] || chains[seed_index].len() < 2 {
-            continue;
-        }
-        used[seed_index] = true;
-        let mut chain = chains[seed_index].clone();
-
-        loop {
-            let Some(current_dir) = chain_out_dir(&chain, false) else {
-                break;
-            };
-            let end = *chain.last().unwrap_or(&chain[0]);
-            let Some((next_index, next_at_start)) = choose_nearby_chain_continuation(
-                &chains, &used, end, current_dir, max_gap_sq,
-            ) else {
-                break;
-            };
-            used[next_index] = true;
-            append_chain_points(&mut chain, &chains[next_index], next_at_start);
-        }
-
-        loop {
-            let Some(current_dir) = chain_out_dir(&chain, true) else {
-                break;
-            };
-            let start = chain[0];
-            let Some((next_index, next_at_start)) = choose_nearby_chain_continuation(
-                &chains, &used, start, current_dir, max_gap_sq,
-            ) else {
-                break;
-            };
-            used[next_index] = true;
-            prepend_chain_points(&mut chain, &chains[next_index], next_at_start);
-        }
-
-        if chain.len() >= 2 {
-            out.push(chain);
-        }
-    }
-
-    out
-}
-
 #[derive(Clone, Copy)]
 struct ClipRectF {
     min_x: f32,
@@ -2555,255 +2394,131 @@ fn tile_clip_rect(tile_key: TileKey, padding: f32) -> ClipRectF {
     }
 }
 
-fn clip_outcode(point: (f32, f32), rect: ClipRectF) -> u8 {
-    let mut code = 0_u8;
-    if point.0 < rect.min_x {
-        code |= 1;
-    } else if point.0 > rect.max_x {
-        code |= 2;
-    }
-    if point.1 < rect.min_y {
-        code |= 4;
-    } else if point.1 > rect.max_y {
-        code |= 8;
-    }
-    code
-}
-
-fn clip_segment_to_rect(
-    mut a: (f32, f32),
-    mut b: (f32, f32),
-    rect: ClipRectF,
-) -> Option<((f32, f32), (f32, f32))> {
-    let mut code_a = clip_outcode(a, rect);
-    let mut code_b = clip_outcode(b, rect);
-    let mut guard = 0;
-
-    loop {
-        if (code_a | code_b) == 0 {
-            return Some((a, b));
-        }
-        if (code_a & code_b) != 0 {
-            return None;
-        }
-        if guard > 8 {
-            return None;
-        }
-        guard += 1;
-
-        let code_out = if code_a != 0 { code_a } else { code_b };
-        let dx = b.0 - a.0;
-        let dy = b.1 - a.1;
-
-        let (x, y) = if (code_out & 8) != 0 {
-            if dy.abs() <= f32::EPSILON {
-                return None;
-            }
-            (a.0 + dx * (rect.max_y - a.1) / dy, rect.max_y)
-        } else if (code_out & 4) != 0 {
-            if dy.abs() <= f32::EPSILON {
-                return None;
-            }
-            (a.0 + dx * (rect.min_y - a.1) / dy, rect.min_y)
-        } else if (code_out & 2) != 0 {
-            if dx.abs() <= f32::EPSILON {
-                return None;
-            }
-            (rect.max_x, a.1 + dy * (rect.max_x - a.0) / dx)
-        } else {
-            if dx.abs() <= f32::EPSILON {
-                return None;
-            }
-            (rect.min_x, a.1 + dy * (rect.min_x - a.0) / dx)
-        };
-
-        if code_out == code_a {
-            a = (x, y);
-            code_a = clip_outcode(a, rect);
-        } else {
-            b = (x, y);
-            code_b = clip_outcode(b, rect);
-        }
+fn tile_clip_bounds(tile_key: TileKey, padding: f32) -> LeafletBounds {
+    let rect = tile_clip_rect(tile_key, padding);
+    LeafletBounds {
+        min: LeafletPoint {
+            x: rect.min_x,
+            y: rect.min_y,
+        },
+        max: LeafletPoint {
+            x: rect.max_x,
+            y: rect.max_y,
+        },
     }
 }
 
-fn approx_eq_point(a: (f32, f32), b: (f32, f32)) -> bool {
-    let dx = a.0 - b.0;
-    let dy = a.1 - b.1;
-    dx * dx + dy * dy <= 1e-4
+#[derive(Clone, Debug)]
+struct PreparedWay {
+    way_index: usize,
+    points: Vec<(f32, f32)>,
 }
 
-fn clip_polyline_parts(points: &[(f32, f32)], rect: ClipRectF) -> Vec<Vec<(f32, f32)>> {
-    if points.len() < 2 {
+#[derive(Clone, Debug)]
+struct FillRing {
+    order: usize,
+    points: Vec<(f32, f32)>,
+    signed_area: f64,
+}
+
+#[derive(Debug)]
+struct FillFeatureGroup {
+    color: u32,
+    rings: Vec<FillRing>,
+}
+
+fn normalize_polygon_ring(points: &[(f32, f32)]) -> Option<Vec<(f32, f32)>> {
+    if points.len() < 3 {
+        return None;
+    }
+
+    let mut ring = Vec::<(f32, f32)>::with_capacity(points.len());
+    for &point in points {
+        if ring.last().copied() != Some(point) {
+            ring.push(point);
+        }
+    }
+
+    if ring.len() >= 2 && ring.first().copied() == ring.last().copied() {
+        ring.pop();
+    }
+
+    if ring.len() < 3 {
+        return None;
+    }
+
+    let signed_area = polygon_signed_area(&ring);
+    if signed_area.abs() <= POLYGON_AREA_EPSILON {
+        return None;
+    }
+
+    Some(ring)
+}
+
+fn polygon_signed_area(ring: &[(f32, f32)]) -> f64 {
+    if ring.len() < 3 {
+        return 0.0;
+    }
+
+    let mut area = 0.0_f64;
+    for i in 0..ring.len() {
+        let j = (i + 1) % ring.len();
+        area += ring[i].0 as f64 * ring[j].1 as f64 - ring[j].0 as f64 * ring[i].1 as f64;
+    }
+    area * 0.5
+}
+
+fn classify_polygon_rings(rings: &[FillRing], max_rings: usize) -> Vec<Vec<Vec<(f32, f32)>>> {
+    if rings.is_empty() {
         return Vec::new();
     }
 
-    let mut parts = Vec::<Vec<(f32, f32)>>::new();
-    let mut current = Vec::<(f32, f32)>::new();
-    for index in 0..points.len() - 1 {
-        let a = points[index];
-        let b = points[index + 1];
-        let Some((clipped_a, clipped_b)) = clip_segment_to_rect(a, b, rect) else {
-            if current.len() >= 2 {
-                parts.push(std::mem::take(&mut current));
+    let mut selected = rings
+        .iter()
+        .filter(|ring| ring.signed_area.abs() > POLYGON_AREA_EPSILON)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Vec::new();
+    }
+
+    if max_rings > 0 && selected.len() > max_rings {
+        selected.sort_unstable_by(|a, b| b.signed_area.abs().total_cmp(&a.signed_area.abs()));
+        selected.truncate(max_rings);
+        selected.sort_unstable_by_key(|ring| ring.order);
+    }
+
+    let mut polygons = Vec::<Vec<Vec<(f32, f32)>>>::new();
+    let mut current = Vec::<Vec<(f32, f32)>>::new();
+    let mut ccw: Option<bool> = None;
+
+    for ring in selected {
+        let is_ccw = ring.signed_area < 0.0;
+        if ccw.is_none() {
+            ccw = Some(is_ccw);
+        }
+
+        if ccw == Some(is_ccw) {
+            if !current.is_empty() {
+                polygons.push(current);
+                current = Vec::new();
             }
-            continue;
-        };
-
-        if current.is_empty() {
-            current.push(clipped_a);
-        } else if !approx_eq_point(*current.last().unwrap_or(&clipped_a), clipped_a) {
-            current.push(clipped_a);
-        }
-
-        if !approx_eq_point(*current.last().unwrap_or(&clipped_b), clipped_b) {
-            current.push(clipped_b);
-        }
-
-        if !approx_eq_point(clipped_b, b) || index == points.len() - 2 {
-            if current.len() >= 2 {
-                parts.push(std::mem::take(&mut current));
-            } else {
-                current.clear();
-            }
-        }
-    }
-    parts
-}
-
-fn sq_dist(a: (f32, f32), b: (f32, f32)) -> f32 {
-    let dx = b.0 - a.0;
-    let dy = b.1 - a.1;
-    dx * dx + dy * dy
-}
-
-fn sq_closest_point_on_segment(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
-    let mut x = a.0;
-    let mut y = a.1;
-    let mut dx = b.0 - x;
-    let mut dy = b.1 - y;
-    let dot = dx * dx + dy * dy;
-
-    if dot > 0.0 {
-        let t = ((point.0 - x) * dx + (point.1 - y) * dy) / dot;
-        if t > 1.0 {
-            x = b.0;
-            y = b.1;
-        } else if t > 0.0 {
-            x += dx * t;
-            y += dy * t;
+            current.push(ring.points.clone());
+        } else if !current.is_empty() {
+            current.push(ring.points.clone());
         }
     }
 
-    dx = point.0 - x;
-    dy = point.1 - y;
-    dx * dx + dy * dy
-}
-
-fn simplify_dp_step(
-    points: &[(f32, f32)],
-    markers: &mut [bool],
-    sq_tolerance: f32,
-    first: usize,
-    last: usize,
-) {
-    if last <= first + 1 {
-        return;
-    }
-    let mut max_sq_dist = 0.0_f32;
-    let mut index = first;
-
-    for i in first + 1..last {
-        let sq_dist = sq_closest_point_on_segment(points[i], points[first], points[last]);
-        if sq_dist > max_sq_dist {
-            max_sq_dist = sq_dist;
-            index = i;
-        }
+    if !current.is_empty() {
+        polygons.push(current);
     }
 
-    if max_sq_dist > sq_tolerance {
-        markers[index] = true;
-        simplify_dp_step(points, markers, sq_tolerance, first, index);
-        simplify_dp_step(points, markers, sq_tolerance, index, last);
-    }
-}
-
-fn simplify_polyline(points: &[(f32, f32)], tolerance: f32) -> Vec<(f32, f32)> {
-    if points.len() < 3 || tolerance <= f32::EPSILON {
-        return points.to_vec();
-    }
-
-    let sq_tolerance = tolerance * tolerance;
-
-    let mut reduced = Vec::<(f32, f32)>::with_capacity(points.len());
-    reduced.push(points[0]);
-    let mut prev = 0_usize;
-    for i in 1..points.len() {
-        if sq_dist(points[i], points[prev]) > sq_tolerance {
-            reduced.push(points[i]);
-            prev = i;
-        }
-    }
-    if prev < points.len() - 1 {
-        reduced.push(*points.last().unwrap_or(&points[0]));
-    }
-
-    if reduced.len() < 3 {
-        return reduced;
-    }
-
-    let len = reduced.len();
-    let mut markers = vec![false; len];
-    markers[0] = true;
-    markers[len - 1] = true;
-    simplify_dp_step(&reduced, &mut markers, sq_tolerance, 0, len - 1);
-
-    let mut out = Vec::<(f32, f32)>::with_capacity(len);
-    for (i, point) in reduced.into_iter().enumerate() {
-        if markers[i] {
-            out.push(point);
-        }
-    }
-    out
-}
-
-fn polyline_length(points: &[(f32, f32)]) -> f32 {
-    if points.len() < 2 {
-        return 0.0;
-    }
-    let mut total = 0.0_f32;
-    for pair in points.windows(2) {
-        let dx = pair[1].0 - pair[0].0;
-        let dy = pair[1].1 - pair[0].1;
-        total += (dx * dx + dy * dy).sqrt();
-    }
-    total
-}
-
-fn is_minor_bridge_glitch_candidate(tags: &HashMap<String, String>, points_len: usize) -> bool {
-    if !tag_is_truthy(tags, "bridge") || points_len > 4 {
-        return false;
-    }
-    matches!(
-        tags.get("highway").map(|v| v.as_str()),
-        Some(
-            "footway"
-                | "cycleway"
-                | "path"
-                | "steps"
-                | "track"
-                | "service"
-                | "pedestrian"
-                | "rail"
-                | "tram"
-        )
-    )
+    polygons
 }
 
 fn build_tile_buffers_from_body(
     tile_key: TileKey,
     body: &str,
-    dark_theme: bool,
+    theme: &CompiledMapTheme,
 ) -> Result<TileBuffers, String> {
     let parsed = OverpassResponse::deserialize_json_lenient(body)
         .map_err(|e| format!("json error at line {} col {}: {}", e.line, e.col, e.msg))?;
@@ -2847,132 +2562,161 @@ fn build_tile_buffers_from_body(
     let mut feature_count = 0usize;
     let mut labels = Vec::<TileLabel>::new();
 
-    let mut prepared = Vec::<(usize, Vec<i64>, Vec<(f32, f32)>)>::with_capacity(ways.len());
+    let mut prepared = Vec::<PreparedWay>::with_capacity(ways.len());
     for (way_index, way) in ways.iter().enumerate() {
         let projected = project_way_points_with_nodes(&way.nodes, &nodes, tile_key.z);
         if projected.len() < 2 {
             continue;
         }
-        let mut projected_node_ids = Vec::<i64>::with_capacity(projected.len());
         let mut points = Vec::<(f32, f32)>::with_capacity(projected.len());
-        for (node_id, point) in projected {
-            projected_node_ids.push(node_id);
+        for (_node_id, point) in projected {
             points.push(point);
         }
-        prepared.push((way_index, projected_node_ids, points));
+        prepared.push(PreparedWay { way_index, points });
     }
 
-    for (way_index, _projected_node_ids, points) in &prepared {
-        let way = &ways[*way_index];
-        if points.len() >= 3 {
-            if let Some(color) = fill_color(&way.tags, way.closed, dark_theme) {
-                emit_path(&mut path, points, true);
-                tessellate_path_fill(
-                    &mut path,
-                    &mut tess,
-                    &mut tess_verts,
-                    &mut tess_indices,
-                    LineJoin::Miter,
-                    4.0,
-                    1.0,
-                    false,
-                );
-                append_tessellated_geometry(
-                    &tess_verts,
-                    &tess_indices,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    VectorRenderParams {
-                        color: hex_to_premul_rgba(color, 1.0),
-                        stroke_mult: 1e6,
-                        shape_id: 0.0,
-                        params: [0.0; 6],
-                        zbias: fill_zbias,
-                    },
-                );
-                fill_zbias += VECTOR_ZBIAS_STEP;
-                feature_count += 1;
-            }
-        }
-    }
+    let mut fill_groups = Vec::<FillFeatureGroup>::new();
+    let mut fill_group_lookup = HashMap::<(String, u32), usize>::new();
+    for (order, prepared_way) in prepared.iter().enumerate() {
+        let way = &ways[prepared_way.way_index];
+        let Some(color) = fill_color_for_tags(theme, &way.tags, way.closed) else {
+            continue;
+        };
+        let Some(ring_points) = normalize_polygon_ring(&prepared_way.points) else {
+            continue;
+        };
 
-    let mut stroke_segments = Vec::<StrokePreparedSegment>::new();
-    for (way_index, projected_node_ids, points) in &prepared {
-        let way = &ways[*way_index];
-        if let Some(label) = extract_way_label(&way.tags, points) {
-            labels.push(label);
-        }
-        if is_minor_bridge_glitch_candidate(&way.tags, points.len()) {
+        let feature_key = way
+            .tags
+            .get(MVT_INTERNAL_FEATURE_KEY)
+            .cloned()
+            .unwrap_or_else(|| format!("way:{}", prepared_way.way_index));
+        let group_key = (feature_key, color);
+        let group_index = if let Some(index) = fill_group_lookup.get(&group_key).copied() {
+            index
+        } else {
+            let index = fill_groups.len();
+            fill_group_lookup.insert(group_key, index);
+            fill_groups.push(FillFeatureGroup {
+                color,
+                rings: Vec::new(),
+            });
+            index
+        };
+
+        let ring_order = way
+            .tags
+            .get(MVT_INTERNAL_RING_INDEX_KEY)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(order);
+        let signed_area = polygon_signed_area(&ring_points);
+        if signed_area.abs() <= POLYGON_AREA_EPSILON {
             continue;
         }
-        if let Some(style) = stroke_style(&way.tags, dark_theme, tile_key.z) {
-            stroke_segments.push(StrokePreparedSegment {
-                style,
-                merge_key: stroke_style_merge_key(style),
-                node_ids: projected_node_ids.clone(),
-                points: points.clone(),
-            });
-        }
+        fill_groups[group_index].rings.push(FillRing {
+            order: ring_order,
+            points: ring_points,
+            signed_area,
+        });
     }
 
-    let mut groups = HashMap::<StrokeMergeKey, Vec<usize>>::new();
-    for (segment_index, segment) in stroke_segments.iter().enumerate() {
-        groups
-            .entry(segment.merge_key)
-            .or_default()
-            .push(segment_index);
+    for group in fill_groups {
+        let polygons = classify_polygon_rings(&group.rings, EARCUT_MAX_RINGS);
+        for polygon in polygons {
+            if polygon.is_empty() {
+                continue;
+            }
+            for ring in &polygon {
+                emit_path(&mut path, ring, true);
+            }
+            tessellate_path_fill(
+                &mut path,
+                &mut tess,
+                &mut tess_verts,
+                &mut tess_indices,
+                LineJoin::Miter,
+                4.0,
+                1.0,
+                false,
+            );
+            append_tessellated_geometry(
+                &tess_verts,
+                &tess_indices,
+                &mut fill_vertices,
+                &mut fill_indices,
+                VectorRenderParams {
+                    color: hex_to_premul_rgba(group.color, 1.0),
+                    stroke_mult: 1e6,
+                    shape_id: 0.0,
+                    params: [0.0; 6],
+                    zbias: fill_zbias,
+                },
+            );
+            fill_zbias += VECTOR_ZBIAS_STEP;
+            feature_count += 1;
+        }
     }
 
     let mut stroke_jobs = Vec::<StrokeDrawJob>::new();
-    for (_key, group_indices) in groups {
-        if group_indices.is_empty() {
-            continue;
+    for prepared_way in &prepared {
+        let way = &ways[prepared_way.way_index];
+        if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
+            labels.push(label);
         }
-        let style = stroke_segments[group_indices[0]].style;
-        let chains = merge_stroke_segments(&stroke_segments, &group_indices);
-        for points in chains {
+        if let Some(style) = stroke_style_for_tags(theme, &way.tags, tile_key.z) {
+            let center_overlay = way.tags.contains_key("highway")
+                && style.center.shape_id == 0.0
+                && style.center.width > ROAD_CENTER_OVERLAY_MIN_WIDTH;
             stroke_jobs.push(StrokeDrawJob {
                 sort_rank: style.sort_rank,
                 style,
+                center_overlay,
+                points: prepared_way.points.clone(),
+            });
+        }
+    }
+    let mut grouped_strokes =
+        HashMap::<(StrokeStyleKey, bool), (StrokeStyle, bool, Vec<Vec<(f32, f32)>>)>::new();
+    for job in stroke_jobs {
+        let key = (StrokeStyleKey::from(job.style), job.center_overlay);
+        let entry = grouped_strokes
+            .entry(key)
+            .or_insert((job.style, job.center_overlay, Vec::new()));
+        entry.2.push(job.points);
+    }
+
+    let mut merged_stroke_jobs = Vec::<StrokeDrawJob>::new();
+    for (_key, (style, center_overlay, polylines)) in grouped_strokes {
+        for points in merge_stroke_polylines(&polylines) {
+            merged_stroke_jobs.push(StrokeDrawJob {
+                sort_rank: style.sort_rank,
+                style,
+                center_overlay,
                 points,
             });
         }
     }
-    stroke_jobs.sort_unstable_by_key(|job| job.sort_rank);
-    let clip_rect = tile_clip_rect(tile_key, ROAD_CLIP_PADDING);
 
-    for job in stroke_jobs {
-        let clipped_parts = clip_polyline_parts(&job.points, clip_rect);
-        for part in clipped_parts {
-            let simplify_tolerance =
-                (ROAD_SMOOTH_FACTOR * job.style.center.width * 0.06).clamp(0.02, 0.18);
-            let simplified = simplify_polyline(&part, simplify_tolerance);
-            if simplified.len() < 2 {
-                continue;
-            }
-
-            let part_length = polyline_length(&simplified);
-            let min_len = if job.sort_rank < 260 {
-                (job.style.center.width * 4.5).max(5.5)
-            } else if job.sort_rank < 450 {
-                (job.style.center.width * 2.8).max(3.2)
-            } else {
-                (job.style.center.width * 1.35).max(1.1)
-            };
-            if part_length < min_len && job.sort_rank < 560 {
+    merged_stroke_jobs.sort_unstable_by_key(|job| job.sort_rank);
+    let clip_bounds = tile_clip_bounds(tile_key, ROAD_CLIP_PADDING);
+    for job in merged_stroke_jobs {
+        let parts = build_polyline_parts(&job.points, clip_bounds, false, ROAD_SMOOTH_FACTOR);
+        for part in parts {
+            if part.len() < 2 {
                 continue;
             }
 
             if let Some(casing) = job.style.casing {
                 append_stroke_pass(
                     &mut path,
-                    &simplified,
+                    &part,
                     &mut tess,
                     &mut tess_verts,
                     &mut tess_indices,
                     &mut stroke_vertices,
                     &mut stroke_indices,
                     casing,
+                    LineCap::Butt,
                     &mut stroke_zbias,
                 );
                 feature_count += 1;
@@ -2980,16 +2724,41 @@ fn build_tile_buffers_from_body(
 
             append_stroke_pass(
                 &mut path,
-                &simplified,
+                &part,
                 &mut tess,
                 &mut tess_verts,
                 &mut tess_indices,
                 &mut stroke_vertices,
                 &mut stroke_indices,
                 job.style.center,
+                LineCap::Butt,
                 &mut stroke_zbias,
             );
             feature_count += 1;
+
+            if job.center_overlay {
+                let overlay_width = (job.style.center.width * ROAD_CENTER_OVERLAY_WIDTH_SCALE)
+                    .max(ROAD_CENTER_OVERLAY_MIN_WIDTH)
+                    .min(job.style.center.width - 0.05);
+                if overlay_width > 0.0 {
+                    append_stroke_pass(
+                        &mut path,
+                        &part,
+                        &mut tess,
+                        &mut tess_verts,
+                        &mut tess_indices,
+                        &mut stroke_vertices,
+                        &mut stroke_indices,
+                        StrokePassStyle {
+                            width: overlay_width,
+                            ..job.style.center
+                        },
+                        LineCap::Round,
+                        &mut stroke_zbias,
+                    );
+                    feature_count += 1;
+                }
+            }
         }
     }
 
@@ -3036,204 +2805,6 @@ fn project_way_points_with_nodes(
     }
 
     out
-}
-
-fn fill_color(tags: &HashMap<String, String>, closed: bool, dark_theme: bool) -> Option<u32> {
-    if !closed {
-        return None;
-    }
-
-    if tags.contains_key("building") {
-        return Some(if dark_theme { 0x383d46 } else { 0xc6c0b5 });
-    }
-
-    if tag_is(tags, "natural", "water") || tag_is(tags, "waterway", "riverbank") {
-        return Some(if dark_theme { 0x204f74 } else { 0x9ecff2 });
-    }
-
-    if let Some(landuse) = tags.get("landuse") {
-        return Some(if dark_theme {
-            match landuse.as_str() {
-                "residential" => 0x2a2f36,
-                "commercial" | "retail" => 0x30343b,
-                "industrial" => 0x282c32,
-                "forest" => 0x243629,
-                "grass" | "meadow" | "farmland" => 0x2a3c2d,
-                _ => 0x2d3239,
-            }
-        } else {
-            match landuse.as_str() {
-                "residential" => 0xe9e4dc,
-                "commercial" | "retail" => 0xe1dbd2,
-                "industrial" => 0xd6d1cb,
-                "forest" => 0xc4deb0,
-                "grass" | "meadow" | "farmland" => 0xd4e5bf,
-                _ => 0xe5dfd6,
-            }
-        });
-    }
-
-    if let Some(leisure) = tags.get("leisure") {
-        return Some(if dark_theme {
-            match leisure.as_str() {
-                "park" | "garden" | "golf_course" => 0x2f4a34,
-                "pitch" => 0x32553a,
-                _ => 0x2b4230,
-            }
-        } else {
-            match leisure.as_str() {
-                "park" | "garden" | "golf_course" => 0xc5e2b6,
-                "pitch" => 0xb8db9f,
-                _ => 0xd1e8bf,
-            }
-        });
-    }
-
-    None
-}
-
-fn stroke_style(tags: &HashMap<String, String>, dark_theme: bool, tile_zoom: u32) -> Option<StrokeStyle> {
-    let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
-    if is_road_polygon_layer(layer) || layer == "bridges" {
-        return None;
-    }
-    if matches!(
-        layer,
-        "street_labels"
-            | "street_labels_points"
-            | "streets_polygons_labels"
-            | "transportation_name"
-            | "water_lines_labels"
-            | "water_polygons_labels"
-            | "boundary_labels"
-            | "place_labels"
-    ) {
-        if layer == "street_labels" && tile_zoom < 14 {
-            // Shortbread has no "streets" layer below z14, so keep street label lines as fallback.
-        } else {
-            return None;
-        }
-    }
-    if matches!(layer, "street_labels_points" | "streets_polygons_labels") {
-        return None;
-    }
-
-    let mut width_scale = 0.86_f32;
-    let mut rank_bias = 0_i16;
-    if tag_is_truthy(tags, "link") {
-        width_scale *= 0.84;
-        rank_bias -= 10;
-    }
-    if tag_is_truthy(tags, "tunnel") {
-        rank_bias -= 22;
-    }
-
-    let make_style =
-        |base_rank: i16, casing: Option<(u32, f32)>, center: (u32, f32)| -> StrokeStyle {
-            let rank = (base_rank as i32 + rank_bias as i32).clamp(i16::MIN as i32, i16::MAX as i32)
-                as i16;
-            StrokeStyle {
-                sort_rank: rank,
-                casing: casing.map(|(color, width)| StrokePassStyle {
-                    color,
-                    width: width * width_scale,
-                    shape_id: 0.0,
-                }),
-                center: StrokePassStyle {
-                    color: center.0,
-                    width: center.1 * width_scale,
-                    shape_id: 0.0,
-                },
-            }
-        };
-
-    if let Some(highway) = tags.get("highway") {
-        let mut style = if dark_theme {
-            match highway.as_str() {
-                "motorway" => make_style(700, Some((0x8f6937, 3.9)), (0xd29b54, 3.0)),
-                "trunk" => make_style(640, Some((0x8c7141, 3.5)), (0xc8a561, 2.7)),
-                "primary" => make_style(560, Some((0x706857, 3.1)), (0xb9aa86, 2.35)),
-                "secondary" | "busway" => make_style(470, Some((0x556170, 2.75)), (0x95a1b1, 2.0)),
-                "tertiary" => make_style(390, Some((0x4b5765, 2.4)), (0x7d899a, 1.7)),
-                "residential" | "unclassified" | "living_street" => {
-                    make_style(310, Some((0x404a57, 2.0)), (0x677383, 1.35))
-                }
-                "service" | "pedestrian" => {
-                    make_style(240, Some((0x3e4753, 1.75)), (0x5e6a79, 1.1))
-                }
-                "cycleway" | "footway" | "path" | "steps" | "track" => {
-                    make_style(160, None, (0x4f5966, 0.82))
-                }
-                _ => make_style(280, Some((0x404a57, 1.9)), (0x606c7b, 1.2)),
-            }
-        } else {
-            match highway.as_str() {
-                "motorway" => make_style(700, Some((0xc38d49, 3.9)), (0xe2ad65, 3.0)),
-                "trunk" => make_style(640, Some((0xc59f5f, 3.5)), (0xe8c17e, 2.7)),
-                "primary" => make_style(560, Some((0xc6b181, 3.1)), (0xf0d39c, 2.35)),
-                "secondary" | "busway" => make_style(470, Some((0xd0c8b6, 2.75)), (0xf4e4c4, 2.0)),
-                "tertiary" => make_style(390, Some((0xc6c0b3, 2.4)), (0xf5ebd8, 1.7)),
-                "residential" | "unclassified" | "living_street" => {
-                    make_style(310, Some((0xc2bcae, 2.0)), (0xfefefd, 1.35))
-                }
-                "service" | "pedestrian" => {
-                    make_style(240, Some((0xc5bfb2, 1.75)), (0xf6f2ea, 1.1))
-                }
-                "cycleway" | "footway" | "path" | "steps" | "track" => {
-                    make_style(160, None, (0xb6afa1, 0.82))
-                }
-                _ => make_style(280, Some((0xc3bcaf, 1.9)), (0xf5f1e9, 1.2)),
-            }
-        };
-
-        if tag_is_truthy(tags, "tunnel") {
-            style.center.shape_id = 11.0;
-            if let Some(casing) = style.casing.as_mut() {
-                casing.shape_id = 11.0;
-            }
-        }
-
-        return Some(style);
-    }
-
-    if let Some(waterway) = tags.get("waterway") {
-        let main_width = match waterway.as_str() {
-            "river" => 1.55,
-            "canal" => 1.22,
-            "stream" => 0.9,
-            _ => 0.82,
-        };
-
-        return Some(if dark_theme {
-            make_style(
-                140,
-                Some((0x2f6188, main_width + 0.28)),
-                (0x4f93c8, main_width),
-            )
-        } else {
-            make_style(
-                140,
-                Some((0x4a8fc3, main_width + 0.28)),
-                (0x73b5e4, main_width),
-            )
-        });
-    }
-
-    if tags.contains_key("railway") {
-        let mut style = if dark_theme {
-            make_style(180, Some((0x3f4650, 0.96)), (0x707783, 0.62))
-        } else {
-            make_style(180, Some((0xb7b2a9, 0.96)), (0x8f8a81, 0.62))
-        };
-        style.center.shape_id = 10.0;
-        return Some(style);
-    }
-
-    None
-}
-
-fn tag_is(tags: &HashMap<String, String>, key: &str, value: &str) -> bool {
-    tags.get(key).is_some_and(|v| v == value)
 }
 
 fn tag_is_truthy(tags: &HashMap<String, String>, key: &str) -> bool {
@@ -3372,25 +2943,34 @@ impl MvtValue {
 #[derive(Debug)]
 struct MvtTileJsonBuilder {
     nodes: Vec<(i64, f64, f64)>,
-    node_map: HashMap<(i32, i32), i64>,
     ways: Vec<(i64, Vec<i64>, HashMap<String, String>)>,
     next_node_id: i64,
     next_way_id: i64,
+    next_generated_feature_id: u64,
 }
 
 impl Default for MvtTileJsonBuilder {
     fn default() -> Self {
         Self {
             nodes: Vec::new(),
-            node_map: HashMap::new(),
             ways: Vec::new(),
             next_node_id: 1,
             next_way_id: 1,
+            next_generated_feature_id: 1,
         }
     }
 }
 
 impl MvtTileJsonBuilder {
+    fn alloc_feature_id(&mut self) -> u64 {
+        let id = self.next_generated_feature_id;
+        self.next_generated_feature_id = self.next_generated_feature_id.wrapping_add(1);
+        if self.next_generated_feature_id == 0 {
+            self.next_generated_feature_id = 1;
+        }
+        id
+    }
+
     fn add_path(
         &mut self,
         tile_key: TileKey,
@@ -3405,16 +2985,10 @@ impl MvtTileJsonBuilder {
 
         let mut node_ids = Vec::with_capacity(points.len() + 1);
         for &(x, y) in points {
-            let node_id = if let Some(existing) = self.node_map.get(&(x, y)).copied() {
-                existing
-            } else {
-                let id = self.next_node_id;
-                self.next_node_id += 1;
-                self.node_map.insert((x, y), id);
-                let (lon, lat) = local_tile_to_lon_lat(tile_key, extent, x, y);
-                self.nodes.push((id, lon, lat));
-                id
-            };
+            let node_id = self.next_node_id;
+            self.next_node_id += 1;
+            let (lon, lat) = local_tile_to_lon_lat(tile_key, extent, x, y);
+            self.nodes.push((node_id, lon, lat));
 
             if node_ids.last().copied() != Some(node_id) {
                 node_ids.push(node_id);
@@ -3536,7 +3110,7 @@ fn load_local_tile_batch(
     mbtiles_path: &Path,
     cache_dir: &Path,
     requested: &[TileKey],
-    dark_theme: bool,
+    theme: &CompiledMapTheme,
 ) -> Result<Vec<LoadedLocalTile>, String> {
     if requested.is_empty() {
         return Ok(Vec::new());
@@ -3547,7 +3121,7 @@ fn load_local_tile_batch(
     for key in requested {
         let cache_path = cache_dir.join(format!("z{}_x{}_y{}.json", key.z, key.x, key.y));
         match fs::read_to_string(&cache_path) {
-            Ok(body) => match build_tile_buffers_from_body(*key, &body, dark_theme) {
+            Ok(body) => match build_tile_buffers_from_body(*key, &body, theme) {
                 Ok(buffers) => loaded.push(LoadedLocalTile {
                     tile_key: *key,
                     buffers,
@@ -3630,7 +3204,7 @@ fn load_local_tile_batch(
             }
 
             match mbtiles_tile_to_overpass_json(tile_key, &tile.tile_data) {
-                Ok(body) => match build_tile_buffers_from_body(tile_key, &body, dark_theme) {
+                Ok(body) => match build_tile_buffers_from_body(tile_key, &body, theme) {
                     Ok(buffers) => {
                         store_tile_data_cache_on_disk(tile_key, &body);
                         loaded.push(LoadedLocalTile { tile_key, buffers });
@@ -3785,6 +3359,7 @@ fn parse_mvt_feature(
     builder: &mut MvtTileJsonBuilder,
 ) -> Result<(), String> {
     let mut pos = 0_usize;
+    let mut feature_id: Option<u64> = None;
     let mut tag_indexes = Vec::<u32>::new();
     let mut geom_type = MvtGeomType::Unknown;
     let mut geometry_cmds = Vec::<u32>::new();
@@ -3794,6 +3369,7 @@ fn parse_mvt_feature(
         let field = (key >> 3) as u32;
         let wire = (key & 0x7) as u8;
         match (field, wire) {
+            (1, 0) => feature_id = Some(read_pb_varint(feature_data, &mut pos)?),
             (2, 2) => {
                 let packed = read_pb_len_slice(feature_data, &mut pos)?;
                 tag_indexes = read_packed_u32(packed)?;
@@ -3825,8 +3401,15 @@ fn parse_mvt_feature(
     }
     normalize_mvt_tags(layer_name, geom_type, &mut tags);
 
+    let polygon_feature_key = if geom_type == MvtGeomType::Polygon {
+        let raw_id = feature_id.unwrap_or_else(|| builder.alloc_feature_id());
+        Some(format!("{}:{}", layer_name, raw_id))
+    } else {
+        None
+    };
+
     let paths = decode_mvt_geometry(&geometry_cmds, geom_type)?;
-    for mut path in paths {
+    for (ring_index, mut path) in paths.into_iter().enumerate() {
         if path.len() < 2 {
             continue;
         }
@@ -3839,7 +3422,15 @@ fn parse_mvt_feature(
         if close && path.len() < 4 {
             continue;
         }
-        builder.add_path(tile_key, extent, &path, tags.clone(), close);
+        let mut path_tags = tags.clone();
+        if let Some(feature_key) = &polygon_feature_key {
+            path_tags.insert(MVT_INTERNAL_FEATURE_KEY.to_string(), feature_key.clone());
+            path_tags.insert(
+                MVT_INTERNAL_RING_INDEX_KEY.to_string(),
+                ring_index.to_string(),
+            );
+        }
+        builder.add_path(tile_key, extent, &path, path_tags, close);
     }
 
     Ok(())

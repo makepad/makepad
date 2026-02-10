@@ -1,23 +1,10 @@
-use {
-    crate::{
-        window::WindowId,
-        event::{
-            MouseDownEvent,
-            MouseUpEvent,
-            MouseMoveEvent,
-            ScrollEvent,
-            WindowGeomChangeEvent,
-            WindowDragQueryEvent,
-            WindowCloseRequestedEvent,
-            WindowClosedEvent,
-            TextInputEvent,
-            KeyEvent,
-            DragEvent,
-            DropEvent,
-            TextClipboardEvent,
-            TimerEvent,
-        },
-    }
+use crate::{
+    event::{
+        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
+        TextClipboardEvent, TextInputEvent, TimerEvent, WindowCloseRequestedEvent,
+        WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
+    },
+    window::WindowId,
 };
 
 #[derive(Debug)]

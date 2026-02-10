@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types)]
-use makepad_jni_sys as jni_sys;
 use jni_sys::*;
-use std::os::raw::{c_long,c_ulong};
+use makepad_jni_sys as jni_sys;
+use std::os::raw::{c_long, c_ulong};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -31,7 +31,7 @@ extern "C" {
         outDevicePtrPtr: *mut *mut AMidiDevice,
     ) -> media_status_t;
     pub fn AMidiDevice_release(midiDevice: *const AMidiDevice) -> media_status_t;
-    
+
     pub fn AMidiDevice_getNumInputPorts(device: *const AMidiDevice) -> c_long;
     pub fn AMidiDevice_getNumOutputPorts(device: *const AMidiDevice) -> c_long;
     pub fn AMidiOutputPort_open(
@@ -58,5 +58,5 @@ extern "C" {
         maxBytes: c_ulong,
         numBytesReceivedPtr: *mut c_ulong,
         outTimestampPtr: *mut i64,
-    ) -> c_long;    
+    ) -> c_long;
 }

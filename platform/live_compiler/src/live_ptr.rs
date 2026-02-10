@@ -1,18 +1,17 @@
 #![allow(dead_code)]
 
-use{
-    crate::{
-        makepad_live_tokenizer::LiveId,
-    },
-    std::fmt,
-};
- 
+use {crate::makepad_live_tokenizer::LiveId, std::fmt};
+
 #[derive(Clone, Copy, Default, Debug, Eq, Ord, PartialOrd, Hash, PartialEq)]
 pub struct LiveFileId(pub u16);
 
 impl LiveFileId {
-    pub fn new(index: usize) -> LiveFileId {LiveFileId(index as u16)}
-    pub fn to_index(&self) -> usize {self.0 as usize}
+    pub fn new(index: usize) -> LiveFileId {
+        LiveFileId(index as u16)
+    }
+    pub fn to_index(&self) -> usize {
+        self.0 as usize
+    }
 }
 
 //TODO FIX THIS THING TO BE N LEVELS OF MODULES
@@ -20,8 +19,7 @@ impl LiveFileId {
 pub struct LiveModuleId(pub LiveId, pub LiveId);
 
 impl LiveModuleId {
-    pub fn from_str(module_path: &str) -> Result<Self,
-    String> {
+    pub fn from_str(module_path: &str) -> Result<Self, String> {
         // ok lets split off the first 2 things from module_path
         let bytes = module_path.as_bytes();
         let len = bytes.len();
@@ -30,19 +28,25 @@ impl LiveModuleId {
         let mut i = 0;
         while i < len {
             if bytes[i] == b':' {
-                crate_id = LiveId::from_str_with_lut(std::str::from_utf8(&bytes[0..i]).unwrap()) ?;
+                crate_id = LiveId::from_str_with_lut(std::str::from_utf8(&bytes[0..i]).unwrap())?;
                 i += 2;
-                break
+                break;
             }
             i += 1;
         }
-        if i == len { // module_path is only one thing
-            Ok(LiveModuleId(LiveId(0), LiveId::from_str_with_lut(std::str::from_utf8(&bytes[0..len]).unwrap()) ?))
+        if i == len {
+            // module_path is only one thing
+            Ok(LiveModuleId(
+                LiveId(0),
+                LiveId::from_str_with_lut(std::str::from_utf8(&bytes[0..len]).unwrap())?,
+            ))
         } else {
-            Ok(LiveModuleId(crate_id, LiveId::from_str_with_lut(std::str::from_utf8(&bytes[i..len]).unwrap()) ?))
+            Ok(LiveModuleId(
+                crate_id,
+                LiveId::from_str_with_lut(std::str::from_utf8(&bytes[i..len]).unwrap())?,
+            ))
         }
     }
-
 }
 
 impl fmt::Display for LiveModuleId {
@@ -58,9 +62,9 @@ pub struct LocalPtr(pub usize);
 #[derive(Copy, Default, Clone, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
 pub struct LiveFileGeneration(u16);
 
-impl LiveFileGeneration{
-    pub fn next_gen(&mut self){
-        self.0+=1
+impl LiveFileGeneration {
+    pub fn next_gen(&mut self) {
+        self.0 += 1
     }
 }
 
@@ -78,30 +82,38 @@ pub struct LivePtr {
 }
 
 pub type LiveRef = Option<LivePtr>;
- 
-impl LivePtr{
-    pub fn invalid()->Self{
-        Self{
+
+impl LivePtr {
+    pub fn invalid() -> Self {
+        Self {
             file_id: LiveFileId::default(),
             generation: LiveFileGeneration(u16::MAX),
-            index: 0
+            index: 0,
         }
     }
-    
-    pub fn is_invalid(&self)->bool{
+
+    pub fn is_invalid(&self) -> bool {
         self.generation.0 == u16::MAX
     }
-    
-    pub fn node_index(&self)->usize{
+
+    pub fn node_index(&self) -> usize {
         self.index as usize
     }
-    
-    pub fn with_index(&self, index:usize)->Self{
-        Self{file_id:self.file_id, index:index as u32, generation:self.generation}
+
+    pub fn with_index(&self, index: usize) -> Self {
+        Self {
+            file_id: self.file_id,
+            index: index as u32,
+            generation: self.generation,
+        }
     }
 
-    pub fn from_index(file_id:LiveFileId, index:usize, generation:LiveFileGeneration)->Self{
-        Self{file_id, index:index as u32, generation}
+    pub fn from_index(file_id: LiveFileId, index: usize, generation: LiveFileGeneration) -> Self {
+        Self {
+            file_id,
+            index: index as u32,
+            generation,
+        }
     }
 }
 

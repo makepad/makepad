@@ -1,14 +1,11 @@
 use {
+    makepad_script::makepad_live_id::LiveId,
     std::{
         any::TypeId,
         cell::RefCell,
+        collections::{hash_map::Entry, HashMap},
         rc::Rc,
-        collections::{
-            HashMap,
-            hash_map::Entry
-        }
     },
-    makepad_script::makepad_live_id::LiveId,
 };
 
 #[derive(Clone)]
@@ -52,35 +49,36 @@ impl ComponentRegistries {
         let reg = self.0.borrow();
         for entry in reg.values() {
             if entry.component_type() == ty {
-                return entry.get_component_info(name)
+                return entry.get_component_info(name);
             }
         }
         None
     }
-    
+
     pub fn new() -> Self {
         Self(Rc::new(RefCell::new(HashMap::new())))
     }
-    
+
     pub fn get<T: 'static + ComponentRegistry>(&self) -> std::cell::Ref<'_, T> {
-        std::cell::Ref::map(
-            self.0.borrow(),
-            |v| v
-                .get(&TypeId::of::<T>()).unwrap()
-                .downcast_ref::<T>().unwrap()
-        )
+        std::cell::Ref::map(self.0.borrow(), |v| {
+            v.get(&TypeId::of::<T>())
+                .unwrap()
+                .downcast_ref::<T>()
+                .unwrap()
+        })
     }
-    
-    pub fn get_or_create<T: 'static + Default + ComponentRegistry>(&self) -> std::cell::RefMut<'_, T> {
+
+    pub fn get_or_create<T: 'static + Default + ComponentRegistry>(
+        &self,
+    ) -> std::cell::RefMut<'_, T> {
         let reg = self.0.borrow_mut();
-        std::cell::RefMut::map(
-            reg,
-            |v|
+        std::cell::RefMut::map(reg, |v| {
             match v.entry(TypeId::of::<T>()) {
                 Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => v.insert(Box::<T>::default())
+                Entry::Vacant(v) => v.insert(Box::<T>::default()),
             }
-            .downcast_mut::<T>().unwrap()
-        )
+            .downcast_mut::<T>()
+            .unwrap()
+        })
     }
 }

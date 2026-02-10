@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoImageBlend = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/imageblend.md") } 
+            <Markdown> { body: dep("crate://self/resources/imageblend.md") }
         }
         demos = {
             <H4> { text: "Standard" }
@@ -30,7 +28,7 @@ live_design!{
                     width: Fill,
                     height: Fill
                 }
-            
+
             }
         }
     }

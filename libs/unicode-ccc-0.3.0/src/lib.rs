@@ -14,7 +14,6 @@ assert_eq!(get_canonical_combining_class('\u{18A9}'), CanonicalCombiningClass::A
 */
 
 #![no_std]
-
 #![forbid(unsafe_code)]
 
 /// The Unicode version.

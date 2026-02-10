@@ -1,6 +1,5 @@
 // mildly stripped down version of native_dialog_rs dialog interface.
-use std::path::{PathBuf};
-
+use std::path::PathBuf;
 
 /// Represents a set of file extensions and their description.
 #[derive(Debug, PartialEq)]
@@ -25,7 +24,7 @@ impl FileDialog {
         FileDialog {
             filename: None,
             location: None,
-            filters: vec![],           
+            filters: vec![],
             title: None,
         }
     }
@@ -38,7 +37,7 @@ impl FileDialog {
 
     /// Sets the default value of the filename text field in the dialog. For open dialogs of macOS
     /// and zenity, this is a no-op because there's no such text field on the dialog.
-    pub fn set_filename(mut self, filename:  String) -> Self {
+    pub fn set_filename(mut self, filename: String) -> Self {
         self.filename = Some(filename);
         self
     }
@@ -50,7 +49,7 @@ impl FileDialog {
     }
 
     /// Sets the default location that the dialog shows at open.
-    pub fn set_location(mut self, path:  PathBuf) -> Self {
+    pub fn set_location(mut self, path: PathBuf) -> Self {
         self.location = Some(path);
         self
     }
@@ -64,7 +63,7 @@ impl FileDialog {
 
     /// Adds a file type filter. The filter must contains at least one extension, otherwise this
     /// method will panic. For dialogs that open directories, this is a no-op.
-    pub fn add_filter(mut self, description: String, extensions:  Vec<String>) -> Self {
+    pub fn add_filter(mut self, description: String, extensions: Vec<String>) -> Self {
         if extensions.is_empty() {
             panic!("The file extensions of a filter must be specified.")
         }
@@ -80,16 +79,10 @@ impl FileDialog {
         self.filters = vec![];
         self
     }
-
-
-
 }
-
-
 
 impl Default for FileDialog {
     fn default() -> Self {
         Self::new()
     }
 }
-

@@ -1,6 +1,6 @@
 //! Utilities for working with hex float formats.
 
-use super::{Round, Status, f32_from_bits, f64_from_bits};
+use super::{f32_from_bits, f64_from_bits, Round, Status};
 
 /// Construct a 16-bit float from hex float representation (C-style)
 #[cfg(f16_enabled)]

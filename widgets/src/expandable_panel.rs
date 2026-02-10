@@ -1,12 +1,4 @@
-use {
-    crate::{
-        touch_gesture::*,
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*,
-        view::*,
-    }
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, touch_gesture::*, view::*, widget::*};
 
 live_design! {
     ExpandablePanelBase = {{ExpandablePanel}} {}
@@ -20,17 +12,23 @@ pub enum ExpandablePanelAction {
 
 #[derive(Live, Widget)]
 pub struct ExpandablePanel {
-    #[deref] view: View,
-    #[rust] touch_gesture: Option<TouchGesture>,
-    #[live] initial_offset: f64,
+    #[deref]
+    view: View,
+    #[rust]
+    touch_gesture: Option<TouchGesture>,
+    #[live]
+    initial_offset: f64,
 }
 
 impl LiveHook for ExpandablePanel {
     fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
         if apply.from.is_from_doc() {
-            self.apply_over(cx, live! {
-                panel = { margin: { top: (self.initial_offset) }}
-            });
+            self.apply_over(
+                cx,
+                live! {
+                    panel = { margin: { top: (self.initial_offset) }}
+                },
+            );
         }
     }
 }
@@ -40,12 +38,18 @@ impl Widget for ExpandablePanel {
         self.view.handle_event(cx, event, scope);
 
         if let Some(touch_gesture) = self.touch_gesture.as_mut() {
-            if touch_gesture.handle_event(cx, event, self.view.area()).has_changed() {
+            if touch_gesture
+                .handle_event(cx, event, self.view.area())
+                .has_changed()
+            {
                 let scrolled_at = touch_gesture.scrolled_at;
                 let panel_margin = self.initial_offset - scrolled_at;
-                self.apply_over(cx, live! {
-                    panel = { margin: { top: (panel_margin) }}
-                });
+                self.apply_over(
+                    cx,
+                    live! {
+                        panel = { margin: { top: (panel_margin) }}
+                    },
+                );
                 self.redraw(cx);
 
                 cx.widget_action(

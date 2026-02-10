@@ -109,7 +109,10 @@ impl<V: Vector> One<V> {
     /// Create a new searcher that finds occurrences of the byte given.
     #[inline(always)]
     pub(crate) unsafe fn new(needle: u8) -> One<V> {
-        One { s1: needle, v1: V::splat(needle) }
+        One {
+            s1: needle,
+            v1: V::splat(needle),
+        }
     }
 
     /// Returns the needle given to `One::new`.
@@ -140,11 +143,7 @@ impl<V: Vector> One<V> {
     /// * The distance being in bounds must not rely on "wrapping around" the
     /// address space.
     #[inline(always)]
-    pub(crate) unsafe fn find_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub(crate) unsafe fn find_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         // If we want to support vectors bigger than 256 bits, we probably
         // need to move up to using a u64 for the masks used below. Currently
         // they are 32 bits, which means we're SOL for vectors that need masks
@@ -251,11 +250,7 @@ impl<V: Vector> One<V> {
     /// * The distance being in bounds must not rely on "wrapping around" the
     /// address space.
     #[inline(always)]
-    pub(crate) unsafe fn rfind_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub(crate) unsafe fn rfind_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         // If we want to support vectors bigger than 256 bits, we probably
         // need to move up to using a u64 for the masks used below. Currently
         // they are 32 bits, which means we're SOL for vectors that need masks
@@ -346,11 +341,7 @@ impl<V: Vector> One<V> {
     /// * The distance being in bounds must not rely on "wrapping around" the
     /// address space.
     #[inline(always)]
-    pub(crate) unsafe fn count_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> usize {
+    pub(crate) unsafe fn count_raw(&self, start: *const u8, end: *const u8) -> usize {
         debug_assert!(V::BYTES <= 32, "vector cannot be bigger than 32 bytes");
 
         let confirm = |b| b == self.needle1();
@@ -490,11 +481,7 @@ impl<V: Vector> Two<V> {
     /// * The distance being in bounds must not rely on "wrapping around" the
     /// address space.
     #[inline(always)]
-    pub(crate) unsafe fn find_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub(crate) unsafe fn find_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         // If we want to support vectors bigger than 256 bits, we probably
         // need to move up to using a u64 for the masks used below. Currently
         // they are 32 bits, which means we're SOL for vectors that need masks
@@ -589,11 +576,7 @@ impl<V: Vector> Two<V> {
     /// * The distance being in bounds must not rely on "wrapping around" the
     /// address space.
     #[inline(always)]
-    pub(crate) unsafe fn rfind_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub(crate) unsafe fn rfind_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         // If we want to support vectors bigger than 256 bits, we probably
         // need to move up to using a u64 for the masks used below. Currently
         // they are 32 bits, which means we're SOL for vectors that need masks
@@ -707,11 +690,7 @@ impl<V: Vector> Three<V> {
 
     /// Create a new searcher that finds occurrences of the byte given.
     #[inline(always)]
-    pub(crate) unsafe fn new(
-        needle1: u8,
-        needle2: u8,
-        needle3: u8,
-    ) -> Three<V> {
+    pub(crate) unsafe fn new(needle1: u8, needle2: u8, needle3: u8) -> Three<V> {
         Three {
             s1: needle1,
             s2: needle2,
@@ -762,11 +741,7 @@ impl<V: Vector> Three<V> {
     /// * The distance being in bounds must not rely on "wrapping around" the
     /// address space.
     #[inline(always)]
-    pub(crate) unsafe fn find_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub(crate) unsafe fn find_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         // If we want to support vectors bigger than 256 bits, we probably
         // need to move up to using a u64 for the masks used below. Currently
         // they are 32 bits, which means we're SOL for vectors that need masks
@@ -808,18 +783,12 @@ impl<V: Vector> Three<V> {
                 let or4 = or1.or(or2);
                 let or5 = or3.or(or4);
                 if or5.movemask_will_have_non_zero() {
-                    let mask = eqa1
-                        .movemask()
-                        .or(eqa2.movemask())
-                        .or(eqa3.movemask());
+                    let mask = eqa1.movemask().or(eqa2.movemask()).or(eqa3.movemask());
                     if mask.has_non_zero() {
                         return Some(cur.add(topos(mask)));
                     }
 
-                    let mask = eqb1
-                        .movemask()
-                        .or(eqb2.movemask())
-                        .or(eqb3.movemask());
+                    let mask = eqb1.movemask().or(eqb2.movemask()).or(eqb3.movemask());
                     debug_assert!(mask.has_non_zero());
                     return Some(cur.add(V::BYTES).add(topos(mask)));
                 }
@@ -871,11 +840,7 @@ impl<V: Vector> Three<V> {
     /// * The distance being in bounds must not rely on "wrapping around" the
     /// address space.
     #[inline(always)]
-    pub(crate) unsafe fn rfind_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub(crate) unsafe fn rfind_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         // If we want to support vectors bigger than 256 bits, we probably
         // need to move up to using a u64 for the masks used below. Currently
         // they are 32 bits, which means we're SOL for vectors that need masks
@@ -915,18 +880,12 @@ impl<V: Vector> Three<V> {
                 let or4 = or1.or(or2);
                 let or5 = or3.or(or4);
                 if or5.movemask_will_have_non_zero() {
-                    let mask = eqb1
-                        .movemask()
-                        .or(eqb2.movemask())
-                        .or(eqb3.movemask());
+                    let mask = eqb1.movemask().or(eqb2.movemask()).or(eqb3.movemask());
                     if mask.has_non_zero() {
                         return Some(cur.add(V::BYTES).add(topos(mask)));
                     }
 
-                    let mask = eqa1
-                        .movemask()
-                        .or(eqa2.movemask())
-                        .or(eqa3.movemask());
+                    let mask = eqa1.movemask().or(eqa2.movemask()).or(eqa3.movemask());
                     debug_assert!(mask.has_non_zero());
                     return Some(cur.add(topos(mask)));
                 }
@@ -1061,10 +1020,7 @@ impl<'h> Iter<'h> {
 
     /// Returns the number of remaining elements in this iterator.
     #[inline(always)]
-    pub(crate) fn count(
-        self,
-        mut count_raw: impl FnMut(*const u8, *const u8) -> usize,
-    ) -> usize {
+    pub(crate) fn count(self, mut count_raw: impl FnMut(*const u8, *const u8) -> usize) -> usize {
         // SAFETY: Pointers are derived directly from the same &[u8] haystack.
         // We only ever modify start/end corresponding to a matching offset
         // found between start and end. Thus all changes to start/end maintain
@@ -1101,7 +1057,10 @@ impl<'h> Iter<'h> {
     /// Provides an implementation of `Iterator::size_hint`.
     #[inline(always)]
     pub(crate) fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.end.as_usize().saturating_sub(self.start.as_usize())))
+        (
+            0,
+            Some(self.end.as_usize().saturating_sub(self.start.as_usize())),
+        )
     }
 }
 

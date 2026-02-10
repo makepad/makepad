@@ -1,17 +1,11 @@
+use crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*};
 
-use crate::{
-    widget::*,
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    scroll_bars::{ScrollBars}
-};
-
-live_design!{
+live_design! {
     link widgets;
     use link::theme::*;
     use link::shaders::*;
     use crate::scroll_bars::ScrollBars;
-        
+
     pub FlatListBase = {{FlatList}} {}
     pub FlatList = <FlatListBase> {
         width: Fill, height: Fill,
@@ -19,7 +13,7 @@ live_design!{
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
         flow: Down
     }
-    
+
 }
 /*
 #[derive(Clone,Copy)]
@@ -38,48 +32,77 @@ enum ScrollState {
 #[derive(Clone, DefaultNone)]
 pub enum FlatListAction {
     Scroll,
-    None
+    None,
 }
 
 #[derive(Live, Widget)]
 pub struct FlatList {
     //#[rust] area: Area,
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
 
-    #[live(0.2)] flick_scroll_minimum: f64,
-    #[live(80.0)] flick_scroll_maximum: f64,
-    #[live(0.005)] flick_scroll_scaling: f64,
-    #[live(0.98)] flick_scroll_decay: f64,
-    #[live(0.2)] swipe_drag_duration: f64,
-    #[live(100.0)] max_pull_down: f64,
-    #[live(true)] align_top_when_empty: bool,
-    #[live(false)] grab_key_focus: bool,
-    #[live(true)] drag_scrolling: bool,
-    
-    #[rust(Vec2Index::X)] vec_index: Vec2Index,
-    #[redraw] #[live] scroll_bars: ScrollBars,
-    #[live] capture_overload: bool,
-    #[rust] draw_state: DrawStateWrap<()>,
-    
-    #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<LiveId, (LiveId,WidgetRef)>,
+    #[live(0.2)]
+    flick_scroll_minimum: f64,
+    #[live(80.0)]
+    flick_scroll_maximum: f64,
+    #[live(0.005)]
+    flick_scroll_scaling: f64,
+    #[live(0.98)]
+    flick_scroll_decay: f64,
+    #[live(0.2)]
+    swipe_drag_duration: f64,
+    #[live(100.0)]
+    max_pull_down: f64,
+    #[live(true)]
+    align_top_when_empty: bool,
+    #[live(false)]
+    grab_key_focus: bool,
+    #[live(true)]
+    drag_scrolling: bool,
+
+    #[rust(Vec2Index::X)]
+    vec_index: Vec2Index,
+    #[redraw]
+    #[live]
+    scroll_bars: ScrollBars,
+    #[live]
+    capture_overload: bool,
+    #[rust]
+    draw_state: DrawStateWrap<()>,
+
+    #[rust]
+    templates: ComponentMap<LiveId, LivePtr>,
+    #[rust]
+    items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
     //#[rust(DragState::None)] drag_state: DragState,
     /*#[rust(ScrollState::Stopped)] scroll_state: ScrollState*/
 }
 
 impl LiveHook for FlatList {
-            
-    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
+    fn before_apply(
+        &mut self,
+        _cx: &mut Cx,
+        apply: &mut Apply,
+        _index: usize,
+        _nodes: &[LiveNode],
+    ) {
+        if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
             self.templates.clear();
         }
     }
-    
+
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(
+        &mut self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         if nodes[index].is_instance_prop() {
-            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index){
+            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index) {
                 let id = nodes[index].id;
                 self.templates.insert(id, live_ptr);
                 // lets apply this thing over all our childnodes with that template
@@ -89,34 +112,37 @@ impl LiveHook for FlatList {
                     }
                 }
             }
-        }
-        else {
+        } else {
             cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
         }
         nodes.skip_node(index)
     }
-    
-    fn after_apply(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+
+    fn after_apply(
+        &mut self,
+        _cx: &mut Cx,
+        _applyl: &mut Apply,
+        _index: usize,
+        _nodes: &[LiveNode],
+    ) {
         if let Flow::Down = self.layout.flow {
             self.vec_index = Vec2Index::Y
-        }
-        else {
+        } else {
             self.vec_index = Vec2Index::X
         }
     }
 }
 
 impl FlatList {
-    
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.scroll_bars.begin(cx, walk, self.layout);
     }
-    
+
     fn end(&mut self, cx: &mut Cx2d) {
         self.scroll_bars.end(cx);
     }
 
-    pub fn space_left(&self, cx:&mut Cx2d)->f64{
+    pub fn space_left(&self, cx: &mut Cx2d) -> f64 {
         let view_total = cx.turtle().used();
         let rect_now = cx.turtle().rect();
         rect_now.size.y - view_total.y
@@ -124,12 +150,11 @@ impl FlatList {
 
     pub fn item(&mut self, cx: &mut Cx, id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
-            let (_, entry) = self.items.get_or_insert(cx, id, | cx | {
+            let (_, entry) = self.items.get_or_insert(cx, id, |cx| {
                 (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
             });
             Some(entry.clone())
-        }
-        else {
+        } else {
             warning!("Template not found: {template}. Did you add it to the <FlatList> instance in `live_design!{{}}`?");
             None
         }
@@ -145,10 +170,8 @@ impl FlatList {
     }*/
 }
 
-
 impl Widget for FlatList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-
         let uid = self.widget_uid();
         self.scroll_bars.handle_event(cx, event, scope);
         /*
@@ -160,12 +183,10 @@ impl Widget for FlatList {
             }
         });
         */
-        for (item_id,item) in self.items.values_mut() {
+        for (item_id, item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
-            scope.with_id(*item_id, |scope|{
-                cx.group_widget_actions(uid, item_uid, |cx|{
-                    item.handle_event(cx, event, scope)
-                });
+            scope.with_id(*item_id, |scope| {
+                cx.group_widget_actions(uid, item_uid, |cx| item.handle_event(cx, event, scope));
             })
         }
         /*
@@ -212,7 +233,7 @@ impl Widget for FlatList {
             self.scroll_state = ScrollState::Stopped;
         }*/
         /*
-        if !self.scroll_bars.is_area_captured(cx) || is_scroll{ 
+        if !self.scroll_bars.is_area_captured(cx) || is_scroll{
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
                     self.scroll_state = ScrollState::Stopped;
@@ -220,7 +241,7 @@ impl Widget for FlatList {
                     dispatch_action(cx, FlatListAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 },
-                
+
                 Hit::FingerDown(e) => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area);
@@ -269,7 +290,7 @@ impl Widget for FlatList {
                                 self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
                             }
                             else if scaled_delta.abs() > self.flick_scroll_minimum{
-                                
+
                                 self.scroll_state = ScrollState::Flick {
                                     delta: scaled_delta.min(self.flick_scroll_maximum).max(-self.flick_scroll_maximum),
                                     next_frame: cx.new_next_frame()
@@ -292,11 +313,11 @@ impl Widget for FlatList {
             }
         }*/
     }
-    
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
-            return DrawStep::make_step()
+            return DrawStep::make_step();
         }
         self.end(cx);
         self.draw_state.end();
@@ -305,31 +326,29 @@ impl Widget for FlatList {
 }
 
 impl FlatListRef {
-   
     pub fn item(&self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.item(cx, entry_id, template)
-        }
-        else {
+        } else {
             None
         }
     }
-    
+
     pub fn items_with_actions(&self, actions: &Actions) -> Vec<(LiveId, WidgetRef)> {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);
         set
     }
-    
+
     fn items_with_actions_vec(&self, actions: &Actions, set: &mut Vec<(LiveId, WidgetRef)>) {
         let uid = self.widget_uid();
         for action in actions {
-            if let Some(action) = action.downcast_ref::<WidgetAction>(){
-                if let Some(group) = &action.group{
-                    if group.group_uid == uid{
+            if let Some(action) = action.downcast_ref::<WidgetAction>() {
+                if let Some(group) = &action.group {
+                    if group.group_uid == uid {
                         if let Some(inner) = self.borrow() {
                             for (item_id, (_templ_id, item)) in inner.items.iter() {
-                                if group.item_uid == item.widget_uid(){
+                                if group.item_uid == item.widget_uid() {
                                     set.push((*item_id, item.clone()))
                                 }
                             }

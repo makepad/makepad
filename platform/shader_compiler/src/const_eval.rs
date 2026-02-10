@@ -1,25 +1,20 @@
-use{
-    std::cell::Cell,
+use {
     crate::{
-        makepad_live_compiler::{
-            LiveError,
-            LiveErrorOrigin,
-            live_error_origin,
-            TokenSpan
-        },
+        analyse::ShaderAnalyseOptions,
+        makepad_live_compiler::{live_error_origin, LiveError, LiveErrorOrigin, TokenSpan},
         shader_ast::*,
-        analyse::ShaderAnalyseOptions
-    }
+    },
+    std::cell::Cell,
 };
 
 pub struct ConstEvaluator {
-    pub options: ShaderAnalyseOptions
+    pub options: ShaderAnalyseOptions,
 }
 
 impl ConstEvaluator {
     pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, LiveError> {
         self.try_const_eval_expr(expr).ok_or_else(|| LiveError {
-            origin:live_error_origin!(),
+            origin: live_error_origin!(),
             span: expr.span.into(),
             message: String::from("expression is not const"),
         })
@@ -50,36 +45,28 @@ impl ConstEvaluator {
                 ref expr,
                 ref index_expr,
             } => self.try_const_eval_index_expr(span, expr, index_expr),
-            ExprKind::MethodCall {
-                ref arg_exprs,
-                ..
-            } => self.try_const_eval_all_call_expr(arg_exprs),
-            ExprKind::PlainCall {
-                ref arg_exprs,
-                ..
-            } => self.try_const_eval_all_call_expr(arg_exprs),
-            ExprKind::BuiltinCall {
-                ref arg_exprs,
-                ..
-            } => self.try_const_eval_all_call_expr(arg_exprs),
+            ExprKind::MethodCall { ref arg_exprs, .. } => {
+                self.try_const_eval_all_call_expr(arg_exprs)
+            }
+            ExprKind::PlainCall { ref arg_exprs, .. } => {
+                self.try_const_eval_all_call_expr(arg_exprs)
+            }
+            ExprKind::BuiltinCall { ref arg_exprs, .. } => {
+                self.try_const_eval_all_call_expr(arg_exprs)
+            }
             /*xprKind::ClosureCall {
                 ref arg_exprs,
                 ..
             } => self.try_const_eval_all_call_expr(arg_exprs),*/
             ExprKind::ClosureDef(_) => None,
-            ExprKind::ConsCall {
-                ref arg_exprs,
-                ..
-            } => self.try_const_eval_all_call_expr(arg_exprs),
-            ExprKind::Var {
-                span,
-                ref kind,
-                ..
-            } => self.try_const_eval_var_expr(span, kind),
-            ExprKind::StructCons{
+            ExprKind::ConsCall { ref arg_exprs, .. } => {
+                self.try_const_eval_all_call_expr(arg_exprs)
+            }
+            ExprKind::Var { span, ref kind, .. } => self.try_const_eval_var_expr(span, kind),
+            ExprKind::StructCons {
                 struct_ptr,
                 span,
-                ref args
+                ref args,
             } => self.try_const_eval_struct_cons(struct_ptr, span, args),
             ExprKind::Lit { span, lit } => self.try_const_eval_lit_expr(span, lit),
         };
@@ -117,8 +104,8 @@ impl ConstEvaluator {
         let right_val = self.try_const_eval_expr(right_expr);
         let left_val = left_val?;
         let right_val = right_val?;
-        if self.options.no_const_collapse{
-            return None
+        if self.options.no_const_collapse {
+            return None;
         }
         match op {
             BinOp::Or => match (&left_val, &right_val) {
@@ -188,8 +175,8 @@ impl ConstEvaluator {
     fn try_const_eval_un_expr(&self, _span: TokenSpan, op: UnOp, expr: &Expr) -> Option<Val> {
         let val = self.try_const_eval_expr(expr);
         let val = val?;
-        if self.options.no_const_collapse{
-            return None
+        if self.options.no_const_collapse {
+            return None;
         }
         match op {
             UnOp::Not => match val {
@@ -249,9 +236,9 @@ impl ConstEvaluator {
         &self,
         _struct_ptr: StructPtr,
         _span: TokenSpan,
-        args: &Vec<(Ident,Expr)>,
+        args: &Vec<(Ident, Expr)>,
     ) -> Option<Val> {
-        for arg in args{
+        for arg in args {
             self.try_const_eval_expr(&arg.1);
         }
         None

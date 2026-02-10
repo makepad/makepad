@@ -1,22 +1,16 @@
-use crate::{
-    touch_gesture::*,
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*,
-    view::*,
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, touch_gesture::*, view::*, widget::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.ExpandablePanelBase = #(ExpandablePanel::register_widget(vm))
-    
+
     mod.widgets.ExpandablePanel = mod.widgets.ExpandablePanelBase{
         width: Fill
         height: Fill
         flow: Overlay
-        
+
         panel := View{
             width: Fill
             height: Fill
@@ -33,10 +27,14 @@ pub enum ExpandablePanelAction {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ExpandablePanel {
-    #[deref] view: View,
-    #[rust] touch_gesture: Option<TouchGesture>,
-    #[live] initial_offset: f64,
-    #[rust] current_panel_margin: f64,
+    #[deref]
+    view: View,
+    #[rust]
+    touch_gesture: Option<TouchGesture>,
+    #[live]
+    initial_offset: f64,
+    #[rust]
+    current_panel_margin: f64,
 }
 
 impl Widget for ExpandablePanel {
@@ -44,7 +42,10 @@ impl Widget for ExpandablePanel {
         self.view.handle_event(cx, event, scope);
 
         if let Some(touch_gesture) = self.touch_gesture.as_mut() {
-            if touch_gesture.handle_event(cx, event, self.view.area()).has_changed() {
+            if touch_gesture
+                .handle_event(cx, event, self.view.area())
+                .has_changed()
+            {
                 let scrolled_at = touch_gesture.scrolled_at;
                 self.current_panel_margin = self.initial_offset - scrolled_at;
                 self.redraw(cx);
@@ -64,7 +65,7 @@ impl Widget for ExpandablePanel {
         if let Some(mut panel) = panel_ref.borrow_mut() {
             panel.walk.margin.top = self.current_panel_margin;
         }
-        
+
         let result = self.view.draw_walk(cx, scope, walk);
 
         if self.touch_gesture.is_none() {
@@ -93,7 +94,7 @@ impl ExpandablePanelRef {
         }
         None
     }
-    
+
     pub fn reset(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             if let Some(touch_gesture) = inner.touch_gesture.as_mut() {
@@ -103,7 +104,7 @@ impl ExpandablePanelRef {
             inner.redraw(cx);
         }
     }
-    
+
     pub fn get_current_offset(&self) -> f64 {
         if let Some(inner) = self.borrow() {
             inner.current_panel_margin

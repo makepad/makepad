@@ -1,7 +1,7 @@
 /// Extensions to `char`.
 pub trait CharExt {
     fn is_ascii_word(self) -> bool;
-    
+
     fn is_word(self) -> bool;
 }
 

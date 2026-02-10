@@ -15,36 +15,36 @@ struct EncoderFlags {
     /// Whether JPEG images should be encoded as progressive images
     jpeg_encode_progressive: bool,
     /// Whether JPEG images should use optimized huffman tables
-    jpeg_optimize_huffman:   bool,
+    jpeg_optimize_huffman: bool,
     /// Whether to not preserve metadata across image transformations
-    image_strip_metadata:    bool
+    image_strip_metadata: bool,
 }
 
 /// Options shared by some of the encoders in
 /// the `zune-` family of image crates
 #[derive(Debug, Copy, Clone)]
 pub struct EncoderOptions {
-    width:       usize,
-    height:      usize,
-    colorspace:  ColorSpace,
-    quality:     u8,
-    depth:       BitDepth,
+    width: usize,
+    height: usize,
+    colorspace: ColorSpace,
+    quality: u8,
+    depth: BitDepth,
     num_threads: u8,
-    effort:      u8,
-    flags:       EncoderFlags
+    effort: u8,
+    flags: EncoderFlags,
 }
 
 impl Default for EncoderOptions {
     fn default() -> Self {
         Self {
-            width:       0,
-            height:      0,
-            colorspace:  ColorSpace::RGB,
-            quality:     80,
-            depth:       BitDepth::Eight,
+            width: 0,
+            height: 0,
+            colorspace: ColorSpace::RGB,
+            quality: 80,
+            depth: BitDepth::Eight,
             num_threads: 4,
-            effort:      4,
-            flags:       EncoderFlags::default()
+            effort: 4,
+            flags: EncoderFlags::default(),
         }
     }
 }
@@ -62,7 +62,10 @@ impl EncoderOptions {
     /// returns: EncoderOptions
     ///
     pub fn new(
-        width: usize, height: usize, colorspace: ColorSpace, depth: BitDepth
+        width: usize,
+        height: usize,
+        colorspace: ColorSpace,
+        depth: BitDepth,
     ) -> EncoderOptions {
         EncoderOptions {
             width,

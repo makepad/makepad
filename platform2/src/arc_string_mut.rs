@@ -6,7 +6,7 @@ use crate::makepad_script::*;
 #[derive(Clone)]
 pub enum ArcStringMut {
     Rc(ScriptRcString),
-    String(String)
+    String(String),
 }
 
 impl Default for ArcStringMut {
@@ -25,20 +25,20 @@ impl ArcStringMut {
     pub fn as_rc(&self) -> ScriptRcString {
         match self {
             Self::Rc(rc) => rc.clone(),
-            Self::String(s) => ScriptRcString::new(s.clone())
+            Self::String(s) => ScriptRcString::new(s.clone()),
         }
     }
-    
+
     pub fn as_mut(&mut self) -> &mut String {
         match self {
             Self::Rc(rc) => {
                 *self = Self::String(rc.0.to_string());
                 self.as_mut()
             }
-            Self::String(s) => s
+            Self::String(s) => s,
         }
     }
-    
+
     pub fn as_mut_empty(&mut self) -> &mut String {
         match self {
             Self::Rc(_) => {
@@ -67,7 +67,7 @@ impl ArcStringMut {
     pub fn as_ref(&self) -> &str {
         match self {
             Self::Rc(rc) => &rc.0,
-            Self::String(s) => s
+            Self::String(s) => s,
         }
     }
 }
@@ -83,13 +83,19 @@ impl ScriptNew for ArcStringMut {
 }
 
 impl ScriptApply for ArcStringMut {
-    fn script_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, value: ScriptValue) {
+    fn script_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        value: ScriptValue,
+    ) {
         // Convert to owned String using the heap's cast method
         let mut s = String::new();
         vm.bx.heap.cast_to_string(value, &mut s);
         *self = ArcStringMut::String(s);
     }
-    
+
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let s = self.as_ref();
         if let Some(val) = ScriptValue::from_inline_string(s) {

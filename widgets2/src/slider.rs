@@ -1,24 +1,24 @@
 use crate::{
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
+    text_input::{TextInput, TextInputAction},
     widget::*,
-    animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
-    text_input::{TextInput, TextInputAction}
 };
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
-    
+
     mod.widgets.SliderBase = #(Slider::register_widget(vm))
     mod.widgets.DragAxis =  set_type_default() do #(DragAxis::script_api(vm))
     mod.widgets.splat(mod.widgets.DragAxis)
-    
+
     use mod.widgets.*
-        
+
     set_type_default() do #(DrawSlider::script_shader(vm)){
         ..mod.draw.DrawQuad // splat in draw quad
     }
-    
+
     mod.widgets.SliderMinimal = set_type_default() do mod.widgets.SliderBase{
         min: 0.0
         max: 1.0
@@ -28,7 +28,7 @@ script_mod!{
         precision: 2.
         height: 25
         hover_actions_enabled: false
-        
+
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
@@ -48,7 +48,7 @@ script_mod!{
             color_2_focus: uniform(theme.color_inset_2_focus)
             color_2_disabled: uniform(theme.color_inset_2_disabled)
             color_2_drag: uniform(theme.color_inset_2_drag)
-            
+
             border_color: uniform(theme.color_bevel_outset_1)
             border_color_hover: uniform(theme.color_bevel_outset_1)
             border_color_focus: uniform(theme.color_bevel_outset_1)
@@ -99,7 +99,7 @@ script_mod!{
                         .mix(self.border_color_2_hover.mix(self.border_color_2_drag, self.drag), self.hover)
                         .mix(self.border_color_2_disabled, self.disabled)
                 )
-                    
+
                 // Track highlight
                 sdf.rect(
                     0
@@ -114,7 +114,7 @@ script_mod!{
                         .mix(self.border_color_hover.mix(self.border_color_drag, self.drag), self.hover)
                         .mix(self.border_color_disabled, self.disabled)
                 )
-                    
+
                 // Amount
                 sdf.rect(
                     0
@@ -128,7 +128,7 @@ script_mod!{
                         .mix(self.val_color_hover.mix(self.val_color_drag, self.drag), self.hover)
                         .mix(self.val_color_disabled, self.disabled)
                 )
-                    
+
                 // Handle
                 let handle_bg_size = mix(0, 10, self.hover)
                 let handle_bg_x = self.slide_pos * self.rect_size.x
@@ -178,13 +178,13 @@ script_mod!{
                     .mix(self.color_disabled, self.disabled)
             }
         }
-            
+
         label_walk: Walk{
             width: Fill
             height: Fit
             margin: Inset{top: 0., bottom: theme.space_1}
         }
-            
+
         text_input: TextInput{
             empty_text: "0"
             is_numeric_only: true
@@ -241,7 +241,7 @@ script_mod!{
                 color_disabled: theme.color_u_hidden
             }
         }
-            
+
         animator: Animator{
             disabled: {
                 default: @off
@@ -331,7 +331,7 @@ script_mod!{
             border_color_2_disabled: theme.color_bevel_outset_2_disabled
         }
     }
-        
+
     mod.widgets.SliderFlat = mod.widgets.SliderMinimal{
         height: 36
 
@@ -402,7 +402,7 @@ script_mod!{
                     offset_px.x / self.rect_size.x
                     offset_px.y / self.rect_size.y
                 )
-                    
+
                 let border_sz_uv = vec2(
                     self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
@@ -574,13 +574,13 @@ script_mod!{
                         .mix(border_color_2_hover.mix(border_color_2_drag, self.drag), self.hover)
                         .mix(border_color_2_disabled, self.disabled)
                 )
-                    
+
                 // Value line
                 let track_length = self.rect_size.x - offset_sides * 4.
                 let val_x = self.slide_pos * track_length + offset_sides * 2.
                 let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5
                 let move_x = mix(offset_sides, self.rect_size.x * 0.5, self.bipolar)
-                
+
                 sdf.move_to(move_x, offset_top)
                 sdf.line_to(val_x, offset_top)
 
@@ -591,7 +591,7 @@ script_mod!{
                         .mix(self.val_color_disabled, self.disabled),
                     slider_height
                 )
-                    
+
                 // Handle
                 let ctrl_height = self.rect_size.y - offset_px.y
                 let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides) - 3
@@ -610,13 +610,13 @@ script_mod!{
                     .mix(handle_fill_disabled, self.disabled)
 
                 sdf.fill_keep(hfill)
-                
+
                 let hstroke = handle_stroke
                     .mix(handle_stroke_hover.mix(handle_stroke_drag, self.drag), self.hover)
                     .mix(handle_stroke_disabled, self.disabled)
 
                 sdf.stroke(hstroke, self.border_size)
-                
+
                 return sdf.result
             }
         }
@@ -682,7 +682,7 @@ script_mod!{
             border_radius: uniform(theme.corner_radius * 2.)
 
             color_dither: uniform(1.0)
-            
+
             color: uniform(theme.color_inset)
             color_hover: uniform(theme.color_inset_hover)
             color_focus: uniform(theme.color_inset_focus)
@@ -882,7 +882,7 @@ script_mod!{
                         .mix(self.handle_color_focus.mix(self.handle_color_hover.mix(self.handle_color_drag, self.drag), self.hover), self.focus)
                         .mix(self.handle_color_disabled, self.disabled)
                 )
-                
+
                 return sdf.result
             }
         }
@@ -1009,7 +1009,7 @@ script_mod!{
             val_padding: uniform(5.)
 
             color_dither: uniform(1.)
-            
+
             color: uniform(theme.color_inset)
             color_hover: uniform(theme.color_inset_hover)
             color_focus: uniform(theme.color_inset_focus)
@@ -1186,7 +1186,7 @@ script_mod!{
                     outer_end
                     border_sz * 4.
                 )
-                
+
                 sdf.fill(
                     mix(self.border_color, theme.color_d_hidden, gradient_up)
                         .mix(mix(self.border_color_hover, theme.color_d_hidden, gradient_up), self.hover)
@@ -1283,7 +1283,7 @@ script_mod!{
                         .mix(mix(self.border_color_focus, theme.color_u_hidden, gradient_up).mix(mix(self.border_color_hover, theme.color_u_hidden, gradient_up).mix(mix(self.border_color_drag, theme.color_u_hidden, gradient_up), self.drag), self.hover), self.focus)
                         .mix(mix(self.border_color_disabled, theme.color_u_hidden, gradient_up), self.disabled)
                 )
-                
+
                 return sdf.result
             }
         }
@@ -1325,60 +1325,86 @@ script_mod!{
 
 #[derive(Copy, Clone, Debug, Script, ScriptHook)]
 pub enum DragAxis {
-    #[pick] Horizontal,
-    Vertical
+    #[pick]
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSlider {
-    #[deref] draw_super: DrawQuad,
-    #[live] label_size: f32,
-    #[live] slide_pos: f32,
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    label_size: f32,
+    #[live]
+    slide_pos: f32,
 }
 
 #[derive(Script, Widget, Animator)]
 pub struct Slider {
-    #[source] source: ScriptObjectRef,
-    #[redraw] #[live] draw_bg: DrawSlider,
-    
-    #[walk] walk: Walk,
+    #[source]
+    source: ScriptObjectRef,
+    #[redraw]
+    #[live]
+    draw_bg: DrawSlider,
 
-    #[live(DragAxis::Horizontal)] pub axis: DragAxis,
-    
-    #[layout] layout: Layout,
-    #[apply_default] animator: Animator,
-    
-    #[rust] label_area: Area,
-    #[live] label_walk: Walk,
-    #[live] label_align: Align,
-    #[live] draw_text: DrawText,
-    #[live] text: String,
-    
-    #[live] text_input: TextInput,
-    
-    #[live] precision: usize,
-    
-    #[live] min: f64,
-    #[live] max: f64,
-    #[live] step: f64,
-    #[live] default: f64,
-    
-    #[live] bind: String,
+    #[walk]
+    walk: Walk,
+
+    #[live(DragAxis::Horizontal)]
+    pub axis: DragAxis,
+
+    #[layout]
+    layout: Layout,
+    #[apply_default]
+    animator: Animator,
+
+    #[rust]
+    label_area: Area,
+    #[live]
+    label_walk: Walk,
+    #[live]
+    label_align: Align,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    text: String,
+
+    #[live]
+    text_input: TextInput,
+
+    #[live]
+    precision: usize,
+
+    #[live]
+    min: f64,
+    #[live]
+    max: f64,
+    #[live]
+    step: f64,
+    #[live]
+    default: f64,
+
+    #[live]
+    bind: String,
 
     // Indicates if the label of the slider responds to hover events
     // The primary use case for this kind of emitted actions is for tooltips displaying
     // and it is turned on by default, since this component already consumes finger events
-    #[live(true)] hover_actions_enabled: bool,
-    
-    #[rust] pub relative_value: f64,
-    #[rust] pub dragging: Option<f64>,
+    #[live(true)]
+    hover_actions_enabled: bool,
+
+    #[rust]
+    pub relative_value: f64,
+    #[rust]
+    pub dragging: Option<f64>,
 }
 
 impl ScriptHook for Slider {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.set_internal(self.default);
-        vm.with_cx_mut(|cx|{
+        vm.with_cx_mut(|cx| {
             self.update_text_input(cx);
         });
     }
@@ -1393,66 +1419,67 @@ pub enum SliderAction {
     LabelHoverIn(Rect),
     LabelHoverOut,
     #[default]
-    None
+    None,
 }
 
 impl Slider {
-    
     fn to_external(&self) -> f64 {
         let val = self.relative_value * (self.max - self.min);
-        if self.step != 0.0{
-            return (val / self.step).floor()* self.step + self.min
-        }
-        else{
-            val  + self.min
+        if self.step != 0.0 {
+            return (val / self.step).floor() * self.step + self.min;
+        } else {
+            val + self.min
         }
     }
-    
+
     fn set_internal(&mut self, external: f64) -> bool {
         let old = self.relative_value;
         self.relative_value = (external - self.min) / (self.max - self.min);
         old != self.relative_value
     }
-    
+
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external();
-        self.text_input.set_text(cx, &match self.precision{
-            0=>format!("{:.0}",e),
-            1=>format!("{:.1}",e),
-            2=>format!("{:.2}",e),
-            3=>format!("{:.3}",e),
-            4=>format!("{:.4}",e),
-            5=>format!("{:.5}",e),
-            6=>format!("{:.6}",e),
-            7=>format!("{:.7}",e),
-            _=>format!("{}",e)
-        });
+        self.text_input.set_text(
+            cx,
+            &match self.precision {
+                0 => format!("{:.0}", e),
+                1 => format!("{:.1}", e),
+                2 => format!("{:.2}", e),
+                3 => format!("{:.3}", e),
+                4 => format!("{:.4}", e),
+                5 => format!("{:.5}", e),
+                6 => format!("{:.6}", e),
+                7 => format!("{:.7}", e),
+                _ => format!("{}", e),
+            },
+        );
         self.text_input.select_all(cx);
     }
-    
+
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.slide_pos = self.relative_value as f32;
         self.draw_bg.begin(cx, walk, self.layout);
-        
-        if let Flow::Right { wrap: false, .. } = self.layout.flow{
-            
+
+        if let Flow::Right { wrap: false, .. } = self.layout.flow {
             if let Some(mut dw) = cx.defer_walk_turtle(self.label_walk) {
                 //, (self.value*100.0) as usize);
                 let walk = self.text_input.walk(cx);
                 let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
-        
+
                 let label_walk = dw.resolve(cx);
                 cx.begin_turtle(label_walk, Layout::default());
-                self.draw_text.draw_walk(cx, label_walk, self.label_align, &self.text);
+                self.draw_text
+                    .draw_walk(cx, label_walk, self.label_align, &self.text);
                 cx.end_turtle_with_area(&mut self.label_area);
             }
-        }
-        else{
+        } else {
             let walk = self.text_input.walk(cx);
             let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
-            self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.text);
+            self.draw_text
+                .draw_walk(cx, self.label_walk, self.label_align, &self.text);
         }
-        
+
         self.draw_bg.end(cx);
     }
 
@@ -1460,37 +1487,42 @@ impl Slider {
         self.to_external()
     }
 
-    pub fn set_value(&mut self, cx:&mut Cx, v: f64) {
+    pub fn set_value(&mut self, cx: &mut Cx, v: f64) {
         let prev_value = self.value();
         self.set_internal(v);
         if v != prev_value {
             self.update_text_input(cx);
         }
     }
-    }
-
+}
 
 impl Widget for Slider {
-    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.animator_toggle(
+            cx,
+            disabled,
+            Animate::Yes,
+            ids!(disabled.on),
+            ids!(disabled.off),
+        );
     }
-                
-    fn disabled(&self, cx:&Cx) -> bool {
+
+    fn disabled(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-        
+
         // alright lets match our designer against the slider backgdrop
-        match event.hit_designer(cx, self.draw_bg.area()){
-            HitDesigner::DesignerPick(_e)=>{
+        match event.hit_designer(cx, self.draw_bg.area()) {
+            HitDesigner::DesignerPick(_e) => {
                 cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
             }
-            _=>()
+            _ => (),
         }
-        
+
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
                 TextInputAction::KeyFocus => {
@@ -1504,14 +1536,18 @@ impl Widget for Slider {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
-                    cx.widget_action(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
+                    cx.widget_action(
+                        uid,
+                        &scope.path,
+                        SliderAction::TextSlide(self.to_external()),
+                    );
                 }
                 TextInputAction::Escaped => {
                     self.update_text_input(cx);
                 }
-                _ => ()
+                _ => (),
             }
-        };
+        }
 
         if self.hover_actions_enabled {
             match event.hits_with_capture_overload(cx, self.label_area, true) {
@@ -1520,29 +1556,33 @@ impl Widget for Slider {
                 }
                 Hit::FingerHoverOut(_) => {
                     cx.widget_action(uid, &scope.path, SliderAction::LabelHoverOut);
-                },
-                _ => ()
+                }
+                _ => (),
             }
         }
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                if self.animator_in_state(cx, ids!(disabled.on)) { return (); }
+                if self.animator_in_state(cx, ids!(disabled.on)) {
+                    return ();
+                }
                 self.animator_play(cx, ids!(hover.on));
-            },
+            }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
-            },
+            }
             Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Grab);
-            },
+            }
             Hit::FingerDown(FingerDownEvent {
                 // abs,
                 // rect,
                 device,
                 ..
             }) if device.is_primary_hit() => {
-                if self.animator_in_state(cx, ids!(disabled.on)) { return (); }
+                if self.animator_in_state(cx, ids!(disabled.on)) {
+                    return ();
+                }
                 // cx.set_key_focus(self.slider.area());
                 // self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
                 self.update_text_input(cx);
@@ -1551,14 +1591,16 @@ impl Widget for Slider {
                 self.text_input.set_key_focus(cx);
                 self.text_input.select_all(cx);
                 self.text_input.redraw(cx);
-                                
+
                 self.animator_play(cx, ids!(drag.on));
                 self.dragging = Some(self.relative_value);
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
-            },
+            }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                if self.animator_in_state(cx, ids!(disabled.on)) { return (); }
+                if self.animator_in_state(cx, ids!(disabled.on)) {
+                    return ();
+                }
 
                 self.text_input.set_is_read_only(cx, false);
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
@@ -1566,8 +1608,7 @@ impl Widget for Slider {
                 self.animator_play(cx, ids!(drag.off));
                 if fe.is_over && fe.device.has_hovers() {
                     self.animator_play(cx, ids!(hover.on));
-                }
-                else {
+                } else {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 self.dragging = None;
@@ -1575,14 +1616,21 @@ impl Widget for Slider {
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerMove(fe) => {
-                if self.animator_in_state(cx, ids!(disabled.on)) { return (); }
+                if self.animator_in_state(cx, ids!(disabled.on)) {
+                    return ();
+                }
 
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
                     if let DragAxis::Horizontal = self.axis {
-                        self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_bg.label_size as f64)).max(0.0).min(1.0);
+                        self.relative_value = (start_pos
+                            + rel.x / (fe.rect.size.x - self.draw_bg.label_size as f64))
+                            .max(0.0)
+                            .min(1.0);
                     } else {
-                        self.relative_value = (start_pos - rel.y / fe.rect.size.y as f64).max(0.0).min(1.0);
+                        self.relative_value = (start_pos - rel.y / fe.rect.size.y as f64)
+                            .max(0.0)
+                            .min(1.0);
                     }
                     self.set_internal(self.to_external());
                     self.draw_bg.redraw(cx);
@@ -1590,84 +1638,78 @@ impl Widget for Slider {
                     cx.widget_action(uid, &scope.path, SliderAction::Slide(self.to_external()));
                 }
             }
-            _ => ()
+            _ => (),
         }
     }
-    
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk_slider(cx, walk);
         DrawStep::done()
     }
-    
+
     fn text(&self) -> String {
         format!("{}", self.to_external())
     }
-        
-    fn set_text(&mut self, cx:&mut Cx, v: &str) {
-        if let Ok(v) = v.parse::<f64>(){
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if let Ok(v) = v.parse::<f64>() {
             self.set_internal(v);
             self.update_text_input(cx);
         }
     }
-        
 }
 
-impl SliderRef{
-    pub fn value(&self)->Option<f64> {
-        if let Some(inner) = self.borrow(){
-            return Some(inner.value())
+impl SliderRef {
+    pub fn value(&self) -> Option<f64> {
+        if let Some(inner) = self.borrow() {
+            return Some(inner.value());
         }
 
-        return None
+        return None;
     }
 
-    pub fn set_value(&self, cx:&mut Cx, v: f64) {
+    pub fn set_value(&self, cx: &mut Cx, v: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_value(cx, v)
         }
     }
-    
-    pub fn slided(&self, actions:&Actions)->Option<f64>{
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            match item.cast(){
-                SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
-                    return Some(v)
-                }
-                _=>()
-            }
-        }
-        None
-    }
-    
-    pub fn end_slide(&self, actions:&Actions)->Option<f64>{
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            match item.cast(){
-                SliderAction::EndSlide(v) | SliderAction::TextSlide(v) => {
-                    return Some(v)
-                }
-                _=>()
-            }
-        }
-        None
-    }
-    
 
-    pub fn label_hover_in(&self, actions:&Actions)->Option<Rect>{
+    pub fn slided(&self, actions: &Actions) -> Option<f64> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            match item.cast(){
+            match item.cast() {
+                SliderAction::TextSlide(v) | SliderAction::Slide(v) => return Some(v),
+                _ => (),
+            }
+        }
+        None
+    }
+
+    pub fn end_slide(&self, actions: &Actions) -> Option<f64> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            match item.cast() {
+                SliderAction::EndSlide(v) | SliderAction::TextSlide(v) => return Some(v),
+                _ => (),
+            }
+        }
+        None
+    }
+
+    pub fn label_hover_in(&self, actions: &Actions) -> Option<Rect> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            match item.cast() {
                 SliderAction::LabelHoverIn(rect) => Some(rect),
-                _=> None
+                _ => None,
             }
         } else {
             None
         }
     }
 
-    pub fn label_hover_out(&self, actions:&Actions)->bool{
+    pub fn label_hover_out(&self, actions: &Actions) -> bool {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            match item.cast(){
+            match item.cast() {
                 SliderAction::LabelHoverOut => true,
-                _=> false
+                _ => false,
             }
         } else {
             false

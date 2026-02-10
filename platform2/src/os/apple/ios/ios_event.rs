@@ -1,24 +1,11 @@
-use {
-    crate::{
-        window::WindowId,
-        event::{
-            MouseDownEvent,
-            MouseUpEvent,
-            MouseMoveEvent,
-            ScrollEvent,
-            WindowGeomChangeEvent,
-            TextInputEvent,
-            TextRangeReplaceEvent,
-            KeyEvent,
-            TextClipboardEvent,
-            TimerEvent,
-            LongPressEvent,
-            TouchUpdateEvent,
-            VirtualKeyboardEvent,
-            GamepadConnectedEvent
-        },
-        permission::PermissionResult,
-    }
+use crate::{
+    event::{
+        GamepadConnectedEvent, KeyEvent, LongPressEvent, MouseDownEvent, MouseMoveEvent,
+        MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TextRangeReplaceEvent,
+        TimerEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeomChangeEvent,
+    },
+    permission::PermissionResult,
+    window::WindowId,
 };
 
 #[derive(Debug, Clone)]
@@ -34,9 +21,9 @@ pub enum IosEvent {
     MouseMove(MouseMoveEvent),
     TouchUpdate(TouchUpdateEvent),
     LongPress(LongPressEvent),
-    
+
     Scroll(ScrollEvent),
-    
+
     TextInput(TextInputEvent),
     TextRangeReplace(TextRangeReplaceEvent),
     KeyDown(KeyEvent),

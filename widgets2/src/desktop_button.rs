@@ -1,29 +1,27 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        button::ButtonAction,
-        makepad_draw::*,
-        widget::*,
-        animator::{Animator, AnimatorImpl, AnimatorAction},
-    }
+use crate::{
+    animator::{Animator, AnimatorAction, AnimatorImpl},
+    button::ButtonAction,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
 };
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     let DesktopButtonType = set_type_default() do #(DesktopButtonType::script_api(vm))
     mod.widgets.DesktopButtonType = DesktopButtonType
-    
+
     mod.widgets.DesktopButtonBase = #(DesktopButton::register_widget(vm))
-    
+
     mod.widgets.DesktopButton = set_type_default() do mod.widgets.DesktopButtonBase{
         width: 46 height: 29
         draw_bg +: {
             button_type: instance(DesktopButtonType.Fullscreen)
             hover: instance(0.0)
             down: instance(0.0)
-            
+
             color: uniform(theme.color_label_inner)
             color_hover: uniform(theme.color_label_inner_hover)
             color_down: uniform(theme.color_label_inner_down)
@@ -33,11 +31,11 @@ script_mod!{
                 sdf.aa = sdf.aa * 3.0
                 let sz = 4.5
                 let c = self.rect_size * vec2(0.5, 0.5)
-                
+
                 let color = self.color
                     .mix(self.color_hover, self.hover)
                     .mix(self.color_down, self.down)
-                
+
                 match self.button_type {
                     DesktopButtonType.WindowsMin => {
                         sdf.move_to(c.x - sz, c.y)
@@ -104,7 +102,7 @@ script_mod!{
                         draw_bg: {down: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
@@ -117,7 +115,7 @@ script_mod!{
                         }
                     }
                 }
-                
+
                 down: AnimatorState{
                     from: {all: Snap}
                     apply: {
@@ -130,7 +128,7 @@ script_mod!{
             }
         }
     }
-    
+
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
@@ -141,16 +139,21 @@ pub enum DesktopButtonType {
     WindowsMaxToggled = 3,
     WindowsClose = 4,
     XRMode = 5,
-    #[pick] Fullscreen = 6,
+    #[pick]
+    Fullscreen = 6,
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct DesktopButton {
-    #[source] source: ScriptObjectRef,
+    #[source]
+    source: ScriptObjectRef,
     #[apply_default]
     animator: Animator,
-    #[walk] walk: Walk,
-    #[redraw] #[live] draw_bg: DrawQuad,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawQuad,
 }
 
 impl Widget for DesktopButton {
@@ -159,12 +162,12 @@ impl Widget for DesktopButton {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
-        
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(fe) => {
                 cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
                 self.animator_play(cx, ids!(hover.down));
-            },
+            }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, ids!(hover.on));
@@ -175,23 +178,23 @@ impl Widget for DesktopButton {
             Hit::FingerLongPress(_) => {
                 cx.widget_action(uid, &scope.path, ButtonAction::LongPressed);
             }
-            Hit::FingerUp(fe) => if fe.is_over {
-                cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
-                if fe.device.has_hovers() {
-                    self.animator_play(cx, ids!(hover.on));
-                }
-                else{
+            Hit::FingerUp(fe) => {
+                if fe.is_over {
+                    cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                    if fe.device.has_hovers() {
+                        self.animator_play(cx, ids!(hover.on));
+                    } else {
+                        self.animator_play(cx, ids!(hover.off));
+                    }
+                } else {
+                    cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
                     self.animator_play(cx, ids!(hover.off));
                 }
             }
-            else {
-                cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
-                self.animator_play(cx, ids!(hover.off));
-            }
-            _ => ()
+            _ => (),
         };
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let _ = self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()

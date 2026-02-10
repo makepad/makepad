@@ -11,13 +11,13 @@
 // Original authors: alexchrichton, bluss
 
 // UTF-8 ranges and tags for encoding characters
-const TAG_CONT: u8    = 0b1000_0000;
-const TAG_TWO_B: u8   = 0b1100_0000;
+const TAG_CONT: u8 = 0b1000_0000;
+const TAG_TWO_B: u8 = 0b1100_0000;
 const TAG_THREE_B: u8 = 0b1110_0000;
-const TAG_FOUR_B: u8  = 0b1111_0000;
-const MAX_ONE_B: u32   =     0x80;
-const MAX_TWO_B: u32   =    0x800;
-const MAX_THREE_B: u32 =  0x10000;
+const TAG_FOUR_B: u8 = 0b1111_0000;
+const MAX_ONE_B: u32 = 0x80;
+const MAX_TWO_B: u32 = 0x800;
+const MAX_THREE_B: u32 = 0x10000;
 
 /// Placeholder
 pub struct EncodeUtf8Error;
@@ -29,8 +29,7 @@ pub struct EncodeUtf8Error;
 ///
 /// Safety: `ptr` must be writable for `len` bytes.
 #[inline]
-pub unsafe fn encode_utf8(ch: char, ptr: *mut u8, len: usize) -> Result<usize, EncodeUtf8Error>
-{
+pub unsafe fn encode_utf8(ch: char, ptr: *mut u8, len: usize) -> Result<usize, EncodeUtf8Error> {
     let code = ch as u32;
     if code < MAX_ONE_B && len >= 1 {
         ptr.add(0).write(code as u8);
@@ -41,19 +40,18 @@ pub unsafe fn encode_utf8(ch: char, ptr: *mut u8, len: usize) -> Result<usize, E
         return Ok(2);
     } else if code < MAX_THREE_B && len >= 3 {
         ptr.add(0).write((code >> 12 & 0x0F) as u8 | TAG_THREE_B);
-        ptr.add(1).write((code >>  6 & 0x3F) as u8 | TAG_CONT);
+        ptr.add(1).write((code >> 6 & 0x3F) as u8 | TAG_CONT);
         ptr.add(2).write((code & 0x3F) as u8 | TAG_CONT);
         return Ok(3);
     } else if len >= 4 {
         ptr.add(0).write((code >> 18 & 0x07) as u8 | TAG_FOUR_B);
         ptr.add(1).write((code >> 12 & 0x3F) as u8 | TAG_CONT);
-        ptr.add(2).write((code >>  6 & 0x3F) as u8 | TAG_CONT);
+        ptr.add(2).write((code >> 6 & 0x3F) as u8 | TAG_CONT);
         ptr.add(3).write((code & 0x3F) as u8 | TAG_CONT);
         return Ok(4);
     };
     Err(EncodeUtf8Error)
 }
-
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri is too slow
@@ -62,7 +60,9 @@ fn test_encode_utf8() {
     let mut data = [0u8; 16];
     for codepoint in 0..=(std::char::MAX as u32) {
         if let Some(ch) = std::char::from_u32(codepoint) {
-            for elt in &mut data { *elt = 0; }
+            for elt in &mut data {
+                *elt = 0;
+            }
             let ptr = data.as_mut_ptr();
             let len = data.len();
             unsafe {
@@ -89,4 +89,3 @@ fn test_encode_utf8_oob() {
         }
     }
 }
-

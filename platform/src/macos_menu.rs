@@ -1,9 +1,4 @@
-use {
-    crate::{
-        makepad_live_id::LiveId,
-        event::KeyCode
-    },
-};
+use crate::{event::KeyCode, makepad_live_id::LiveId};
 
 /*
 #[derive(Clone, Copy, Default)]
@@ -15,8 +10,19 @@ pub struct CxCommandSetting {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum MacosMenu {
-    Main {items:Vec<MacosMenu>},
-    Item {name: String, command:LiveId, shift:bool, key:KeyCode, enabled: bool},
-    Sub {name: String, items: Vec<MacosMenu>},
-    Line
+    Main {
+        items: Vec<MacosMenu>,
+    },
+    Item {
+        name: String,
+        command: LiveId,
+        shift: bool,
+        key: KeyCode,
+        enabled: bool,
+    },
+    Sub {
+        name: String,
+        items: Vec<MacosMenu>,
+    },
+    Line,
 }

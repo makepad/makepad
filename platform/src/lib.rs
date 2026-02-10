@@ -15,39 +15,39 @@ mod ime;
 
 pub mod action;
 
-pub mod live_traits;
-pub mod live_cx;
 pub mod live_atomic;
+pub mod live_cx;
+pub mod live_traits;
 
-pub mod thread;
 pub mod audio;
 pub mod midi;
-pub mod video;
 pub mod scope;
+pub mod thread;
+pub mod video;
 //pub mod script;
 
-mod draw_matrix;
-mod draw_shader; 
 mod draw_list;
+mod draw_matrix;
+mod draw_shader;
 mod draw_vars;
 
-mod id_pool;
-pub mod event;
-pub mod permission;
-mod area;
-mod window;
-mod pass;
-mod texture;
-mod cursor;
-mod macos_menu;
 mod animator;
-mod gpu_info;
-mod geometry;
-mod debug;
-mod component_map;
+mod area;
 mod component_list;
+mod component_map;
+mod cursor;
+mod debug;
+pub mod event;
+mod geometry;
+mod gpu_info;
+mod id_pool;
+mod macos_menu;
+mod pass;
 mod performance_stats;
+pub mod permission;
 pub mod studio;
+mod texture;
+mod window;
 
 pub mod web_socket;
 
@@ -67,236 +67,147 @@ mod app_main;
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
-pub use ::windows as windows;
+pub use ::windows;
 
 pub use makepad_futures;
- 
+
 pub use {
-    makepad_error_log,
-    makepad_shader_compiler,
-    makepad_shader_compiler::makepad_derive_live,
-    makepad_shader_compiler::makepad_math,
-    makepad_shader_compiler::makepad_live_tokenizer,
-    makepad_shader_compiler::makepad_micro_serde,
-    makepad_shader_compiler::makepad_live_compiler,
-    makepad_shader_compiler::makepad_live_id,
-    makepad_http,
-    smallvec,
-    smallvec::SmallVec,
-    //makepad_image_formats::image,
-    makepad_derive_live::*,
-    
-    //makepad_script::vm::*,
-    //makepad_script::traits::*,
-    //makepad_script::script,
-    log::*,
-    makepad_math::*,
-    makepad_live_id::*,
-    app_main::*,
-    //makepad_script::vm,
-    makepad_live_compiler::{
-        vec4_ext::*,
-        live_error_origin,
-        LiveErrorOrigin,
-        LiveNodeOrigin,
-        LiveRegistry,
-        LiveId,
-        LiveIdMap,
-        LiveFileId,
-        LivePtr,
-        LiveRef,
-        LiveNode,
-        LiveType,
-        LiveTypeInfo,
-        LiveTypeField,
-        LiveFieldKind,
-        LiveComponentInfo,
-        LiveComponentRegistry,
-        LivePropType,
-        LiveProp,
-        LiveIdAsProp,
-        LiveValue,
-        InlineString,
-        LiveBinding,
-        LiveIdPath,
-        LiveNodeSliceToCbor,
-        LiveNodeVecFromCbor,
-        LiveModuleId,
-        LiveNodeSlice,
-        LiveNodeVec,
-        LiveNodeSliceApi,
-        LiveNodeVecApi,
-    },
-    component_map::ComponentMap,
-    component_list::ComponentList,
-    makepad_shader_compiler::{
-        ShaderRegistry,
-        ShaderEnum,
-        DrawShaderPtr,
-        ShaderTy,
-    },
     crate::{
-        os::*,
-        cx_api::{CxOsApi, OpenUrlInPlace, CxOsOp},
-        ime::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType, SoftKeyboardConfig, TextInputConfig},
-        media_api::CxMediaApi,
-        scope::*,
-        draw_list::{
-            CxDrawItem,
-            CxRectArea,
-            CxDrawCall,
-            DrawList,
-            DrawListId,
-            CxDrawListPool
+        action::{
+            Action, ActionCast, ActionCastRef, ActionDefaultRef, ActionTrait, Actions, ActionsBuf,
         },
-        cx::{
-            Cx,
-            CxRef,
-            OsType
-        },
-        area::{
-            Area,
-            RectArea,
-            InstanceArea
-        },
-        midi::*,
+        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Ease, Play},
+        area::{Area, InstanceArea, RectArea},
         audio::*,
-        thread::*,
-        video::*,
-        web_socket::{WebSocket,WebSocketMessage},
+        cursor::MouseCursor,
+        cx::{Cx, CxRef, OsType},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
+        draw_matrix::DrawMatrix,
+        draw_vars::{shader_enum, DrawVars},
         event::{
-            VirtualKeyboardEvent,
-            HttpRequest,
-            HttpResponse,
+            DesignerPickEvent,
+            DigitDevice,
+            DragEvent,
+            DragHit,
+            DragHitEvent,
+            DragItem,
+            DragResponse,
+            DragState,
+            DrawEvent,
+            DropEvent,
+            DropHitEvent,
+            Event,
+            FingerDownEvent,
+            FingerHoverEvent,
+            FingerMoveEvent,
+            FingerScrollEvent,
+            FingerUpEvent,
+            Hit,
+            HitDesigner,
+            HitOptions,
+            HoverState,
+            HttpError,
             HttpMethod,
             HttpProgress,
-            HttpError,
-            NetworkResponse,
-            NetworkResponsesEvent,
-            Margin,
+            HttpRequest,
+            HttpResponse,
             KeyCode,
-            Event,
-            Hit,
-            DragHit,
-            Trigger,
-            //MidiInputListEvent,
-            Timer,
-            NextFrame,
+            KeyEvent,
+            KeyFocusEvent,
             KeyModifiers,
-            DrawEvent,
-            DigitDevice,
+            Margin,
             MouseButton,
             MouseDownEvent,
             MouseMoveEvent,
             MouseUpEvent,
-            FingerDownEvent,
-            FingerMoveEvent,
-            FingerUpEvent,
-            HoverState,
-            FingerHoverEvent,
-            FingerScrollEvent,
-            WindowGeomChangeEvent,
-            WindowMovedEvent,
+            NetworkResponse,
+            NetworkResponsesEvent,
+            NextFrame,
             NextFrameEvent,
-            TimerEvent,
-            KeyEvent,
-            KeyFocusEvent,
-            TextInputEvent,
             TextClipboardEvent,
+            TextInputEvent,
+            //MidiInputListEvent,
+            Timer,
+            TimerEvent,
+            Trigger,
+            VirtualKeyboardEvent,
             WindowCloseRequestedEvent,
             WindowClosedEvent,
-            WindowDragQueryResponse,
             WindowDragQueryEvent,
+            WindowDragQueryResponse,
+            WindowGeomChangeEvent,
+            WindowMovedEvent,
+            XrAnchor,
             XrController,
             XrHand,
-            XrAnchor,
+            XrLocalEvent,
             XrState,
             XrUpdateEvent,
-            XrLocalEvent,
-            DragEvent,
-            DropEvent,
-            DragState,
-            DragItem,
-            DragResponse,
-            HitOptions,
-            DragHitEvent,
-            DropHitEvent,
-            DesignerPickEvent,
-            HitDesigner,
-        },
-        action::{
-            Action,
-            Actions,
-            ActionsBuf, 
-            ActionCast,
-            ActionCastRef,
-            ActionTrait,
-            ActionDefaultRef
-        },
-        cursor::MouseCursor,
-        macos_menu::MacosMenu,
-        draw_matrix::DrawMatrix,
-        window::{WindowHandle,CxWindowPool, WindowId},
-        pass::{
-            PassId,
-            CxPassParent,
-            CxPassRect,
-            Pass,
-            PassClearColor,
-            PassClearDepth
-        },
-        texture::{
-            Texture,
-            TextureId,
-            TextureFormat,
-            TextureSize,
-            TextureUpdated,
-            TextureAnimation,
-        },
-        live_prims::{
-            LiveDependency,
-            ArcStringMut,
-        },
-        live_traits::{
-            LiveHookDeref,
-            LiveBody,
-            LiveRegister,
-            LiveNew,
-            LiveApply,
-            LiveHook,
-            LiveApplyValue,
-            LiveApplyReset,
-            LiveRead,
-            ToLiveValue,
-            Apply,
-            ApplyFrom,
-        },
-        animator::{
-            Ease,
-            Play,
-            Animate,
-            Animator,
-            AnimatorImpl,
-            AnimatorAction,
-        },
-        draw_vars::{
-            shader_enum,
-            DrawVars
         },
         geometry::{
-            GeometryFingerprint,
-            GeometryField,
-            GeometryFields,
-            GeometryId,
-            GeometryRef,
-            Geometry,
+            Geometry, GeometryField, GeometryFields, GeometryFingerprint, GeometryId, GeometryRef,
         },
-        gpu_info::GpuPerformance,     
-        ui_runner::*,  
+        gpu_info::GpuPerformance,
+        ime::{
+            AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
+            TextInputConfig,
+        },
+        live_prims::{ArcStringMut, LiveDependency},
+        live_traits::{
+            Apply, ApplyFrom, LiveApply, LiveApplyReset, LiveApplyValue, LiveBody, LiveHook,
+            LiveHookDeref, LiveNew, LiveRead, LiveRegister, ToLiveValue,
+        },
+        macos_menu::MacosMenu,
+        media_api::CxMediaApi,
+        midi::*,
+        os::*,
+        pass::{CxPassParent, CxPassRect, Pass, PassClearColor, PassClearDepth, PassId},
+        scope::*,
+        texture::{
+            Texture, TextureAnimation, TextureFormat, TextureId, TextureSize, TextureUpdated,
+        },
+        thread::*,
+        ui_runner::*,
+        video::*,
+        web_socket::{WebSocket, WebSocketMessage},
+        window::{CxWindowPool, WindowHandle, WindowId},
     },
-};
+    app_main::*,
+    component_list::ComponentList,
+    component_map::ComponentMap,
+    //makepad_script::vm::*,
+    //makepad_script::traits::*,
+    //makepad_script::script,
+    log::*,
+    //makepad_image_formats::image,
+    makepad_derive_live::*,
 
+    makepad_error_log,
+    makepad_http,
+    //makepad_script::vm,
+    makepad_live_compiler::{
+        live_error_origin, vec4_ext::*, InlineString, LiveBinding, LiveComponentInfo,
+        LiveComponentRegistry, LiveErrorOrigin, LiveFieldKind, LiveFileId, LiveId, LiveIdAsProp,
+        LiveIdMap, LiveIdPath, LiveModuleId, LiveNode, LiveNodeOrigin, LiveNodeSlice,
+        LiveNodeSliceApi, LiveNodeSliceToCbor, LiveNodeVec, LiveNodeVecApi, LiveNodeVecFromCbor,
+        LiveProp, LivePropType, LivePtr, LiveRef, LiveRegistry, LiveType, LiveTypeField,
+        LiveTypeInfo, LiveValue,
+    },
+    makepad_live_id::*,
+    makepad_math::*,
+    makepad_shader_compiler,
+    makepad_shader_compiler::makepad_derive_live,
+    makepad_shader_compiler::makepad_live_compiler,
+    makepad_shader_compiler::makepad_live_id,
+    makepad_shader_compiler::makepad_live_tokenizer,
+    makepad_shader_compiler::makepad_math,
+    makepad_shader_compiler::makepad_micro_serde,
+    makepad_shader_compiler::{DrawShaderPtr, ShaderEnum, ShaderRegistry, ShaderTy},
+    smallvec,
+    smallvec::SmallVec,
+};

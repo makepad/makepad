@@ -108,6 +108,6 @@ macro_rules! new_local_ref {
 }
 
 pub use {
-    call_bool_method, call_int_method, call_long_method, call_method, call_object_method, call_void_method,call_float_method,
-    get_utf_str, new_global_ref, new_local_ref, new_object,
+    call_bool_method, call_float_method, call_int_method, call_long_method, call_method,
+    call_object_method, call_void_method, get_utf_str, new_global_ref, new_local_ref, new_object,
 };

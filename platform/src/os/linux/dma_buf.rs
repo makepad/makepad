@@ -25,8 +25,9 @@ use crate::makepad_micro_serde::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct Image<FD>
-    // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
-    where FD: Sized
+// HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
+where
+    FD: Sized,
 {
     pub drm_format: DrmFormat,
     // FIXME(eddyb) support 2-4 planes (not needed for RGBA, so most likely only
@@ -36,8 +37,14 @@ pub struct Image<FD>
 
 impl<FD> Image<FD> {
     pub fn planes_fd_map<FD2>(self, f: impl FnMut(FD) -> FD2) -> Image<FD2> {
-        let Image { drm_format, planes: plane0 } = self;
-        Image { drm_format, planes: plane0.fd_map(f) }
+        let Image {
+            drm_format,
+            planes: plane0,
+        } = self;
+        Image {
+            drm_format,
+            planes: plane0.fd_map(f),
+        }
     }
 }
 
@@ -77,8 +84,9 @@ pub struct DrmFormat {
 
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct ImagePlane<FD>
-    // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
-    where FD: Sized
+// HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
+where
+    FD: Sized,
 {
     /// Linux DMA-BUF file descriptor, representing a generic GPU buffer object.
     ///
@@ -94,7 +102,15 @@ pub struct ImagePlane<FD>
 
 impl<FD> ImagePlane<FD> {
     fn fd_map<FD2>(self, f: impl FnOnce(FD) -> FD2) -> ImagePlane<FD2> {
-        let ImagePlane { dma_buf_fd, offset, stride } = self;
-        ImagePlane { dma_buf_fd: f(dma_buf_fd), offset, stride }
+        let ImagePlane {
+            dma_buf_fd,
+            offset,
+            stride,
+        } = self;
+        ImagePlane {
+            dma_buf_fd: f(dma_buf_fd),
+            offset,
+            stride,
+        }
     }
 }

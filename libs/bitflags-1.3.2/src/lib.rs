@@ -1235,7 +1235,10 @@ mod tests {
         assert_eq!(UNION, Flags::A | Flags::C);
         assert_eq!(DIFFERENCE, Flags::all() - Flags::A);
         assert_eq!(COMPLEMENT, !Flags::C);
-        assert_eq!(SYM_DIFFERENCE, (Flags::A | Flags::C) ^ (Flags::all() - Flags::A));
+        assert_eq!(
+            SYM_DIFFERENCE,
+            (Flags::A | Flags::C) ^ (Flags::all() - Flags::A)
+        );
     }
 
     #[test]
@@ -1712,7 +1715,8 @@ mod tests {
     fn test_serde_bitflags_roundtrip() {
         let flags = SerdeFlags::A | SerdeFlags::B;
 
-        let deserialized: SerdeFlags = serde_json::from_str(&serde_json::to_string(&flags).unwrap()).unwrap();
+        let deserialized: SerdeFlags =
+            serde_json::from_str(&serde_json::to_string(&flags).unwrap()).unwrap();
 
         assert_eq!(deserialized.bits, flags.bits);
     }

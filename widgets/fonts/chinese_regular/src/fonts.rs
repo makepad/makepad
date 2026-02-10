@@ -1,5 +1,5 @@
 use makepad_platform::*;
 
-live_design!{
+live_design! {
     use link::widgets::*;
 }

@@ -1,21 +1,17 @@
 use {
-    std::{
-        ops::{Index, IndexMut},
-        collections::{
-            HashMap,
-            HashSet,
-            BTreeSet,
-        },
-    },
     crate::{
-        makepad_live_compiler::{LiveValue, LiveFieldKind, LiveNode, LivePtr, LiveNodeSliceApi},
-        makepad_shader_compiler::*,
-        makepad_live_id::*,
-        live_traits::*,
+        cx::Cx,
         draw_vars::DrawVars,
+        live_traits::*,
+        makepad_live_compiler::{LiveFieldKind, LiveNode, LiveNodeSliceApi, LivePtr, LiveValue},
+        makepad_live_id::*,
+        makepad_shader_compiler::*,
         os::CxOsDrawShader,
-        cx::Cx
-    }
+    },
+    std::{
+        collections::{BTreeSet, HashMap, HashSet},
+        ops::{Index, IndexMut},
+    },
 };
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -35,19 +31,23 @@ impl CxDrawShaderOptions {
         while let Some(node_index) = node_iter {
             let node = &doc.nodes[node_index];
             match node.id {
-                live_id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
-                    ret.draw_call_group = id;
+                live_id!(draw_call_group) => {
+                    if let LiveValue::Id(id) = node.value {
+                        ret.draw_call_group = id;
+                    }
                 }
-                live_id!(debug_id) => if let LiveValue::Id(id) = node.value {
-                    ret.debug_id = Some(id);
+                live_id!(debug_id) => {
+                    if let LiveValue::Id(id) = node.value {
+                        ret.debug_id = Some(id);
+                    }
                 }
-                _ => ()
+                _ => (),
             }
             node_iter = doc.nodes.next_child(node_index);
         }
         ret
     }
-    
+
     pub fn _appendable_drawcall(&self, other: &Self) -> bool {
         self == other
     }
@@ -56,7 +56,7 @@ impl CxDrawShaderOptions {
 #[derive(Default)]
 pub struct CxDrawShaderItem {
     pub draw_shader_id: usize,
-    pub options: CxDrawShaderOptions
+    pub options: CxDrawShaderOptions,
 }
 
 #[derive(Default)]
@@ -68,11 +68,11 @@ pub struct CxDrawShaders {
     pub compile_set: BTreeSet<DrawShaderPtr>,
     pub fingerprints: Vec<DrawShaderFingerprint>,
     pub error_set: HashSet<DrawShaderPtr>,
-    pub error_fingerprints: Vec<Vec<LiveNode >>,
+    pub error_fingerprints: Vec<Vec<LiveNode>>,
 }
 
-impl CxDrawShaders{
-    pub fn reset_for_live_reload(&mut self){
+impl CxDrawShaders {
+    pub fn reset_for_live_reload(&mut self) {
         self.ptr_to_item.clear();
         self.fingerprints.clear();
         self.error_set.clear();
@@ -109,12 +109,12 @@ impl IndexMut<usize> for CxDrawShaders {
 pub struct DrawShader {
     pub draw_shader_generation: u64,
     pub draw_shader_id: usize,
-    pub draw_shader_ptr: DrawShaderPtr
+    pub draw_shader_ptr: DrawShaderPtr,
 }
 
-impl DrawShader{
-    pub fn false_compare_id(&self)->u64{
-        ((self.draw_shader_id as u64)<<32) | self.draw_shader_ptr.0.index as u64
+impl DrawShader {
+    pub fn false_compare_id(&self) -> u64 {
+        ((self.draw_shader_id as u64) << 32) | self.draw_shader_ptr.0.index as u64
     }
 }
 
@@ -122,13 +122,13 @@ pub struct CxDrawShader {
     pub class_prop: LiveId,
     pub type_name: LiveId,
     pub os_shader_id: Option<usize>,
-    pub mapping: CxDrawShaderMapping
+    pub mapping: CxDrawShaderMapping,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct DrawShaderFingerprint {
     pub fingerprint: Vec<LiveNode>,
-    pub draw_shader_id: usize
+    pub draw_shader_id: usize,
 }
 
 impl DrawShaderFingerprint {
@@ -141,14 +141,22 @@ impl DrawShaderFingerprint {
         while let Some(node_index) = node_iter {
             let node = &doc.nodes[node_index];
             match node.value {
-                LiveValue::DSL {token_start, token_count, ..} => {
+                LiveValue::DSL {
+                    token_start,
+                    token_count,
+                    ..
+                } => {
                     fingerprint.push(LiveNode {
                         id: node.id,
                         origin: node.origin,
-                        value: LiveValue::DSL {token_start, token_count, expand_index: None}
+                        value: LiveValue::DSL {
+                            token_start,
+                            token_count,
+                            expand_index: None,
+                        },
                     });
                 }
-                _ => ()
+                _ => (),
             }
             node_iter = doc.nodes.next_child(node_index);
         }
@@ -171,9 +179,8 @@ pub enum DrawShaderInputPacking {
     #[allow(dead_code)]
     UniformsHLSL,
     #[allow(dead_code)]
-    UniformsMetal
+    UniformsMetal,
 }
-
 
 #[derive(Clone, Debug)]
 pub struct DrawShaderInput {
@@ -181,20 +188,21 @@ pub struct DrawShaderInput {
     pub ty: ShaderTy,
     pub offset: usize,
     pub slots: usize,
-    pub live_ptr: Option<LivePtr>
+    pub live_ptr: Option<LivePtr>,
 }
 
 #[cfg(any(target_arch = "wasm32"))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
+pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking =
+    DrawShaderInputPacking::UniformsGLSLTight;
 
+#[cfg(all(any(target_os = "android", target_os = "linux"), use_gles_3))]
+pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking =
+    DrawShaderInputPacking::UniformsGLSL140;
+#[cfg(all(any(target_os = "android", target_os = "linux"), not(use_gles_3)))]
+pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking =
+    DrawShaderInputPacking::UniformsGLSLTight;
 
-#[cfg(all(any(target_os = "android", target_os = "linux"),use_gles_3))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL140;
-#[cfg(all(any(target_os = "android", target_os = "linux"),not(use_gles_3)))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
-
-
-#[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
 #[cfg(any(target_os = "windows"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
@@ -204,10 +212,10 @@ impl DrawShaderInputs {
         Self {
             inputs: Vec::new(),
             packing_method,
-            total_slots: 0
+            total_slots: 0,
         }
     }
-    
+
     pub fn push(&mut self, id: LiveId, ty: ShaderTy, live_ptr: Option<LivePtr>) {
         let slots = ty.slots();
         match self.packing_method {
@@ -217,7 +225,7 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    live_ptr
+                    live_ptr,
                 });
                 self.total_slots += slots;
             }
@@ -227,12 +235,13 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    live_ptr
+                    live_ptr,
                 });
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsGLSL140 => {
-                if (self.total_slots & 3) + slots > 4 { // goes over the boundary
+                if (self.total_slots & 3) + slots > 4 {
+                    // goes over the boundary
                     self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
                 }
                 self.inputs.push(DrawShaderInput {
@@ -240,12 +249,13 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    live_ptr
+                    live_ptr,
                 });
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsHLSL => {
-                if (self.total_slots & 3) + slots > 4 { // goes over the boundary
+                if (self.total_slots & 3) + slots > 4 {
+                    // goes over the boundary
                     self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
                 }
                 self.inputs.push(DrawShaderInput {
@@ -253,13 +263,14 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    live_ptr
+                    live_ptr,
                 });
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsMetal => {
-                let aligned_slots = if slots == 3 {4} else {slots};
-                if (self.total_slots & 3) + aligned_slots > 4 { // goes over the boundary
+                let aligned_slots = if slots == 3 { 4 } else { slots };
+                if (self.total_slots & 3) + aligned_slots > 4 {
+                    // goes over the boundary
                     self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
                 }
                 self.inputs.push(DrawShaderInput {
@@ -267,21 +278,20 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    live_ptr
+                    live_ptr,
                 });
                 self.total_slots += aligned_slots;
             }
         }
     }
-    
+
     pub fn finalize(&mut self) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => (),
-            DrawShaderInputPacking::UniformsGLSLTight =>(),
-            DrawShaderInputPacking::UniformsHLSL |
-            DrawShaderInputPacking::UniformsMetal|
-            DrawShaderInputPacking::UniformsGLSL140
-            => {
+            DrawShaderInputPacking::UniformsGLSLTight => (),
+            DrawShaderInputPacking::UniformsHLSL
+            | DrawShaderInputPacking::UniformsMetal
+            | DrawShaderInputPacking::UniformsGLSL140 => {
                 if self.total_slots & 3 > 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
@@ -293,14 +303,14 @@ impl DrawShaderInputs {
 #[derive(Clone)]
 pub struct DrawShaderTextureInput {
     pub id: LiveId,
-    pub ty: ShaderTy
+    pub ty: ShaderTy,
 }
 
 #[derive(Clone)]
 pub struct CxDrawShaderMapping {
     pub flags: DrawShaderFlags,
     pub const_table: DrawShaderConstTable,
-    
+
     pub geometries: DrawShaderInputs,
     pub instances: DrawShaderInputs,
     pub var_instances: DrawShaderInputs,
@@ -320,9 +330,13 @@ pub struct CxDrawShaderMapping {
 }
 
 impl CxDrawShaderMapping {
-    
-    pub fn from_draw_shader_def(draw_shader_def: &DrawShaderDef, const_table: DrawShaderConstTable, uniform_packing: DrawShaderInputPacking) -> CxDrawShaderMapping { //}, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
-        
+    pub fn from_draw_shader_def(
+        draw_shader_def: &DrawShaderDef,
+        const_table: DrawShaderConstTable,
+        uniform_packing: DrawShaderInputPacking,
+    ) -> CxDrawShaderMapping {
+        //}, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
+
         let mut geometries = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut var_instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
@@ -340,10 +354,14 @@ impl CxDrawShaderMapping {
         for field in &draw_shader_def.fields {
             let ty = field.ty_expr.ty.borrow().as_ref().unwrap().clone();
             match &field.kind {
-                DrawShaderFieldKind::Geometry {..} => {
+                DrawShaderFieldKind::Geometry { .. } => {
                     geometries.push(field.ident.0, ty, None);
                 }
-                DrawShaderFieldKind::Instance {var_def_ptr, live_field_kind, ..} => {
+                DrawShaderFieldKind::Instance {
+                    var_def_ptr,
+                    live_field_kind,
+                    ..
+                } => {
                     if field.ident.0 == live_id!(rect_pos) {
                         rect_pos = Some(instances.total_slots);
                     }
@@ -354,43 +372,43 @@ impl CxDrawShaderMapping {
                         draw_clip = Some(instances.total_slots);
                     }
                     if var_def_ptr.is_some() {
-                        var_instances.push(field.ident.0, ty.clone(), None,);
+                        var_instances.push(field.ident.0, ty.clone(), None);
                     }
-                    if let ShaderTy::Enum{..} = ty{
+                    if let ShaderTy::Enum { .. } = ty {
                         instance_enums.push(instances.total_slots);
                     }
                     instances.push(field.ident.0, ty, None);
                     if let LiveFieldKind::Live = live_field_kind {
-                        live_instances.inputs.push(instances.inputs.last().unwrap().clone());
+                        live_instances
+                            .inputs
+                            .push(instances.inputs.last().unwrap().clone());
                     }
                 }
-                DrawShaderFieldKind::Uniform {block_ident, ..} => {
-                    match block_ident.0 {
-                        live_id!(draw_call) => {
-                            draw_call_uniforms.push(field.ident.0, ty, None);
-                        }
-                        live_id!(draw_list) => {
-                            draw_list_uniforms.push(field.ident.0, ty, None);
-                        }
-                        live_id!(pass) => {
-                            pass_uniforms.push(field.ident.0, ty, None);
-                        }
-                        live_id!(user) => {
-                            user_uniforms.push(field.ident.0, ty, None);
-                        }
-                        _ => ()
+                DrawShaderFieldKind::Uniform { block_ident, .. } => match block_ident.0 {
+                    live_id!(draw_call) => {
+                        draw_call_uniforms.push(field.ident.0, ty, None);
                     }
-                }
-                DrawShaderFieldKind::Texture {..} => {
+                    live_id!(draw_list) => {
+                        draw_list_uniforms.push(field.ident.0, ty, None);
+                    }
+                    live_id!(pass) => {
+                        pass_uniforms.push(field.ident.0, ty, None);
+                    }
+                    live_id!(user) => {
+                        user_uniforms.push(field.ident.0, ty, None);
+                    }
+                    _ => (),
+                },
+                DrawShaderFieldKind::Texture { .. } => {
                     textures.push(DrawShaderTextureInput {
-                        ty:ty,
+                        ty: ty,
                         id: field.ident.0,
                     });
                 }
-                _ => ()
+                _ => (),
             }
         }
-        
+
         geometries.finalize();
         instances.finalize();
         var_instances.finalize();
@@ -399,22 +417,25 @@ impl CxDrawShaderMapping {
         draw_list_uniforms.finalize();
         draw_call_uniforms.finalize();
         pass_uniforms.finalize();
-        
+
         // fill up the default values for the user uniforms
-        
-        
+
         // ok now the live uniforms
         for (value_node_ptr, ty) in draw_shader_def.all_live_refs.borrow().iter() {
             live_uniforms.push(LiveId(0), ty.clone(), Some(value_node_ptr.0));
         }
-        
+
         CxDrawShaderMapping {
             const_table,
             uses_time: draw_shader_def.uses_time.get(),
             flags: draw_shader_def.flags,
             geometries,
             instances,
-            live_uniforms_buf: {let mut r = Vec::new(); r.resize(live_uniforms.total_slots, 0.0); r},
+            live_uniforms_buf: {
+                let mut r = Vec::new();
+                r.resize(live_uniforms.total_slots, 0.0);
+                r
+            },
             var_instances,
             live_instances,
             user_uniforms,
@@ -429,14 +450,14 @@ impl CxDrawShaderMapping {
             draw_clip,
         }
     }
-    
+
     pub fn update_live_and_user_uniforms(&mut self, cx: &mut Cx, apply: &mut Apply) {
         // and write em into the live_uniforms buffer
         let live_registry = cx.live_registry.clone();
         let live_registry = live_registry.borrow();
-        
+
         for input in &self.live_uniforms.inputs {
-            let (nodes,index) = live_registry.ptr_to_nodes_index(input.live_ptr.unwrap());
+            let (nodes, index) = live_registry.ptr_to_nodes_index(input.live_ptr.unwrap());
             DrawVars::apply_slots(
                 cx,
                 input.slots,
@@ -444,7 +465,7 @@ impl CxDrawShaderMapping {
                 input.offset,
                 apply,
                 index,
-                nodes
+                nodes,
             );
         }
     }

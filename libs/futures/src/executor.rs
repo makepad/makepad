@@ -35,12 +35,16 @@ pub struct Spawner {
 
 impl Spawner {
     pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
-        if self.task_sender.send(Arc::new(Task {
-            inner: Mutex::new(TaskInner {
-                future: Some(Box::pin(future)),
-                task_sender: self.task_sender.clone(),
-            }),
-        })).is_err() {
+        if self
+            .task_sender
+            .send(Arc::new(Task {
+                inner: Mutex::new(TaskInner {
+                    future: Some(Box::pin(future)),
+                    task_sender: self.task_sender.clone(),
+                }),
+            }))
+            .is_err()
+        {
             return Err(SpawnError::shutdown());
         }
         Ok(())
@@ -72,7 +76,7 @@ struct Task {
 
 impl Task {
     fn run(self: Arc<Task>) {
-        use {std::task::Context, crate::task};
+        use {crate::task, std::task::Context};
 
         let future = self.inner.lock().unwrap().future.take();
         if let Some(mut future) = future {

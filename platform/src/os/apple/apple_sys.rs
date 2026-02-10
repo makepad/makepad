@@ -3,48 +3,38 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
+use crate::os::apple::apple_util::four_char_as_u32;
 pub use {
     makepad_objc_sys::{
-        runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO, ObjcId, nil},
+        class,
         declare::{ClassDecl, ProtocolDecl},
         msg_send,
-        sel,
-        class,
-        sel_impl,
-        Encode,
-        Encoding
+        runtime::{nil, Class, ObjcId, Object, Protocol, Sel, BOOL, NO, YES},
+        sel, sel_impl, Encode, Encoding,
     },
-    std::{
-        ffi::c_void,
-        os::raw::c_ulong,
-        ptr::NonNull,
-    },
+    std::{ffi::c_void, os::raw::c_ulong, ptr::NonNull},
 };
-use crate::os::apple::apple_util::four_char_as_u32;
-
 
 //use bitflags::bitflags;
-
-
 
 pub struct RcObjcId(NonNull<Object>);
 
 impl RcObjcId {
     pub fn from_owned(id: NonNull<Object>) -> Self {
-        Self (id)
+        Self(id)
     }
-    
+
     pub fn from_unowned(id: NonNull<Object>) -> Self {
         unsafe {
             let _: () = msg_send![id.as_ptr(), retain];
         }
         Self::from_owned(id)
     }
-    
+
     pub fn as_id(&self) -> ObjcId {
         self.0.as_ptr()
     }
-    
+
     pub fn forget(self) -> NonNull<Object> {
         unsafe {
             let _: () = msg_send![self.0.as_ptr(), retain];
@@ -92,7 +82,7 @@ extern "C" {
 #[cfg(any(target_os = "ios", target_os = "tvos"))]
 #[link(name = "UIKit", kind = "framework")]
 extern "C" {
-pub fn UIApplicationMain(
+    pub fn UIApplicationMain(
         argc: i32,
         argv: *mut *mut i8,
         principal_class_name: ObjcId,
@@ -102,21 +92,21 @@ pub fn UIApplicationMain(
 
 #[link(name = "Foundation", kind = "framework")]
 extern "C" {
-    pub fn dispatch_queue_create(label: *const u8, attr: ObjcId,) -> ObjcId;
-    pub fn dispatch_get_global_queue(ident:u64, flags: u64) -> ObjcId;
+    pub fn dispatch_queue_create(label: *const u8, attr: ObjcId) -> ObjcId;
+    pub fn dispatch_get_global_queue(ident: u64, flags: u64) -> ObjcId;
     pub fn dispatch_release(object: ObjcId);
     pub fn _NSGetExecutablePath(buf: *mut u8, buf_size: &mut u32);
 
     pub fn NSLog(format: ObjcId, ...);
-    
+
     pub static NSNotificationCenter: ObjcId;
     pub static NSRunLoopCommonModes: ObjcId;
     pub static NSDefaultRunLoopMode: ObjcId;
     pub static NSProcessInfo: ObjcId;
     pub fn NSStringFromClass(class: ObjcId) -> ObjcId;
-    
+
     pub fn __CFStringMakeConstantString(cStr: *const ::std::os::raw::c_char) -> CFStringRef;
-    
+
     pub fn CFStringGetLength(theString: CFStringRef) -> u64;
     pub fn CFStringGetBytes(
         theString: CFStringRef,
@@ -128,13 +118,18 @@ extern "C" {
         maxBufLen: u64,
         usedBufLen: *mut u64,
     ) -> u64;
-    
+
 }
 
 #[link(name = "ImageIO", kind = "framework")]
 extern "C" {
     pub static kUTTypePNG: ObjcId;
-    pub fn CGImageDestinationCreateWithURL(url: ObjcId, ty: ObjcId, count: u64, options: ObjcId) -> ObjcId;
+    pub fn CGImageDestinationCreateWithURL(
+        url: ObjcId,
+        ty: ObjcId,
+        count: u64,
+        options: ObjcId,
+    ) -> ObjcId;
     pub fn CGImageDestinationAddImage(dest: ObjcId, img: ObjcId, props: ObjcId);
     pub fn CGImageDestinationFinalize(dest: ObjcId) -> bool;
 }
@@ -156,7 +151,6 @@ extern "C" {
     pub static VNRecognizeTextRequest: ObjcId;
 }
 
-
 pub const kCGEventLeftMouseDown: u32 = 1;
 pub const kCGEventLeftMouseUp: u32 = 2;
 pub const kCGMouseEventClickState: u32 = 1;
@@ -166,12 +160,29 @@ pub const kCGMouseEventClickState: u32 = 1;
 extern "C" {
     pub fn CGEventSourceCreate(state_id: u32) -> ObjcId;
     pub fn CGEventSetIntegerValueField(event: ObjcId, field: u32, value: u64);
-    pub fn CGEventCreateMouseEvent(source: ObjcId, mouse_type: u32, pos: NSPoint, button: u32) -> ObjcId;
-    pub fn CGEventCreateScrollWheelEvent(source: ObjcId, is_line: u32, wheel_count: u32, wheel1: i32, wheel2: i32, wheel3: i32) -> ObjcId;
+    pub fn CGEventCreateMouseEvent(
+        source: ObjcId,
+        mouse_type: u32,
+        pos: NSPoint,
+        button: u32,
+    ) -> ObjcId;
+    pub fn CGEventCreateScrollWheelEvent(
+        source: ObjcId,
+        is_line: u32,
+        wheel_count: u32,
+        wheel1: i32,
+        wheel2: i32,
+        wheel3: i32,
+    ) -> ObjcId;
     pub fn CGEventPostToPid(pid: u32, event: ObjcId);
     pub fn CGEventPost(tap: u32, event: ObjcId);
-    
-    pub fn CGWindowListCreateImage(rect: NSRect, options: u32, window_id: u32, imageoptions: u32) -> ObjcId;
+
+    pub fn CGWindowListCreateImage(
+        rect: NSRect,
+        options: u32,
+        window_id: u32,
+        imageoptions: u32,
+    ) -> ObjcId;
     pub fn CGMainDisplayID() -> u32;
     pub fn CGDisplayPixelsHigh(display: u32) -> u64;
     pub fn CGColorCreateGenericRGB(red: f64, green: f64, blue: f64, alpha: f64) -> ObjcId;
@@ -229,10 +240,8 @@ pub const kCMTimeFlags_HasBeenRounded: CMTimeFlags = 1 << 1;
 pub const kCMTimeFlags_PositiveInfinity: CMTimeFlags = 1 << 2;
 pub const kCMTimeFlags_NegativeInfinity: CMTimeFlags = 1 << 3;
 pub const kCMTimeFlags_Indefinite: CMTimeFlags = 1 << 4;
-pub const kCMTimeFlags_ImpliedValueFlagsMask: CMTimeFlags = kCMTimeFlags_PositiveInfinity
-    | kCMTimeFlags_NegativeInfinity
-    | kCMTimeFlags_Indefinite;
-
+pub const kCMTimeFlags_ImpliedValueFlagsMask: CMTimeFlags =
+    kCMTimeFlags_PositiveInfinity | kCMTimeFlags_NegativeInfinity | kCMTimeFlags_Indefinite;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
@@ -258,7 +267,9 @@ pub type CVReturn = i32;
 
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
-    pub fn CMVideoFormatDescriptionGetDimensions(videoDesc: CMFormatDescriptionRef) -> CMVideoDimensions;
+    pub fn CMVideoFormatDescriptionGetDimensions(
+        videoDesc: CMFormatDescriptionRef,
+    ) -> CMVideoDimensions;
     pub fn CMFormatDescriptionGetMediaSubType(desc: CMFormatDescriptionRef) -> u32;
     pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
 }
@@ -268,8 +279,14 @@ extern "C" {
     pub static kCVPixelBufferWidthKey: CFStringRef;
     pub static kCVPixelBufferHeightKey: CFStringRef;
     pub static kCVPixelBufferPixelFormatTypeKey: CFStringRef;
-    pub fn CVPixelBufferLockBaseAddress(pixelBuffer: CVPixelBufferRef, lockFlags: CVPixelBufferLockFlags,) -> CVReturn;
-    pub fn CVPixelBufferUnlockBaseAddress(pixelBuffer: CVPixelBufferRef, unlockFlags: CVPixelBufferLockFlags,) -> CVReturn;
+    pub fn CVPixelBufferLockBaseAddress(
+        pixelBuffer: CVPixelBufferRef,
+        lockFlags: CVPixelBufferLockFlags,
+    ) -> CVReturn;
+    pub fn CVPixelBufferUnlockBaseAddress(
+        pixelBuffer: CVPixelBufferRef,
+        unlockFlags: CVPixelBufferLockFlags,
+    ) -> CVReturn;
     pub fn CVPixelBufferGetDataSize(pixelBuffer: CVPixelBufferRef) -> std::os::raw::c_ulong;
     pub fn CVPixelBufferGetBaseAddress(pixelBuffer: CVPixelBufferRef) -> *mut c_void;
     pub fn CVPixelBufferGetWidth(pixelBuffer: CVPixelBufferRef) -> usize;
@@ -278,10 +295,7 @@ extern "C" {
     pub fn CVPixelBufferIsPlanar(pixelBuffer: CVPixelBufferRef) -> bool;
 }
 
-
 // Foundation
-
-
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -303,8 +317,12 @@ pub struct NSPoint {
 
 unsafe impl Encode for NSPoint {
     fn encode() -> Encoding {
-        let encoding = format!("{{CGPoint={}{}}}", f64::encode().as_str(), f64::encode().as_str());
-        unsafe {Encoding::from_str(&encoding)}
+        let encoding = format!(
+            "{{CGPoint={}{}}}",
+            f64::encode().as_str(),
+            f64::encode().as_str()
+        );
+        unsafe { Encoding::from_str(&encoding) }
     }
 }
 
@@ -317,11 +335,14 @@ pub struct NSSize {
 
 unsafe impl Encode for NSSize {
     fn encode() -> Encoding {
-        let encoding = format!("{{CGSize={}{}}}", f64::encode().as_str(), f64::encode().as_str());
-        unsafe {Encoding::from_str(&encoding)}
+        let encoding = format!(
+            "{{CGSize={}{}}}",
+            f64::encode().as_str(),
+            f64::encode().as_str()
+        );
+        unsafe { Encoding::from_str(&encoding) }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Debug, Clone)]
@@ -332,8 +353,12 @@ pub struct NSRect {
 
 unsafe impl Encode for NSRect {
     fn encode() -> Encoding {
-        let encoding = format!("{{CGRect={}{}}}", NSPoint::encode().as_str(), NSSize::encode().as_str());
-        unsafe {Encoding::from_str(&encoding)}
+        let encoding = format!(
+            "{{CGRect={}{}}}",
+            NSPoint::encode().as_str(),
+            NSSize::encode().as_str()
+        );
+        unsafe { Encoding::from_str(&encoding) }
     }
 }
 
@@ -349,7 +374,7 @@ pub enum NSEventModifierFlags {
     NSNumericPadKeyMask = 1 << 21,
     NSHelpKeyMask = 1 << 22,
     NSFunctionKeyMask = 1 << 23,
-    NSDeviceIndependentModifierFlagsMask = 0xffff0000
+    NSDeviceIndependentModifierFlagsMask = 0xffff0000,
 }
 pub const NSTrackignActiveAlways: u64 = 0x80;
 pub const NSTrackingInVisibleRect: u64 = 0x200;
@@ -368,7 +393,7 @@ pub const NSUserDomainMask: u64 = 1;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NSWindowTitleVisibility {
     NSWindowTitleVisible = 0,
-    NSWindowTitleHidden = 1
+    NSWindowTitleHidden = 1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -437,7 +462,7 @@ pub enum NSEventMask {
     NSEventMaskBeginGesture = 1 << NSEventType::NSEventTypeBeginGesture as u64,
     NSEventMaskEndGesture = 1 << NSEventType::NSEventTypeEndGesture as u64,
     NSEventMaskPressure = 1 << NSEventType::NSEventTypePressure as u64,
-    NSAnyEventMask = 0xffffffffffffffff
+    NSAnyEventMask = 0xffffffffffffffff,
 }
 
 #[repr(u64)] // NSUInteger
@@ -447,13 +472,13 @@ pub enum NSWindowStyleMask {
     NSClosableWindowMask = 1 << 1,
     NSMiniaturizableWindowMask = 1 << 2,
     NSResizableWindowMask = 1 << 3,
-    
+
     NSTexturedBackgroundWindowMask = 1 << 8,
-    
+
     NSUnifiedTitleAndToolbarWindowMask = 1 << 12,
-    
+
     NSFullScreenWindowMask = 1 << 14,
-    
+
     NSFullSizeContentViewWindowMask = 1 << 15,
 }
 
@@ -461,7 +486,7 @@ pub enum NSWindowStyleMask {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NSApplicationActivationOptions {
     NSApplicationActivateAllWindows = 1 << 0,
-    NSApplicationActivateIgnoringOtherApps = 1 << 1
+    NSApplicationActivateIgnoringOtherApps = 1 << 1,
 }
 
 #[repr(i64)]
@@ -470,7 +495,7 @@ pub enum NSApplicationActivationPolicy {
     NSApplicationActivationPolicyRegular = 0,
     NSApplicationActivationPolicyAccessory = 1,
     NSApplicationActivationPolicyProhibited = 2,
-    NSApplicationActivationPolicyERROR = -1
+    NSApplicationActivationPolicyERROR = -1,
 }
 
 #[repr(u64)]
@@ -478,7 +503,7 @@ pub enum NSApplicationActivationPolicy {
 pub enum NSBackingStoreType {
     NSBackingStoreRetained = 0,
     NSBackingStoreNonretained = 1,
-    NSBackingStoreBuffered = 2
+    NSBackingStoreBuffered = 2,
 }
 
 #[repr(C)]
@@ -502,7 +527,7 @@ unsafe impl Encode for NSRange {
             u64::encode().as_str(),
             u64::encode().as_str(),
         );
-        unsafe {Encoding::from_str(&encoding)}
+        unsafe { Encoding::from_str(&encoding) }
     }
 }
 
@@ -510,12 +535,12 @@ pub trait NSMutableAttributedString: Sized {
     unsafe fn alloc(_: Self) -> ObjcId {
         msg_send![class!(NSMutableAttributedString), alloc]
     }
-    
+
     unsafe fn init(self) -> ObjcId;
     // *mut NSMutableAttributedString
     unsafe fn init_with_string(self, string: ObjcId) -> ObjcId;
     unsafe fn init_with_attributed_string(self, string: ObjcId) -> ObjcId;
-    
+
     unsafe fn string(self) -> ObjcId;
     // *mut NSString
     unsafe fn mutable_string(self) -> ObjcId;
@@ -527,34 +552,29 @@ impl NSMutableAttributedString for ObjcId {
     unsafe fn init(self) -> ObjcId {
         msg_send![self, init]
     }
-    
+
     unsafe fn init_with_string(self, string: ObjcId) -> ObjcId {
         msg_send![self, initWithString: string]
     }
-    
+
     unsafe fn init_with_attributed_string(self, string: ObjcId) -> ObjcId {
         msg_send![self, initWithAttributedString: string]
     }
-    
+
     unsafe fn string(self) -> ObjcId {
         msg_send![self, string]
     }
-    
+
     unsafe fn mutable_string(self) -> ObjcId {
         msg_send![self, mutableString]
     }
-    
+
     unsafe fn length(self) -> u64 {
         msg_send![self, length]
     }
 }
 
-
-
 // Metal API
-
-
-
 
 #[repr(u64)]
 #[derive(Clone, Debug)]
@@ -590,10 +610,10 @@ pub struct MTLClearColor {
 pub enum MTLPixelFormat {
     //RGBA8Unorm = 70,
     R8Unorm = 10,
-    RG8Unorm   = 30,
+    RG8Unorm = 30,
     R32Float = 55,
     BGRA8Unorm = 80,
-    RGBA16Float  = 115,
+    RGBA16Float = 115,
     RGBA32Float = 125,
     Depth32Float = 252,
     //Stencil8 = 253,
@@ -770,16 +790,24 @@ pub const MTLResourceHazardTrackingModeMask: u64 = 0x3 << MTLResourceHazardTrack
 #[allow(non_upper_case_globals)]
 pub struct MTLResourceOptions;
 impl MTLResourceOptions {
-    pub const CPUCacheModeDefaultCache: u64 = (MTLCPUCacheMode::DefaultCache as u64) << MTLResourceCPUCacheModeShift;
-    pub const CPUCacheModeWriteCombined: u64 = (MTLCPUCacheMode::WriteCombined as u64) << MTLResourceCPUCacheModeShift;
-    
-    pub const HazardTrackingModeUntracked: u64 = (MTLHazardTrackingMode::Untracked as u64) << MTLResourceHazardTrackingModeShift;
-    pub const HazardTrackingModeTracked: u64 = (MTLHazardTrackingMode::Tracked as u64) << MTLResourceHazardTrackingModeShift;
-    
-    pub const StorageModeShared: u64 = (MTLStorageMode::Shared as u64) << MTLResourceStorageModeShift;
-    pub const StorageModeManaged: u64 = (MTLStorageMode::Managed as u64) << MTLResourceStorageModeShift;
-    pub const StorageModePrivate: u64 = (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift;
-    pub const StorageModeMemoryless: u64 = (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift;
+    pub const CPUCacheModeDefaultCache: u64 =
+        (MTLCPUCacheMode::DefaultCache as u64) << MTLResourceCPUCacheModeShift;
+    pub const CPUCacheModeWriteCombined: u64 =
+        (MTLCPUCacheMode::WriteCombined as u64) << MTLResourceCPUCacheModeShift;
+
+    pub const HazardTrackingModeUntracked: u64 =
+        (MTLHazardTrackingMode::Untracked as u64) << MTLResourceHazardTrackingModeShift;
+    pub const HazardTrackingModeTracked: u64 =
+        (MTLHazardTrackingMode::Tracked as u64) << MTLResourceHazardTrackingModeShift;
+
+    pub const StorageModeShared: u64 =
+        (MTLStorageMode::Shared as u64) << MTLResourceStorageModeShift;
+    pub const StorageModeManaged: u64 =
+        (MTLStorageMode::Managed as u64) << MTLResourceStorageModeShift;
+    pub const StorageModePrivate: u64 =
+        (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift;
+    pub const StorageModeMemoryless: u64 =
+        (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift;
 }
 
 #[repr(u64)]
@@ -793,26 +821,27 @@ pub enum NSDragOperation {
 unsafe impl Encode for NSDragOperation {
     fn encode() -> Encoding {
         let encoding = format!("Q");
-        unsafe {Encoding::from_str(&encoding)}
+        unsafe { Encoding::from_str(&encoding) }
     }
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct __CFString {_unused: [u8; 0]}
+pub struct __CFString {
+    _unused: [u8; 0],
+}
 pub type CFStringRef = *const __CFString;
-
-
 
 // CORE AUDIO
 
-
 pub const kAudioUnitManufacturer_Apple: u32 = 1634758764;
 
-#[repr(C)] pub struct OpaqueAudioComponent([u8; 0]);
+#[repr(C)]
+pub struct OpaqueAudioComponent([u8; 0]);
 pub type CAudioComponent = *mut OpaqueAudioComponent;
 
-#[repr(C)] pub struct ComponentInstanceRecord([u8; 0]);
+#[repr(C)]
+pub struct ComponentInstanceRecord([u8; 0]);
 pub type CAudioComponentInstance = *mut ComponentInstanceRecord;
 pub type CAudioUnit = CAudioComponentInstance;
 
@@ -832,13 +861,12 @@ pub struct CAudioStreamBasicDescription {
     pub mReserved: u32,
 }
 
-
 #[repr(C)]
 pub struct AudioChannelLayout {
     pub mChannelLayoutTag: AudioLayoutChannelTag,
     pub mChannelBitmap: u32,
     pub mNumberChannelDescriptions: u32,
-    pub mChannelDescriptions: [AudioChannelDescription; 2]
+    pub mChannelDescriptions: [AudioChannelDescription; 2],
 }
 
 /*
@@ -1032,7 +1060,6 @@ pub struct _AudioBuffer {
 
 pub const MAX_AUDIO_BUFFERS: usize = 8;
 #[repr(C)]
-
 #[derive(Debug)]
 pub struct AudioBufferList {
     pub mNumberBuffers: u32,
@@ -1055,7 +1082,7 @@ pub struct AudioTimeStamp {
 #[repr(u32)]
 pub enum AudioUnitType {
     Undefined = 0,
-    
+
     IO = 1635086197,
     MusicDevice = 1635085685,
     MusicEffect = 1635085670,
@@ -1071,7 +1098,7 @@ pub enum AudioUnitType {
 #[repr(u32)]
 pub enum AudioUnitSubType {
     Undefined = 0,
-    
+
     PeakLimiter = 1819112562,
     DynamicsProcessor = 1684237680,
     LowPassFilter = 1819304307,
@@ -1091,7 +1118,7 @@ pub enum AudioUnitSubType {
     NetSend = 1853058660,
     RogerBeep = 1919903602,
     NBandEQ = 1851942257,
-    
+
     //pub enum FormatConverterType
     AUConverter = 1668247158,
     NewTimePitch = 1853191280,
@@ -1101,21 +1128,21 @@ pub enum AudioUnitSubType {
     Merger = 1835364967,
     Varispeed = 1986097769,
     AUiPodTimeOther = 1768977519,
-    
+
     //pub enum MixerType
     MultiChannelMixer = 1835232632,
     StereoMixer = 1936554098,
     Mixer3D = 862219640,
     MatrixMixer = 1836608888,
-    
+
     //pub enum GeneratorType {
     ScheduledSoundPlayer = 1936945260,
     AudioFilePlayer = 1634103404,
-    
+
     //pub enum MusicDeviceType {
     DLSSynth = 1684828960,
     Sampler = 1935764848,
-    
+
     //pub enum IOType {
     GenericOutput = 1734700658,
     HalOutput = 1634230636,
@@ -1127,7 +1154,6 @@ pub enum AudioUnitSubType {
 
 pub const kAudioComponentInstantiation_LoadInProcess: u32 = 2;
 pub const kAudioComponentInstantiation_LoadOutOfProcess: u32 = 1;
-
 
 pub type ItemCount = u64;
 pub type MIDIObjectRef = u32;
@@ -1177,7 +1203,7 @@ pub enum AudioObjectPropertySelector {
 pub enum AudioObjectPropertyScope {
     Global = four_char_as_u32("glob"),
     Output = four_char_as_u32("outp"),
-    Input = four_char_as_u32("inpt")
+    Input = four_char_as_u32("inpt"),
 }
 #[repr(usize)]
 pub enum AVAudioSessionCategoryOption {
@@ -1190,45 +1216,44 @@ pub enum AVAudioSessionCategoryOption {
 
 #[repr(u32)]
 pub enum AudioObjectPropertyElement {
-    Master = 0
+    Master = 0,
 }
 
 #[repr(C)]
 pub struct AudioObjectPropertyAddress {
     pub mSelector: AudioObjectPropertySelector,
     pub mScope: AudioObjectPropertyScope,
-    pub mElement: AudioObjectPropertyElement
+    pub mElement: AudioObjectPropertyElement,
 }
 
 pub const kAudioObjectSystemObject: AudioDeviceID = 1;
 pub type AudioObjectID = u32;
 pub type AudioDeviceID = u32;
 
-
 #[link(name = "CoreMidi", kind = "framework")]
 extern "C" {
     pub static kMIDIPropertyManufacturer: CFStringRef;
     pub static kMIDIPropertyDisplayName: CFStringRef;
     pub static kMIDIPropertyUniqueID: CFStringRef;
-    
+
     pub fn MIDIGetNumberOfSources() -> ItemCount;
     pub fn MIDIGetSource(sourceIndex0: ItemCount) -> MIDIEndpointRef;
-    
+
     pub fn MIDIGetNumberOfDestinations() -> ItemCount;
     pub fn MIDIGetDestination(sourceIndex0: ItemCount) -> MIDIEndpointRef;
-    
+
     pub fn MIDISendEventList(
         port: MIDIPortRef,
         dest: MIDIEndpointRef,
         evtlist: *const MIDIEventList,
     ) -> OSStatus;
-    
+
     pub fn MIDIClientCreateWithBlock(
         name: CFStringRef,
         outClient: *mut MIDIClientRef,
         notifyBlock: ObjcId,
     ) -> OSStatus;
-    
+
     pub fn MIDIInputPortCreateWithProtocol(
         client: MIDIClientRef,
         portName: CFStringRef,
@@ -1236,45 +1261,43 @@ extern "C" {
         outPort: *mut MIDIPortRef,
         receiveBlock: ObjcId,
     ) -> OSStatus;
-    
+
     pub fn MIDIOutputPortCreate(
         client: MIDIClientRef,
         portName: CFStringRef,
         outPort: *mut MIDIPortRef,
     ) -> OSStatus;
-    
+
     pub fn MIDIObjectGetStringProperty(
         obj: MIDIObjectRef,
         propertyID: CFStringRef,
         str_: *mut CFStringRef,
     ) -> OSStatus;
-    
+
     pub fn MIDIObjectGetIntegerProperty(
         obj: MIDIObjectRef,
         propertyID: CFStringRef,
         outValue: *mut i32,
     ) -> OSStatus;
-    
+
     pub fn MIDIPortConnectSource(
         port: MIDIPortRef,
         source: MIDIEndpointRef,
         connRefCon: *mut ::std::os::raw::c_void,
     ) -> OSStatus;
-    
-    pub fn MIDIPortDisconnectSource(
-        port: MIDIPortRef,
-        source: MIDIEndpointRef,
-    ) -> OSStatus;
-    
+
+    pub fn MIDIPortDisconnectSource(port: MIDIPortRef, source: MIDIEndpointRef) -> OSStatus;
+
 }
 
 pub type AudioObjectPropertyListenerProc = Option<
-unsafe extern "system" fn(
-    inObjectID: AudioObjectID,
-    inNumberAddresses: u32,
-    inAddresses: *const AudioObjectPropertyAddress,
-    inClientData: *mut ()
-) -> OSStatus>;
+    unsafe extern "system" fn(
+        inObjectID: AudioObjectID,
+        inNumberAddresses: u32,
+        inAddresses: *const AudioObjectPropertyAddress,
+        inClientData: *mut (),
+    ) -> OSStatus,
+>;
 
 // AVAudioSessionPortOverride values
 pub const AVAudioSessionPortOverrideNone: u64 = 0;
@@ -1284,29 +1307,29 @@ pub const AVAudioSessionPortOverrideSpeaker: u64 = 1936747378; // 'spkr'
 extern "C" {
     pub static AVAudioSessionCategoryPlayAndRecord: ObjcId;
     pub static AVAudioSessionCategoryPlayback: ObjcId;
-    
+
     pub fn AudioObjectGetPropertyDataSize(
         inObjectId: AudioObjectID,
         inAddress: *const AudioObjectPropertyAddress,
         inQualifierDataSize: u32,
         inQualifierData: *const (),
-        outDataSize: *mut u32
+        outDataSize: *mut u32,
     ) -> OSStatus;
-    
+
     pub fn AudioObjectGetPropertyData(
         inObjectId: AudioObjectID,
         inAddress: *const AudioObjectPropertyAddress,
         inQualifierDataSize: u32,
         inQualifierData: *const (),
         ioDataSize: *mut u32,
-        outData: *mut ()
+        outData: *mut (),
     ) -> OSStatus;
-    
+
     pub fn AudioObjectAddPropertyListener(
         inObjectId: AudioObjectID,
         inAddress: *const AudioObjectPropertyAddress,
         inListener: AudioObjectPropertyListenerProc,
-        inClientData: *mut ()
+        inClientData: *mut (),
     ) -> OSStatus;
 
 }
@@ -1347,7 +1370,7 @@ pub const kAudioUnitScope_Input: u32 = 1;
 pub const kAudioUnitScope_Output: u32 = 2;
 
 // Audio Unit elements (buses) for VPIO
-pub const kInputBus: u32 = 1;  // Microphone input
+pub const kInputBus: u32 = 1; // Microphone input
 pub const kOutputBus: u32 = 0; // Speaker output
 
 #[link(name = "AudioToolbox", kind = "framework")]
@@ -1362,25 +1385,15 @@ extern "C" {
         outInstance: *mut CAudioUnit,
     ) -> OSStatus;
 
-    pub fn AudioComponentInstanceDispose(
-        inInstance: CAudioUnit,
-    ) -> OSStatus;
+    pub fn AudioComponentInstanceDispose(inInstance: CAudioUnit) -> OSStatus;
 
-    pub fn AudioUnitInitialize(
-        inUnit: CAudioUnit,
-    ) -> OSStatus;
+    pub fn AudioUnitInitialize(inUnit: CAudioUnit) -> OSStatus;
 
-    pub fn AudioUnitUninitialize(
-        inUnit: CAudioUnit,
-    ) -> OSStatus;
+    pub fn AudioUnitUninitialize(inUnit: CAudioUnit) -> OSStatus;
 
-    pub fn AudioOutputUnitStart(
-        ci: CAudioUnit,
-    ) -> OSStatus;
+    pub fn AudioOutputUnitStart(ci: CAudioUnit) -> OSStatus;
 
-    pub fn AudioOutputUnitStop(
-        ci: CAudioUnit,
-    ) -> OSStatus;
+    pub fn AudioOutputUnitStop(ci: CAudioUnit) -> OSStatus;
 
     pub fn AudioUnitSetProperty(
         inUnit: CAudioUnit,
@@ -1409,6 +1422,3 @@ extern "C" {
         ioData: *mut AudioBufferList,
     ) -> OSStatus;
 }
-
-
-

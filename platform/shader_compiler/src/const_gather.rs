@@ -1,25 +1,19 @@
-use{
+use {
+    crate::{makepad_live_compiler::TokenSpan, shader_ast::*},
     std::cell::Cell,
-    crate::{
-         makepad_live_compiler::{
-            TokenSpan
-        },
-        shader_ast::*,
-    }
 };
-
 
 #[derive(Clone)]
 pub struct ConstGatherer<'a> {
     pub fn_def: &'a FnDef,
-    pub const_gather_active: bool
+    pub const_gather_active: bool,
 }
 
 impl<'a> ConstGatherer<'a> {
     pub fn const_gather_expr(&self, expr: &Expr) {
         //let gather_span = if self.gather_all{Some(expr.span)}else{None};
-        if !self.const_gather_active{
-            return
+        if !self.const_gather_active {
+            return;
         }
         match *expr.const_val.borrow() {
             Some(Some(Val::Vec4f(val))) => {
@@ -41,7 +35,7 @@ impl<'a> ConstGatherer<'a> {
                 self.write_f32(val);
                 return;
             }
-            _ => {},
+            _ => {}
         }
 
         match expr.kind {
@@ -58,27 +52,19 @@ impl<'a> ConstGatherer<'a> {
                 ref right_expr,
             } => self.const_gather_bin_expr(span, op, left_expr, right_expr),
             ExprKind::Un { span, op, ref expr } => self.const_gather_un_expr(span, op, expr),
-            ExprKind::MethodCall {
-                ref arg_exprs,
-                ..
-            } => self.const_gather_all_call_expr(arg_exprs),
-            ExprKind::PlainCall {
-                ref arg_exprs,
-                ..
-            } => self.const_gather_all_call_expr(arg_exprs),
-            ExprKind::BuiltinCall {
-                ref arg_exprs,
-                ..
-            } => self.const_gather_all_call_expr(arg_exprs),
+            ExprKind::MethodCall { ref arg_exprs, .. } => {
+                self.const_gather_all_call_expr(arg_exprs)
+            }
+            ExprKind::PlainCall { ref arg_exprs, .. } => self.const_gather_all_call_expr(arg_exprs),
+            ExprKind::BuiltinCall { ref arg_exprs, .. } => {
+                self.const_gather_all_call_expr(arg_exprs)
+            }
             /*ExprKind::ClosureCall {
                 ref arg_exprs,
                 ..
             } => self.const_gather_all_call_expr(arg_exprs),*/
             ExprKind::ClosureDef(_) => (),
-            ExprKind::ConsCall {
-                ref arg_exprs,
-                ..
-            } => self.const_gather_all_call_expr(arg_exprs),
+            ExprKind::ConsCall { ref arg_exprs, .. } => self.const_gather_all_call_expr(arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -89,15 +75,11 @@ impl<'a> ConstGatherer<'a> {
                 ref expr,
                 ref index_expr,
             } => self.const_gather_index_expr(span, expr, index_expr),
-            ExprKind::Var {
-                span,
-                ref kind,
-                ..
-            } => self.const_gather_var_expr(span, kind),
-            ExprKind::StructCons{
+            ExprKind::Var { span, ref kind, .. } => self.const_gather_var_expr(span, kind),
+            ExprKind::StructCons {
                 struct_ptr,
                 span,
-                ref args
+                ref args,
             } => self.const_gather_struct_cons(struct_ptr, span, args),
             ExprKind::Lit { span, lit } => self.const_gather_lit_expr(span, lit),
         }
@@ -116,7 +98,13 @@ impl<'a> ConstGatherer<'a> {
     }
 
     #[allow(clippy::float_cmp)]
-    fn const_gather_bin_expr(&self, _span: TokenSpan, _op: BinOp, left_expr: &Expr, right_expr: &Expr) {
+    fn const_gather_bin_expr(
+        &self,
+        _span: TokenSpan,
+        _op: BinOp,
+        left_expr: &Expr,
+        right_expr: &Expr,
+    ) {
         self.const_gather_expr(left_expr);
         self.const_gather_expr(right_expr);
     }
@@ -147,25 +135,25 @@ impl<'a> ConstGatherer<'a> {
         &self,
         _struct_ptr: StructPtr,
         _span: TokenSpan,
-        args: &Vec<(Ident,Expr)>,
+        args: &Vec<(Ident, Expr)>,
     ) {
-        for arg in args{
+        for arg in args {
             self.const_gather_expr(&arg.1);
         }
     }
 
-    fn write_span(&self, span: &TokenSpan, slots:usize) {
+    fn write_span(&self, span: &TokenSpan, slots: usize) {
         let index = self.fn_def.const_table.borrow().as_ref().unwrap().len();
         self.fn_def
             .const_table_spans
             .borrow_mut()
             .as_mut()
             .unwrap()
-            .push(ConstTableSpan{
+            .push(ConstTableSpan {
                 token_id: span.token_id,
                 offset: index,
-                slots
-            });            
+                slots,
+            });
     }
 
     fn write_f32(&self, val: f32) {

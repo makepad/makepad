@@ -74,6 +74,8 @@ pub mod tab_close_button;
 pub mod html;
 pub mod markdown;
 
+pub mod map_leaflet;
+pub mod map_style;
 pub mod map_view;
 pub mod math_view;
 pub mod pdf_view;
@@ -322,6 +324,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::svg::script_mod(vm);
     crate::vector::script_mod(vm);
     crate::chart::script_mod(vm);
+    crate::map_style::script_mod(vm);
     crate::map_view::script_mod(vm);
     crate::math_view::script_mod(vm);
 

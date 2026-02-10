@@ -591,7 +591,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
                     // gives us a linear time disjointness check.
                     slot_versions[i] = MaybeUninit::new(version.get());
                     *version = NonZeroU32::new(2).unwrap();
-                },
+                }
 
                 _ => break,
             }
@@ -610,7 +610,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
                     Occupied { version, value } => {
                         ptrs[j] = MaybeUninit::new(value);
                         *version = NonZeroU32::new_unchecked(slot_versions[j].assume_init());
-                    },
+                    }
                     _ => unreachable_unchecked(),
                 }
             }
@@ -1027,7 +1027,7 @@ impl<'a, K: Key, V> Entry<'a, K, V> {
             Entry::Occupied(mut entry) => {
                 f(entry.get_mut());
                 Entry::Occupied(entry)
-            },
+            }
             Entry::Vacant(entry) => Entry::Vacant(entry),
         }
     }
@@ -1271,7 +1271,7 @@ impl<'a, K: Key, V> VacantEntry<'a, K, V> {
         // Despite the slot being considered Vacant for this entry, it might be occupied
         // with an outdated element.
         match replace(slot, Slot::new_occupied(self.kd.version.get(), value)) {
-            Occupied { .. } => {},
+            Occupied { .. } => {}
             Vacant => self.map.num_elems += 1,
         }
         unsafe { slot.get_unchecked_mut() }

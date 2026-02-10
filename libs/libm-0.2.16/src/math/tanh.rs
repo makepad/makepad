@@ -49,5 +49,9 @@ pub fn tanh(mut x: f64) -> f64 {
         t = x;
     }
 
-    if sign { -t } else { t }
+    if sign {
+        -t
+    } else {
+        t
+    }
 }

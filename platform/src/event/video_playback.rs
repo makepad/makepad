@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
-use makepad_shader_compiler::makepad_live_tokenizer::LiveId;
 use crate::TextureId;
+use makepad_shader_compiler::makepad_live_tokenizer::LiveId;
 
 #[derive(Clone, Debug)]
 pub struct VideoPlaybackPreparedEvent {
@@ -20,17 +20,17 @@ pub struct VideoTextureUpdatedEvent {
 pub enum VideoSource {
     InMemory(Rc<Vec<u8>>),
     Network(String),
-    Filesystem(String)
+    Filesystem(String),
 }
 
 #[derive(Clone, Debug)]
 pub struct VideoPlaybackCompletedEvent {
-    pub video_id: LiveId
+    pub video_id: LiveId,
 }
 
 #[derive(Clone, Debug)]
 pub struct VideoPlaybackResourcesReleasedEvent {
-    pub video_id: LiveId
+    pub video_id: LiveId,
 }
 
 #[derive(Clone, Debug)]
@@ -42,5 +42,5 @@ pub struct VideoDecodingErrorEvent {
 #[derive(Clone, Debug)]
 pub struct TextureHandleReadyEvent {
     pub texture_id: TextureId,
-    pub handle: u32, 
+    pub handle: u32,
 }

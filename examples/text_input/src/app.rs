@@ -1,6 +1,6 @@
 use makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -202,7 +202,8 @@ app_main!(App);
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
+    #[live]
+    ui: WidgetRef,
 }
 
 impl LiveRegister for App {

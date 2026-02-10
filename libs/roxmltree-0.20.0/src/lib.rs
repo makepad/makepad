@@ -573,7 +573,7 @@ impl<'a, 'input> Attribute<'a, 'input> {
     /// ```
     ///
     /// [Document::text_pos_at]: struct.Document.html#method.text_pos_at
-    #[deprecated(note="replaced by `range`")]
+    #[deprecated(note = "replaced by `range`")]
     #[cfg(feature = "positions")]
     #[inline]
     pub fn position(&self) -> usize {
@@ -624,7 +624,10 @@ impl<'a, 'input> Attribute<'a, 'input> {
     #[inline]
     pub fn range_value(&self) -> Range<usize> {
         // +1 on start and -1 on end are to exclude the quotes around the value (all valid quotes are 1 byte)
-        let start = self.data.range.start + usize::from(self.data.qname_len) + usize::from(self.data.eq_len) + 1;
+        let start = self.data.range.start
+            + usize::from(self.data.qname_len)
+            + usize::from(self.data.eq_len)
+            + 1;
         let end = self.data.range.end - 1;
         start..end
     }

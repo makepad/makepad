@@ -1,20 +1,12 @@
-use {
-    crate::{
-        makepad_micro_serde::*,
-        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
-        makepad_live_compiler::{
-            LiveValue,
-            LiveTypeInfo,
-            LiveModuleId,
-            LiveType,
-            LiveId,
-            LiveNode,
-            LiveNodeSliceApi
-        },
-        makepad_derive_live::*,
-        live_traits::*,
-        cx::Cx,
-    }
+use crate::{
+    cx::Cx,
+    live_traits::*,
+    makepad_derive_live::*,
+    makepad_live_compiler::{
+        LiveId, LiveModuleId, LiveNode, LiveNodeSliceApi, LiveType, LiveTypeInfo, LiveValue,
+    },
+    makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin},
+    makepad_micro_serde::*,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Live, LiveHook, SerBin, DeBin, SerJson, DeJson)]
@@ -22,7 +14,7 @@ use {
 pub enum MouseCursor {
     // don't show the cursor
     Hidden,
-    
+
     //  *
     //  *  *
     //  *    *
@@ -30,15 +22,16 @@ pub enum MouseCursor {
     //  *   *
     //  *    *
     //        *
-    #[pick] Default,
-    
+    #[pick]
+    Default,
+
     //     |
     //     |
     //  ---+---
     //     |
     //     |
     Crosshair,
-    
+
     //    *
     //    *
     //    * * * *
@@ -47,7 +40,7 @@ pub enum MouseCursor {
     //  * *     *
     //  *      *
     Hand,
-    
+
     //  *
     //  *  *
     //  *    *
@@ -56,20 +49,20 @@ pub enum MouseCursor {
     //  *    *
     //        *
     Arrow,
-    
+
     //     ^
     //     |
     //  <--+-->
     //     |
     //     v
     Move,
-    
+
     //   --+--
     //     |
     //     |
     //   __|__
     Text,
-    
+
     //  |******|
     //   \****/
     //    \**/
@@ -77,7 +70,7 @@ pub enum MouseCursor {
     //   /****\
     //  |******|
     Wait,
-    
+
     //  *
     //  *  *
     //  *    *
@@ -86,35 +79,34 @@ pub enum MouseCursor {
     //  *    *   ?
     //        *
     Help,
-    
-    
+
     //    _____
     //   / \   \
     //  |   \  |
     //   \___\/
     NotAllowed,
 
-    //     
+    //
     //    * * * *
     //    * * * *
-    // *  * * * * 
+    // *  * * * *
     // *  *     *
-    //  * *     * 
+    //  * *     *
     //  *      *
     Grab,
-    
-    //      
-    //    
+
+    //
+    //
     //    * * * *
-    //  * * * * * 
+    //  * * * * *
     // *  *     *
-    //  * *     * 
+    //  * *     *
     //  *      *
     Grabbing,
-    
+
     /*
-    
-    //  * 
+
+    //  *
     //  *  *
     //  *    *
     //  *      * |----|
@@ -123,7 +115,7 @@ pub enum MouseCursor {
     //        *  |----|
     Progress,
 
-    //  * 
+    //  *
     //  *  *
     //  *    *
     //  *      *
@@ -131,39 +123,39 @@ pub enum MouseCursor {
     //  *    *  |----|
     //        * |----|
     ContextMenu,
-    
-    //     | | 
+
+    //     | |
     //     | |
     //  ---+ +---
     //  ---+ +---
     //     | |
     //     | |
-    
+
     Cell,
     //   |     |
     //   |-----|
     //   |     |
     VerticalText,
-    
-    //  * 
+
+    //  *
     //  *  *
     //  *    *
     //  *      *
     //  *   *    |  ^ |
     //  *    *   | /  |
-    //        *      
+    //        *
     Alias,
-    
-    //  * 
+
+    //  *
     //  *  *
     //  *    *
     //  *      *
-    //  *   *   
+    //  *   *
     //  *    *   |+|
-    //        *       
+    //        *
     Copy,
-    
-    //    * 
+
+    //    *
     //    *
     //    * * * *
     // *  * * * *    _____
@@ -171,12 +163,12 @@ pub enum MouseCursor {
     //  * *     *  |   \  |
     //  *      *    \___\/
     NoDrop,
-    
+
     //     ^
     //   < * >
-    //     v 	
+    //     v
     AllScroll,
-    
+
     //   _____
     //  /  |  \
     //  | -+- |
@@ -184,7 +176,7 @@ pub enum MouseCursor {
     //     |
     //     |
     ZoomIn,
-    
+
     //   _____
     //  /     \
     //  | --- |
@@ -193,66 +185,64 @@ pub enum MouseCursor {
     //     |
     ZoomOut,
     */
-    
-    
     //     ^
     //     |
     NResize,
-    
+
     //     ^
     //    /
     NeResize,
-    
+
     //    -->
     EResize,
-    
+
     //    \
     //     v
     SeResize,
-    
+
     //     |
     //     v
     SResize,
-    
+
     //    /
     //   v
     SwResize,
-    
+
     //    <--
     WResize,
-    
+
     //   ^
     //    \
     NwResize,
-    
+
     //     ^
     //     |
-    //     v 	
+    //     v
     NsResize,
-    
+
     //     ^
     //    /
     //   v
     NeswResize,
-    
+
     //  <--->
     EwResize,
-    
+
     //   ^
     //    \
     //     v
     NwseResize,
-    
+
     //     ||
     //   <-||->
     //     ||
     ColResize,
-    
+
     //     ^
     //     |
     //   =====
     //     |
-    //     v 	
+    //     v
     RowResize,
 }
 

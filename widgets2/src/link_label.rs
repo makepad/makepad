@@ -1,16 +1,16 @@
 use crate::{
-    makepad_derive_widget::*,
-    widget::*,
-    makepad_draw::*,
     button::{Button, ButtonAction},
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
 };
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.LinkLabelBase = #(LinkLabel::register_widget(vm))
-    
+
     mod.widgets.LinkLabel = set_type_default() do mod.widgets.LinkLabelBase{
         width: Fit
         height: Fit
@@ -19,7 +19,7 @@ script_mod!{
         padding: 0.
         margin: theme.mspace_v_2
         label_walk: Walk{width: Fit, height: Fit}
-        
+
         draw_text +: {
             hover: instance(0.0)
             down: instance(0.0)
@@ -44,7 +44,7 @@ script_mod!{
             text_style: theme.font_regular{
                 font_size: theme.font_size_p
             }
-            
+
             get_color: fn() {
                 let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
                 let mut c2 = self.color
@@ -73,9 +73,9 @@ script_mod!{
                     .mix(mix(self.color_disabled, c2_disabled, gradient_dir), self.disabled)
             }
         }
-        
+
         icon_walk: Walk{width: Fit, height: Fit}
-        
+
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
@@ -133,7 +133,7 @@ script_mod!{
                 return sdf.stroke(stroke_color, mix(0.7, 1., self.hover))
             }
         }
-        
+
         animator: Animator{
             disabled: {
                 default: @off
@@ -161,7 +161,7 @@ script_mod!{
                         draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
@@ -172,7 +172,7 @@ script_mod!{
                         draw_text: {down: 0.0, hover: snap(1.0)}
                     }
                 }
-                
+
                 down: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -214,36 +214,42 @@ script_mod!{
 /// This is a wrapper around (and derefs to) a [`Button`] widget.
 #[derive(Script, ScriptHook, Widget)]
 pub struct LinkLabel {
-    #[source] source: ScriptObjectRef,
-    #[deref] button: Button,
-    #[live] pub url: String,
-    #[live] pub open_in_place: bool,
+    #[source]
+    source: ScriptObjectRef,
+    #[deref]
+    button: Button,
+    #[live]
+    pub url: String,
+    #[live]
+    pub open_in_place: bool,
 }
 
 impl Widget for LinkLabel {
-    fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        scope: &mut Scope,
-    ) {
-        let actions = cx.capture_actions(|cx|{
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let actions = cx.capture_actions(|cx| {
             self.button.handle_event(cx, event, scope);
         });
         if self.url.len() > 0 && self.clicked(&actions) {
-            cx.open_url(&self.url, if self.open_in_place { OpenUrlInPlace::Yes } else { OpenUrlInPlace::No });
+            cx.open_url(
+                &self.url,
+                if self.open_in_place {
+                    OpenUrlInPlace::Yes
+                } else {
+                    OpenUrlInPlace::No
+                },
+            );
         }
         cx.extend_actions(actions);
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.button.draw_walk(cx, scope, walk)
     }
-    
+
     fn text(&self) -> String {
         self.button.text()
     }
-    
+
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.button.set_text(cx, v);
     }
@@ -326,13 +332,13 @@ impl LinkLabelRef {
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
         self.borrow().and_then(|b| b.released_modifiers(actions))
     }
-    
+
     pub fn set_text(&self, cx: &mut Cx, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, text);
         }
     }
-    
+
     pub fn set_url(&self, url: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.url = url.to_string();

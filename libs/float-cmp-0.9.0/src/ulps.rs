@@ -1,12 +1,12 @@
 // Copyright 2014-2020 Optimal Computing (NZ) Ltd.
 // Licensed under the MIT license.  See LICENSE for details.
 
-#[cfg(feature="num_traits")]
+#[cfg(feature = "num_traits")]
 use num_traits::NumCast;
 
 /// A trait for floating point numbers which computes the number of representable
 /// values or ULPs (Units of Least Precision) that separate the two given values.
-#[cfg(feature="num_traits")]
+#[cfg(feature = "num_traits")]
 pub trait Ulps {
     type U: Copy + NumCast;
 
@@ -22,7 +22,7 @@ pub trait Ulps {
     fn prev(&self) -> Self;
 }
 
-#[cfg(not(feature="num_traits"))]
+#[cfg(not(feature = "num_traits"))]
 pub trait Ulps {
     type U: Copy;
 
@@ -42,7 +42,6 @@ impl Ulps for f32 {
     type U = i32;
 
     fn ulps(&self, other: &f32) -> i32 {
-
         // IEEE754 defined floating point storage representation to
         // maintain their order when their bit patterns are interpreted as
         // integers.  This is a huge boon to the task at hand, as we can
@@ -138,7 +137,6 @@ impl Ulps for f64 {
     type U = i64;
 
     fn ulps(&self, other: &f64) -> i64 {
-
         // IEEE754 defined floating point storage representation to
         // maintain their order when their bit patterns are interpreted as
         // integers.  This is a huge boon to the task at hand, as we can
@@ -229,4 +227,3 @@ fn f64_ulps_test6() {
     assert!(negzero.prev() < 0.0);
     assert!(zero.next() > 0.0);
 }
-

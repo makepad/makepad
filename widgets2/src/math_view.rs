@@ -9,7 +9,7 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.draw
     use mod.text.*
-    
+
     mod.widgets.MathViewBase = #(MathView::register_widget(vm))
 
     mod.widgets.MathView = set_type_default() do mod.widgets.MathViewBase{
@@ -179,14 +179,18 @@ impl MathView {
         for item in &layout.items {
             match item {
                 LayoutItem::Glyph(glyph) => {
-                    if let Some(shape_id) =
-                        build_glyph_shape(&mut self.draw_glyph, layout_font.as_ref(), glyph, layout.ascent)
-                    {
+                    if let Some(shape_id) = build_glyph_shape(
+                        &mut self.draw_glyph,
+                        layout_font.as_ref(),
+                        glyph,
+                        layout.ascent,
+                    ) {
                         push_component(&self.draw_glyph, shape_id, &mut components);
                     }
                 }
                 LayoutItem::Rule(rule) => {
-                    if let Some(shape_id) = build_rule_shape(&mut self.draw_glyph, rule, layout.ascent)
+                    if let Some(shape_id) =
+                        build_rule_shape(&mut self.draw_glyph, rule, layout.ascent)
                     {
                         push_component(&self.draw_glyph, shape_id, &mut components);
                     }
@@ -261,14 +265,12 @@ fn build_glyph_shape(
     dg.commit_shape(Some(0))
 }
 
-fn build_rule_shape(dg: &mut DrawGlyph, rule: &LayoutRule, layout_ascent: f32) -> Option<GlyphShapeId> {
-    build_rect_shape(
-        dg,
-        rule.x,
-        layout_ascent + rule.y,
-        rule.width,
-        rule.height,
-    )
+fn build_rule_shape(
+    dg: &mut DrawGlyph,
+    rule: &LayoutRule,
+    layout_ascent: f32,
+) -> Option<GlyphShapeId> {
+    build_rect_shape(dg, rule.x, layout_ascent + rule.y, rule.width, rule.height)
 }
 
 fn build_rect_shape(dg: &mut DrawGlyph, x: f32, y: f32, w: f32, h: f32) -> Option<GlyphShapeId> {

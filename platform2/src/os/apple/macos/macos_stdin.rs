@@ -172,9 +172,8 @@ impl Cx {
                     }));
                     let text = response.borrow().clone();
                     if let Some(text) = text {
-                        let _ = io::stdout().write_all(
-                            StdinToHost::SetClipboard(text).to_json().as_bytes(),
-                        );
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
                         let _ = io::stdout().flush();
                     }
                 }
@@ -185,9 +184,8 @@ impl Cx {
                     }));
                     let text = response.borrow().clone();
                     if let Some(text) = text {
-                        let _ = io::stdout().write_all(
-                            StdinToHost::SetClipboard(text).to_json().as_bytes(),
-                        );
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
                         let _ = io::stdout().flush();
                     }
                 }
@@ -415,9 +413,8 @@ impl Cx {
                     self.os.http_requests.cancel_http_request(request_id);
                 }
                 CxOsOp::CopyToClipboard(content) => {
-                    let _ = io::stdout().write_all(
-                        StdinToHost::SetClipboard(content).to_json().as_bytes(),
-                    );
+                    let _ = io::stdout()
+                        .write_all(StdinToHost::SetClipboard(content).to_json().as_bytes());
                     let _ = io::stdout().flush();
                 }
                 _ => (), /*

@@ -1,8 +1,6 @@
-use {
-    crate::{
-        os::{OsMidiOutput,OsMidiInput},
-        makepad_live_id::{LiveId, FromLiveId},
-    }
+use crate::{
+    makepad_live_id::{FromLiveId, LiveId},
+    os::{OsMidiInput, OsMidiOutput},
 };
 
 #[derive(Clone, Debug)]
@@ -37,8 +35,7 @@ impl std::fmt::Display for MidiPortsEvent {
         for desc in &self.descs {
             if desc.port_type.is_input() {
                 write!(f, "[Input] {}\n", desc.name).unwrap()
-            }
-            else {
+            } else {
                 write!(f, "[Output] {}\n", desc.name).unwrap()
             }
         }
@@ -53,7 +50,7 @@ impl std::fmt::Debug for MidiPortDesc {
 }
 
 #[derive(Default)]
-pub struct MidiInput(pub (crate) Option<OsMidiInput>);
+pub struct MidiInput(pub(crate) Option<OsMidiInput>);
 unsafe impl Send for MidiInput {}
 
 impl MidiInput {
@@ -63,17 +60,17 @@ impl MidiInput {
 }
 
 #[derive(Default)]
-pub struct MidiOutput(pub (crate) Option<OsMidiOutput>);
+pub struct MidiOutput(pub(crate) Option<OsMidiOutput>);
 unsafe impl Send for MidiOutput {}
 
 impl MidiOutput {
     pub fn send(&self, port: Option<MidiPortId>, data: MidiData) {
         let output = self.0.as_ref().unwrap();
         output.send(port, data);
-    } 
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)] 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MidiData {
     pub data: [u8; 3],
 }
@@ -81,10 +78,14 @@ pub struct MidiData {
 impl std::convert::From<u32> for MidiData {
     fn from(data: u32) -> Self {
         MidiData {
-            data: [((data >> 16) & 0xff) as u8, ((data >> 8) & 0xff) as u8, ((data >> 0) & 0xff) as u8]
+            data: [
+                ((data >> 16) & 0xff) as u8,
+                ((data >> 8) & 0xff) as u8,
+                ((data >> 0) & 0xff) as u8,
+            ],
         }
-    } 
-}  
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MidiPortType {
@@ -96,13 +97,13 @@ impl MidiPortType {
     pub fn is_input(&self) -> bool {
         match self {
             Self::Input => true,
-            _ => false
+            _ => false,
         }
     }
     pub fn is_output(&self) -> bool {
         match self {
             Self::Output => true,
-            _ => false
+            _ => false,
         }
     }
 }
@@ -117,7 +118,6 @@ pub struct MidiPortDesc {
     pub port_type: MidiPortType,
 }
 
-
 #[derive(Clone, Copy, Debug)]
 pub struct MidiNote {
     pub is_on: bool,
@@ -130,30 +130,25 @@ impl Into<MidiData> for MidiNote {
     fn into(self) -> MidiData {
         MidiData {
             data: [
-                (if self.is_on {0x9}else {0x8} << 4) | self.channel,
+                (if self.is_on { 0x9 } else { 0x8 } << 4) | self.channel,
                 self.note_number,
-                self.velocity
-            ]
+                self.velocity,
+            ],
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug)]
 pub struct MidiAftertouch {
     pub channel: u8,
     pub note_number: u8,
-    pub velocity: u8
+    pub velocity: u8,
 }
 
 impl Into<MidiData> for MidiAftertouch {
     fn into(self) -> MidiData {
         MidiData {
-            data: [
-                0xA0 | self.channel,
-                self.note_number,
-                self.velocity
-            ]
+            data: [0xA0 | self.channel, self.note_number, self.velocity],
         }
     }
 }
@@ -168,40 +163,30 @@ pub struct MidiControlChange {
 impl Into<MidiData> for MidiControlChange {
     fn into(self) -> MidiData {
         MidiData {
-            data: [
-                0xB0 | self.channel,
-                self.param,
-                self.value
-            ]
+            data: [0xB0 | self.channel, self.param, self.value],
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug)]
 pub struct MidiProgramChange {
     pub channel: u8,
     pub hi: u8,
-    pub lo: u8
+    pub lo: u8,
 }
 
 impl Into<MidiData> for MidiProgramChange {
     fn into(self) -> MidiData {
         MidiData {
-            data: [
-                0xC0 | self.channel,
-                self.hi,
-                self.lo
-            ]
+            data: [0xC0 | self.channel, self.hi, self.lo],
         }
     }
 }
 
-
 #[derive(Clone, Copy, Debug)]
 pub struct MidiChannelAftertouch {
     pub channel: u8,
-    pub value: u16
+    pub value: u16,
 }
 
 impl Into<MidiData> for MidiChannelAftertouch {
@@ -209,13 +194,12 @@ impl Into<MidiData> for MidiChannelAftertouch {
         MidiData {
             data: [
                 0xD0 | self.channel,
-                (((self.value as u32)>>7)&0x7f) as u8,
-                ((self.value as u32)&0x7f) as u8,
-            ]
+                (((self.value as u32) >> 7) & 0x7f) as u8,
+                ((self.value as u32) & 0x7f) as u8,
+            ],
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug)]
 pub struct MidiPitchBend {
@@ -228,9 +212,9 @@ impl Into<MidiData> for MidiPitchBend {
         MidiData {
             data: [
                 0xE0 | self.channel,
-                (((self.bend as u32)>>7)&0x7f) as u8,
-                ((self.bend as u32)&0x7f) as u8,
-            ]
+                (((self.bend as u32) >> 7) & 0x7f) as u8,
+                ((self.bend as u32) & 0x7f) as u8,
+            ],
         }
     }
 }
@@ -239,17 +223,13 @@ impl Into<MidiData> for MidiPitchBend {
 pub struct MidiSystem {
     pub channel: u8,
     pub hi: u8,
-    pub lo: u8
+    pub lo: u8,
 }
 
 impl Into<MidiData> for MidiSystem {
     fn into(self) -> MidiData {
         MidiData {
-            data: [
-                0xF0 | self.channel,
-                self.hi,
-                self.lo
-            ]
+            data: [0xF0 | self.channel, self.hi, self.lo],
         }
     }
 }
@@ -263,14 +243,14 @@ pub enum MidiEvent {
     PitchBend(MidiPitchBend),
     ChannelAftertouch(MidiChannelAftertouch),
     System(MidiSystem),
-    Unknown(MidiData)
+    Unknown(MidiData),
 }
 
 impl MidiEvent {
     pub fn on_note(&self) -> Option<MidiNote> {
         match self {
             Self::Note(note) => Some(*note),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -282,7 +262,7 @@ impl MidiData {
     pub fn channel(&self) -> u8 {
         self.data[0] & 0xf
     }
-    
+
     pub fn decode(&self) -> MidiEvent {
         let status = self.status();
         let channel = self.channel();
@@ -300,7 +280,7 @@ impl MidiData {
                     note_number: self.data[1],
                     velocity,
                 })
-            },
+            }
             0xA => MidiEvent::Aftertouch(MidiAftertouch {
                 channel,
                 note_number: self.data[1],
@@ -309,12 +289,12 @@ impl MidiData {
             0xB => MidiEvent::ControlChange(MidiControlChange {
                 channel,
                 param: self.data[1],
-                value: self.data[2]
+                value: self.data[2],
             }),
             0xC => MidiEvent::ProgramChange(MidiProgramChange {
                 channel,
                 hi: self.data[1],
-                lo: self.data[2]
+                lo: self.data[2],
             }),
             0xD => MidiEvent::ChannelAftertouch(MidiChannelAftertouch {
                 channel,
@@ -327,9 +307,9 @@ impl MidiData {
             0xF => MidiEvent::System(MidiSystem {
                 channel,
                 hi: self.data[1],
-                lo: self.data[2]
+                lo: self.data[2],
             }),
-            _ => MidiEvent::Unknown(*self)
+            _ => MidiEvent::Unknown(*self),
         }
     }
 }

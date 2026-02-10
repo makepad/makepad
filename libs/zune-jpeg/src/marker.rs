@@ -52,7 +52,7 @@ pub enum Marker {
     /// Comment
     COM,
     /// Unknown markers
-    UNKNOWN(u8)
+    UNKNOWN(u8),
 }
 
 impl Marker {
@@ -85,7 +85,7 @@ impl Marker {
             0xE2 => Some(APP(2)),
             0xED => Some(APP(13)),
             0xEE => Some(APP(14)),
-            _ => Some(UNKNOWN(n))
+            _ => Some(UNKNOWN(n)),
         }
     }
 }

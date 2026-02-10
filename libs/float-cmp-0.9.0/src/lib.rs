@@ -189,7 +189,7 @@ pub use self::ulps_eq::ApproxEqUlps;
 mod eq;
 pub use self::eq::{ApproxEq, F32Margin, F64Margin};
 
-#[cfg(feature="ratio")]
+#[cfg(feature = "ratio")]
 mod ratio;
-#[cfg(feature="ratio")]
+#[cfg(feature = "ratio")]
 pub use self::ratio::ApproxEqRatio;

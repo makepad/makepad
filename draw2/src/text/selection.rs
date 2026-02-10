@@ -16,8 +16,7 @@ impl Selection {
     /// Returns `true` if this `Selection` and the `other` Selection
     /// have the same `index`` values for both their `cursor` and `anchor`.
     pub fn index_eq(self, other: Selection) -> bool {
-        self.cursor.index == other.cursor.index
-            && self.anchor.index == other.anchor.index
+        self.cursor.index == other.cursor.index && self.anchor.index == other.anchor.index
     }
 }
 

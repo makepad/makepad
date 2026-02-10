@@ -63,7 +63,9 @@ fn convert_be_to_le_u16(out: &mut [u8], _use_sse4: bool) {
 ///
 #[inline]
 pub fn convert_be_to_target_endian_u16(
-    sample: &mut [u8], endian: ByteEndian, use_intrinsics: bool
+    sample: &mut [u8],
+    endian: ByteEndian,
+    use_intrinsics: bool,
 ) {
     // if target is BE no conversion
     if endian == ByteEndian::BE {
@@ -85,7 +87,10 @@ pub const fn is_le() -> bool {
 }
 
 pub(crate) fn expand_palette(
-    input: &[u8], out: &mut [u8], palette: &[PLTEEntry; 256], components: usize
+    input: &[u8],
+    out: &mut [u8],
+    palette: &[PLTEEntry; 256],
+    components: usize,
 ) {
     if components == 0 {
         return;
@@ -120,7 +125,11 @@ pub(crate) fn expand_palette(
 /// * `depth`:  The depth of the image
 ///
 pub fn expand_trns<const SIXTEEN_BITS: bool>(
-    input: &[u8], out: &mut [u8], color: PngColor, trns_bytes: [u16; 4], depth: u8
+    input: &[u8],
+    out: &mut [u8],
+    color: PngColor,
+    trns_bytes: [u16; 4],
+    depth: u8,
 ) {
     const DEPTH_SCALE_TABLE: [u8; 9] = [0, 0xff, 0x55, 0, 0x11, 0, 0, 0, 0x01];
 
@@ -175,7 +184,7 @@ pub fn expand_trns<const SIXTEEN_BITS: bool>(
                     }
                 }
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     } else {
         match color {
@@ -209,14 +218,19 @@ pub fn expand_trns<const SIXTEEN_BITS: bool>(
                     chunk[3] = 255 * u8::from(mask);
                 }
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 }
 
 /// Expand bits to bytes expand images with less than 8 bpp
 pub(crate) fn expand_bits_to_byte(
-    width: usize, depth: usize, out_n: usize, plte_present: bool, input: &[u8], out: &mut [u8]
+    width: usize,
+    depth: usize,
+    out_n: usize,
+    plte_present: bool,
+    input: &[u8],
+    out: &mut [u8],
 ) {
     let scale = if plte_present {
         // When a palette is used we only separate the indexes in this pass,
@@ -227,7 +241,7 @@ pub(crate) fn expand_bits_to_byte(
             1 => 0xFF,
             2 => 0x55,
             4 => 0x11,
-            _ => return
+            _ => return,
         }
     };
 
@@ -347,7 +361,9 @@ pub(crate) fn add_alpha(input: &[u8], output: &mut [u8], colorspace: PngColor, d
                 out_chunk[7] = 255;
             }
         }
-        (a, b) => panic!("Unknown combination of depth {a:?} and color type for expand alpha {b:?}")
+        (a, b) => {
+            panic!("Unknown combination of depth {a:?} and color type for expand alpha {b:?}")
+        }
     }
 }
 
@@ -357,7 +373,7 @@ pub fn convert_u16_to_u8_slice(slice: &mut [u16]) -> &mut [u8] {
     unsafe {
         core::slice::from_raw_parts_mut(
             slice.as_ptr() as *mut u8,
-            slice.len().checked_mul(2).unwrap()
+            slice.len().checked_mul(2).unwrap(),
         )
     }
 }

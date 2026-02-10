@@ -1,22 +1,22 @@
 use crate::{
+    animator::{Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
-    animator::{Animator, AnimatorImpl, AnimatorAction},
 };
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.PopupMenuItemBase = #(PopupMenuItem::script_component(vm))
     mod.widgets.PopupMenuBase = #(PopupMenu::script_component(vm))
-        
+
     mod.widgets.PopupMenuItem = set_type_default() do mod.widgets.PopupMenuItemBase{
         width: Fill
         height: Fit
         align: Align{y: 0.5}
         padding: theme.mspace_1{left: 15.}
-        
+
         draw_text +: {
             active: instance(0.0)
             hover: instance(0.0)
@@ -38,7 +38,7 @@ script_mod!{
                     .mix(self.color_disabled, self.disabled)
             }
         }
-        
+
         draw_bg +: {
             active: instance(0.0)
             hover: instance(0.0)
@@ -74,7 +74,7 @@ script_mod!{
             mark_color: uniform(theme.color_u_hidden)
             mark_color_active: uniform(theme.color_mark_active)
             mark_color_disabled: uniform(theme.color_mark_disabled)
-            
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
@@ -136,17 +136,17 @@ script_mod!{
                     color_stroke_active = mix(self.border_color_active, self.border_color_2_active, dir)
                     color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
                 }
-                
+
                 let fill = color_fill
                     .mix(color_fill_active, self.active)
                     .mix(color_fill_hover, self.hover)
                     .mix(color_fill_disabled, self.disabled)
-                
+
                 let stroke = color_stroke
                     .mix(color_stroke_active, self.active)
                     .mix(color_stroke_hover, self.hover)
                     .mix(color_stroke_disabled, self.disabled)
-                
+
                 sdf.fill_keep(fill)
                 sdf.stroke(stroke, self.border_size)
 
@@ -163,11 +163,11 @@ script_mod!{
                         .mix(self.mark_color_active, self.active)
                         .mix(self.mark_color_disabled, self.disabled)
                     1.)
-                
+
                 return sdf.result
             }
         }
-        
+
         animator: Animator{
             disabled: {
                 default: @off
@@ -204,7 +204,7 @@ script_mod!{
                     }
                 }
             }
-            
+
             active: {
                 default: @off
                 off: AnimatorState{
@@ -255,9 +255,9 @@ script_mod!{
         height: Fit
         flow: Flow.Down
         padding: theme.mspace_1
-        
+
         menu_item: mod.widgets.PopupMenuItem{}
-        
+
         draw_bg +: {
             border_size: uniform(theme.beveling)
             gradient_border_horizontal: uniform(0.0)
@@ -338,7 +338,7 @@ script_mod!{
 
     mod.widgets.PopupMenuGradientY = mod.widgets.PopupMenu{
         menu_item: mod.widgets.PopupMenuItemGradientY{}
-        
+
         draw_bg +: {
             color: theme.color_fg_app
             color_2: theme.color_fg_app * 1.2
@@ -347,7 +347,7 @@ script_mod!{
 
     mod.widgets.PopupMenuGradientX = mod.widgets.PopupMenuGradientY{
         menu_item: mod.widgets.PopupMenuItemGradientY{}
-        
+
         draw_bg +: {
             gradient_border_horizontal: 0.0
             gradient_fill_horizontal: 1.0
@@ -355,46 +355,73 @@ script_mod!{
     }
 }
 
-
 #[derive(Script, ScriptHook, Animator)]
 pub struct PopupMenuItem {
-    #[source] source: ScriptObjectRef,
-    
-    #[live] draw_bg: DrawQuad,
-    #[live] draw_text: DrawText,
-    
-    #[layout] layout: Layout,
-    #[apply_default] animator: Animator,
-    #[walk] walk: Walk,
-    
-    #[live] indent_width: f32,
-    #[live] icon_walk: Walk,
-    
-    #[live] opened: f32,
-    #[live] hover: f32,
-    #[live] active: f32,
+    #[source]
+    source: ScriptObjectRef,
+
+    #[live]
+    draw_bg: DrawQuad,
+    #[live]
+    draw_text: DrawText,
+
+    #[layout]
+    layout: Layout,
+    #[apply_default]
+    animator: Animator,
+    #[walk]
+    walk: Walk,
+
+    #[live]
+    indent_width: f32,
+    #[live]
+    icon_walk: Walk,
+
+    #[live]
+    opened: f32,
+    #[live]
+    hover: f32,
+    #[live]
+    active: f32,
 }
 
 #[derive(Script)]
 pub struct PopupMenu {
-    #[source] source: ScriptObjectRef,
-    
-    #[live] draw_list: DrawList2d,
-    #[live] menu_item: ScriptValue,
-    
-    #[live] draw_bg: DrawQuad,
-    #[layout] layout: Layout,
-    #[walk] walk: Walk,
-    #[live] items: Vec<String>,
-    #[rust] first_tap: bool,
-    #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
-    #[rust] init_select_item: Option<PopupMenuItemId>,
-    
-    #[rust] count: usize,
+    #[source]
+    source: ScriptObjectRef,
+
+    #[live]
+    draw_list: DrawList2d,
+    #[live]
+    menu_item: ScriptValue,
+
+    #[live]
+    draw_bg: DrawQuad,
+    #[layout]
+    layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[live]
+    items: Vec<String>,
+    #[rust]
+    first_tap: bool,
+    #[rust]
+    menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
+    #[rust]
+    init_select_item: Option<PopupMenuItemId>,
+
+    #[rust]
+    count: usize,
 }
 
 impl ScriptHook for PopupMenu {
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, _value: ScriptValue) {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         // Apply menu_item template to existing items
         if !self.menu_item.is_nil() {
             for (_, node) in self.menu_items.iter_mut() {
@@ -409,7 +436,7 @@ pub enum PopupMenuItemAction {
     WasSweeped,
     WasSelected,
     MightBeSelected,
-    None
+    None,
 }
 
 #[derive(Clone, Default)]
@@ -424,17 +451,13 @@ pub enum PopupMenuAction {
 pub struct PopupMenuItemId(pub LiveId);
 
 impl PopupMenuItem {
-    
-    pub fn draw_item(
-        &mut self,
-        cx: &mut Cx2d,
-        label: &str,
-    ) {
+    pub fn draw_item(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
-        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_text
+            .draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
     }
-    
+
     pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
@@ -445,11 +468,11 @@ impl PopupMenuItem {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.area().redraw(cx);
         }
-        
+
         match event.hits_with_options(
             cx,
             self.draw_bg.area(),
-            HitOptions::new().with_sweep_area(sweep_area)
+            HitOptions::new().with_sweep_area(sweep_area),
         ) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
@@ -465,8 +488,7 @@ impl PopupMenuItem {
             Hit::FingerUp(se) if se.is_primary_hit() => {
                 if !se.is_sweep {
                     dispatch_action(cx, PopupMenuItemAction::WasSelected);
-                }
-                else {
+                } else {
                     self.animator_play(cx, ids!(hover.off));
                     self.animator_play(cx, ids!(active.off));
                 }
@@ -477,24 +499,23 @@ impl PopupMenuItem {
 }
 
 impl PopupMenu {
-    
     pub fn menu_contains_pos(&self, cx: &mut Cx, pos: Vec2d) -> bool {
         self.draw_bg.area().clipped_rect(cx).contains(pos)
     }
-    
+
     pub fn begin(&mut self, cx: &mut Cx2d) {
         self.draw_list.begin_overlay_reuse(cx);
-        
+
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
-        
+
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.count = 0;
     }
-    
+
     pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d) {
         self.draw_bg.end(cx);
-        
+
         cx.end_pass_sized_turtle_with_shift(shift_area, shift);
         self.draw_list.end(cx);
         self.menu_items.retain_visible();
@@ -502,46 +523,38 @@ impl PopupMenu {
             self.select_item_state(cx, init_select_item);
         }
     }
-    
+
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.draw_list.redraw(cx);
     }
-    
-    pub fn draw_item(
-        &mut self,
-        cx: &mut Cx2d,
-        item_id: PopupMenuItemId,
-        label: &str,
-    ) {
+
+    pub fn draw_item(&mut self, cx: &mut Cx2d, item_id: PopupMenuItemId, label: &str) {
         self.count += 1;
-        
+
         let menu_item = self.menu_item;
         let menu_item = self.menu_items.get_or_insert(cx, item_id, |cx| {
-            cx.with_vm(|vm| {
-                PopupMenuItem::script_from_value(vm, menu_item)
-            })
+            cx.with_vm(|vm| PopupMenuItem::script_from_value(vm, menu_item))
         });
         menu_item.draw_item(cx, label);
     }
-    
+
     pub fn init_select_item(&mut self, which_id: PopupMenuItemId) {
         self.init_select_item = Some(which_id);
         self.first_tap = true;
     }
-    
+
     fn select_item_state(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
         for (id, item) in &mut *self.menu_items {
             if *id == which_id {
                 item.animator_cut(cx, ids!(active.on));
                 item.animator_cut(cx, ids!(hover.on));
-            }
-            else {
+            } else {
                 item.animator_cut(cx, ids!(active.off));
                 item.animator_cut(cx, ids!(hover.off));
             }
         }
     }
-    
+
     pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
@@ -551,16 +564,17 @@ impl PopupMenu {
     ) {
         let mut actions = Vec::new();
         for (item_id, node) in self.menu_items.iter_mut() {
-            node.handle_event_with(cx, event, sweep_area, &mut |_, e| actions.push((*item_id, e)));
+            node.handle_event_with(cx, event, sweep_area, &mut |_, e| {
+                actions.push((*item_id, e))
+            });
         }
-        
+
         for (node_id, action) in actions {
             match action {
                 PopupMenuItemAction::MightBeSelected => {
                     if self.first_tap {
                         self.first_tap = false;
-                    }
-                    else {
+                    } else {
                         self.select_item_state(cx, node_id);
                         dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                     }
@@ -573,7 +587,7 @@ impl PopupMenu {
                     self.select_item_state(cx, node_id);
                     dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                 }
-                _ => ()
+                _ => (),
             }
         }
     }

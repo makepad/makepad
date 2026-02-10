@@ -1,20 +1,11 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::os::raw::{
-    c_void,
-    c_uint,
-    c_char,
-    c_int,
- };
- 
+use std::os::raw::{c_char, c_int, c_uint, c_void};
+
 #[link(name = "drm")]
-extern "C" { 
-    pub fn drmGetDevices2(
-        flags: u32,
-        devices: *mut drmDevicePtr,
-        max_devices: c_int,
-    ) -> c_int;
+extern "C" {
+    pub fn drmGetDevices2(flags: u32, devices: *mut drmDevicePtr, max_devices: c_int) -> c_int;
     pub fn drmModeGetResources(fd: c_int) -> drmModeResPtr;
     pub fn drmModeGetConnector(fd: c_int, connectorId: u32) -> drmModeConnectorPtr;
     pub fn drmModeFreeConnector(ptr: drmModeConnectorPtr);
@@ -25,7 +16,7 @@ extern "C" {
         fd: c_int,
         width: u32,
         height: u32,
-        pixel_format: u32, 
+        pixel_format: u32,
         bo_handles: *const u32,
         pitches: *const u32,
         offsets: *const u32,
@@ -49,10 +40,7 @@ extern "C" {
         flags: u32,
         user_data: *mut c_void,
     ) -> c_int;
-    pub fn drmHandleEvent(
-        fd: c_int,
-        evctx: drmEventContextPtr,
-    ) -> c_int;
+    pub fn drmHandleEvent(fd: c_int, evctx: drmEventContextPtr) -> c_int;
 }
 
 pub const MAX_DRM_DEVICES: usize = 64;

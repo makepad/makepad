@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoDropdown = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/dropdown.md") } 
+            <Markdown> { body: dep("crate://self/resources/dropdown.md") }
         }
         demos = {
             <H4> { text: "Standard" }
@@ -94,7 +92,7 @@ live_design!{
 
                 padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: 22.5 }
                 margin: <THEME_MSPACE_V_1> {}
-            
+
                 draw_text: {
                     color: (THEME_COLOR_LABEL_INNER)
                     color_hover: (THEME_COLOR_LABEL_INNER_HOVER)

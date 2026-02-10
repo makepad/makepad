@@ -29,12 +29,15 @@ pub struct EnterError {
 
 impl fmt::Display for EnterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "can't run an executor within the scope of another executor on the same thread")
+        write!(
+            f,
+            "can't run an executor within the scope of another executor on the same thread"
+        )
     }
 }
 
 /// Marks the current thread as being within the scope of an executor.
-/// 
+///
 /// This is a helper function used to ensure that users don't accidentally run an executor within
 /// the scope of another executor on the same thread. Executors should call this function before
 /// they begin executing a task, and drop the returned RAII guard after they finished executing the

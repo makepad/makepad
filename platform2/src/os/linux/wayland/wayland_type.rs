@@ -1,5 +1,5 @@
-use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1;
 use crate::{MouseButton, MouseCursor};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1;
 
 impl Into<wp_cursor_shape_device_v1::Shape> for MouseCursor {
     fn into(self) -> wp_cursor_shape_device_v1::Shape {
@@ -43,6 +43,6 @@ pub fn from_mouse(button: u32) -> Option<MouseButton> {
         0x112 => Some(MouseButton::MIDDLE),
         0x116 => Some(MouseButton::BACK),
         0x117 => Some(MouseButton::FORWARD),
-        _ => None
+        _ => None,
     }
 }

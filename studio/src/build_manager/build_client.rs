@@ -4,46 +4,42 @@
 
 use {
     crate::{
-        makepad_micro_serde::*,
-        makepad_file_server::FileSystemRoots,
-        makepad_platform::{*, cx_stdin::aux_chan},
         build_manager::{
-            build_protocol::{BuildCmd, BuildCmdWrap, BuildClientMessageWrap, LogItem},
+            build_protocol::{BuildClientMessageWrap, BuildCmd, BuildCmdWrap, LogItem},
             build_server::{BuildConnection, BuildServer},
-        }
+        },
+        makepad_file_server::FileSystemRoots,
+        makepad_micro_serde::*,
+        makepad_platform::{cx_stdin::aux_chan, *},
     },
     std::{
-        path::Path,
+        env,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
+        path::Path,
+        path::PathBuf,
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
-        env,
-        path::PathBuf
     },
 };
 
-pub struct BuildClient{
+pub struct BuildClient {
     pub cmd_sender: Sender<BuildCmdWrap>,
     pub msg_signal: SignalToUI,
     pub msg_receiver: Receiver<BuildClientMessageWrap>,
 }
- 
-impl BuildClient {
 
+impl BuildClient {
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn send_cmd_with_id(&self, cmd_id: LiveId, cmd: BuildCmd){
-        self.cmd_sender.send(BuildCmdWrap{
-            cmd_id,
-            cmd
-        }).unwrap();
+    pub fn send_cmd_with_id(&self, cmd_id: LiveId, cmd: BuildCmd) {
+        self.cmd_sender.send(BuildCmdWrap { cmd_id, cmd }).unwrap();
     }
-    
+
     #[cfg(target_arch = "wasm32")]
-    pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){}
-     
+    pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd) {}
+
     #[cfg(target_arch = "wasm32")]
-    pub fn new_with_local_server(_ubdir:&str) -> Self {
+    pub fn new_with_local_server(_ubdir: &str) -> Self {
         let (cmd_sender, _cmd_receiver) = mpsc::channel();
         let msg_signal = LiveId::unique().into();
         let (_msg_sender, msg_receiver) = mpsc::channel();
@@ -53,9 +49,9 @@ impl BuildClient {
             msg_receiver,
         }
     }
-    
+
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn new_with_local_server(roots:FileSystemRoots) -> Self {
+    pub fn new_with_local_server(roots: FileSystemRoots) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
         let msg_signal = SignalToUI::new();
         let (msg_sender, msg_receiver) = mpsc::channel();
@@ -76,21 +72,20 @@ impl BuildClient {
             server.connect(Box::new({
                 let msg_sender = msg_sender.clone();
                 let msg_signal = msg_signal.clone();
-                move | msg_item:BuildClientMessageWrap | {
+                move |msg_item: BuildClientMessageWrap| {
                     msg_sender.send(msg_item).unwrap();
                     msg_signal.set()
                 }
             })),
         );
         /*spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);*/
-        
+
         Self {
             cmd_sender,
             msg_signal,
             msg_receiver,
         }
     }
-    
 }
 /*
 fn spawn_connection_listener(listener: TcpListener, mut server: BuildServer) {
@@ -125,9 +120,9 @@ fn spawn_remote_cmd_handler(
         let len = u32::from_be_bytes(len_bytes);
         let mut request_bytes = vec![0; len as usize];
         stream.read_exact(&mut request_bytes).unwrap();
-        
+
         let cmd = DeBin::deserialize_bin(request_bytes.as_slice()).unwrap();
-        
+
         connection.handle_cmd(cmd);
     });
 }*/
@@ -139,9 +134,9 @@ fn spawn_msg_sender(
     thread::spawn(move || loop {
         let msg = msg_receiver.recv().unwrap();
         let mut msg_bytes = Vec::new();
-        
+
         msg.ser_bin(&mut msg_bytes);
-        
+
         let len_bytes = msg_bytes.len().to_be_bytes();
         stream.write_all(&len_bytes).unwrap();
         stream.write_all(&msg_bytes).unwrap();
@@ -167,23 +162,22 @@ fn _spawn_msg_receiver(
     thread::spawn(move || loop {
         let mut len_bytes = [0; 4];
         stream.read_exact(&mut len_bytes).unwrap();
-        
+
         let len = u32::from_be_bytes(len_bytes);
         let mut msg_bytes = vec![0; len as usize];
         stream.read_exact(&mut msg_bytes).unwrap();
-        
+
         let msg = DeBin::deserialize_bin(msg_bytes.as_slice()).unwrap();
-        
+
         msg_sender.send(msg).unwrap();
         msg_signal.set()
     });
 }
 */
-fn spawn_local_cmd_handler(
-    cmd_receiver: Receiver<BuildCmdWrap>,
-    connection: BuildConnection,
-) {
-    thread::spawn(move || while let Ok(cmd) = cmd_receiver.recv() {
-        connection.handle_cmd(cmd);
+fn spawn_local_cmd_handler(cmd_receiver: Receiver<BuildCmdWrap>, connection: BuildConnection) {
+    thread::spawn(move || {
+        while let Ok(cmd) = cmd_receiver.recv() {
+            connection.handle_cmd(cmd);
+        }
     });
 }

@@ -1,21 +1,19 @@
 use {
-    std::{str, sync::Arc},
     crate::{
-        makepad_live_compiler::*,
-        makepad_math::*,
-        cx::Cx,
-        live_traits::*,
-        animator::Animator
-    }
+        animator::Animator, cx::Cx, live_traits::*, makepad_live_compiler::*, makepad_math::*,
+    },
+    std::{str, sync::Arc},
 };
 
 #[macro_export]
-macro_rules!get_component {
+macro_rules! get_component {
     ( $ comp_id: expr, $ ty: ty, $ frame: expr) => {
-        $ frame.get_component( $ comp_id).map_or(None, | v | v.cast_mut::< $ ty>())
-    }
+        $frame
+            .get_component($comp_id)
+            .map_or(None, |v| v.cast_mut::<$ty>())
+    };
 }
- 
+
 #[macro_export]
 macro_rules!live_primitive {
     ( $ ty: ty, $ default: expr, $ apply: item, $ to_live_value: item) => {
@@ -26,7 +24,7 @@ macro_rules!live_primitive {
         impl LiveRead for $ ty {
             fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
                 out.push(LiveNode::from_id_value(id, self.to_live_value()));
-            } 
+            }
         }
         impl LiveApply for $ ty {
             //fn type_id(&self) -> TypeId {
@@ -39,7 +37,7 @@ macro_rules!live_primitive {
             fn new(_cx: &mut Cx) -> Self {
                 $ default
             }
-            
+
             fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
                 LiveTypeInfo {
                     module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
@@ -63,11 +61,10 @@ live_primitive!(
                 self.apply(cx, apply, index, nodes);
             }
             nodes.skip_node(index)
-        }
-        else if nodes[index].value.is_open() { // cant use this
+        } else if nodes[index].value.is_open() {
+            // cant use this
             nodes.skip_node(index)
-        }
-        else {
+        } else {
             *self = nodes[index].value.clone();
             index + 1
         }
@@ -86,7 +83,7 @@ live_primitive!(
                 *self = *id;
                 index + 1
             }
-            LiveValue::BareEnum(id)=>{
+            LiveValue::BareEnum(id) => {
                 *self = *id;
                 index + 1
             }
@@ -97,7 +94,12 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "LiveId");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "LiveId",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -125,11 +127,11 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Float64(val) => {
-                *self = val.abs()>0.00001;
+                *self = val.abs() > 0.00001;
                 index + 1
             }
             LiveValue::Float32(val) => {
-                *self = val.abs()>0.00001;
+                *self = val.abs() > 0.00001;
                 index + 1
             }
             LiveValue::Array => {
@@ -138,12 +140,17 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            }
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "bool");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "bool",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -152,7 +159,6 @@ live_primitive!(
         LiveValue::Bool(*self)
     }
 );
-
 
 live_primitive!(
     f32,
@@ -175,18 +181,23 @@ live_primitive!(
                 *self = *val as f32;
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "f32");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "f32",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -217,18 +228,23 @@ live_primitive!(
                 *self = *val as f64;
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "f64");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "f64",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -259,18 +275,23 @@ live_primitive!(
                 *self = *val as i64;
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "i64",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -301,18 +322,23 @@ live_primitive!(
                 *self = *val as u64;
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "i64",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -343,18 +369,23 @@ live_primitive!(
                 *self = *val as i32;
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "i64",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -385,18 +416,23 @@ live_primitive!(
                 *self = *val as u32;
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "i64",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -427,18 +463,23 @@ live_primitive!(
                 *self = *val as usize;
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "i64",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -447,7 +488,6 @@ live_primitive!(
         LiveValue::Int64(*self as i64)
     }
 );
-
 
 live_primitive!(
     Vec2d,
@@ -480,12 +520,17 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            }
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2f");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "Vec2f",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -526,12 +571,17 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            }
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2f");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "Vec2f",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -553,7 +603,7 @@ live_primitive!(
             LiveValue::Uint64(v) => {
                 *self = Vec3f::all(*v as f32);
                 index + 1
-            }            
+            }
             LiveValue::Int64(v) => {
                 *self = Vec3f::all(*v as f32);
                 index + 1
@@ -576,12 +626,17 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            }
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec3f");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "Vec3f",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -597,21 +652,36 @@ live_primitive!(
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Vec2f(v) => {
-                *self = Vec4f{x:v.x, y:v.y, z:v.x, w:v.y};
+                *self = Vec4f {
+                    x: v.x,
+                    y: v.y,
+                    z: v.x,
+                    w: v.y,
+                };
                 index + 1
             }
             LiveValue::Vec3f(v) => {
-                *self = Vec4f{x:v.x, y:v.y, z:v.z, w:1.0};
+                *self = Vec4f {
+                    x: v.x,
+                    y: v.y,
+                    z: v.z,
+                    w: 1.0,
+                };
                 index + 1
             }
             LiveValue::Vec4f(v) => {
-                *self = Vec4f{x:v.x, y:v.y, z:v.z, w:v.w};
+                *self = Vec4f {
+                    x: v.x,
+                    y: v.y,
+                    z: v.z,
+                    w: v.w,
+                };
                 index + 1
             }
             LiveValue::Uint64(v) => {
                 *self = Vec4f::all(*v as f32);
                 index + 1
-            }  
+            }
             LiveValue::Int64(v) => {
                 *self = Vec4f::all(*v as f32);
                 index + 1
@@ -634,12 +704,17 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            }
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4f");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "Vec4f",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -648,7 +723,6 @@ live_primitive!(
         LiveValue::Color(self.to_u32())
     }
 );
-
 
 live_primitive!(
     Mat4f,
@@ -661,12 +735,17 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
-            LiveValue::DSL {..} => nodes.skip_node(index),
+            }
+            LiveValue::DSL { .. } => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4f");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "Vec4f",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -696,9 +775,9 @@ live_primitive!(
                 self.push_str(v.as_str());
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
@@ -718,7 +797,12 @@ live_primitive!(
                 index + 1
             }
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "String",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -728,81 +812,73 @@ live_primitive!(
         //let bytes = self.as_bytes();
         if let Some(inline_str) = InlineString::from_str(&self) {
             LiveValue::InlineString(inline_str)
-        }
-        else {
+        } else {
             LiveValue::String(Arc::new(self.clone()))
         }
     }
 );
 
-pub enum ArcStringMut{
+pub enum ArcStringMut {
     Arc(Arc<String>),
-    String(String)
+    String(String),
 }
 
-impl Default for ArcStringMut{
-    fn default()->Self{Self::String(String::new())}
+impl Default for ArcStringMut {
+    fn default() -> Self {
+        Self::String(String::new())
+    }
 }
 
-impl ArcStringMut{
-    pub fn as_arc(&self)->Arc<String>{
-        match self{
-            Self::Arc(rc)=>{
+impl ArcStringMut {
+    pub fn as_arc(&self) -> Arc<String> {
+        match self {
+            Self::Arc(rc) => {
                 return rc.clone();
             }
-            Self::String(s)=>{
-                return Arc::new(s.clone())
-            }
+            Self::String(s) => return Arc::new(s.clone()),
         }
     }
-    pub fn as_mut(&mut self)->&mut String{
-        match self{
-            Self::Arc(rc)=>{
+    pub fn as_mut(&mut self) -> &mut String {
+        match self {
+            Self::Arc(rc) => {
                 *self = Self::String(rc.to_string());
                 return self.as_mut();
             }
-            Self::String(s)=>{
-                return s
-            }
+            Self::String(s) => return s,
         }
     }
-    pub fn as_mut_empty(&mut self)->&mut String{
-        match self{
-            Self::Arc(_)=>{
+    pub fn as_mut_empty(&mut self) -> &mut String {
+        match self {
+            Self::Arc(_) => {
                 *self = Self::String(String::new());
                 return self.as_mut();
             }
-            Self::String(s)=>{
+            Self::String(s) => {
                 s.clear();
-                return s
+                return s;
             }
         }
     }
 
-    pub fn set(&mut self, v:&str){
-        match self{
-            Self::Arc(_rc)=>{
+    pub fn set(&mut self, v: &str) {
+        match self {
+            Self::Arc(_rc) => {
                 *self = Self::String(v.to_string());
             }
-            Self::String(s)=>{
+            Self::String(s) => {
                 s.clear();
                 s.push_str(v);
             }
         }
     }
 
-    pub fn as_ref(&self)->&str{
-        match self{
-            Self::Arc(rc)=>{
-                &*rc
-            }
-            Self::String(s)=>{
-                return &s
-            }
+    pub fn as_ref(&self) -> &str {
+        match self {
+            Self::Arc(rc) => &*rc,
+            Self::String(s) => return &s,
         }
     }
 }
-
 
 live_primitive!(
     ArcStringMut,
@@ -821,9 +897,9 @@ live_primitive!(
                 *self = ArcStringMut::String(v.as_str().to_string());
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
@@ -843,7 +919,12 @@ live_primitive!(
                 index + 1
             }
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "String",
+                );
                 nodes.skip_node(index)
             }
         }
@@ -853,11 +934,10 @@ live_primitive!(
         //let bytes = self.as_bytes();
         if let Some(inline_str) = InlineString::from_str(&self.as_ref()) {
             LiveValue::InlineString(inline_str)
-        }
-        else {
-            match self{
-                ArcStringMut::Arc(rc)=>LiveValue::String(rc.clone()),
-                ArcStringMut::String(v)=>LiveValue::String(Arc::new(v.clone()))
+        } else {
+            match self {
+                ArcStringMut::Arc(rc) => LiveValue::String(rc.clone()),
+                ArcStringMut::String(v) => LiveValue::String(Arc::new(v.clone())),
             }
         }
     }
@@ -907,14 +987,13 @@ live_primitive!(
     }
 );*/
 
-impl ToLiveValue for &str{
+impl ToLiveValue for &str {
     fn to_live_value(&self) -> LiveValue {
         // lets check our byte size and choose a storage mode appropriately.
         //let bytes = self.as_bytes();
         if let Some(inline_str) = InlineString::from_str(self) {
             LiveValue::InlineString(inline_str)
-        }
-        else {
+        } else {
             LiveValue::String(Arc::new(self.to_string()))
         }
     }
@@ -934,41 +1013,63 @@ impl LiveIdToEnum for &[LiveId;1]{
 #[derive(Debug, Default, Clone)]
 pub struct LiveDependency(Arc<String>);
 
-impl LiveDependency{
-    pub fn as_str(&self)->&str{&self.0}
-    pub fn as_ref(&self)->&Arc<String>{&self.0}
+impl LiveDependency {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn as_ref(&self) -> &Arc<String> {
+        &self.0
+    }
 }
-
 
 live_primitive!(
     LiveDependency,
     LiveDependency::default(),
-    fn apply(&mut self, cx: &mut Cx, _applyl: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(
+        &mut self,
+        cx: &mut Cx,
+        _applyl: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         match &nodes[index].value {
-            LiveValue::Dependency (dep)=> {
+            LiveValue::Dependency(dep) => {
                 *self = Self(dep.clone());
                 index + 1
             }
-            LiveValue::Expr {..} => {
+            LiveValue::Expr { .. } => {
                 panic!("Expr node found whilst deserialising DSL")
-            },
+            }
 
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Dependency");
+                cx.apply_error_wrong_value_type_for_primitive(
+                    live_error_origin!(),
+                    index,
+                    nodes,
+                    "Dependency",
+                );
                 nodes.skip_node(index)
             }
         }
     },
-    fn to_live_value(&self) -> LiveValue { panic!() }
+    fn to_live_value(&self) -> LiveValue {
+        panic!()
+    }
 );
-
 
 live_primitive!(
     LivePtr,
-    LivePtr {file_id: LiveFileId(0), index: 0, generation: Default::default()},
+    LivePtr {
+        file_id: LiveFileId(0),
+        index: 0,
+        generation: Default::default()
+    },
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(file_id) = apply.from.file_id() {
-            *self = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+            *self = cx
+                .live_registry
+                .borrow()
+                .file_id_index_to_live_ptr(file_id, index);
         }
         nodes.skip_node(index)
     },
@@ -976,4 +1077,3 @@ live_primitive!(
         panic!()
     }
 );
-

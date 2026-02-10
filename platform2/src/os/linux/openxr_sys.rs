@@ -1,17 +1,14 @@
 #![allow(non_snake_case)]
-use crate::module_loader::ModuleLoader;
+use crate::makepad_live_id::LiveId;
 use crate::makepad_micro_serde::*;
-use std::os::raw::c_char;
-use std::os::raw::c_void;
-use std::fmt;
+use crate::module_loader::ModuleLoader;
+use crate::os::linux::egl_sys::*;
 use std::ffi::CStr;
 use std::ffi::CString;
-use crate::os::linux::egl_sys::*;
-use crate::makepad_live_id::LiveId;
+use std::fmt;
+use std::os::raw::c_char;
+use std::os::raw::c_void;
 // Consts
-
-
-
 
 pub const MAX_APPLICATION_NAME_SIZE: usize = 128usize;
 pub const MAX_ENGINE_NAME_SIZE: usize = 128usize;
@@ -24,23 +21,26 @@ pub const MAX_ACTION_SET_NAME_SIZE: usize = 64usize;
 pub const MAX_ACTION_NAME_SIZE: usize = 64usize;
 pub const MAX_LOCALIZED_ACTION_SET_NAME_SIZE: usize = 128usize;
 pub const MAX_LOCALIZED_ACTION_NAME_SIZE: usize = 128usize;
-pub const MAX_COLOCATION_DISCOVERY_BUFFER_SIZE_META:usize = 1024;
-pub const HAND_JOINT_COUNT_EXT:usize = 26;
+pub const MAX_COLOCATION_DISCOVERY_BUFFER_SIZE_META: usize = 1024;
+pub const HAND_JOINT_COUNT_EXT: usize = 26;
 pub const UUID_SIZE: usize = 16usize;
 
 // Macros
 
-
-
 macro_rules! get_proc_addr {
     ($get_addr:expr, $inst:expr,  $ty:ident) => {
-        unsafe{
+        unsafe {
             let mut f: *mut c_void = 0 as *mut _;
-            let res = $get_addr($inst, CStr::from_bytes_with_nul(&concat!(stringify!($ty), "\0").as_bytes()[1..]).unwrap().as_ptr(),&mut f as *mut _ as _);
+            let res = $get_addr(
+                $inst,
+                CStr::from_bytes_with_nul(&concat!(stringify!($ty), "\0").as_bytes()[1..])
+                    .unwrap()
+                    .as_ptr(),
+                &mut f as *mut _ as _,
+            );
             if f.is_null() {
                 Err(format!("Cannot find symbol {} {:?}", stringify!($ty), res))
-            }
-            else{
+            } else {
                 Ok({ std::mem::transmute_copy::<_, $ty>(&f) })
             }
         }
@@ -51,57 +51,59 @@ macro_rules! bitmask {
     ($name:ident) => {
         impl $name {
             #[inline]
-            pub fn contains(&self, other:$name)->bool{
+            pub fn contains(&self, other: $name) -> bool {
                 (self.0 & other.0) != 0
             }
         }
         impl std::ops::BitOr for $name {
             type Output = $name;
-            
+
             #[inline]
             fn bitor(self, rhs: $name) -> $name {
                 $name(self.0 | rhs.0)
             }
         }
-    }
+    };
 }
-
-
-
 
 // Function tables
 
-
-
-
 pub struct LibOpenXrLoader {
-    pub xrCreateInstance:TxrCreateInstance,
+    pub xrCreateInstance: TxrCreateInstance,
     pub xrGetInstanceProcAddr: TxrGetInstanceProcAddr,
     pub xrEnumerateInstanceExtensionProperties: TxrEnumerateInstanceExtensionProperties,
-    pub xrEnumerateApiLayerProperties:TxrEnumerateApiLayerProperties,
+    pub xrEnumerateApiLayerProperties: TxrEnumerateApiLayerProperties,
     pub xrInitializeLoaderKHR: TxrInitializeLoaderKHR,
     _keep_module_alive: ModuleLoader,
 }
 
 impl LibOpenXrLoader {
     pub fn try_load() -> Result<LibOpenXrLoader, String> {
-        let module = ModuleLoader::load("libopenxr_loader.so").map_err(|_| "cannot find libopenxr_loader.so".to_string())?;
-                        
-        let gipa:TxrGetInstanceProcAddr = 
-        module.get_symbol("xrGetInstanceProcAddr").ok().unwrap();
-                        
+        let module = ModuleLoader::load("libopenxr_loader.so")
+            .map_err(|_| "cannot find libopenxr_loader.so".to_string())?;
+
+        let gipa: TxrGetInstanceProcAddr = module.get_symbol("xrGetInstanceProcAddr").ok().unwrap();
+
         Ok(LibOpenXrLoader {
             xrGetInstanceProcAddr: gipa,
             xrCreateInstance: get_proc_addr!(gipa, XrInstance(0), TxrCreateInstance)?,
-            xrEnumerateInstanceExtensionProperties:  get_proc_addr!(gipa, XrInstance(0), TxrEnumerateInstanceExtensionProperties)?,
-            xrEnumerateApiLayerProperties: get_proc_addr!(gipa, XrInstance(0), TxrEnumerateApiLayerProperties)?,
+            xrEnumerateInstanceExtensionProperties: get_proc_addr!(
+                gipa,
+                XrInstance(0),
+                TxrEnumerateInstanceExtensionProperties
+            )?,
+            xrEnumerateApiLayerProperties: get_proc_addr!(
+                gipa,
+                XrInstance(0),
+                TxrEnumerateApiLayerProperties
+            )?,
             xrInitializeLoaderKHR: get_proc_addr!(gipa, XrInstance(0), TxrInitializeLoaderKHR)?,
-            _keep_module_alive: module
+            _keep_module_alive: module,
         })
     }
 }
 
-pub struct LibOpenXr{
+pub struct LibOpenXr {
     pub xrGetInstanceProperties: TxrGetInstanceProperties,
     pub xrGetSystem: TxrGetSystem,
     pub xrGetSystemProperties: TxrGetSystemProperties,
@@ -109,10 +111,10 @@ pub struct LibOpenXr{
     pub xrCreateSession: TxrCreateSession,
     pub xrEnumerateViewConfigurations: TxrEnumerateViewConfigurations,
     pub xrGetViewConfigurationProperties: TxrGetViewConfigurationProperties,
-    pub xrEnumerateViewConfigurationViews:TxrEnumerateViewConfigurationViews,
+    pub xrEnumerateViewConfigurationViews: TxrEnumerateViewConfigurationViews,
     pub xrCreateReferenceSpace: TxrCreateReferenceSpace,
     pub xrCreateSwapchain: TxrCreateSwapchain,
-    pub xrEnumerateSwapchainImages:TxrEnumerateSwapchainImages,
+    pub xrEnumerateSwapchainImages: TxrEnumerateSwapchainImages,
     pub xrCreatePassthroughFB: TxrCreatePassthroughFB,
     pub xrCreatePassthroughLayerFB: TxrCreatePassthroughLayerFB,
     pub xrPassthroughStartFB: TxrPassthroughStartFB,
@@ -120,8 +122,9 @@ pub struct LibOpenXr{
     pub xrCreateEnvironmentDepthProviderMETA: TxrCreateEnvironmentDepthProviderMETA,
     pub xrCreateEnvironmentDepthSwapchainMETA: TxrCreateEnvironmentDepthSwapchainMETA,
     pub xrGetEnvironmentDepthSwapchainStateMETA: TxrGetEnvironmentDepthSwapchainStateMETA,
-    pub xrEnumerateEnvironmentDepthSwapchainImagesMETA: TxrEnumerateEnvironmentDepthSwapchainImagesMETA,
-    pub xrStartEnvironmentDepthProviderMETA:TxrStartEnvironmentDepthProviderMETA,
+    pub xrEnumerateEnvironmentDepthSwapchainImagesMETA:
+        TxrEnumerateEnvironmentDepthSwapchainImagesMETA,
+    pub xrStartEnvironmentDepthProviderMETA: TxrStartEnvironmentDepthProviderMETA,
     pub xrPollEvent: TxrPollEvent,
     pub xrBeginSession: TxrBeginSession,
     pub xrPerfSettingsSetPerformanceLevelEXT: TxrPerfSettingsSetPerformanceLevelEXT,
@@ -131,10 +134,10 @@ pub struct LibOpenXr{
     pub xrSetAndroidApplicationThreadKHR: TxrSetAndroidApplicationThreadKHR,
     pub xrLocateSpace: TxrLocateSpace,
     pub xrLocateViews: TxrLocateViews,
-    pub xrAcquireSwapchainImage:TxrAcquireSwapchainImage,
-    pub xrWaitSwapchainImage:TxrWaitSwapchainImage,
+    pub xrAcquireSwapchainImage: TxrAcquireSwapchainImage,
+    pub xrWaitSwapchainImage: TxrWaitSwapchainImage,
     pub xrAcquireEnvironmentDepthImageMETA: TxrAcquireEnvironmentDepthImageMETA,
-    pub xrReleaseSwapchainImage:TxrReleaseSwapchainImage,
+    pub xrReleaseSwapchainImage: TxrReleaseSwapchainImage,
     pub xrEndSession: TxrEndSession,
     pub xrStopEnvironmentDepthProviderMETA: TxrStopEnvironmentDepthProviderMETA,
     pub xrDestroyEnvironmentDepthProviderMETA: TxrDestroyEnvironmentDepthProviderMETA,
@@ -148,7 +151,7 @@ pub struct LibOpenXr{
     pub xrStringToPath: TxrStringToPath,
     pub xrCreateActionSet: TxrCreateActionSet,
     pub xrCreateAction: TxrCreateAction,
-    pub xrSuggestInteractionProfileBindings:TxrSuggestInteractionProfileBindings,
+    pub xrSuggestInteractionProfileBindings: TxrSuggestInteractionProfileBindings,
     pub xrAttachSessionActionSets: TxrAttachSessionActionSets,
     pub xrCreateActionSpace: TxrCreateActionSpace,
     pub xrGetActionStateBoolean: TxrGetActionStateBoolean,
@@ -156,8 +159,10 @@ pub struct LibOpenXr{
     pub xrGetActionStateVector2f: TxrGetActionStateVector2f,
     pub xrGetActionStatePose: TxrGetActionStatePose,
     pub xrSyncActions: TxrSyncActions,
-    pub xrResumeSimultaneousHandsAndControllersTrackingMETA: TxrResumeSimultaneousHandsAndControllersTrackingMETA,
-    pub xrPauseSimultaneousHandsAndControllersTrackingMETA: TxrPauseSimultaneousHandsAndControllersTrackingMETA,
+    pub xrResumeSimultaneousHandsAndControllersTrackingMETA:
+        TxrResumeSimultaneousHandsAndControllersTrackingMETA,
+    pub xrPauseSimultaneousHandsAndControllersTrackingMETA:
+        TxrPauseSimultaneousHandsAndControllersTrackingMETA,
     pub xrCreateHandTrackerEXT: TxrCreateHandTrackerEXT,
     pub xrDestroyHandTrackerEXT: TxrDestroyHandTrackerEXT,
     pub xrLocateHandJointsEXT: TxrLocateHandJointsEXT,
@@ -176,94 +181,203 @@ pub struct LibOpenXr{
     pub xrEraseSpacesMETA: TxrEraseSpacesMETA,
 }
 
-
-
 impl LibOpenXr {
-    pub fn try_load(loader:&LibOpenXrLoader, instance:XrInstance) -> Result<LibOpenXr, String> {
+    pub fn try_load(loader: &LibOpenXrLoader, instance: XrInstance) -> Result<LibOpenXr, String> {
         let gipa = loader.xrGetInstanceProcAddr;
-        Ok(LibOpenXr{
+        Ok(LibOpenXr {
             xrGetInstanceProperties: get_proc_addr!(gipa, instance, TxrGetInstanceProperties)?,
-            xrGetSystem:get_proc_addr!(gipa, instance, TxrGetSystem)?,
-            xrGetSystemProperties:get_proc_addr!(gipa, instance, TxrGetSystemProperties)?, 
-            xrGetOpenGLESGraphicsRequirementsKHR:get_proc_addr!(gipa, instance, TxrGetOpenGLESGraphicsRequirementsKHR)?,
-            xrCreateSession:get_proc_addr!(gipa, instance, TxrCreateSession)?,
-            xrEnumerateViewConfigurations: get_proc_addr!(gipa, instance, TxrEnumerateViewConfigurations)?,
-            xrGetViewConfigurationProperties:get_proc_addr!(gipa, instance, TxrGetViewConfigurationProperties)?,
-            xrEnumerateViewConfigurationViews:get_proc_addr!(gipa, instance, TxrEnumerateViewConfigurationViews)?,
-            xrCreateReferenceSpace:get_proc_addr!(gipa, instance, TxrCreateReferenceSpace)?,
-            xrCreateSwapchain:get_proc_addr!(gipa, instance, TxrCreateSwapchain)?,
-            xrEnumerateSwapchainImages:get_proc_addr!(gipa, instance, TxrEnumerateSwapchainImages)?,
-            xrCreatePassthroughFB:get_proc_addr!(gipa, instance, TxrCreatePassthroughFB)?,
-            xrCreatePassthroughLayerFB: get_proc_addr!(gipa, instance, TxrCreatePassthroughLayerFB)?,
+            xrGetSystem: get_proc_addr!(gipa, instance, TxrGetSystem)?,
+            xrGetSystemProperties: get_proc_addr!(gipa, instance, TxrGetSystemProperties)?,
+            xrGetOpenGLESGraphicsRequirementsKHR: get_proc_addr!(
+                gipa,
+                instance,
+                TxrGetOpenGLESGraphicsRequirementsKHR
+            )?,
+            xrCreateSession: get_proc_addr!(gipa, instance, TxrCreateSession)?,
+            xrEnumerateViewConfigurations: get_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateViewConfigurations
+            )?,
+            xrGetViewConfigurationProperties: get_proc_addr!(
+                gipa,
+                instance,
+                TxrGetViewConfigurationProperties
+            )?,
+            xrEnumerateViewConfigurationViews: get_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateViewConfigurationViews
+            )?,
+            xrCreateReferenceSpace: get_proc_addr!(gipa, instance, TxrCreateReferenceSpace)?,
+            xrCreateSwapchain: get_proc_addr!(gipa, instance, TxrCreateSwapchain)?,
+            xrEnumerateSwapchainImages: get_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateSwapchainImages
+            )?,
+            xrCreatePassthroughFB: get_proc_addr!(gipa, instance, TxrCreatePassthroughFB)?,
+            xrCreatePassthroughLayerFB: get_proc_addr!(
+                gipa,
+                instance,
+                TxrCreatePassthroughLayerFB
+            )?,
             xrPassthroughStartFB: get_proc_addr!(gipa, instance, TxrPassthroughStartFB)?,
-            xrPassthroughLayerResumeFB: get_proc_addr!(gipa, instance, TxrPassthroughLayerResumeFB)?,
-            xrCreateEnvironmentDepthProviderMETA: get_proc_addr!(gipa, instance, TxrCreateEnvironmentDepthProviderMETA)?,
-            xrCreateEnvironmentDepthSwapchainMETA: get_proc_addr!(gipa, instance, TxrCreateEnvironmentDepthSwapchainMETA)?,
-            xrGetEnvironmentDepthSwapchainStateMETA: get_proc_addr!(gipa, instance, TxrGetEnvironmentDepthSwapchainStateMETA)?,
-            xrEnumerateEnvironmentDepthSwapchainImagesMETA: get_proc_addr!(gipa, instance, TxrEnumerateEnvironmentDepthSwapchainImagesMETA)?,
-            xrStartEnvironmentDepthProviderMETA: get_proc_addr!(gipa, instance, TxrStartEnvironmentDepthProviderMETA)?,
+            xrPassthroughLayerResumeFB: get_proc_addr!(
+                gipa,
+                instance,
+                TxrPassthroughLayerResumeFB
+            )?,
+            xrCreateEnvironmentDepthProviderMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrCreateEnvironmentDepthProviderMETA
+            )?,
+            xrCreateEnvironmentDepthSwapchainMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrCreateEnvironmentDepthSwapchainMETA
+            )?,
+            xrGetEnvironmentDepthSwapchainStateMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrGetEnvironmentDepthSwapchainStateMETA
+            )?,
+            xrEnumerateEnvironmentDepthSwapchainImagesMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateEnvironmentDepthSwapchainImagesMETA
+            )?,
+            xrStartEnvironmentDepthProviderMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrStartEnvironmentDepthProviderMETA
+            )?,
             xrPollEvent: get_proc_addr!(gipa, instance, TxrPollEvent)?,
             xrBeginSession: get_proc_addr!(gipa, instance, TxrBeginSession)?,
-            xrPerfSettingsSetPerformanceLevelEXT: get_proc_addr!(gipa, instance, TxrPerfSettingsSetPerformanceLevelEXT)?,
+            xrPerfSettingsSetPerformanceLevelEXT: get_proc_addr!(
+                gipa,
+                instance,
+                TxrPerfSettingsSetPerformanceLevelEXT
+            )?,
             xrWaitFrame: get_proc_addr!(gipa, instance, TxrWaitFrame)?,
             xrBeginFrame: get_proc_addr!(gipa, instance, TxrBeginFrame)?,
             xrEndFrame: get_proc_addr!(gipa, instance, TxrEndFrame)?,
-            xrSetAndroidApplicationThreadKHR:get_proc_addr!(gipa, instance, TxrSetAndroidApplicationThreadKHR)?,
-            xrLocateSpace:get_proc_addr!(gipa, instance, TxrLocateSpace)?,
+            xrSetAndroidApplicationThreadKHR: get_proc_addr!(
+                gipa,
+                instance,
+                TxrSetAndroidApplicationThreadKHR
+            )?,
+            xrLocateSpace: get_proc_addr!(gipa, instance, TxrLocateSpace)?,
             xrLocateViews: get_proc_addr!(gipa, instance, TxrLocateViews)?,
             xrAcquireSwapchainImage: get_proc_addr!(gipa, instance, TxrAcquireSwapchainImage)?,
             xrWaitSwapchainImage: get_proc_addr!(gipa, instance, TxrWaitSwapchainImage)?,
-            xrAcquireEnvironmentDepthImageMETA: get_proc_addr!(gipa, instance, TxrAcquireEnvironmentDepthImageMETA)?,
-            xrReleaseSwapchainImage:get_proc_addr!(gipa, instance, TxrReleaseSwapchainImage)?,
+            xrAcquireEnvironmentDepthImageMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrAcquireEnvironmentDepthImageMETA
+            )?,
+            xrReleaseSwapchainImage: get_proc_addr!(gipa, instance, TxrReleaseSwapchainImage)?,
             xrEndSession: get_proc_addr!(gipa, instance, TxrEndSession)?,
-            xrStopEnvironmentDepthProviderMETA: get_proc_addr!(gipa, instance, TxrStopEnvironmentDepthProviderMETA)?,
-            xrDestroyEnvironmentDepthProviderMETA: get_proc_addr!(gipa, instance, TxrDestroyEnvironmentDepthProviderMETA)?,
-            xrPassthroughPauseFB:get_proc_addr!(gipa, instance, TxrPassthroughPauseFB)?,
+            xrStopEnvironmentDepthProviderMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrStopEnvironmentDepthProviderMETA
+            )?,
+            xrDestroyEnvironmentDepthProviderMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrDestroyEnvironmentDepthProviderMETA
+            )?,
+            xrPassthroughPauseFB: get_proc_addr!(gipa, instance, TxrPassthroughPauseFB)?,
             xrDestroyPassthroughFB: get_proc_addr!(gipa, instance, TxrDestroyPassthroughFB)?,
             xrDestroySwapchain: get_proc_addr!(gipa, instance, TxrDestroySwapchain)?,
-            xrDestroyEnvironmentDepthSwapchainMETA: get_proc_addr!(gipa, instance, TxrDestroyEnvironmentDepthSwapchainMETA)?,
+            xrDestroyEnvironmentDepthSwapchainMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrDestroyEnvironmentDepthSwapchainMETA
+            )?,
             xrDestroySpace: get_proc_addr!(gipa, instance, TxrDestroySpace)?,
             xrDestroySession: get_proc_addr!(gipa, instance, TxrDestroySession)?,
             xrDestroyInstance: get_proc_addr!(gipa, instance, TxrDestroyInstance)?,
             xrStringToPath: get_proc_addr!(gipa, instance, TxrStringToPath)?,
             xrCreateActionSet: get_proc_addr!(gipa, instance, TxrCreateActionSet)?,
             xrCreateAction: get_proc_addr!(gipa, instance, TxrCreateAction)?,
-            xrSuggestInteractionProfileBindings: get_proc_addr!(gipa, instance, TxrSuggestInteractionProfileBindings)?,
+            xrSuggestInteractionProfileBindings: get_proc_addr!(
+                gipa,
+                instance,
+                TxrSuggestInteractionProfileBindings
+            )?,
             xrAttachSessionActionSets: get_proc_addr!(gipa, instance, TxrAttachSessionActionSets)?,
             xrCreateActionSpace: get_proc_addr!(gipa, instance, TxrCreateActionSpace)?,
-            xrGetActionStateBoolean:  get_proc_addr!(gipa, instance, TxrGetActionStateBoolean)?,
+            xrGetActionStateBoolean: get_proc_addr!(gipa, instance, TxrGetActionStateBoolean)?,
             xrGetActionStateFloat: get_proc_addr!(gipa, instance, TxrGetActionStateFloat)?,
-            xrGetActionStateVector2f: get_proc_addr!(gipa, instance,TxrGetActionStateVector2f)?,
+            xrGetActionStateVector2f: get_proc_addr!(gipa, instance, TxrGetActionStateVector2f)?,
             xrGetActionStatePose: get_proc_addr!(gipa, instance, TxrGetActionStatePose)?,
             xrSyncActions: get_proc_addr!(gipa, instance, TxrSyncActions)?,
-            xrResumeSimultaneousHandsAndControllersTrackingMETA:get_proc_addr!(gipa, instance, TxrResumeSimultaneousHandsAndControllersTrackingMETA)?,
-            xrPauseSimultaneousHandsAndControllersTrackingMETA:get_proc_addr!(gipa, instance, TxrPauseSimultaneousHandsAndControllersTrackingMETA)?,
+            xrResumeSimultaneousHandsAndControllersTrackingMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrResumeSimultaneousHandsAndControllersTrackingMETA
+            )?,
+            xrPauseSimultaneousHandsAndControllersTrackingMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrPauseSimultaneousHandsAndControllersTrackingMETA
+            )?,
             xrCreateHandTrackerEXT: get_proc_addr!(gipa, instance, TxrCreateHandTrackerEXT)?,
             xrDestroyHandTrackerEXT: get_proc_addr!(gipa, instance, TxrDestroyHandTrackerEXT)?,
             xrLocateHandJointsEXT: get_proc_addr!(gipa, instance, TxrLocateHandJointsEXT)?,
-            xrSetEnvironmentDepthHandRemovalMETA: get_proc_addr!(gipa, instance, TxrSetEnvironmentDepthHandRemovalMETA)?,
-            xrStartColocationAdvertisementMETA: get_proc_addr!(gipa, instance, TxrStartColocationAdvertisementMETA)?,
-            xrStopColocationAdvertisementMETA: get_proc_addr!(gipa, instance, TxrStopColocationAdvertisementMETA)?,
-            xrStartColocationDiscoveryMETA: get_proc_addr!(gipa, instance, TxrStartColocationDiscoveryMETA)?,
-            xrStopColocationDiscoveryMETA: get_proc_addr!(gipa, instance, TxrStopColocationDiscoveryMETA)?,
+            xrSetEnvironmentDepthHandRemovalMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrSetEnvironmentDepthHandRemovalMETA
+            )?,
+            xrStartColocationAdvertisementMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrStartColocationAdvertisementMETA
+            )?,
+            xrStopColocationAdvertisementMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrStopColocationAdvertisementMETA
+            )?,
+            xrStartColocationDiscoveryMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrStartColocationDiscoveryMETA
+            )?,
+            xrStopColocationDiscoveryMETA: get_proc_addr!(
+                gipa,
+                instance,
+                TxrStopColocationDiscoveryMETA
+            )?,
             xrCreateSpatialAnchorFB: get_proc_addr!(gipa, instance, TxrCreateSpatialAnchorFB)?,
-            xrShareSpacesMETA:get_proc_addr!(gipa, instance, TxrShareSpacesMETA)?,
-            xrEnumerateSpaceSupportedComponentsFB:get_proc_addr!(gipa, instance, TxrEnumerateSpaceSupportedComponentsFB)?,
-            xrSetSpaceComponentStatusFB: get_proc_addr!(gipa, instance, TxrSetSpaceComponentStatusFB)?,
+            xrShareSpacesMETA: get_proc_addr!(gipa, instance, TxrShareSpacesMETA)?,
+            xrEnumerateSpaceSupportedComponentsFB: get_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateSpaceSupportedComponentsFB
+            )?,
+            xrSetSpaceComponentStatusFB: get_proc_addr!(
+                gipa,
+                instance,
+                TxrSetSpaceComponentStatusFB
+            )?,
             xrQuerySpacesFB: get_proc_addr!(gipa, instance, TxrQuerySpacesFB)?,
-            xrRetrieveSpaceQueryResultsFB: get_proc_addr!(gipa, instance, TxrRetrieveSpaceQueryResultsFB)?,
+            xrRetrieveSpaceQueryResultsFB: get_proc_addr!(
+                gipa,
+                instance,
+                TxrRetrieveSpaceQueryResultsFB
+            )?,
             xrSaveSpacesMETA: get_proc_addr!(gipa, instance, TxrSaveSpacesMETA)?,
             xrEraseSpacesMETA: get_proc_addr!(gipa, instance, TxrEraseSpacesMETA)?,
-         })
+        })
     }
 }
 
-
-
 // Function types
-
-
-
 
 pub type XrVoidFunction = unsafe extern "C" fn();
 pub type TxrGetInstanceProcAddr = unsafe extern "C" fn(
@@ -290,9 +404,8 @@ pub type TxrEnumerateApiLayerProperties = unsafe extern "C" fn(
     properties: *mut XrApiLayerProperties,
 ) -> XrResult;
 
-pub type TxrInitializeLoaderKHR = unsafe extern "C" fn(
-    loader_init_info: *const LoaderInitInfoBaseHeaderKHR
-) -> XrResult;
+pub type TxrInitializeLoaderKHR =
+    unsafe extern "C" fn(loader_init_info: *const LoaderInitInfoBaseHeaderKHR) -> XrResult;
 
 pub type TxrGetInstanceProperties = unsafe extern "C" fn(
     instance: XrInstance,
@@ -378,20 +491,16 @@ pub type TxrCreatePassthroughLayerFB = unsafe extern "C" fn(
     out_layer: *mut XrPassthroughLayerFB,
 ) -> XrResult;
 
-pub type TxrPassthroughStartFB = unsafe extern "C" fn(
-    passthrough: XrPassthroughFB
-) -> XrResult;
+pub type TxrPassthroughStartFB = unsafe extern "C" fn(passthrough: XrPassthroughFB) -> XrResult;
 
-pub type TxrPassthroughLayerResumeFB = unsafe extern "C" fn(
-    layer: XrPassthroughLayerFB
-) -> XrResult;
+pub type TxrPassthroughLayerResumeFB =
+    unsafe extern "C" fn(layer: XrPassthroughLayerFB) -> XrResult;
 
 pub type TxrCreateEnvironmentDepthProviderMETA = unsafe extern "C" fn(
     session: XrSession,
     create_info: *const XrEnvironmentDepthProviderCreateInfoMETA,
     environment_depth_provider: *mut XrEnvironmentDepthProviderMETA,
 ) -> XrResult;
-
 
 pub type TxrCreateEnvironmentDepthSwapchainMETA = unsafe extern "C" fn(
     environment_depth_provider: XrEnvironmentDepthProviderMETA,
@@ -411,21 +520,14 @@ pub type TxrEnumerateEnvironmentDepthSwapchainImagesMETA = unsafe extern "C" fn(
     images: *mut XrSwapchainImageOpenGLESKHR,
 ) -> XrResult;
 
-pub type TxrStartEnvironmentDepthProviderMETA = unsafe extern "C" fn(
-    environment_depth_provider: XrEnvironmentDepthProviderMETA,
-) -> XrResult;
+pub type TxrStartEnvironmentDepthProviderMETA =
+    unsafe extern "C" fn(environment_depth_provider: XrEnvironmentDepthProviderMETA) -> XrResult;
 
 pub type TxrPollEvent =
-unsafe extern "C" fn(
-    instance: XrInstance, 
-    event_data: *mut XrEventDataBuffer
-) -> XrResult;
+    unsafe extern "C" fn(instance: XrInstance, event_data: *mut XrEventDataBuffer) -> XrResult;
 
 pub type TxrBeginSession =
-unsafe extern "C" fn(
-    session: XrSession, 
-    begin_info: *const XrSessionBeginInfo
-) -> XrResult;
+    unsafe extern "C" fn(session: XrSession, begin_info: *const XrSessionBeginInfo) -> XrResult;
 
 pub type TxrPerfSettingsSetPerformanceLevelEXT = unsafe extern "C" fn(
     session: XrSession,
@@ -443,18 +545,13 @@ pub type TxrWaitFrame = unsafe extern "C" fn(
     session: XrSession,
     frame_wait_info: *const XrFrameWaitInfo,
     frame_state: *mut XrFrameState,
-) ->XrResult;
-
-pub type TxrBeginFrame = unsafe extern "C" fn(
-    session: XrSession,
-    frame_begin_info: *const XrFrameBeginInfo,
 ) -> XrResult;
+
+pub type TxrBeginFrame =
+    unsafe extern "C" fn(session: XrSession, frame_begin_info: *const XrFrameBeginInfo) -> XrResult;
 
 pub type TxrEndFrame =
-unsafe extern "C" fn(
-    session: XrSession, 
-    frame_end_info: *const XrFrameEndInfo
-) -> XrResult;
+    unsafe extern "C" fn(session: XrSession, frame_end_info: *const XrFrameEndInfo) -> XrResult;
 
 pub type TxrLocateSpace = unsafe extern "C" fn(
     space: XrSpace,
@@ -494,46 +591,28 @@ pub type TxrReleaseSwapchainImage = unsafe extern "C" fn(
     release_info: *const XrSwapchainImageReleaseInfo,
 ) -> XrResult;
 
-pub type TxrEndSession = unsafe extern "C" fn(
-    session: XrSession
-) -> XrResult;
+pub type TxrEndSession = unsafe extern "C" fn(session: XrSession) -> XrResult;
 
-pub type TxrStopEnvironmentDepthProviderMETA = unsafe extern "C" fn(
-    environment_depth_provider: XrEnvironmentDepthProviderMETA,
-) -> XrResult;
+pub type TxrStopEnvironmentDepthProviderMETA =
+    unsafe extern "C" fn(environment_depth_provider: XrEnvironmentDepthProviderMETA) -> XrResult;
 
-pub type TxrDestroyEnvironmentDepthProviderMETA = unsafe extern "C" fn(
-    environment_depth_provider: XrEnvironmentDepthProviderMETA,
-) -> XrResult;
+pub type TxrDestroyEnvironmentDepthProviderMETA =
+    unsafe extern "C" fn(environment_depth_provider: XrEnvironmentDepthProviderMETA) -> XrResult;
 
-pub type TxrPassthroughPauseFB = unsafe extern "C" fn(
-    passthrough: XrPassthroughFB
-) -> XrResult;
+pub type TxrPassthroughPauseFB = unsafe extern "C" fn(passthrough: XrPassthroughFB) -> XrResult;
 
-pub type TxrDestroyPassthroughFB = unsafe extern "C" fn(
-    passthrough: XrPassthroughFB
-) -> XrResult;
+pub type TxrDestroyPassthroughFB = unsafe extern "C" fn(passthrough: XrPassthroughFB) -> XrResult;
 
-pub type TxrDestroySwapchain = unsafe extern "C" fn(
-    swapchain: XrSwapchain
-) -> XrResult;
+pub type TxrDestroySwapchain = unsafe extern "C" fn(swapchain: XrSwapchain) -> XrResult;
 
 pub type TxrDestroyEnvironmentDepthSwapchainMETA =
-unsafe extern "C" fn(
-    swapchain: XrEnvironmentDepthSwapchainMETA
-) -> XrResult;
+    unsafe extern "C" fn(swapchain: XrEnvironmentDepthSwapchainMETA) -> XrResult;
 
-pub type TxrDestroySpace = unsafe extern "C" fn(
-    space: XrSpace
-) -> XrResult;
+pub type TxrDestroySpace = unsafe extern "C" fn(space: XrSpace) -> XrResult;
 
-pub type TxrDestroySession = unsafe extern "C" fn(
-    session: XrSession
-) -> XrResult;
+pub type TxrDestroySession = unsafe extern "C" fn(session: XrSession) -> XrResult;
 
-pub type TxrDestroyInstance = unsafe extern "C" fn(
-    instance: XrInstance
-) -> XrResult;
+pub type TxrDestroyInstance = unsafe extern "C" fn(instance: XrInstance) -> XrResult;
 
 pub type TxrStringToPath = unsafe extern "C" fn(
     instance: XrInstance,
@@ -569,7 +648,6 @@ pub type TxrCreateActionSpace = unsafe extern "C" fn(
     space: *mut XrSpace,
 ) -> XrResult;
 
-
 pub type TxrGetActionStateBoolean = unsafe extern "C" fn(
     session: XrSession,
     get_info: *const XrActionStateGetInfo,
@@ -595,13 +673,17 @@ pub type TxrGetActionStatePose = unsafe extern "C" fn(
 ) -> XrResult;
 
 pub type TxrSyncActions =
-unsafe extern "C" fn(session: XrSession, sync_info: *const XrActionsSyncInfo) -> XrResult;
+    unsafe extern "C" fn(session: XrSession, sync_info: *const XrActionsSyncInfo) -> XrResult;
 
-pub type TxrResumeSimultaneousHandsAndControllersTrackingMETA =
-unsafe extern "C" fn(session: XrSession, resume_info: *const XrSimultaneousHandsAndControllersTrackingResumeInfoMETA) -> XrResult;
+pub type TxrResumeSimultaneousHandsAndControllersTrackingMETA = unsafe extern "C" fn(
+    session: XrSession,
+    resume_info: *const XrSimultaneousHandsAndControllersTrackingResumeInfoMETA,
+) -> XrResult;
 
-pub type TxrPauseSimultaneousHandsAndControllersTrackingMETA =
-unsafe extern "C" fn(session: XrSession, pause_info: *const XrSimultaneousHandsAndControllersTrackingPauseInfoMETA) -> XrResult;
+pub type TxrPauseSimultaneousHandsAndControllersTrackingMETA = unsafe extern "C" fn(
+    session: XrSession,
+    pause_info: *const XrSimultaneousHandsAndControllersTrackingPauseInfoMETA,
+) -> XrResult;
 
 pub type TxrCreateHandTrackerEXT = unsafe extern "C" fn(
     session: XrSession,
@@ -610,7 +692,7 @@ pub type TxrCreateHandTrackerEXT = unsafe extern "C" fn(
 ) -> XrResult;
 
 pub type TxrDestroyHandTrackerEXT =
-unsafe extern "C" fn(hand_tracker: XrHandTrackerEXT) -> XrResult;
+    unsafe extern "C" fn(hand_tracker: XrHandTrackerEXT) -> XrResult;
 
 pub type TxrLocateHandJointsEXT = unsafe extern "C" fn(
     hand_tracker: XrHandTrackerEXT,
@@ -626,27 +708,26 @@ pub type TxrSetEnvironmentDepthHandRemovalMETA = unsafe extern "C" fn(
 pub type TxrStartColocationAdvertisementMETA = unsafe extern "C" fn(
     session: XrSession,
     info: *const XrColocationAdvertisementStartInfoMETA,
-    request_id: *mut XrAsyncRequestIdFB
+    request_id: *mut XrAsyncRequestIdFB,
 ) -> XrResult;
 
 pub type TxrStopColocationAdvertisementMETA = unsafe extern "C" fn(
     session: XrSession,
     info: *const XrColocationAdvertisementStopInfoMETA,
-    request_id: *mut XrAsyncRequestIdFB
+    request_id: *mut XrAsyncRequestIdFB,
 ) -> XrResult;
 
 pub type TxrStartColocationDiscoveryMETA = unsafe extern "C" fn(
     session: XrSession,
     info: *const XrColocationDiscoveryStartInfoMETA,
-    request_id: *mut XrAsyncRequestIdFB
+    request_id: *mut XrAsyncRequestIdFB,
 ) -> XrResult;
 
 pub type TxrStopColocationDiscoveryMETA = unsafe extern "C" fn(
     session: XrSession,
     info: *const XrColocationDiscoveryStopInfoMETA,
-    request_id: *mut XrAsyncRequestIdFB
+    request_id: *mut XrAsyncRequestIdFB,
 ) -> XrResult;
-
 
 pub type TxrCreateSpatialAnchorFB = unsafe extern "C" fn(
     session: XrSession,
@@ -658,7 +739,7 @@ pub type TxrShareSpacesMETA = unsafe extern "C" fn(
     session: XrSession,
     info: *const XrShareSpacesInfoMETA,
     request_id: *mut XrAsyncRequestIdFB,
-)->XrResult;
+) -> XrResult;
 
 pub type TxrEnumerateSpaceSupportedComponentsFB = unsafe extern "C" fn(
     space: XrSpace,
@@ -707,77 +788,76 @@ pub struct XrHandTrackerEXT(pub u64);
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrAction(pub u64);
 
-impl XrAction{
+impl XrAction {
     pub fn new(
         xr: &LibOpenXr,
         set: XrActionSet,
         action_type: XrActionType,
-        action_name:&str, 
-        localized_action_name:&str,
-        sub_paths: &[XrPath]
-    )->Result<Self,String>{
+        action_name: &str,
+        localized_action_name: &str,
+        sub_paths: &[XrPath],
+    ) -> Result<Self, String> {
         let mut action = XrAction(0);
-        let info = XrActionCreateInfo{
+        let info = XrActionCreateInfo {
             ty: XrStructureType::ACTION_CREATE_INFO,
             next: 0 as *mut _,
             action_name: xr_to_string(action_name),
             action_type,
-            localized_action_name: if localized_action_name.len()>0{xr_to_string(localized_action_name)}else{xr_to_string(action_name)},
+            localized_action_name: if localized_action_name.len() > 0 {
+                xr_to_string(localized_action_name)
+            } else {
+                xr_to_string(action_name)
+            },
             count_subaction_paths: sub_paths.len() as _,
-            subaction_paths: if sub_paths.len()>0{
-                sub_paths.as_ptr() as * const _
-            }
-            else{
-                0 as * const _
-            }
+            subaction_paths: if sub_paths.len() > 0 {
+                sub_paths.as_ptr() as *const _
+            } else {
+                0 as *const _
+            },
         };
-        unsafe{(xr.xrCreateAction)(set, &info, &mut action)}.to_result("xrCreateAction")?;
+        unsafe { (xr.xrCreateAction)(set, &info, &mut action) }.to_result("xrCreateAction")?;
         Ok(action)
     }
 }
-        
+
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrActionSet(pub u64);
 
-impl XrActionSet{
+impl XrActionSet {
     pub fn new(
         xr: &LibOpenXr,
         instance: XrInstance,
-        prio: u32, 
-        name: &str, 
-        local:&str,
-    )->Result<Self, String>{
+        prio: u32,
+        name: &str,
+        local: &str,
+    ) -> Result<Self, String> {
         let mut set = XrActionSet(0);
-        let info = XrActionSetCreateInfo{
+        let info = XrActionSetCreateInfo {
             ty: XrStructureType::ACTION_SET_CREATE_INFO,
             next: 0 as *mut _,
             action_set_name: xr_to_string(name),
             localized_action_set_name: xr_to_string(local),
-            priority:prio as _,
+            priority: prio as _,
         };
-        unsafe{(xr.xrCreateActionSet)(instance, &info, &mut set)}.to_result("xrCreateActionSet")?;
+        unsafe { (xr.xrCreateActionSet)(instance, &info, &mut set) }
+            .to_result("xrCreateActionSet")?;
         Ok(set)
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrPath(pub u64);
 
-impl XrPath{
-    pub fn new(xr: &LibOpenXr, instance:XrInstance, value: &str)->Result<Self,String>{
+impl XrPath {
+    pub fn new(xr: &LibOpenXr, instance: XrInstance, value: &str) -> Result<Self, String> {
         let mut path = XrPath(0);
-        unsafe{(xr.xrStringToPath)(
-            instance,
-            CString::new(value).unwrap().as_ptr(),
-            &mut path
-        )}.to_result("xrStringToPath")?;
+        unsafe { (xr.xrStringToPath)(instance, CString::new(value).unwrap().as_ptr(), &mut path) }
+            .to_result("xrStringToPath")?;
         Ok(path)
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -807,22 +887,29 @@ pub struct XrSwapchain(pub u64);
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrSpace(pub u64);
 
-impl XrSpace{
-    pub fn new_action_space(xr: &LibOpenXr, session:XrSession, action: XrAction, subaction_path: XrPath, pose_in_action_space:XrPosef)->Result<Self,String>{
+impl XrSpace {
+    pub fn new_action_space(
+        xr: &LibOpenXr,
+        session: XrSession,
+        action: XrAction,
+        subaction_path: XrPath,
+        pose_in_action_space: XrPosef,
+    ) -> Result<Self, String> {
         let mut space = XrSpace(0);
-        let info = XrActionSpaceCreateInfo{
+        let info = XrActionSpaceCreateInfo {
             ty: XrStructureType::ACTION_SPACE_CREATE_INFO,
             next: 0 as *mut _,
             action,
             subaction_path,
-            pose_in_action_space
+            pose_in_action_space,
         };
-        unsafe{(xr.xrCreateActionSpace)(session, &info, &mut space)}.to_result("xrCreateActionSpace")?;
+        unsafe { (xr.xrCreateActionSpace)(session, &info, &mut space) }
+            .to_result("xrCreateActionSpace")?;
         Ok(space)
     }
-    
-    pub fn destroy(self, xr: &LibOpenXr){
-        unsafe{(xr.xrDestroySpace)(self)};
+
+    pub fn destroy(self, xr: &LibOpenXr) {
+        unsafe { (xr.xrDestroySpace)(self) };
     }
 }
 
@@ -838,15 +925,7 @@ pub struct XrInstance(pub u64);
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrSession(pub u64);
 
-
-
-
-
-
 // Small value types
-
-
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, SerBin, DeBin)]
@@ -855,20 +934,22 @@ pub struct XrUuid {
 }
 pub type XrUuidEXT = XrUuid;
 
-impl XrUuid{
-    pub fn from_bytes(b:&[u8])->Self{
+impl XrUuid {
+    pub fn from_bytes(b: &[u8]) -> Self {
         let mut uid = XrUuid::default();
-        for i in 0..uid.data.len(){
-            uid.data[i] = b[i%b.len()];
+        for i in 0..uid.data.len() {
+            uid.data[i] = b[i % b.len()];
         }
         uid
     }
-    pub fn generate()->Self{
-        let bytes = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0.to_be_bytes();
+    pub fn generate() -> Self {
+        let bytes = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now()))
+            .0
+            .to_be_bytes();
         Self::from_bytes(&bytes)
     }
-    
-    pub fn from_live_id(live_id:LiveId)->Self{
+
+    pub fn from_live_id(live_id: LiveId) -> Self {
         let bytes = live_id.0.to_be_bytes();
         Self::from_bytes(&bytes)
     }
@@ -877,12 +958,16 @@ impl XrUuid{
 #[repr(transparent)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrBool32(pub u32);
-impl XrBool32{
-    pub fn as_bool(&self)->bool{
-       return self.0 == 1 
+impl XrBool32 {
+    pub fn as_bool(&self) -> bool {
+        return self.0 == 1;
     }
-    pub fn from_bool(v:bool)->Self{
-        if v{XrBool32(1)}else{XrBool32(0)}
+    pub fn from_bool(v: bool) -> Self {
+        if v {
+            XrBool32(1)
+        } else {
+            XrBool32(0)
+        }
     }
 }
 
@@ -890,17 +975,22 @@ impl XrBool32{
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct XrVersion(pub u64);
 
-
-impl XrVersion{
-    pub fn major(&self)->u64{(self.0 >> 48)&0xffff}
-    pub fn minor(&self)->u64{(self.0 >> 32)&0xffff}
-    pub fn patch(&self)->u64{(self.0)&0xffffffff}
+impl XrVersion {
+    pub fn major(&self) -> u64 {
+        (self.0 >> 48) & 0xffff
+    }
+    pub fn minor(&self) -> u64 {
+        (self.0 >> 32) & 0xffff
+    }
+    pub fn patch(&self) -> u64 {
+        (self.0) & 0xffffffff
+    }
 }
 
-pub const XP_API_VERSION_1_0:XrVersion = XrVersion(
+pub const XP_API_VERSION_1_0: XrVersion = XrVersion(
     (1 << 48) |  // major
     (0 << 32) |  // minor
-    (46) // patch
+    (46), // patch
 );
 
 pub type XrFovf = crate::makepad_math::CameraFov;
@@ -916,11 +1006,11 @@ impl XrTime {
     pub fn from_nanos(x: i64) -> Self {
         Self(x)
     }
-    
+
     pub fn as_nanos(self) -> i64 {
         self.0
     }
-    
+
     pub fn as_secs_f64(self) -> f64 {
         self.0 as f64 / 1e9f64
     }
@@ -933,7 +1023,7 @@ impl XrDuration {
     pub fn from_nanos(x: i64) -> Self {
         Self(x)
     }
-    
+
     pub fn as_nanos(self) -> i64 {
         self.0
     }
@@ -959,12 +1049,7 @@ pub struct XrRect2Di {
     pub extent: XrExtent2Di,
 }
 
-
-
-
-
 // Struct datatypes
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -974,13 +1059,13 @@ pub struct XrSpaceUuidFilterInfoFB {
     pub uuid_count: u32,
     pub uuids: *const XrUuidEXT,
 }
-impl Default for XrSpaceUuidFilterInfoFB{
-    fn default()->Self{
-        XrSpaceUuidFilterInfoFB{
+impl Default for XrSpaceUuidFilterInfoFB {
+    fn default() -> Self {
+        XrSpaceUuidFilterInfoFB {
             ty: XrStructureType::SPACE_UUID_FILTER_INFO_FB,
             next: 0 as *mut _,
             uuid_count: 0,
-            uuids: 0 as * mut _
+            uuids: 0 as *mut _,
         }
     }
 }
@@ -992,12 +1077,12 @@ pub struct XrSpaceComponentFilterInfoFB {
     pub next: *const c_void,
     pub component_type: XrSpaceComponentTypeFB,
 }
-impl Default for XrSpaceComponentFilterInfoFB{
-    fn default()->Self{
-        XrSpaceComponentFilterInfoFB{
+impl Default for XrSpaceComponentFilterInfoFB {
+    fn default() -> Self {
+        XrSpaceComponentFilterInfoFB {
             ty: XrStructureType::SPACE_COMPONENT_FILTER_INFO_FB,
             next: 0 as *mut _,
-            component_type: XrSpaceComponentTypeFB(0)
+            component_type: XrSpaceComponentTypeFB(0),
         }
     }
 }
@@ -1008,7 +1093,7 @@ pub struct XrEventDataSpacesEraseResultMETA {
     pub ty: XrStructureType,
     pub next: *mut c_void,
     pub request_id: XrAsyncRequestIdFB,
-    pub result: XrResult
+    pub result: XrResult,
 }
 
 #[repr(C)]
@@ -1022,15 +1107,15 @@ pub struct XrSpacesEraseInfoMETA {
     pub uuids: *const XrUuid,
 }
 
-impl Default for XrSpacesEraseInfoMETA{
-    fn default()->Self{
-        XrSpacesEraseInfoMETA{
+impl Default for XrSpacesEraseInfoMETA {
+    fn default() -> Self {
+        XrSpacesEraseInfoMETA {
             ty: XrStructureType::SPACES_ERASE_INFO_META,
             next: 0 as *mut _,
             space_count: 0,
-            spaces: 0 as * const _,
+            spaces: 0 as *const _,
             uuid_count: 0,
-            uuids: 0 as *const _
+            uuids: 0 as *const _,
         }
     }
 }
@@ -1041,7 +1126,7 @@ pub struct XrEventDataSpacesSaveResultMETA {
     pub ty: XrStructureType,
     pub next: *mut c_void,
     pub request_id: XrAsyncRequestIdFB,
-    pub result: XrResult
+    pub result: XrResult,
 }
 
 #[repr(C)]
@@ -1050,19 +1135,18 @@ pub struct XrSpacesSaveInfoMETA {
     pub ty: XrStructureType,
     pub next: *mut c_void,
     pub space_count: u32,
-    pub spaces: *const XrSpace
+    pub spaces: *const XrSpace,
 }
-impl Default for XrSpacesSaveInfoMETA{
-    fn default()->Self{
-        XrSpacesSaveInfoMETA{
+impl Default for XrSpacesSaveInfoMETA {
+    fn default() -> Self {
+        XrSpacesSaveInfoMETA {
             ty: XrStructureType::SPACES_SAVE_INFO_META,
             next: 0 as *mut _,
             space_count: 0,
-            spaces: 0 as *const _
+            spaces: 0 as *const _,
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1070,9 +1154,9 @@ pub struct XrSpaceQueryResultFB {
     pub space: XrSpace,
     pub uuid: XrUuidEXT,
 }
-impl Default for XrSpaceQueryResultFB{
-    fn default()->Self{
-        XrSpaceQueryResultFB{
+impl Default for XrSpaceQueryResultFB {
+    fn default() -> Self {
+        XrSpaceQueryResultFB {
             space: XrSpace(0),
             uuid: Default::default(),
         }
@@ -1088,9 +1172,9 @@ pub struct XrSpaceQueryResultsFB {
     pub result_count_output: u32,
     pub results: *mut XrSpaceQueryResultFB,
 }
-impl Default for XrSpaceQueryResultsFB{
-    fn default()->Self{
-        XrSpaceQueryResultsFB{
+impl Default for XrSpaceQueryResultsFB {
+    fn default() -> Self {
+        XrSpaceQueryResultsFB {
             ty: XrStructureType::SPACE_QUERY_RESULTS_FB,
             next: 0 as *mut _,
             result_capacity_input: 0,
@@ -1146,9 +1230,9 @@ pub struct XrSpaceQueryInfoFB {
     pub filter: *const XrSpaceFilterInfoBaseHeaderFB,
     pub exclude_filter: *const XrSpaceFilterInfoBaseHeaderFB,
 }
-impl Default for XrSpaceQueryInfoFB{
-    fn default()->Self{
-        XrSpaceQueryInfoFB{
+impl Default for XrSpaceQueryInfoFB {
+    fn default() -> Self {
+        XrSpaceQueryInfoFB {
             ty: XrStructureType::SPACE_QUERY_INFO_FB,
             next: 0 as *const _,
             query_action: XrSpaceQueryActionFB(0),
@@ -1167,9 +1251,9 @@ pub struct XrSpaceGroupUuidFilterInfoMETA {
     pub next: *const c_void,
     pub group_uuid: XrUuid,
 }
-impl Default for XrSpaceGroupUuidFilterInfoMETA{
-    fn default()->Self{
-        XrSpaceGroupUuidFilterInfoMETA{
+impl Default for XrSpaceGroupUuidFilterInfoMETA {
+    fn default() -> Self {
+        XrSpaceGroupUuidFilterInfoMETA {
             ty: XrStructureType::SPACE_GROUP_UUID_FILTER_INFO_META,
             next: 0 as *const _,
             group_uuid: XrUuid::default(),
@@ -1184,9 +1268,9 @@ pub struct XrSpaceStorageLocationFilterInfoFB {
     pub next: *const c_void,
     pub location: XrSpaceStorageLocationFB,
 }
-impl Default for XrSpaceStorageLocationFilterInfoFB{
-    fn default()->Self{
-        XrSpaceStorageLocationFilterInfoFB{
+impl Default for XrSpaceStorageLocationFilterInfoFB {
+    fn default() -> Self {
+        XrSpaceStorageLocationFilterInfoFB {
             ty: XrStructureType::SPACE_STORAGE_LOCATION_FILTER_INFO_FB,
             next: 0 as *const _,
             location: XrSpaceStorageLocationFB(0),
@@ -1200,7 +1284,7 @@ pub struct XrEventDataShareSpacesCompleteMETA {
     pub ty: XrStructureType,
     pub next: *const c_void,
     pub request_id: XrAsyncRequestIdFB,
-    pub result: XrResult
+    pub result: XrResult,
 }
 
 #[repr(C)]
@@ -1212,9 +1296,9 @@ pub struct XrSpaceComponentStatusSetInfoFB {
     pub enabled: XrBool32,
     pub timeout: XrDuration,
 }
-impl Default for XrSpaceComponentStatusSetInfoFB{
-    fn default()->Self{
-        XrSpaceComponentStatusSetInfoFB{
+impl Default for XrSpaceComponentStatusSetInfoFB {
+    fn default() -> Self {
+        XrSpaceComponentStatusSetInfoFB {
             ty: XrStructureType::SPACE_COMPONENT_STATUS_SET_INFO_FB,
             next: 0 as *const _,
             component_type: XrSpaceComponentTypeFB(0),
@@ -1240,7 +1324,7 @@ pub struct XrEventDataSpatialAnchorCreateCompleteFB {
 pub struct XrShareSpacesRecipientBaseHeaderMETA {
     pub ty: XrStructureType,
     pub next: *const c_void,
-} 
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1249,11 +1333,11 @@ pub struct XrShareSpacesInfoMETA {
     pub next: *const c_void,
     pub space_count: u32,
     pub spaces: *const XrSpace,
-    pub recipient_info: *const XrShareSpacesRecipientBaseHeaderMETA
+    pub recipient_info: *const XrShareSpacesRecipientBaseHeaderMETA,
 }
-impl Default for XrShareSpacesInfoMETA{
-    fn default()->Self{
-        XrShareSpacesInfoMETA{
+impl Default for XrShareSpacesInfoMETA {
+    fn default() -> Self {
+        XrShareSpacesInfoMETA {
             ty: XrStructureType::SHARE_SPACES_INFO_META,
             next: 0 as *const _,
             space_count: 0,
@@ -1271,13 +1355,13 @@ pub struct XrShareSpacesRecipientGroupsMETA {
     pub group_count: u32,
     pub groups: *const XrUuid,
 }
-impl Default for XrShareSpacesRecipientGroupsMETA{
-    fn default()->Self{
-        XrShareSpacesRecipientGroupsMETA{
+impl Default for XrShareSpacesRecipientGroupsMETA {
+    fn default() -> Self {
+        XrShareSpacesRecipientGroupsMETA {
             ty: XrStructureType::SHARE_SPACES_RECIPIENT_GROUPS_META,
             next: 0 as *const _,
-            group_count:  0,
-            groups: 0 as *mut _
+            group_count: 0,
+            groups: 0 as *mut _,
         }
     }
 }
@@ -1291,12 +1375,12 @@ pub struct XrSpatialAnchorCreateInfoFB {
     pub pose_in_space: XrPosef,
     pub time: XrTime,
 }
-impl Default for XrSpatialAnchorCreateInfoFB{
-    fn default()->Self{
-        XrSpatialAnchorCreateInfoFB{
+impl Default for XrSpatialAnchorCreateInfoFB {
+    fn default() -> Self {
+        XrSpatialAnchorCreateInfoFB {
             ty: XrStructureType::SPATIAL_ANCHOR_CREATE_INFO_FB,
             next: 0 as *const _,
-            space:  XrSpace(0),
+            space: XrSpace(0),
             pose_in_space: Default::default(),
             time: XrTime(0),
         }
@@ -1305,17 +1389,17 @@ impl Default for XrSpatialAnchorCreateInfoFB{
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct  XrColocationDiscoveryStartInfoMETA {
+pub struct XrColocationDiscoveryStartInfoMETA {
     pub ty: XrStructureType,
     pub next: *const c_void,
-} 
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct XrColocationDiscoveryStopInfoMETA {
     pub ty: XrStructureType,
     pub next: *const c_void,
-} 
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1323,16 +1407,16 @@ pub struct XrColocationAdvertisementStartInfoMETA {
     pub ty: XrStructureType,
     pub next: *const c_void,
     pub buffer_size: u32,
-    pub buffer: *const u8
+    pub buffer: *const u8,
 }
 
-impl Default for XrColocationAdvertisementStartInfoMETA{
-    fn default()->Self{
-        XrColocationAdvertisementStartInfoMETA{
+impl Default for XrColocationAdvertisementStartInfoMETA {
+    fn default() -> Self {
+        XrColocationAdvertisementStartInfoMETA {
             ty: XrStructureType::COLOCATION_ADVERTISEMENT_START_INFO_META,
             next: 0 as *const _,
-            buffer_size:  0 as _,
-            buffer: 0 as *mut _
+            buffer_size: 0 as _,
+            buffer: 0 as *mut _,
         }
     }
 }
@@ -1342,7 +1426,7 @@ impl Default for XrColocationAdvertisementStartInfoMETA{
 pub struct XrColocationAdvertisementStopInfoMETA {
     pub ty: XrStructureType,
     pub next: *const c_void,
-} 
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1361,7 +1445,7 @@ pub struct XrEventDataStopColocationAdvertisementCompleteMETA {
     pub next: *const c_void,
     pub advertisement_request_id: XrAsyncRequestIdFB,
     pub result: XrResult,
-} 
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1370,7 +1454,7 @@ pub struct XrEventDataColocationAdvertisementCompleteMETA {
     pub next: *const c_void,
     pub advertisment_request_id: XrAsyncRequestIdFB,
     pub result: XrResult,
-} 
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1387,10 +1471,10 @@ pub struct XrEventDataColocationDiscoveryResultMETA {
     pub ty: XrStructureType,
     pub next: *const c_void,
     pub discovery_request_id: XrAsyncRequestIdFB,
-    pub advertisement_uuid:  XrUuid,
+    pub advertisement_uuid: XrUuid,
     pub buffer_size: u32,
-    pub buffer:[u8;MAX_COLOCATION_DISCOVERY_BUFFER_SIZE_META]
-} 
+    pub buffer: [u8; MAX_COLOCATION_DISCOVERY_BUFFER_SIZE_META],
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1399,7 +1483,7 @@ pub struct XrEventDataColocationDiscoveryCompleteMETA {
     pub next: *const c_void,
     pub discovery_request_id: XrAsyncRequestIdFB,
     pub result: XrResult,
-} 
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1426,12 +1510,12 @@ pub struct XrEnvironmentDepthHandRemovalSetInfoMETA {
     pub enabled: XrBool32,
 }
 
-impl Default for XrEnvironmentDepthHandRemovalSetInfoMETA{
-    fn default()->Self{
-        XrEnvironmentDepthHandRemovalSetInfoMETA{
+impl Default for XrEnvironmentDepthHandRemovalSetInfoMETA {
+    fn default() -> Self {
+        XrEnvironmentDepthHandRemovalSetInfoMETA {
             ty: XrStructureType::ENVIRONMENT_DEPTH_HAND_REMOVAL_SET_INFO_META,
             next: 0 as *const _,
-            enabled: XrBool32(0)
+            enabled: XrBool32(0),
         }
     }
 }
@@ -1445,9 +1529,9 @@ pub struct XrHandJointsLocateInfoEXT {
     pub time: XrTime,
 }
 
-impl Default for XrHandJointsLocateInfoEXT{
-    fn default()->Self{
-        XrHandJointsLocateInfoEXT{
+impl Default for XrHandJointsLocateInfoEXT {
+    fn default() -> Self {
+        XrHandJointsLocateInfoEXT {
             ty: XrStructureType::HAND_JOINTS_LOCATE_INFO_EXT,
             next: 0 as *const _,
             base_space: XrSpace(0),
@@ -1474,14 +1558,14 @@ pub struct XrHandJointLocationsEXT {
     pub joint_locations: *mut XrHandJointLocationEXT,
 }
 
-impl Default for XrHandJointLocationsEXT{
-    fn default()->Self{
-        XrHandJointLocationsEXT{
+impl Default for XrHandJointLocationsEXT {
+    fn default() -> Self {
+        XrHandJointLocationsEXT {
             ty: XrStructureType::HAND_JOINT_LOCATIONS_EXT,
             next: 0 as *mut _,
             is_active: XrBool32(0),
             joint_count: 0,
-            joint_locations: 0 as * mut _
+            joint_locations: 0 as *mut _,
         }
     }
 }
@@ -1498,9 +1582,9 @@ pub struct XrHandTrackingAimStateFB {
     pub pinch_strength_ring: f32,
     pub pinch_strength_little: f32,
 }
-impl Default for XrHandTrackingAimStateFB{
-    fn default()->Self{
-        XrHandTrackingAimStateFB{
+impl Default for XrHandTrackingAimStateFB {
+    fn default() -> Self {
+        XrHandTrackingAimStateFB {
             ty: XrStructureType::HAND_TRACKING_AIM_STATE_FB,
             next: 0 as *mut _,
             status: XrHandTrackingAimFlagsFB(0),
@@ -1513,7 +1597,6 @@ impl Default for XrHandTrackingAimStateFB{
     }
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct XrHandTrackingScaleFB {
@@ -1524,19 +1607,18 @@ pub struct XrHandTrackingScaleFB {
     pub override_hand_scale: XrBool32,
     pub override_value_input: f32,
 }
-impl Default for XrHandTrackingScaleFB{
-    fn default()->Self{
-        XrHandTrackingScaleFB{
+impl Default for XrHandTrackingScaleFB {
+    fn default() -> Self {
+        XrHandTrackingScaleFB {
             ty: XrStructureType::HAND_TRACKING_SCALE_FB,
             next: 0 as *mut _,
             sensor_output: 0.0,
             current_output: 0.0,
             override_hand_scale: XrBool32(0),
-            override_value_input: 0.0
+            override_value_input: 0.0,
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1546,17 +1628,16 @@ pub struct XrHandTrackerCreateInfoEXT {
     pub hand: XrHandEXT,
     pub hand_joint_set: XrHandJointSetEXT,
 }
-impl Default for XrHandTrackerCreateInfoEXT{
-    fn default()->Self{
-        XrHandTrackerCreateInfoEXT{
+impl Default for XrHandTrackerCreateInfoEXT {
+    fn default() -> Self {
+        XrHandTrackerCreateInfoEXT {
             ty: XrStructureType::HAND_TRACKER_CREATE_INFO_EXT,
             next: 0 as *mut _,
             hand: XrHandEXT::LEFT,
-            hand_joint_set: XrHandJointSetEXT::DEFAULT
+            hand_joint_set: XrHandJointSetEXT::DEFAULT,
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1574,18 +1655,16 @@ pub struct XrActionsSyncInfo {
     pub active_action_sets: *const XrActiveActionSet,
 }
 
-
-impl Default for XrActionsSyncInfo{
-    fn default()->Self{
-        XrActionsSyncInfo{
+impl Default for XrActionsSyncInfo {
+    fn default() -> Self {
+        XrActionsSyncInfo {
             ty: XrStructureType::ACTIONS_SYNC_INFO,
             next: 0 as *mut _,
             count_active_action_sets: 0,
-            active_action_sets: 0 as *const _
+            active_action_sets: 0 as *const _,
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1598,28 +1677,34 @@ pub struct XrActionStateBoolean {
     pub is_active: XrBool32,
 }
 
-impl Default for XrActionStateBoolean{
-    fn default()->Self{
-        XrActionStateBoolean{
+impl Default for XrActionStateBoolean {
+    fn default() -> Self {
+        XrActionStateBoolean {
             ty: XrStructureType::ACTION_STATE_BOOLEAN,
             next: 0 as *mut _,
             current_state: Default::default(),
             changed_since_last_sync: Default::default(),
             last_change_time: XrTime(0),
-            is_active: Default::default()
+            is_active: Default::default(),
         }
     }
 }
 
-impl XrActionStateBoolean{
-    pub fn get(xr:&LibOpenXr, session:XrSession, action:XrAction, subaction_path:XrPath)->Self{
-        let info = XrActionStateGetInfo{
+impl XrActionStateBoolean {
+    pub fn get(
+        xr: &LibOpenXr,
+        session: XrSession,
+        action: XrAction,
+        subaction_path: XrPath,
+    ) -> Self {
+        let info = XrActionStateGetInfo {
             action,
             subaction_path,
             ..Default::default()
         };
         let mut state = XrActionStateBoolean::default();
-        unsafe{(xr.xrGetActionStateBoolean)(session, &info, &mut state)}.log_error("xrGetActionStateBoolean");
+        unsafe { (xr.xrGetActionStateBoolean)(session, &info, &mut state) }
+            .log_error("xrGetActionStateBoolean");
         state
     }
 }
@@ -1635,28 +1720,34 @@ pub struct XrActionStateFloat {
     pub is_active: XrBool32,
 }
 
-impl Default for XrActionStateFloat{
-    fn default()->Self{
-        XrActionStateFloat{
+impl Default for XrActionStateFloat {
+    fn default() -> Self {
+        XrActionStateFloat {
             ty: XrStructureType::ACTION_STATE_FLOAT,
             next: 0 as *mut _,
             current_state: Default::default(),
             changed_since_last_sync: Default::default(),
             last_change_time: XrTime(0),
-            is_active: Default::default()
+            is_active: Default::default(),
         }
     }
 }
 
-impl XrActionStateFloat{
-    pub fn get(xr:&LibOpenXr, session:XrSession, action:XrAction, subaction_path:XrPath)->Self{
-        let info = XrActionStateGetInfo{
+impl XrActionStateFloat {
+    pub fn get(
+        xr: &LibOpenXr,
+        session: XrSession,
+        action: XrAction,
+        subaction_path: XrPath,
+    ) -> Self {
+        let info = XrActionStateGetInfo {
             action,
             subaction_path,
             ..Default::default()
         };
         let mut state = XrActionStateFloat::default();
-        unsafe{(xr.xrGetActionStateFloat)(session, &info, &mut state)}.log_error("xrGetActionStateFloat");
+        unsafe { (xr.xrGetActionStateFloat)(session, &info, &mut state) }
+            .log_error("xrGetActionStateFloat");
         state
     }
 }
@@ -1672,29 +1763,34 @@ pub struct XrActionStateVector2f {
     pub is_active: XrBool32,
 }
 
-
-impl Default for XrActionStateVector2f{
-    fn default()->Self{
-        XrActionStateVector2f{
+impl Default for XrActionStateVector2f {
+    fn default() -> Self {
+        XrActionStateVector2f {
             ty: XrStructureType::ACTION_STATE_VECTOR2F,
             next: 0 as *mut _,
             current_state: Default::default(),
             changed_since_last_sync: Default::default(),
             last_change_time: XrTime(0),
-            is_active: Default::default()
+            is_active: Default::default(),
         }
     }
 }
 
-impl XrActionStateVector2f{
-    pub fn get(xr:&LibOpenXr, session:XrSession, action:XrAction, subaction_path:XrPath)->Self{
-        let info = XrActionStateGetInfo{
+impl XrActionStateVector2f {
+    pub fn get(
+        xr: &LibOpenXr,
+        session: XrSession,
+        action: XrAction,
+        subaction_path: XrPath,
+    ) -> Self {
+        let info = XrActionStateGetInfo {
             action,
             subaction_path,
             ..Default::default()
         };
         let mut state = XrActionStateVector2f::default();
-        unsafe{(xr.xrGetActionStateVector2f)(session, &info, &mut state)}.log_error("xrGetActionStateVector2f");
+        unsafe { (xr.xrGetActionStateVector2f)(session, &info, &mut state) }
+            .log_error("xrGetActionStateVector2f");
         state
     }
 }
@@ -1707,9 +1803,9 @@ pub struct XrActionStatePose {
     pub is_active: XrBool32,
 }
 
-impl Default for XrActionStatePose{
-    fn default()->Self{
-        XrActionStatePose{
+impl Default for XrActionStatePose {
+    fn default() -> Self {
+        XrActionStatePose {
             ty: XrStructureType::ACTION_STATE_POSE,
             next: 0 as *mut _,
             is_active: Default::default(),
@@ -1717,19 +1813,24 @@ impl Default for XrActionStatePose{
     }
 }
 
-impl XrActionStatePose{
-    pub fn get(xr:&LibOpenXr, session:XrSession, action:XrAction, subaction_path:XrPath)->Self{
-        let info = XrActionStateGetInfo{
+impl XrActionStatePose {
+    pub fn get(
+        xr: &LibOpenXr,
+        session: XrSession,
+        action: XrAction,
+        subaction_path: XrPath,
+    ) -> Self {
+        let info = XrActionStateGetInfo {
             action,
             subaction_path,
             ..Default::default()
         };
         let mut state = XrActionStatePose::default();
-        unsafe{(xr.xrGetActionStatePose)(session, &info, &mut state)}.log_error("xrGetActionStatePose");
+        unsafe { (xr.xrGetActionStatePose)(session, &info, &mut state) }
+            .log_error("xrGetActionStatePose");
         state
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1740,10 +1841,9 @@ pub struct XrActionStateGetInfo {
     pub subaction_path: XrPath,
 }
 
-impl Default for XrActionStateGetInfo{
-
-    fn default()->Self{
-        XrActionStateGetInfo{
+impl Default for XrActionStateGetInfo {
+    fn default() -> Self {
+        XrActionStateGetInfo {
             ty: XrStructureType::ACTION_STATE_GET_INFO,
             next: 0 as *mut _,
             action: XrAction(0),
@@ -1770,13 +1870,13 @@ pub struct XrSessionActionSetsAttachInfo {
     pub count_action_sets: u32,
     pub action_sets: *const XrActionSet,
 }
-impl Default for XrSessionActionSetsAttachInfo{
-    fn default()->Self{
-        XrSessionActionSetsAttachInfo{
+impl Default for XrSessionActionSetsAttachInfo {
+    fn default() -> Self {
+        XrSessionActionSetsAttachInfo {
             ty: XrStructureType::SESSION_ACTION_SETS_ATTACH_INFO,
             next: 0 as *mut _,
             count_action_sets: 0,
-            action_sets: 0 as * const _
+            action_sets: 0 as *const _,
         }
     }
 }
@@ -1791,14 +1891,14 @@ pub struct XrInteractionProfileSuggestedBinding {
     pub suggested_bindings: *const XrActionSuggestedBinding,
 }
 
-impl Default for XrInteractionProfileSuggestedBinding{
-    fn default()->Self{
-        XrInteractionProfileSuggestedBinding{
+impl Default for XrInteractionProfileSuggestedBinding {
+    fn default() -> Self {
+        XrInteractionProfileSuggestedBinding {
             ty: XrStructureType::INTERACTION_PROFILE_SUGGESTED_BINDING,
             next: 0 as *mut _,
             interaction_profile: XrPath(0),
             count_suggested_bindings: 0,
-            suggested_bindings: 0 as * const _
+            suggested_bindings: 0 as *const _,
         }
     }
 }
@@ -1810,11 +1910,16 @@ pub struct XrActionSuggestedBinding {
     pub binding: XrPath,
 }
 
-impl XrActionSuggestedBinding{
-    pub fn new(xr: &LibOpenXr, instance:XrInstance, action:XrAction, path:&str)->Result<Self,String>{
-        Ok(Self{
+impl XrActionSuggestedBinding {
+    pub fn new(
+        xr: &LibOpenXr,
+        instance: XrInstance,
+        action: XrAction,
+        path: &str,
+    ) -> Result<Self, String> {
+        Ok(Self {
             action,
-            binding: XrPath::new(xr, instance, path)?
+            binding: XrPath::new(xr, instance, path)?,
         })
     }
 }
@@ -1830,7 +1935,6 @@ pub struct XrActionCreateInfo {
     pub subaction_paths: *const XrPath,
     pub localized_action_name: [c_char; MAX_LOCALIZED_ACTION_NAME_SIZE],
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1853,9 +1957,9 @@ pub struct XrCompositionLayerProjection {
     pub views: *const XrCompositionLayerProjectionView,
 }
 
-impl Default for XrCompositionLayerProjection{
-    fn default()->Self{
-        XrCompositionLayerProjection{
+impl Default for XrCompositionLayerProjection {
+    fn default() -> Self {
+        XrCompositionLayerProjection {
             ty: XrStructureType::COMPOSITION_LAYER_PROJECTION,
             next: 0 as *mut _,
             layer_flags: XrCompositionLayerFlags(0),
@@ -1874,7 +1978,6 @@ pub struct XrSwapchainSubImage {
     pub image_array_index: u32,
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct XrCompositionLayerProjectionView {
@@ -1885,18 +1988,18 @@ pub struct XrCompositionLayerProjectionView {
     pub sub_image: XrSwapchainSubImage,
 }
 
-impl Default for XrCompositionLayerProjectionView{
-    fn default()->Self{
-        XrCompositionLayerProjectionView{
+impl Default for XrCompositionLayerProjectionView {
+    fn default() -> Self {
+        XrCompositionLayerProjectionView {
             ty: XrStructureType::COMPOSITION_LAYER_PROJECTION_VIEW,
             next: 0 as *mut _,
             pose: Default::default(),
             fov: Default::default(),
-            sub_image: XrSwapchainSubImage{
+            sub_image: XrSwapchainSubImage {
                 swapchain: XrSwapchain(0),
                 image_rect: Default::default(),
-                image_array_index:0
-            }
+                image_array_index: 0,
+            },
         }
     }
 }
@@ -1911,14 +2014,14 @@ pub struct XrCompositionLayerPassthroughFB {
     pub layer_handle: XrPassthroughLayerFB,
 }
 
-impl Default for XrCompositionLayerPassthroughFB{
-    fn default()->Self{
-        XrCompositionLayerPassthroughFB{
+impl Default for XrCompositionLayerPassthroughFB {
+    fn default() -> Self {
+        XrCompositionLayerPassthroughFB {
             ty: XrStructureType::COMPOSITION_LAYER_PASSTHROUGH_FB,
             next: 0 as *mut _,
             flags: XrCompositionLayerFlags(0),
             space: XrSpace(0),
-            layer_handle: XrPassthroughLayerFB(0)
+            layer_handle: XrPassthroughLayerFB(0),
         }
     }
 }
@@ -1930,9 +2033,9 @@ pub struct XrSwapchainImageReleaseInfo {
     pub next: *const c_void,
 }
 
-impl Default for XrSwapchainImageReleaseInfo{
-    fn default()->Self{
-        XrSwapchainImageReleaseInfo{
+impl Default for XrSwapchainImageReleaseInfo {
+    fn default() -> Self {
+        XrSwapchainImageReleaseInfo {
             ty: XrStructureType::SWAPCHAIN_IMAGE_RELEASE_INFO,
             next: 0 as *mut _,
         }
@@ -1948,9 +2051,9 @@ pub struct XrEnvironmentDepthImageViewMETA {
     pub pose: XrPosef,
 }
 
-impl Default for XrEnvironmentDepthImageViewMETA{
-    fn default()->Self{
-        XrEnvironmentDepthImageViewMETA{
+impl Default for XrEnvironmentDepthImageViewMETA {
+    fn default() -> Self {
+        XrEnvironmentDepthImageViewMETA {
             ty: XrStructureType::ENVIRONMENT_DEPTH_IMAGE_VIEW_META,
             next: 0 as *mut _,
             fov: Default::default(),
@@ -1970,15 +2073,15 @@ pub struct XrEnvironmentDepthImageMETA {
     pub views: [XrEnvironmentDepthImageViewMETA; 2usize],
 }
 
-impl Default for XrEnvironmentDepthImageMETA{
-    fn default()->Self{
-        XrEnvironmentDepthImageMETA{
+impl Default for XrEnvironmentDepthImageMETA {
+    fn default() -> Self {
+        XrEnvironmentDepthImageMETA {
             ty: XrStructureType::ENVIRONMENT_DEPTH_IMAGE_META,
             next: 0 as *mut _,
             swapchain_index: 0,
             near_z: 0.0,
             far_z: 0.0,
-            views: [Default::default(); 2]
+            views: [Default::default(); 2],
         }
     }
 }
@@ -2006,9 +2109,9 @@ pub struct XrSimultaneousHandsAndControllersTrackingResumeInfoMETA {
     pub next: *const c_void,
 }
 
-impl Default for XrSimultaneousHandsAndControllersTrackingResumeInfoMETA{
-    fn default()->Self{
-        XrSimultaneousHandsAndControllersTrackingResumeInfoMETA{
+impl Default for XrSimultaneousHandsAndControllersTrackingResumeInfoMETA {
+    fn default() -> Self {
+        XrSimultaneousHandsAndControllersTrackingResumeInfoMETA {
             ty: XrStructureType::SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META,
             next: 0 as *mut _,
         }
@@ -2022,16 +2125,14 @@ pub struct XrSimultaneousHandsAndControllersTrackingPauseInfoMETA {
     pub next: *const c_void,
 }
 
-impl Default for XrSimultaneousHandsAndControllersTrackingPauseInfoMETA{
-    fn default()->Self{
-        XrSimultaneousHandsAndControllersTrackingPauseInfoMETA{
+impl Default for XrSimultaneousHandsAndControllersTrackingPauseInfoMETA {
+    fn default() -> Self {
+        XrSimultaneousHandsAndControllersTrackingPauseInfoMETA {
             ty: XrStructureType::SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META,
             next: 0 as *mut _,
         }
     }
 }
-
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -2042,17 +2143,16 @@ pub struct XrEnvironmentDepthImageAcquireInfoMETA {
     pub display_time: XrTime,
 }
 
-impl Default for XrEnvironmentDepthImageAcquireInfoMETA{
-    fn default()->Self{
-        XrEnvironmentDepthImageAcquireInfoMETA{
+impl Default for XrEnvironmentDepthImageAcquireInfoMETA {
+    fn default() -> Self {
+        XrEnvironmentDepthImageAcquireInfoMETA {
             ty: XrStructureType::ENVIRONMENT_DEPTH_IMAGE_ACQUIRE_INFO_META,
             next: 0 as *mut _,
             space: XrSpace(0),
-            display_time: XrTime(0)
+            display_time: XrTime(0),
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -2061,12 +2161,12 @@ pub struct XrSwapchainImageWaitInfo {
     pub next: *const c_void,
     pub timeout: XrDuration,
 }
-impl Default for XrSwapchainImageWaitInfo{
-    fn default()->Self{
-        XrSwapchainImageWaitInfo{
+impl Default for XrSwapchainImageWaitInfo {
+    fn default() -> Self {
+        XrSwapchainImageWaitInfo {
             ty: XrStructureType::SWAPCHAIN_IMAGE_WAIT_INFO,
             next: 0 as *mut _,
-            timeout: XrDuration(0)
+            timeout: XrDuration(0),
         }
     }
 }
@@ -2077,9 +2177,9 @@ pub struct XrSwapchainImageAcquireInfo {
     pub ty: XrStructureType,
     pub next: *const c_void,
 }
-impl Default for XrSwapchainImageAcquireInfo{
-    fn default()->Self{
-        XrSwapchainImageAcquireInfo{
+impl Default for XrSwapchainImageAcquireInfo {
+    fn default() -> Self {
+        XrSwapchainImageAcquireInfo {
             ty: XrStructureType::SWAPCHAIN_IMAGE_ACQUIRE_INFO,
             next: 0 as *mut _,
         }
@@ -2095,14 +2195,14 @@ pub struct XrViewLocateInfo {
     pub display_time: XrTime,
     pub space: XrSpace,
 }
-impl Default for XrViewLocateInfo{
-    fn default()->Self{
-        XrViewLocateInfo{
+impl Default for XrViewLocateInfo {
+    fn default() -> Self {
+        XrViewLocateInfo {
             ty: XrStructureType::VIEW_LOCATE_INFO,
             next: 0 as *mut _,
             view_configuration_type: Default::default(),
             display_time: XrTime(0),
-            space:XrSpace(0),
+            space: XrSpace(0),
         }
     }
 }
@@ -2115,9 +2215,9 @@ pub struct XrViewState {
     pub view_state_flags: XrViewStateFlags,
 }
 
-impl Default for XrViewState{
-    fn default()->Self{
-        XrViewState{
+impl Default for XrViewState {
+    fn default() -> Self {
+        XrViewState {
             ty: XrStructureType::VIEW_STATE,
             next: 0 as *mut _,
             view_state_flags: XrViewStateFlags(0),
@@ -2134,30 +2234,25 @@ pub struct XrSpaceLocation {
     pub pose: XrPosef,
 }
 
-impl XrSpaceLocation{
-    pub fn locate(xr:&LibOpenXr, local_space: XrSpace, time:XrTime, space:XrSpace)->Self{
+impl XrSpaceLocation {
+    pub fn locate(xr: &LibOpenXr, local_space: XrSpace, time: XrTime, space: XrSpace) -> Self {
         let mut location = XrSpaceLocation::default();
-        unsafe{(xr.xrLocateSpace)(
-            space,
-            local_space,
-            time,
-            &mut location
-        )}.log_error("xrLocateSpace");
+        unsafe { (xr.xrLocateSpace)(space, local_space, time, &mut location) }
+            .log_error("xrLocateSpace");
         location
     }
 }
 
-impl Default for XrSpaceLocation{
-    fn default()->Self{
-        XrSpaceLocation{
+impl Default for XrSpaceLocation {
+    fn default() -> Self {
+        XrSpaceLocation {
             ty: XrStructureType::SPACE_LOCATION,
             next: 0 as *mut _,
             location_flags: XrSpaceLocationFlags(0),
-            pose: XrPosef::default()
+            pose: XrPosef::default(),
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -2179,15 +2274,15 @@ pub struct XrFrameEndInfo {
     pub layers: *const *const XrCompositionLayerBaseHeader,
 }
 
-impl Default for XrFrameEndInfo{
-    fn default()->Self{
-        XrFrameEndInfo{
+impl Default for XrFrameEndInfo {
+    fn default() -> Self {
+        XrFrameEndInfo {
             ty: XrStructureType::FRAME_END_INFO,
             next: 0 as *const _,
             display_time: XrTime(0),
             environment_blend_mode: XrEnvironmentBlendMode::OPAQUE,
             layer_count: 0,
-            layers: 0 as *const *const _
+            layers: 0 as *const *const _,
         }
     }
 }
@@ -2199,9 +2294,9 @@ pub struct XrFrameBeginInfo {
     pub next: *const c_void,
 }
 
-impl Default for XrFrameBeginInfo{
-    fn default()->Self{
-        XrFrameBeginInfo{
+impl Default for XrFrameBeginInfo {
+    fn default() -> Self {
+        XrFrameBeginInfo {
             ty: XrStructureType::FRAME_BEGIN_INFO,
             next: 0 as *mut _,
         }
@@ -2226,7 +2321,6 @@ pub struct XrEventDataSessionStateChanged {
     pub time: XrTime,
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct XrEventDataBuffer {
@@ -2234,7 +2328,6 @@ pub struct XrEventDataBuffer {
     pub next: *const c_void,
     pub varying: [u8; 4000usize],
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -2245,13 +2338,13 @@ pub struct XrEnvironmentDepthSwapchainStateMETA {
     pub height: u32,
 }
 
-impl Default for XrEnvironmentDepthSwapchainStateMETA{
-    fn default()->Self{
-        XrEnvironmentDepthSwapchainStateMETA{
+impl Default for XrEnvironmentDepthSwapchainStateMETA {
+    fn default() -> Self {
+        XrEnvironmentDepthSwapchainStateMETA {
             ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_STATE_META,
-            next: 0 as * mut _,
+            next: 0 as *mut _,
             width: 0,
-            height: 0
+            height: 0,
         }
     }
 }
@@ -2276,11 +2369,11 @@ pub struct XrEnvironmentDepthProviderCreateInfoMETA {
     pub create_flags: XrEnvironmentDepthProviderCreateFlagsMETA,
 }
 
-impl Default for XrEnvironmentDepthProviderCreateInfoMETA{
-    fn default()->Self{
-        XrEnvironmentDepthProviderCreateInfoMETA{
+impl Default for XrEnvironmentDepthProviderCreateInfoMETA {
+    fn default() -> Self {
+        XrEnvironmentDepthProviderCreateInfoMETA {
             ty: XrStructureType::ENVIRONMENT_DEPTH_PROVIDER_CREATE_INFO_META,
-            next: 0 as * const _,
+            next: 0 as *const _,
             create_flags: XrEnvironmentDepthProviderCreateFlagsMETA(0),
         }
     }
@@ -2296,18 +2389,17 @@ pub struct XrPassthroughLayerCreateInfoFB {
     pub purpose: XrPassthroughLayerPurposeFB,
 }
 
-impl Default for XrPassthroughLayerCreateInfoFB{
-    fn default()->Self{
-        Self{
+impl Default for XrPassthroughLayerCreateInfoFB {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::PASSTHROUGH_LAYER_CREATE_INFO_FB,
             next: 0 as *const _,
             passthrough: XrPassthroughFB(0),
             flags: XrPassthroughFlagsFB(0),
-            purpose: XrPassthroughLayerPurposeFB::RECONSTRUCTION
+            purpose: XrPassthroughLayerPurposeFB::RECONSTRUCTION,
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -2317,12 +2409,12 @@ pub struct XrPassthroughCreateInfoFB {
     pub flags: XrPassthroughFlagsFB,
 }
 
-impl Default for XrPassthroughCreateInfoFB{
-    fn default()->Self{
-        XrPassthroughCreateInfoFB{
+impl Default for XrPassthroughCreateInfoFB {
+    fn default() -> Self {
+        XrPassthroughCreateInfoFB {
             ty: XrStructureType::PASSTHROUGH_CREATE_INFO_FB,
             next: 0 as *const _,
-            flags: XrPassthroughFlagsFB(0)
+            flags: XrPassthroughFlagsFB(0),
         }
     }
 }
@@ -2335,9 +2427,9 @@ pub struct XrSwapchainImageOpenGLESKHR {
     pub image: u32,
 }
 
-impl Default for XrSwapchainImageOpenGLESKHR{
-    fn default()->Self{
-        XrSwapchainImageOpenGLESKHR{
+impl Default for XrSwapchainImageOpenGLESKHR {
+    fn default() -> Self {
+        XrSwapchainImageOpenGLESKHR {
             ty: XrStructureType::SWAPCHAIN_IMAGE_OPENGL_ES_KHR,
             next: 0 as *mut _,
             image: 0,
@@ -2361,24 +2453,23 @@ pub struct XrSwapchainCreateInfo {
     pub mip_count: u32,
 }
 
-impl Default for XrSwapchainCreateInfo{
-    fn default()->Self{
-        Self{
+impl Default for XrSwapchainCreateInfo {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::SWAPCHAIN_CREATE_INFO,
             next: 0 as *const _,
             create_flags: XrSwapchainCreateFlags(0),
             usage_flags: XrSwapchainUsageFlags(0),
             format: 0,
-            width:0,
-            height:0,
+            width: 0,
+            height: 0,
             sample_count: 0,
-            face_count:0,
-            array_size:0,
-            mip_count:0
+            face_count: 0,
+            array_size: 0,
+            mip_count: 0,
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -2388,13 +2479,13 @@ pub struct XrView {
     pub pose: XrPosef,
     pub fov: XrFovf,
 }
-impl Default for XrView{
-    fn default()->Self{
-        XrView{
+impl Default for XrView {
+    fn default() -> Self {
+        XrView {
             ty: XrStructureType::VIEW,
             next: 0 as *mut _,
             pose: XrPosef::default(),
-            fov: XrFovf::default()
+            fov: XrFovf::default(),
         }
     }
 }
@@ -2408,16 +2499,25 @@ pub struct XrReferenceSpaceCreateInfo {
     pub pose_in_reference_space: XrPosef,
 }
 
-impl Default for XrReferenceSpaceCreateInfo{
-    fn default()->Self{
-        Self{
+impl Default for XrReferenceSpaceCreateInfo {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::REFERENCE_SPACE_CREATE_INFO,
             next: 0 as *const _,
             reference_space_type: XrReferenceSpaceType::VIEW,
-            pose_in_reference_space: XrPosef{
-                orientation: XrQuaternionf{x:0.,y:0.,z:0.,w:1.0},
-                position: XrVector3f{x:0.0,y:0.0,z:0.0}
-            }
+            pose_in_reference_space: XrPosef {
+                orientation: XrQuaternionf {
+                    x: 0.,
+                    y: 0.,
+                    z: 0.,
+                    w: 1.0,
+                },
+                position: XrVector3f {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            },
         }
     }
 }
@@ -2435,9 +2535,9 @@ pub struct XrViewConfigurationView {
     pub max_swapchain_sample_count: u32,
 }
 
-impl Default for XrViewConfigurationView{
-    fn default()->Self{
-        Self{
+impl Default for XrViewConfigurationView {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::VIEW_CONFIGURATION_VIEW,
             next: 0 as *mut _,
             recommended_image_rect_width: 0,
@@ -2445,7 +2545,7 @@ impl Default for XrViewConfigurationView{
             recommended_image_rect_height: 0,
             max_image_rect_height: 0,
             recommended_swapchain_sample_count: 0,
-            max_swapchain_sample_count: 0
+            max_swapchain_sample_count: 0,
         }
     }
 }
@@ -2459,14 +2559,13 @@ pub struct XrViewConfigurationProperties {
     pub fov_mutable: XrBool32,
 }
 
-
-impl Default for XrViewConfigurationProperties{
-    fn default()->Self{
-        Self{
+impl Default for XrViewConfigurationProperties {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::VIEW_CONFIGURATION_PROPERTIES,
             next: 0 as *mut _,
             view_configuration_type: XrViewConfigurationType(0),
-            fov_mutable: XrBool32(0)
+            fov_mutable: XrBool32(0),
         }
     }
 }
@@ -2480,13 +2579,13 @@ pub struct XrInstanceProperties {
     pub runtime_name: [c_char; MAX_RUNTIME_NAME_SIZE],
 }
 
-impl Default for XrInstanceProperties{
-    fn default()->Self{
-        Self{
+impl Default for XrInstanceProperties {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::INSTANCE_PROPERTIES,
             next: 0 as *mut _,
-            runtime_name: [0;MAX_RUNTIME_NAME_SIZE],
-            runtime_version: XrVersion(0)
+            runtime_name: [0; MAX_RUNTIME_NAME_SIZE],
+            runtime_version: XrVersion(0),
         }
     }
 }
@@ -2500,9 +2599,9 @@ pub struct XrGraphicsRequirementsOpenGLESKHR {
     pub max_api_version_supported: XrVersion,
 }
 
-impl Default for XrGraphicsRequirementsOpenGLESKHR{
-    fn default()->Self{
-        Self{
+impl Default for XrGraphicsRequirementsOpenGLESKHR {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::GRAPHICS_REQUIREMENTS_OPENGL_ES_KHR,
             next: 0 as *mut _,
             min_api_version_supported: XrVersion(0),
@@ -2510,7 +2609,6 @@ impl Default for XrGraphicsRequirementsOpenGLESKHR{
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -2520,9 +2618,9 @@ pub struct XrSystemGetInfo {
     pub form_factor: XrFormFactor,
 }
 
-impl Default for XrSystemGetInfo{
-    fn default()->Self{
-        Self{
+impl Default for XrSystemGetInfo {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::SYSTEM_GET_INFO,
             next: 0 as *mut _,
             form_factor: XrFormFactor(0),
@@ -2546,13 +2644,13 @@ pub struct XrExtensionProperties {
     pub extension_version: u32,
 }
 
-impl Default for XrExtensionProperties{
-    fn default()->Self{
-        Self{
+impl Default for XrExtensionProperties {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::EXTENSION_PROPERTIES,
             next: 0 as *mut _,
-            extension_name: [0;MAX_EXTENSION_NAME_SIZE],
-            extension_version: 0
+            extension_name: [0; MAX_EXTENSION_NAME_SIZE],
+            extension_version: 0,
         }
     }
 }
@@ -2578,15 +2676,15 @@ pub struct XrApiLayerProperties {
     pub description: [c_char; MAX_API_LAYER_DESCRIPTION_SIZE],
 }
 
-impl Default for XrApiLayerProperties{
-    fn default()->Self{
-        Self{
+impl Default for XrApiLayerProperties {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::API_LAYER_PROPERTIES,
             next: 0 as *mut _,
-            layer_name: [0;MAX_API_LAYER_NAME_SIZE],
+            layer_name: [0; MAX_API_LAYER_NAME_SIZE],
             spec_version: XrVersion(0),
             layer_version: 0,
-            description: [0;MAX_API_LAYER_DESCRIPTION_SIZE]
+            description: [0; MAX_API_LAYER_DESCRIPTION_SIZE],
         }
     }
 }
@@ -2618,16 +2716,16 @@ pub struct XrSystemProperties {
     pub tracking_properties: XrSystemTrackingProperties,
 }
 
-impl Default for XrSystemProperties{
-    fn default()->Self{
-        Self{
+impl Default for XrSystemProperties {
+    fn default() -> Self {
+        Self {
             ty: XrStructureType::SYSTEM_PROPERTIES,
             next: 0 as *mut _,
             system_id: XrSystemId(0),
             vendor_id: 0,
             system_name: [0; MAX_SYSTEM_NAME_SIZE],
             graphics_properties: Default::default(),
-            tracking_properties: Default::default()
+            tracking_properties: Default::default(),
         }
     }
 }
@@ -2680,9 +2778,9 @@ pub struct XrFrameWaitInfo {
     pub next: *const c_void,
 }
 
-impl Default for XrFrameWaitInfo{
-    fn default()->Self{
-        XrFrameWaitInfo{
+impl Default for XrFrameWaitInfo {
+    fn default() -> Self {
+        XrFrameWaitInfo {
             ty: XrStructureType::FRAME_WAIT_INFO,
             next: 0 as *mut _,
         }
@@ -2699,38 +2797,34 @@ pub struct XrFrameState {
     pub should_render: XrBool32,
 }
 
-impl Default for XrFrameState{
-    fn default()->Self{
-        XrFrameState{
+impl Default for XrFrameState {
+    fn default() -> Self {
+        XrFrameState {
             ty: XrStructureType::FRAME_STATE,
             next: 0 as *mut _,
             predicted_display_time: XrTime(0),
             predicted_display_period: XrDuration(0),
-            should_render: XrBool32(0)
+            should_render: XrBool32(0),
         }
     }
 }
 
-
 // Utils
 
-
-
-
-
-pub fn xr_string(slc:&[c_char])->&str{
+pub fn xr_string(slc: &[c_char]) -> &str {
     let slc_end = slc.iter().position(|v| *v == 0).unwrap();
     std::str::from_utf8(&slc[0..slc_end]).unwrap_or("")
 }
 
-pub fn xr_string_zero_terminated(slc:&[c_char])->&str{
+pub fn xr_string_zero_terminated(slc: &[c_char]) -> &str {
     let slc_end = slc.iter().position(|v| *v == 0).unwrap();
-    std::str::from_utf8(&slc[0..slc_end+1]).unwrap_or("")
+    std::str::from_utf8(&slc[0..slc_end + 1]).unwrap_or("")
 }
 
-pub fn xr_array_fetch<T, F>(default:T, f:F)->Result<Vec<T>, String> where
-T: Clone,
-F:Fn(u32, *mut u32, *mut T)->Result<(),String>
+pub fn xr_array_fetch<T, F>(default: T, f: F) -> Result<Vec<T>, String>
+where
+    T: Clone,
+    F: Fn(u32, *mut u32, *mut T) -> Result<(), String>,
 {
     let mut len = 0;
     f(0, &mut len, 0 as *mut _)?;
@@ -2740,29 +2834,23 @@ F:Fn(u32, *mut u32, *mut T)->Result<(),String>
     Ok(v)
 }
 
-pub fn xr_to_string<const N:usize>(v: &str)->[c_char;N]{
-    let mut ret = [0u8;N];
-    for (i,c) in v.bytes().enumerate(){
+pub fn xr_to_string<const N: usize>(v: &str) -> [c_char; N] {
+    let mut ret = [0u8; N];
+    for (i, c) in v.bytes().enumerate() {
         ret[i] = c;
     }
     ret
 }
 
-pub fn xr_static_str_array<const N:usize>(v: &[&'static str;N])->[*const c_char;N]{
-    let mut ret = [0 as *const c_char;N];
-    for (i,c) in v.iter().enumerate(){
+pub fn xr_static_str_array<const N: usize>(v: &[&'static str; N]) -> [*const c_char; N] {
+    let mut ret = [0 as *const c_char; N];
+    for (i, c) in v.iter().enumerate() {
         ret[i] = c.as_ptr();
     }
     ret
 }
 
-
-
-
-
 // Bitflags
-
-
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -2825,7 +2913,6 @@ pub struct XrEnvironmentDepthProviderCreateFlagsMETA(pub u64);
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct XrInstanceCreateFlags(pub u64);
 
-
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct XrPassthroughFlagsFB(pub u64);
@@ -2858,12 +2945,7 @@ impl XrSwapchainUsageFlags {
 }
 bitmask!(XrSwapchainUsageFlags);
 
-
-
-
-
 // Enums
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -2877,15 +2959,13 @@ impl fmt::Debug for XrSpaceQueryActionFB {
             Self::LOAD => Some("LOAD"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrSpaceStorageLocationFB {}", self.0)
         }
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -2903,15 +2983,13 @@ impl fmt::Debug for XrSpaceStorageLocationFB {
             Self::CLOUD => Some("CLOUD"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrSpaceStorageLocationFB {}", self.0)
         }
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq, Default)]
@@ -2941,15 +3019,13 @@ impl fmt::Debug for XrSpaceComponentTypeFB {
             Self::TRIANGLE_MESH_M => Some("TRIANGLE_MESH_M"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrSpaceComponentTypeFB {}", self.0)
         }
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -2965,16 +3041,13 @@ impl fmt::Debug for XrHandJointSetEXT {
             Self::HAND_WITH_FOREARM_ULTRA => Some("HAND_WITH_FOREARM_ULTRA"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrHandJointSetEXT {}", self.0)
         }
     }
 }
-
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -2990,10 +3063,9 @@ impl fmt::Debug for XrHandEXT {
             Self::RIGHT => Some("RIGHT"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrHandEXT {}", self.0)
         }
     }
@@ -3019,15 +3091,13 @@ impl fmt::Debug for XrActionType {
             Self::VIBRATION_OUTPUT => Some("VIBRATION_OUTPUT"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrActionType {}", self.0)
         }
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -3045,15 +3115,13 @@ impl fmt::Debug for XrEnvironmentBlendMode {
             Self::ALPHA_BLEND => Some("ALPHA_BLEND"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrEnvironmentBlendMode {}", self.0)
         }
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -3073,10 +3141,9 @@ impl fmt::Debug for XrAndroidThreadTypeKHR {
             Self::RENDERER_WORKER => Some("RENDERER_WORKER"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrAndroidThreadTypeKHR {}", self.0)
         }
     }
@@ -3097,15 +3164,13 @@ impl fmt::Debug for XrPerfSettingsDomainEXT {
             Self::GPU => Some("GPU"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrPerfSettingsDomainEXT {}", self.0)
         }
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -3126,10 +3191,9 @@ impl fmt::Debug for XrPerfSettingsLevelEXT {
             Self::BOOST => Some("BOOST"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrPerfSettingsLevelEXT {}", self.0)
         }
     }
@@ -3164,15 +3228,13 @@ impl fmt::Debug for XrSessionState {
             Self::EXITING => Some("EXITING"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrSessionState {}", self.0)
         }
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -3192,15 +3254,13 @@ impl fmt::Debug for XrPassthroughLayerPurposeFB {
             Self::TRACKED_KEYBOARD_MASKED_HANDS => Some("TRACKED_KEYBOARD_MASKED_HANDS"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrPassthroughLayerPurposeFB {}", self.0)
         }
     }
 }
-
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -3228,10 +3288,9 @@ impl fmt::Debug for XrReferenceSpaceType {
             Self::LOCALIZATION_MAP_ML => Some("LOCALIZATION_MAP_ML"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrReferenceSpaceType {}", self.0)
         }
     }
@@ -3253,9 +3312,10 @@ impl XrViewConfigurationType {
     pub const PRIMARY_MONO: XrViewConfigurationType = Self(1i32);
     pub const PRIMARY_STEREO: XrViewConfigurationType = Self(2i32);
     pub const PRIMARY_STEREO_WITH_FOVEATED_INSET: XrViewConfigurationType = Self(1000037000i32);
-    pub const PRIMARY_QUAD_VARJO: XrViewConfigurationType = Self::PRIMARY_STEREO_WITH_FOVEATED_INSET;
+    pub const PRIMARY_QUAD_VARJO: XrViewConfigurationType =
+        Self::PRIMARY_STEREO_WITH_FOVEATED_INSET;
     pub const SECONDARY_MONO_FIRST_PERSON_OBSERVER_MSFT: XrViewConfigurationType =
-    Self(1000054000i32);
+        Self(1000054000i32);
 }
 impl fmt::Debug for XrViewConfigurationType {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
@@ -3268,14 +3328,13 @@ impl fmt::Debug for XrViewConfigurationType {
             }
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrViewConfigurationType {}", self.0)
         }
     }
-} 
+}
 impl fmt::Debug for XrFormFactor {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         let name = match *self {
@@ -3283,10 +3342,9 @@ impl fmt::Debug for XrFormFactor {
             Self::HANDHELD_DISPLAY => Some("HANDHELD_DISPLAY"),
             _ => None,
         };
-        if let Some(name) = name{
+        if let Some(name) = name {
             write!(fmt, "{}", name)
-        }
-        else{
+        } else {
             write!(fmt, "unknown XrFormFactor")
         }
     }
@@ -3386,7 +3444,8 @@ impl XrStructureType {
     pub const VISIBILITY_MASK_KHR: XrStructureType = Self(1000031000i32);
     pub const EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR: XrStructureType = Self(1000031001i32);
     pub const SESSION_CREATE_INFO_OVERLAY_EXTX: XrStructureType = Self(1000033000i32);
-    pub const EVENT_DATA_MAIN_SESSION_VISIBILITY_CHANGED_EXTX: XrStructureType = Self(1000033003i32);
+    pub const EVENT_DATA_MAIN_SESSION_VISIBILITY_CHANGED_EXTX: XrStructureType =
+        Self(1000033003i32);
     pub const COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR: XrStructureType = Self(1000034000i32);
     pub const SPATIAL_ANCHOR_CREATE_INFO_MSFT: XrStructureType = Self(1000039000i32);
     pub const SPATIAL_ANCHOR_SPACE_CREATE_INFO_MSFT: XrStructureType = Self(1000039001i32);
@@ -3396,9 +3455,9 @@ impl XrStructureType {
     pub const GRAPHICS_BINDING_EGL_MNDX: XrStructureType = Self(1000048004i32);
     pub const SPATIAL_GRAPH_NODE_SPACE_CREATE_INFO_MSFT: XrStructureType = Self(1000049000i32);
     pub const SPATIAL_GRAPH_STATIC_NODE_BINDING_CREATE_INFO_MSFT: XrStructureType =
-    Self(1000049001i32);
+        Self(1000049001i32);
     pub const SPATIAL_GRAPH_NODE_BINDING_PROPERTIES_GET_INFO_MSFT: XrStructureType =
-    Self(1000049002i32);
+        Self(1000049002i32);
     pub const SPATIAL_GRAPH_NODE_BINDING_PROPERTIES_MSFT: XrStructureType = Self(1000049003i32);
     pub const SYSTEM_HAND_TRACKING_PROPERTIES_EXT: XrStructureType = Self(1000051000i32);
     pub const HAND_TRACKER_CREATE_INFO_EXT: XrStructureType = Self(1000051001i32);
@@ -3411,13 +3470,14 @@ impl XrStructureType {
     pub const HAND_MESH_MSFT: XrStructureType = Self(1000052003i32);
     pub const HAND_POSE_TYPE_INFO_MSFT: XrStructureType = Self(1000052004i32);
     pub const SECONDARY_VIEW_CONFIGURATION_SESSION_BEGIN_INFO_MSFT: XrStructureType =
-    Self(1000053000i32);
+        Self(1000053000i32);
     pub const SECONDARY_VIEW_CONFIGURATION_STATE_MSFT: XrStructureType = Self(1000053001i32);
     pub const SECONDARY_VIEW_CONFIGURATION_FRAME_STATE_MSFT: XrStructureType = Self(1000053002i32);
-    pub const SECONDARY_VIEW_CONFIGURATION_FRAME_END_INFO_MSFT: XrStructureType = Self(1000053003i32);
+    pub const SECONDARY_VIEW_CONFIGURATION_FRAME_END_INFO_MSFT: XrStructureType =
+        Self(1000053003i32);
     pub const SECONDARY_VIEW_CONFIGURATION_LAYER_INFO_MSFT: XrStructureType = Self(1000053004i32);
     pub const SECONDARY_VIEW_CONFIGURATION_SWAPCHAIN_CREATE_INFO_MSFT: XrStructureType =
-    Self(1000053005i32);
+        Self(1000053005i32);
     pub const CONTROLLER_MODEL_KEY_STATE_MSFT: XrStructureType = Self(1000055000i32);
     pub const CONTROLLER_MODEL_NODE_PROPERTIES_MSFT: XrStructureType = Self(1000055001i32);
     pub const CONTROLLER_MODEL_PROPERTIES_MSFT: XrStructureType = Self(1000055002i32);
@@ -3427,7 +3487,7 @@ impl XrStructureType {
     pub const HOLOGRAPHIC_WINDOW_ATTACHMENT_MSFT: XrStructureType = Self(1000063000i32);
     pub const COMPOSITION_LAYER_REPROJECTION_INFO_MSFT: XrStructureType = Self(1000066000i32);
     pub const COMPOSITION_LAYER_REPROJECTION_PLANE_OVERRIDE_MSFT: XrStructureType =
-    Self(1000066001i32);
+        Self(1000066001i32);
     pub const ANDROID_SURFACE_SWAPCHAIN_CREATE_INFO_FB: XrStructureType = Self(1000070000i32);
     pub const COMPOSITION_LAYER_SECURE_CONTENT_FB: XrStructureType = Self(1000072000i32);
     pub const BODY_TRACKER_CREATE_INFO_FB: XrStructureType = Self(1000076001i32);
@@ -3445,7 +3505,7 @@ impl XrStructureType {
     pub const GRAPHICS_BINDING_VULKAN2_KHR: XrStructureType = Self::GRAPHICS_BINDING_VULKAN_KHR;
     pub const SWAPCHAIN_IMAGE_VULKAN2_KHR: XrStructureType = Self::SWAPCHAIN_IMAGE_VULKAN_KHR;
     pub const GRAPHICS_REQUIREMENTS_VULKAN2_KHR: XrStructureType =
-    Self::GRAPHICS_REQUIREMENTS_VULKAN_KHR;
+        Self::GRAPHICS_REQUIREMENTS_VULKAN_KHR;
     pub const COMPOSITION_LAYER_EQUIRECT2_KHR: XrStructureType = Self(1000091000i32);
     pub const SCENE_OBSERVER_CREATE_INFO_MSFT: XrStructureType = Self(1000097000i32);
     pub const SCENE_CREATE_INFO_MSFT: XrStructureType = Self(1000097001i32);
@@ -3541,7 +3601,7 @@ impl XrStructureType {
     pub const USER_CALIBRATION_ENABLE_EVENTS_INFO_ML: XrStructureType = Self(1000472002i32);
     pub const SPATIAL_ANCHOR_PERSISTENCE_INFO_MSFT: XrStructureType = Self(1000142000i32);
     pub const SPATIAL_ANCHOR_FROM_PERSISTED_ANCHOR_CREATE_INFO_MSFT: XrStructureType =
-    Self(1000142001i32);
+        Self(1000142001i32);
     pub const SCENE_MARKERS_MSFT: XrStructureType = Self(1000147000i32);
     pub const SCENE_MARKER_TYPE_FILTER_MSFT: XrStructureType = Self(1000147001i32);
     pub const SCENE_MARKER_QR_CODES_MSFT: XrStructureType = Self(1000147002i32);
@@ -3589,7 +3649,7 @@ impl XrStructureType {
     pub const HAPTIC_PCM_VIBRATION_FB: XrStructureType = Self(1000209001i32);
     pub const DEVICE_PCM_SAMPLE_RATE_STATE_FB: XrStructureType = Self(1000209002i32);
     pub const DEVICE_PCM_SAMPLE_RATE_GET_INFO_FB: XrStructureType =
-    Self::DEVICE_PCM_SAMPLE_RATE_STATE_FB;
+        Self::DEVICE_PCM_SAMPLE_RATE_STATE_FB;
     pub const COMPOSITION_LAYER_DEPTH_TEST_FB: XrStructureType = Self(1000212000i32);
     pub const LOCAL_DIMMING_FRAME_END_INFO_META: XrStructureType = Self(1000216000i32);
     pub const PASSTHROUGH_PREFERENCES_META: XrStructureType = Self(1000217000i32);
@@ -3597,7 +3657,8 @@ impl XrStructureType {
     pub const VIRTUAL_KEYBOARD_CREATE_INFO_META: XrStructureType = Self(1000219002i32);
     pub const VIRTUAL_KEYBOARD_SPACE_CREATE_INFO_META: XrStructureType = Self(1000219003i32);
     pub const VIRTUAL_KEYBOARD_LOCATION_INFO_META: XrStructureType = Self(1000219004i32);
-    pub const VIRTUAL_KEYBOARD_MODEL_VISIBILITY_SET_INFO_META: XrStructureType = Self(1000219005i32);
+    pub const VIRTUAL_KEYBOARD_MODEL_VISIBILITY_SET_INFO_META: XrStructureType =
+        Self(1000219005i32);
     pub const VIRTUAL_KEYBOARD_ANIMATION_STATE_META: XrStructureType = Self(1000219006i32);
     pub const VIRTUAL_KEYBOARD_MODEL_ANIMATION_STATES_META: XrStructureType = Self(1000219007i32);
     pub const VIRTUAL_KEYBOARD_TEXTURE_DATA_META: XrStructureType = Self(1000219009i32);
@@ -3664,35 +3725,42 @@ impl XrStructureType {
     pub const FUTURE_POLL_RESULT_EXT: XrStructureType = Self(1000469003i32);
     pub const EVENT_DATA_USER_PRESENCE_CHANGED_EXT: XrStructureType = Self(1000470000i32);
     pub const SYSTEM_USER_PRESENCE_PROPERTIES_EXT: XrStructureType = Self(1000470001i32);
-    
+
     pub const COLOCATION_DISCOVERY_START_INFO_META: XrStructureType = Self(1000571010);
     pub const COLOCATION_DISCOVERY_STOP_INFO_META: XrStructureType = Self(1000571011);
     pub const COLOCATION_ADVERTISEMENT_START_INFO_META: XrStructureType = Self(1000571012);
     pub const COLOCATION_ADVERTISEMENT_STOP_INFO_META: XrStructureType = Self(1000571013);
-    pub const EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META: XrStructureType = Self(1000571020);
-    pub const EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META: XrStructureType = Self(1000571021);
+    pub const EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META: XrStructureType =
+        Self(1000571020);
+    pub const EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META: XrStructureType =
+        Self(1000571021);
     pub const EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META: XrStructureType = Self(1000571022);
-    pub const EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META: XrStructureType = Self(1000571023);
+    pub const EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META: XrStructureType =
+        Self(1000571023);
     pub const EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META: XrStructureType = Self(1000571024);
     pub const EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META: XrStructureType = Self(1000571025);
-    pub const EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META: XrStructureType = Self(1000571026);
+    pub const EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META: XrStructureType =
+        Self(1000571026);
     pub const SYSTEM_COLOCATION_DISCOVERY_PROPERTIES_META: XrStructureType = Self(1000571030);
-    
-    pub const  SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META: XrStructureType = Self(1000532002i32);
-    pub const  SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META: XrStructureType = Self(1000532003i32);
-    
+
+    pub const SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META: XrStructureType =
+        Self(1000532002i32);
+    pub const SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META: XrStructureType =
+        Self(1000532003i32);
+
     pub const SHARE_SPACES_RECIPIENT_GROUPS_META: XrStructureType = Self(1000572000);
     pub const SPACE_GROUP_UUID_FILTER_INFO_META: XrStructureType = Self(1000572001);
-    pub const SYSTEM_SPATIAL_ENTITY_GROUP_SHARING_PROPERTIES_META: XrStructureType = Self(1000572100);
-    
+    pub const SYSTEM_SPATIAL_ENTITY_GROUP_SHARING_PROPERTIES_META: XrStructureType =
+        Self(1000572100);
+
     pub const SHARE_SPACES_INFO_META: XrStructureType = Self(1000290001);
     pub const EVENT_DATA_SHARE_SPACES_COMPLETE_META: XrStructureType = Self(1000290002);
-    
+
     pub const SPACES_LOCATE_INFO_KHR: XrStructureType = Self::SPACES_LOCATE_INFO;
     pub const SPACE_LOCATIONS_KHR: XrStructureType = Self::SPACE_LOCATIONS;
     pub const SPACE_VELOCITIES_KHR: XrStructureType = Self::SPACE_VELOCITIES;
-    
-    pub const SYSTEM_SPACE_PERSISTENCE_PROPERTIES_META : XrStructureType = Self(1000259000);
+
+    pub const SYSTEM_SPACE_PERSISTENCE_PROPERTIES_META: XrStructureType = Self(1000259000);
     pub const SPACES_SAVE_INFO_META: XrStructureType = Self(1000259001);
     pub const EVENT_DATA_SPACES_SAVE_RESULT_META: XrStructureType = Self(1000259002);
     pub const SPACES_ERASE_INFO_META: XrStructureType = Self(1000259003);
@@ -4278,57 +4346,51 @@ impl fmt::Debug for XrStructureType {
             Self::SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META => {
                 Some("SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META")
             }
-            Self::COLOCATION_DISCOVERY_START_INFO_META=> {
+            Self::COLOCATION_DISCOVERY_START_INFO_META => {
                 Some("COLOCATION_DISCOVERY_START_INFO_META")
             }
-            Self::COLOCATION_DISCOVERY_STOP_INFO_META=> {
+            Self::COLOCATION_DISCOVERY_STOP_INFO_META => {
                 Some("COLOCATION_DISCOVERY_STOP_INFO_META")
             }
-            Self::COLOCATION_ADVERTISEMENT_START_INFO_META=> {
+            Self::COLOCATION_ADVERTISEMENT_START_INFO_META => {
                 Some("COLOCATION_ADVERTISEMENT_START_INFO_META")
             }
-            Self::COLOCATION_ADVERTISEMENT_STOP_INFO_META=> {
+            Self::COLOCATION_ADVERTISEMENT_STOP_INFO_META => {
                 Some("COLOCATION_ADVERTISEMENT_STOP_INFO_META")
             }
-            Self::EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META=> {
+            Self::EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META => {
                 Some("EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META")
             }
-            Self::EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META=> {
+            Self::EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META => {
                 Some("EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META")
             }
-            Self::EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META=> {
+            Self::EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META => {
                 Some("EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META")
             }
-            Self::EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META=> {
+            Self::EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META => {
                 Some("EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META")
             }
-            Self::EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META=> {
+            Self::EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META => {
                 Some("EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META")
             }
-            Self::EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META=> {
+            Self::EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META => {
                 Some("EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META")
             }
-            Self::EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META=> {
+            Self::EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META => {
                 Some("EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META")
             }
-            Self::SYSTEM_COLOCATION_DISCOVERY_PROPERTIES_META=> {
+            Self::SYSTEM_COLOCATION_DISCOVERY_PROPERTIES_META => {
                 Some("SYSTEM_COLOCATION_DISCOVERY_PROPERTIES_META")
             }
-            
-            Self::SHARE_SPACES_RECIPIENT_GROUPS_META=> {
-                Some("SHARE_SPACES_RECIPIENT_GROUPS_META")
-            }
-            Self::SPACE_GROUP_UUID_FILTER_INFO_META=> {
-                Some("SPACE_GROUP_UUID_FILTER_INFO_META")
-            }
-            Self::SYSTEM_SPATIAL_ENTITY_GROUP_SHARING_PROPERTIES_META=> {
+
+            Self::SHARE_SPACES_RECIPIENT_GROUPS_META => Some("SHARE_SPACES_RECIPIENT_GROUPS_META"),
+            Self::SPACE_GROUP_UUID_FILTER_INFO_META => Some("SPACE_GROUP_UUID_FILTER_INFO_META"),
+            Self::SYSTEM_SPATIAL_ENTITY_GROUP_SHARING_PROPERTIES_META => {
                 Some("SYSTEM_SPATIAL_ENTITY_GROUP_SHARING_PROPERTIES_META")
             }
-                
-            Self::SHARE_SPACES_INFO_META=> {
-                Some("SHARE_SPACES_INFO_META")
-            }
-            Self::EVENT_DATA_SHARE_SPACES_COMPLETE_META=> {
+
+            Self::SHARE_SPACES_INFO_META => Some("SHARE_SPACES_INFO_META"),
+            Self::EVENT_DATA_SHARE_SPACES_COMPLETE_META => {
                 Some("EVENT_DATA_SHARE_SPACES_COMPLETE_META")
             }
             _ => None,
@@ -4345,24 +4407,23 @@ impl fmt::Debug for XrStructureType {
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct XrResult(pub i32);
 impl XrResult {
-    pub fn to_result(&self, name: &str)->Result<(),String>{
-        if *self != XrResult::SUCCESS{
+    pub fn to_result(&self, name: &str) -> Result<(), String> {
+        if *self != XrResult::SUCCESS {
             crate::log!("OpenXR error in {}: {}", name, self);
             Err(format!("OpenXR error in {}: {}", name, self))
-        }
-        else{
+        } else {
             Ok(())
         }
     }
-    
-    pub fn log_error(&self, name: &str)->bool{
-        if *self != XrResult::SUCCESS{
+
+    pub fn log_error(&self, name: &str) -> bool {
+        if *self != XrResult::SUCCESS {
             crate::log!("OpenXR error in {}: {}", name, self);
-            return true
+            return true;
         }
         false
     }
-        
+
     pub const SUCCESS: XrResult = Self(0i32);
     pub const TIMEOUT_EXPIRED: XrResult = Self(1i32);
     pub const SESSION_LOSS_PENDING: XrResult = Self(3i32);
@@ -4482,15 +4543,15 @@ impl XrResult {
     pub const ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED_KHR: XrResult =
         Self::ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED;
     pub const ERROR_PERMISSION_INSUFFICIENT_KHR: XrResult = Self::ERROR_PERMISSION_INSUFFICIENT;
-    
+
     pub const ERROR_SPACE_INSUFFICIENT_RESOURCES_META: XrResult = Self(-1000259000);
     pub const ERROR_SPACE_STORAGE_AT_CAPACITY_META: XrResult = Self(-1000259001);
     pub const ERROR_SPACE_INSUFFICIENT_VIEW_META: XrResult = Self(1000259002);
     pub const ERROR_SPACE_PERMISSION_INSUFFICIENT_META: XrResult = Self(-1000259003);
-    pub const ERROR_SPACE_RATE_LIMITED_META : XrResult = Self(-1000259004);
+    pub const ERROR_SPACE_RATE_LIMITED_META: XrResult = Self(-1000259004);
     pub const ERROR_SPACE_TOO_DARK_META: XrResult = Self(-1000259005);
-    pub const ERROR_SPACE_TOO_BRIGHT_META : XrResult = Self(-1000259006);
-    
+    pub const ERROR_SPACE_TOO_BRIGHT_META: XrResult = Self(-1000259006);
+
     pub fn from_raw(x: i32) -> Self {
         Self(x)
     }
@@ -4701,15 +4762,20 @@ impl std::fmt::Debug for XrResult {
             }
             Self::ERROR_FUTURE_PENDING_EXT => Some("ERROR_FUTURE_PENDING_EXT"),
             Self::ERROR_FUTURE_INVALID_EXT => Some("ERROR_FUTURE_INVALID_EXT"),
-            Self::ERROR_SPACE_INSUFFICIENT_RESOURCES_META => Some("ERROR_SPACE_INSUFFICIENT_RESOURCES_META"),
-            Self::ERROR_SPACE_STORAGE_AT_CAPACITY_META => Some("ERROR_SPACE_STORAGE_AT_CAPACITY_META"),
+            Self::ERROR_SPACE_INSUFFICIENT_RESOURCES_META => {
+                Some("ERROR_SPACE_INSUFFICIENT_RESOURCES_META")
+            }
+            Self::ERROR_SPACE_STORAGE_AT_CAPACITY_META => {
+                Some("ERROR_SPACE_STORAGE_AT_CAPACITY_META")
+            }
             Self::ERROR_SPACE_INSUFFICIENT_VIEW_META => Some("ERROR_SPACE_INSUFFICIENT_VIEW_META"),
-            Self::ERROR_SPACE_PERMISSION_INSUFFICIENT_META => Some("ERROR_SPACE_PERMISSION_INSUFFICIENT_META"),
+            Self::ERROR_SPACE_PERMISSION_INSUFFICIENT_META => {
+                Some("ERROR_SPACE_PERMISSION_INSUFFICIENT_META")
+            }
             Self::ERROR_SPACE_RATE_LIMITED_META => Some("ERROR_SPACE_RATE_LIMITED_META"),
             Self::ERROR_SPACE_TOO_DARK_META => Some("ERROR_SPACE_TOO_DARK_META"),
             Self::ERROR_SPACE_TOO_BRIGHT_META => Some("ERROR_SPACE_TOO_BRIGHT_META"),
-            
-            
+
             _ => None,
         };
         if let Some(reason) = reason {

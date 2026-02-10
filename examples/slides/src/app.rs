@@ -1,17 +1,15 @@
 use crate::{
-    makepad_widgets::*,
-    makepad_widgets::slides_view::*,
-    makepad_widgets::makepad_micro_serde::*,
-}; 
+    makepad_widgets::makepad_micro_serde::*, makepad_widgets::slides_view::*, makepad_widgets::*,
+};
 use std::fs::File;
 use std::io::Write;
 
-live_design!{ 
+live_design! {
     use link::widgets::*;
     use link::theme::*;
     use link::shaders::*;
     App = {{App}} {
-        
+
         ui: <Window> {
             show_bg: true
             width: Fill,
@@ -89,7 +87,7 @@ live_design!{
                         <SlideBody> {text: "- Automatic localisation\n- Generating Rust code\n     - Types\n     - Clean error messages"}
                     }
                     <Slide> {
-                        title = {text: "Thank you"}, 
+                        title = {text: "Thank you"},
                         <SlideBody> {text: "- Repo\n        https://github.com/makepad/makepad\n- Website\n        www.makepad.nl\n- Twitter\n        @rikarends\n        @ejpbruel\n- Questions?"}
                     }
                 }
@@ -102,18 +100,20 @@ app_main!(App);
 
 #[derive(Live)]
 pub struct App {
-    #[live] ui: WidgetRef,
-
+    #[live]
+    ui: WidgetRef,
 }
 
-impl LiveHook for App{
-    fn after_new_from_doc(&mut self, cx:&mut Cx){
+impl LiveHook for App {
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
         if let Ok(contents) = std::fs::read_to_string("makepad_slides_state.ron") {
             match AppStateRon::deserialize_ron(&contents) {
-                Ok(state)=>{
-                    self.ui.slides_view(ids!(slides_view)).set_current_slide(cx, state.slide);
+                Ok(state) => {
+                    self.ui
+                        .slides_view(ids!(slides_view))
+                        .set_current_slide(cx, state.slide);
                 }
-                _=>()
+                _ => (),
             }
         }
     }
@@ -126,15 +126,15 @@ impl LiveRegister for App {
 }
 
 #[derive(SerRon, DeRon)]
-struct AppStateRon{
-    slide:usize
+struct AppStateRon {
+    slide: usize,
 }
 
 impl MatchEvent for App {
-    fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
+    fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions) {
         let slides_view = self.ui.slides_view(ids!(slides_view));
-        if let Some(slide) = slides_view.flipped(&actions){
-            let saved = AppStateRon{slide}.serialize_ron();
+        if let Some(slide) = slides_view.flipped(&actions) {
+            let saved = AppStateRon { slide }.serialize_ron();
             let mut f = File::create("makepad_slides_state.ron").expect("Unable to create file");
             f.write_all(saved.as_bytes()).expect("Unable to write data");
         }

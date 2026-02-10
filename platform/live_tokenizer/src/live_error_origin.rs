@@ -1,16 +1,19 @@
 use std::fmt;
 
 #[macro_export]
-macro_rules!live_error_origin{
+macro_rules! live_error_origin {
     () => {
-        LiveErrorOrigin { filename : file ! ( ) . to_string ( ) , line : line ! ( ) as usize }
-    }
+        LiveErrorOrigin {
+            filename: file!().to_string(),
+            line: line!() as usize,
+        }
+    };
 }
 
 #[derive(Clone, Default, PartialEq)]
 pub struct LiveErrorOrigin {
     pub filename: String,
-    pub line:usize
+    pub line: usize,
 }
 
 impl fmt::Display for LiveErrorOrigin {

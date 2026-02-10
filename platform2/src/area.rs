@@ -122,14 +122,13 @@ impl Area {
         // Check if old area is stale by comparing against Cx's redraw_id
         if let Area::Instance(old_inst) = self {
             if let Area::Instance(new_inst) = new_area {
-                
-                if new_inst.redraw_id != old_inst.redraw_id || 
-                old_inst.draw_list_id != new_inst.draw_list_id || 
-                old_inst.draw_item_id != new_inst.draw_item_id
+                if new_inst.redraw_id != old_inst.redraw_id
+                    || old_inst.draw_list_id != new_inst.draw_list_id
+                    || old_inst.draw_item_id != new_inst.draw_item_id
                 {
                     return new_area;
                 }
-                
+
                 // Extend: keep old offset, expand count to cover both ranges
                 return Area::Instance(InstanceArea {
                     draw_list_id: old_inst.draw_list_id,

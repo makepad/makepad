@@ -8,7 +8,7 @@ pub struct CubicSegment {
     pub p0: Point,
     pub p1: Point,
     pub p2: Point,
-    pub p3: Point
+    pub p3: Point,
 }
 
 impl CubicSegment {

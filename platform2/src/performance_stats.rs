@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 #[derive(Debug)]
 pub struct FrameStats {
     pub occurred_at: f64,
-    pub time_spent: f64
+    pub time_spent: f64,
 }
 
 pub struct PerformanceStats {
@@ -24,11 +24,11 @@ impl PerformanceStats {
     pub fn process_frame_data(&mut self, time: f64) {
         if let Some(previous_time) = self.last_frame_time {
             if self.max_frame_times.len() == 0 {
-                self.max_frame_times.push_front(FrameStats{
+                self.max_frame_times.push_front(FrameStats {
                     occurred_at: time,
-                    time_spent: time - previous_time
+                    time_spent: time - previous_time,
                 });
-                return
+                return;
             }
 
             let current_period = (time * 10.0) as i64;
@@ -42,9 +42,9 @@ impl PerformanceStats {
                     self.max_frame_times.pop_back();
                 }
 
-                self.max_frame_times.push_front(FrameStats{
+                self.max_frame_times.push_front(FrameStats {
                     occurred_at: time,
-                    time_spent: time - previous_time
+                    time_spent: time - previous_time,
                 });
             }
         };

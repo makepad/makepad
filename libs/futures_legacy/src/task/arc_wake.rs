@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 /// A trait for waking up a specific task.
-/// 
+///
 /// Objects that implement this trait which are wrapped in an `Arc` can be converted into a
 /// [`Waker`].
-/// 
+///
 /// The following functions convert an `ArcWake` into a [`Waker`]:
 /// * [`waker`] converts an `Arc<impl ArcWake>` into a [`Waker`].
 /// * [`waker_ref`] converts a reference to an `Arc<Impl ArcWake>` into a [`WakerRef`].
-/// 
+///
 /// [`Waker`]: std::task::Waker
 /// [`WakerRef`]: super::WakerRef
 /// [`waker`]: super::waker()

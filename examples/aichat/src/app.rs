@@ -38,6 +38,7 @@ script_mod! {
                     height: Fit
                     selectable: true
                     use_code_block_widget: true
+                    use_math_widget: true
                     body: ""
                     code_block := View {
                         width: Fill
@@ -58,6 +59,12 @@ script_mod! {
                             width: Fill
                             height: Fit
                         }
+                    }
+                    inline_math := MathView {
+                        font_size: 13.0
+                    }
+                    display_math := MathView {
+                        font_size: 15.0
                     }
                 }
 
@@ -101,6 +108,7 @@ script_mod! {
                         height: Fit
                         selectable: true
                         use_code_block_widget: true
+                        use_math_widget: true
                         body: ""
                         draw_text +: {
                             get_color: fn() {
@@ -133,6 +141,12 @@ script_mod! {
                                 width: Fill
                                 height: Fit
                             }
+                        }
+                        inline_math := MathView {
+                            font_size: 13.0
+                        }
+                        display_math := MathView {
+                            font_size: 15.0
                         }
                     }
                 }

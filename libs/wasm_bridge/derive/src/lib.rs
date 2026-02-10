@@ -1,6 +1,5 @@
 //#![feature(proc_macro_span)]
-use proc_macro::{TokenStream};
-
+use proc_macro::TokenStream;
 
 mod derive_wasm_bridge;
 use derive_wasm_bridge::*;

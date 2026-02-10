@@ -1,10 +1,4 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*
-    }
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 live_design! {
     VectorLine = {{VectorLine}} {
@@ -39,7 +33,8 @@ pub struct VectorLine {
     walk: Walk,
     #[live]
     draw_ls: DrawLine,
-    #[redraw] #[rust]
+    #[redraw]
+    #[rust]
     area: Area,
     #[live(15.0)]
     line_width: f64,
@@ -64,12 +59,7 @@ pub enum LineAction {
 }
 
 impl Widget for VectorLine {
-    fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        _scope: &mut Scope,
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
     }
 

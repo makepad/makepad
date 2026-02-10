@@ -343,10 +343,7 @@ extern "C" {
         syms_out: *mut *const xkb_keysym_t,
     ) -> c_int;
 
-    pub fn xkb_state_key_get_one_sym(
-        state: *mut xkb_state,
-        key: xkb_keycode_t,
-    ) -> xkb_keysym_t;
+    pub fn xkb_state_key_get_one_sym(state: *mut xkb_state, key: xkb_keycode_t) -> xkb_keysym_t;
 
     // UTF-8 string queries
     pub fn xkb_state_key_get_utf8(
@@ -384,15 +381,9 @@ extern "C" {
     ) -> c_int;
 
     // LED state queries
-    pub fn xkb_state_led_name_is_active(
-        state: *mut xkb_state,
-        name: *const c_char,
-    ) -> c_int;
+    pub fn xkb_state_led_name_is_active(state: *mut xkb_state, name: *const c_char) -> c_int;
 
-    pub fn xkb_state_led_index_is_active(
-        state: *mut xkb_state,
-        idx: xkb_led_index_t,
-    ) -> c_int;
+    pub fn xkb_state_led_index_is_active(state: *mut xkb_state, idx: xkb_led_index_t) -> c_int;
 
     // Keymap queries
     pub fn xkb_keymap_mod_get_index(
@@ -411,28 +402,14 @@ extern "C" {
     ) -> xkb_led_index_t;
 
     // Key repeat
-    pub fn xkb_keymap_key_repeats(
-        keymap: *mut xkb_keymap,
-        key: xkb_keycode_t,
-    ) -> c_int;
+    pub fn xkb_keymap_key_repeats(keymap: *mut xkb_keymap, key: xkb_keycode_t) -> c_int;
 
     // Keysym utilities
-    pub fn xkb_keysym_get_name(
-        keysym: xkb_keysym_t,
-        buffer: *mut c_char,
-        size: usize,
-    ) -> c_int;
+    pub fn xkb_keysym_get_name(keysym: xkb_keysym_t, buffer: *mut c_char, size: usize) -> c_int;
 
-    pub fn xkb_keysym_from_name(
-        name: *const c_char,
-        flags: u32,
-    ) -> xkb_keysym_t;
+    pub fn xkb_keysym_from_name(name: *const c_char, flags: u32) -> xkb_keysym_t;
 
-    pub fn xkb_keysym_to_utf8(
-        keysym: xkb_keysym_t,
-        buffer: *mut c_char,
-        size: usize,
-    ) -> c_int;
+    pub fn xkb_keysym_to_utf8(keysym: xkb_keysym_t, buffer: *mut c_char, size: usize) -> c_int;
 
     pub fn xkb_keysym_to_utf32(keysym: xkb_keysym_t) -> u32;
 
@@ -459,24 +436,19 @@ extern "C" {
         size: usize,
     ) -> c_int;
 
-    pub fn xkb_compose_state_get_one_sym(
-        state: *mut c_void, // xkb_compose_state
+    pub fn xkb_compose_state_get_one_sym(state: *mut c_void, // xkb_compose_state
     ) -> xkb_keysym_t;
 
-    pub fn xkb_compose_state_get_status(
-        state: *mut c_void, // xkb_compose_state
+    pub fn xkb_compose_state_get_status(state: *mut c_void, // xkb_compose_state
     ) -> u32; // xkb_compose_status
 
-    pub fn xkb_compose_state_reset(
-        state: *mut c_void, // xkb_compose_state
+    pub fn xkb_compose_state_reset(state: *mut c_void, // xkb_compose_state
     );
 
-    pub fn xkb_compose_state_unref(
-        state: *mut c_void, // xkb_compose_state
+    pub fn xkb_compose_state_unref(state: *mut c_void, // xkb_compose_state
     );
 
-    pub fn xkb_compose_table_unref(
-        table: *mut c_void, // xkb_compose_table
+    pub fn xkb_compose_table_unref(table: *mut c_void, // xkb_compose_table
     );
 }
 
@@ -610,8 +582,8 @@ pub fn xkb_keysym_to_keycode(keysym: xkb_keysym_t) -> crate::event::keyboard::Ke
 }
 
 // Safe wrapper layer for XKB functionality
-use std::ptr;
 use std::ffi::CString;
+use std::ptr;
 
 /// Safe wrapper around XKB context
 pub struct XkbContext {
@@ -909,9 +881,8 @@ impl XkbCompose {
     /// Create a new compose table and state for the given locale
     pub fn new(context: &XkbContext, locale: &str) -> Option<Self> {
         let c_locale = CString::new(locale).ok()?;
-        let table = unsafe {
-            xkb_compose_table_new_from_locale(context.as_ptr(), c_locale.as_ptr(), 0)
-        };
+        let table =
+            unsafe { xkb_compose_table_new_from_locale(context.as_ptr(), c_locale.as_ptr(), 0) };
 
         if table.is_null() {
             return None;
@@ -959,11 +930,7 @@ impl XkbCompose {
 
         let mut buffer = vec![0u8; size as usize];
         let actual_size = unsafe {
-            xkb_compose_state_get_utf8(
-                self.state,
-                buffer.as_mut_ptr() as *mut c_char,
-                buffer.len(),
-            )
+            xkb_compose_state_get_utf8(self.state, buffer.as_mut_ptr() as *mut c_char, buffer.len())
         };
 
         if actual_size > 0 {
@@ -1078,13 +1045,8 @@ pub fn keysym_from_name(name: &str) -> Option<u32> {
 /// Helper function to convert keysym value to name
 pub fn keysym_get_name(keysym: u32) -> String {
     let mut buffer = [0u8; 64];
-    let size = unsafe {
-        xkb_keysym_get_name(
-            keysym,
-            buffer.as_mut_ptr() as *mut c_char,
-            buffer.len(),
-        )
-    };
+    let size =
+        unsafe { xkb_keysym_get_name(keysym, buffer.as_mut_ptr() as *mut c_char, buffer.len()) };
 
     if size > 0 && size < buffer.len() as i32 {
         let name_bytes = &buffer[..size as usize];
@@ -1097,18 +1059,16 @@ pub fn keysym_get_name(keysym: u32) -> String {
 /// Helper function to convert keysym to UTF-8 string
 pub fn keysym_to_utf8(keysym: u32) -> String {
     let mut buffer = [0u8; 8]; // UTF-8 character can be at most 4 bytes, plus null terminator
-    let size = unsafe {
-        xkb_keysym_to_utf8(
-            keysym,
-            buffer.as_mut_ptr() as *mut c_char,
-            buffer.len(),
-        )
-    };
+    let size =
+        unsafe { xkb_keysym_to_utf8(keysym, buffer.as_mut_ptr() as *mut c_char, buffer.len()) };
 
     if size > 0 && size < buffer.len() as i32 {
         let utf8_bytes = &buffer[..size as usize];
         // Remove null terminator if present
-        let end = utf8_bytes.iter().position(|&b| b == 0).unwrap_or(utf8_bytes.len());
+        let end = utf8_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(utf8_bytes.len());
         String::from_utf8_lossy(&utf8_bytes[..end]).to_string()
     } else {
         String::new()

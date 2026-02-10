@@ -4,7 +4,7 @@ use {
 };
 
 /// A reference to a `Waker`.
-/// 
+///
 /// [`Waker`]: std::task::Waker
 #[derive(Debug)]
 pub struct WakerRef<'a> {

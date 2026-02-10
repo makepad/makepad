@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoRadioButton = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/radiobutton.md") } 
+            <Markdown> { body: dep("crate://self/resources/radiobutton.md") }
         }
         demos = {
             <H4> { text: "Default"}
@@ -96,7 +94,7 @@ live_design!{
 
                     label_walk: { margin: { left: 5. } }
                     label_align: { x: 0., y: 0. }
-                    
+
                     draw_icon: {
                         color: #A00
                         color_active: #F00
@@ -118,7 +116,7 @@ live_design!{
 
                     label_walk: { margin: { left: 5. } }
                     label_align: { x: 0., y: 0. }
-                    
+
                     draw_icon: {
                         color: #A00
                         color_active: #F00
@@ -417,9 +415,9 @@ live_design!{
                         width: Fit, height: Fit,
                         align: { x: 0., y: 0. }
                         padding: <THEME_MSPACE_V_2> { left: (THEME_SPACE_2)}
-                        
+
                         icon_walk: { margin: { left: 20. } }
-                        
+
                         label_walk: {
                             width: Fit, height: Fit,
                             margin: <THEME_MSPACE_H_1> { left: 13. }
@@ -484,7 +482,7 @@ live_design!{
                             color_2_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
                             color_2_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
                         }
-                    
+
                     }
                     radio2 = <RadioButton> { text: "Option 2" }
                     radio3 = <RadioButton> { text: "Option 3" }

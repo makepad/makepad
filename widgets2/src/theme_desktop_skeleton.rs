@@ -1,9 +1,9 @@
 use crate::makepad_platform::*;
 
-script_mod!{
+script_mod! {
     use mod.math.*
     use mod.pod.*
-    
+
     mod.themes.skeleton = {
         let theme = me
         // GLOBAL PARAMETERS
@@ -17,7 +17,7 @@ script_mod!{
         space_2: 6.
         space_3: 9.
 
-        mspace_1: {top: 3., right: 3., bottom: 3., left: 3.} 
+        mspace_1: {top: 3., right: 3., bottom: 3., left: 3.}
         mspace_h_1: {top: 0., right: 3., bottom: 0., left: 3.}
         mspace_v_1: {top: 3., right: 0., bottom: 3., left: 0.}
         mspace_2: {top: 6., right: 6., bottom: 6., left: 6.}
@@ -31,7 +31,7 @@ script_mod!{
         data_icon_width: 15.5
         data_icon_height: 21.5
 
-        container_corner_radius: 5. 
+        container_corner_radius: 5.
         textselection_corner_radius: 12.5
         tab_height: 38.
         tab_flat_height: 33.
@@ -220,7 +220,7 @@ script_mod!{
         color_val_1_focus: #6
         color_val_1_drag: #6
         color_val_1_disabled: #00000000
-        
+
         color_val_2: #3
         color_val_2_hover: #4
         color_val_2_focus: #4

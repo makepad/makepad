@@ -1,6 +1,6 @@
 #![cfg_attr(lines, feature(proc_macro_span))]
 
-use proc_macro::{TokenStream};
+use proc_macro::TokenStream;
 
 mod derive_live;
 use crate::derive_live::*;
@@ -13,7 +13,6 @@ use crate::derive_live_hook::*;
 
 mod derive_live_read;
 use crate::derive_live_read::*;
-
 
 mod live_design_macro;
 use crate::live_design_macro::*;
@@ -30,19 +29,22 @@ use crate::derive_live_registry::*;
 //#[path = "../../live_tokenizer/src/colorhex.rs"]
 //mod colorhex;
 
-#[proc_macro_derive(Live, attributes(
-    calc,
-    live,
-    rust,
-    pick,
-    animator,
-    walk,
-    layout,
-    deref,
-    designable,
-    live_ignore,
-    live_debug
-))]
+#[proc_macro_derive(
+    Live,
+    attributes(
+        calc,
+        live,
+        rust,
+        pick,
+        animator,
+        walk,
+        layout,
+        deref,
+        designable,
+        live_ignore,
+        live_debug
+    )
+)]
 pub fn derive_live(input: TokenStream) -> TokenStream {
     derive_live_impl(input)
 }
@@ -56,7 +58,6 @@ pub fn derive_live_apply(input: TokenStream) -> TokenStream {
 pub fn derive_live_register(input: TokenStream) -> TokenStream {
     derive_live_register_impl(input)
 }
-
 
 #[proc_macro_derive(LiveRead)]
 pub fn derive_live_read(input: TokenStream) -> TokenStream {
@@ -108,8 +109,7 @@ pub fn derive_live_atomic(input: TokenStream) -> TokenStream {
     derive_live_atomic_impl(input)
 }
 
-#[proc_macro_derive(DefaultNone)] 
+#[proc_macro_derive(DefaultNone)]
 pub fn derive_widget_action(input: TokenStream) -> TokenStream {
     derive_default_none_impl(input)
 }
-

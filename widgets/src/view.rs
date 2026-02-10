@@ -1,5 +1,7 @@
 use {
-    crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*}, makepad_draw::event::FingerLongPressEvent, std::cell::RefCell
+    crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
+    makepad_draw::event::FingerLongPressEvent,
+    std::cell::RefCell,
 };
 
 live_design! {
@@ -47,20 +49,20 @@ impl LiveHook for ViewDebug {
         match apply.from{
             ApplyFrom::NewFromDoc{file_id} | ApplyFrom::UpdateFromDoc{file_id}=>{
                 // store this here
-                
+
                 let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                
+
                 let registry = cx.live_registry.clone();
                 let registry = registry.borrow();
                 let  (nodes,index) = registry.ptr_to_nodes_index(live_ptr);
                 // then apply it
-                
+
             }
             _=>{}
         }
     }
     */
-    
+
     fn skip_apply(
         &mut self,
         _cx: &mut Cx,
@@ -179,13 +181,13 @@ pub struct View {
     design_mode: bool,
 
     #[rust]
-    find_cache: RefCell<SmallVec<[(u64, WidgetSet);3]>>,
+    find_cache: RefCell<SmallVec<[(u64, WidgetSet); 3]>>,
 
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
     #[rust]
     view_size: Option<Vec2d>,
-    
+
     #[rust]
     area: Area,
     #[rust]
@@ -194,16 +196,15 @@ pub struct View {
     #[rust]
     texture_cache: Option<ViewTextureCache>,
     #[rust]
-    defer_walks: SmallVec<[(LiveId, DeferredWalk);1]>,
+    defer_walks: SmallVec<[(LiveId, DeferredWalk); 1]>,
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
-    children: SmallVec<[(LiveId, WidgetRef);2]>,
+    children: SmallVec<[(LiveId, WidgetRef); 2]>,
     #[rust]
-    live_update_order: SmallVec<[LiveId;1]>,
+    live_update_order: SmallVec<[LiveId; 1]>,
     //#[rust]
     //draw_order: Vec<LiveId>,
-
     #[animator]
     animator: Animator,
 }
@@ -229,18 +230,13 @@ impl LiveHook for View {
         }
     }
 
-    fn after_apply(
-        &mut self,
-        cx: &mut Cx,
-        apply: &mut Apply,
-        _index: usize,
-        _nodes: &[LiveNode],
-    ) {
-        if apply.from.is_update_from_doc(){//livecoding
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if apply.from.is_update_from_doc() {
+            //livecoding
             // update/delete children list
-            for (idx, id) in self.live_update_order.iter().enumerate(){
+            for (idx, id) in self.live_update_order.iter().enumerate() {
                 // lets remove this id from the childlist
-                if let Some(pos) = self.children.iter().position(|(i,_v)| *i == *id){
+                if let Some(pos) = self.children.iter().position(|(i, _v)| *i == *id) {
                     // alright so we have the position its in now, and the position it should be in
                     self.children.swap(idx, pos);
                 }
@@ -265,13 +261,14 @@ impl LiveHook for View {
         apply: &mut Apply,
         index: usize,
         nodes: &[LiveNode],
-    ) -> usize { 
-
+    ) -> usize {
         let id = nodes[index].id;
         match apply.from {
             ApplyFrom::Animate | ApplyFrom::Over => {
                 let node_id = nodes[index].id;
-                if let Some((_,component)) = self.children.iter_mut().find(|(id,_)| *id == node_id) {
+                if let Some((_, component)) =
+                    self.children.iter_mut().find(|(id, _)| *id == node_id)
+                {
                     component.apply(cx, apply, index, nodes)
                 } else {
                     nodes.skip_node(index)
@@ -279,16 +276,20 @@ impl LiveHook for View {
             }
             ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
                 if nodes[index].is_instance_prop() {
-                    if apply.from.is_update_from_doc(){//livecoding
+                    if apply.from.is_update_from_doc() {
+                        //livecoding
                         self.live_update_order.push(id);
                     }
                     //self.draw_order.push(id);
-                    if let Some((_,node)) = self.children.iter_mut().find(|(id2,_)| *id2 == id){
+                    if let Some((_, node)) = self.children.iter_mut().find(|(id2, _)| *id2 == id) {
                         node.apply(cx, apply, index, nodes)
-                    }
-                    else{
-                        self.children.push((id,WidgetRef::new(cx)));
-                        self.children.last_mut().unwrap().1.apply(cx, apply, index, nodes)
+                    } else {
+                        self.children.push((id, WidgetRef::new(cx)));
+                        self.children
+                            .last_mut()
+                            .unwrap()
+                            .1
+                            .apply(cx, apply, index, nodes)
                     }
                 } else {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
@@ -483,7 +484,7 @@ impl ViewSet {
         }
     }
 
-    pub fn set_visible(&self, cx:&mut Cx, visible: bool) {
+    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         for item in self.iter() {
             item.set_visible(cx, visible)
         }
@@ -557,22 +558,24 @@ impl WidgetNode for View {
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
-    
-    fn area(&self)->Area{
+
+    fn area(&self) -> Area {
         self.area
     }
-    
+
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
-        for (_,child) in &mut self.children {
+        for (_, child) in &mut self.children {
             child.redraw(cx);
         }
     }
-    
-    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
-        for (_,child) in &self.children {
+
+    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
+        for (_, child) in &self.children {
             let x = child.uid_to_widget(uid);
-            if !x.is_empty(){return x}
+            if !x.is_empty() {
+                return x;
+            }
         }
         WidgetRef::empty()
     }
@@ -582,15 +585,17 @@ impl WidgetNode for View {
             WidgetCache::Yes | WidgetCache::Clear => {
                 if let WidgetCache::Clear = cached {
                     self.find_cache.borrow_mut().clear();
-                    if path.len() == 0{
-                        return
+                    if path.len() == 0 {
+                        return;
                     }
                 }
                 let mut hash = 0u64;
                 for i in 0..path.len() {
                     hash ^= path[i].0
                 }
-                if let Some((_,widget_set)) = self.find_cache.borrow().iter().find(|(h,_v)| h == &hash) {
+                if let Some((_, widget_set)) =
+                    self.find_cache.borrow().iter().find(|(h, _v)| h == &hash)
+                {
                     results.extend_from_set(widget_set);
                     /*#[cfg(not(ignore_query))]
                     if results.0.len() == 0{
@@ -603,20 +608,20 @@ impl WidgetNode for View {
                     return;
                 }
                 let mut local_results = WidgetSet::empty();
-                if let Some((_,child)) = self.children.iter().find(|(id,_)| *id == path[0]) {
+                if let Some((_, child)) = self.children.iter().find(|(id, _)| *id == path[0]) {
                     if path.len() > 1 {
                         child.find_widgets(&path[1..], WidgetCache::No, &mut local_results);
                     } else {
                         local_results.push(child.clone());
                     }
                 }
-                for (_,child) in &self.children {
+                for (_, child) in &self.children {
                     child.find_widgets(path, WidgetCache::No, &mut local_results);
                 }
                 if !local_results.is_empty() {
                     results.extend_from_set(&local_results);
                 }
-               /* #[cfg(not(ignore_query))]
+                /* #[cfg(not(ignore_query))]
                 if local_results.0.len() == 0{
                     log!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
                 }
@@ -627,27 +632,27 @@ impl WidgetNode for View {
                 self.find_cache.borrow_mut().push((hash, local_results));
             }
             WidgetCache::No => {
-                 if let Some((_,child)) = self.children.iter().find(|(id,_)| *id == path[0]) {
+                if let Some((_, child)) = self.children.iter().find(|(id, _)| *id == path[0]) {
                     if path.len() > 1 {
                         child.find_widgets(&path[1..], WidgetCache::No, results);
                     } else {
                         results.push(child.clone());
                     }
                 }
-                for (_,child) in &self.children {
+                for (_, child) in &self.children {
                     child.find_widgets(path, WidgetCache::No, results);
                 }
             }
         }
     }
-    
-    fn set_visible(&mut self, cx:&mut Cx, visible:bool) {
-        if self.visible != visible{
+
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.visible != visible {
             self.visible = visible;
             self.redraw(cx);
         }
     }
-        
+
     fn visible(&self) -> bool {
         self.visible
     }
@@ -655,11 +660,10 @@ impl WidgetNode for View {
 
 impl Widget for View {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-                
-        if !self.visible && event.requires_visibility(){
-            return
+        if !self.visible && event.requires_visibility() {
+            return;
         }
-        
+
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.redraw(cx);
@@ -701,7 +705,7 @@ impl Widget for View {
             }
             EventOrder::List(list) => {
                 for id in list {
-                    if let Some((_,child)) = self.children.iter_mut().find(|(id2,_)| id2 == id) {
+                    if let Some((_, child)) = self.children.iter_mut().find(|(id2, _)| id2 == id) {
                         scope.with_id(*id, |scope| {
                             child.handle_event(cx, event, scope);
                         })
@@ -709,14 +713,14 @@ impl Widget for View {
                 }
             }
         }
-                
-        match event.hit_designer(cx, self.area()){
-            HitDesigner::DesignerPick(_e)=>{
+
+        match event.hit_designer(cx, self.area()) {
+            HitDesigner::DesignerPick(_e) => {
                 cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
             }
-            _=>()
+            _ => (),
         }
-        
+
         if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
                 Hit::FingerDown(e) => {
@@ -729,7 +733,9 @@ impl Widget for View {
                     }
                 }
                 Hit::FingerMove(e) => cx.widget_action(uid, &scope.path, ViewAction::FingerMove(e)),
-                Hit::FingerLongPress(e) => cx.widget_action(uid, &scope.path, ViewAction::FingerLongPress(e)), 
+                Hit::FingerLongPress(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerLongPress(e))
+                }
                 Hit::FingerUp(e) => {
                     cx.widget_action(uid, &scope.path, ViewAction::FingerUp(e));
                     if self.animator.live_ptr.is_some() {
@@ -761,7 +767,6 @@ impl Widget for View {
             scroll_bars.handle_scroll_event(cx, event, scope, &mut Vec::new());
         }
     }
-
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // the beginning state
@@ -800,10 +805,7 @@ impl Widget for View {
                                     2.0 / self.dpi_factor.unwrap_or(1.0),
                                 );
                             } else {*/
-                                cx.set_pass_area(
-                                    &texture_cache.pass,
-                                    self.area,
-                                );
+                            cx.set_pass_area(&texture_cache.pass, self.area);
                             //}
                         }
                         return DrawStep::done();
@@ -832,7 +834,7 @@ impl Widget for View {
                     }
                     let texture_cache = self.texture_cache.as_mut().unwrap();
                     cx.make_child_pass(&texture_cache.pass);
-                    cx.begin_pass(&texture_cache.pass, self.dpi_factor); 
+                    cx.begin_pass(&texture_cache.pass, self.dpi_factor);
                     self.draw_list.as_mut().unwrap().begin_always(cx)
                 }
                 ViewOptimize::DrawList => {
@@ -873,7 +875,7 @@ impl Widget for View {
         while let Some(DrawState::Drawing(step, resume)) = self.draw_state.get() {
             if step < self.children.len() {
                 //let id = self.draw_order[step];
-                if let Some((id,child)) = self.children.get_mut(step) {
+                if let Some((id, child)) = self.children.get_mut(step) {
                     if child.visible() {
                         let walk = child.walk(cx);
                         if resume {
@@ -895,7 +897,7 @@ impl Widget for View {
         while let Some(DrawState::DeferWalk(step)) = self.draw_state.get() {
             if step < self.defer_walks.len() {
                 let (id, dw) = &mut self.defer_walks[step];
-                if let Some((id, child)) = self.children.iter_mut().find(|(id2,_)|id2 == id) {
+                if let Some((id, child)) = self.children.iter_mut().find(|(id2, _)| id2 == id) {
                     let walk = dw.resolve(cx);
                     scope.with_id(*id, |scope| child.draw_walk(cx, scope, walk))?;
                 }
@@ -940,7 +942,7 @@ impl Widget for View {
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
                         let texture_cache = self.texture_cache.as_mut().unwrap();
-                       /* if false {
+                        /* if false {
                             // FIXME(eddyb) this was the previous logic,
                             // but the only tested apps that use `CachedView`
                             // are sized correctly (regardless of `dpi_factor`)
@@ -951,10 +953,7 @@ impl Widget for View {
                                 2.0 / self.dpi_factor.unwrap_or(1.0),
                             );
                         } else {*/
-                            cx.set_pass_area(
-                                &texture_cache.pass,
-                                area,
-                            );
+                        cx.set_pass_area(&texture_cache.pass, area);
                         //}
                     }
                 }
@@ -1008,28 +1007,26 @@ enum DrawState {
 }
 
 impl View {
-    pub fn swap_child(&mut self, pos_a: usize, pos_b: usize){
+    pub fn swap_child(&mut self, pos_a: usize, pos_b: usize) {
         self.children.swap(pos_a, pos_b);
     }
-    
-    pub fn child_index(&mut self, comp:&WidgetRef)->Option<usize>{
-        if let Some(pos) = self.children.iter().position(|(_,w)|{w == comp}){
+
+    pub fn child_index(&mut self, comp: &WidgetRef) -> Option<usize> {
+        if let Some(pos) = self.children.iter().position(|(_, w)| w == comp) {
             Some(pos)
-        }
-        else{
+        } else {
             None
         }
     }
-    
-    pub fn child_at_index(&mut self, index:usize)->Option<&WidgetRef>{
-        if let Some(f) = self.children.get(index){
+
+    pub fn child_at_index(&mut self, index: usize) -> Option<&WidgetRef> {
+        if let Some(f) = self.children.get(index) {
             Some(&f.1)
-        }
-        else{
+        } else {
             None
         }
     }
-    
+
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: Vec2d) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.set_scroll_pos(cx, v);
@@ -1064,11 +1061,11 @@ impl View {
     pub fn child_count(&self) -> usize {
         self.children.len()
     }
-    
-    pub fn debug_print_children(&self){
+
+    pub fn debug_print_children(&self) {
         log!("Debug print view children {:?}", self.children.len());
-        for i in 0..self.children.len(){
-            log!("Child: {}",self.children[i].0)
+        for i in 0..self.children.len() {
+            log!("Child: {}", self.children[i].0)
         }
     }
 

@@ -729,10 +729,8 @@ impl<W: JfifWrite> Encoder<W> {
                                 &row[i],
                                 block_x * 8 * max_h_sampling + (h_offset * 8),
                                 v_offset * 8,
-                                max_h_sampling
-                                    / component.horizontal_sampling_factor as usize,
-                                max_v_sampling
-                                    / component.vertical_sampling_factor as usize,
+                                max_h_sampling / component.horizontal_sampling_factor as usize,
+                                max_v_sampling / component.vertical_sampling_factor as usize,
                                 buffer_width,
                             );
 

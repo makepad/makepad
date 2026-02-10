@@ -422,6 +422,6 @@ pub(crate) fn android_to_makepad_key_code(key_code: u32) -> KeyCode {
         160 => KeyCode::NumpadEnter,
         161 => KeyCode::NumpadEquals,
 
-        _ => KeyCode::Unknown
+        _ => KeyCode::Unknown,
     }
 }

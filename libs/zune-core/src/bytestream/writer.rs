@@ -14,14 +14,14 @@ enum Mode {
     // Big endian
     BE,
     // Little Endian
-    LE
+    LE,
 }
 
 /// Encapsulates a simple Byte writer with
 /// support for Endian aware writes
 pub struct ZWriter<T: ZByteWriterTrait> {
-    buffer:        T,
-    bytes_written: usize
+    buffer: T,
+    bytes_written: usize,
 }
 
 impl<T: ZByteWriterTrait> ZWriter<T> {
@@ -66,8 +66,8 @@ impl<T: ZByteWriterTrait> ZWriter<T> {
     /// # Arguments
     pub fn new(data: T) -> ZWriter<T> {
         ZWriter {
-            buffer:        data,
-            bytes_written: 0
+            buffer: data,
+            bytes_written: 0,
         }
     }
 
@@ -99,7 +99,8 @@ impl<T: ZByteWriterTrait> ZWriter<T> {
     /// some redundant code.
     #[inline]
     pub fn write_const_bytes<const N: usize>(
-        &mut self, byte: &[u8; N]
+        &mut self,
+        byte: &[u8; N],
     ) -> Result<(), ZByteIoError> {
         self.buffer.write_const_bytes(byte)?;
         self.bytes_written += N;

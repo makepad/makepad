@@ -1,19 +1,19 @@
 use crate::*;
 use makepad_script::*;
 
-pub mod net;
-pub mod draw; 
+pub mod draw;
 pub mod event;
-pub mod vm;
 pub mod fs;
-pub mod run;
-pub mod std;
-pub mod script;
-pub mod timer;
-pub mod task;
+pub mod net;
 pub mod res;
+pub mod run;
+pub mod script;
+pub mod std;
+pub mod task;
+pub mod timer;
+pub mod vm;
 
-pub fn script_mod(vm:&mut ScriptVm){
+pub fn script_mod(vm: &mut ScriptVm) {
     crate::script::net::script_mod(vm);
     crate::script::fs::script_mod(vm);
     crate::script::run::script_mod(vm);

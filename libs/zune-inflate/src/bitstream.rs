@@ -14,12 +14,12 @@
 pub struct BitStreamReader<'src> {
     // buffer from which we are pulling in bits from
     // used in decompression.
-    pub src:       &'src [u8],
+    pub src: &'src [u8],
     // position in our buffer,
-    pub position:  usize,
+    pub position: usize,
     pub bits_left: u8,
-    pub buffer:    u64,
-    pub over_read: usize
+    pub buffer: u64,
+    pub over_read: usize,
 }
 
 impl<'src> BitStreamReader<'src> {
@@ -31,10 +31,10 @@ impl<'src> BitStreamReader<'src> {
     pub fn new(in_buffer: &'src [u8]) -> BitStreamReader<'src> {
         BitStreamReader {
             bits_left: 0,
-            buffer:    0,
-            src:       in_buffer,
-            position:  0,
-            over_read: 0
+            buffer: 0,
+            src: in_buffer,
+            position: 0,
+            over_read: 0,
         }
     }
     /// Refill the bitstream ensuring the buffer has bits between
@@ -64,7 +64,7 @@ impl<'src> BitStreamReader<'src> {
                 // bits left are now between 56-63
                 self.bits_left |= 56;
             }
-            None => self.refill_slow()
+            None => self.refill_slow(),
         }
     }
     #[inline(always)]

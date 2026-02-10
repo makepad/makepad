@@ -10,7 +10,7 @@ use {
 };
 
 /// Runs the given future to completion on the current thread.
-/// 
+///
 /// This function will block until the given future has completed.
 pub fn block_on<F: Future>(mut f: F) -> <F as Future>::Output {
     use std::pin::Pin;
@@ -44,7 +44,7 @@ fn run_executor<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(mut f: F) -> T {
         }
     }
     let _enter = super::enter().unwrap();
-   
+
     CURRENT_THREAD_NOTIFIER.with(|notifier| {
         let waker = waker_ref(notifier);
         let mut cx = Context::from_waker(&waker);

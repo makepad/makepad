@@ -16,7 +16,7 @@ use makepad_zune_core::bytestream::ZByteIoError;
 
 use crate::misc::{
     START_OF_FRAME_EXT_AR, START_OF_FRAME_EXT_SEQ, START_OF_FRAME_LOS_SEQ,
-    START_OF_FRAME_LOS_SEQ_AR, START_OF_FRAME_PROG_DCT_AR
+    START_OF_FRAME_LOS_SEQ_AR, START_OF_FRAME_PROG_DCT_AR,
 };
 
 /// Common Decode errors
@@ -50,7 +50,7 @@ pub enum DecodeErrors {
     /// Too small output for size
     TooSmallOutput(usize, usize),
 
-    IoErrors(ZByteIoError)
+    IoErrors(ZByteIoError),
 }
 
 #[cfg(feature = "std")]
@@ -120,7 +120,7 @@ pub enum UnsupportedSchemes {
     /// Progressive DCT, arithmetic coding,
     ProgressiveDctArithmetic,
     /// Lossless ( sequential), arithmetic coding
-    LosslessArithmetic
+    LosslessArithmetic,
 }
 
 impl Debug for UnsupportedSchemes {
@@ -161,7 +161,7 @@ impl UnsupportedSchemes {
             START_OF_FRAME_LOS_SEQ_AR => Some(Self::LosslessArithmetic),
             START_OF_FRAME_EXT_SEQ => Some(Self::ExtendedSequentialHuffman),
             START_OF_FRAME_EXT_AR => Some(Self::ExtendedSequentialDctArithmetic),
-            _ => None
+            _ => None,
         }
     }
 }

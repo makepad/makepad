@@ -1,7 +1,7 @@
 use super::{
+    input::Cursor,
     prog::{InstPtr, Pred, Prog},
     sparse_set::SparseSet,
-    input::Cursor,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -172,12 +172,7 @@ struct AddThreadView<'a, C: Cursor> {
 }
 
 impl<'a, C: Cursor> AddThreadView<'a, C> {
-    fn add_thread(
-        &mut self,
-        threads: &mut Threads,
-        inst: InstPtr,
-        slots: &mut [Option<usize>],
-    ) {
+    fn add_thread(&mut self, threads: &mut Threads, inst: InstPtr, slots: &mut [Option<usize>]) {
         use super::prog::Inst;
 
         self.stack.push(AddThreadFrame::AddThread(inst));

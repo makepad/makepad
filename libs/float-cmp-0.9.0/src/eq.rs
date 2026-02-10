@@ -1,11 +1,11 @@
 // Copyright 2014-2020 Optimal Computing (NZ) Ltd.
 // Licensed under the MIT license.  See LICENSE for details.
 
+use super::Ulps;
 use core::{f32, f64};
 #[cfg(feature = "num-traits")]
 #[allow(unused_imports)]
 use num_traits::float::FloatCore;
-use super::Ulps;
 
 /// A trait for approximate equality comparisons.
 pub trait ApproxEq: Sized {
@@ -45,14 +45,14 @@ pub trait ApproxEq: Sized {
 #[derive(Debug, Clone, Copy)]
 pub struct F32Margin {
     pub epsilon: f32,
-    pub ulps: i32
+    pub ulps: i32,
 }
 impl Default for F32Margin {
     #[inline]
     fn default() -> F32Margin {
         F32Margin {
             epsilon: f32::EPSILON,
-            ulps: 4
+            ulps: 4,
         }
     }
 }
@@ -61,27 +61,21 @@ impl F32Margin {
     pub fn zero() -> F32Margin {
         F32Margin {
             epsilon: 0.0,
-            ulps: 0
+            ulps: 0,
         }
     }
     pub fn epsilon(self, epsilon: f32) -> Self {
-        F32Margin {
-            epsilon,
-            ..self
-        }
+        F32Margin { epsilon, ..self }
     }
     pub fn ulps(self, ulps: i32) -> Self {
-        F32Margin {
-            ulps,
-            ..self
-        }
+        F32Margin { ulps, ..self }
     }
 }
 impl From<(f32, i32)> for F32Margin {
     fn from(m: (f32, i32)) -> F32Margin {
         F32Margin {
             epsilon: m.0,
-            ulps: m.1
+            ulps: m.1,
         }
     }
 }
@@ -136,7 +130,9 @@ fn f32_approx_eq_test4() {
 fn f32_approx_eq_test5() {
     let f: f32 = 0.1_f32;
     let mut sum: f32 = 0.0_f32;
-    for _ in 0_isize..10_isize { sum += f; }
+    for _ in 0_isize..10_isize {
+        sum += f;
+    }
     let product: f32 = f * 10.0_f32;
     assert!(sum != product); // Should not be directly equal:
     assert!(sum.approx_eq(product, (f32::EPSILON, 1)) == true);
@@ -148,7 +144,7 @@ fn f32_approx_eq_test6() {
     let y: f32 = 1000000.1_f32;
     assert!(x != y); // Should not be directly equal
     assert!(x.approx_eq(y, (0.0, 2)) == true); // 2 ulps does it
-    // epsilon method no good here:
+                                               // epsilon method no good here:
     assert!(x.approx_eq(y, (1000.0 * f32::EPSILON, 0)) == false);
 }
 
@@ -171,14 +167,14 @@ fn f32_approx_eq_test6() {
 #[derive(Debug, Clone, Copy)]
 pub struct F64Margin {
     pub epsilon: f64,
-    pub ulps: i64
+    pub ulps: i64,
 }
 impl Default for F64Margin {
     #[inline]
     fn default() -> F64Margin {
         F64Margin {
             epsilon: f64::EPSILON,
-            ulps: 4
+            ulps: 4,
         }
     }
 }
@@ -187,27 +183,21 @@ impl F64Margin {
     pub fn zero() -> F64Margin {
         F64Margin {
             epsilon: 0.0,
-            ulps: 0
+            ulps: 0,
         }
     }
     pub fn epsilon(self, epsilon: f64) -> Self {
-        F64Margin {
-            epsilon,
-            ..self
-        }
+        F64Margin { epsilon, ..self }
     }
     pub fn ulps(self, ulps: i64) -> Self {
-        F64Margin {
-            ulps,
-            ..self
-        }
+        F64Margin { ulps, ..self }
     }
 }
 impl From<(f64, i64)> for F64Margin {
     fn from(m: (f64, i64)) -> F64Margin {
         F64Margin {
             epsilon: m.0,
-            ulps: m.1
+            ulps: m.1,
         }
     }
 }
@@ -239,7 +229,7 @@ fn f64_approx_eq_test1() {
     let g: f64 = -0.0000000000000005551115123125783_f64;
     assert!(f != g); // Should not be precisely equal.
     assert!(f.approx_eq(g, (3.0 * f64::EPSILON, 0)) == true); // 3e is enough.
-    // ULPs test won't ever call these equal.
+                                                              // ULPs test won't ever call these equal.
 }
 #[test]
 fn f64_approx_eq_test2() {
@@ -263,7 +253,9 @@ fn f64_approx_eq_test4() {
 fn f64_approx_eq_test5() {
     let f: f64 = 0.1_f64;
     let mut sum: f64 = 0.0_f64;
-    for _ in 0_isize..10_isize { sum += f; }
+    for _ in 0_isize..10_isize {
+        sum += f;
+    }
     let product: f64 = f * 10.0_f64;
     assert!(sum != product); // Should not be precisely equaly.
     assert!(sum.approx_eq(product, (f64::EPSILON, 0)) == true);
@@ -282,23 +274,26 @@ fn f64_code_triggering_issue_20() {
 }
 
 impl<T> ApproxEq for &[T]
-where T: Copy + ApproxEq {
+where
+    T: Copy + ApproxEq,
+{
     type Margin = <T as ApproxEq>::Margin;
 
     fn approx_eq<M: Into<Self::Margin>>(self, other: Self, margin: M) -> bool {
         let margin = margin.into();
-        if self.len() != other.len() { return false; }
-        self.iter().zip(other.iter()).all(|(a,b)| {
-            a.approx_eq(*b, margin)
-        })
+        if self.len() != other.len() {
+            return false;
+        }
+        self.iter()
+            .zip(other.iter())
+            .all(|(a, b)| a.approx_eq(*b, margin))
     }
 }
 
 #[test]
 fn test_slices() {
-    assert!( [1.33, 2.4, 2.5].approx_eq(&[1.33, 2.4, 2.5], (0.0, 0_i64)) );
-    assert!( !  [1.33, 2.4, 2.6].approx_eq(&[1.33, 2.4, 2.5], (0.0, 0_i64)) );
-    assert!( !  [1.33, 2.4].approx_eq(&[1.33, 2.4, 2.5], (0.0, 0_i64)) );
-    assert!( !  [1.33, 2.4, 2.5].approx_eq(&[1.33, 2.4], (0.0, 0_i64)) );
+    assert!([1.33, 2.4, 2.5].approx_eq(&[1.33, 2.4, 2.5], (0.0, 0_i64)));
+    assert!(![1.33, 2.4, 2.6].approx_eq(&[1.33, 2.4, 2.5], (0.0, 0_i64)));
+    assert!(![1.33, 2.4].approx_eq(&[1.33, 2.4, 2.5], (0.0, 0_i64)));
+    assert!(![1.33, 2.4, 2.5].approx_eq(&[1.33, 2.4], (0.0, 0_i64)));
 }
-

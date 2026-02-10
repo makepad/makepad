@@ -1,8 +1,4 @@
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 live_design! {
     link widgets
@@ -13,17 +9,17 @@ live_design! {
     pub Icon = <IconBase> {
         width: Fit,
         height: Fit,
-        
+
         icon_walk: {
             width: 17.5,
             height: Fit,
         }
-        
+
         draw_bg: {
             uniform color_dither: 1.0
             uniform color: #0000,
             uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0;
 
             fn pixel(self) -> vec4 {
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -46,7 +42,7 @@ live_design! {
             uniform color_dither: 1.0
             uniform color: #f00
             uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0;
 
             fn get_color(self) -> vec4 {
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -70,7 +66,7 @@ live_design! {
         draw_icon: {
             uniform color: (#f00)
             uniform color_2: (#00f)
-            uniform gradient_fill_horizontal: 1.0; 
+            uniform gradient_fill_horizontal: 1.0;
         }
     }
 
@@ -99,8 +95,7 @@ pub struct Icon {
 }
 
 impl Widget for Icon {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
-    }
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);

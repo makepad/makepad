@@ -1,10 +1,10 @@
 use makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
-    
+
     VideoFrame = <Image> {
         height: All,
         width: All,
@@ -21,10 +21,10 @@ live_design!{
                     1.0
                 )
             }
-            
+
             fn get_video_pixel(self, pos:vec2) -> vec4 {
                 let pix = self.pos * self.image_size;
-                
+
                 // fetch pixel
                 let data = sample2d(self.image, pos).xyzw;
                 if self.is_rgb > 0.5 {
@@ -35,13 +35,13 @@ live_design!{
                 }
                 return yuv_to_rgb(data.z, data.y, data.w)
             }
-            
+
             fn pixel(self) -> vec4 {
                 return self.get_video_pixel(self.pos);
             }
         }
     }
-    
+
     App = {{App}} {
         ui: <Window> {
             body={
@@ -54,9 +54,12 @@ app_main!(App);
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
-    #[rust([Texture::new(cx)])] video_input: [Texture; 1],
-    #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
+    #[live]
+    ui: WidgetRef,
+    #[rust([Texture::new(cx)])]
+    video_input: [Texture; 1],
+    #[rust]
+    video_recv: ToUIReceiver<(usize, VideoBuffer)>,
 }
 
 impl LiveRegister for App {
@@ -65,40 +68,48 @@ impl LiveRegister for App {
     }
 }
 
-impl MatchEvent for App{
-    fn handle_signal(&mut self, cx:&mut Cx){
+impl MatchEvent for App {
+    fn handle_signal(&mut self, cx: &mut Cx) {
         while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
-            let (current_w, current_h) = self.video_input[id].get_format(cx).vec_width_height().unwrap();
+            let (current_w, current_h) = self.video_input[id]
+                .get_format(cx)
+                .vec_width_height()
+                .unwrap();
             if current_w != vfb.format.width / 2 || current_h != vfb.format.height {
-                self.video_input[id] = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32{
-                    data: Some(vec![]),
-                    updated: TextureUpdated::Full,
-                    width: vfb.format.width / 2,
-                    height: vfb.format.height
-                });
+                self.video_input[id] = Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        data: Some(vec![]),
+                        updated: TextureUpdated::Full,
+                        width: vfb.format.width / 2,
+                        height: vfb.format.height,
+                    },
+                );
             }
             if let Some(buf) = vfb.as_vec_u32() {
                 self.video_input[id].swap_vec_u32(cx, buf);
             }
             let image_size = [vfb.format.width as f32, vfb.format.height as f32];
             let v = self.ui.view(ids!(video_input0));
-            v.as_image().set_texture(cx, Some(self.video_input[id].clone()));
+            v.as_image()
+                .set_texture(cx, Some(self.video_input[id].clone()));
             v.set_uniform(cx, ids!(image_size), &image_size);
             v.set_uniform(cx, ids!(is_rgb), &[0.0]);
             v.redraw(cx);
         }
     }
-    
-    fn handle_startup(&mut self, cx:&mut Cx){
+
+    fn handle_startup(&mut self, cx: &mut Cx) {
         let video_sender = self.video_recv.sender();
-        cx.video_input(0, move | img | {
+        cx.video_input(0, move |img| {
             let _ = video_sender.send((0, img.to_buffer()));
         });
     }
-    
-    fn handle_video_inputs(&mut self, cx:&mut Cx, devices:&VideoInputsEvent){
+
+    fn handle_video_inputs(&mut self, cx: &mut Cx, devices: &VideoInputsEvent) {
         log!("{:?}", devices);
-        let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1920, 1080, 31.0);
+        let input =
+            devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1920, 1080, 31.0);
         cx.use_video_input(&input);
     }
 }

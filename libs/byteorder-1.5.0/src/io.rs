@@ -670,10 +670,7 @@ pub trait ReadBytesExt: io::Read {
     /// assert_eq!([517, 768], dst);
     /// ```
     #[inline]
-    fn read_u128_into<T: ByteOrder>(
-        &mut self,
-        dst: &mut [u128],
-    ) -> Result<()> {
+    fn read_u128_into<T: ByteOrder>(&mut self, dst: &mut [u128]) -> Result<()> {
         {
             let buf = unsafe { slice_to_u8_mut(dst) };
             self.read_exact(buf)?;
@@ -855,10 +852,7 @@ pub trait ReadBytesExt: io::Read {
     /// assert_eq!([517, 768], dst);
     /// ```
     #[inline]
-    fn read_i128_into<T: ByteOrder>(
-        &mut self,
-        dst: &mut [i128],
-    ) -> Result<()> {
+    fn read_i128_into<T: ByteOrder>(&mut self, dst: &mut [i128]) -> Result<()> {
         {
             let buf = unsafe { slice_to_u8_mut(dst) };
             self.read_exact(buf)?;
@@ -945,10 +939,7 @@ pub trait ReadBytesExt: io::Read {
     /// ```
     #[inline]
     #[deprecated(since = "1.2.0", note = "please use `read_f32_into` instead")]
-    fn read_f32_into_unchecked<T: ByteOrder>(
-        &mut self,
-        dst: &mut [f32],
-    ) -> Result<()> {
+    fn read_f32_into_unchecked<T: ByteOrder>(&mut self, dst: &mut [f32]) -> Result<()> {
         self.read_f32_into::<T>(dst)
     }
 
@@ -1036,10 +1027,7 @@ pub trait ReadBytesExt: io::Read {
     /// ```
     #[inline]
     #[deprecated(since = "1.2.0", note = "please use `read_f64_into` instead")]
-    fn read_f64_into_unchecked<T: ByteOrder>(
-        &mut self,
-        dst: &mut [f64],
-    ) -> Result<()> {
+    fn read_f64_into_unchecked<T: ByteOrder>(&mut self, dst: &mut [f64]) -> Result<()> {
         self.read_f64_into::<T>(dst)
     }
 }
@@ -1439,11 +1427,7 @@ pub trait WriteBytesExt: io::Write {
     /// assert_eq!(wtr, b"\x48\xc5\x74\x62\xe9\x00\x00\x00\x00\x2b");
     /// ```
     #[inline]
-    fn write_uint<T: ByteOrder>(
-        &mut self,
-        n: u64,
-        nbytes: usize,
-    ) -> Result<()> {
+    fn write_uint<T: ByteOrder>(&mut self, n: u64, nbytes: usize) -> Result<()> {
         let mut buf = [0; 8];
         T::write_uint(&mut buf, n, nbytes);
         self.write_all(&buf[0..nbytes])
@@ -1475,11 +1459,7 @@ pub trait WriteBytesExt: io::Write {
     /// assert_eq!(wtr, b"\xf3\x64\xf4\xd1\xfd\xb0\x81\x00\x00\x00\x00\x00\x00\x2b");
     /// ```
     #[inline]
-    fn write_int<T: ByteOrder>(
-        &mut self,
-        n: i64,
-        nbytes: usize,
-    ) -> Result<()> {
+    fn write_int<T: ByteOrder>(&mut self, n: i64, nbytes: usize) -> Result<()> {
         let mut buf = [0; 8];
         T::write_int(&mut buf, n, nbytes);
         self.write_all(&buf[0..nbytes])
@@ -1490,11 +1470,7 @@ pub trait WriteBytesExt: io::Write {
     /// If the given integer is not representable in the given number of bytes,
     /// this method panics. If `nbytes > 16`, this method panics.
     #[inline]
-    fn write_uint128<T: ByteOrder>(
-        &mut self,
-        n: u128,
-        nbytes: usize,
-    ) -> Result<()> {
+    fn write_uint128<T: ByteOrder>(&mut self, n: u128, nbytes: usize) -> Result<()> {
         let mut buf = [0; 16];
         T::write_uint128(&mut buf, n, nbytes);
         self.write_all(&buf[0..nbytes])
@@ -1505,11 +1481,7 @@ pub trait WriteBytesExt: io::Write {
     /// If the given integer is not representable in the given number of bytes,
     /// this method panics. If `nbytes > 16`, this method panics.
     #[inline]
-    fn write_int128<T: ByteOrder>(
-        &mut self,
-        n: i128,
-        nbytes: usize,
-    ) -> Result<()> {
+    fn write_int128<T: ByteOrder>(&mut self, n: i128, nbytes: usize) -> Result<()> {
         let mut buf = [0; 16];
         T::write_int128(&mut buf, n, nbytes);
         self.write_all(&buf[0..nbytes])

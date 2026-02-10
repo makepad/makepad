@@ -1,7 +1,7 @@
 pub mod quadratic_segment;
 
-mod arc;
 mod affine_transformation;
+mod arc;
 mod cubic_segment;
 mod f32_ext;
 mod line_segment;
@@ -13,8 +13,8 @@ mod transformation;
 mod trapezoid;
 mod vector;
 
-pub use self::arc::Arc;
 pub use self::affine_transformation::AffineTransformation;
+pub use self::arc::Arc;
 pub use self::cubic_segment::CubicSegment;
 pub use self::f32_ext::F64Ext;
 pub use self::line_segment::LineSegment;

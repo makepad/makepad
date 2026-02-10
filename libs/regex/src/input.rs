@@ -4,7 +4,7 @@ pub trait Input<'a> {
     type Cursor: Cursor;
 
     fn slice(&self, range: Range<usize>) -> Self;
-    
+
     fn cursor_start(&self) -> Self::Cursor;
 
     fn cursor_end(&self) -> Self::Cursor;
@@ -24,13 +24,13 @@ pub trait Cursor: Clone {
     fn prev_byte(&mut self) -> Option<u8>;
 
     fn prev_char(&mut self) -> Option<char>;
-    
+
     fn move_next_byte(&mut self) -> bool;
 
     fn move_next_char(&mut self) -> bool;
 
     fn move_prev_byte(&mut self) -> bool;
-    
+
     fn move_prev_char(&mut self) -> bool;
 
     fn is_line_start(&mut self) -> bool {
@@ -98,7 +98,7 @@ impl<C: Cursor> Cursor for RevCursor<C> {
     fn move_prev_byte(&mut self) -> bool {
         self.cursor.move_next_byte()
     }
-    
+
     fn move_prev_char(&mut self) -> bool {
         self.cursor.move_next_char()
     }

@@ -27,11 +27,7 @@ use crate::arch::generic::memchr as generic;
 pub fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
     // SAFETY: memchr_raw, when a match is found, always returns a valid
     // pointer between start and end.
-    unsafe {
-        generic::search_slice_with_raw(haystack, |start, end| {
-            memchr_raw(needle, start, end)
-        })
-    }
+    unsafe { generic::search_slice_with_raw(haystack, |start, end| memchr_raw(needle, start, end)) }
 }
 
 /// Search for the last occurrence of a byte in a slice.
@@ -60,9 +56,7 @@ pub fn memrchr(needle: u8, haystack: &[u8]) -> Option<usize> {
     // SAFETY: memrchr_raw, when a match is found, always returns a valid
     // pointer between start and end.
     unsafe {
-        generic::search_slice_with_raw(haystack, |start, end| {
-            memrchr_raw(needle, start, end)
-        })
+        generic::search_slice_with_raw(haystack, |start, end| memrchr_raw(needle, start, end))
     }
 }
 
@@ -155,12 +149,7 @@ pub fn memrchr2(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
 /// assert_eq!(memchr3(b'k', b'q', b'u', haystack), Some(4));
 /// ```
 #[inline]
-pub fn memchr3(
-    needle1: u8,
-    needle2: u8,
-    needle3: u8,
-    haystack: &[u8],
-) -> Option<usize> {
+pub fn memchr3(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Option<usize> {
     // SAFETY: memchr3_raw, when a match is found, always returns a valid
     // pointer between start and end.
     unsafe {
@@ -193,12 +182,7 @@ pub fn memchr3(
 /// assert_eq!(memrchr3(b'k', b'o', b'n', haystack), Some(17));
 /// ```
 #[inline]
-pub fn memrchr3(
-    needle1: u8,
-    needle2: u8,
-    needle3: u8,
-    haystack: &[u8],
-) -> Option<usize> {
+pub fn memrchr3(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Option<usize> {
     // SAFETY: memrchr3_raw, when a match is found, always returns a valid
     // pointer between start and end.
     unsafe {
@@ -229,22 +213,14 @@ pub fn memrchr_iter(needle: u8, haystack: &[u8]) -> Rev<Memchr<'_>> {
 /// The iterator returned implements `DoubleEndedIterator`. This means it
 /// can also be used to find occurrences in reverse order.
 #[inline]
-pub fn memchr2_iter<'h>(
-    needle1: u8,
-    needle2: u8,
-    haystack: &'h [u8],
-) -> Memchr2<'h> {
+pub fn memchr2_iter<'h>(needle1: u8, needle2: u8, haystack: &'h [u8]) -> Memchr2<'h> {
     Memchr2::new(needle1, needle2, haystack)
 }
 
 /// Returns an iterator over all occurrences of the needles in a haystack, in
 /// reverse.
 #[inline]
-pub fn memrchr2_iter(
-    needle1: u8,
-    needle2: u8,
-    haystack: &[u8],
-) -> Rev<Memchr2<'_>> {
+pub fn memrchr2_iter(needle1: u8, needle2: u8, haystack: &[u8]) -> Rev<Memchr2<'_>> {
     Memchr2::new(needle1, needle2, haystack).rev()
 }
 
@@ -253,24 +229,14 @@ pub fn memrchr2_iter(
 /// The iterator returned implements `DoubleEndedIterator`. This means it
 /// can also be used to find occurrences in reverse order.
 #[inline]
-pub fn memchr3_iter<'h>(
-    needle1: u8,
-    needle2: u8,
-    needle3: u8,
-    haystack: &'h [u8],
-) -> Memchr3<'h> {
+pub fn memchr3_iter<'h>(needle1: u8, needle2: u8, needle3: u8, haystack: &'h [u8]) -> Memchr3<'h> {
     Memchr3::new(needle1, needle2, needle3, haystack)
 }
 
 /// Returns an iterator over all occurrences of the needles in a haystack, in
 /// reverse.
 #[inline]
-pub fn memrchr3_iter(
-    needle1: u8,
-    needle2: u8,
-    needle3: u8,
-    haystack: &[u8],
-) -> Rev<Memchr3<'_>> {
+pub fn memrchr3_iter(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Rev<Memchr3<'_>> {
     Memchr3::new(needle1, needle2, needle3, haystack).rev()
 }
 
@@ -392,7 +358,8 @@ impl<'h> Iterator for Memchr2<'h> {
         // pointers returns will fall within the start and end bounds, and this
         // upholds the safety contract of `self.it.next`.
         unsafe {
-            self.it.next(|s, e| memchr2_raw(self.needle1, self.needle2, s, e))
+            self.it
+                .next(|s, e| memchr2_raw(self.needle1, self.needle2, s, e))
         }
     }
 
@@ -409,9 +376,8 @@ impl<'h> DoubleEndedIterator for Memchr2<'h> {
         // pointers returns will fall within the start and end bounds, and this
         // upholds the safety contract of `self.it.next_back`.
         unsafe {
-            self.it.next_back(|s, e| {
-                memrchr2_raw(self.needle1, self.needle2, s, e)
-            })
+            self.it
+                .next_back(|s, e| memrchr2_raw(self.needle1, self.needle2, s, e))
         }
     }
 }
@@ -443,12 +409,7 @@ impl<'h> Memchr3<'h> {
     /// The iterator returned implements `DoubleEndedIterator`. This means it
     /// can also be used to find occurrences in reverse order.
     #[inline]
-    pub fn new(
-        needle1: u8,
-        needle2: u8,
-        needle3: u8,
-        haystack: &'h [u8],
-    ) -> Memchr3<'h> {
+    pub fn new(needle1: u8, needle2: u8, needle3: u8, haystack: &'h [u8]) -> Memchr3<'h> {
         Memchr3 {
             needle1,
             needle2,
@@ -467,9 +428,8 @@ impl<'h> Iterator for Memchr3<'h> {
         // pointers returns will fall within the start and end bounds, and this
         // upholds the safety contract of `self.it.next`.
         unsafe {
-            self.it.next(|s, e| {
-                memchr3_raw(self.needle1, self.needle2, self.needle3, s, e)
-            })
+            self.it
+                .next(|s, e| memchr3_raw(self.needle1, self.needle2, self.needle3, s, e))
         }
     }
 
@@ -486,9 +446,8 @@ impl<'h> DoubleEndedIterator for Memchr3<'h> {
         // pointers returns will fall within the start and end bounds, and this
         // upholds the safety contract of `self.it.next_back`.
         unsafe {
-            self.it.next_back(|s, e| {
-                memrchr3_raw(self.needle1, self.needle2, self.needle3, s, e)
-            })
+            self.it
+                .next_back(|s, e| memrchr3_raw(self.needle1, self.needle2, self.needle3, s, e))
         }
     }
 }
@@ -501,11 +460,7 @@ impl<'h> core::iter::FusedIterator for Memchr3<'h> {}
 ///
 /// Pointers must be valid. See `One::find_raw`.
 #[inline]
-unsafe fn memchr_raw(
-    needle: u8,
-    start: *const u8,
-    end: *const u8,
-) -> Option<*const u8> {
+unsafe fn memchr_raw(needle: u8, start: *const u8, end: *const u8) -> Option<*const u8> {
     #[cfg(target_arch = "x86_64")]
     {
         // x86_64 does CPU feature detection at runtime in order to use AVX2
@@ -538,11 +493,7 @@ unsafe fn memchr_raw(
 ///
 /// Pointers must be valid. See `One::rfind_raw`.
 #[inline]
-unsafe fn memrchr_raw(
-    needle: u8,
-    start: *const u8,
-    end: *const u8,
-) -> Option<*const u8> {
+unsafe fn memrchr_raw(needle: u8, start: *const u8, end: *const u8) -> Option<*const u8> {
     #[cfg(target_arch = "x86_64")]
     {
         crate::arch::x86_64::memchr::memrchr_raw(needle, start, end)
@@ -595,8 +546,7 @@ unsafe fn memchr2_raw(
         target_arch = "aarch64"
     )))]
     {
-        crate::arch::all::memchr::Two::new(needle1, needle2)
-            .find_raw(start, end)
+        crate::arch::all::memchr::Two::new(needle1, needle2).find_raw(start, end)
     }
 }
 
@@ -622,9 +572,7 @@ unsafe fn memrchr2_raw(
     }
     #[cfg(target_arch = "aarch64")]
     {
-        crate::arch::aarch64::memchr::memrchr2_raw(
-            needle1, needle2, start, end,
-        )
+        crate::arch::aarch64::memchr::memrchr2_raw(needle1, needle2, start, end)
     }
     #[cfg(not(any(
         target_arch = "x86_64",
@@ -632,8 +580,7 @@ unsafe fn memrchr2_raw(
         target_arch = "aarch64"
     )))]
     {
-        crate::arch::all::memchr::Two::new(needle1, needle2)
-            .rfind_raw(start, end)
+        crate::arch::all::memchr::Two::new(needle1, needle2).rfind_raw(start, end)
     }
 }
 
@@ -652,21 +599,15 @@ unsafe fn memchr3_raw(
 ) -> Option<*const u8> {
     #[cfg(target_arch = "x86_64")]
     {
-        crate::arch::x86_64::memchr::memchr3_raw(
-            needle1, needle2, needle3, start, end,
-        )
+        crate::arch::x86_64::memchr::memchr3_raw(needle1, needle2, needle3, start, end)
     }
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
-        crate::arch::wasm32::memchr::memchr3_raw(
-            needle1, needle2, needle3, start, end,
-        )
+        crate::arch::wasm32::memchr::memchr3_raw(needle1, needle2, needle3, start, end)
     }
     #[cfg(target_arch = "aarch64")]
     {
-        crate::arch::aarch64::memchr::memchr3_raw(
-            needle1, needle2, needle3, start, end,
-        )
+        crate::arch::aarch64::memchr::memchr3_raw(needle1, needle2, needle3, start, end)
     }
     #[cfg(not(any(
         target_arch = "x86_64",
@@ -674,8 +615,7 @@ unsafe fn memchr3_raw(
         target_arch = "aarch64"
     )))]
     {
-        crate::arch::all::memchr::Three::new(needle1, needle2, needle3)
-            .find_raw(start, end)
+        crate::arch::all::memchr::Three::new(needle1, needle2, needle3).find_raw(start, end)
     }
 }
 
@@ -694,21 +634,15 @@ unsafe fn memrchr3_raw(
 ) -> Option<*const u8> {
     #[cfg(target_arch = "x86_64")]
     {
-        crate::arch::x86_64::memchr::memrchr3_raw(
-            needle1, needle2, needle3, start, end,
-        )
+        crate::arch::x86_64::memchr::memrchr3_raw(needle1, needle2, needle3, start, end)
     }
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
-        crate::arch::wasm32::memchr::memrchr3_raw(
-            needle1, needle2, needle3, start, end,
-        )
+        crate::arch::wasm32::memchr::memrchr3_raw(needle1, needle2, needle3, start, end)
     }
     #[cfg(target_arch = "aarch64")]
     {
-        crate::arch::aarch64::memchr::memrchr3_raw(
-            needle1, needle2, needle3, start, end,
-        )
+        crate::arch::aarch64::memchr::memrchr3_raw(needle1, needle2, needle3, start, end)
     }
     #[cfg(not(any(
         target_arch = "x86_64",
@@ -716,8 +650,7 @@ unsafe fn memrchr3_raw(
         target_arch = "aarch64"
     )))]
     {
-        crate::arch::all::memchr::Three::new(needle1, needle2, needle3)
-            .rfind_raw(start, end)
+        crate::arch::all::memchr::Three::new(needle1, needle2, needle3).rfind_raw(start, end)
     }
 }
 
@@ -756,133 +689,108 @@ mod tests {
 
     #[test]
     fn forward1_iter() {
-        crate::tests::memchr::Runner::new(1).forward_iter(
-            |haystack, needles| {
-                Some(memchr_iter(needles[0], haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(1)
+            .forward_iter(|haystack, needles| Some(memchr_iter(needles[0], haystack).collect()))
     }
 
     #[test]
     fn forward1_oneshot() {
-        crate::tests::memchr::Runner::new(1).forward_oneshot(
-            |haystack, needles| Some(memchr(needles[0], haystack)),
-        )
+        crate::tests::memchr::Runner::new(1)
+            .forward_oneshot(|haystack, needles| Some(memchr(needles[0], haystack)))
     }
 
     #[test]
     fn reverse1_iter() {
-        crate::tests::memchr::Runner::new(1).reverse_iter(
-            |haystack, needles| {
-                Some(memrchr_iter(needles[0], haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(1)
+            .reverse_iter(|haystack, needles| Some(memrchr_iter(needles[0], haystack).collect()))
     }
 
     #[test]
     fn reverse1_oneshot() {
-        crate::tests::memchr::Runner::new(1).reverse_oneshot(
-            |haystack, needles| Some(memrchr(needles[0], haystack)),
-        )
+        crate::tests::memchr::Runner::new(1)
+            .reverse_oneshot(|haystack, needles| Some(memrchr(needles[0], haystack)))
     }
 
     #[test]
     fn count1_iter() {
-        crate::tests::memchr::Runner::new(1).count_iter(|haystack, needles| {
-            Some(memchr_iter(needles[0], haystack).count())
-        })
+        crate::tests::memchr::Runner::new(1)
+            .count_iter(|haystack, needles| Some(memchr_iter(needles[0], haystack).count()))
     }
 
     #[test]
     fn forward2_iter() {
-        crate::tests::memchr::Runner::new(2).forward_iter(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                Some(memchr2_iter(n1, n2, haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(2).forward_iter(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            Some(memchr2_iter(n1, n2, haystack).collect())
+        })
     }
 
     #[test]
     fn forward2_oneshot() {
-        crate::tests::memchr::Runner::new(2).forward_oneshot(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                Some(memchr2(n1, n2, haystack))
-            },
-        )
+        crate::tests::memchr::Runner::new(2).forward_oneshot(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            Some(memchr2(n1, n2, haystack))
+        })
     }
 
     #[test]
     fn reverse2_iter() {
-        crate::tests::memchr::Runner::new(2).reverse_iter(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                Some(memrchr2_iter(n1, n2, haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(2).reverse_iter(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            Some(memrchr2_iter(n1, n2, haystack).collect())
+        })
     }
 
     #[test]
     fn reverse2_oneshot() {
-        crate::tests::memchr::Runner::new(2).reverse_oneshot(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                Some(memrchr2(n1, n2, haystack))
-            },
-        )
+        crate::tests::memchr::Runner::new(2).reverse_oneshot(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            Some(memrchr2(n1, n2, haystack))
+        })
     }
 
     #[test]
     fn forward3_iter() {
-        crate::tests::memchr::Runner::new(3).forward_iter(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                let n3 = needles.get(2).copied()?;
-                Some(memchr3_iter(n1, n2, n3, haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(3).forward_iter(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            let n3 = needles.get(2).copied()?;
+            Some(memchr3_iter(n1, n2, n3, haystack).collect())
+        })
     }
 
     #[test]
     fn forward3_oneshot() {
-        crate::tests::memchr::Runner::new(3).forward_oneshot(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                let n3 = needles.get(2).copied()?;
-                Some(memchr3(n1, n2, n3, haystack))
-            },
-        )
+        crate::tests::memchr::Runner::new(3).forward_oneshot(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            let n3 = needles.get(2).copied()?;
+            Some(memchr3(n1, n2, n3, haystack))
+        })
     }
 
     #[test]
     fn reverse3_iter() {
-        crate::tests::memchr::Runner::new(3).reverse_iter(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                let n3 = needles.get(2).copied()?;
-                Some(memrchr3_iter(n1, n2, n3, haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(3).reverse_iter(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            let n3 = needles.get(2).copied()?;
+            Some(memrchr3_iter(n1, n2, n3, haystack).collect())
+        })
     }
 
     #[test]
     fn reverse3_oneshot() {
-        crate::tests::memchr::Runner::new(3).reverse_oneshot(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                let n3 = needles.get(2).copied()?;
-                Some(memrchr3(n1, n2, n3, haystack))
-            },
-        )
+        crate::tests::memchr::Runner::new(3).reverse_oneshot(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            let n3 = needles.get(2).copied()?;
+            Some(memrchr3(n1, n2, n3, haystack))
+        })
     }
 
     // Prior to memchr 2.6, the memchr iterators both implemented Send and

@@ -1,28 +1,26 @@
 #![allow(unused)]
-use makepad_live_id::*;
-use crate::value::*;
 use crate::heap::*;
 use crate::native::*;
-use crate::pod::*;
 use crate::numeric::NumericValue;
+use crate::pod::*;
+use crate::value::*;
 use crate::*;
+use makepad_live_id::*;
 
 #[macro_export]
-macro_rules! script_pod_def{
-    ($heap:expr, $pod: expr, $ty: ident, $id:ident, $pod_ty:expr, $pod_def:expr )=>{
-        {
-            let pod_obj = $heap.new_with_proto(id_lut!($ty).into());
-            let pt = $heap.new_pod_type($pod_ty, $pod_def);
-            $heap.set_object_storage_vec2(pod_obj);
-            $heap.set_object_pod_type(pod_obj, pt); 
-            $heap.set_value_def($pod, id!($id).into(), pod_obj.into());
-            pt
-        }
-    };
+macro_rules! script_pod_def {
+    ($heap:expr, $pod: expr, $ty: ident, $id:ident, $pod_ty:expr, $pod_def:expr ) => {{
+        let pod_obj = $heap.new_with_proto(id_lut!($ty).into());
+        let pt = $heap.new_pod_type($pod_ty, $pod_def);
+        $heap.set_object_storage_vec2(pod_obj);
+        $heap.set_object_pod_type(pod_obj, pt);
+        $heap.set_value_def($pod, id!($id).into(), pod_obj.into());
+        pt
+    }};
 }
 
 #[derive(Default)]
-pub struct ScriptPodBuiltins{
+pub struct ScriptPodBuiltins {
     pub pod_void: ScriptPodType,
     pub pod_struct: ScriptPodType,
     pub pod_array: ScriptPodType,
@@ -31,7 +29,7 @@ pub struct ScriptPodBuiltins{
     pub pod_f16: ScriptPodType,
     pub pod_u32: ScriptPodType,
     pub pod_i32: ScriptPodType,
-    pub pod_atomic_u32: ScriptPodType, 
+    pub pod_atomic_u32: ScriptPodType,
     pub pod_atomic_i32: ScriptPodType,
     pub pod_vec2f: ScriptPodType,
     pub pod_vec3f: ScriptPodType,
@@ -59,62 +57,145 @@ pub struct ScriptPodBuiltins{
     pub pod_mat4x4f: ScriptPodType,
 }
 
-impl ScriptPodBuiltins{
- 
-    pub fn value_to_exact_type(&self, val:ScriptValue)->Option<ScriptPodType>{
-        if val.is_f64(){
-            return Some(self.pod_f32)
+impl ScriptPodBuiltins {
+    pub fn value_to_exact_type(&self, val: ScriptValue) -> Option<ScriptPodType> {
+        if val.is_f64() {
+            return Some(self.pod_f32);
         }
-        if val.is_f32(){
-            return Some(self.pod_f32)
+        if val.is_f32() {
+            return Some(self.pod_f32);
         }
-        if val.is_u40(){
-            return Some(self.pod_u32)
+        if val.is_u40() {
+            return Some(self.pod_u32);
         }
-        if val.is_u32(){
-            return Some(self.pod_u32)
+        if val.is_u32() {
+            return Some(self.pod_u32);
         }
-        if val.is_i32(){
-            return Some(self.pod_i32)
+        if val.is_i32() {
+            return Some(self.pod_i32);
         }
-        if val.is_f16(){
-            return Some(self.pod_f16)
+        if val.is_f16() {
+            return Some(self.pod_f16);
         }
-        if val.is_bool(){
-            return Some(self.pod_bool)
+        if val.is_bool() {
+            return Some(self.pod_bool);
         }
         None
     }
 }
 
-pub fn define_pod_module(heap:&mut ScriptHeap, native:&mut ScriptNative)->ScriptPodBuiltins{
-    
+pub fn define_pod_module(heap: &mut ScriptHeap, native: &mut ScriptNative) -> ScriptPodBuiltins {
     let pod = heap.new_module(id!(pod));
-        
-    let pod_void = heap.pod_def_atom(pod, id_lut!(void), None, ScriptPodTy::Void, id_lut!(pod_void), ScriptValue::NIL);
+
+    let pod_void = heap.pod_def_atom(
+        pod,
+        id_lut!(void),
+        None,
+        ScriptPodTy::Void,
+        id_lut!(pod_void),
+        ScriptValue::NIL,
+    );
     assert!(pod_void == ScriptPodType::VOID);
-    
-    let pod_struct = heap.pod_def_atom(pod, id_lut!(struct), None, ScriptPodTy::UndefinedStruct, id_lut!(pod_struct), ScriptValue::NIL);
-    
-    let pod_array = heap.pod_def_atom(pod, id_lut!(array), None, ScriptPodTy::ArrayBuilder, id_lut!(pod_array), ScriptValue::NIL);
-    
-    let pod_bool = heap.pod_def_atom(pod, id_lut!(bool), None, ScriptPodTy::Bool, id_lut!(pod_bool), ScriptValue::from_bool(false));
-    
-    let pod_f32 = heap.pod_def_atom(pod, id_lut!(f32), Some(id_lut!(float)), ScriptPodTy::F32, id_lut!(pod_f32), ScriptValue::from_f32(0.0));
-        
-    let pod_f16 = heap.pod_def_atom(pod, id_lut!(f16), None, ScriptPodTy::F16, id_lut!(pod_f16), ScriptValue::from_f16(0.0));
-    
-    let pod_u32 = heap.pod_def_atom(pod, id_lut!(u32), None, ScriptPodTy::U32, id_lut!(pod_u32), ScriptValue::from_u32(0));    
-    
-    let pod_i32 = heap.pod_def_atom(pod, id_lut!(i32), None, ScriptPodTy::I32, id_lut!(pod_i32), ScriptValue::from_i32(0));    
-    
-    let pod_atomic_u32 = heap.pod_def_atom(pod, id_lut!(atomic_u32), None, ScriptPodTy::AtomicU32, id_lut!(pod_atomic_u32), ScriptValue::from_u32(0));    
-    
-    let pod_atomic_i32 = heap.pod_def_atom(pod, id_lut!(pod_atomic_i32), None, ScriptPodTy::AtomicI32, id_lut!(pod_atomic_i32), ScriptValue::from_i32(0));    
-    
-    let pod_vec2f = heap.pod_def_vec(pod, id_lut!(vec2f), Some(id_lut!(vec2)), ScriptPodVec::Vec2f);
-    let pod_vec3f = heap.pod_def_vec(pod, id_lut!(vec3f), Some(id_lut!(vec3)), ScriptPodVec::Vec3f);
-    let pod_vec4f = heap.pod_def_vec(pod, id_lut!(vec4f), Some(id_lut!(vec4)), ScriptPodVec::Vec4f);
+
+    let pod_struct = heap.pod_def_atom(
+        pod,
+        id_lut!(struct),
+        None,
+        ScriptPodTy::UndefinedStruct,
+        id_lut!(pod_struct),
+        ScriptValue::NIL,
+    );
+
+    let pod_array = heap.pod_def_atom(
+        pod,
+        id_lut!(array),
+        None,
+        ScriptPodTy::ArrayBuilder,
+        id_lut!(pod_array),
+        ScriptValue::NIL,
+    );
+
+    let pod_bool = heap.pod_def_atom(
+        pod,
+        id_lut!(bool),
+        None,
+        ScriptPodTy::Bool,
+        id_lut!(pod_bool),
+        ScriptValue::from_bool(false),
+    );
+
+    let pod_f32 = heap.pod_def_atom(
+        pod,
+        id_lut!(f32),
+        Some(id_lut!(float)),
+        ScriptPodTy::F32,
+        id_lut!(pod_f32),
+        ScriptValue::from_f32(0.0),
+    );
+
+    let pod_f16 = heap.pod_def_atom(
+        pod,
+        id_lut!(f16),
+        None,
+        ScriptPodTy::F16,
+        id_lut!(pod_f16),
+        ScriptValue::from_f16(0.0),
+    );
+
+    let pod_u32 = heap.pod_def_atom(
+        pod,
+        id_lut!(u32),
+        None,
+        ScriptPodTy::U32,
+        id_lut!(pod_u32),
+        ScriptValue::from_u32(0),
+    );
+
+    let pod_i32 = heap.pod_def_atom(
+        pod,
+        id_lut!(i32),
+        None,
+        ScriptPodTy::I32,
+        id_lut!(pod_i32),
+        ScriptValue::from_i32(0),
+    );
+
+    let pod_atomic_u32 = heap.pod_def_atom(
+        pod,
+        id_lut!(atomic_u32),
+        None,
+        ScriptPodTy::AtomicU32,
+        id_lut!(pod_atomic_u32),
+        ScriptValue::from_u32(0),
+    );
+
+    let pod_atomic_i32 = heap.pod_def_atom(
+        pod,
+        id_lut!(pod_atomic_i32),
+        None,
+        ScriptPodTy::AtomicI32,
+        id_lut!(pod_atomic_i32),
+        ScriptValue::from_i32(0),
+    );
+
+    let pod_vec2f = heap.pod_def_vec(
+        pod,
+        id_lut!(vec2f),
+        Some(id_lut!(vec2)),
+        ScriptPodVec::Vec2f,
+    );
+    let pod_vec3f = heap.pod_def_vec(
+        pod,
+        id_lut!(vec3f),
+        Some(id_lut!(vec3)),
+        ScriptPodVec::Vec3f,
+    );
+    let pod_vec4f = heap.pod_def_vec(
+        pod,
+        id_lut!(vec4f),
+        Some(id_lut!(vec4)),
+        ScriptPodVec::Vec4f,
+    );
     let pod_vec2u = heap.pod_def_vec(pod, id_lut!(vec2u), None, ScriptPodVec::Vec2u);
     let pod_vec3u = heap.pod_def_vec(pod, id_lut!(vec3u), None, ScriptPodVec::Vec3u);
     let pod_vec4u = heap.pod_def_vec(pod, id_lut!(vec4u), None, ScriptPodVec::Vec4u);
@@ -127,7 +208,7 @@ pub fn define_pod_module(heap:&mut ScriptHeap, native:&mut ScriptNative)->Script
     let pod_vec2b = heap.pod_def_vec(pod, id_lut!(vec2b), None, ScriptPodVec::Vec2b);
     let pod_vec3b = heap.pod_def_vec(pod, id_lut!(vec3b), None, ScriptPodVec::Vec3b);
     let pod_vec4b = heap.pod_def_vec(pod, id_lut!(vec4b), None, ScriptPodVec::Vec4b);
-        
+
     let pod_mat2x2f = heap.pod_def_mat(pod, id_lut!(mat2x2f), ScriptPodMat::Mat2x2f);
     let pod_mat2x3f = heap.pod_def_mat(pod, id_lut!(mat2x3f), ScriptPodMat::Mat2x3f);
     let pod_mat2x4f = heap.pod_def_mat(pod, id_lut!(mat2x4f), ScriptPodMat::Mat2x4f);
@@ -137,27 +218,58 @@ pub fn define_pod_module(heap:&mut ScriptHeap, native:&mut ScriptNative)->Script
     let pod_mat4x2f = heap.pod_def_mat(pod, id_lut!(mat4x2f), ScriptPodMat::Mat4x2f);
     let pod_mat4x3f = heap.pod_def_mat(pod, id_lut!(mat4x3f), ScriptPodMat::Mat4x3f);
     let pod_mat4x4f = heap.pod_def_mat(pod, id_lut!(mat4x4f), ScriptPodMat::Mat4x4f);
-                
+
     // Add mix method for all pod types (f32, vec2f, vec3f, vec4f, etc.)
     // self.mix(other, alpha) -> mix(self, other, alpha)
-    native.add_type_method(heap, ScriptValueType::REDUX_POD, id!(mix), script_args!(other=0.0, a=0.0), |vm, args|{
-        let sself = vm.bx.heap.value(args, id!(self).into(), vm.bx.threads.cur_ref().trap.pass());
-        let other = vm.bx.heap.value(args, id!(other).into(), vm.bx.threads.cur_ref().trap.pass());
-        let a_val = vm.bx.heap.value(args, id!(a).into(), vm.bx.threads.cur_ref().trap.pass());
-        
-        let self_nv = NumericValue::from_script_value_heap(&vm.bx.heap, sself, vm.bx.threads.cur_ref().trap.ip);
-        let other_nv = NumericValue::from_script_value_heap(&vm.bx.heap, other, vm.bx.threads.cur_ref().trap.ip);
-        
-        // mix typically has scalar alpha, but can also have matching type alpha
-        if let Some(a_f) = a_val.as_f64() {
-            self_nv.mix_scalar(other_nv, a_f).to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
-        } else {
-            let a_nv = NumericValue::from_script_value_heap(&vm.bx.heap, a_val, vm.bx.threads.cur_ref().trap.ip);
-            self_nv.mix_componentwise(other_nv, a_nv).to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
-        }
-    });
-    
-    let ps = ScriptPodBuiltins{
+    native.add_type_method(
+        heap,
+        ScriptValueType::REDUX_POD,
+        id!(mix),
+        script_args!(other = 0.0, a = 0.0),
+        |vm, args| {
+            let sself =
+                vm.bx
+                    .heap
+                    .value(args, id!(self).into(), vm.bx.threads.cur_ref().trap.pass());
+            let other =
+                vm.bx
+                    .heap
+                    .value(args, id!(other).into(), vm.bx.threads.cur_ref().trap.pass());
+            let a_val = vm
+                .bx
+                .heap
+                .value(args, id!(a).into(), vm.bx.threads.cur_ref().trap.pass());
+
+            let self_nv = NumericValue::from_script_value_heap(
+                &vm.bx.heap,
+                sself,
+                vm.bx.threads.cur_ref().trap.ip,
+            );
+            let other_nv = NumericValue::from_script_value_heap(
+                &vm.bx.heap,
+                other,
+                vm.bx.threads.cur_ref().trap.ip,
+            );
+
+            // mix typically has scalar alpha, but can also have matching type alpha
+            if let Some(a_f) = a_val.as_f64() {
+                self_nv
+                    .mix_scalar(other_nv, a_f)
+                    .to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
+            } else {
+                let a_nv = NumericValue::from_script_value_heap(
+                    &vm.bx.heap,
+                    a_val,
+                    vm.bx.threads.cur_ref().trap.ip,
+                );
+                self_nv
+                    .mix_componentwise(other_nv, a_nv)
+                    .to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
+            }
+        },
+    );
+
+    let ps = ScriptPodBuiltins {
         pod_void,
         pod_struct,
         pod_array,
@@ -168,21 +280,21 @@ pub fn define_pod_module(heap:&mut ScriptHeap, native:&mut ScriptNative)->Script
         pod_i32,
         pod_atomic_u32,
         pod_atomic_i32,
-        pod_vec2f, 
-        pod_vec3f, 
-        pod_vec4f, 
-        pod_vec2h, 
-        pod_vec3h, 
+        pod_vec2f,
+        pod_vec3f,
+        pod_vec4f,
+        pod_vec2h,
+        pod_vec3h,
         pod_vec4h,
-        pod_vec2u, 
-        pod_vec3u, 
-        pod_vec4u, 
-        pod_vec2i, 
-        pod_vec3i, 
-        pod_vec4i, 
-        pod_vec2b, 
-        pod_vec3b, 
-        pod_vec4b, 
+        pod_vec2u,
+        pod_vec3u,
+        pod_vec4u,
+        pod_vec2i,
+        pod_vec3i,
+        pod_vec4i,
+        pod_vec2b,
+        pod_vec3b,
+        pod_vec4b,
         pod_mat2x2f,
         pod_mat2x3f,
         pod_mat2x4f,

@@ -7,31 +7,32 @@ pub enum HostOs {
     MacosX64,
     MacosAarch64,
     LinuxX64,
-    Unsupported
+    Unsupported,
 }
-
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum AndroidVariant {
     Default,
-    Quest
+    Quest,
 }
 impl AndroidVariant {
-    fn from_str(opt: &str) -> Result<Self,String> {
-        for opt in opt.split(","){
+    fn from_str(opt: &str) -> Result<Self, String> {
+        for opt in opt.split(",") {
             match opt {
-                "default"=> return Ok(AndroidVariant::Default),
+                "default" => return Ok(AndroidVariant::Default),
                 "quest" => return Ok(AndroidVariant::Quest),
-                _=>()
+                _ => (),
             }
         }
-        return Err(format!("please provide a valid android variant: default, quest"))
-        
+        return Err(format!(
+            "please provide a valid android variant: default, quest"
+        ));
     }
-    
-    fn manifest_xml(&self, label:&str, class_name:&str, url:&str, sdk_version: usize)->String{
-        match self{
-            Self::Default=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
+
+    fn manifest_xml(&self, label: &str, class_name: &str, url: &str, sdk_version: usize) -> String {
+        match self {
+            Self::Default => format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
                 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
                 xmlns:tools="http://schemas.android.com/tools"
                 package="{url}">
@@ -79,8 +80,10 @@ impl AndroidVariant {
                 </intent>
                 </queries>
                 </manifest>
-                "#),
-            Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
+                "#
+            ),
+            Self::Quest => format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
                 <manifest
                     xmlns:android="http://schemas.android.com/apk/res/android"
                     xmlns:tools="http://schemas.android.com/tools"
@@ -166,11 +169,12 @@ impl AndroidVariant {
                 </queries>
                                             
                 </manifest>
-                "#)
-            }
+                "#
+            ),
         }
     }
-    
+}
+
 /*
 Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
     <manifest
@@ -180,8 +184,8 @@ Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
     android:versionName="1.0"
     android:installLocation="auto"
     >
-                        
-                                            
+
+
     <uses-sdk android:targetSdkVersion="{sdk_version}" />
     <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
     <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
@@ -194,7 +198,7 @@ Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
-                                                                
+
     <application
     android:label="{label}"
     android:allowBackup="false"
@@ -216,7 +220,7 @@ Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
     <action android:name="android.intent.action.VR" />
     </intent-filter>
     </activity>
-                            
+
     <activity
     android:name="{class_name}.MakepadAppXr"
     android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
@@ -224,7 +228,7 @@ Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
     android:exported="true"
     android:launchMode="singleTask"
     android:screenOrientation="landscape"
-    android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" 
+    android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
     >
     <intent-filter>
     <action android:name="android.intent.action.MAIN" />
@@ -232,12 +236,12 @@ Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
     </intent-filter>
     </activity>
     </application>
-                                                                
+
     <queries>
     <!-- to talk to the broker -->
-    <provider 
+    <provider
     android:name="x" android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
-                                                                        
+
     <!-- so client-side code of runtime/layers can talk to their service sides -->
     <intent>
     <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
@@ -249,32 +253,40 @@ Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
     <action android:name="android.intent.action.MAIN" />
     </intent>
     </queries>
-                        
+
     </manifest>
-    "#)*/    
-    
-    
+    "#)*/
+
 #[allow(non_camel_case_types)]
 pub enum AndroidTarget {
     aarch64,
     x86_64,
     armv7,
-    i686
+    i686,
 }
 
 impl AndroidTarget {
-    fn from_str(opt: &str) -> Result<Vec<Self>,
-    String> {
+    fn from_str(opt: &str) -> Result<Vec<Self>, String> {
         let mut out = Vec::new();
-        for opt in opt.split(","){
+        for opt in opt.split(",") {
             match opt {
-                "all"=> return Ok(vec![AndroidTarget::aarch64, AndroidTarget::x86_64, AndroidTarget::armv7, AndroidTarget::i686]),
+                "all" => {
+                    return Ok(vec![
+                        AndroidTarget::aarch64,
+                        AndroidTarget::x86_64,
+                        AndroidTarget::armv7,
+                        AndroidTarget::i686,
+                    ])
+                }
                 "aarch64" => out.push(AndroidTarget::aarch64),
                 "x86_64" => out.push(AndroidTarget::x86_64),
                 "armv7" => out.push(AndroidTarget::armv7),
                 "i686" => out.push(AndroidTarget::i686),
                 x => {
-                    return Err(format!("{:?} please provide a valid ABI: aarch64, x86_64, armv7, i686", x))
+                    return Err(format!(
+                        "{:?} please provide a valid ABI: aarch64, x86_64, armv7, i686",
+                        x
+                    ))
                 }
             }
         }
@@ -296,21 +308,21 @@ impl AndroidTarget {
             Self::i686 => "i386",
         }
     }
-    
+
     fn clang(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64-linux-android",
-            Self::x86_64 => "x86_64-linux-android", 
-            Self::armv7 => "armv7a-linux-androideabi", 
-            Self::i686 => "i686-linux-android", 
+            Self::x86_64 => "x86_64-linux-android",
+            Self::armv7 => "armv7a-linux-androideabi",
+            Self::i686 => "i686-linux-android",
         }
     }
-    fn toolchain(&self)->&'static str{
+    fn toolchain(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64-linux-android",
             Self::x86_64 => "x86_64-linux-android",
             Self::armv7 => "armv7-linux-androideabi",
-            Self::i686 => "i686-linux-android"
+            Self::i686 => "i686-linux-android",
         }
     }
     fn to_str(&self) -> &'static str {
@@ -340,8 +352,7 @@ impl AndroidTarget {
 }
 
 impl HostOs {
-    fn from_str(opt: &str) -> Result<Self,
-    String> {
+    fn from_str(opt: &str) -> Result<Self, String> {
         match opt {
             "windows-x64" => Ok(HostOs::WindowsX64),
             "macos-x64" => Ok(HostOs::MacosX64),
@@ -352,14 +363,14 @@ impl HostOs {
             }
         }
     }
-    
+
     fn default_path(&self) -> &'static str {
         match self {
             Self::WindowsX64 => "./android_33_windows_x64",
             Self::MacosX64 => "./android_33_macos_x64",
             Self::MacosAarch64 => "./android_33_macos_aarch64",
             Self::LinuxX64 => "./android_33_linux_x64",
-            Self::Unsupported => panic!()
+            Self::Unsupported => panic!(),
         }
     }
 }
@@ -367,10 +378,14 @@ impl HostOs {
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     #[allow(unused)]
     let mut host_os = HostOs::Unsupported;
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))] let mut host_os = HostOs::WindowsX64;
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))] let mut host_os = HostOs::MacosX64;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))] let mut host_os = HostOs::MacosAarch64;
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))] let mut host_os = HostOs::LinuxX64;
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    let mut host_os = HostOs::WindowsX64;
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let mut host_os = HostOs::MacosX64;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let mut host_os = HostOs::MacosAarch64;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let mut host_os = HostOs::LinuxX64;
     let mut sdk_path = None;
     let mut package_name = None;
     let mut app_label = None;
@@ -378,77 +393,61 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut variant = AndroidVariant::Default;
     let mut targets = vec![AndroidTarget::aarch64];
     let mut keep_sdk_sources = false;
-    
+
     let urls = sdk::ANDROID_SDK_URLS_33;
-    
+
     // pull out options
     for i in 0..args.len() {
         let v = &args[i];
         if let Some(opt) = v.strip_prefix("--host-os=") {
-            host_os = HostOs::from_str(opt) ?;
-        }
-        else if let Some(opt) = v.strip_prefix("--sdk-path=") {
+            host_os = HostOs::from_str(opt)?;
+        } else if let Some(opt) = v.strip_prefix("--sdk-path=") {
             sdk_path = Some(opt.to_string());
-        }
-        else if let Some(opt) = v.strip_prefix("--package-name=") {
+        } else if let Some(opt) = v.strip_prefix("--package-name=") {
             package_name = Some(opt.to_string());
-        }
-        else if let Some(opt) = v.strip_prefix("--app-label=") {
+        } else if let Some(opt) = v.strip_prefix("--app-label=") {
             app_label = Some(opt.to_string());
-        }
-        else if let Some(opt) = v.strip_prefix("--abi=") {
+        } else if let Some(opt) = v.strip_prefix("--abi=") {
             targets = AndroidTarget::from_str(opt)?;
-        }
-        else if let Some(d) = v.strip_prefix("--devices=") {
+        } else if let Some(d) = v.strip_prefix("--devices=") {
             devices = d.split(",").map(|v| v.to_string()).collect()
-        }
-        else if let Some(opt) = v.strip_prefix("--variant=") {
+        } else if let Some(opt) = v.strip_prefix("--variant=") {
             variant = AndroidVariant::from_str(opt)?;
-        }
-        else if v.trim() == "--keep-sdk-sources" {
+        } else if v.trim() == "--keep-sdk-sources" {
             keep_sdk_sources = true;
-        }
-        else {
+        } else {
             args = &args[i..];
-            break
+            break;
         }
     }
     if sdk_path.is_none() {
-        sdk_path = Some(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), host_os.default_path().to_string()));
+        sdk_path = Some(format!(
+            "{}/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            host_os.default_path().to_string()
+        ));
     }
-    
+
     let cwd = std::env::current_dir().unwrap();
     let sdk_dir = cwd.join(sdk_path.unwrap());
-    
+
     match args[0].as_ref() {
-        "adb" => {
-            compile::adb(&sdk_dir, host_os, &args[1..])
-        },
-        "java" => {
-            compile::java(&sdk_dir, host_os, &args[1..])
-        },
-        "javac" => {
-            compile::javac(&sdk_dir, host_os, &args[1..])
-        },
-        "rustup-toolchain-install" | "rustup-install-toolchain"  => {
+        "adb" => compile::adb(&sdk_dir, host_os, &args[1..]),
+        "java" => compile::java(&sdk_dir, host_os, &args[1..]),
+        "javac" => compile::javac(&sdk_dir, host_os, &args[1..]),
+        "rustup-toolchain-install" | "rustup-install-toolchain" => {
             sdk::rustup_toolchain_install(&targets)
         }
-        "download-sdk" => {
-            sdk::download_sdk(&sdk_dir, host_os, &args[1..], &urls)
-        }
-        "expand-sdk" => {
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets, &urls)
-        }
-        "remove-sdk-sources" => {
-            sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
-        }
-        "toolchain-install" | "install-toolchain"=> {
+        "download-sdk" => sdk::download_sdk(&sdk_dir, host_os, &args[1..], &urls),
+        "expand-sdk" => sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets, &urls),
+        "remove-sdk-sources" => sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]),
+        "toolchain-install" | "install-toolchain" => {
             println!("Installing Android toolchain\n");
-            sdk::rustup_toolchain_install(&targets) ?;
-            sdk::download_sdk(&sdk_dir, host_os, &args[1..], &urls) ?;
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets, &urls) ?;
+            sdk::rustup_toolchain_install(&targets)?;
+            sdk::download_sdk(&sdk_dir, host_os, &args[1..], &urls)?;
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets, &urls)?;
             if !keep_sdk_sources {
-                sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]) ?;
+                sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])?;
             }
             println!("\nAndroid toolchain has been installed\n");
             Ok(())
@@ -457,12 +456,29 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
         "build" => {
-            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant, &urls) ?;
+            compile::build(
+                &sdk_dir,
+                host_os,
+                package_name,
+                app_label,
+                &args[1..],
+                &targets,
+                &variant,
+                &urls,
+            )?;
             Ok(())
         }
-        "run" => {
-            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant, &urls, devices)
-        }
-        _ => Err(format!("{} is not a valid command or option", args[0]))
+        "run" => compile::run(
+            &sdk_dir,
+            host_os,
+            package_name,
+            app_label,
+            &args[1..],
+            &targets,
+            &variant,
+            &urls,
+            devices,
+        ),
+        _ => Err(format!("{} is not a valid command or option", args[0])),
     }
 }

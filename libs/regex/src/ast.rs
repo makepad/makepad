@@ -1,4 +1,7 @@
-use {std::mem, super::{char_class::CharClass, prog::Pred}};
+use {
+    super::{char_class::CharClass, prog::Pred},
+    std::mem,
+};
 
 #[derive(Clone, Debug)]
 pub enum Op {

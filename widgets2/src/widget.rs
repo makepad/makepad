@@ -63,7 +63,9 @@ impl<'a> fmt::Display for WidgetTreeDisplay<'a> {
                     for _ in 0..depth {
                         write!(f, " - ")?;
                     }
-                    let type_name = self.heap.type_name_by_id(*ty)
+                    let type_name = self
+                        .heap
+                        .type_name_by_id(*ty)
                         .and_then(|id| id.as_string(|s| s.map(|s| s.to_string())))
                         .unwrap_or_else(|| format!("{:?}", ty));
                     if let Some(name_str) = name.as_string(|s| s.map(|s| s.to_string())) {

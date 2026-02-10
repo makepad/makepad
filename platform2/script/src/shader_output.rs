@@ -1,11 +1,11 @@
-use makepad_live_id::*;
+use crate::heap::*;
+use crate::pod::*;
+use crate::shader_backend::*;
 use crate::value::*;
 use crate::vm::*;
-use crate::pod::*;
-use crate::heap::*;
-use crate::shader_backend::*;
-use std::fmt::Write;
+use makepad_live_id::*;
 use std::collections::BTreeSet;
+use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SamplerFilter {
@@ -45,17 +45,26 @@ impl Default for ShaderSampler {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct ShaderSamplerOptions{
-}
+pub struct ShaderSamplerOptions {}
 
 #[derive(Debug, Default, Clone)]
 pub struct ShaderStorageFlags(u32);
-impl ShaderStorageFlags{
-    pub fn set_read(&mut self){self.0 |= 1}
-    pub fn set_write(&mut self){self.0 |= 1}
-    pub fn is_read(&self)->bool{self.0 & 1 != 0}
-    pub fn is_write(&self)->bool{self.0 & 2 != 0}
-    pub fn is_readwrite(&self)->bool{self.0 & 3 == 3}
+impl ShaderStorageFlags {
+    pub fn set_read(&mut self) {
+        self.0 |= 1
+    }
+    pub fn set_write(&mut self) {
+        self.0 |= 1
+    }
+    pub fn is_read(&self) -> bool {
+        self.0 & 1 != 0
+    }
+    pub fn is_write(&self) -> bool {
+        self.0 & 2 != 0
+    }
+    pub fn is_readwrite(&self) -> bool {
+        self.0 & 3 == 3
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +82,7 @@ pub enum TextureType {
 }
 
 #[derive(Debug, Clone)]
-pub enum ShaderIoKind{
+pub enum ShaderIoKind {
     StorageBuffer(ShaderStorageFlags),
     UniformBuffer,
     Sampler(ShaderSamplerOptions),
@@ -104,7 +113,6 @@ pub struct ScopeUniformSource {
     pub ty: ScriptPodType,
 }
 
-
 /// Tracks a uniform buffer defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
 /// This is distinct from uniform buffers on io_self - these come from the surrounding scope.
 #[derive(Debug, Clone)]
@@ -131,7 +139,7 @@ pub struct ScopeTextureSource {
 
 #[allow(unused)]
 #[derive(Debug)]
-pub struct ShaderIo{
+pub struct ShaderIo {
     pub kind: ShaderIoKind,
     pub name: LiveId,
     pub ty: ScriptPodType,
@@ -143,31 +151,30 @@ impl ShaderIo {
     pub fn kind(&self) -> &ShaderIoKind {
         &self.kind
     }
-    
+
     pub fn name(&self) -> LiveId {
         self.name
     }
-    
+
     pub fn ty(&self) -> ScriptPodType {
         self.ty
     }
-    
+
     pub fn buffer_index(&self) -> Option<usize> {
         self.buffer_index
     }
 }
 
-
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
-pub enum ShaderMode{
+pub enum ShaderMode {
     Vertex,
     #[default]
     Fragment,
-    Compute
+    Compute,
 }
 
 #[derive(Default, Debug)]
-pub struct ShaderOutput{
+pub struct ShaderOutput {
     pub mode: ShaderMode,
     pub backend: ShaderBackend,
     pub io: Vec<ShaderIo>,
@@ -196,12 +203,15 @@ pub struct UniformBufferBindings {
 impl UniformBufferBindings {
     /// Look up buffer index by Pod type name
     pub fn get_by_type_name(&self, type_name: LiveId) -> Option<usize> {
-        self.bindings.iter().find(|(name, _)| *name == type_name).map(|(_, idx)| *idx)
+        self.bindings
+            .iter()
+            .find(|(name, _)| *name == type_name)
+            .map(|(_, idx)| *idx)
     }
-} 
+}
 
 #[derive(Debug)]
-pub struct ShaderFn{
+pub struct ShaderFn {
     pub call_sig: String,
     pub overload: usize,
     pub name: LiveId,
@@ -211,29 +221,29 @@ pub struct ShaderFn{
     pub ret: ScriptPodType,
 }
 
-impl ShaderOutput{
+impl ShaderOutput {
     /// Pre-collect ALL Rust instance fields in the correct order for struct layout.
     /// Uses recursion to process from deepest prototype to io_self, collecting all rust type properties.
     /// Dyn instance fields are NOT pre-collected - they are added during compilation
     /// as encountered, and their order doesn't matter.
-    /// 
+    ///
     /// IoInstance struct layout: Dyn fields first (any order), Rust fields last (must match Repr(C))
     /// RustInstance fields are pushed in the correct order: deref parent fields first, then child fields.
     pub fn pre_collect_rust_instance_io(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
         self.pre_collect_rust_instance_io_recursive(vm, io_self);
     }
-    
+
     fn pre_collect_rust_instance_io_recursive(&mut self, vm: &mut ScriptVm, obj: ScriptObject) {
         // First, recurse to prototype (to process deepest ancestor first)
         // This ensures parent's RustInstance fields come before child's fields
         if let Some(proto_obj) = vm.bx.heap.proto(obj).as_object() {
             self.pre_collect_rust_instance_io_recursive(vm, proto_obj);
         }
-        
+
         // Then process this object's type properties
         let obj_data = vm.bx.heap.object_data(obj);
         let ty_index = obj_data.tag.as_type_index();
-        
+
         if let Some(ty_index) = ty_index {
             // Collect the ordered props - iter_rust_instance_ordered returns all instance fields
             // (parent fields + this type's fields after deref) because rust_instance_start is now
@@ -241,10 +251,14 @@ impl ShaderOutput{
             let type_check = vm.bx.heap.type_check(ty_index);
             // Collect into a Vec first to avoid borrow issues with heap mutation below
             let ordered_props: Vec<_> = type_check.props.iter_rust_instance_ordered().collect();
-            
+
             for (field_id, type_id) in ordered_props {
                 // Get the pod type from the type_id
-                if let Some(pod_ty) = vm.bx.heap.type_id_to_pod_type(type_id, &vm.bx.code.builtins.pod) {
+                if let Some(pod_ty) = vm
+                    .bx
+                    .heap
+                    .type_id_to_pod_type(type_id, &vm.bx.code.builtins.pod)
+                {
                     // Skip if already added (handles duplicate prototypes in chain)
                     if !self.io.iter().any(|io| io.name == field_id) {
                         vm.bx.heap.pod_type_name_if_not_set(pod_ty, field_id);
@@ -259,17 +273,17 @@ impl ShaderOutput{
             }
         }
     }
-    
+
     /// Pre-collect ALL shader IO (uniforms, textures, fragment outputs) in definition order.
     /// Walks from deepest prototype to io_self, collecting all shader IO properties in a single pass.
     /// This ensures IO appears in definition order, not access order during compilation.
-    /// 
-    /// Note: RustInstance and DynInstance are handled separately - RustInstance via 
+    ///
+    /// Note: RustInstance and DynInstance are handled separately - RustInstance via
     /// pre_collect_rust_instance_io (from Rust type properties), DynInstance during compilation.
     pub fn pre_collect_shader_io(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
         // Use recursion to process from deepest prototype first (no temporary Vec needed)
         self.pre_collect_shader_io_recursive(vm, io_self);
-        
+
         // Set pod type names for uniforms (requires mutable heap, done after iteration)
         for io in &self.io {
             if matches!(io.kind, ShaderIoKind::Uniform) {
@@ -277,15 +291,15 @@ impl ShaderOutput{
             }
         }
     }
-    
+
     fn pre_collect_shader_io_recursive(&mut self, vm: &ScriptVm, obj: ScriptObject) {
         use crate::mod_shader::*;
-        
+
         // First recurse to prototype (to process deepest first)
         if let Some(proto_obj) = vm.bx.heap.proto(obj).as_object() {
             self.pre_collect_shader_io_recursive(vm, proto_obj);
         }
-        
+
         // Then process this object's map entries in insertion order
         let obj_data = vm.bx.heap.object_data(obj);
         obj_data.map_iter_ordered(|key, value| {
@@ -355,8 +369,11 @@ impl ShaderOutput{
             }
         });
     }
-    
-    pub(crate) fn get_pod_type_from_value(vm: &ScriptVm, value: ScriptValue) -> Option<ScriptPodType> {
+
+    pub(crate) fn get_pod_type_from_value(
+        vm: &ScriptVm,
+        value: ScriptValue,
+    ) -> Option<ScriptPodType> {
         // Check if it's a primitive type (f32, f64, bool, etc.)
         if let Some(pod_ty) = vm.bx.code.builtins.pod.value_to_exact_type(value) {
             return Some(pod_ty);
@@ -380,32 +397,37 @@ impl ShaderOutput{
         }
         None
     }
-    
-    pub fn create_struct_defs(&mut self, vm:&ScriptVm, out:&mut String){
-        for io in &self.io{
+
+    pub fn create_struct_defs(&mut self, vm: &ScriptVm, out: &mut String) {
+        for io in &self.io {
             let ty = io.ty;
-            if let ScriptPodTy::Struct{..} = vm.bx.heap.pod_type_ref(ty).ty{
+            if let ScriptPodTy::Struct { .. } = vm.bx.heap.pod_type_ref(ty).ty {
                 self.structs.insert(ty);
             }
         }
-        self.backend.pod_struct_defs(&vm.bx.heap, &self.structs, out);
+        self.backend
+            .pod_struct_defs(&vm.bx.heap, &self.structs, out);
     }
-    
+
     pub fn create_functions(&self, out: &mut String) {
         for fns in &self.functions {
             writeln!(out, "{}{{\n{}}}\n", fns.call_sig, fns.out).ok();
         }
     }
-    
+
     /// Find the vertex buffer object from io_self by looking for SHADER_IO_VERTEX_BUFFER type
-    pub fn find_vertex_buffer_object(&self, vm: &ScriptVm, io_self: ScriptObject) -> Option<ScriptObject> {
+    pub fn find_vertex_buffer_object(
+        &self,
+        vm: &ScriptVm,
+        io_self: ScriptObject,
+    ) -> Option<ScriptObject> {
         use crate::mod_shader::SHADER_IO_VERTEX_BUFFER;
-        
+
         // Walk the prototype chain looking for vertex buffer properties
         let mut current = Some(io_self);
         while let Some(obj) = current {
             let obj_data = vm.bx.heap.object_data(obj);
-            
+
             // Check map properties
             if let Some(ret) = obj_data.map_iter_ret(|_key, value| {
                 if let Some(value_obj) = value.as_object() {
@@ -419,20 +441,24 @@ impl ShaderOutput{
             }) {
                 return Some(ret);
             }
-            
+
             // Move to next prototype
             current = vm.bx.heap.proto(obj).as_object();
         }
         None
     }
-    
+
     /// Assign buffer indices to uniform buffers starting from `start_index`.
     /// Returns the UniformBufferBindings and the next available buffer index.
     /// Also sets the buffer_index field on each ShaderIo.
-    pub fn assign_uniform_buffer_indices(&mut self, heap: &ScriptHeap, start_index: usize) -> (UniformBufferBindings, usize) {
+    pub fn assign_uniform_buffer_indices(
+        &mut self,
+        heap: &ScriptHeap,
+        start_index: usize,
+    ) -> (UniformBufferBindings, usize) {
         let mut bindings = UniformBufferBindings::default();
         let mut buf_idx = start_index;
-        
+
         for io in &mut self.io {
             if let ShaderIoKind::UniformBuffer = io.kind {
                 // Get the Pod type name for this uniform buffer
@@ -444,22 +470,25 @@ impl ShaderOutput{
                 buf_idx += 1;
             }
         }
-        
+
         // Assign scope uniform buffer index if we have any scope uniforms
-        let has_scope_uniforms = self.io.iter().any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
+        let has_scope_uniforms = self
+            .io
+            .iter()
+            .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
         if has_scope_uniforms {
             bindings.scope_uniform_buffer_index = Some(buf_idx);
             buf_idx += 1;
         }
-        
+
         (bindings, buf_idx)
     }
-    
+
     /// Get the UniformBufferBindings from the current IO state.
     /// This should be called after `assign_uniform_buffer_indices` has been called.
     pub fn get_uniform_buffer_bindings(&self, heap: &ScriptHeap) -> UniformBufferBindings {
         let mut bindings = UniformBufferBindings::default();
-        
+
         for io in &self.io {
             if let ShaderIoKind::UniformBuffer = io.kind {
                 if let Some(buf_idx) = io.buffer_index {
@@ -470,21 +499,26 @@ impl ShaderOutput{
                 }
             }
         }
-        
+
         // Compute scope uniform buffer index (one past the max uniform buffer index, or start at 3)
-        let has_scope_uniforms = self.io.iter().any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
+        let has_scope_uniforms = self
+            .io
+            .iter()
+            .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
         if has_scope_uniforms {
-            let max_idx = self.io.iter()
+            let max_idx = self
+                .io
+                .iter()
                 .filter_map(|io| io.buffer_index)
                 .max()
                 .map(|m| m + 1)
                 .unwrap_or(3);
             bindings.scope_uniform_buffer_index = Some(max_idx);
         }
-        
+
         bindings
     }
-    
+
     /// Get or create a sampler with the given properties, returns the sampler index
     pub fn get_or_create_sampler(&mut self, sampler: ShaderSampler) -> usize {
         // Check if we already have this sampler
@@ -496,5 +530,4 @@ impl ShaderOutput{
         self.samplers.push(sampler);
         idx
     }
-    
 }

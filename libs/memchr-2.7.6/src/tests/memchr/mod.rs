@@ -11,33 +11,117 @@ pub(crate) mod naive;
 pub(crate) mod prop;
 
 const SEEDS: &'static [Seed] = &[
-    Seed { haystack: "a", needles: &[b'a'], positions: &[0] },
-    Seed { haystack: "aa", needles: &[b'a'], positions: &[0, 1] },
-    Seed { haystack: "aaa", needles: &[b'a'], positions: &[0, 1, 2] },
-    Seed { haystack: "", needles: &[b'a'], positions: &[] },
-    Seed { haystack: "z", needles: &[b'a'], positions: &[] },
-    Seed { haystack: "zz", needles: &[b'a'], positions: &[] },
-    Seed { haystack: "zza", needles: &[b'a'], positions: &[2] },
-    Seed { haystack: "zaza", needles: &[b'a'], positions: &[1, 3] },
-    Seed { haystack: "zzza", needles: &[b'a'], positions: &[3] },
-    Seed { haystack: "\x00a", needles: &[b'a'], positions: &[1] },
-    Seed { haystack: "\x00", needles: &[b'\x00'], positions: &[0] },
-    Seed { haystack: "\x00\x00", needles: &[b'\x00'], positions: &[0, 1] },
-    Seed { haystack: "\x00a\x00", needles: &[b'\x00'], positions: &[0, 2] },
-    Seed { haystack: "zzzzzzzzzzzzzzzza", needles: &[b'a'], positions: &[16] },
+    Seed {
+        haystack: "a",
+        needles: &[b'a'],
+        positions: &[0],
+    },
+    Seed {
+        haystack: "aa",
+        needles: &[b'a'],
+        positions: &[0, 1],
+    },
+    Seed {
+        haystack: "aaa",
+        needles: &[b'a'],
+        positions: &[0, 1, 2],
+    },
+    Seed {
+        haystack: "",
+        needles: &[b'a'],
+        positions: &[],
+    },
+    Seed {
+        haystack: "z",
+        needles: &[b'a'],
+        positions: &[],
+    },
+    Seed {
+        haystack: "zz",
+        needles: &[b'a'],
+        positions: &[],
+    },
+    Seed {
+        haystack: "zza",
+        needles: &[b'a'],
+        positions: &[2],
+    },
+    Seed {
+        haystack: "zaza",
+        needles: &[b'a'],
+        positions: &[1, 3],
+    },
+    Seed {
+        haystack: "zzza",
+        needles: &[b'a'],
+        positions: &[3],
+    },
+    Seed {
+        haystack: "\x00a",
+        needles: &[b'a'],
+        positions: &[1],
+    },
+    Seed {
+        haystack: "\x00",
+        needles: &[b'\x00'],
+        positions: &[0],
+    },
+    Seed {
+        haystack: "\x00\x00",
+        needles: &[b'\x00'],
+        positions: &[0, 1],
+    },
+    Seed {
+        haystack: "\x00a\x00",
+        needles: &[b'\x00'],
+        positions: &[0, 2],
+    },
+    Seed {
+        haystack: "zzzzzzzzzzzzzzzza",
+        needles: &[b'a'],
+        positions: &[16],
+    },
     Seed {
         haystack: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzza",
         needles: &[b'a'],
         positions: &[32],
     },
     // two needles (applied to memchr2 + memchr3)
-    Seed { haystack: "az", needles: &[b'a', b'z'], positions: &[0, 1] },
-    Seed { haystack: "az", needles: &[b'a', b'z'], positions: &[0, 1] },
-    Seed { haystack: "az", needles: &[b'x', b'y'], positions: &[] },
-    Seed { haystack: "az", needles: &[b'a', b'y'], positions: &[0] },
-    Seed { haystack: "az", needles: &[b'x', b'z'], positions: &[1] },
-    Seed { haystack: "yyyyaz", needles: &[b'a', b'z'], positions: &[4, 5] },
-    Seed { haystack: "yyyyaz", needles: &[b'z', b'a'], positions: &[4, 5] },
+    Seed {
+        haystack: "az",
+        needles: &[b'a', b'z'],
+        positions: &[0, 1],
+    },
+    Seed {
+        haystack: "az",
+        needles: &[b'a', b'z'],
+        positions: &[0, 1],
+    },
+    Seed {
+        haystack: "az",
+        needles: &[b'x', b'y'],
+        positions: &[],
+    },
+    Seed {
+        haystack: "az",
+        needles: &[b'a', b'y'],
+        positions: &[0],
+    },
+    Seed {
+        haystack: "az",
+        needles: &[b'x', b'z'],
+        positions: &[1],
+    },
+    Seed {
+        haystack: "yyyyaz",
+        needles: &[b'a', b'z'],
+        positions: &[4, 5],
+    },
+    Seed {
+        haystack: "yyyyaz",
+        needles: &[b'z', b'a'],
+        positions: &[4, 5],
+    },
     // three needles (applied to memchr3)
     Seed {
         haystack: "xyz",
@@ -49,9 +133,21 @@ const SEEDS: &'static [Seed] = &[
         needles: &[b'x', b'y', b'z'],
         positions: &[0, 1, 2],
     },
-    Seed { haystack: "zxy", needles: &[b'x', b'a', b'z'], positions: &[0, 1] },
-    Seed { haystack: "zxy", needles: &[b't', b'a', b'z'], positions: &[0] },
-    Seed { haystack: "yxz", needles: &[b't', b'a', b'z'], positions: &[2] },
+    Seed {
+        haystack: "zxy",
+        needles: &[b'x', b'a', b'z'],
+        positions: &[0, 1],
+    },
+    Seed {
+        haystack: "zxy",
+        needles: &[b't', b'a', b'z'],
+        positions: &[0],
+    },
+    Seed {
+        haystack: "yxz",
+        needles: &[b't', b'a', b'z'],
+        positions: &[2],
+    },
 ];
 
 /// Runs a host of substring search tests.
@@ -121,8 +217,7 @@ impl Runner {
                 continue;
             }
             for t in seed.generate() {
-                let mut results = match test(t.haystack.as_bytes(), &t.needles)
-                {
+                let mut results = match test(t.haystack.as_bytes(), &t.needles) {
                     None => continue,
                     Some(results) => results,
                 };

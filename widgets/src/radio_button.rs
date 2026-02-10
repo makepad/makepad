@@ -1,42 +1,36 @@
-use crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*,
-        View,
-        Image,
-    };
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, Image, View};
 
-live_design!{
+live_design! {
     link widgets;
     use link::theme::*;
     use link::shaders::*;
     use crate::view_ui::CachedRoundedView;
-    
+
     DrawRadioButton = {{DrawRadioButton}} {}
     pub RadioButtonBase = {{RadioButton}} {}
     pub RadioButtonGroupBase = {{RadioButtonGroup }} {}
-    
+
     pub RadioButtonFlat = <RadioButtonBase> {
         width: Fit, height: Fit,
         align: { x: 0., y: 0. }
         padding: <THEME_MSPACE_V_2> { left: (THEME_SPACE_2)}
-        
+
         icon_walk: { margin: { left: 20. } }
-        
+
         label_walk: {
             width: Fit, height: Fit,
             margin: <THEME_MSPACE_H_1> { left: 13. }
         }
         label_align: { y: 0.0 }
-        
+
         draw_bg: {
             instance disabled: 0.,
             instance down: 0.,
 
             uniform size: 15.0,
 
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0;
+            uniform gradient_fill_horizontal: 0.0;
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -143,7 +137,7 @@ live_design!{
 
                 let scale_factor_fill = vec2(
                     self.rect_size.x / sz_inner_px,
-                    self.rect_size.y / sz_inner_px 
+                    self.rect_size.y / sz_inner_px
                 );
 
                 let gradient_border = vec2(
@@ -250,21 +244,21 @@ live_design!{
                 return sdf.result
             }
         }
-        
+
     draw_text: {
         instance active: 0.0
         instance focus: 0.0
             instance down: 0.,
             instance hover: 0.0
             instance disabled: 0.,
-                
+
             uniform color: (THEME_COLOR_LABEL_OUTER)
             uniform color_hover: (THEME_COLOR_LABEL_OUTER_HOVER)
             uniform color_down: (THEME_COLOR_LABEL_OUTER_DOWN)
             uniform color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
             uniform color_focus: (THEME_COLOR_LABEL_OUTER_FOCUS)
             uniform color_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
-                
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -289,7 +283,7 @@ live_design!{
                     )
             }
         }
-            
+
         draw_icon: {
             instance focus: 0.0
             instance disabled: 0.,
@@ -336,7 +330,7 @@ live_design!{
                     )
             }
         }
-            
+
         animator: {
             disabled = {
                 default: off,
@@ -419,7 +413,7 @@ live_design!{
             }
         }
     }
-        
+
     pub RadioButton = <RadioButtonFlat> {
         draw_bg: {
             color: (THEME_COLOR_INSET)
@@ -457,8 +451,8 @@ live_design!{
 
     pub RadioButtonGradientX = <RadioButtonGradientY> {
         draw_bg: {
-            gradient_border_horizontal: 1.0; 
-            gradient_fill_horizontal: 1.0; 
+            gradient_border_horizontal: 1.0;
+            gradient_fill_horizontal: 1.0;
         }
     }
 
@@ -483,7 +477,7 @@ live_design!{
 
         label_walk: { margin: { left: (THEME_SPACE_2) } }
     }
-        
+
     pub RadioButtonFlatter = <RadioButton> {
         draw_text: {
             color: (THEME_COLOR_LABEL_OUTER_OFF)
@@ -502,7 +496,7 @@ live_design!{
             }
         }
     }
-        
+
     pub RadioButtonTabFlat = <RadioButton> {
         height: Fit,
         label_walk: {
@@ -518,8 +512,8 @@ live_design!{
 
             uniform size: 15.0,
 
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0;
+            uniform gradient_fill_horizontal: 0.0;
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -645,14 +639,14 @@ live_design!{
         }
 
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
-            
+
         draw_text: {
             color: (THEME_COLOR_LABEL_INNER)
             color_active: (THEME_COLOR_LABEL_INNER_ACTIVE)
             color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
         }
     }
-    
+
     pub RadioButtonTab = <RadioButtonTabFlat> {
         draw_bg: {
             border_color: (THEME_COLOR_BEVEL_OUTSET_1)
@@ -678,8 +672,8 @@ live_design!{
 
     pub RadioButtonTabGradientX = <RadioButtonTabGradientY> {
         draw_bg: {
-            gradient_border_horizontal: 1.0; 
-            gradient_fill_horizontal: 1.0; 
+            gradient_border_horizontal: 1.0;
+            gradient_fill_horizontal: 1.0;
         }
     }
 
@@ -693,25 +687,29 @@ live_design!{
     pub RadioButtonGroupTab = <RadioButtonTab> {
         height: Fit,
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25), right: (THEME_SPACE_2 * 2.)}
-            
+
     }
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawRadioButton {
-    #[deref] draw_super: DrawQuad,
-    #[live] hover: f32,
-    #[live] focus: f32,
-    #[live] active: f32
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    hover: f32,
+    #[live]
+    focus: f32,
+    #[live]
+    active: f32,
 }
-
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
 #[repr(u32)]
 pub enum RadioType {
-    #[pick] Round = shader_enum(1),
+    #[pick]
+    Round = shader_enum(1),
     Tab = shader_enum(2),
 }
 
@@ -719,46 +717,62 @@ pub enum RadioType {
 #[live_ignore]
 pub enum MediaType {
     Image,
-    #[pick] Icon,
+    #[pick]
+    Icon,
     None,
 }
 
 #[derive(Live, LiveHook, Widget)]
 pub struct RadioButtonGroup {
-    #[deref] frame: View
+    #[deref]
+    frame: View,
 }
 
 #[derive(Live, LiveHook, Widget)]
 pub struct RadioButton {
-    #[redraw] #[live] draw_bg: DrawRadioButton,
-    #[live] draw_icon: DrawIcon,
-    #[live] draw_text: DrawText,
+    #[redraw]
+    #[live]
+    draw_bg: DrawRadioButton,
+    #[live]
+    draw_icon: DrawIcon,
+    #[live]
+    draw_text: DrawText,
 
-    #[live] value: LiveValue,
+    #[live]
+    value: LiveValue,
 
-    #[live] media: MediaType,
-    
-    #[live] icon_walk: Walk,
-    #[walk] walk: Walk,
+    #[live]
+    media: MediaType,
 
-    #[live] image: Image,
+    #[live]
+    icon_walk: Walk,
+    #[walk]
+    walk: Walk,
 
-    #[layout] layout: Layout,
-    #[animator] animator: Animator,
-    
-    #[live] label_walk: Walk,
-    #[live] label_align: Align,
-    #[live] text: ArcStringMut,
-    
-    #[live] bind: String,
+    #[live]
+    image: Image,
+
+    #[layout]
+    layout: Layout,
+    #[animator]
+    animator: Animator,
+
+    #[live]
+    label_walk: Walk,
+    #[live]
+    label_align: Align,
+    #[live]
+    text: ArcStringMut,
+
+    #[live]
+    bind: String,
 }
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum RadioButtonAction {
     Clicked,
-    None
+    None,
 }
-
 
 impl RadioButtonGroup {
     pub fn draw_walk(&mut self, _cx: &mut Cx2d, _walk: Walk) {}
@@ -777,34 +791,30 @@ impl RadioButton {
             }
             MediaType::None => {}
         }
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
+        self.draw_text
+            .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
     }
-        
 }
 
 impl Widget for RadioButtonGroup {
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         //let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-              
     }
-    
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
         DrawStep::done()
     }
-    
 }
 
 impl Widget for RadioButton {
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-                
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -820,13 +830,13 @@ impl Widget for RadioButton {
             Hit::FingerHoverOut(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animator_play(cx, ids!(hover.off));
-            },
+            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, ids!(active.off)) {
                     self.animator_play(cx, ids!(hover.down));
                 }
                 self.set_key_focus(cx);
-            },
+            }
             Hit::FingerUp(_fe) => {
                 self.animator_play(cx, ids!(hover.on));
                 if self.animator_in_state(cx, ids!(active.off)) {
@@ -836,46 +846,49 @@ impl Widget for RadioButton {
                     self.animator_play(cx, ids!(active.off));
                 }
             }
-            Hit::FingerMove(_fe) => {
-                                
-            }
-            _ => ()
+            Hit::FingerMove(_fe) => {}
+            _ => (),
         }
+    }
 
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.animator_toggle(
+            cx,
+            disabled,
+            Animate::Yes,
+            ids!(disabled.on),
+            ids!(disabled.off),
+        );
     }
-    
-    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
-    }
-                
-    fn disabled(&self, cx:&Cx) -> bool {
+
+    fn disabled(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
         DrawStep::done()
     }
-    
+
     fn text(&self) -> String {
         self.text.as_ref().to_string()
     }
-            
-    fn set_text(&mut self, cx:&mut Cx, v: &str) {
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
     }
 }
 
-impl RadioButtonRef{
-    fn unselect(&self, cx:&mut Cx){
-        if let Some(mut inner) = self.borrow_mut(){
+impl RadioButtonRef {
+    fn unselect(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.animator_play(cx, ids!(active.off));
         }
     }
 
-    pub fn select(&self, cx: &mut Cx, scope: &mut Scope){
-        if let Some(mut inner) = self.borrow_mut(){
+    pub fn select(&self, cx: &mut Cx, scope: &mut Scope) {
+        if let Some(mut inner) = self.borrow_mut() {
             if inner.animator_in_state(cx, ids!(active.off)) {
                 inner.animator_play(cx, ids!(active.on));
                 cx.widget_action(inner.widget_uid(), &scope.path, RadioButtonAction::Clicked);
@@ -884,34 +897,45 @@ impl RadioButtonRef{
     }
 }
 
-impl RadioButtonSet{
-    
-    pub fn selected(&self, cx: &mut Cx, actions: &Actions)->Option<usize>{
-        for action in actions{
-            if let Some(action) = action.as_widget_action(){
-                match action.cast(){
-                    RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| action.widget_uid == v.widget_uid()){
-                        for (i, item) in self.0.iter().enumerate(){
-                            if i != index{
-                                RadioButtonRef(item.clone()).unselect(cx);
+impl RadioButtonSet {
+    pub fn selected(&self, cx: &mut Cx, actions: &Actions) -> Option<usize> {
+        for action in actions {
+            if let Some(action) = action.as_widget_action() {
+                match action.cast() {
+                    RadioButtonAction::Clicked => {
+                        if let Some(index) = self
+                            .0
+                            .iter()
+                            .position(|v| action.widget_uid == v.widget_uid())
+                        {
+                            for (i, item) in self.0.iter().enumerate() {
+                                if i != index {
+                                    RadioButtonRef(item.clone()).unselect(cx);
+                                }
                             }
+                            return Some(index);
                         }
-                        return Some(index);
                     }
-                    _ => ()
+                    _ => (),
                 }
             }
         }
         None
     }
-    
-    pub fn selected_to_visible(&self, cx: &mut Cx, ui:&WidgetRef, actions: &Actions, paths:&[&[LiveId]] ) {
+
+    pub fn selected_to_visible(
+        &self,
+        cx: &mut Cx,
+        ui: &WidgetRef,
+        actions: &Actions,
+        paths: &[&[LiveId]],
+    ) {
         // find a widget action that is in our radiogroup
-        if let Some(index) = self.selected(cx, actions){
+        if let Some(index) = self.selected(cx, actions) {
             // ok now we set visible
-            for (i,path) in paths.iter().enumerate(){
+            for (i, path) in paths.iter().enumerate() {
                 let widget = ui.widget(path);
-                widget.apply_over(cx, live!{visible:(i == index)});
+                widget.apply_over(cx, live! {visible:(i == index)});
                 widget.redraw(cx);
             }
         }

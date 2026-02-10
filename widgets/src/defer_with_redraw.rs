@@ -1,6 +1,5 @@
-use makepad_draw::ui_runner::{UiRunner, DeferCallback};
 use crate::Widget;
-
+use makepad_draw::ui_runner::{DeferCallback, UiRunner};
 
 /// Extension only aviailable when the `UiRunner` is used with a `Widget`.
 pub trait DeferWithRedraw<T: 'static> {

@@ -1,24 +1,10 @@
-use {
-    crate::{
-        window::WindowId,
-        event::{
-            MouseDownEvent,
-            MouseUpEvent,
-            MouseMoveEvent,
-            MouseLeaveEvent,
-            ScrollEvent,
-            WindowGeomChangeEvent,
-            WindowDragQueryEvent,
-            WindowCloseRequestedEvent,
-            WindowClosedEvent,
-            TextInputEvent,
-            KeyEvent,
-            DragEvent,
-            DropEvent,
-            TextClipboardEvent,
-            TimerEvent,
-        },
-    }
+use crate::{
+    event::{
+        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseLeaveEvent, MouseMoveEvent,
+        MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
+        WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
+    },
+    window::WindowId,
 };
 
 #[derive(Debug)]
@@ -30,13 +16,13 @@ pub enum Win32Event {
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
     Paint,
-    
+
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
     MouseLeave(MouseLeaveEvent),
     Scroll(ScrollEvent),
-    
+
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     TextInput(TextInputEvent),

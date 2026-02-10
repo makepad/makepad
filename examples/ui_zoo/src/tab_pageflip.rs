@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoPageFlip = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/pageflip.md") } 
+            <Markdown> { body: dep("crate://self/resources/pageflip.md") }
         }
         demos = {
             <View> {
@@ -26,7 +24,7 @@ live_design!{
                 width: Fill, height: Fill,
                 flow: Down
 
-                active_page: page_a 
+                active_page: page_a
 
                 page_a = <View> {
                     align: { x: 0.5, y: 0.5 }

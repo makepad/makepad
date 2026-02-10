@@ -1,8 +1,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::ffi::c_void;
 use makepad_jni_sys as jni_sys;
+use std::ffi::c_void;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -15,7 +15,6 @@ pub struct ANativeWindow {
 pub struct AAssetManager {
     _unused: [u8; 0],
 }
-
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -34,7 +33,10 @@ extern "C" {
     ) -> *mut AAsset;
     pub fn AAsset_getLength64(asset: *mut AAsset) -> i64;
     pub fn ANativeWindow_release(window: *mut ANativeWindow);
-    pub fn ANativeWindow_fromSurface(env: *mut jni_sys::JNIEnv, surface: jni_sys::jobject) -> *mut ANativeWindow;
+    pub fn ANativeWindow_fromSurface(
+        env: *mut jni_sys::JNIEnv,
+        surface: jni_sys::jobject,
+    ) -> *mut ANativeWindow;
     pub fn AAsset_read(
         asset: *mut AAsset,
         buf: *mut ::std::os::raw::c_void,
@@ -45,21 +47,19 @@ extern "C" {
         env: *mut jni_sys::JNIEnv,
         assetManager: jni_sys::jobject,
     ) -> *mut AAssetManager;
-    
-    pub fn  ANativeWindow_setFrameRate(
-         window: *mut ANativeWindow,
-         frameRate:f32,
-         compatibility:i8
-    )->i32;
+
+    pub fn ANativeWindow_setFrameRate(
+        window: *mut ANativeWindow,
+        frameRate: f32,
+        compatibility: i8,
+    ) -> i32;
 }
 
 pub type AChoreographer = c_void;
 pub type AChoreographerFrameCallbackData = c_void;
 
-pub type AChoreographer_vsyncCallback = unsafe extern "C" fn(
-    callbackData: *mut AChoreographerFrameCallbackData,
-    data: *mut c_void,
-);
+pub type AChoreographer_vsyncCallback =
+    unsafe extern "C" fn(callbackData: *mut AChoreographerFrameCallbackData, data: *mut c_void);
 
 /// The function type for posting callbacks to the AChoreographer
 pub type AChoreographerPostCallbackFn = unsafe extern "C" fn(
@@ -106,40 +106,40 @@ pub struct ANativeActivityCallbacks {
     pub onStart: ::std::option::Option<unsafe extern "C" fn(activity: *mut ANativeActivity)>,
     pub onResume: ::std::option::Option<unsafe extern "C" fn(activity: *mut ANativeActivity)>,
     pub onSaveInstanceState: ::std::option::Option<
-    unsafe extern "C" fn(
-        activity: *mut ANativeActivity,
-        outSize: *mut usize,
-    ) -> *mut ::std::os::raw::c_void,
+        unsafe extern "C" fn(
+            activity: *mut ANativeActivity,
+            outSize: *mut usize,
+        ) -> *mut ::std::os::raw::c_void,
     >,
     pub onPause: ::std::option::Option<unsafe extern "C" fn(activity: *mut ANativeActivity)>,
     pub onStop: ::std::option::Option<unsafe extern "C" fn(activity: *mut ANativeActivity)>,
     pub onDestroy: ::std::option::Option<unsafe extern "C" fn(activity: *mut ANativeActivity)>,
     pub onWindowFocusChanged: ::std::option::Option<
-    unsafe extern "C" fn(activity: *mut ANativeActivity, hasFocus: ::std::os::raw::c_int),
+        unsafe extern "C" fn(activity: *mut ANativeActivity, hasFocus: ::std::os::raw::c_int),
     >,
     pub onNativeWindowCreated: ::std::option::Option<
-    unsafe extern "C" fn(activity: *mut ANativeActivity, window: *mut ANativeWindow),
+        unsafe extern "C" fn(activity: *mut ANativeActivity, window: *mut ANativeWindow),
     >,
     pub onNativeWindowResized: ::std::option::Option<
-    unsafe extern "C" fn(activity: *mut ANativeActivity, window: *mut ANativeWindow),
+        unsafe extern "C" fn(activity: *mut ANativeActivity, window: *mut ANativeWindow),
     >,
     pub onNativeWindowRedrawNeeded: ::std::option::Option<
-    unsafe extern "C" fn(activity: *mut ANativeActivity, window: *mut ANativeWindow),
+        unsafe extern "C" fn(activity: *mut ANativeActivity, window: *mut ANativeWindow),
     >,
     pub onNativeWindowDestroyed: ::std::option::Option<
-    unsafe extern "C" fn(activity: *mut ANativeActivity, window: *mut ANativeWindow),
+        unsafe extern "C" fn(activity: *mut ANativeActivity, window: *mut ANativeWindow),
     >,
     pub onInputQueueCreated: ::std::option::Option<
-    unsafe extern "C" fn(activity: *mut ANativeActivity, queue: *mut AInputQueue),
+        unsafe extern "C" fn(activity: *mut ANativeActivity, queue: *mut AInputQueue),
     >,
     pub onInputQueueDestroyed: ::std::option::Option<
-    unsafe extern "C" fn(activity: *mut ANativeActivity, queue: *mut AInputQueue),
+        unsafe extern "C" fn(activity: *mut ANativeActivity, queue: *mut AInputQueue),
     >,
     pub onContentRectChanged: ::std::option::Option<
-    unsafe extern "C" fn(activity: *mut ANativeActivity, rect: *const ARect),
+        unsafe extern "C" fn(activity: *mut ANativeActivity, rect: *const ARect),
     >,
     pub onConfigurationChanged:
-    ::std::option::Option<unsafe extern "C" fn(activity: *mut ANativeActivity)>,
+        ::std::option::Option<unsafe extern "C" fn(activity: *mut ANativeActivity)>,
     pub onLowMemory: ::std::option::Option<unsafe extern "C" fn(activity: *mut ANativeActivity)>,
 }
 

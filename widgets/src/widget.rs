@@ -1,14 +1,14 @@
 pub use crate::register_widget;
 use {
-    crate::makepad_draw::*,
     crate::designer_data::DesignerDataToWidget,
+    crate::makepad_draw::*,
     std::any::TypeId,
     std::cell::RefCell,
     std::collections::BTreeMap,
     std::fmt,
-    std::sync::Arc,
     std::fmt::{Debug, Error, Formatter},
     std::rc::Rc,
+    std::sync::Arc,
 };
 
 #[derive(Clone, Copy)]
@@ -38,11 +38,15 @@ pub trait WidgetNode: LiveApply {
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
-    fn set_action_data(&mut self, _data:Arc<dyn ActionTrait>){}
-    fn action_data(&self)->Option<Arc<dyn ActionTrait>>{None}
-        
-    fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){}
-    fn visible(&self) -> bool {true}
+    fn set_action_data(&mut self, _data: Arc<dyn ActionTrait>) {}
+    fn action_data(&self) -> Option<Arc<dyn ActionTrait>> {
+        None
+    }
+
+    fn set_visible(&mut self, _cx: &mut Cx, _visible: bool) {}
+    fn visible(&self) -> bool {
+        true
+    }
 }
 
 pub trait Widget: WidgetNode {
@@ -86,16 +90,16 @@ pub trait Widget: WidgetNode {
         false
     }
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes: &[LiveNode], _path: &[LiveId]) {}
-    
-    fn draw_3d(&mut self, _cx:&mut Cx3d, _scope: &mut Scope)->DrawStep{
+
+    fn draw_3d(&mut self, _cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
         DrawStep::done()
     }
-    
-    fn draw_3d_all(&mut self, cx:&mut Cx3d, scope: &mut Scope){
+
+    fn draw_3d_all(&mut self, cx: &mut Cx3d, scope: &mut Scope) {
         while self.draw_3d(cx, scope).is_step() {}
     }
-    
-    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep{
+
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
         DrawStep::done()
     }
 
@@ -107,41 +111,39 @@ pub trait Widget: WidgetNode {
     fn draw_walk_all(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) {
         while self.draw_walk(cx, scope, walk).is_step() {}
     }
-    
+
     fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut Scope) {
         while self.draw(cx, scope).is_step() {}
     }
-    
+
     fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
-       self.draw(cx, &mut Scope::empty())
+        self.draw(cx, &mut Scope::empty())
     }
-    
+
     fn draw_all_unscoped(&mut self, cx: &mut Cx2d) {
         self.draw_all(cx, &mut Scope::empty());
     }
-        
-    
+
     fn text(&self) -> String {
         String::new()
     }
 
-    fn set_text(&mut self, _cx:&mut Cx, _v: &str) {}
-    
-    fn set_key_focus(&self, cx:&mut Cx){
+    fn set_text(&mut self, _cx: &mut Cx, _v: &str) {}
+
+    fn set_key_focus(&self, cx: &mut Cx) {
         cx.set_key_focus(self.area())
     }
-    
-    fn key_focus(&self, cx:&Cx)->bool{
+
+    fn key_focus(&self, cx: &Cx) -> bool {
         cx.has_key_focus(self.area())
     }
-    
-    fn set_disabled(&mut self, _cx:&mut Cx, _disabled:bool){
-    }
-                
-    fn disabled(&self, _cx:&Cx) -> bool {
+
+    fn set_disabled(&mut self, _cx: &mut Cx, _disabled: bool) {}
+
+    fn disabled(&self, _cx: &Cx) -> bool {
         false
     }
-        
+
     /*fn set_text_and_redraw(&mut self, cx: &mut Cx, v: &str) {
         self.set_text(v);
         self.redraw(cx);
@@ -169,7 +171,10 @@ pub trait Widget: WidgetNode {
         LiveType::of::<Self>()
     }
 
-    fn ui_runner(&self) -> UiRunner<Self> where Self: Sized + 'static {
+    fn ui_runner(&self) -> UiRunner<Self>
+    where
+        Self: Sized + 'static,
+    {
         UiRunner::new(self.widget_uid().0 as usize)
     }
 }
@@ -246,7 +251,7 @@ impl Debug for WidgetRef {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct WidgetSet(pub SmallVec<[WidgetRef;2]>);
+pub struct WidgetSet(pub SmallVec<[WidgetRef; 2]>);
 
 impl WidgetSet {
     pub fn is_empty(&mut self) -> bool {
@@ -258,14 +263,14 @@ impl WidgetSet {
     }
 
     pub fn extend_from_set(&mut self, other: &WidgetSet) {
-        for item in other.iter(){
+        for item in other.iter() {
             self.0.push(item.clone())
         }
     }
 
     pub fn into_first(self) -> WidgetRef {
-        for item in self.0{
-            return item
+        for item in self.0 {
+            return item;
         }
         WidgetRef::empty()
     }
@@ -311,25 +316,27 @@ impl WidgetSet {
     pub fn empty() -> Self {
         Self::default()
     }
-    
+
     pub fn set_text(&self, cx: &mut Cx, v: &str) {
         for item in &self.0 {
             item.set_text(cx, v)
         }
     }
 
-    pub fn iter(&self)->WidgetSetIterator<'_>{
-        return WidgetSetIterator{
+    pub fn iter(&self) -> WidgetSetIterator<'_> {
+        return WidgetSetIterator {
             widget_set: self,
-            index: 0
-        }
+            index: 0,
+        };
     }
-    
-    pub fn filter_actions<'a>(&'a self, actions:&'a Actions)-> impl Iterator<Item = &'a WidgetAction>{
+
+    pub fn filter_actions<'a>(
+        &'a self,
+        actions: &'a Actions,
+    ) -> impl Iterator<Item = &'a WidgetAction> {
         actions.filter_widget_actions_set(self)
     }
 }
-
 
 pub struct WidgetSetIterator<'a> {
     widget_set: &'a WidgetSet,
@@ -340,10 +347,10 @@ impl<'a> Iterator for WidgetSetIterator<'a> {
     // We can refer to this type using Self::Item
     type Item = &'a WidgetRef;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.widget_set.0.len(){
+        if self.index < self.widget_set.0.len() {
             let idx = self.index;
             self.index += 1;
-            return Some(&self.widget_set.0[idx])
+            return Some(&self.widget_set.0[idx]);
         }
         None
     }
@@ -358,30 +365,28 @@ impl PartialEq for WidgetRef {
         !Rc::ptr_eq(&self.0, &other.0)
     }
 }
-pub trait OptionWidgetRefExt{
+pub trait OptionWidgetRefExt {
     fn into_ref(self) -> WidgetRef;
 }
-impl OptionWidgetRefExt for Option<WidgetRef>{
-    fn into_ref(self) -> WidgetRef{
-        if let Some(v) = self{
-            return v
-        }
-        else{
+impl OptionWidgetRefExt for Option<WidgetRef> {
+    fn into_ref(self) -> WidgetRef {
+        if let Some(v) = self {
+            return v;
+        } else {
             WidgetRef::empty()
-        }     
+        }
     }
 }
 
 impl WidgetRef {
-    pub fn into_option(self)->Option<WidgetRef>{
-        if self.is_empty(){
+    pub fn into_option(self) -> Option<WidgetRef> {
+        if self.is_empty() {
             None
-        }
-        else{
+        } else {
             Some(self)
         }
     }
-    
+
     pub fn empty() -> Self {
         Self(Rc::new(RefCell::new(None)))
     }
@@ -432,15 +437,15 @@ impl WidgetRef {
             inner.widget.handle_event_with(cx, event, scope, sweep_area)
         }
     }
-    
+
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let start = cx.new_actions.len();
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.widget.handle_event(cx, event, scope); 
+            inner.widget.handle_event(cx, event, scope);
         }
         let end = cx.new_actions.len();
-        if start != end{
-            for action in &mut cx.new_actions[start..end]{
+        if start != end {
+            for action in &mut cx.new_actions[start..end] {
                 if let Some(action) = action.downcast_mut::<WidgetAction>() {
                     action.widgets.push(self.clone());
                 }
@@ -478,23 +483,22 @@ impl WidgetRef {
         }
         false
     }
-    
-    pub fn set_action_data<T:ActionTrait + PartialEq>(&self, data:T){
+
+    pub fn set_action_data<T: ActionTrait + PartialEq>(&self, data: T) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            if let Some(v) = inner.widget.action_data(){
-                if let Some(v) = v.downcast_ref::<T>(){
-                    if v.ne(&data){
+            if let Some(v) = inner.widget.action_data() {
+                if let Some(v) = v.downcast_ref::<T>() {
+                    if v.ne(&data) {
                         inner.widget.set_action_data(Arc::new(data));
                     }
                 }
-            }
-            else{
+            } else {
                 inner.widget.set_action_data(Arc::new(data));
             }
         }
     }
-    
-    pub fn set_action_data_always<T:ActionTrait>(&self, data:T){
+
+    pub fn set_action_data_always<T: ActionTrait>(&self, data: T) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.set_action_data(Arc::new(data));
         }
@@ -515,14 +519,14 @@ impl WidgetRef {
         }
         WidgetRef::empty()
     }
-        
-    pub fn clear_query_cache(&self){
+
+    pub fn clear_query_cache(&self) {
         if let Some(inner) = self.0.borrow_mut().as_ref() {
             let mut res = WidgetSet::empty();
             inner.widget.find_widgets(&[], WidgetCache::Clear, &mut res);
         }
     }
-    
+
     pub fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         if let Some(inner) = self.0.borrow().as_ref() {
             inner.widget.find_widgets(path, cached, results)
@@ -535,7 +539,7 @@ impl WidgetRef {
         }
         WidgetRef::empty()
     }
-    
+
     // depricate this one
     pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
@@ -543,14 +547,14 @@ impl WidgetRef {
         }
         WidgetSet::default()
     }
-    
+
     pub fn widget_set(&self, paths: &[&[LiveId]]) -> WidgetSet {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.widgets(paths);
         }
         WidgetSet::default()
     }
-    
+
     pub fn draw_walk(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).step() {
@@ -568,13 +572,13 @@ impl WidgetRef {
             inner.widget.draw_walk_all(cx, scope, walk)
         }
     }
-    
+
     pub fn draw_3d_all(&self, cx: &mut Cx3d, scope: &mut Scope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.draw_3d_all(cx, scope)
         }
     }
-    
+
     pub fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw_3d(cx, scope).step() {
@@ -586,7 +590,7 @@ impl WidgetRef {
         }
         DrawStep::done()
     }
-    
+
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw(cx, scope).step() {
@@ -598,7 +602,7 @@ impl WidgetRef {
         }
         DrawStep::done()
     }
-    
+
     pub fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw(cx, &mut Scope::empty()).step() {
@@ -624,20 +628,20 @@ impl WidgetRef {
             return inner.widget.redraw(cx);
         }
     }
-    
-    pub fn set_visible(&self, cx:&mut Cx, visible:bool) {
+
+    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.set_visible(cx, visible);
         }
     }
-    
+
     pub fn visible(&self) -> bool {
         if let Some(inner) = self.0.borrow().as_ref() {
             return inner.widget.visible();
         }
         true
     }
-    
+
     pub fn text(&self) -> String {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.text()
@@ -645,57 +649,60 @@ impl WidgetRef {
             String::new()
         }
     }
-    
+
     pub fn set_text(&self, cx: &mut Cx, v: &str) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.set_text(cx, v)
         }
     }
-    
-    pub fn key_focus(&self, cx:&Cx) -> bool {
+
+    pub fn key_focus(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.0.borrow().as_ref() {
             inner.widget.key_focus(cx)
         } else {
             false
         }
     }
-        
+
     pub fn set_key_focus(&self, cx: &mut Cx) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.set_key_focus(cx)
         }
     }
-    
-    pub fn set_disabled(&self, cx:&mut Cx, disabled:bool) {
+
+    pub fn set_disabled(&self, cx: &mut Cx, disabled: bool) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.set_disabled(cx, disabled);
         }
     }
-        
-    pub fn disabled(&self, cx:&Cx) -> bool {
+
+    pub fn disabled(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.0.borrow().as_ref() {
             return inner.widget.disabled(cx);
         }
         true
     }
-    
+
     pub fn draw_all(&self, cx: &mut Cx2d, scope: &mut Scope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.draw_all(cx, scope);
         }
     }
-    
-    pub fn action_data(&self)->Option<Arc<dyn ActionTrait>>{
+
+    pub fn action_data(&self) -> Option<Arc<dyn ActionTrait>> {
         if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.action_data()
+            return inner.widget.action_data();
         }
         None
     }
-        
-    pub fn filter_actions<'a>(&'a self, actions:&'a Actions)-> impl Iterator<Item = &'a WidgetAction>{
+
+    pub fn filter_actions<'a>(
+        &'a self,
+        actions: &'a Actions,
+    ) -> impl Iterator<Item = &'a WidgetAction> {
         actions.filter_widget_actions(self.widget_uid())
     }
-    
+
     pub fn draw_all_unscoped(&self, cx: &mut Cx2d) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.draw_all_unscoped(cx);
@@ -733,15 +740,18 @@ impl WidgetRef {
     pub fn apply_over(&self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, &mut ApplyFrom::Over.into(), 0, nodes);
     }
-    
-    fn store_designer_backref(&self, cx:&mut Cx, apply:&mut Apply, index:usize){
-        if let Some(scope) = &mut apply.scope{
-            if let Some(file_id) = apply.from.file_id(){
-                if let Some(dd) = scope.data.get_mut::<DesignerDataToWidget>(){
-                    let ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+
+    fn store_designer_backref(&self, cx: &mut Cx, apply: &mut Apply, index: usize) {
+        if let Some(scope) = &mut apply.scope {
+            if let Some(file_id) = apply.from.file_id() {
+                if let Some(dd) = scope.data.get_mut::<DesignerDataToWidget>() {
+                    let ptr = cx
+                        .live_registry
+                        .borrow()
+                        .file_id_index_to_live_ptr(file_id, index);
                     dd.live_ptr_to_widget.insert(ptr, self.clone());
                 }
-            }                        
+            }
         }
     }
     fn apply(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
@@ -791,10 +801,9 @@ impl WidgetRef {
             return idx;
         }
         cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
-        
+
         nodes.skip_node(index)
     }
-    
 }
 
 impl LiveHook for WidgetRef {}
@@ -820,17 +829,17 @@ impl LiveNew for WidgetRef {
     }
 }
 
-pub trait WidgetActionTrait: 'static + Send+ Sync {
+pub trait WidgetActionTrait: 'static + Send + Sync {
     fn ref_cast_type_id(&self) -> TypeId;
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn box_clone(&self) -> Box<dyn WidgetActionTrait>;
 }
 
-pub trait ActionDefault{
+pub trait ActionDefault {
     fn default_ref(&self) -> Box<dyn WidgetActionTrait>;
 }
 
-impl<T: 'static + ?Sized + Clone + Debug + Send+ Sync> WidgetActionTrait for T {
+impl<T: 'static + ?Sized + Clone + Debug + Send + Sync> WidgetActionTrait for T {
     fn ref_cast_type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
@@ -857,22 +866,21 @@ impl Clone for Box<dyn WidgetActionTrait> {
     }
 }
 
-
 #[derive(Default)]
-pub struct WidgetActionData{
-    data: Option<Arc<dyn ActionTrait>>
+pub struct WidgetActionData {
+    data: Option<Arc<dyn ActionTrait>>,
 }
 
-impl WidgetActionData{
-    pub fn set(&mut self,  data:impl ActionTrait){
+impl WidgetActionData {
+    pub fn set(&mut self, data: impl ActionTrait) {
         self.data = Some(Arc::new(data));
     }
-    
-    pub fn set_box(&mut self,  data:Arc<dyn ActionTrait>){
+
+    pub fn set_box(&mut self, data: Arc<dyn ActionTrait>) {
         self.data = Some(data);
     }
-    
-    pub fn clone_data(&self)->Option<Arc<dyn ActionTrait>>{
+
+    pub fn clone_data(&self) -> Option<Arc<dyn ActionTrait>> {
         self.data.clone()
     }
 }
@@ -884,12 +892,12 @@ pub struct WidgetAction {
     /// and then cheaply cloned to be emitted as part of an action.
     ///
     /// To attach data to a widget action, use the `widget_action_with_data()` method.
-    pub data: Option< Arc<dyn ActionTrait>>,
+    pub data: Option<Arc<dyn ActionTrait>>,
     /// The emitted action object itself, which acts as a dyn Any-like.
     pub action: Box<dyn WidgetActionTrait>,
     /// The complete list of widgets this action bubbles up from.
     /// You can use this to explore the UI tree of the widget that emitted the action.
-    pub widgets: SmallVec<[WidgetRef;4]>,
+    pub widgets: SmallVec<[WidgetRef; 4]>,
     /// The UID of the widget that emitted this action.
     pub widget_uid: WidgetUid,
     /// The path-list of the widgets this action bubbles up from (if any).
@@ -918,17 +926,12 @@ pub trait WidgetActionCxExt {
         F: FnOnce(&mut Cx) -> R;
 }
 
-
 pub trait WidgetActionsApi {
-    
-    fn widget(&self, path:&[LiveId])->WidgetRef;
-    
-    fn widget_action(&self, path:&[LiveId])->Option<&WidgetAction>;
-        
-    fn find_widget_action_cast<T: WidgetActionTrait>(
-        &self,
-        widget_uid: WidgetUid,
-    ) -> T
+    fn widget(&self, path: &[LiveId]) -> WidgetRef;
+
+    fn widget_action(&self, path: &[LiveId]) -> Option<&WidgetAction>;
+
+    fn find_widget_action_cast<T: WidgetActionTrait>(&self, widget_uid: WidgetUid) -> T
     where
         T: Default + Clone;
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
@@ -993,13 +996,11 @@ pub trait WidgetActionsApi {
     ) -> impl Iterator<Item = T>
     where
         T: Default + Clone;
-        
-    fn filter_actions_data<T: ActionTrait>(
-            &self,
-        ) -> impl Iterator<Item = &T>
-        where
+
+    fn filter_actions_data<T: ActionTrait>(&self) -> impl Iterator<Item = &T>
+    where
         T: Clone;
-        
+
     fn filter_widget_actions_set(&self, set: &WidgetSet) -> impl Iterator<Item = &WidgetAction>;
 }
 
@@ -1008,7 +1009,7 @@ pub trait WidgetActionOptionApi {
     fn cast<T: WidgetActionTrait>(&self) -> T
     where
         T: Default + Clone;
-    fn cast_ref<T: WidgetActionTrait+ ActionDefaultRef>(&self) -> &T;
+    fn cast_ref<T: WidgetActionTrait + ActionDefaultRef>(&self) -> &T;
 }
 
 impl WidgetActionOptionApi for Option<&WidgetAction> {
@@ -1032,9 +1033,8 @@ impl WidgetActionOptionApi for Option<&WidgetAction> {
         }
         T::default()
     }
-    
-    fn cast_ref<T: WidgetActionTrait+ ActionDefaultRef>(&self) -> &T
-    {
+
+    fn cast_ref<T: WidgetActionTrait + ActionDefaultRef>(&self) -> &T {
         if let Some(item) = self {
             if let Some(item) = item.action.downcast_ref::<T>() {
                 return item;
@@ -1055,34 +1055,41 @@ impl WidgetActionCast for Action {
 }
 
 impl WidgetActionsApi for Actions {
-    fn widget_action(&self, path:&[LiveId])->Option<&WidgetAction>{
+    fn widget_action(&self, path: &[LiveId]) -> Option<&WidgetAction> {
         for action in self {
             if let Some(action) = action.downcast_ref::<WidgetAction>() {
                 let mut ap = action.path.data.iter().rev();
-                if path.iter().rev().all(|p| ap.find(|&ap| p == ap).is_some()){
-                    return Some(action)
+                if path.iter().rev().all(|p| ap.find(|&ap| p == ap).is_some()) {
+                    return Some(action);
                 }
             }
         }
         None
     }
-    
-    fn widget(&self, path:&[LiveId])->WidgetRef{
-        self.iter().find_map(|action| {
-            action.downcast_ref::<WidgetAction>().and_then(|action| {
-                let mut ret = None;
-                let mut ap = action.path.data.iter().rev();
-                path.iter().enumerate().rev().all(|(i, p)| {
-                    let found = ap.find(|&ap| p == ap).is_some(); 
-                    if found && ret.is_none() {
-                        ret = action.widgets.get(i);
-                    }
-                    found
-                }).then_some(ret).flatten()
+
+    fn widget(&self, path: &[LiveId]) -> WidgetRef {
+        self.iter()
+            .find_map(|action| {
+                action.downcast_ref::<WidgetAction>().and_then(|action| {
+                    let mut ret = None;
+                    let mut ap = action.path.data.iter().rev();
+                    path.iter()
+                        .enumerate()
+                        .rev()
+                        .all(|(i, p)| {
+                            let found = ap.find(|&ap| p == ap).is_some();
+                            if found && ret.is_none() {
+                                ret = action.widgets.get(i);
+                            }
+                            found
+                        })
+                        .then_some(ret)
+                        .flatten()
+                })
             })
-        }).map_or_else(|| WidgetRef::empty(), |ret| ret.clone())
+            .map_or_else(|| WidgetRef::empty(), |ret| ret.clone())
     }
-    
+
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction> {
         for action in self {
             if let Some(action) = action.downcast_ref::<WidgetAction>() {
@@ -1093,7 +1100,7 @@ impl WidgetActionsApi for Actions {
         }
         None
     }
-    
+
     fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send>(
         &self,
         widget_uid: WidgetUid,
@@ -1116,9 +1123,8 @@ impl WidgetActionsApi for Actions {
                 .and_then(|action| (action.widget_uid == widget_uid).then_some(action))
         })
     }
-    
 
-    fn filter_widget_actions_cast<T: WidgetActionTrait >(
+    fn filter_widget_actions_cast<T: WidgetActionTrait>(
         &self,
         widget_uid: WidgetUid,
     ) -> impl Iterator<Item = T>
@@ -1128,40 +1134,33 @@ impl WidgetActionsApi for Actions {
         self.filter_widget_actions(widget_uid).map(|action| {
             if let Some(a) = action.action.downcast_ref::<T>() {
                 a.clone()
-            }else {
+            } else {
                 T::default()
             }
         })
     }
-    
-    fn filter_actions_data<T: ActionTrait>(
-        &self,
-    ) -> impl Iterator<Item = &T>
-    {
+
+    fn filter_actions_data<T: ActionTrait>(&self) -> impl Iterator<Item = &T> {
         self.iter().filter_map(move |action| {
-            action
-            .downcast_ref::<WidgetAction>()
-            .and_then(|action|{
-                if let Some(a) = &action.data{
+            action.downcast_ref::<WidgetAction>().and_then(|action| {
+                if let Some(a) = &action.data {
                     if let Some(a) = a.downcast_ref::<T>() {
                         Some(a)
-                    }else {
+                    } else {
                         None
                     }
-                }else {
+                } else {
                     None
                 }
             })
         })
     }
-        
-    fn filter_widget_actions_set(&self, set:&WidgetSet) -> impl Iterator<Item = &WidgetAction> {
+
+    fn filter_widget_actions_set(&self, set: &WidgetSet) -> impl Iterator<Item = &WidgetAction> {
         self.iter().filter_map(move |action| {
-            action
-            .downcast_ref::<WidgetAction>()
-            .and_then(|action| (
-                set.iter().any(|w| action.widget_uid == w.widget_uid())
-            ).then_some(action))
+            action.downcast_ref::<WidgetAction>().and_then(|action| {
+                (set.iter().any(|w| action.widget_uid == w.widget_uid())).then_some(action)
+            })
         })
     }
 }
@@ -1182,7 +1181,7 @@ impl WidgetActionCxExt for Cx {
             group: None,
         })
     }
-    
+
     fn widget_action_with_data(
         &mut self,
         action_data: &WidgetActionData,
@@ -1220,18 +1219,17 @@ impl WidgetActionCxExt for Cx {
             },
         )
     }
-    
 }
 
 impl WidgetAction {
-    pub fn widget(&self)->&WidgetRef{
+    pub fn widget(&self) -> &WidgetRef {
         self.widgets.first().unwrap()
     }
-    
-    pub fn widget_nth(&self, n:usize)->&WidgetRef{
+
+    pub fn widget_nth(&self, n: usize) -> &WidgetRef {
         self.widgets.iter().nth(n).unwrap()
     }
-    
+
     pub fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T
     where
         T: Default + Clone,
@@ -1241,17 +1239,15 @@ impl WidgetAction {
         }
         T::default()
     }
-    
-    pub fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T
-    {
+
+    pub fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T {
         if let Some(item) = self.action.downcast_ref::<T>() {
-            return item
+            return item;
         }
         T::default_ref()
     }
-    
-    pub fn downcast_ref<T: WidgetActionTrait + Send + ActionDefaultRef>(&self) -> Option<&T>
-    {
+
+    pub fn downcast_ref<T: WidgetActionTrait + Send + ActionDefaultRef>(&self) -> Option<&T> {
         self.action.downcast_ref::<T>()
     }
 }
@@ -1294,8 +1290,7 @@ impl<T: Clone> DrawStateWrap<T> {
         }
     }
 
-    pub fn begin_state(&mut self, cx: &mut Cx) -> Option<&mut Option<T>>
-    {
+    pub fn begin_state(&mut self, cx: &mut Cx) -> Option<&mut Option<T>> {
         if self.redraw_id != cx.redraw_id() {
             self.redraw_id = cx.redraw_id();
             Some(&mut self.state)

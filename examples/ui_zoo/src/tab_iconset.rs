@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoIconSet = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/iconset.md") } 
+            <Markdown> { body: dep("crate://self/resources/iconset.md") }
         }
         demos = {
             flow: Right { wrap: true },

@@ -74,8 +74,7 @@ cases.
 #![cfg_attr(miri, allow(dead_code, unused_macros))]
 
 use core::{
-    convert::TryInto, fmt::Debug, hash::Hash, mem::align_of,
-    ptr::copy_nonoverlapping, slice,
+    convert::TryInto, fmt::Debug, hash::Hash, mem::align_of, ptr::copy_nonoverlapping, slice,
 };
 
 #[cfg(feature = "std")]
@@ -210,16 +209,7 @@ mod private {
 /// [`BigEndian`]: enum.BigEndian.html
 /// [`LittleEndian`]: enum.LittleEndian.html
 pub trait ByteOrder:
-    Clone
-    + Copy
-    + Debug
-    + Default
-    + Eq
-    + Hash
-    + Ord
-    + PartialEq
-    + PartialOrd
-    + private::Sealed
+    Clone + Copy + Debug + Default + Eq + Hash + Ord + PartialEq + PartialOrd + private::Sealed
 {
     /// Reads an unsigned 16 bit integer from `buf`.
     ///
@@ -1088,9 +1078,7 @@ pub trait ByteOrder:
     /// ```
     #[inline]
     fn read_i16_into(src: &[u8], dst: &mut [i16]) {
-        let dst = unsafe {
-            slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u16, dst.len())
-        };
+        let dst = unsafe { slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u16, dst.len()) };
         Self::read_u16_into(src, dst)
     }
 
@@ -1117,9 +1105,7 @@ pub trait ByteOrder:
     /// ```
     #[inline]
     fn read_i32_into(src: &[u8], dst: &mut [i32]) {
-        let dst = unsafe {
-            slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u32, dst.len())
-        };
+        let dst = unsafe { slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u32, dst.len()) };
         Self::read_u32_into(src, dst);
     }
 
@@ -1146,9 +1132,7 @@ pub trait ByteOrder:
     /// ```
     #[inline]
     fn read_i64_into(src: &[u8], dst: &mut [i64]) {
-        let dst = unsafe {
-            slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u64, dst.len())
-        };
+        let dst = unsafe { slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u64, dst.len()) };
         Self::read_u64_into(src, dst);
     }
 
@@ -1175,9 +1159,7 @@ pub trait ByteOrder:
     /// ```
     #[inline]
     fn read_i128_into(src: &[u8], dst: &mut [i128]) {
-        let dst = unsafe {
-            slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u128, dst.len())
-        };
+        let dst = unsafe { slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u128, dst.len()) };
         Self::read_u128_into(src, dst);
     }
 
@@ -1426,9 +1408,7 @@ pub trait ByteOrder:
     /// assert_eq!(numbers_given, numbers_got);
     /// ```
     fn write_i8_into(src: &[i8], dst: &mut [u8]) {
-        let src = unsafe {
-            slice::from_raw_parts(src.as_ptr() as *const u8, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
         dst.copy_from_slice(src);
     }
 
@@ -1454,9 +1434,7 @@ pub trait ByteOrder:
     /// assert_eq!(numbers_given, numbers_got);
     /// ```
     fn write_i16_into(src: &[i16], dst: &mut [u8]) {
-        let src = unsafe {
-            slice::from_raw_parts(src.as_ptr() as *const u16, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts(src.as_ptr() as *const u16, src.len()) };
         Self::write_u16_into(src, dst);
     }
 
@@ -1482,9 +1460,7 @@ pub trait ByteOrder:
     /// assert_eq!(numbers_given, numbers_got);
     /// ```
     fn write_i32_into(src: &[i32], dst: &mut [u8]) {
-        let src = unsafe {
-            slice::from_raw_parts(src.as_ptr() as *const u32, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts(src.as_ptr() as *const u32, src.len()) };
         Self::write_u32_into(src, dst);
     }
 
@@ -1510,9 +1486,7 @@ pub trait ByteOrder:
     /// assert_eq!(numbers_given, numbers_got);
     /// ```
     fn write_i64_into(src: &[i64], dst: &mut [u8]) {
-        let src = unsafe {
-            slice::from_raw_parts(src.as_ptr() as *const u64, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts(src.as_ptr() as *const u64, src.len()) };
         Self::write_u64_into(src, dst);
     }
 
@@ -1538,9 +1512,7 @@ pub trait ByteOrder:
     /// assert_eq!(numbers_given, numbers_got);
     /// ```
     fn write_i128_into(src: &[i128], dst: &mut [u8]) {
-        let src = unsafe {
-            slice::from_raw_parts(src.as_ptr() as *const u128, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts(src.as_ptr() as *const u128, src.len()) };
         Self::write_u128_into(src, dst);
     }
 
@@ -1567,9 +1539,7 @@ pub trait ByteOrder:
     /// assert_eq!(numbers_given, numbers_got);
     /// ```
     fn write_f32_into(src: &[f32], dst: &mut [u8]) {
-        let src = unsafe {
-            slice::from_raw_parts(src.as_ptr() as *const u32, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts(src.as_ptr() as *const u32, src.len()) };
         Self::write_u32_into(src, dst);
     }
 
@@ -1596,9 +1566,7 @@ pub trait ByteOrder:
     /// assert_eq!(numbers_given, numbers_got);
     /// ```
     fn write_f64_into(src: &[f64], dst: &mut [u8]) {
-        let src = unsafe {
-            slice::from_raw_parts(src.as_ptr() as *const u64, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts(src.as_ptr() as *const u64, src.len()) };
         Self::write_u64_into(src, dst);
     }
 
@@ -1697,9 +1665,7 @@ pub trait ByteOrder:
     /// ```
     #[inline]
     fn from_slice_i16(src: &mut [i16]) {
-        let src = unsafe {
-            slice::from_raw_parts_mut(src.as_mut_ptr() as *mut u16, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts_mut(src.as_mut_ptr() as *mut u16, src.len()) };
         Self::from_slice_u16(src);
     }
 
@@ -1722,9 +1688,7 @@ pub trait ByteOrder:
     /// ```
     #[inline]
     fn from_slice_i32(src: &mut [i32]) {
-        let src = unsafe {
-            slice::from_raw_parts_mut(src.as_mut_ptr() as *mut u32, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts_mut(src.as_mut_ptr() as *mut u32, src.len()) };
         Self::from_slice_u32(src);
     }
 
@@ -1747,9 +1711,7 @@ pub trait ByteOrder:
     /// ```
     #[inline]
     fn from_slice_i64(src: &mut [i64]) {
-        let src = unsafe {
-            slice::from_raw_parts_mut(src.as_mut_ptr() as *mut u64, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts_mut(src.as_mut_ptr() as *mut u64, src.len()) };
         Self::from_slice_u64(src);
     }
 
@@ -1772,9 +1734,7 @@ pub trait ByteOrder:
     /// ```
     #[inline]
     fn from_slice_i128(src: &mut [i128]) {
-        let src = unsafe {
-            slice::from_raw_parts_mut(src.as_mut_ptr() as *mut u128, src.len())
-        };
+        let src = unsafe { slice::from_raw_parts_mut(src.as_mut_ptr() as *mut u128, src.len()) };
         Self::from_slice_u128(src);
     }
 
@@ -2341,8 +2301,7 @@ mod test {
     impl Arbitrary for Wi128<u128> {
         fn arbitrary<G: Gen>(gen: &mut G) -> Wi128<u128> {
             let max = calc_max!(::core::u128::MAX, gen.size(), 16);
-            let output = (gen.gen::<u64>() as u128)
-                | ((gen.gen::<u64>() as u128) << 64);
+            let output = (gen.gen::<u64>() as u128) | ((gen.gen::<u64>() as u128) << 64);
             Wi128(output & (max - 1))
         }
     }
@@ -2350,8 +2309,7 @@ mod test {
     impl Arbitrary for Wi128<i128> {
         fn arbitrary<G: Gen>(gen: &mut G) -> Wi128<i128> {
             let max = calc_max!(::core::i128::MAX, gen.size(), 16);
-            let output = (gen.gen::<i64>() as i128)
-                | ((gen.gen::<i64>() as i128) << 64);
+            let output = (gen.gen::<i64>() as i128) | ((gen.gen::<i64>() as i128) << 64);
             Wi128(output & (max - 1))
         }
     }
@@ -2371,9 +2329,7 @@ mod test {
             mod $name {
                 #[allow(unused_imports)]
                 use super::{qc_sized, Wi128};
-                use crate::{
-                    BigEndian, ByteOrder, LittleEndian, NativeEndian,
-                };
+                use crate::{BigEndian, ByteOrder, LittleEndian, NativeEndian};
 
                 #[test]
                 fn big_endian() {
@@ -2412,9 +2368,7 @@ mod test {
             mod $name {
                 #[allow(unused_imports)]
                 use super::{qc_sized, Wi128};
-                use crate::{
-                    BigEndian, ByteOrder, LittleEndian, NativeEndian,
-                };
+                use crate::{BigEndian, ByteOrder, LittleEndian, NativeEndian};
                 use core::mem::size_of;
 
                 #[test]
@@ -2453,20 +2407,8 @@ mod test {
         };
     }
 
-    qc_byte_order!(
-        prop_u16,
-        u16,
-        ::core::u16::MAX as u64,
-        read_u16,
-        write_u16
-    );
-    qc_byte_order!(
-        prop_i16,
-        i16,
-        ::core::i16::MAX as u64,
-        read_i16,
-        write_i16
-    );
+    qc_byte_order!(prop_u16, u16, ::core::u16::MAX as u64, read_u16, write_u16);
+    qc_byte_order!(prop_i16, i16, ::core::i16::MAX as u64, read_i16, write_i16);
     qc_byte_order!(
         prop_u24,
         u32,
@@ -2481,20 +2423,8 @@ mod test {
         read_i24,
         write_i24
     );
-    qc_byte_order!(
-        prop_u32,
-        u32,
-        ::core::u32::MAX as u64,
-        read_u32,
-        write_u32
-    );
-    qc_byte_order!(
-        prop_i32,
-        i32,
-        ::core::i32::MAX as u64,
-        read_i32,
-        write_i32
-    );
+    qc_byte_order!(prop_u32, u32, ::core::u32::MAX as u64, read_u32, write_u32);
+    qc_byte_order!(prop_i32, i32, ::core::i32::MAX as u64, read_i32, write_i32);
     qc_byte_order!(
         prop_u48,
         u64,
@@ -2509,34 +2439,10 @@ mod test {
         read_i48,
         write_i48
     );
-    qc_byte_order!(
-        prop_u64,
-        u64,
-        ::core::u64::MAX as u64,
-        read_u64,
-        write_u64
-    );
-    qc_byte_order!(
-        prop_i64,
-        i64,
-        ::core::i64::MAX as u64,
-        read_i64,
-        write_i64
-    );
-    qc_byte_order!(
-        prop_f32,
-        f32,
-        ::core::u64::MAX as u64,
-        read_f32,
-        write_f32
-    );
-    qc_byte_order!(
-        prop_f64,
-        f64,
-        ::core::i64::MAX as u64,
-        read_f64,
-        write_f64
-    );
+    qc_byte_order!(prop_u64, u64, ::core::u64::MAX as u64, read_u64, write_u64);
+    qc_byte_order!(prop_i64, i64, ::core::i64::MAX as u64, read_i64, write_i64);
+    qc_byte_order!(prop_f32, f32, ::core::u64::MAX as u64, read_f32, write_f32);
+    qc_byte_order!(prop_f64, f64, ::core::i64::MAX as u64, read_f64, write_f64);
 
     qc_byte_order!(prop_u128, Wi128<u128>, 16 + 1, read_u128, write_u128);
     qc_byte_order!(prop_i128, Wi128<i128>, 16 + 1, read_i128, write_i128);
@@ -2800,78 +2706,15 @@ mod test {
         write_int
     );
 
-    qc_byte_order!(
-        prop_int128_1,
-        Wi128<i128>,
-        1,
-        1,
-        read_int128,
-        write_int128
-    );
-    qc_byte_order!(
-        prop_int128_2,
-        Wi128<i128>,
-        2,
-        2,
-        read_int128,
-        write_int128
-    );
-    qc_byte_order!(
-        prop_int128_3,
-        Wi128<i128>,
-        3,
-        3,
-        read_int128,
-        write_int128
-    );
-    qc_byte_order!(
-        prop_int128_4,
-        Wi128<i128>,
-        4,
-        4,
-        read_int128,
-        write_int128
-    );
-    qc_byte_order!(
-        prop_int128_5,
-        Wi128<i128>,
-        5,
-        5,
-        read_int128,
-        write_int128
-    );
-    qc_byte_order!(
-        prop_int128_6,
-        Wi128<i128>,
-        6,
-        6,
-        read_int128,
-        write_int128
-    );
-    qc_byte_order!(
-        prop_int128_7,
-        Wi128<i128>,
-        7,
-        7,
-        read_int128,
-        write_int128
-    );
-    qc_byte_order!(
-        prop_int128_8,
-        Wi128<i128>,
-        8,
-        8,
-        read_int128,
-        write_int128
-    );
-    qc_byte_order!(
-        prop_int128_9,
-        Wi128<i128>,
-        9,
-        9,
-        read_int128,
-        write_int128
-    );
+    qc_byte_order!(prop_int128_1, Wi128<i128>, 1, 1, read_int128, write_int128);
+    qc_byte_order!(prop_int128_2, Wi128<i128>, 2, 2, read_int128, write_int128);
+    qc_byte_order!(prop_int128_3, Wi128<i128>, 3, 3, read_int128, write_int128);
+    qc_byte_order!(prop_int128_4, Wi128<i128>, 4, 4, read_int128, write_int128);
+    qc_byte_order!(prop_int128_5, Wi128<i128>, 5, 5, read_int128, write_int128);
+    qc_byte_order!(prop_int128_6, Wi128<i128>, 6, 6, read_int128, write_int128);
+    qc_byte_order!(prop_int128_7, Wi128<i128>, 7, 7, read_int128, write_int128);
+    qc_byte_order!(prop_int128_8, Wi128<i128>, 8, 8, read_int128, write_int128);
+    qc_byte_order!(prop_int128_9, Wi128<i128>, 9, 9, read_int128, write_int128);
     qc_byte_order!(
         prop_int128_10,
         Wi128<i128>,
@@ -2938,9 +2781,7 @@ mod test {
         ($name:ident, $maximally_small:expr, $zero:expr,
          $read:ident, $write:ident) => {
             mod $name {
-                use crate::{
-                    BigEndian, ByteOrder, LittleEndian, NativeEndian,
-                };
+                use crate::{BigEndian, ByteOrder, LittleEndian, NativeEndian};
 
                 #[test]
                 #[should_panic]
@@ -2987,9 +2828,7 @@ mod test {
         };
         ($name:ident, $maximally_small:expr, $read:ident) => {
             mod $name {
-                use crate::{
-                    BigEndian, ByteOrder, LittleEndian, NativeEndian,
-                };
+                use crate::{BigEndian, ByteOrder, LittleEndian, NativeEndian};
 
                 #[test]
                 #[should_panic]
@@ -3079,9 +2918,7 @@ mod test {
         ($name:ident, $read:ident, $write:ident,
          $num_bytes:expr, $numbers:expr) => {
             mod $name {
-                use crate::{
-                    BigEndian, ByteOrder, LittleEndian, NativeEndian,
-                };
+                use crate::{BigEndian, ByteOrder, LittleEndian, NativeEndian};
 
                 #[test]
                 #[should_panic]
@@ -3329,10 +3166,7 @@ mod stdtests {
             mod $name {
                 #[allow(unused_imports)]
                 use crate::test::{qc_sized, Wi128};
-                use crate::{
-                    BigEndian, LittleEndian, NativeEndian, ReadBytesExt,
-                    WriteBytesExt,
-                };
+                use crate::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
                 use std::io::Cursor;
 
                 #[test]
@@ -3380,10 +3214,7 @@ mod stdtests {
             mod $name {
                 #[allow(unused_imports)]
                 use crate::test::{qc_sized, Wi128};
-                use crate::{
-                    BigEndian, LittleEndian, NativeEndian, ReadBytesExt,
-                    WriteBytesExt,
-                };
+                use crate::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
                 use std::io::Cursor;
 
                 #[test]
@@ -3878,17 +3709,14 @@ mod stdtests {
                 use super::qc_unsized;
                 #[allow(unused_imports)]
                 use crate::test::Wi128;
-                use crate::{
-                    BigEndian, ByteOrder, LittleEndian, NativeEndian,
-                };
+                use crate::{BigEndian, ByteOrder, LittleEndian, NativeEndian};
                 use core::mem::size_of;
 
                 #[test]
                 fn big_endian() {
                     #[allow(unused_unsafe)]
                     fn prop(numbers: Vec<$ty_int>) -> bool {
-                        let numbers: Vec<_> =
-                            numbers.into_iter().map(|x| x.clone()).collect();
+                        let numbers: Vec<_> = numbers.into_iter().map(|x| x.clone()).collect();
                         let num_bytes = size_of::<$ty_int>() * numbers.len();
                         let mut bytes = vec![0; num_bytes];
 
@@ -3908,8 +3736,7 @@ mod stdtests {
                 fn little_endian() {
                     #[allow(unused_unsafe)]
                     fn prop(numbers: Vec<$ty_int>) -> bool {
-                        let numbers: Vec<_> =
-                            numbers.into_iter().map(|x| x.clone()).collect();
+                        let numbers: Vec<_> = numbers.into_iter().map(|x| x.clone()).collect();
                         let num_bytes = size_of::<$ty_int>() * numbers.len();
                         let mut bytes = vec![0; num_bytes];
 
@@ -3929,8 +3756,7 @@ mod stdtests {
                 fn native_endian() {
                     #[allow(unused_unsafe)]
                     fn prop(numbers: Vec<$ty_int>) -> bool {
-                        let numbers: Vec<_> =
-                            numbers.into_iter().map(|x| x.clone()).collect();
+                        let numbers: Vec<_> = numbers.into_iter().map(|x| x.clone()).collect();
                         let num_bytes = size_of::<$ty_int>() * numbers.len();
                         let mut bytes = vec![0; num_bytes];
 

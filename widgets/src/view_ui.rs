@@ -1,23 +1,21 @@
-use {
-    crate::makepad_platform::*
-};
+use crate::makepad_platform::*;
 
 live_design! {
     link widgets;
-    
+
     use link::theme::*;
     use crate::view::ViewBase;
     use crate::scroll_bars::ScrollBars;
     use makepad_draw::shader::std::*;
-    
+
     pub View = <ViewBase> {}
-    
+
     pub Hr = <View> {
         width: Fill, height: (THEME_SPACE_2 * 7.5),
         flow: Down,
         margin: 0.
 
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             color: (THEME_COLOR_BEVEL_OUTSET_2)
             uniform color_2: (THEME_COLOR_BEVEL_OUTSET_1)
@@ -40,7 +38,7 @@ live_design! {
                     0,
                     self.rect_size.y * 0.5 - sz,
                     self.rect_size.x,
-                    sz 
+                    sz
                 )
 
                 sdf.fill(self.color_2);
@@ -48,12 +46,12 @@ live_design! {
             }
         }
     }
-    
+
     pub Vr = <View> {
         width: (THEME_SPACE_2 * 2.), height: Fill,
         flow: Right,
 
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             color: (THEME_COLOR_BEVEL_OUTSET_2)
             uniform color_2: (THEME_COLOR_BEVEL_OUTSET_1)
@@ -85,16 +83,16 @@ live_design! {
             }
         }
     }
-    
+
     pub Filler = <View> { width: Fill, height: Fill }
-    
+
     pub SolidView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             fn get_color(self) -> vec4 {
                 return self.color
             }
-                    
+
             fn pixel(self) -> vec4 {
                 return Pal::premul(self.get_color())
             }
@@ -102,7 +100,7 @@ live_design! {
     }
 
     pub RectView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
 
         draw_bg: {
             uniform color_dither: 1.0
@@ -115,7 +113,7 @@ live_design! {
 
             uniform border_color: #0000
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-                        
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -160,17 +158,17 @@ live_design! {
             }
         }
     }
-        
+
     pub RectShadowView = <ViewBase> {
         clip_x:false,
         clip_y:false,
-                
-        show_bg: true, 
+
+        show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
             uniform border_size: 0.0
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0;
+            uniform gradient_fill_horizontal: 0.0;
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color: #f00
@@ -179,13 +177,13 @@ live_design! {
             uniform shadow_color: #0007
             uniform shadow_offset: vec2(0.0,0.0)
             uniform shadow_radius: 10.0
-                    
+
             varying rect_size2: vec2,
             varying rect_size3: vec2,
             varying sdf_rect_pos: vec2,
             varying sdf_rect_size: vec2,
-            varying rect_pos2: vec2,     
-            varying rect_shift: vec2,  
+            varying rect_pos2: vec2,
+            varying rect_shift: vec2,
 
             fn vertex(self) -> vec4 {
                 let min_offset = min(self.shadow_offset,vec2(0));
@@ -197,7 +195,7 @@ live_design! {
                 self.sdf_rect_pos = -min_offset + vec2(self.border_size + self.shadow_radius);
                 return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
             }
-                                                
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size3)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -226,7 +224,7 @@ live_design! {
                     self.sdf_rect_pos.x,
                     self.sdf_rect_pos.y,
                     self.sdf_rect_size.x,
-                    self.sdf_rect_size.y 
+                    self.sdf_rect_size.y
                 )
                 if sdf.shape > -1.0{ // try to skip the expensive gauss shadow
                     let m = self.shadow_radius;
@@ -234,7 +232,7 @@ live_design! {
                     let v = GaussShadow::box_shadow(vec2(m) + o, self.rect_size2+o, self.pos * (self.rect_size3+vec2(m)) , m*0.5);
                     sdf.clear(self.shadow_color*v)
                 }
-                                                                
+
                 sdf.fill_keep(mix(self.color, color_2, gradient_fill_dir));
                 if self.border_size > 0.0 {
                     sdf.stroke(
@@ -244,16 +242,16 @@ live_design! {
             }
         }
     }
-                
+
     pub RoundedShadowView = <ViewBase>{
         clip_x:false,
         clip_y:false,
-                            
+
         show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0;
+            uniform gradient_fill_horizontal: 0.0;
 
             color: #8
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
@@ -266,14 +264,14 @@ live_design! {
             uniform shadow_color: #0007
             uniform shadow_radius: 20.0,
             uniform shadow_offset: vec2(0.0, 0.0)
-                                            
+
             varying rect_size2: vec2,
             varying rect_size3: vec2,
-            varying rect_pos2: vec2,     
-            varying rect_shift: vec2,    
+            varying rect_pos2: vec2,
+            varying rect_shift: vec2,
             varying sdf_rect_pos: vec2,
             varying sdf_rect_size: vec2,
-                                              
+
             fn vertex(self) -> vec4 {
                 let min_offset = min(self.shadow_offset,vec2(0));
                 self.rect_size2 = self.rect_size + 2.0*vec2(self.shadow_radius);
@@ -282,11 +280,11 @@ live_design! {
                 self.sdf_rect_size = self.rect_size2 - vec2(self.shadow_radius * 2.0 + self.border_size * 2.0)
                 self.sdf_rect_pos = -min_offset + vec2(self.border_size + self.shadow_radius);
                 self.rect_shift = -min_offset;
-                                                            
+
                 return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
             }
-                                                        
-            fn pixel(self) -> vec4 {                                                
+
+            fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size3)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
@@ -314,7 +312,7 @@ live_design! {
                     self.sdf_rect_pos.x,
                     self.sdf_rect_pos.y,
                     self.sdf_rect_size.x,
-                    self.sdf_rect_size.y, 
+                    self.sdf_rect_size.y,
                     max(1.0, self.border_radius)
                 )
                 if sdf.shape > -1.0{ // try to skip the expensive gauss shadow
@@ -323,7 +321,7 @@ live_design! {
                     let v = GaussShadow::rounded_box_shadow(vec2(m) + o, self.rect_size2+o, self.pos * (self.rect_size3+vec2(m)), self.shadow_radius*0.5, self.border_radius*2.0);
                     sdf.clear(self.shadow_color*v)
                 }
-                                                                    
+
                 sdf.fill_keep(mix(self.color, color_2, gradient_fill_dir))
 
                 if self.border_size > 0.0 {
@@ -335,13 +333,13 @@ live_design! {
             }
         }
     }
-                
+
     pub RoundedView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0;
+            uniform gradient_fill_horizontal: 0.0;
 
             uniform border_size: 0.0
             uniform border_radius: 2.5
@@ -349,7 +347,7 @@ live_design! {
             uniform border_color: #0000
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
-                                
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -394,13 +392,13 @@ live_design! {
             }
         }
     }
-                
+
     pub RoundedXView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0;
+            uniform gradient_fill_horizontal: 0.0;
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
 
@@ -409,7 +407,7 @@ live_design! {
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
             uniform border_radius: vec2(2.5, 2.5)
-                            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -455,9 +453,9 @@ live_design! {
             }
         }
     }
-                
+
     pub RoundedYView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
             uniform gradient_border_horizontal: 0.0
@@ -470,7 +468,7 @@ live_design! {
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
             uniform border_radius: vec2(2.5, 2.5)
-                                                        
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -519,9 +517,9 @@ live_design! {
             }
         }
     }
-                
+
     pub RoundedAllView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
             uniform gradient_border_horizontal: 0.0
@@ -533,7 +531,7 @@ live_design! {
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
             uniform border_radius: vec4(2.5, 2.5, 2.5, 2.5)
-                            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -557,7 +555,7 @@ live_design! {
                 if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
-                            
+
                 sdf.box_all(
                     self.border_inset.x + self.border_size,
                     self.border_inset.y + self.border_size,
@@ -584,9 +582,9 @@ live_design! {
             }
         }
     }
-                
+
     pub CircleView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
             uniform gradient_border_horizontal: 0.0
@@ -597,7 +595,7 @@ live_design! {
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
             uniform border_radius: 5.0
-                            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -621,7 +619,7 @@ live_design! {
                 if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
-                            
+
                 if self.border_radius > 0.0 {
                     sdf.circle(
                         self.rect_size.x * 0.5,
@@ -655,9 +653,9 @@ live_design! {
             }
         }
     }
-                
+
     pub HexagonView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
             uniform gradient_border_horizontal: 0.0
@@ -670,11 +668,11 @@ live_design! {
             uniform border_color: #0000
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
             uniform border_radius: vec2(0.0, 1.0)
-                            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                
+
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
                     color_2 = self.color_2;
@@ -723,14 +721,14 @@ live_design! {
                         self.border_size
                     )
                 }
-                
+
                 return sdf.result
             }
         }
     }
-                
+
     pub GradientXView = <ViewBase> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             uniform gradient_fill_horizontal: 1.0
 
@@ -753,15 +751,15 @@ live_design! {
 
                 return mix(self.color, color_2, gradient_fill_dir + dither)
             }
-                            
+
             fn pixel(self) -> vec4 {
                 return Pal::premul(self.get_color())
             }
         }
     }
-                
+
     pub GradientYView = <GradientXView> {
-        show_bg: true, 
+        show_bg: true,
         draw_bg: {
             uniform gradient_fill_horizontal: 0.0
 
@@ -770,7 +768,7 @@ live_design! {
             uniform color_dither: 1.0
         }
     }
-                
+
     pub CachedView = <ViewBase> {
         optimize: Texture,
         draw_bg: {
@@ -790,7 +788,7 @@ live_design! {
             }
         }
     }
-            
+
     pub CachedRoundedView = <ViewBase> {
         optimize: Texture,
         draw_bg: {
@@ -798,15 +796,15 @@ live_design! {
             uniform border_color: #000F
             uniform border_inset: vec4(0., 0., 0., 0.)
             uniform border_radius: 2.5
-                                
+
             texture image: texture2d
             varying scale: vec2
             varying shift: vec2
-                                            
+
             fn get_border_color(self) -> vec4 {
                 return self.border_color
             }
-                                        
+
             fn vertex(self) -> vec4 {
                 let dpi = self.dpi_factor;
                 let ceil_size = ceil(self.rect_size * dpi) / dpi
@@ -815,9 +813,9 @@ live_design! {
                 self.shift = (self.rect_pos - floor_pos) / ceil_size;
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
-                                
+
             fn pixel(self) -> vec4 {
-                                        
+
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box(
                     self.border_inset.x + self.border_size,
@@ -835,7 +833,7 @@ live_design! {
             }
         }
     }
-    
+
     pub CachedScrollXY = <CachedView> {
         scroll_bars: <ScrollBars> {
             show_scroll_x: true, show_scroll_y: true
@@ -843,21 +841,21 @@ live_design! {
             scroll_bar_y: {drag_scrolling: true}
         }
     }
-        
+
     pub CachedScrollX = <CachedView> {
         scroll_bars: <ScrollBars> {
             show_scroll_x: true, show_scroll_y: false
             scroll_bar_x: {drag_scrolling: true}
         }
     }
-        
+
     pub CachedScrollY = <CachedView> {
         scroll_bars: <ScrollBars> {
             show_scroll_x: false, show_scroll_y: true
             scroll_bar_y: {drag_scrolling: true}
         }
     }
-        
+
     pub ScrollXYView = <ViewBase> {
         scroll_bars: <ScrollBars> {
             show_scroll_x: true, show_scroll_y: true
@@ -870,7 +868,7 @@ live_design! {
         scroll_bars: <ScrollBars> {
             show_scroll_x: true, show_scroll_y: false
             scroll_bar_x: {drag_scrolling: true}
-        }   
+        }
     }
 
     pub ScrollYView = <ViewBase> {
