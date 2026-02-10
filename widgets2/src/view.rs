@@ -1,12 +1,8 @@
 use {
     crate::makepad_draw::event::FingerLongPressEvent,
     crate::{
-        animator::*,
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        makepad_script::{ScriptFnRef, ScriptRefOptionExt},
-        scroll_bars::ScrollBars,
-        widget::*,
+        animator::*, makepad_derive_widget::*, makepad_draw::*, makepad_script::ScriptFnRef,
+        scroll_bars::ScrollBars, widget::*,
     },
     std::cell::RefCell,
 };
