@@ -5,6 +5,7 @@ use {
         font_family::{FontFamily, FontFamilyId},
         geom::{Point, Rect, Size},
         loader::{self, FontDefinition, FontFamilyDefinition, Loader},
+        msdfer,
         num::Zero,
         rasterizer::{self, RasterizedGlyph, Rasterizer},
         sdfer,
@@ -88,7 +89,8 @@ impl Layouter {
             .loader
             .get_or_load_font_family(params.style.font_family_id)
             .clone();
-        LayoutContext::new(font_family, params.text, params.style, params.options).layout_multiline()
+        LayoutContext::new(font_family, params.text, params.style, params.options)
+            .layout_multiline()
     }
 }
 
@@ -109,8 +111,28 @@ impl Default for Settings {
                         radius: 8.0,
                         cutoff: 0.25,
                     },
+                    msdfer: msdfer::Settings {
+                        padding: 4,
+                        radius: 8.0,
+                        cutoff: 0.25,
+                        corner_angle_threshold: 3.0,
+                    },
+                    msdf_resolution: rasterizer::MsdfResolutionSettings {
+                        min_dpxs_per_em: 32.0,
+                        base_dpxs_per_em: 64.0,
+                        max_dpxs_per_em: 128.0,
+                        target_feature_texels: 1.75,
+                        dpx_quantum: 8.0,
+                        min_feature_floor_ems: 1.0 / 1024.0,
+                    },
+                    msdf_complexity: rasterizer::MsdfComplexitySettings {
+                        max_outline_commands: 180,
+                        max_estimated_segments: 1000,
+                    },
+                    outline_rasterization_mode: rasterizer::OutlineRasterizationMode::Msdf,
                     grayscale_atlas_size: Size::new(4096, 4096),
                     color_atlas_size: Size::new(2048, 2048),
+                    msdf_atlas_size: Size::new(4096, 4096),
                 },
             },
             cache_size: 4096,
@@ -132,7 +154,12 @@ struct LayoutContext {
 }
 
 impl LayoutContext {
-    fn new(font_family: Rc<FontFamily>, text: Substr, style: Style, options: LayoutOptions) -> Self {
+    fn new(
+        font_family: Rc<FontFamily>,
+        text: Substr,
+        style: Style,
+        options: LayoutOptions,
+    ) -> Self {
         Self {
             font_family,
             text,
@@ -254,7 +281,7 @@ impl LayoutContext {
     }
 
     fn append_text(&mut self, text: &ShapedText) {
-       for glyph in &text.glyphs {
+        for glyph in &text.glyphs {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
                 font: glyph.font.clone(),
@@ -275,12 +302,10 @@ impl LayoutContext {
     fn finish_current_row(&mut self, newline: bool) {
         let font = self.font_family.fonts().get(0);
         let font_size_in_lpxs = self.style.font_size_in_lpxs();
-        let ascender_in_lpxs =
-            font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
+        let ascender_in_lpxs = font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
         let descender_in_lpxs =
             font.map_or(0.0, |font| font.descender_in_ems()) * font_size_in_lpxs;
-        let line_gap_in_lpxs =
-            font.map_or(0.0, |font| font.line_gap_in_ems()) * font_size_in_lpxs;
+        let line_gap_in_lpxs = font.map_or(0.0, |font| font.line_gap_in_ems()) * font_size_in_lpxs;
 
         let text = self
             .text
@@ -738,7 +763,7 @@ impl LaidoutText {
                         start_row.ascender_in_lpxs - start_row.descender_in_lpxs,
                     ),
                 ),
-                ascender_in_lpxs: start_row.ascender_in_lpxs
+                ascender_in_lpxs: start_row.ascender_in_lpxs,
             });
             for row_index in start_row_index + 1..end_row_index {
                 let row = &self.rows[row_index];
@@ -753,7 +778,7 @@ impl LaidoutText {
                             row.ascender_in_lpxs - row.descender_in_lpxs,
                         ),
                     ),
-                    ascender_in_lpxs: row.ascender_in_lpxs
+                    ascender_in_lpxs: row.ascender_in_lpxs,
                 });
             }
             selection_rects.push(SelectionRect {
@@ -792,7 +817,8 @@ pub struct LaidoutRow {
 
 impl LaidoutRow {
     pub fn line_spacing_in_lpxs(&self, next_row: &LaidoutRow) -> f32 {
-        (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs) * next_row.line_spacing_scale
+        (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs)
+            * next_row.line_spacing_scale
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {

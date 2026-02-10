@@ -1,0 +1,9 @@
+[package]
+name = "makepad-latex-math"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ttf-parser = { path = "../ttf-parser-0.24.1" }
+
+[dev-dependencies]

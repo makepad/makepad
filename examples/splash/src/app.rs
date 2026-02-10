@@ -728,6 +728,25 @@ script_mod! {
         }
     }
 
+    // ===========================================
+    // BIG TEXT TAB - Huge font labels stacked vertically
+    // ===========================================
+
+    let TabBigText = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #222
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 20 spacing: 0
+            align: Align{x: 0.5}
+
+            Label{text: "M" draw_text.color: #f44 draw_text.text_style.font_size: 400}
+            Label{text: "ak" draw_text.color: #f80 draw_text.text_style.font_size: 400}
+            Label{text: "ep" draw_text.color: #fc0 draw_text.text_style.font_size: 400}
+            Label{text: "ad" draw_text.color: #4c4 draw_text.text_style.font_size: 400}
+            Label{text: "!" draw_text.color: #48f draw_text.text_style.font_size: 400}
+        }
+    }
+
     // Vector tab - SVG examples recreated in Splash Vector syntax
     // These should look identical to the SVG versions in the Media tab
 
@@ -1364,7 +1383,7 @@ script_mod! {
 
         // Center panel - content widgets
         center_tabs := DockTabs{
-            tabs: [@math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
+            tabs: [@bigtext_tab, @math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
             selected: 0
             closable: true
         }
@@ -1389,6 +1408,11 @@ script_mod! {
             kind: @TabSelectionTest        }
 
         // Individual tabs
+        bigtext_tab := DockTab{
+            name: "BigText"
+            template: @CloseableTab
+            kind: @TabBigText        }
+
         math_tab := DockTab{
             name: "Math"
             template: @CloseableTab
@@ -1470,6 +1494,7 @@ script_mod! {
             kind: @TabModal        }
 
         // Content templates by widget type
+        TabBigText := TabBigText{}
         TabMathView := TabMathView{}
         TabVector := TabVector{}
         TabScrollbarTest := TabScrollbarTest{}

@@ -2,7 +2,7 @@ use {
     super::{
         font::{FontId, GlyphId},
         geom::{Point, Rect, Size},
-        image::{Image, Bgra, Subimage, SubimageMut, R},
+        image::{Bgra, Image, Subimage, SubimageMut},
         num::Zero,
     },
     std::collections::HashMap,
@@ -13,8 +13,7 @@ pub struct FontAtlas<T> {
     needs_reset: bool,
     image: Image<T>,
     dirty_rect: Rect<usize>,
-    current_point: Point<usize>,
-    current_row_height: usize,
+    free_rects: Vec<Rect<usize>>,
     cached_glyph_image_rects: HashMap<GlyphImageKey, Rect<usize>>,
 }
 
@@ -27,8 +26,7 @@ impl<T> FontAtlas<T> {
             needs_reset: false,
             image: Image::new(size),
             dirty_rect: Rect::ZERO,
-            current_point: Point::ZERO,
-            current_row_height: 0,
+            free_rects: vec![Rect::from(size)],
             cached_glyph_image_rects: HashMap::new(),
         }
     }
@@ -68,22 +66,104 @@ impl<T> FontAtlas<T> {
         Some(GlyphImage::Allocated(self.image.subimage_mut(rect)))
     }
 
+    pub fn get_cached_glyph_image_rect(&self, key: &GlyphImageKey) -> Option<Rect<usize>> {
+        self.cached_glyph_image_rects.get(key).copied()
+    }
+
+    pub fn get_cached_glyph_image_mut(&mut self, rect: Rect<usize>) -> SubimageMut<'_, T> {
+        self.mark_dirty_rect(rect);
+        self.image.subimage_mut(rect)
+    }
+
     fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
-        if self.current_point.x + size.width > self.size().width {
-            self.current_point.x = 0;
-            self.current_point.y += self.current_row_height;
-            self.current_row_height = 0;
+        let rect = match self.place_rect(size) {
+            Some(rect) => rect,
+            None => {
+                self.needs_reset = true;
+                return None;
+            }
+        };
+        self.mark_dirty_rect(rect);
+        Some(rect)
+    }
+
+    fn mark_dirty_rect(&mut self, rect: Rect<usize>) {
+        if self.dirty_rect.is_empty() {
+            self.dirty_rect = rect;
+        } else {
+            self.dirty_rect = self.dirty_rect.union(rect);
         }
-        if self.current_point.y + size.height > self.size().height {
-            self.needs_reset = true;
+    }
+
+    // Online max-rects packing: picks a stable placement for each incoming rectangle,
+    // never relocates existing rectangles, and keeps free space fragmented efficiently.
+    fn place_rect(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
+        if size.width == 0 || size.height == 0 {
             return None;
         }
-        let origin = self.current_point;
-        self.current_point.x += size.width;
-        self.current_row_height = self.current_row_height.max(size.height);
-        let rect = Rect::new(origin, size);
-        self.dirty_rect = self.dirty_rect.union(rect);
-        Some(rect)
+
+        let mut best_index = None;
+        let mut best_short = usize::MAX;
+        let mut best_long = usize::MAX;
+        let mut best_area = usize::MAX;
+        for (index, free) in self.free_rects.iter().copied().enumerate() {
+            if size.width > free.size.width || size.height > free.size.height {
+                continue;
+            }
+            let leftover_w = free.size.width - size.width;
+            let leftover_h = free.size.height - size.height;
+            let short = leftover_w.min(leftover_h);
+            let long = leftover_w.max(leftover_h);
+            let area = free.size.width * free.size.height - size.width * size.height;
+            if (short, long, area) < (best_short, best_long, best_area) {
+                best_short = short;
+                best_long = long;
+                best_area = area;
+                best_index = Some(index);
+            }
+        }
+
+        let best_index = best_index?;
+        let placed = Rect::new(self.free_rects[best_index].origin, size);
+        self.split_free_rects(placed);
+        self.prune_free_rects();
+        Some(placed)
+    }
+
+    fn split_free_rects(&mut self, used: Rect<usize>) {
+        let mut next_free_rects = Vec::with_capacity(self.free_rects.len().saturating_mul(2));
+        for free in self.free_rects.drain(..) {
+            if !rects_intersect(free, used) {
+                next_free_rects.push(free);
+                continue;
+            }
+            split_free_rect(free, used, &mut next_free_rects);
+        }
+        self.free_rects = next_free_rects;
+    }
+
+    fn prune_free_rects(&mut self) {
+        let mut i = 0;
+        while i < self.free_rects.len() {
+            let mut remove_i = false;
+            let mut j = i + 1;
+            while j < self.free_rects.len() {
+                if self.free_rects[i].contains_rect(self.free_rects[j]) {
+                    self.free_rects.swap_remove(j);
+                    continue;
+                }
+                if self.free_rects[j].contains_rect(self.free_rects[i]) {
+                    remove_i = true;
+                    break;
+                }
+                j += 1;
+            }
+            if remove_i {
+                self.free_rects.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     pub fn reset_if_needed(&mut self) -> bool {
@@ -92,14 +172,73 @@ impl<T> FontAtlas<T> {
         }
         self.needs_reset = false;
         self.dirty_rect = Rect::ZERO;
-        self.current_point = Point::ZERO;
-        self.current_row_height = 0;
+        self.free_rects.clear();
+        self.free_rects.push(Rect::from(self.size()));
         self.cached_glyph_image_rects.clear();
         true
     }
 }
 
-pub type GrayscaleAtlas = FontAtlas<R>;
+fn rects_intersect(a: Rect<usize>, b: Rect<usize>) -> bool {
+    let a_max = a.max();
+    let b_max = b.max();
+    a.origin.x < b_max.x && a_max.x > b.origin.x && a.origin.y < b_max.y && a_max.y > b.origin.y
+}
+
+fn split_free_rect(free: Rect<usize>, used: Rect<usize>, out: &mut Vec<Rect<usize>>) {
+    let free_max = free.max();
+    let used_max = used.max();
+
+    if used.origin.x < free_max.x && used_max.x > free.origin.x {
+        if used.origin.y > free.origin.y {
+            push_non_empty_rect(
+                out,
+                Rect::new(
+                    free.origin,
+                    Size::new(free.size.width, used.origin.y - free.origin.y),
+                ),
+            );
+        }
+        if used_max.y < free_max.y {
+            push_non_empty_rect(
+                out,
+                Rect::new(
+                    Point::new(free.origin.x, used_max.y),
+                    Size::new(free.size.width, free_max.y - used_max.y),
+                ),
+            );
+        }
+    }
+
+    if used.origin.y < free_max.y && used_max.y > free.origin.y {
+        if used.origin.x > free.origin.x {
+            push_non_empty_rect(
+                out,
+                Rect::new(
+                    free.origin,
+                    Size::new(used.origin.x - free.origin.x, free.size.height),
+                ),
+            );
+        }
+        if used_max.x < free_max.x {
+            push_non_empty_rect(
+                out,
+                Rect::new(
+                    Point::new(used_max.x, free.origin.y),
+                    Size::new(free_max.x - used_max.x, free.size.height),
+                ),
+            );
+        }
+    }
+}
+
+fn push_non_empty_rect(out: &mut Vec<Rect<usize>>, rect: Rect<usize>) {
+    if rect.size.width != 0 && rect.size.height != 0 {
+        out.push(rect);
+    }
+}
+
+pub type GrayscaleAtlas = FontAtlas<Bgra>;
 
 // Debug save_to_png methods commented out - would require png encoder crate
 // impl GrayscaleAtlas {
@@ -119,6 +258,8 @@ pub type GrayscaleAtlas = FontAtlas<R>;
 // }
 
 pub type ColorAtlas = FontAtlas<Bgra>;
+
+pub type MsdfAtlas = FontAtlas<Bgra>;
 
 // impl ColorAtlas {
 //     pub fn save_to_png(&self, path: impl AsRef<Path>) {
@@ -141,6 +282,13 @@ pub struct GlyphImageKey {
     pub font_id: FontId,
     pub glyph_id: GlyphId,
     pub size: Size<usize>,
+    pub kind: GlyphImageKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GlyphImageKind {
+    Outline,
+    Color,
 }
 
 #[derive(Debug)]

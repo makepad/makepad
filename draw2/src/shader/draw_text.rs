@@ -71,6 +71,7 @@ script_mod! {
 
         grayscale_texture: texture_2d(float)
         color_texture: texture_2d(float)
+        msdf_texture: texture_2d(float)
 
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
@@ -92,6 +93,7 @@ script_mod! {
             let s = self.grayscale_texture.sample(p).x;
             // Convert sampled SDF to coverage (0..1). scale is source texels per screen pixel.
             let safe_scale = max(scale, 0.0001);
+            let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
             var a = clamp(
                 (s - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
                 0.0,
@@ -100,7 +102,21 @@ script_mod! {
             // Polarity compensation:
             // dark text on light backgrounds usually appears softer than the inverse,
             // so we bias coverage slightly by text luminance.
+            let bias = (0.5 - luma) * self.sdf_luma_bias;
+            a = clamp(a - bias, 0.0, 1.0);
+            return a
+        }
+
+        msdf: fn(scale, p, color) {
+            let s = self.msdf_texture.sample(p);
+            let dist = max(min(s.r, s.g), min(max(s.r, s.g), s.b));
+            let safe_scale = max(scale, 0.0001);
             let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+            var a = clamp(
+                (dist - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
+                0.0,
+                1.0,
+            );
             let bias = (0.5 - luma) * self.sdf_luma_bias;
             a = clamp(a - bias, 0.0, 1.0);
             return a
@@ -125,12 +141,20 @@ script_mod! {
                 let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
                 let s = self.sdf(scale, p, c)
                 return s * vec4(c.rgb * c.a, c.a)
-            } else {
+            } else if self.texture_index == 1 {
                 let tex_size = self.color_texture.size()
                 let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
                 let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
                 let c = self.color_texture.sample(p)
                 return vec4(c.rgb * c.a, c.a)
+            } else {
+                let c = self.get_color()
+                let scale = (dxt + dyt) * self.msdf_texture.size().x * 0.5
+                let tex_size = self.msdf_texture.size()
+                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
+                let s = self.msdf(scale, p, c)
+                return s * vec4(c.rgb * c.a, c.a)
             }
         }
     }
@@ -489,6 +513,7 @@ impl DrawText {
         self.draw_vars.dyn_uniforms[1] = sdfer_settings.cutoff;
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
+        self.draw_vars.texture_slots[2] = Some(fonts.msdf_texture().clone());
     }
 
     fn draw_row(
@@ -586,6 +611,7 @@ impl DrawText {
         let texture_index = match glyph.atlas_kind {
             AtlasKind::Grayscale => 0.0,
             AtlasKind::Color => 1.0,
+            AtlasKind::Msdf => 2.0,
         };
 
         let atlas_image_bounds = glyph.atlas_image_bounds;

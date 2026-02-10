@@ -24,6 +24,8 @@ script_mod! {
         baseline_offset: -2.0
         sdf_fallback_font_size: 22.0
         draw_text +: {
+            sdf_sharpness: 1.0
+            sdf_luma_bias: 0.0
             text_style: TextStyle{
                 font_family: FontFamily{
                     latin := FontMember{res: crate_resource("self:resources/NewCMMath-Regular.otf") asc: 0.0 desc: 0.0}
