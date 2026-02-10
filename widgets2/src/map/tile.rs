@@ -67,15 +67,25 @@ pub struct PendingTileRequest {
 }
 
 #[derive(Debug)]
-pub enum LocalSourceMessage {
-    Generated {
+pub enum TileWorkerMessage {
+    LocalBatchLoaded {
         style_epoch: u64,
         requested: Vec<TileKey>,
         loaded: Vec<LoadedLocalTile>,
     },
-    Failed {
+    LocalBatchFailed {
         style_epoch: u64,
         requested: Vec<TileKey>,
+        error: String,
+    },
+    NetworkTileParsed {
+        style_epoch: u64,
+        tile_key: TileKey,
+        buffers: TileBuffers,
+    },
+    NetworkTileParseFailed {
+        style_epoch: u64,
+        tile_key: TileKey,
         error: String,
     },
 }
@@ -514,7 +524,7 @@ pub fn build_tile_buffers_from_body(
                             width: overlay_width,
                             ..style.center
                         },
-                        LineCap::Square,
+                        LineCap::Butt,
                         &mut stroke_zbias,
                     );
                     feature_count += 1;

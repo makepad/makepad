@@ -145,6 +145,43 @@ View{ height: Fit ...rest of properties...
 
 ---
 
+## ⛔⛔⛔ CRITICAL: USE `width: Fill` ON THE ROOT CONTAINER ⛔⛔⛔
+
+**NEVER use a fixed pixel width (e.g., `width: 400`) on your outermost container.** Your output renders inside a container that provides available width — use `width: Fill` to fill it.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  The ROOT container MUST use  width: Fill                       │
+│                                                                 │
+│  ✅ RoundedView{ width: Fill height: Fit ... }                  │
+│  ❌ RoundedView{ width: 400 height: Fit ... }                   │
+│                                                                 │
+│  Fixed widths make your UI a narrow sliver or completely broken │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why?** A fixed width like `width: 400` does not adapt to the available space. Worse, if the parent container is narrower than 400, your content gets clipped. If a parse error occurs anywhere in the code, the entire layout can collapse to near-zero width.
+
+**ALWAYS use `width: Fill` on the root element:**
+```
+RoundedView{ width: Fill height: Fit flow: Down
+    // your content
+}
+```
+
+Fixed pixel widths are fine for **inner elements** like icons, avatars, or specific components — just never on the outermost container.
+
+---
+
+## ⛔ CRITICAL: `draw_bg.border_radius` TAKES A FLOAT, NOT AN INSET ⛔
+
+```
+✅ draw_bg.border_radius: 16.0
+❌ draw_bg.border_radius: Inset{top: 0 bottom: 16 left: 0 right: 0}
+```
+
+`border_radius` is a single `f32` value applied uniformly to all corners. Passing an `Inset` or object will cause a parse error that can **silently break your entire layout**.
+
 ---
 
 ## ⚠️ USE STYLED VIEWS, NOT RAW `View{}` ⚠️
@@ -2362,7 +2399,7 @@ This creates a map centered on Amsterdam at zoom level 14 with the default light
 // Default map (Amsterdam, light theme, offline tiles)
 MapView{width: Fill height: Fill}
 
-// Custom center and zoom
+// Custom center and zoom (e.g. New York)
 MapView{
     width: Fill height: Fill
     center_lon: -73.9857
@@ -2421,3 +2458,4 @@ MapView includes built-in light and dark themes with colors for:
 - The status bar in the bottom-left shows tile loading progress and feature counts
 - MapView fills its container by default (`width: Fill`, `height: Fill`)
 - For online mode, set `use_network: true` and optionally `use_local_mbtiles: false`
+- For locations outside the Amsterdam region in offline mode, set `use_network: true` to fetch tiles from the Overpass API

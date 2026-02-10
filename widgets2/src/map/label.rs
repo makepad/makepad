@@ -48,7 +48,7 @@ pub struct LabelCandidate {
     pub screen_path: Vec<Vec2d>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LabelPerfStats {
     pub draw_tiles: usize,
     pub tiles_with_labels: usize,
@@ -291,44 +291,59 @@ fn point_label_path(point: (f32, f32)) -> Vec<(f32, f32)> {
 
 // --- Curve smoothing ---
 
-pub fn smooth_label_curve(points: &[Vec2d]) -> Vec<Vec2d> {
+/// Smooths `points` into `buf_a`, using `buf_b` and `cum` as scratch space.
+/// On return, `buf_a` contains the smoothed polyline.
+pub fn smooth_label_curve_into(
+    points: &[Vec2d],
+    buf_a: &mut Vec<Vec2d>,
+    buf_b: &mut Vec<Vec2d>,
+    cum: &mut Vec<f64>,
+) {
+    buf_a.clear();
     if points.len() < 3 {
-        return points.to_vec();
+        buf_a.extend_from_slice(points);
+        return;
     }
-    let cumulative = polyline_cumulative_lengths(points);
-    let total = *cumulative.last().unwrap_or(&0.0);
+    cum.clear();
+    polyline_cumulative_lengths_into(points, cum);
+    let total = *cum.last().unwrap_or(&0.0);
     if total < 12.0 {
-        return points.to_vec();
+        buf_a.extend_from_slice(points);
+        return;
     }
 
-    let mut out = resample_polyline_evenly(
+    resample_polyline_evenly_into(
         points,
-        &cumulative,
+        cum,
         LABEL_CURVE_RESAMPLE_SPACING,
         LABEL_CURVE_MAX_SAMPLES,
+        buf_a,
     );
+
     for _ in 0..LABEL_CURVE_SMOOTH_PASSES {
-        out = smooth_polyline_once(&out);
+        smooth_polyline_once_into(buf_a, buf_b);
+        std::mem::swap(buf_a, buf_b);
     }
-    out
 }
 
-fn resample_polyline_evenly(
+fn resample_polyline_evenly_into(
     points: &[Vec2d],
     cumulative: &[f64],
     spacing: f64,
     max_samples: usize,
-) -> Vec<Vec2d> {
+    out: &mut Vec<Vec2d>,
+) {
+    out.clear();
     let total = *cumulative.last().unwrap_or(&0.0);
     if points.len() < 2 || total <= 1e-6 {
-        return points.to_vec();
+        out.extend_from_slice(points);
+        return;
     }
 
     let spacing = spacing.max(1.0);
     let mut sample_count = (total / spacing).ceil() as usize + 1;
     sample_count = sample_count.clamp(2, max_samples.max(2));
 
-    let mut out = Vec::<Vec2d>::with_capacity(sample_count);
     for i in 0..sample_count {
         let t = if sample_count <= 1 {
             0.0
@@ -351,29 +366,28 @@ fn resample_polyline_evenly(
         }
     }
     if out.len() < 2 {
-        points.to_vec()
-    } else {
-        out
+        out.clear();
+        out.extend_from_slice(points);
     }
 }
 
-fn smooth_polyline_once(points: &[Vec2d]) -> Vec<Vec2d> {
-    if points.len() < 3 {
-        return points.to_vec();
+fn smooth_polyline_once_into(src: &[Vec2d], dst: &mut Vec<Vec2d>) {
+    dst.clear();
+    if src.len() < 3 {
+        dst.extend_from_slice(src);
+        return;
     }
-    let mut out = Vec::<Vec2d>::with_capacity(points.len());
-    out.push(points[0]);
-    for i in 1..points.len() - 1 {
-        let prev = points[i - 1];
-        let cur = points[i];
-        let next = points[i + 1];
-        out.push(dvec2(
+    dst.push(src[0]);
+    for i in 1..src.len() - 1 {
+        let prev = src[i - 1];
+        let cur = src[i];
+        let next = src[i + 1];
+        dst.push(dvec2(
             (prev.x + 2.0 * cur.x + next.x) * 0.25,
             (prev.y + 2.0 * cur.y + next.y) * 0.25,
         ));
     }
-    out.push(points[points.len() - 1]);
-    out
+    dst.push(src[src.len() - 1]);
 }
 
 // --- Label layout ---
