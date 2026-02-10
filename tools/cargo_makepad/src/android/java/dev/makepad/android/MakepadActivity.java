@@ -62,6 +62,8 @@ import java.util.HashMap;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
+import android.util.SparseArray;
+
 // note: //% is a special miniquad's pre-processor for plugins
 // when there are no plugins - //% whatever will be replaced to an empty string
 // before compiling
@@ -599,6 +601,90 @@ public class MakepadActivity
     private int[] mSelectionBounds = new int[4]; // left, top, right, bottom
     private int mKeyboardShift = 0; // keyboard shift amount from Rust
 
+    // Activity result callback registry for plugins (robius-camera, file pickers, etc.)
+    // This allows dynamically loaded code to receive activity results.
+    // Callbacks are stored as Object and invoked via reflection to support dynamic class loading.
+    private static final SparseArray<Object> sActivityResultCallbacks = new SparseArray<>();
+    private static int sNextRequestCode = 10000; // Start high to avoid conflicts
+
+    // Permission result callback registry for plugins
+    // Callbacks are stored as Object and invoked via reflection to support dynamic class loading.
+    private static final SparseArray<Object> sPermissionResultCallbacks = new SparseArray<>();
+    private static int sNextPermissionRequestCode = 20000; // Different range from activity results
+
+    /**
+     * Register a callback to receive activity results.
+     * The callback object must have a method: void onActivityResult(int resultCode, Intent data)
+     * @param callback The callback object to invoke when the result arrives
+     * @return The request code to use with startActivityForResult
+     */
+    public static int registerActivityResultCallback(Object callback) {
+        int requestCode = sNextRequestCode++;
+        sActivityResultCallbacks.put(requestCode, callback);
+        return requestCode;
+    }
+
+    /**
+     * Unregister a previously registered callback.
+     * @param requestCode The request code returned by registerActivityResultCallback
+     */
+    public static void unregisterActivityResultCallback(int requestCode) {
+        sActivityResultCallbacks.remove(requestCode);
+    }
+
+    /**
+     * Register a callback to receive permission results and request the permission.
+     * The callback object must have a method: void onPermissionResult(boolean granted)
+     * @param callback The callback object to invoke when the result arrives
+     * @param permission The permission to request (e.g., "android.permission.CAMERA")
+     * @return The request code used for the permission request
+     */
+    public int requestPermissionWithCallback(Object callback, String permission) {
+        int requestCode = sNextPermissionRequestCode++;
+
+        // Check if permission is already granted
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
+                // Already granted - invoke callback immediately
+                try {
+                    java.lang.reflect.Method method = callback.getClass().getMethod(
+                        "onPermissionResult", boolean.class);
+                    method.invoke(callback, true);
+                } catch (Exception e) {
+                    Log.e("Makepad", "Failed to invoke permission result callback", e);
+                }
+                return requestCode;
+            }
+
+            // Need to request permission
+            sPermissionResultCallbacks.put(requestCode, callback);
+            requestPermissions(new String[]{permission}, requestCode);
+        } else {
+            // Permissions are granted at install time on older Android versions
+            try {
+                java.lang.reflect.Method method = callback.getClass().getMethod(
+                    "onPermissionResult", boolean.class);
+                method.invoke(callback, true);
+            } catch (Exception e) {
+                Log.e("Makepad", "Failed to invoke permission result callback", e);
+            }
+        }
+
+        return requestCode;
+    }
+
+    /**
+     * Check if a permission is granted (for use by plugins).
+     * @param permission The permission to check
+     * @return true if granted, false otherwise
+     */
+    public boolean isPermissionGranted(String permission) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
+        }
+        return true; // Granted at install time on older versions
+    }
+
     static {
         System.loadLibrary("makepad");
     }
@@ -697,6 +783,19 @@ public class MakepadActivity
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        // Dispatch to registered callbacks (for robius-camera, file pickers, etc.)
+        // Uses reflection to support dynamically loaded callback classes.
+        Object callback = sActivityResultCallbacks.get(requestCode);
+        if (callback != null) {
+            sActivityResultCallbacks.remove(requestCode);
+            try {
+                java.lang.reflect.Method method = callback.getClass().getMethod(
+                    "onActivityResult", int.class, Intent.class);
+                method.invoke(callback, resultCode, data);
+            } catch (Exception e) {
+                Log.e("Makepad", "Failed to invoke activity result callback", e);
+            }
+        }
         //% MAIN_ACTIVITY_ON_ACTIVITY_RESULT
     }
 
@@ -704,6 +803,22 @@ public class MakepadActivity
     public void onRequestPermissionsResult(int requestId, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestId, permissions, grantResults);
 
+        // Check for plugin callbacks first (robius-camera, etc.)
+        Object callback = sPermissionResultCallbacks.get(requestId);
+        if (callback != null) {
+            sPermissionResultCallbacks.remove(requestId);
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            try {
+                java.lang.reflect.Method method = callback.getClass().getMethod(
+                    "onPermissionResult", boolean.class);
+                method.invoke(callback, granted);
+            } catch (Exception e) {
+                Log.e("Makepad", "Failed to invoke permission result callback", e);
+            }
+            return; // Don't also call MakepadNative for plugin callbacks
+        }
+
+        // Original Makepad callback handling
         for (int i = 0; i < permissions.length; i++) {
             int status;
             if (grantResults[i] == PackageManager.PERMISSION_GRANTED) {
