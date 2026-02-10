@@ -31,18 +31,12 @@
 
 use crate::{
     cx::Cx,
+    live_traits::*,
     makepad_derive_live::*,
     makepad_live_compiler::{
-        LiveValue,
-        LiveTypeInfo,
-        LiveModuleId,
-        LiveType,
-        LiveId,
-        LiveNode,
-        LiveNodeSliceApi,
+        LiveId, LiveModuleId, LiveNode, LiveNodeSliceApi, LiveType, LiveTypeInfo, LiveValue,
     },
-    makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
-    live_traits::*,
+    makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin},
 };
 
 /// Input mode hint for soft keyboards (matches web standard `inputmode` attribute).
@@ -61,7 +55,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum InputMode {
-    #[pick] Text,
+    #[pick]
+    Text,
     Ascii,
     Url,
     Numeric,
@@ -85,7 +80,8 @@ pub enum InputMode {
 pub enum AutoCapitalize {
     None,
     Words,
-    #[pick] Sentences,
+    #[pick]
+    Sentences,
     AllCharacters,
 }
 
@@ -100,7 +96,8 @@ pub enum AutoCapitalize {
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum AutoCorrect {
-    #[pick] Default,
+    #[pick]
+    Default,
     Enabled,
     Disabled,
 }
@@ -112,7 +109,8 @@ pub enum AutoCorrect {
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum ReturnKeyType {
-    #[pick] Default,
+    #[pick]
+    Default,
     /// "Go" action, typically for URL fields, dismisses keyboard.
     Go,
     /// "Search" action, typically for search fields, dismisses keyboard.
@@ -126,19 +124,27 @@ pub enum ReturnKeyType {
 }
 
 impl Default for InputMode {
-    fn default() -> Self { InputMode::Text }
+    fn default() -> Self {
+        InputMode::Text
+    }
 }
 
 impl Default for AutoCapitalize {
-    fn default() -> Self { AutoCapitalize::Sentences }
+    fn default() -> Self {
+        AutoCapitalize::Sentences
+    }
 }
 
 impl Default for AutoCorrect {
-    fn default() -> Self { AutoCorrect::Default }
+    fn default() -> Self {
+        AutoCorrect::Default
+    }
 }
 
 impl Default for ReturnKeyType {
-    fn default() -> Self { ReturnKeyType::Default }
+    fn default() -> Self {
+        ReturnKeyType::Default
+    }
 }
 
 /// Soft keyboard configuration for mobile platforms (iOS/Android).

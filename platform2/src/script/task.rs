@@ -1,13 +1,13 @@
-use crate::*;
-use makepad_script::*;
-use makepad_script::id;
 use crate::script::vm::*;
-use std::rc::Rc;
+use crate::*;
+use makepad_script::id;
+use makepad_script::*;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 #[derive(Clone)]
-pub struct CxScriptTask{
+pub struct CxScriptTask {
     pub start_task: Option<ScriptFnRef>,
     pub handle: ScriptHandle,
     pub queue: ScriptArrayRef,
@@ -18,167 +18,207 @@ pub struct CxScriptTask{
 }
 
 #[derive(Default)]
-pub struct CxScriptTasks{
+pub struct CxScriptTasks {
     pub tasks: Rc<RefCell<Vec<CxScriptTask>>>,
 }
 
 // this is a UI-thread pipe
-pub struct CxScriptTaskGc{
+pub struct CxScriptTaskGc {
     pub tasks: Rc<RefCell<Vec<CxScriptTask>>>,
     pub handle: ScriptHandle,
 }
 
-impl ScriptHandleGc for CxScriptTaskGc{
-    fn gc(&mut self){
+impl ScriptHandleGc for CxScriptTaskGc {
+    fn gc(&mut self) {
         self.tasks.borrow_mut().retain(|v| v.handle != self.handle)
     }
-    fn set_handle(&mut self, handle:ScriptHandle){
+    fn set_handle(&mut self, handle: ScriptHandle) {
         self.handle = handle
     }
 }
 
-impl Cx{
-    pub(crate) fn handle_script_tasks(&mut self){
-        loop{
+impl Cx {
+    pub(crate) fn handle_script_tasks(&mut self) {
+        loop {
             let mut next_thread = None;
             let mut start_task = None;
             let mut tasks = self.script_data.tasks.tasks.borrow_mut();
-            for task in tasks.iter_mut(){
+            for task in tasks.iter_mut() {
                 // alright lets check each channels array len and if they are waiting
                 // ifso we call that thread
                 let queue = task.queue.as_array();
-                
+
                 let queue_len = self.script_vm.as_ref().unwrap().heap.array_len(queue);
-                if let Some(st) = task.start_task.take(){
+                if let Some(st) = task.start_task.take() {
                     start_task = Some((st, task.handle));
                     break;
                 }
-                if task.recv_pause.len()>0 && queue_len > 0{
+                if task.recv_pause.len() > 0 && queue_len > 0 {
                     next_thread = task.recv_pause.pop_back();
                     break;
                 }
-                if task.send_pause.len()>0 && queue_len<task.max_depth{
+                if task.send_pause.len() > 0 && queue_len < task.max_depth {
                     next_thread = task.send_pause.pop_back();
                     break;
                 }
             }
             drop(tasks);
             // alright execute this thread
-            if let Some((start_task, handle)) = start_task.take(){
-                self.with_vm(|vm|{
+            if let Some((start_task, handle)) = start_task.take() {
+                self.with_vm(|vm| {
                     vm.call(start_task.into(), &[handle.into()]);
                 })
-            }
-            else if let Some(next_thread) = next_thread.take(){
-                self.with_vm_thread(next_thread, |vm|{
+            } else if let Some(next_thread) = next_thread.take() {
+                self.with_vm_thread(next_thread, |vm| {
                     vm.resume();
                 });
-            }
-            else{
-                break
+            } else {
+                break;
             }
         }
     }
 }
 
-pub fn script_mod(vm:&mut ScriptVm){
+pub fn script_mod(vm: &mut ScriptVm) {
     let std = vm.module(id!(std));
     let task_type = vm.new_handle_type(id_lut!(task));
-    
-    for fn_id in [id_lut!(emit), id_lut!(end)]{
-        vm.add_handle_method(task_type, fn_id, script_args_def!(), move |vm, args|{
-            if let Some(handle) = script_value!(vm, args.self).as_handle(){
+
+    for fn_id in [id_lut!(emit), id_lut!(end)] {
+        vm.add_handle_method(task_type, fn_id, script_args_def!(), move |vm, args| {
+            if let Some(handle) = script_value!(vm, args.self).as_handle() {
                 let cx = vm.host.cx_mut();
-                if let Some(chan) = cx.script_data.tasks.tasks.borrow_mut().iter_mut().find(|v| v.handle == handle){
+                if let Some(chan) = cx
+                    .script_data
+                    .tasks
+                    .tasks
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|v| v.handle == handle)
+                {
                     let array_len = vm.bx.heap.array_len(chan.queue.as_array());
-                    
-                    if chan.max_depth == 0 || array_len < chan.max_depth{
+
+                    if chan.max_depth == 0 || array_len < chan.max_depth {
                         let vec_len = vm.bx.heap.vec_len(args.into());
-                        if vec_len == 0{
-                            vm.bx.heap.array_push(chan.queue.as_array(), NIL, vm.bx.threads.cur().trap.pass());
+                        if vec_len == 0 {
+                            vm.bx.heap.array_push(
+                                chan.queue.as_array(),
+                                NIL,
+                                vm.bx.threads.cur().trap.pass(),
+                            );
+                        } else if vec_len == 1 {
+                            let value =
+                                vm.bx
+                                    .heap
+                                    .vec_value(args, 0, vm.bx.threads.cur().trap.pass());
+                            vm.bx.heap.array_push(
+                                chan.queue.as_array(),
+                                value,
+                                vm.bx.threads.trap(),
+                            );
+                        } else {
+                            vm.bx.heap.array_push(
+                                chan.queue.as_array(),
+                                args.into(),
+                                vm.bx.threads.trap(),
+                            );
                         }
-                        else if vec_len== 1{
-                            let value = vm.bx.heap.vec_value(args, 0, vm.bx.threads.cur().trap.pass());
-                            vm.bx.heap.array_push(chan.queue.as_array(), value, vm.bx.threads.trap());
-                        }
-                        else{
-                            vm.bx.heap.array_push(chan.queue.as_array(), args.into(), vm.bx.threads.trap());
-                        }
-                        if fn_id == id!(end){
+                        if fn_id == id!(end) {
                             chan.ended = true;
                         }
-                        return ((array_len + 1) as f64).into()
-                    }
-                    else {
-                        if chan.send_pause.len() > 100{
-                            return script_err_limit!(vm.bx.threads.trap(), "too many paused calls")
+                        return ((array_len + 1) as f64).into();
+                    } else {
+                        if chan.send_pause.len() > 100 {
+                            return script_err_limit!(vm.bx.threads.trap(), "too many paused calls");
                         }
                         chan.send_pause.push_front(vm.bx.threads.cur().pause());
-                        return NIL
+                        return NIL;
                     }
                 }
             }
             NIL
         });
     }
-    for fn_id in [id_lut!(next), id_lut!(last)]{
-        vm.add_handle_method(task_type, fn_id, script_args_def!(), move |vm, args|{
+    for fn_id in [id_lut!(next), id_lut!(last)] {
+        vm.add_handle_method(task_type, fn_id, script_args_def!(), move |vm, args| {
             // lets find the channel
-            if let Some(handle) = script_value!(vm, args.self).as_handle(){
+            if let Some(handle) = script_value!(vm, args.self).as_handle() {
                 let cx = vm.host.cx_mut();
-                if let Some(task) = cx.script_data.tasks.tasks.borrow_mut().iter_mut().find(|v| v.handle == handle){
-                    if let Some(value) = vm.bx.heap.array_pop_front_option(task.queue.as_array()){
-                        if fn_id == id!(next) || fn_id == id!(last) && task.ended{
-                            return value
+                if let Some(task) = cx
+                    .script_data
+                    .tasks
+                    .tasks
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|v| v.handle == handle)
+                {
+                    if let Some(value) = vm.bx.heap.array_pop_front_option(task.queue.as_array()) {
+                        if fn_id == id!(next) || fn_id == id!(last) && task.ended {
+                            return value;
                         }
                     }
-                    if task.ended{
-                        return NIL
+                    if task.ended {
+                        return NIL;
                     }
-                    if task.recv_pause.len() > 100{
-                        return script_err_limit!(vm.bx.threads.trap(), "too many paused calls")
+                    if task.recv_pause.len() > 100 {
+                        return script_err_limit!(vm.bx.threads.trap(), "too many paused calls");
                     }
                     task.recv_pause.push_front(vm.bx.threads.cur().pause());
-                    return NIL
+                    return NIL;
                 }
             }
             script_err_unexpected!(vm.trap(), "unexpected task state")
         });
     }
-    
-    vm.set_handle_getter(task_type, |vm, pself, prop|{
+
+    vm.set_handle_getter(task_type, |vm, pself, prop| {
         // lets find the channel
-        if prop == id!(queue){
-            if let Some(handle) = pself.as_handle(){
+        if prop == id!(queue) {
+            if let Some(handle) = pself.as_handle() {
                 let cx = vm.host.cx_mut();
-                if let Some(chan) = cx.script_data.tasks.tasks.borrow_mut().iter_mut().find(|v| v.handle == handle){
-                    return chan.queue.as_array().into()
+                if let Some(chan) = cx
+                    .script_data
+                    .tasks
+                    .tasks
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|v| v.handle == handle)
+                {
+                    return chan.queue.as_array().into();
                 }
             }
         }
         script_err_not_found!(vm.trap(), "invalid task prop")
     });
-    
-    vm.add_method(std, id_lut!(task), script_args_def!(start_fn_or_depth = NIL), move |vm, args|{
-        // lets make a new channel
-        let start_fn_or_depth = script_value!(vm, args.start_fn_or_depth);
-        let (start_task, max_depth) = if vm.bx.heap.is_fn(start_fn_or_depth.into()){
-            (Some(vm.bx.heap.new_fn_ref(start_fn_or_depth.as_object().unwrap())), 1)
-        }
-        else{
-            (None, start_fn_or_depth.as_f64().unwrap_or(0.0) as usize)
-        };
-        
-        let cx = vm.host.cx_mut();
-        let handle_gc = CxScriptTaskGc{
-            tasks: cx.script_data.tasks.tasks.clone(),
-            handle: ScriptHandle::ZERO
-        };
-        let handle = vm.bx.heap.new_handle(task_type, Box::new(handle_gc));
-        let array = vm.bx.heap.new_array();
-        let queue = vm.bx.heap.new_array_ref(array);
-        cx.script_data.tasks.tasks.borrow_mut().push(
-            CxScriptTask{
+
+    vm.add_method(
+        std,
+        id_lut!(task),
+        script_args_def!(start_fn_or_depth = NIL),
+        move |vm, args| {
+            // lets make a new channel
+            let start_fn_or_depth = script_value!(vm, args.start_fn_or_depth);
+            let (start_task, max_depth) = if vm.bx.heap.is_fn(start_fn_or_depth.into()) {
+                (
+                    Some(
+                        vm.bx
+                            .heap
+                            .new_fn_ref(start_fn_or_depth.as_object().unwrap()),
+                    ),
+                    1,
+                )
+            } else {
+                (None, start_fn_or_depth.as_f64().unwrap_or(0.0) as usize)
+            };
+
+            let cx = vm.host.cx_mut();
+            let handle_gc = CxScriptTaskGc {
+                tasks: cx.script_data.tasks.tasks.clone(),
+                handle: ScriptHandle::ZERO,
+            };
+            let handle = vm.bx.heap.new_handle(task_type, Box::new(handle_gc));
+            let array = vm.bx.heap.new_array();
+            let queue = vm.bx.heap.new_array_ref(array);
+            cx.script_data.tasks.tasks.borrow_mut().push(CxScriptTask {
                 max_depth,
                 start_task,
                 handle,
@@ -186,9 +226,9 @@ pub fn script_mod(vm:&mut ScriptVm){
                 recv_pause: Default::default(),
                 send_pause: Default::default(),
                 queue,
-            }
-        );
-                    
-        handle.into()
-    });
+            });
+
+            handle.into()
+        },
+    );
 }

@@ -25,9 +25,8 @@ pub use crate::{
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
     overlay::Overlay,
     shader::{
-        draw_glyph::DrawGlyph,
-        draw_quad::DrawColor, draw_quad::DrawQuad, draw_text::DrawText, draw_text::TextStyle,
-        draw_svg_glyph::DrawSvgGlyph,
+        draw_glyph::DrawGlyph, draw_quad::DrawColor, draw_quad::DrawQuad,
+        draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::TextStyle,
         draw_vector::DrawVector,
     },
     /*

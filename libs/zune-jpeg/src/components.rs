@@ -30,7 +30,7 @@ pub type UpSampler = fn(
     in_near: &[i16],
     in_far: &[i16],
     scratch_space: &mut [i16],
-    output: &mut [i16]
+    output: &mut [i16],
 );
 
 /// Component Data from start of frame
@@ -76,7 +76,7 @@ pub(crate) struct Components {
     pub y: usize,
     pub sample_ratio: SampleRatios,
     // a very annoying bug
-    pub fix_an_annoying_bug: usize
+    pub fix_an_annoying_bug: usize,
 }
 
 impl Components {
@@ -174,7 +174,7 @@ impl Components {
             y: 0,
             w2: 0,
             sample_ratio: SampleRatios::None,
-            fix_an_annoying_bug: 1
+            fix_an_annoying_bug: 1,
         })
     }
     /// Setup space for upsampling
@@ -207,7 +207,7 @@ pub enum ComponentID {
     /// Red chrominance
     Cr,
     /// Q or fourth component
-    Q
+    Q,
 }
 
 #[derive(Copy, Debug, Clone, PartialEq, Eq, Default)]
@@ -217,7 +217,7 @@ pub enum SampleRatios {
     H,
     Generic(usize, usize),
     #[default]
-    None
+    None,
 }
 
 impl SampleRatios {
@@ -226,7 +226,7 @@ impl SampleRatios {
             SampleRatios::HV => 4,
             SampleRatios::V | SampleRatios::H => 2,
             SampleRatios::Generic(a, b) => a * b,
-            SampleRatios::None => 1
+            SampleRatios::None => 1,
         }
     }
 }

@@ -1,30 +1,23 @@
 use {
+    crate::{
+        area::Area,
+        event::keyboard::CharOffset,
+        event::*,
+        ime::TextInputConfig,
+        makepad_math::*,
+        os::{
+            apple::{apple_sys::*, apple_util::*},
+            cx_native::EventFlow,
+            ios::{ios_delegates::*, ios_event::*, ios_text_input::*},
+        },
+        window::CxWindowPool,
+    },
     std::{
         cell::{Cell, RefCell},
         ffi::c_void,
         rc::Rc,
         time::Instant,
     },
-    crate::{
-        ime::TextInputConfig,
-        event::*,
-        event::keyboard::CharOffset,
-        os::{
-            apple::{
-                apple_sys::*,
-                apple_util::*,
-            },
-            cx_native::EventFlow,
-            ios::{
-                ios_delegates::*,
-                ios_text_input::*,
-                ios_event::*,
-            }
-        },
-        area::Area,
-        window::CxWindowPool,
-        makepad_math::*,
-    }
 };
 
 // UIKeyboardType
@@ -64,12 +57,13 @@ thread_local! {
 }
 
 pub fn with_ios_app<R>(f: impl FnOnce(&mut IosApp) -> R) -> R {
-    IOS_APP.with_borrow_mut(|app| {
-        f(app.as_mut().unwrap())
-    })
+    IOS_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
 }
 
-pub fn init_ios_app_global(metal_device: ObjcId, event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>) {
+pub fn init_ios_app_global(
+    metal_device: ObjcId,
+    event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>,
+) {
     unsafe {
         IOS_CLASSES = Box::into_raw(Box::new(IosClasses::new()));
         IOS_APP.with(|app| {
@@ -78,18 +72,15 @@ pub fn init_ios_app_global(metal_device: ObjcId, event_callback: Box<dyn FnMut(I
     }
 }
 
-
 pub fn get_ios_class_global() -> &'static IosClasses {
-    unsafe {
-        &*(IOS_CLASSES)
-    }
+    unsafe { &*(IOS_CLASSES) }
 }
 
 #[derive(Clone)]
 pub struct IosTimer {
     timer_id: u64,
     nstimer: ObjcId,
-    repeats: bool
+    repeats: bool,
 }
 
 pub struct IosClasses {
@@ -136,7 +127,7 @@ pub enum IosTextInputEvent {
 
 pub struct IosApp {
     pub time_start: Instant,
-    pub virtual_keyboard_event:  Option<VirtualKeyboardEvent>,
+    pub virtual_keyboard_event: Option<VirtualKeyboardEvent>,
     /// Queue of text input events from UITextInput
     /// Using a Vec allows batching multiple events (e.g., replaceRange + insertText)
     /// to be processed atomically before SyncImeState can interfere
@@ -152,7 +143,7 @@ pub struct IosApp {
     pub text_input_view: Option<ObjcId>,
     /// IME candidate window position
     pub ime_position: Option<DVec2>,
-    event_callback: Option<Box<dyn FnMut(IosEvent) -> EventFlow >>,
+    event_callback: Option<Box<dyn FnMut(IosEvent) -> EventFlow>>,
     event_flow: EventFlow,
     pasteboard: ObjcId,
     edit_menu_delegate_instance: ObjcId,
@@ -164,11 +155,14 @@ pub struct IosApp {
 }
 
 impl IosApp {
-    pub fn new(metal_device: ObjcId, event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>) -> IosApp {
+    pub fn new(
+        metal_device: ObjcId,
+        event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>,
+    ) -> IosApp {
         unsafe {
-
             let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
-            let edit_menu_delegate_instance: ObjcId = msg_send![get_ios_class_global().edit_menu_delegate, new];
+            let edit_menu_delegate_instance: ObjcId =
+                msg_send![get_ios_class_global().edit_menu_delegate, new];
             IosApp {
                 virtual_keyboard_event: None,
                 queued_text_events: Vec::new(),
@@ -192,27 +186,31 @@ impl IosApp {
             }
         }
     }
-    
+
     pub fn did_finish_launching_with_options(&mut self) {
         unsafe {
             let main_screen: ObjcId = msg_send![class!(UIScreen), mainScreen];
             let screen_rect: NSRect = msg_send![main_screen, bounds];
-            
+
             let window_obj: ObjcId = msg_send![class!(UIWindow), alloc];
             let window_obj: ObjcId = msg_send![window_obj, initWithFrame: screen_rect];
-            
+
             let mtk_view_obj: ObjcId = msg_send![get_ios_class_global().mtk_view, alloc];
             let mtk_view_obj: ObjcId = msg_send![mtk_view_obj, initWithFrame: screen_rect];
-            
-            let mtk_view_dlg_obj: ObjcId = msg_send![get_ios_class_global().mtk_view_delegate, alloc];
+
+            let mtk_view_dlg_obj: ObjcId =
+                msg_send![get_ios_class_global().mtk_view_delegate, alloc];
             let mtk_view_dlg_obj: ObjcId = msg_send![mtk_view_dlg_obj, init];
 
             // Instantiate a long-press gesture recognizer and our delegate,
             // set that delegate to be the target of the "gesture recognized" action,
             // and add the gesture recognizer to our MTKView subclass.
-            let gesture_recognizer_handler_obj: ObjcId = msg_send![get_ios_class_global().gesture_recognizer_handler, alloc];
-            let gesture_recognizer_handler_obj: ObjcId = msg_send![gesture_recognizer_handler_obj, init];
-            let gesture_recognizer_obj: ObjcId = msg_send![class!(UILongPressGestureRecognizer), alloc];
+            let gesture_recognizer_handler_obj: ObjcId =
+                msg_send![get_ios_class_global().gesture_recognizer_handler, alloc];
+            let gesture_recognizer_handler_obj: ObjcId =
+                msg_send![gesture_recognizer_handler_obj, init];
+            let gesture_recognizer_obj: ObjcId =
+                msg_send![class!(UILongPressGestureRecognizer), alloc];
             let gesture_recognizer_obj: ObjcId = msg_send![
                 gesture_recognizer_obj,
                 initWithTarget: gesture_recognizer_handler_obj
@@ -222,12 +220,12 @@ impl IosApp {
             // later touch events from being sent to the MTKView *after* it has recognized its gesture.
             let () = msg_send!(gesture_recognizer_obj, setCancelsTouchesInView: NO);
             let () = msg_send![mtk_view_obj, addGestureRecognizer: gesture_recognizer_obj];
-            
+
             let view_ctrl_obj: ObjcId = msg_send![class!(UIViewController), alloc];
             let view_ctrl_obj: ObjcId = msg_send![view_ctrl_obj, init];
-            
+
             let () = msg_send![view_ctrl_obj, setView: mtk_view_obj];
-            
+
             let () = msg_send![mtk_view_obj, setPreferredFramesPerSecond: 120];
             let () = msg_send![mtk_view_obj, setDelegate: mtk_view_dlg_obj];
             let () = msg_send![mtk_view_obj, setDevice: self.metal_device];
@@ -253,8 +251,11 @@ impl IosApp {
             (*text_input_view).set_ivar::<f64>("ime_pos_y", 0.0);
             // Initialize keyboard config ivars with defaults
             (*text_input_view).set_ivar::<i64>("_keyboard_type", UI_KEYBOARD_TYPE_DEFAULT);
-            (*text_input_view).set_ivar::<i64>("_autocapitalization_type", UI_TEXT_AUTOCAPITALIZATION_SENTENCES);
-            (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1);  // Use CJK detection logic
+            (*text_input_view).set_ivar::<i64>(
+                "_autocapitalization_type",
+                UI_TEXT_AUTOCAPITALIZATION_SENTENCES,
+            );
+            (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1); // Use CJK detection logic
             (*text_input_view).set_ivar::<i64>("_return_key_type", UI_RETURN_KEY_DEFAULT);
             (*text_input_view).set_ivar::<bool>("_secure_text_entry", false);
             // Floating cursor (keyboard trackpad) state
@@ -269,7 +270,8 @@ impl IosApp {
             let textfield_dlg: ObjcId = msg_send![get_ios_class_global().textfield_delegate, alloc];
             let textfield_dlg: ObjcId = msg_send![textfield_dlg, init];
 
-            let notification_center: ObjcId = msg_send![class!(NSNotificationCenter), defaultCenter];
+            let notification_center: ObjcId =
+                msg_send![class!(NSNotificationCenter), defaultCenter];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidChangeFrame:) name: UIKeyboardDidChangeFrameNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillChangeFrame:) name: UIKeyboardWillChangeFrameNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidShow:) name: UIKeyboardDidShowNotification object: nil];
@@ -280,9 +282,9 @@ impl IosApp {
 
             // Store the delegate for cleanup
             self.keyboard_observer_delegate = Some(textfield_dlg);
-            
+
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
-            
+
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
             let () = msg_send![window_obj, makeKeyAndVisible];
 
@@ -302,27 +304,33 @@ impl IosApp {
             self.edit_menu_interaction = Some(edit_menu_interaction);
         }
     }
-    
+
     pub fn draw_size_will_change() {
         // Avoid re-entrant calls by checking if we're already in a with_ios_app call
-        if IOS_APP.try_with(|app| {
-            if let Ok(app_ref) = app.try_borrow_mut() {
-                if app_ref.is_some() {
-                    Self::check_window_geom();
+        if IOS_APP
+            .try_with(|app| {
+                if let Ok(app_ref) = app.try_borrow_mut() {
+                    if app_ref.is_some() {
+                        Self::check_window_geom();
+                    }
+                    // Otherwise we skip the call, should be safe since draw_size_will_change is called again afterwards
                 }
-                // Otherwise we skip the call, should be safe since draw_size_will_change is called again afterwards
-            }
-        }).is_err() {
+            })
+            .is_err()
+        {
             // IOS_APP is not accessible on this thread, ignore the call (this shouldn't happen)
         }
     }
-    
+
     pub fn check_window_geom() {
-        let main_screen: ObjcId = unsafe {msg_send![class!(UIScreen), mainScreen]};
-        let screen_rect: NSRect = unsafe {msg_send![main_screen, bounds]};
-        let dpi_factor: f64 = unsafe {msg_send![main_screen, scale]};
-        let new_size = dvec2(screen_rect.size.width as f64, screen_rect.size.height as f64);
-        
+        let main_screen: ObjcId = unsafe { msg_send![class!(UIScreen), mainScreen] };
+        let screen_rect: NSRect = unsafe { msg_send![main_screen, bounds] };
+        let dpi_factor: f64 = unsafe { msg_send![main_screen, scale] };
+        let new_size = dvec2(
+            screen_rect.size.width as f64,
+            screen_rect.size.height as f64,
+        );
+
         let new_geom = WindowGeom {
             xr_is_presenting: false,
             is_topmost: false,
@@ -331,56 +339,58 @@ impl IosApp {
             inner_size: new_size,
             outer_size: new_size,
             dpi_factor,
-            position: dvec2(0.0, 0.0)
+            position: dvec2(0.0, 0.0),
         };
-        
+
         let first_draw = with_ios_app(|app| app.first_draw);
         if first_draw {
             with_ios_app(|app| app.update_geom(new_geom.clone()));
-            IosApp::do_callback(
-                IosEvent::Init,
-            );
+            IosApp::do_callback(IosEvent::Init);
         }
-        
+
         let old_geom = with_ios_app(|app| app.update_geom(new_geom.clone()));
         if let Some(old_geom) = old_geom {
-            IosApp::do_callback(
-                IosEvent::WindowGeomChange(WindowGeomChangeEvent {
-                    window_id: CxWindowPool::id_zero(),
-                    old_geom,
-                    new_geom
-                }), 
-            );
+            IosApp::do_callback(IosEvent::WindowGeomChange(WindowGeomChangeEvent {
+                window_id: CxWindowPool::id_zero(),
+                old_geom,
+                new_geom,
+            }));
         }
     }
-    
-    fn update_geom(&mut self, new_geom: WindowGeom)->Option<WindowGeom>{
-        if self.first_draw || new_geom != self.last_window_geom{
+
+    fn update_geom(&mut self, new_geom: WindowGeom) -> Option<WindowGeom> {
+        if self.first_draw || new_geom != self.last_window_geom {
             let old_geom = self.last_window_geom.clone();
             self.last_window_geom = new_geom;
             return Some(old_geom);
         }
         None
     }
-    
+
     pub fn draw_in_rect() {
         Self::check_window_geom();
         with_ios_app(|app| app.first_draw = false);
         IosApp::do_callback(IosEvent::Paint);
     }
-    
+
     pub fn update_touch(&mut self, uid: u64, abs: Vec2d, state: TouchState) {
         self.update_touch_with_details(uid, abs, state, dvec2(0.0, 0.0), 0.0);
     }
 
-    pub fn update_touch_with_details(&mut self, uid: u64, abs: Vec2d, state: TouchState, radius: Vec2d, force: f64) {
-        if let Some(touch) = self.touches.iter_mut().find( | v | v.uid == uid) {
+    pub fn update_touch_with_details(
+        &mut self,
+        uid: u64,
+        abs: Vec2d,
+        state: TouchState,
+        radius: Vec2d,
+        force: f64,
+    ) {
+        if let Some(touch) = self.touches.iter_mut().find(|v| v.uid == uid) {
             touch.state = state;
             touch.abs = abs;
             touch.radius = radius;
             touch.force = force;
-        }
-        else {
+        } else {
             self.touches.push(TouchPoint {
                 state,
                 abs,
@@ -390,11 +400,11 @@ impl IosApp {
                 force,
                 radius,
                 handled: Cell::new(Area::Empty),
-                sweep_lock: Cell::new(Area::Empty)
+                sweep_lock: Cell::new(Area::Empty),
             })
         }
     }
-    
+
     pub fn send_touch_update() {
         let time_now = with_ios_app(|app| app.time_now());
         let touches = with_ios_app(|app| app.touches.clone());
@@ -402,10 +412,18 @@ impl IosApp {
             time: time_now,
             window_id: CxWindowPool::id_zero(),
             modifiers: KeyModifiers::default(),
-            touches
+            touches,
         }));
         // remove the stopped touches
-        with_ios_app(|app| app.touches.retain( | v | if let TouchState::Stop = v.state {false}else {true}));
+        with_ios_app(|app| {
+            app.touches.retain(|v| {
+                if let TouchState::Stop = v.state {
+                    false
+                } else {
+                    true
+                }
+            })
+        });
     }
 
     pub fn send_long_press(abs: NSPoint, uid: u64) {
@@ -422,7 +440,7 @@ impl IosApp {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
-    
+
     pub fn event_loop() {
         unsafe {
             let app_delegate = get_ios_class_global().app_delegate;
@@ -430,11 +448,11 @@ impl IosApp {
             let class_string = NSStringFromClass(class as _);
             let argc = 1;
             let mut argv = b"Makepad\0" as *const u8 as *mut i8;
-            
+
             UIApplicationMain(argc, &mut argv, nil, class_string);
         }
     }
-    
+
     pub fn show_keyboard() {
         // Use text_input_view for keyboard (UITextInput protocol)
         let _ = IOS_APP.try_with(|app| {
@@ -451,7 +469,7 @@ impl IosApp {
     /// Configure keyboard settings (UITextInputTraits)
     /// Uses caching to avoid calling reloadInputViews every frame
     pub fn configure_keyboard(config: &TextInputConfig) {
-        use crate::ime::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType};
+        use crate::ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType};
 
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
@@ -496,10 +514,13 @@ impl IosApp {
                             };
 
                             (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
-                            (*text_input_view).set_ivar::<i64>("_autocapitalization_type", autocap_type);
-                            (*text_input_view).set_ivar::<i64>("_autocorrection_type", autocorrect_type);
+                            (*text_input_view)
+                                .set_ivar::<i64>("_autocapitalization_type", autocap_type);
+                            (*text_input_view)
+                                .set_ivar::<i64>("_autocorrection_type", autocorrect_type);
                             (*text_input_view).set_ivar::<i64>("_return_key_type", return_type);
-                            (*text_input_view).set_ivar::<bool>("_secure_text_entry", config.is_secure);
+                            (*text_input_view)
+                                .set_ivar::<bool>("_secure_text_entry", config.is_secure);
 
                             let () = msg_send![text_input_view, reloadInputViews];
                         }
@@ -556,12 +577,14 @@ impl IosApp {
                         unsafe {
                             // Get inputDelegate for notifications - this is critical for iOS
                             // to know the text/cursor has changed (needed for autocorrect positioning)
-                            let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
+                            let input_delegate: ObjcId =
+                                *(*text_input_view).get_ivar("_inputDelegate");
 
                             // Notify BEFORE changes
                             if input_delegate != nil {
                                 let () = msg_send![input_delegate, textWillChange: text_input_view];
-                                let () = msg_send![input_delegate, selectionWillChange: text_input_view];
+                                let () =
+                                    msg_send![input_delegate, selectionWillChange: text_input_view];
                             }
 
                             // Get or create text buffer
@@ -578,7 +601,10 @@ impl IosApp {
                             // Clear existing content
                             let len: u64 = msg_send![buffer, length];
                             if len > 0 {
-                                let range = NSRange { location: 0, length: len };
+                                let range = NSRange {
+                                    location: 0,
+                                    length: len,
+                                };
                                 let () = msg_send![buffer, deleteCharactersInRange: range];
                             }
 
@@ -593,7 +619,8 @@ impl IosApp {
 
                             // Notify AFTER changes (CRITICAL for autocorrect positioning)
                             if input_delegate != nil {
-                                let () = msg_send![input_delegate, selectionDidChange: text_input_view];
+                                let () =
+                                    msg_send![input_delegate, selectionDidChange: text_input_view];
                                 let () = msg_send![input_delegate, textDidChange: text_input_view];
                             }
                         }
@@ -609,23 +636,21 @@ impl IosApp {
             let event_flow = callback(event);
             let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
             with_ios_app(|app| app.event_flow = event_flow);
-            
+
             if let EventFlow::Wait = event_flow {
-                let () = unsafe {msg_send![mtk_view, setPaused: YES]};
+                let () = unsafe { msg_send![mtk_view, setPaused: YES] };
+            } else {
+                let () = unsafe { msg_send![mtk_view, setPaused: NO] };
             }
-            else {
-                let () = unsafe {msg_send![mtk_view, setPaused: NO]};
-            }
-            
+
             with_ios_app(|app| app.event_callback = Some(callback));
         }
     }
-    
-    
+
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-            
+
             let nstimer: ObjcId = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: interval
@@ -636,17 +661,17 @@ impl IosApp {
             ];
             let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
             let () = msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
-            
+
             self.timers.push(IosTimer {
                 timer_id: timer_id,
                 nstimer: nstimer,
-                repeats: repeats
+                repeats: repeats,
             });
             let () = msg_send![pool, release];
         }
     }
 
-    pub fn queue_virtual_keyboard_event(&mut self, event:VirtualKeyboardEvent){
+    pub fn queue_virtual_keyboard_event(&mut self, event: VirtualKeyboardEvent) {
         self.virtual_keyboard_event = Some(event);
     }
 
@@ -661,7 +686,7 @@ impl IosApp {
             }
         }
     }
-    
+
     pub fn send_text_input(input: String, replace_last: bool) {
         // Queue text input - will be processed on next timer tick
         // Using a Vec queue allows batching multiple events (e.g., autocorrect + space)
@@ -669,7 +694,8 @@ impl IosApp {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_events.push(IosTextInputEvent::TextInput(input, replace_last));
+                    app.queued_text_events
+                        .push(IosTextInputEvent::TextInput(input, replace_last));
                 }
             }
         });
@@ -682,7 +708,8 @@ impl IosApp {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_events.push(IosTextInputEvent::RangeReplace(start, end, text));
+                    app.queued_text_events
+                        .push(IosTextInputEvent::RangeReplace(start, end, text));
                 }
             }
         });
@@ -694,7 +721,8 @@ impl IosApp {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_events.push(IosTextInputEvent::KeyEvent(KeyCode::Backspace));
+                    app.queued_text_events
+                        .push(IosTextInputEvent::KeyEvent(KeyCode::Backspace));
                 }
             }
         });
@@ -705,12 +733,13 @@ impl IosApp {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_events.push(IosTextInputEvent::KeyEvent(KeyCode::ReturnKey));
+                    app.queued_text_events
+                        .push(IosTextInputEvent::KeyEvent(KeyCode::ReturnKey));
                 }
             }
         });
     }
-    
+
     pub fn send_timer_received(nstimer: ObjcId) {
         let len = with_ios_app(|app| app.timers.len());
         let time = with_ios_app(|app| app.time_now());
@@ -720,12 +749,15 @@ impl IosApp {
                 if !with_ios_app(|app| app.timers[i].repeats) {
                     with_ios_app(|app| app.timers.remove(i));
                 }
-                IosApp::do_callback(IosEvent::Timer(TimerEvent {timer_id: timer_id, time:Some(time)}));
-                return
+                IosApp::do_callback(IosEvent::Timer(TimerEvent {
+                    timer_id: timer_id,
+                    time: Some(time),
+                }));
+                return;
             }
         }
     }
-    
+
     pub fn send_paint_event() {
         IosApp::do_callback(IosEvent::Paint);
     }
@@ -753,18 +785,25 @@ impl IosApp {
     pub fn show_clipboard_actions(has_selection: bool, rect: Rect, _keyboard_shift: f64) {
         // Extract what we need from IosApp first, then do ObjC calls AFTER the borrow ends
         // This avoids re-entrant borrow panics when UIKit triggers keyboard notifications
-        let views = IOS_APP.try_with(|app| {
-            if let Ok(app_ref) = app.try_borrow_mut() {
-                if let Some(ref app) = *app_ref {
-                    if let (Some(mtk_view), Some(edit_menu_interaction)) = (app.mtk_view, app.edit_menu_interaction) {
-                        return Some((mtk_view, edit_menu_interaction));
+        let views = IOS_APP
+            .try_with(|app| {
+                if let Ok(app_ref) = app.try_borrow_mut() {
+                    if let Some(ref app) = *app_ref {
+                        if let (Some(mtk_view), Some(edit_menu_interaction)) =
+                            (app.mtk_view, app.edit_menu_interaction)
+                        {
+                            return Some((mtk_view, edit_menu_interaction));
+                        }
                     }
                 }
-            }
-            None
-        }).ok().flatten();
+                None
+            })
+            .ok()
+            .flatten();
 
-        let Some((mtk_view, edit_menu_interaction)) = views else { return };
+        let Some((mtk_view, edit_menu_interaction)) = views else {
+            return;
+        };
 
         unsafe {
             // Store selection state in the view for canPerformAction filtering
@@ -796,14 +835,17 @@ impl IosApp {
 
     pub fn hide_clipboard_actions() {
         // Extract what we need first, then do ObjC calls after borrow ends
-        let interaction = IOS_APP.try_with(|app| {
-            if let Ok(app_ref) = app.try_borrow_mut() {
-                if let Some(ref app) = *app_ref {
-                    return app.edit_menu_interaction;
+        let interaction = IOS_APP
+            .try_with(|app| {
+                if let Ok(app_ref) = app.try_borrow_mut() {
+                    if let Some(ref app) = *app_ref {
+                        return app.edit_menu_interaction;
+                    }
                 }
-            }
-            None
-        }).ok().flatten();
+                None
+            })
+            .ok()
+            .flatten();
 
         if let Some(edit_menu_interaction) = interaction {
             unsafe {
@@ -818,25 +860,25 @@ impl IosApp {
             "copy" => {
                 let response = Rc::new(RefCell::new(None));
                 IosApp::do_callback(IosEvent::TextCopy(TextClipboardEvent {
-                    response: response.clone()
+                    response: response.clone(),
                 }));
                 // After the event handler fills in the response, copy to clipboard
                 let text_to_copy = response.borrow().clone();
                 if let Some(text) = text_to_copy {
                     with_ios_app(|app| app.copy_to_clipboard(&text));
                 }
-            },
+            }
             "cut" => {
                 let response = Rc::new(RefCell::new(None));
                 IosApp::do_callback(IosEvent::TextCut(TextClipboardEvent {
-                    response: response.clone()
+                    response: response.clone(),
                 }));
                 // After the event handler fills in the response, copy to clipboard
                 let text_to_copy = response.borrow().clone();
                 if let Some(text) = text_to_copy {
                     with_ios_app(|app| app.copy_to_clipboard(&text));
                 }
-            },
+            }
             "select_all" => {
                 // Send Cmd+A keypress to trigger select all in widgets
                 // On Apple platforms, is_primary() checks for logo (Command)
@@ -852,7 +894,7 @@ impl IosApp {
                     },
                     time,
                 }));
-            },
+            }
             _ => {
                 crate::log!("iOS: Unknown clipboard action: {}", action);
             }
@@ -874,7 +916,7 @@ impl IosApp {
     pub fn get_ios_directory_paths() -> String {
         unsafe {
             let file_manager: ObjcId = msg_send![class!(NSFileManager), defaultManager];
-            
+
             // Get application support directory
             let app_support_dir: ObjcId = msg_send![
                 file_manager,
@@ -884,7 +926,7 @@ impl IosApp {
             let app_support_url: ObjcId = msg_send![app_support_dir, firstObject];
             let app_support_path: ObjcId = msg_send![app_support_url, path];
             let data_path = nsstring_to_string(app_support_path);
-        
+
             data_path
         }
     }

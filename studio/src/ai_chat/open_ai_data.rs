@@ -7,15 +7,15 @@ pub struct OpenAiChatPrompt {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub max_tokens: i32,
-    pub stream: bool
+    pub stream: bool,
 }
 
 #[derive(Debug, SerJson, DeJson)]
 pub struct OpenAiChatMessage {
     pub content: Option<String>,
     pub role: Option<String>,
-    pub refusal: Option<JsonValue>
-} 
+    pub refusal: Option<JsonValue>,
+}
 
 #[allow(unused)]
 #[derive(Debug, DeJson)]
@@ -42,7 +42,7 @@ pub struct OpenAiChatUsage {
     pub prompt_tokens: i32,
     pub completion_tokens: i32,
     pub total_tokens: i32,
-    pub completion_tokens_details: OpenAiCompletionDetails
+    pub completion_tokens_details: OpenAiCompletionDetails,
 }
 
 #[allow(unused)]
@@ -119,7 +119,7 @@ AiBackend::LlamaLocal=>{
     let mut request = HttpRequest::new(url, HttpMethod::POST);
     request.set_is_streaming();
     request.set_header("Content-Type".to_string(), "application/json".to_string());
-    request.set_metadata_id(chat_id); 
+    request.set_metadata_id(chat_id);
     let mut prompt = String::new();
     prompt.push_str("<|begin_of_text|>\n");
     prompt.push_str("<|start_header_id|>system<|stop_header_id|>");

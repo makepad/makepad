@@ -2,7 +2,7 @@ use crate::{
     cx_2d::*,
     makepad_platform::*,
     shader::draw_glyph::{DrawGlyph, GlyphShape, GlyphShapeId},
-    svg::{self, SvgDefs, SvgDocument, SvgNode, SvgPaint, SvgStyle, Transform2d, SvgUse},
+    svg::{self, SvgDefs, SvgDocument, SvgNode, SvgPaint, SvgStyle, SvgUse, Transform2d},
     turtle::*,
 };
 use makepad_svg::path::{PathCmd, VectorPath};
@@ -284,7 +284,12 @@ impl DrawSvgGlyph {
     }
 }
 
-fn emit_nodes_fill_only(dg: &mut DrawGlyph, nodes: &[SvgNode], defs: &SvgDefs, parent_xf: &Transform2d) {
+fn emit_nodes_fill_only(
+    dg: &mut DrawGlyph,
+    nodes: &[SvgNode],
+    defs: &SvgDefs,
+    parent_xf: &Transform2d,
+) {
     for node in nodes {
         match node {
             SvgNode::Group(group) => {
@@ -356,7 +361,12 @@ fn emit_nodes_fill_only(dg: &mut DrawGlyph, nodes: &[SvgNode], defs: &SvgDefs, p
     }
 }
 
-fn emit_use_fill_only(dg: &mut DrawGlyph, use_node: &SvgUse, defs: &SvgDefs, parent_xf: &Transform2d) {
+fn emit_use_fill_only(
+    dg: &mut DrawGlyph,
+    use_node: &SvgUse,
+    defs: &SvgDefs,
+    parent_xf: &Transform2d,
+) {
     let Some(symbol) = defs.symbols.get(&use_node.href) else {
         return;
     };

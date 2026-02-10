@@ -61,7 +61,6 @@ extern "C" {
     ) -> c_int;
 }
 
-
 // rawfile
 #[repr(C)]
 pub struct RawFile {

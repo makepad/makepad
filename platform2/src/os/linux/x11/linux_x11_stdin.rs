@@ -13,7 +13,11 @@ use {
         window::CxWindowPool,
         CxOsApi,
     },
-    std::{cell::RefCell, io::{self, prelude::*, BufReader}, rc::Rc},
+    std::{
+        cell::RefCell,
+        io::{self, prelude::*, BufReader},
+        rc::Rc,
+    },
 };
 
 #[derive(Default)]
@@ -135,9 +139,8 @@ impl Cx {
                     }));
                     let text = response.borrow().clone();
                     if let Some(text) = text {
-                        let _ = io::stdout().write_all(
-                            StdinToHost::SetClipboard(text).to_json().as_bytes(),
-                        );
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
                         let _ = io::stdout().flush();
                     }
                 }
@@ -148,9 +151,8 @@ impl Cx {
                     }));
                     let text = response.borrow().clone();
                     if let Some(text) = text {
-                        let _ = io::stdout().write_all(
-                            StdinToHost::SetClipboard(text).to_json().as_bytes(),
-                        );
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
                         let _ = io::stdout().flush();
                     }
                 }
@@ -339,9 +341,8 @@ impl Cx {
                     self.os.stdin_timers.timers.remove(&timer_id);
                 }
                 CxOsOp::CopyToClipboard(content) => {
-                    let _ = io::stdout().write_all(
-                        StdinToHost::SetClipboard(content).to_json().as_bytes(),
-                    );
+                    let _ = io::stdout()
+                        .write_all(StdinToHost::SetClipboard(content).to_json().as_bytes());
                     let _ = io::stdout().flush();
                 }
                 _ => (), /*

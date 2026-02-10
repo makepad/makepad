@@ -1,27 +1,25 @@
 use crate::{
-    //makepad_live_id::*,
-    makepad_script::*,
-    script::vm::*,
-    makepad_math::*,
-    id_pool::*,
     area::Area,
-    window::WindowId,
-    os::CxOsPass,
     cx::Cx,
     draw_list::DrawListId,
-    texture::{
-        Texture,
-    }
+    id_pool::*,
+    makepad_math::*,
+    //makepad_live_id::*,
+    makepad_script::*,
+    os::CxOsPass,
+    script::vm::*,
+    texture::Texture,
+    window::WindowId,
 };
 
 #[derive(Debug)]
 pub struct DrawPass(PoolId);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DrawPassId(pub (crate) usize);
+pub struct DrawPassId(pub(crate) usize);
 
 #[derive(Default)]
-pub struct CxDrawPassPool(pub (crate) IdPool<CxDrawPass>);
+pub struct CxDrawPassPool(pub(crate) IdPool<CxDrawPass>);
 impl CxDrawPassPool {
     fn alloc(&mut self) -> DrawPass {
         DrawPass(self.0.alloc())
@@ -30,14 +28,14 @@ impl CxDrawPassPool {
     pub fn id_iter(&self) -> DrawPassIterator {
         DrawPassIterator {
             cur: 0,
-            len: self.0.pool.len()
+            len: self.0.pool.len(),
         }
     }
 }
 
 pub struct DrawPassIterator {
     cur: usize,
-    len: usize
+    len: usize,
 }
 
 impl Iterator for DrawPassIterator {
@@ -67,10 +65,19 @@ impl std::ops::IndexMut<DrawPassId> for CxDrawPassPool {
 
 impl ScriptHook for DrawPass {}
 impl ScriptNew for DrawPass {
-    fn script_new(vm: &mut ScriptVm) -> Self { Self::new(vm.cx_mut()) }
+    fn script_new(vm: &mut ScriptVm) -> Self {
+        Self::new(vm.cx_mut())
+    }
 }
 impl ScriptApply for DrawPass {
-    fn script_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {}
+    fn script_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+    }
 }
 
 impl DrawPass {
@@ -80,19 +87,30 @@ impl DrawPass {
 }
 
 #[derive(Script)]
-pub struct ScriptDrawPass{
-    #[rust(DrawPass::new(vm.cx_mut()))] pub handle: DrawPass,
-    #[live] pub clear_color: Vec4f,
-    #[live] pub dont_clear: bool
+pub struct ScriptDrawPass {
+    #[rust(DrawPass::new(vm.cx_mut()))]
+    pub handle: DrawPass,
+    #[live]
+    pub clear_color: Vec4f,
+    #[live]
+    pub dont_clear: bool,
 }
 
 impl std::ops::Deref for ScriptDrawPass {
     type Target = DrawPass;
-    fn deref(&self) -> &Self::Target { &self.handle }
+    fn deref(&self) -> &Self::Target {
+        &self.handle
+    }
 }
 
 impl ScriptHook for ScriptDrawPass {
-    fn on_after_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue) {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].clear_color = self.clear_color;
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].dont_clear = self.dont_clear;
     }
@@ -148,18 +166,19 @@ impl LiveApply for DrawPass {
 }*/
 
 impl DrawPass {
-    pub fn id_equals(&self, id:usize)->bool{
+    pub fn id_equals(&self, id: usize) -> bool {
         self.0.id == id
     }
 
-    pub fn new_with_name(cx: &mut Cx, name:&str) -> Self {
+    pub fn new_with_name(cx: &mut Cx, name: &str) -> Self {
         let pass = cx.passes.alloc();
         pass.set_pass_name(cx, name);
         pass
     }
 
-    pub fn draw_pass_id(&self) -> DrawPassId {DrawPassId(self.0.id)}
-
+    pub fn draw_pass_id(&self) -> DrawPassId {
+        DrawPassId(self.0.id)
+    }
 
     pub fn set_as_xr_pass(&self, cx: &mut Cx) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
@@ -176,23 +195,27 @@ impl DrawPass {
         cxpass.debug_name = name.to_string();
     }
 
-    pub fn pass_name<'a>(&self, cx: &'a mut Cx)->&'a str{
+    pub fn pass_name<'a>(&self, cx: &'a mut Cx) -> &'a str {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         &cxpass.debug_name
     }
 
     pub fn set_size(&self, cx: &mut Cx, pass_size: Vec2d) {
         let mut pass_size = pass_size;
-        if pass_size.x < 1.0 {pass_size.x = 1.0};
-        if pass_size.y < 1.0 {pass_size.y = 1.0};
+        if pass_size.x < 1.0 {
+            pass_size.x = 1.0
+        };
+        if pass_size.y < 1.0 {
+            pass_size.y = 1.0
+        };
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.pass_rect = Some(CxDrawPassRect::Size(pass_size));
     }
 
-    pub fn size(&self, cx: &mut Cx)->Option<Vec2d> {
+    pub fn size(&self, cx: &mut Cx) -> Option<Vec2d> {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
-        if let Some(CxDrawPassRect::Size(size)) = &cxpass.pass_rect{
-            return Some(*size)
+        if let Some(CxDrawPassRect::Size(size)) = &cxpass.pass_rect {
+            return Some(*size);
         }
         None
     }
@@ -207,31 +230,45 @@ impl DrawPass {
         cxpass.color_textures.truncate(0);
     }
 
-    pub fn add_color_texture(&self, cx: &mut Cx, texture: &Texture, clear_color: DrawPassClearColor) {
+    pub fn add_color_texture(
+        &self,
+        cx: &mut Cx,
+        texture: &Texture,
+        clear_color: DrawPassClearColor,
+    ) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.color_textures.push(CxDrawPassColorTexture {
             texture: texture.clone(),
-            clear_color: clear_color
+            clear_color: clear_color,
         })
     }
 
-    pub fn set_color_texture(&self, cx: &mut Cx, texture: &Texture, clear_color: DrawPassClearColor) {
+    pub fn set_color_texture(
+        &self,
+        cx: &mut Cx,
+        texture: &Texture,
+        clear_color: DrawPassClearColor,
+    ) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
-        if cxpass.color_textures.len()!=0{
+        if cxpass.color_textures.len() != 0 {
             cxpass.color_textures[0] = CxDrawPassColorTexture {
                 texture: texture.clone(),
-                clear_color: clear_color
+                clear_color: clear_color,
             }
-        }
-        else{
+        } else {
             cxpass.color_textures.push(CxDrawPassColorTexture {
                 texture: texture.clone(),
-                clear_color: clear_color
+                clear_color: clear_color,
             })
         }
     }
 
-    pub fn set_depth_texture(&self, cx: &mut Cx, texture: &Texture, clear_depth: DrawPassClearDepth) {
+    pub fn set_depth_texture(
+        &self,
+        cx: &mut Cx,
+        texture: &Texture,
+        clear_depth: DrawPassClearDepth,
+    ) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.depth_texture = Some(texture.clone());
         cxpass.clear_depth = clear_depth;
@@ -242,18 +279,16 @@ impl DrawPass {
         cxpass.debug = debug;
     }
 
-
     pub fn set_dpi_factor(&mut self, cx: &mut Cx, dpi: f64) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.dpi_factor = Some(dpi);
     }
-
 }
 
 #[derive(Clone)]
 pub enum DrawPassClearColor {
     InitWith(Vec4f),
-    ClearWith(Vec4f)
+    ClearWith(Vec4f),
 }
 
 impl Default for DrawPassClearColor {
@@ -265,45 +300,57 @@ impl Default for DrawPassClearColor {
 #[derive(Clone)]
 pub enum DrawPassClearDepth {
     InitWith(f32),
-    ClearWith(f32)
+    ClearWith(f32),
 }
 
 #[derive(Clone)]
 pub struct CxDrawPassColorTexture {
     pub clear_color: DrawPassClearColor,
-    pub texture: Texture
+    pub texture: Texture,
 }
 
 #[derive(Default, Clone, Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawPassUniforms {
-    #[live] pub camera_projection: Mat4f,
-    #[live] pub camera_projection_r: Mat4f,
-    #[live] pub camera_view: Mat4f,
-    #[live] pub camera_view_r: Mat4f,
-    #[live] pub depth_projection: Mat4f,
-    #[live] pub depth_projection_r: Mat4f,
-    #[live] pub depth_view: Mat4f,
-    #[live] pub depth_view_r: Mat4f,
-    #[live] pub camera_inv: Mat4f,
-    #[live] pub dpi_factor: f32,
-    #[live] pub dpi_dilate: f32,
-    #[live] pub time: f32,
-    #[live] pub pad2: f32
+    #[live]
+    pub camera_projection: Mat4f,
+    #[live]
+    pub camera_projection_r: Mat4f,
+    #[live]
+    pub camera_view: Mat4f,
+    #[live]
+    pub camera_view_r: Mat4f,
+    #[live]
+    pub depth_projection: Mat4f,
+    #[live]
+    pub depth_projection_r: Mat4f,
+    #[live]
+    pub depth_view: Mat4f,
+    #[live]
+    pub depth_view_r: Mat4f,
+    #[live]
+    pub camera_inv: Mat4f,
+    #[live]
+    pub dpi_factor: f32,
+    #[live]
+    pub dpi_dilate: f32,
+    #[live]
+    pub time: f32,
+    #[live]
+    pub pad2: f32,
 }
 
 impl DrawPassUniforms {
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawPassUniforms>() >> 2] {
-        unsafe {std::mem::transmute(self)}
+        unsafe { std::mem::transmute(self) }
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub enum CxDrawPassRect {
     Area(Area),
     AreaOrigin(Area, Vec2d),
-    Size(Vec2d)
+    Size(Vec2d),
 }
 
 #[derive(Clone)]
@@ -343,12 +390,12 @@ impl Default for CxDrawPass {
             clear_color: Vec4f::default(),
             depth_init: 1.0,
             main_draw_list_id: None,
-            view_shift: dvec2(0.0,0.0),
-            view_scale: dvec2(1.0,1.0),
+            view_shift: dvec2(0.0, 0.0),
+            view_scale: dvec2(1.0, 1.0),
             parent: CxDrawPassParent::None,
             paint_dirty: false,
             pass_rect: None,
-            os: CxOsPass::default()
+            os: CxOsPass::default(),
         }
     }
 }
@@ -358,7 +405,7 @@ pub enum CxDrawPassParent {
     Xr,
     Window(WindowId),
     DrawPass(DrawPassId),
-    None
+    None,
 }
 
 impl CxDrawPass {
@@ -373,7 +420,6 @@ impl CxDrawPass {
     }
 
     pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d) {
-
         let offset = offset + self.view_shift;
         let size = size * self.view_scale;
 
@@ -385,7 +431,7 @@ impl CxDrawPass {
             100.,
             -100.,
             1.0,
-            1.0
+            1.0,
         );
         self.pass_uniforms.camera_projection = ortho;
         self.pass_uniforms.camera_view = Mat4f::identity();

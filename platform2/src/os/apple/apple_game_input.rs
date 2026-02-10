@@ -1,25 +1,15 @@
-use {
-    crate::{
-        makepad_live_id::*,
-        makepad_objc_sys::{
-            objc_block,
-            runtime::{ObjcId, nil, Sel, BOOL, YES},
-            msg_send,
-            sel,
-            sel_impl,
-            class,
-        },
-        event::{
-            game_input::*,
-        },
-        game_input::CxGameInputApi,
-        cx::Cx,
-        os::{
-            apple::apple_sys::*,
-            apple::apple_util::*,
-        },
-        makepad_math::Vec2,
-    }
+use crate::{
+    cx::Cx,
+    event::game_input::*,
+    game_input::CxGameInputApi,
+    makepad_live_id::*,
+    makepad_math::Vec2,
+    makepad_objc_sys::{
+        class, msg_send, objc_block,
+        runtime::{nil, ObjcId, Sel, BOOL, YES},
+        sel, sel_impl,
+    },
+    os::{apple::apple_sys::*, apple::apple_util::*},
 };
 
 pub struct AppleGameInput {
@@ -42,56 +32,49 @@ impl AppleGameInput {
         F: Fn(GameInputConnectedEvent) + 'static + Clone,
     {
         unsafe {
-             // Enable background monitoring for macOS 11.3+
-             // GCController.shouldMonitorBackgroundEvents = true
-             // This is a class property
-             let gc_controller_class = class!(GCController);
-             let sel_monitor = Sel::register("setShouldMonitorBackgroundEvents:");
-             if msg_send![gc_controller_class, respondsToSelector: sel_monitor] {
-                 let () = msg_send![gc_controller_class, setShouldMonitorBackgroundEvents: YES];
-             }
+            // Enable background monitoring for macOS 11.3+
+            // GCController.shouldMonitorBackgroundEvents = true
+            // This is a class property
+            let gc_controller_class = class!(GCController);
+            let sel_monitor = Sel::register("setShouldMonitorBackgroundEvents:");
+            if msg_send![gc_controller_class, respondsToSelector: sel_monitor] {
+                let () = msg_send![gc_controller_class, setShouldMonitorBackgroundEvents: YES];
+            }
 
             let center: ObjcId = msg_send![class!(NSNotificationCenter), defaultCenter];
             let callback_clone = callback.clone();
-            
-            let block = objc_block!(move | note: ObjcId | {
+
+            let block = objc_block!(move |note: ObjcId| {
                 let controller: ObjcId = msg_send![note, object];
                 let _: ObjcId = msg_send![controller, retain];
                 let vendor_name: ObjcId = msg_send![controller, vendorName];
                 let name = nsstring_to_string(vendor_name);
-                
+
                 let ptr = controller as u64;
-                let id = LiveId(ptr); 
-                
-                let info = GameInputInfo {
-                    id,
-                    name,
-                };
+                let id = LiveId(ptr);
+
+                let info = GameInputInfo { id, name };
                 callback_clone(GameInputConnectedEvent::Connected(info));
             });
-            
+
             let () = msg_send![center, addObserverForName: GCControllerDidConnectNotification object: nil queue: nil usingBlock: &block];
 
             let callback_clone = callback.clone();
-            let block = objc_block!(move | note: ObjcId | {
+            let block = objc_block!(move |note: ObjcId| {
                 let controller: ObjcId = msg_send![note, object];
                 let _: () = msg_send![controller, release];
                 let vendor_name: ObjcId = msg_send![controller, vendorName];
                 let name = nsstring_to_string(vendor_name);
-                
+
                 let ptr = controller as u64;
-                let id = LiveId(ptr); 
-                
-                let info = GameInputInfo {
-                    id,
-                    name,
-                };
+                let id = LiveId(ptr);
+
+                let info = GameInputInfo { id, name };
                 callback_clone(GameInputConnectedEvent::Disconnected(info));
             });
-             let () = msg_send![center, addObserverForName: GCControllerDidDisconnectNotification object: nil queue: nil usingBlock: &block];
-
+            let () = msg_send![center, addObserverForName: GCControllerDidDisconnectNotification object: nil queue: nil usingBlock: &block];
         }
-        
+
         Self::new()
     }
 
@@ -99,7 +82,8 @@ impl AppleGameInput {
         let ptr = info.id.0 as ObjcId;
         self.gamepads.push(info.clone());
         self.controllers.push(ptr);
-        self.states.push(GameInputState::Gamepad(GamepadState::default()));
+        self.states
+            .push(GameInputState::Gamepad(GamepadState::default()));
     }
 
     pub fn on_disconnected(&mut self, info: &GameInputInfo) {
@@ -115,8 +99,7 @@ impl AppleGameInput {
             unsafe {
                 let extended_gamepad: ObjcId = msg_send![*controller, extendedGamepad];
                 if extended_gamepad != nil {
-                     if let GameInputState::Gamepad(state) = &mut self.states[i] {
-                    
+                    if let GameInputState::Gamepad(state) = &mut self.states[i] {
                         let get_val = |btn: ObjcId| -> f32 {
                             if btn != nil {
                                 let val: f32 = msg_send![btn, value];
@@ -133,29 +116,33 @@ impl AppleGameInput {
                         };
 
                         let get_axis = |input: ObjcId| -> f32 {
-                             if input != nil {
-                                 let val: f32 = msg_send![input, value];
-                                 val
-                             } else { 0.0 }
+                            if input != nil {
+                                let val: f32 = msg_send![input, value];
+                                val
+                            } else {
+                                0.0
+                            }
                         };
-                        
+
                         state.a = get_val(msg_send![extended_gamepad, buttonA]);
                         state.b = get_val(msg_send![extended_gamepad, buttonB]);
                         state.x = get_val(msg_send![extended_gamepad, buttonX]);
                         state.y = get_val(msg_send![extended_gamepad, buttonY]);
-                        
+
                         state.left_shoulder = get_val(msg_send![extended_gamepad, leftShoulder]);
                         state.right_shoulder = get_val(msg_send![extended_gamepad, rightShoulder]);
-                        
+
                         state.left_trigger = get_val(msg_send![extended_gamepad, leftTrigger]);
                         state.right_trigger = get_val(msg_send![extended_gamepad, rightTrigger]);
-                        
+
                         state.select = get_val(msg_send![extended_gamepad, buttonOptions]);
                         state.start = get_val(msg_send![extended_gamepad, buttonMenu]);
-                        
-                        state.left_thumb = get_val(msg_send![extended_gamepad, leftThumbstickButton]);
-                        state.right_thumb = get_val(msg_send![extended_gamepad, rightThumbstickButton]);
-                        
+
+                        state.left_thumb =
+                            get_val(msg_send![extended_gamepad, leftThumbstickButton]);
+                        state.right_thumb =
+                            get_val(msg_send![extended_gamepad, rightThumbstickButton]);
+
                         let dpad: ObjcId = msg_send![extended_gamepad, dpad];
                         if dpad != nil {
                             state.dpad_up = get_axis(msg_send![dpad, up]);
@@ -163,7 +150,7 @@ impl AppleGameInput {
                             state.dpad_left = get_axis(msg_send![dpad, left]);
                             state.dpad_right = get_axis(msg_send![dpad, right]);
                         }
-                        
+
                         let left_stick: ObjcId = msg_send![extended_gamepad, leftThumbstick];
                         if left_stick != nil {
                             state.left_stick = Vec2 {
@@ -171,7 +158,7 @@ impl AppleGameInput {
                                 y: get_axis(msg_send![left_stick, yAxis]),
                             };
                         }
-                        
+
                         let right_stick: ObjcId = msg_send![extended_gamepad, rightThumbstick];
                         if right_stick != nil {
                             state.right_stick = Vec2 {
@@ -202,7 +189,7 @@ impl CxGameInputApi for Cx {
         }
         &[]
     }
-    
+
     fn game_input_state_mut(&mut self, index: usize) -> Option<&mut GameInputState> {
         if let Some(game_input) = &mut self.os.apple_game_input {
             if index < game_input.states.len() {
@@ -211,7 +198,7 @@ impl CxGameInputApi for Cx {
         }
         None
     }
-    
+
     fn game_input_states_mut(&mut self) -> &mut [GameInputState] {
         if let Some(game_input) = &mut self.os.apple_game_input {
             return &mut game_input.states;

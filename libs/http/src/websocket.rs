@@ -1,5 +1,4 @@
-
-use crate::digest::{Sha1, base64_encode};
+use crate::digest::{base64_encode, Sha1};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, PartialEq)]
@@ -9,7 +8,7 @@ enum State {
     Len2,
     Len8,
     Data,
-    Mask
+    Mask,
 }
 
 impl State {
@@ -20,7 +19,7 @@ impl State {
             State::Len2 => 2,
             State::Len8 => 8,
             State::Data => 0,
-            State::Mask => 4
+            State::Mask => 4,
         }
     }
 }
@@ -38,7 +37,7 @@ pub struct ServerWebSocket {
     is_partial: bool,
     is_text: bool,
     is_masked: bool,
-    state: State
+    state: State,
 }
 
 pub enum ServerWebSocketMessage<'a> {
@@ -46,7 +45,7 @@ pub enum ServerWebSocketMessage<'a> {
     Pong(&'a [u8]),
     Text(&'a str),
     Binary(&'a [u8]),
-    Close
+    Close,
 }
 
 #[derive(Debug)]
@@ -55,25 +54,25 @@ pub enum ServerWebSocketError<'a> {
     TextNotUTF8(&'a [u8]),
 }
 
-pub const SERVER_WEB_SOCKET_PING_MESSAGE:[u8;2] = [128 | 9,0];
-pub const SERVER_WEB_SOCKET_PONG_MESSAGE:[u8;2] = [128 | 10,0];
+pub const SERVER_WEB_SOCKET_PING_MESSAGE: [u8; 2] = [128 | 9, 0];
+pub const SERVER_WEB_SOCKET_PONG_MESSAGE: [u8; 2] = [128 | 10, 0];
 
 pub enum ServerWebSocketMessageFormat {
     Binary,
-    Text
+    Text,
 }
 
 pub struct ServerWebSocketMessageHeader {
     pub format: ServerWebSocketMessageFormat,
     len: usize,
     masked: bool,
-    data: [u8;14]
+    data: [u8; 14],
 }
 
 impl ServerWebSocketMessageHeader {
-    pub fn from_len(len: usize, format: ServerWebSocketMessageFormat, masked: bool)->Self{
-        let mut data = [0u8;14];
-        
+    pub fn from_len(len: usize, format: ServerWebSocketMessageFormat, masked: bool) -> Self {
+        let mut data = [0u8; 14];
+
         match format {
             ServerWebSocketMessageFormat::Binary => data[0] = 128 | 2,
             ServerWebSocketMessageFormat::Text => data[0] = 128 | 1,
@@ -86,19 +85,17 @@ impl ServerWebSocketMessageHeader {
         }
 
         let header_len;
-        if len < 126{
+        if len < 126 {
             data[1] |= len as u8;
             header_len = 2;
-        }
-        else if len < 65536{
+        } else if len < 65536 {
             data[1] |= 126;
             let bytes = &(len as u16).to_be_bytes();
             for (i, &byte) in bytes.iter().enumerate() {
                 data[i + 2] = byte;
             }
             header_len = 4;
-        }
-        else{
+        } else {
             data[1] |= 127;
             let bytes = &(len as u64).to_be_bytes();
             for (i, &byte) in bytes.iter().enumerate() {
@@ -111,23 +108,33 @@ impl ServerWebSocketMessageHeader {
             for i in header_len..header_len + 4 {
                 data[i] = Self::random_byte();
             }
-            return ServerWebSocketMessageHeader{len: header_len + 4, data, format, masked}
+            return ServerWebSocketMessageHeader {
+                len: header_len + 4,
+                data,
+                format,
+                masked,
+            };
         } else {
-            return ServerWebSocketMessageHeader{len: header_len, data, format, masked}
+            return ServerWebSocketMessageHeader {
+                len: header_len,
+                data,
+                format,
+                masked,
+            };
         }
     }
-    
-    pub fn as_slice(&self)->&[u8]{
+
+    pub fn as_slice(&self) -> &[u8] {
         &self.data[0..self.len]
     }
 
-    pub fn mask(&mut self)->Option<&[u8]> {
+    pub fn mask(&mut self) -> Option<&[u8]> {
         if self.masked {
             match self.len {
                 6 => Some(&self.data[2..6]),
                 10 => Some(&self.data[6..10]),
                 14 => Some(&self.data[10..14]),
-                _ => None
+                _ => None,
             }
         } else {
             None
@@ -136,7 +143,10 @@ impl ServerWebSocketMessageHeader {
 
     // TODO Improve this using a proper random number generator
     fn random_byte() -> u8 {
-        let num = SystemTime::now().duration_since(UNIX_EPOCH).expect("duration_since failed").subsec_nanos();
+        let num = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("duration_since failed")
+            .subsec_nanos();
         num as u8
     }
 }
@@ -156,23 +166,30 @@ impl ServerWebSocket {
             is_masked: false,
             is_partial: false,
             is_text: false,
-            state: State::Opcode
+            state: State::Opcode,
         }
     }
-    
-    pub fn message_to_frame(msg:ServerWebSocketMessage) ->Vec<u8>
-    {
-        match &msg{
-            ServerWebSocketMessage::Text(data)=>{
-                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, false);
+
+    pub fn message_to_frame(msg: ServerWebSocketMessage) -> Vec<u8> {
+        match &msg {
+            ServerWebSocketMessage::Text(data) => {
+                let header = ServerWebSocketMessageHeader::from_len(
+                    data.len(),
+                    ServerWebSocketMessageFormat::Text,
+                    false,
+                );
                 ServerWebSocket::build_message(header, &data.to_string().into_bytes())
             }
-            ServerWebSocketMessage::Binary(data)=>{
-                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Binary, false);
+            ServerWebSocketMessage::Binary(data) => {
+                let header = ServerWebSocketMessageHeader::from_len(
+                    data.len(),
+                    ServerWebSocketMessageFormat::Binary,
+                    false,
+                );
                 ServerWebSocket::build_message(header, &data)
             }
-            _=>panic!()
-        }  
+            _ => panic!(),
+        }
     }
 
     pub fn create_upgrade_response(key: &str) -> String {
@@ -188,9 +205,9 @@ impl ServerWebSocket {
         response_ack
     }
 
-    pub fn build_message(mut header: ServerWebSocketMessageHeader, data: &[u8])->Vec<u8>{
+    pub fn build_message(mut header: ServerWebSocketMessageHeader, data: &[u8]) -> Vec<u8> {
         let mut frame = header.as_slice().to_vec();
-        if let Some(mask) = header.mask(){
+        if let Some(mask) = header.mask() {
             for (i, &byte) in data.iter().enumerate() {
                 frame.push(byte ^ mask[i % 4]);
             }
@@ -199,7 +216,7 @@ impl ServerWebSocket {
         }
         frame
     }
-    
+
     fn parse_head(&mut self, input: &[u8]) -> bool {
         while self.head_expected > 0
             && self.input_read < input.len()
@@ -212,7 +229,7 @@ impl ServerWebSocket {
         }
         self.head_expected != 0
     }
-    
+
     fn to_state(&mut self, state: State) {
         match state {
             State::Data => {
@@ -225,15 +242,18 @@ impl ServerWebSocket {
                 self.is_partial = false;
                 self.is_text = false;
                 self.is_masked = false;
-            },
-            _ => ()
+            }
+            _ => (),
         }
         self.head_written = 0;
         self.head_expected = state.head_expected();
         self.state = state;
     }
-    
-    pub fn parse<F>(&mut self, input: &[u8], mut result: F) where F: FnMut(Result<ServerWebSocketMessage, ServerWebSocketError>){
+
+    pub fn parse<F>(&mut self, input: &[u8], mut result: F)
+    where
+        F: FnMut(Result<ServerWebSocketMessage, ServerWebSocketError>),
+    {
         self.input_read = 0;
         // parse a header
         loop {
@@ -243,29 +263,25 @@ impl ServerWebSocket {
                         break;
                     }
                     let opcode = self.head[0] & 15;
-                    
+
                     if opcode <= 2 {
                         self.is_partial = (self.head[0] & 128) != 0;
                         self.is_text = opcode == 1;
                         self.to_state(State::Len1);
-                    }
-                    else if opcode == 8 {
+                    } else if opcode == 8 {
                         result(Ok(ServerWebSocketMessage::Close));
                         break;
-                    }
-                    else if opcode == 9 {
+                    } else if opcode == 9 {
                         self.is_ping = true;
                         self.to_state(State::Len1);
-                    }
-                    else if opcode == 10 {
+                    } else if opcode == 10 {
                         self.is_pong = true;
                         self.to_state(State::Len1);
-                    }
-                    else {
+                    } else {
                         result(Err(ServerWebSocketError::OpcodeNotSupported(opcode)));
                         break;
                     }
-                },
+                }
                 State::Len1 => {
                     if self.parse_head(input) {
                         break;
@@ -276,95 +292,83 @@ impl ServerWebSocket {
                         self.data_len = len_type as usize;
                         if !self.is_masked {
                             self.to_state(State::Data);
-                        }
-                        else {
+                        } else {
                             self.to_state(State::Mask);
                         }
-                    }
-                    else if len_type == 126 {
+                    } else if len_type == 126 {
                         self.to_state(State::Len2);
-                    }
-                    else if len_type == 127 {
+                    } else if len_type == 127 {
                         self.to_state(State::Len8);
                     }
-                },
+                }
                 State::Len2 => {
                     if self.parse_head(input) {
                         break;
                     }
-                    self.data_len = u16::from_be_bytes(
-                        self.head[0..2].try_into().unwrap()
-                    ) as usize;
+                    self.data_len =
+                        u16::from_be_bytes(self.head[0..2].try_into().unwrap()) as usize;
                     if self.is_masked {
                         self.to_state(State::Mask);
-                    }
-                    else {
+                    } else {
                         self.to_state(State::Data);
                     }
-                },
+                }
                 State::Len8 => {
                     if self.parse_head(input) {
                         break;
                     }
-                    self.data_len = u64::from_be_bytes(
-                        self.head[0..8].try_into().unwrap()
-                    ) as usize;
+                    self.data_len =
+                        u64::from_be_bytes(self.head[0..8].try_into().unwrap()) as usize;
                     if self.is_masked {
                         self.to_state(State::Mask);
-                    }
-                    else {
+                    } else {
                         self.to_state(State::Data);
                     }
-                },
+                }
                 State::Mask => {
                     if self.parse_head(input) {
                         break;
                     }
                     self.to_state(State::Data);
-                },
+                }
                 State::Data => {
                     if self.is_masked {
                         while self.data.len() < self.data_len && self.input_read < input.len() {
-                            self.data.push(input[self.input_read] ^ self.head[self.mask_counter]);
+                            self.data
+                                .push(input[self.input_read] ^ self.head[self.mask_counter]);
                             self.mask_counter = (self.mask_counter + 1) & 3;
                             self.input_read += 1;
                         }
-                    }
-                    else {
+                    } else {
                         while self.data.len() < self.data_len && self.input_read < input.len() {
                             self.data.push(input[self.input_read]);
                             self.input_read += 1;
                         }
                     }
-                    if self.data.len() < self.data_len { // not enough data yet
+                    if self.data.len() < self.data_len {
+                        // not enough data yet
                         break;
-                    }
-                    else {
+                    } else {
                         if self.is_ping {
                             result(Ok(ServerWebSocketMessage::Ping(&self.data)));
-                        }
-                        else if self.is_pong {
+                        } else if self.is_pong {
                             result(Ok(ServerWebSocketMessage::Pong(&self.data)));
-                        }
-                        else if self.is_text{
-                            if let Ok(text) = std::str::from_utf8(&self.data){
+                        } else if self.is_text {
+                            if let Ok(text) = std::str::from_utf8(&self.data) {
                                 result(Ok(ServerWebSocketMessage::Text(text)));
-                            }
-                            else{
+                            } else {
                                 result(Err(ServerWebSocketError::TextNotUTF8(&self.data)))
                             }
-                        }
-                        else{
+                        } else {
                             result(Ok(ServerWebSocketMessage::Binary(&self.data)));
                         }
-                        
+
                         self.to_state(State::Opcode);
                     }
-                },
+                }
             }
         }
     }
-    
 }
 
 impl Default for ServerWebSocket {
@@ -372,4 +376,3 @@ impl Default for ServerWebSocket {
         Self::new()
     }
 }
-

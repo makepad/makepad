@@ -1,7 +1,7 @@
-use crate::{Abgr, Argb, Bgr, Bgra, Grb, Rgb, Rgba};
+use crate::formats::gray::Gray_v08;
 use crate::formats::gray_a::GrayA;
 use crate::formats::gray_alpha::GrayAlpha_v08;
-use crate::formats::gray::Gray_v08;
+use crate::{Abgr, Argb, Bgr, Bgra, Grb, Rgb, Rgba};
 
 #[cfg(feature = "unstable-experimental")]
 use crate::formats::gray::Gray_v09;

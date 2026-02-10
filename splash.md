@@ -1898,3 +1898,526 @@ fn do_search(query) {
 - Use `let` bindings at the top of a block to define reusable styled components, then instantiate them below.
 - Use theme variables (theme.color_bg_app, theme.space_2, etc.) for consistent styling.
 - For simple text answers, just use normal markdown without runsplash blocks.
+
+## Vector Widget (SVG-like Drawing)
+
+The `Vector{}` widget renders SVG-like vector graphics declaratively in Splash. It supports paths, shapes, gradients, filters, groups, transforms, and animations — all without loading external SVG files.
+
+### Basic Usage
+
+```
+Vector{width: 200 height: 200 viewbox: vec4(0 0 200 200)
+    Rect{x: 10 y: 10 w: 80 h: 60 rx: 5 ry: 5 fill: #f80}
+    Circle{cx: 150 cy: 50 r: 30 fill: #08f}
+    Line{x1: 10 y1: 150 x2: 190 y2: 150 stroke: #fff stroke_width: 2}
+}
+```
+
+The `viewbox` property defines the coordinate space as `vec4(x y width height)`. The widget sizes itself to fit the viewbox when `width: Fit` and `height: Fit` (the defaults), or you can set explicit pixel dimensions.
+
+### Shape Types
+
+All shapes support these common style properties:
+
+| Property | Type | Default | Notes |
+|----------|------|---------|-------|
+| `fill` | color, Gradient, RadGradient, Tween, or `false` | inherited | `false` = no fill |
+| `fill_opacity` | f32 | 1.0 | multiplied with fill alpha |
+| `stroke` | color, Gradient, or Tween | none | outline color |
+| `stroke_width` | f32 or Tween | 0.0 | outline thickness |
+| `stroke_opacity` | f32 or Tween | 1.0 | outline alpha |
+| `opacity` | f32 or Tween | 1.0 | overall shape opacity |
+| `stroke_linecap` | string | "butt" | "butt", "round", "square" |
+| `stroke_linejoin` | string | "miter" | "miter", "round", "bevel" |
+| `transform` | Transform or array | identity | see Transforms section |
+| `filter` | Filter ref | none | see Filters section |
+| `shader_id` | f32 | 0.0 | for custom GPU effects on Svg widget |
+
+#### Path — SVG path data
+```
+Path{d: "M 10 10 L 100 100 C 50 50 200 200 300 300 Z" fill: #f00 stroke: #000 stroke_width: 2}
+```
+The `d` property accepts standard SVG path data strings (M, L, C, Q, A, Z, etc.).
+
+#### Rect — Rectangle
+```
+Rect{x: 10 y: 20 w: 100 h: 50 rx: 5 ry: 5 fill: #f80 stroke: #fff stroke_width: 1}
+```
+
+#### Circle
+```
+Circle{cx: 50 cy: 50 r: 40 fill: #08f}
+```
+
+#### Ellipse
+```
+Ellipse{cx: 100 cy: 50 rx: 80 ry: 40 fill: #0f8}
+```
+
+#### Line
+```
+Line{x1: 10 y1: 10 x2: 190 y2: 190 stroke: #fff stroke_width: 2 stroke_linecap: "round"}
+```
+
+#### Polyline — open connected segments
+```
+Polyline{pts: [10 10 50 80 100 20 150 90] fill: false stroke: #ff0 stroke_width: 2}
+```
+
+#### Polygon — closed connected segments
+```
+Polygon{pts: [100 10 40 198 190 78 10 78 160 198] fill: #f0f stroke: #fff stroke_width: 1}
+```
+
+### Groups
+
+`Group{}` composes shapes and applies shared styles/transforms to all children:
+
+```
+Vector{width: 200 height: 200 viewbox: vec4(0 0 200 200)
+    Group{opacity: 0.7 transform: Rotate{deg: 15}
+        Rect{x: 20 y: 20 w: 60 h: 60 fill: #f00}
+        Circle{cx: 130 cy: 50 r: 30 fill: #0f0}
+    }
+}
+```
+
+Groups can be nested. Style properties on a Group (fill, stroke, etc.) apply to its children.
+
+### Gradients
+
+Define gradients as `let` bindings and reference them in `fill` or `stroke`:
+
+#### Linear Gradient
+```
+let my_grad = Gradient{x1: 0 y1: 0 x2: 1 y2: 1
+    Stop{offset: 0 color: #ff0000}
+    Stop{offset: 0.5 color: #00ff00}
+    Stop{offset: 1 color: #0000ff}
+}
+
+Vector{width: 200 height: 100 viewbox: vec4(0 0 200 100)
+    Rect{x: 0 y: 0 w: 200 h: 100 fill: my_grad}
+}
+```
+
+Gradient coordinates (`x1`, `y1`, `x2`, `y2`) are in the range 0–1 (object bounding box). `Stop` children define color stops with `offset` (0–1), `color`, and optional `opacity`.
+
+#### Radial Gradient
+```
+let radial = RadGradient{cx: 0.5 cy: 0.5 r: 0.5
+    Stop{offset: 0 color: #fff}
+    Stop{offset: 1 color: #000}
+}
+
+Vector{width: 200 height: 200 viewbox: vec4(0 0 200 200)
+    Circle{cx: 100 cy: 100 r: 90 fill: radial}
+}
+```
+
+RadGradient properties: `cx`, `cy` (center, default 0.5), `r` (radius, default 0.5), `fx`, `fy` (focal point, defaults to center).
+
+#### Gradient stops with opacity
+```
+let glass = Gradient{x1: 0 y1: 0 x2: 1 y2: 1
+    Stop{offset: 0 color: #xffffff opacity: 0.35}
+    Stop{offset: 0.4 color: #xffffff opacity: 0.08}
+    Stop{offset: 1 color: #xffffff opacity: 0.2}
+}
+```
+
+### Filters
+
+Define a `Filter` with `DropShadow` effects:
+
+```
+let shadow = Filter{
+    DropShadow{dx: 2 dy: 4 blur: 6 color: #000000 opacity: 0.5}
+}
+
+Vector{width: 200 height: 200 viewbox: vec4(0 0 200 200)
+    Rect{x: 40 y: 40 w: 120 h: 120 rx: 10 ry: 10 fill: #445 filter: shadow}
+}
+```
+
+DropShadow properties: `dx` (x offset), `dy` (y offset), `blur` (blur radius), `color`, `opacity`.
+
+### Transforms
+
+Transforms can be applied to any shape or group via the `transform` property. Use a single transform or an array of transforms (composed left-to-right):
+
+#### Static transforms
+```
+// Single transform
+Rect{x: 0 y: 0 w: 50 h: 50 fill: #f00 transform: Rotate{deg: 45}}
+
+// Multiple transforms (composed left-to-right)
+Group{transform: [Translate{x: 100 y: 50} Scale{x: 2 y: 2} Rotate{deg: 30}]
+    Circle{cx: 0 cy: 0 r: 20 fill: #0ff}
+}
+```
+
+Available transforms:
+- `Rotate{deg: 45}` — rotation in degrees. Optional `cx`, `cy` for rotation center
+- `Scale{x: 2 y: 1.5}` — scale factors. If only `x` is given, `y` defaults to the same value
+- `Translate{x: 100 y: 50}` — translation offset
+- `SkewX{deg: 30}` — horizontal skew
+- `SkewY{deg: 15}` — vertical skew
+
+#### Animated transforms
+Add `dur`, `from`, `to` (or `values`), and optionally `loop_` and `begin` to animate:
+
+```
+// Continuously rotating shape
+Circle{cx: 100 cy: 100 r: 30 fill: #0ff
+    transform: Rotate{deg: 0 dur: 2.0 from: 0 to: 360 loop_: true}
+}
+
+// Animated scale
+Rect{x: 50 y: 50 w: 40 h: 40 fill: #f80
+    transform: Scale{x: 1 dur: 1.5 from: 1 to: 2 loop_: true}
+}
+```
+
+### Tween (Property Animation)
+
+Use `Tween{}` to animate individual shape properties (fill, stroke, d, x, y, r, etc.):
+
+```
+// Animated path morphing
+Path{d: Tween{
+    dur: 2.0 loop_: true
+    values: ["M 10 80 Q 50 10 100 80" "M 10 80 Q 50 150 100 80"]
+} fill: #f0f}
+
+// Animated fill color
+Circle{cx: 50 cy: 50 r: 30
+    fill: Tween{dur: 1.5 loop_: true from: #ff0000 to: #0000ff}
+}
+
+// Animated stroke width
+Rect{x: 10 y: 10 w: 80 h: 80
+    fill: false stroke: #fff
+    stroke_width: Tween{dur: 2.0 loop_: true from: 1 to: 5}
+}
+```
+
+Tween properties:
+- `from`, `to` — start and end values
+- `values` — array of keyframe values (alternative to from/to)
+- `dur` — duration in seconds
+- `begin` — start delay in seconds
+- `loop_` — `true` for indefinite, or a number for repeat count
+- `calc` — "linear" (default), "discrete", "paced", "spline"
+- `fill_mode` — "remove" (default) or "freeze"
+
+### Complete Example: App Icon with Gradients, Groups, and Filters
+
+This example from the splash demo recreates the Makepad app icon using Vector:
+
+```
+// Define gradients
+let glass_bg = Gradient{x1: 0 y1: 0 x2: 1 y2: 1
+    Stop{offset: 0 color: #x556677 opacity: 0.45}
+    Stop{offset: 1 color: #x334455 opacity: 0.35}
+}
+let brain_grad = Gradient{x1: 0.5 y1: 0 x2: 0.5 y2: 1
+    Stop{offset: 0 color: #x77ccff}
+    Stop{offset: 0.4 color: #x7799ee}
+    Stop{offset: 0.75 color: #x8866dd}
+    Stop{offset: 1 color: #x9944cc}
+}
+let brain_glow = RadGradient{cx: 0.5 cy: 0.45 r: 0.45
+    Stop{offset: 0 color: #x4466ee opacity: 0.4}
+    Stop{offset: 1 color: #x4466dd opacity: 0.0}
+}
+
+// Define filter
+let icon_shadow = Filter{
+    DropShadow{dx: 0 dy: 4 blur: 6 color: #x000000 opacity: 0.5}
+}
+
+Vector{width: 256 height: 256 viewbox: vec4(0 0 256 256)
+    // Glass background with shadow
+    Rect{x: 16 y: 16 w: 224 h: 224 rx: 44 ry: 44
+        fill: glass_bg filter: icon_shadow}
+
+    // Brain glow
+    Circle{cx: 128 cy: 95 r: 80 fill: brain_glow}
+
+    // Brain paths (scaled and translated group)
+    Group{transform: [Translate{x: 36.8 y: 11.4} Scale{x: 7.6 y: 7.6}]
+        Path{d: "M15.5 13a3.5 3.5 0 0 0 -3.5 3.5v1a3.5 3.5 0 0 0 7 0v-1.8"
+            fill: false stroke: brain_grad stroke_width: 0.35
+            stroke_linecap: "round" stroke_linejoin: "round"}
+        Path{d: "M8.5 13a3.5 3.5 0 0 1 3.5 3.5v1a3.5 3.5 0 0 1 -7 0v-1.8"
+            fill: false stroke: brain_grad stroke_width: 0.35
+            stroke_linecap: "round" stroke_linejoin: "round"}
+    }
+
+    // Keyboard keys
+    Rect{x: 73 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+    Rect{x: 85 y: 190 w: 9 h: 6 rx: 1 ry: 1 fill: #xffffff fill_opacity: 0.18}
+}
+```
+
+### SVG Icons in Vector
+
+Simple SVG icons can be embedded directly as `Path` shapes:
+
+```
+// File icon (from icon_file.svg)
+Vector{width: 32 height: 32 viewbox: vec4(0 0 49 49)
+    Path{d: "M12.069,11.678c0,-2.23 1.813,-4.043 4.043,-4.043l10.107,0l0,8.086c0,1.118 0.903,2.021 2.021,2.021l8.086,0l0,18.193c0,2.23 -1.813,4.043 -4.043,4.043l-16.171,0c-2.23,0 -4.043,-1.813 -4.043,-4.043l0,-24.257Zm24.257,4.043l-8.086,0l0,-8.086l8.086,8.086Z"}
+}
+
+// Folder icon
+Vector{width: 32 height: 32 viewbox: vec4(0 0 49 49)
+    Path{d: "M11.884,37.957l24.257,0c2.23,0 4.043,-1.813 4.043,-4.043l0,-16.172c0,-2.23 -1.813,-4.042 -4.043,-4.042l-10.107,0c-0.638,0 -1.238,-0.297 -1.617,-0.809l-1.213,-1.617c-0.765,-1.017 -1.965,-1.617 -3.235,-1.617l-8.085,0c-2.23,0 -4.043,1.813 -4.043,4.043l0,20.214c0,2.23 1.813,4.043 4.043,4.043Z"}
+}
+```
+
+### Vector vs Svg Widget
+
+| | `Vector{}` | `Svg{}` |
+|---|---|---|
+| **Input** | Declarative shapes in Splash script | External `.svg` file via resource handle |
+| **Use case** | Programmatic/inline vector graphics | Loading pre-made SVG assets |
+| **Gradients** | `let` bindings, referenced by name | Parsed from SVG `<defs>` |
+| **Animation** | `Tween{}` on properties, animated transforms | Parsed from SVG `<animate>` elements |
+| **Custom shaders** | `shader_id` + custom `get_color` on Svg | Same mechanism via `draw_svg +:` |
+| **Syntax** | `Vector{viewbox: ... Path{} Rect{}}` | `Svg{draw_svg +: {svg: crate_resource("self://file.svg")}}` |
+
+Use `Vector{}` when you want to define graphics inline in your UI script. Use `Svg{}` when loading existing SVG files as assets.
+
+### Hex Color Escaping Reminder
+
+When using hex colors containing the letter `e` inside `script_mod!`, use the `#x` prefix to avoid parse errors:
+```
+// These need #x prefix (contain 'e' adjacent to digits)
+fill: #x2ecc71
+fill: #x1e1e2e
+fill: #x4466ee
+
+// These are fine without #x (no 'e' issue)
+fill: #ff4444
+fill: #00ff00
+```
+
+## MathView Widget (LaTeX Math Rendering)
+
+The `MathView{}` widget renders LaTeX mathematical equations using vector glyph rendering with the NewCMMath font.
+
+### Basic Usage
+
+```
+MathView{text: "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}" font_size: 14.0}
+```
+
+### Properties
+
+| Property | Type | Default | Notes |
+|----------|------|---------|-------|
+| `text` | string | "" | LaTeX math expression |
+| `font_size` | f64 | 11.0 | Font size in points |
+| `color` | vec4 | #fff | Color of rendered math |
+| `width` | Size | Fit | Widget width |
+| `height` | Size | Fit | Widget height |
+
+### Examples
+
+```
+// Inline in a layout
+View{flow: Down height: Fit spacing: 12 padding: 15
+
+    Label{text: "Quadratic Formula" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+    MathView{text: "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}" font_size: 14.0}
+
+    Label{text: "Euler's Identity" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+    MathView{text: "e^{i\\pi} + 1 = 0" font_size: 16.0}
+
+    Label{text: "Integral" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+    MathView{text: "\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}" font_size: 14.0}
+
+    Label{text: "Matrix" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+    MathView{text: "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}" font_size: 14.0}
+
+    Label{text: "Sum" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+    MathView{text: "\\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6}" font_size: 14.0}
+
+    Label{text: "Maxwell's Equations" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+    MathView{text: "\\nabla \\times \\mathbf{E} = -\\frac{\\partial \\mathbf{B}}{\\partial t}" font_size: 14.0}
+}
+```
+
+### Different Sizes
+
+```
+View{width: Fill height: Fit flow: Right spacing: 15 align: Align{y: 0.5}}
+MathView{text: "\\alpha + \\beta" font_size: 8.0}
+MathView{text: "\\alpha + \\beta" font_size: 12.0}
+MathView{text: "\\alpha + \\beta" font_size: 18.0}
+MathView{text: "\\alpha + \\beta" font_size: 24.0}
+```
+
+### Supported LaTeX
+
+**Fractions & Roots:**
+`\frac{a}{b}`, `\dfrac{a}{b}`, `\tfrac{a}{b}`, `\sqrt{x}`, `\sqrt[n]{x}`
+
+**Subscripts & Superscripts:**
+`x_i`, `x^2`, `x_i^2`, `a_{n+1}`
+
+**Greek Letters (lowercase):**
+`\alpha`, `\beta`, `\gamma`, `\delta`, `\epsilon`, `\zeta`, `\eta`, `\theta`, `\lambda`, `\mu`, `\nu`, `\xi`, `\pi`, `\rho`, `\sigma`, `\tau`, `\phi`, `\chi`, `\psi`, `\omega`
+
+**Greek Letters (uppercase):**
+`\Gamma`, `\Delta`, `\Theta`, `\Lambda`, `\Xi`, `\Pi`, `\Sigma`, `\Phi`, `\Psi`, `\Omega`
+
+**Big Operators:**
+`\sum`, `\prod`, `\int`, `\iint`, `\iiint`, `\oint`, `\bigcup`, `\bigcap`, `\bigoplus`, `\bigotimes`
+
+**Relations:**
+`=`, `\neq`, `<`, `>`, `\leq`, `\geq`, `\sim`, `\approx`, `\equiv`, `\subset`, `\supset`, `\in`, `\notin`
+
+**Arrows:**
+`\leftarrow`, `\rightarrow`, `\leftrightarrow`, `\Leftarrow`, `\Rightarrow`, `\Leftrightarrow`, `\mapsto`
+
+**Accents:**
+`\hat{x}`, `\bar{x}`, `\tilde{x}`, `\vec{x}`, `\dot{x}`, `\ddot{x}`, `\overline{x}`, `\underline{x}`
+
+**Delimiters (auto-sizing with \left...\right):**
+`\left( \right)`, `\left[ \right]`, `\left\{ \right\}`, `\left| \right|`, `\langle \rangle`, `\lfloor \rfloor`, `\lceil \rceil`
+
+**Matrices:**
+```
+\begin{pmatrix} a & b \\ c & d \end{pmatrix}   % parentheses
+\begin{bmatrix} a & b \\ c & d \end{bmatrix}   % brackets
+\begin{vmatrix} a & b \\ c & d \end{vmatrix}   % determinant bars
+\begin{cases} a & \text{if } x > 0 \\ b & \text{otherwise} \end{cases}
+```
+
+**Styles:**
+`\mathbf{x}` (bold), `\mathit{x}` (italic), `\mathrm{x}` (roman), `\mathcal{x}` (calligraphic), `\mathbb{R}` (blackboard bold), `\mathfrak{g}` (fraktur)
+
+**Spacing:**
+`\,` (thin), `\:` (medium), `\;` (thick), `\!` (negative thin), `\quad`, `\qquad`
+
+**Text & Operators:**
+`\text{...}`, `\sin`, `\cos`, `\tan`, `\log`, `\ln`, `\exp`, `\lim`, `\min`, `\max`, `\det`
+
+**Dots:**
+`\ldots`, `\cdots`, `\vdots`, `\ddots`
+
+**Misc Symbols:**
+`\infty`, `\partial`, `\nabla`, `\forall`, `\exists`, `\emptyset`, `\pm`, `\mp`, `\times`, `\div`, `\cdot`
+
+### Notes
+
+- MathView is read-only — no selection or editing
+- Uses Display math style (large operators centered)
+- Backslashes must be escaped as `\\` in Splash strings
+- The widget sizes itself to fit the rendered equation by default (`width: Fit`, `height: Fit`)
+- An empty `text` produces no output
+
+## MapView Widget (Geographic Map)
+
+The `MapView{}` widget renders interactive geographic maps with OpenStreetMap data. It supports panning, zooming, street labels, and light/dark themes.
+
+### Basic Usage
+
+```
+MapView{
+    width: Fill
+    height: Fill
+}
+```
+
+This creates a map centered on Amsterdam at zoom level 14 with the default light theme.
+
+### Properties
+
+| Property | Type | Default | Notes |
+|----------|------|---------|-------|
+| `center_lon` | f64 | 4.9041 | Longitude of map center |
+| `center_lat` | f64 | 52.3676 | Latitude of map center |
+| `zoom` | f64 | 14.0 | Initial zoom level |
+| `min_zoom` | f64 | 11.0 | Minimum zoom allowed |
+| `max_zoom` | f64 | 17.0 | Maximum zoom allowed |
+| `dark_theme` | bool | false | Light or dark theme |
+| `use_network` | bool | false | Enable online Overpass API |
+| `use_local_mbtiles` | bool | true | Enable local .mbtiles tiles |
+| `width` | Size | Fill | Widget width |
+| `height` | Size | Fill | Widget height |
+
+### Interactions
+
+- **Click + Drag** — Pan the map
+- **Scroll wheel** — Zoom in/out (centered on cursor)
+- **T key** — Toggle light/dark theme
+
+### Examples
+
+```
+// Default map (Amsterdam, light theme, offline tiles)
+MapView{width: Fill height: Fill}
+
+// Custom center and zoom
+MapView{
+    width: Fill height: Fill
+    center_lon: -73.9857
+    center_lat: 40.7484
+    zoom: 15.0
+}
+
+// Dark theme
+MapView{
+    width: Fill height: Fill
+    dark_theme: true
+}
+
+// In a split layout with sidebar
+Splitter{
+    axis: SplitterAxis.Horizontal
+    align: SplitterAlign.FromA(300.0)
+    a := sidebar
+    b := map_area
+}
+sidebar := SolidView{
+    width: Fill height: Fill
+    draw_bg.color: #222
+    flow: Down padding: 15 spacing: 10
+    Label{text: "Map Controls" draw_text.color: #fff draw_text.text_style.font_size: 14}
+    Label{text: "Drag to pan, scroll to zoom" draw_text.color: #888 draw_text.text_style.font_size: 10}
+    Label{text: "Press T to toggle theme" draw_text.color: #888 draw_text.text_style.font_size: 10}
+}
+map_area := MapView{width: Fill height: Fill}
+```
+
+### Data Sources
+
+**Offline mode** (default): Loads tiles from a local `.mbtiles` file at `local/noord-holland-shortbread-1.0.mbtiles`. Covers the Noord Holland region (Amsterdam area). Zoom range 0–14.
+
+**Online mode** (`use_network: true`): Queries the Overpass API for OpenStreetMap data. Covers any location worldwide but requires internet and may be slower.
+
+If both are enabled, offline mode takes priority.
+
+### Theme Styling
+
+MapView includes built-in light and dark themes with colors for:
+- **Buildings** — residential, commercial structures
+- **Water** — rivers, lakes, seas
+- **Land use** — residential, forest, industrial, commercial areas
+- **Leisure** — parks, gardens, pitches
+- **Roads** — motorways, primary, secondary, tertiary, residential, footways
+- **Waterways** — rivers, canals, streams
+- **Railways** — rail lines with dashed styling
+- **Labels** — street names placed along road paths
+
+### Notes
+
+- MapView defaults to offline mode with pre-bundled Amsterdam region tiles
+- Street labels appear at zoom level 13 and above
+- The status bar in the bottom-left shows tile loading progress and feature counts
+- MapView fills its container by default (`width: Fill`, `height: Fill`)
+- For online mode, set `use_network: true` and optionally `use_local_mbtiles: false`

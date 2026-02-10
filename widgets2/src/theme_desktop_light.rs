@@ -1,9 +1,9 @@
 use crate::makepad_platform::*;
 
-script_mod!{
+script_mod! {
     use mod.math.*
     use mod.pod.*
-    
+
     mod.themes.light = {
         let theme = me
         // GLOBAL PARAMETERS
@@ -21,7 +21,7 @@ script_mod!{
         space_2: 1.0 * theme.space_factor
         space_3: 1.5 * theme.space_factor
 
-        mspace_1: {top: theme.space_1, right: theme.space_1, bottom: theme.space_1, left: theme.space_1} 
+        mspace_1: {top: theme.space_1, right: theme.space_1, bottom: theme.space_1, left: theme.space_1}
         mspace_h_1: {top: 0., right: theme.space_1, bottom: 0., left: theme.space_1}
         mspace_v_1: {top: theme.space_1, right: 0., bottom: theme.space_1, left: 0.}
         mspace_2: {top: theme.space_2, right: theme.space_2, bottom: theme.space_2, left: theme.space_2}
@@ -293,7 +293,7 @@ script_mod!{
         color_val_1_focus: theme.color_val_1_hover
         color_val_1_drag: theme.color_val_1_hover
         color_val_1_disabled: theme.color_d_hidden
-        
+
         color_val_2: theme.color_opaque_d_3
         color_val_2_hover: theme.color_opaque_d_4
         color_val_2_focus: theme.color_val_2_hover

@@ -17,17 +17,17 @@ pub mod studio_editor;
 pub mod studio_file_tree;
 
 // Re-export from widgets2 (the new system) - aliased as makepad_widgets
+pub use makepad_code_editor2 as makepad_code_editor;
 pub use makepad_widgets::makepad_draw;
 pub use makepad_widgets::makepad_platform;
 pub use makepad_widgets::makepad_platform::log;
+#[cfg(target_arch = "wasm32")]
+pub use makepad_widgets::makepad_platform::makepad_wasm_bridge;
 pub use makepad_widgets::makepad_script;
 pub use makepad_widgets::makepad_script::makepad_live_id;
 pub use makepad_widgets::makepad_script::makepad_math;
 pub use makepad_widgets::makepad_script::makepad_micro_serde;
 pub use makepad_widgets2 as makepad_widgets;
-pub use makepad_code_editor2 as makepad_code_editor;
-#[cfg(target_arch = "wasm32")]
-pub use makepad_widgets::makepad_platform::makepad_wasm_bridge;
 
 pub use makepad_file_protocol;
 pub use makepad_file_server;

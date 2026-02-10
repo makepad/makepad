@@ -1,24 +1,32 @@
 #![allow(non_camel_case_types)]
 use {
-    std::fmt::{Formatter,Debug, Error},
+    crate::{cx::Cx, live_traits::*, makepad_live_compiler::*},
+    std::fmt::{Debug, Error, Formatter},
     std::marker::PhantomData,
     std::{
+        sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering},
         sync::Arc,
-        sync::atomic::{AtomicU32, AtomicI32, AtomicI64,  AtomicU64, Ordering, AtomicBool},
     },
-    crate::{
-        live_traits::*,
-        makepad_live_compiler::*,
-        cx::Cx,
-    }
 };
 
 pub trait LiveAtomicValue {
-    fn apply_value_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_value_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize;
 }
 
 pub trait LiveAtomic {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize;
 }
 
 pub trait LiveAtomicU32Enum {
@@ -28,35 +36,53 @@ pub trait LiveAtomicU32Enum {
 
 // Atomic u32 enum template
 
+pub struct U32A<T>(AtomicU32, PhantomData<T>)
+where
+    T: LiveAtomicU32Enum;
 
-
-pub struct U32A<T>(AtomicU32, PhantomData<T>) where T: LiveAtomicU32Enum;
-
-impl <T> U32A<T> where T: LiveAtomicU32Enum {
+impl<T> U32A<T>
+where
+    T: LiveAtomicU32Enum,
+{
     pub fn set(&self, val: T) {
         self.0.store(val.as_u32(), Ordering::Relaxed)
     }
-    
+
     pub fn get(&self) -> T {
         T::from_u32(self.0.load(Ordering::Relaxed))
     }
 }
 
-impl <T> Clone for U32A<T> where T: LiveAtomicU32Enum {
-    fn clone(&self)->Self{ 
+impl<T> Clone for U32A<T>
+where
+    T: LiveAtomicU32Enum,
+{
+    fn clone(&self) -> Self {
         let t = self.get();
         U32A(AtomicU32::new(t.as_u32()), PhantomData)
     }
 }
 
-impl<T> Debug for U32A<T> where T: LiveAtomicU32Enum + Debug{
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+impl<T> Debug for U32A<T>
+where
+    T: LiveAtomicU32Enum + Debug,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         self.get().fmt(f)
     }
 }
 
-impl<T> LiveAtomic for U32A<T> where T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+impl<T> LiveAtomic for U32A<T>
+where
+    T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum,
+{
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         let mut value = T::new(cx);
         let index = value.apply(cx, apply, index, nodes);
         self.set(value);
@@ -64,25 +90,34 @@ impl<T> LiveAtomic for U32A<T> where T: LiveApply + LiveNew + 'static + LiveAtom
     }
 }
 
-impl<T> LiveHook for U32A<T> where T: LiveApply + LiveNew + 'static +  LiveAtomicU32Enum {}
-impl<T> LiveApply for U32A<T> where T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum {
+impl<T> LiveHook for U32A<T> where T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum {}
+impl<T> LiveApply for U32A<T>
+where
+    T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum,
+{
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         self.apply_atomic(cx, apply, index, nodes)
     }
 }
 
-impl<T> LiveNew for U32A<T> where T: LiveApply + LiveNew + 'static +  LiveAtomicU32Enum {
+impl<T> LiveNew for U32A<T>
+where
+    T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum,
+{
     fn new(cx: &mut Cx) -> Self {
-        Self (AtomicU32::new(T::new(cx).as_u32()), PhantomData)
+        Self(AtomicU32::new(T::new(cx).as_u32()), PhantomData)
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         T::live_type_info(_cx)
     }
 }
 
-impl<T> LiveRead for U32A<T> where T:LiveRead + LiveAtomicU32Enum{
-    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+impl<T> LiveRead for U32A<T>
+where
+    T: LiveRead + LiveAtomicU32Enum,
+{
+    fn live_read_to(&self, id: LiveId, out: &mut Vec<LiveNode>) {
         self.get().live_read_to(id, out);
     }
 }
@@ -96,27 +131,34 @@ impl Into<U32A<T>> for T where T: LiveApply + LiveNew + 'static + LiveAtomic + L
 
 // Arc
 
-
-
 impl<T> LiveHook for Arc<T> where T: LiveApply + LiveNew + 'static + LiveAtomic {}
-impl<T> LiveApply for Arc<T> where T: LiveApply + LiveNew + 'static + LiveAtomic {
+impl<T> LiveApply for Arc<T>
+where
+    T: LiveApply + LiveNew + 'static + LiveAtomic,
+{
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         self.apply_atomic(cx, apply, index, nodes)
     }
 }
 
-impl<T> LiveNew for Arc<T> where T: LiveApply + LiveNew + 'static + LiveAtomic {
+impl<T> LiveNew for Arc<T>
+where
+    T: LiveApply + LiveNew + 'static + LiveAtomic,
+{
     fn new(cx: &mut Cx) -> Self {
         Arc::new(T::new(cx))
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         T::live_type_info(_cx)
     }
 }
 
-impl<T> LiveRead for Arc<T> where T:LiveRead{
-    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+impl<T> LiveRead for Arc<T>
+where
+    T: LiveRead,
+{
+    fn live_read_to(&self, id: LiveId, out: &mut Vec<LiveNode>) {
         (self as &T).live_read_to(id, out);
     }
 }
@@ -126,15 +168,12 @@ pub trait AtomicGetSet<T> {
     fn set(&self, val: T);
 }
 
-
-
 // atomic f32
-
 
 pub struct f32a(AtomicU32);
 
 impl Clone for f32a {
-    fn clone(&self)->Self{ 
+    fn clone(&self) -> Self {
         f32a(AtomicU32::new(self.get().to_bits()))
     }
 }
@@ -149,7 +188,13 @@ impl AtomicGetSet<f32> for f32a {
 }
 
 impl LiveAtomic for f32a {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         let mut val = 0.0f32;
         let index = val.apply(cx, apply, index, nodes);
         self.set(val);
@@ -164,14 +209,14 @@ impl LiveApply for f32a {
     }
 }
 
-impl Debug for f32a{
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+impl Debug for f32a {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         self.get().fmt(f)
     }
 }
 
-impl LiveRead for f32a{
-    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+impl LiveRead for f32a {
+    fn live_read_to(&self, id: LiveId, out: &mut Vec<LiveNode>) {
         self.get().live_read_to(id, out);
     }
 }
@@ -184,22 +229,20 @@ impl Into<f32a> for f32 {
 
 impl LiveNew for f32a {
     fn new(_cx: &mut Cx) -> Self {
-        Self (AtomicU32::new(0.0f32.to_bits()))
+        Self(AtomicU32::new(0.0f32.to_bits()))
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         f32::live_type_info(_cx)
     }
 }
 
-
 // atomic f32
-
 
 pub struct f64a(AtomicU64);
 
 impl Clone for f64a {
-    fn clone(&self)->Self{ 
+    fn clone(&self) -> Self {
         f64a(AtomicU64::new(self.get().to_bits()))
     }
 }
@@ -214,7 +257,13 @@ impl AtomicGetSet<f64> for f64a {
 }
 
 impl LiveAtomic for f64a {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         let mut val = 0.0f64;
         let index = val.apply(cx, apply, index, nodes);
         self.set(val);
@@ -229,14 +278,14 @@ impl LiveApply for f64a {
     }
 }
 
-impl Debug for f64a{
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+impl Debug for f64a {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         self.get().fmt(f)
     }
 }
 
-impl LiveRead for f64a{
-    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+impl LiveRead for f64a {
+    fn live_read_to(&self, id: LiveId, out: &mut Vec<LiveNode>) {
         self.get().live_read_to(id, out);
     }
 }
@@ -249,27 +298,23 @@ impl Into<f64a> for f64 {
 
 impl LiveNew for f64a {
     fn new(_cx: &mut Cx) -> Self {
-        Self (AtomicU64::new(0.0f64.to_bits()))
+        Self(AtomicU64::new(0.0f64.to_bits()))
     }
-        
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         f32::live_type_info(_cx)
     }
 }
 
-
-
 // atomic u32
-
 
 pub struct u32a(AtomicU32);
 
 impl Clone for u32a {
-    fn clone(&self)->Self{ 
+    fn clone(&self) -> Self {
         u32a(AtomicU32::new(self.get()))
     }
 }
-
 
 impl AtomicGetSet<u32> for u32a {
     fn get(&self) -> u32 {
@@ -281,7 +326,13 @@ impl AtomicGetSet<u32> for u32a {
 }
 
 impl LiveAtomic for u32a {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         let mut val = 0u32;
         let index = val.apply(cx, apply, index, nodes);
         self.0.store(val, Ordering::Relaxed);
@@ -296,8 +347,8 @@ impl LiveApply for u32a {
     }
 }
 
-impl Debug for u32a{
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+impl Debug for u32a {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         self.get().fmt(f)
     }
 }
@@ -310,31 +361,29 @@ impl Into<u32a> for u32 {
 
 impl LiveNew for u32a {
     fn new(_cx: &mut Cx) -> Self {
-        Self (AtomicU32::new(0))
+        Self(AtomicU32::new(0))
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         u32::live_type_info(_cx)
     }
 }
 
-impl LiveRead for u32a{
-    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+impl LiveRead for u32a {
+    fn live_read_to(&self, id: LiveId, out: &mut Vec<LiveNode>) {
         self.get().live_read_to(id, out);
     }
 }
 
 // atomic i64
 
-
 pub struct i64a(AtomicI64);
 
 impl Clone for i64a {
-    fn clone(&self)->Self{ 
+    fn clone(&self) -> Self {
         i64a(AtomicI64::new(self.get()))
     }
 }
-
 
 impl AtomicGetSet<i64> for i64a {
     fn get(&self) -> i64 {
@@ -346,7 +395,13 @@ impl AtomicGetSet<i64> for i64a {
 }
 
 impl LiveAtomic for i64a {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         let mut val = 0i64;
         let index = val.apply(cx, apply, index, nodes);
         self.0.store(val, Ordering::Relaxed);
@@ -354,34 +409,40 @@ impl LiveAtomic for i64a {
     }
 }
 
-impl<T, const N:usize> LiveAtomic for [T;N]  where T: LiveAtomic {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+impl<T, const N: usize> LiveAtomic for [T; N]
+where
+    T: LiveAtomic,
+{
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         // we can only apply from an Array
-        if nodes[index].is_array(){
+        if nodes[index].is_array() {
             let mut index = index + 1;
             let mut count = 0;
-            loop{
-                if nodes[index].is_close(){
+            loop {
+                if nodes[index].is_close() {
                     index += 1;
                     break;
                 }
-                if count < self.len(){
+                if count < self.len() {
                     index = self[count].apply_atomic(cx, apply, index, nodes);
                     count += 1;
-                }
-                else{
-                   index = nodes.skip_node(index)
+                } else {
+                    index = nodes.skip_node(index)
                 }
             }
             index
-        }
-        else{
+        } else {
             cx.apply_error_expected_array(live_error_origin!(), index, nodes);
             nodes.skip_node(index)
         }
     }
-} 
-
+}
 
 impl LiveHook for i64a {}
 impl LiveApply for i64a {
@@ -390,8 +451,8 @@ impl LiveApply for i64a {
     }
 }
 
-impl Debug for i64a{
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+impl Debug for i64a {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         self.get().fmt(f)
     }
 }
@@ -404,34 +465,29 @@ impl Into<i64a> for i64 {
 
 impl LiveNew for i64a {
     fn new(_cx: &mut Cx) -> Self {
-        Self (AtomicI64::new(0))
+        Self(AtomicI64::new(0))
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         u32::live_type_info(_cx)
     }
 }
 
-impl LiveRead for i64a{
-    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+impl LiveRead for i64a {
+    fn live_read_to(&self, id: LiveId, out: &mut Vec<LiveNode>) {
         self.get().live_read_to(id, out);
     }
 }
 
-
-
-
 // atomic i64
-
 
 pub struct i32a(AtomicI32);
 
 impl Clone for i32a {
-    fn clone(&self)->Self{ 
+    fn clone(&self) -> Self {
         i32a(AtomicI32::new(self.get()))
     }
 }
-
 
 impl AtomicGetSet<i32> for i32a {
     fn get(&self) -> i32 {
@@ -443,7 +499,13 @@ impl AtomicGetSet<i32> for i32a {
 }
 
 impl LiveAtomic for i32a {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         let mut val = 0i32;
         let index = val.apply(cx, apply, index, nodes);
         self.0.store(val, Ordering::Relaxed);
@@ -458,8 +520,8 @@ impl LiveApply for i32a {
     }
 }
 
-impl Debug for i32a{
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+impl Debug for i32a {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         self.get().fmt(f)
     }
 }
@@ -472,36 +534,29 @@ impl Into<i32a> for i32 {
 
 impl LiveNew for i32a {
     fn new(_cx: &mut Cx) -> Self {
-        Self (AtomicI32::new(0))
+        Self(AtomicI32::new(0))
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         u32::live_type_info(_cx)
     }
 }
 
-impl LiveRead for i32a{
-    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+impl LiveRead for i32a {
+    fn live_read_to(&self, id: LiveId, out: &mut Vec<LiveNode>) {
         self.get().live_read_to(id, out);
     }
 }
 
-
-
-
-
-
 // atomic u32
-
 
 pub struct boola(AtomicBool);
 
 impl Clone for boola {
-    fn clone(&self)->Self{ 
+    fn clone(&self) -> Self {
         boola(AtomicBool::new(self.get()))
     }
 }
-
 
 impl AtomicGetSet<bool> for boola {
     fn get(&self) -> bool {
@@ -513,7 +568,13 @@ impl AtomicGetSet<bool> for boola {
 }
 
 impl LiveAtomic for boola {
-    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(
+        &self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         let mut val = false;
         let index = val.apply(cx, apply, index, nodes);
         self.0.store(val, Ordering::Relaxed);
@@ -528,8 +589,8 @@ impl LiveApply for boola {
     }
 }
 
-impl Debug for boola{
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+impl Debug for boola {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         self.get().fmt(f)
     }
 }
@@ -542,16 +603,16 @@ impl Into<boola> for bool {
 
 impl LiveNew for boola {
     fn new(_cx: &mut Cx) -> Self {
-        Self (AtomicBool::new(false))
+        Self(AtomicBool::new(false))
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         bool::live_type_info(_cx)
     }
 }
 
-impl LiveRead for boola{
-    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+impl LiveRead for boola {
+    fn live_read_to(&self, id: LiveId, out: &mut Vec<LiveNode>) {
         self.get().live_read_to(id, out);
     }
 }

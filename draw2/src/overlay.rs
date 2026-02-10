@@ -1,25 +1,21 @@
 use {
     /*std::{
         rc::Rc,
-        cell::{RefCell},        
+        cell::{RefCell},
     },*/
-    crate::{
-        makepad_script::*,
-        makepad_platform::*,
-        cx_2d::Cx2d,
-    }
+    crate::{cx_2d::Cx2d, makepad_platform::*, makepad_script::*},
 };
 
 #[derive(Debug, Script, ScriptHook)]
-pub struct Overlay { // draw info per UI element
-    #[new] pub draw_list: DrawList,
-    //pub (crate) sweep_lock: Rc<RefCell<Area>>, 
+pub struct Overlay {
+    // draw info per UI element
+    #[new]
+    pub draw_list: DrawList,
+    //pub (crate) sweep_lock: Rc<RefCell<Area>>,
 }
 
-
-
 impl Overlay {
-    pub fn handle_event(&self, _cx:&Cx, _event:&Event){
+    pub fn handle_event(&self, _cx: &Cx, _event: &Event) {
         /*let area = self.sweep_lock.borrow().clone();
         if !area.is_empty(){
             match event{
@@ -30,23 +26,23 @@ impl Overlay {
             }
         }*/
     }
-    
-    pub fn begin(&self, cx:&mut Cx2d){
+
+    pub fn begin(&self, cx: &mut Cx2d) {
         // mark our overlay_id on cx
         cx.overlay_id = Some(self.draw_list.id());
-       // cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
+        // cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
     }
-    
-    pub fn end(&self, cx:&mut Cx2d){
+
+    pub fn end(&self, cx: &mut Cx2d) {
         cx.overlay_id = None;
         let parent_id = cx.draw_list_stack.last().cloned().unwrap();
         let redraw_id = cx.redraw_id;
         cx.draw_lists[parent_id].append_sub_list(redraw_id, self.draw_list.id());
-        
+
         // flush out all overlays that have a different redraw id than their parent
-        // this means it didn't 
-        for i in 0..cx.draw_lists[self.draw_list.id()].draw_items.len(){
-            if let Some(sub_id) = cx.draw_lists[self.draw_list.id()].draw_items[i].sub_list(){
+        // this means it didn't
+        for i in 0..cx.draw_lists[self.draw_list.id()].draw_items.len() {
+            if let Some(sub_id) = cx.draw_lists[self.draw_list.id()].draw_items[i].sub_list() {
                 // Use checked_index to safely access draw lists that might have been recycled
                 if let Some(sub_draw_list) = cx.draw_lists.checked_index(sub_id) {
                     if let Some(cfp) = sub_draw_list.codeflow_parent_id {
@@ -68,4 +64,3 @@ impl Overlay {
         }
     }
 }
-

@@ -211,7 +211,9 @@ unsafe fn if_then_else(c: __m128i, t: __m128i, e: __m128i) -> __m128i {
 #[target_feature(enable = "sse4.1")]
 #[allow(unused_assignments)]
 unsafe fn de_filter_paeth_sse41_inner<const SIZE: usize>(
-    prev_row: &[u8], raw: &[u8], current: &mut [u8]
+    prev_row: &[u8],
+    raw: &[u8],
+    current: &mut [u8],
 ) {
     let zero = _mm_setzero_si128();
 
@@ -253,7 +255,7 @@ unsafe fn de_filter_paeth_sse41_inner<const SIZE: usize>(
         nearest = if_then_else(
             _mm_cmpeq_epi16(smallest, pa),
             a,
-            if_then_else(_mm_cmpeq_epi16(smallest, pb), b, c)
+            if_then_else(_mm_cmpeq_epi16(smallest, pb), b, c),
         );
 
         /* Note `_epi8`: we need addition to wrap modulo 255. */
@@ -280,7 +282,9 @@ pub fn de_filter_paeth_sse41<const SIZE: usize>(prev_row: &[u8], raw: &[u8], cur
 #[cfg(target_feature = "sse2")]
 #[target_feature(enable = "sse2")]
 unsafe fn defilter_avg_sse2_inner<const SIZE: usize>(
-    prev_row: &[u8], raw: &[u8], current: &mut [u8]
+    prev_row: &[u8],
+    raw: &[u8],
+    current: &mut [u8],
 ) {
     /* The Avg filter predicts each pixel as the (truncated) average of a and b.
      * There's no pixel to the left of the first pixel.  Luckily, it's

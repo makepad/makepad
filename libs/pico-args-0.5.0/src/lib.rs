@@ -33,10 +33,9 @@ If you think that this library doesn't support some feature, it's probably inten
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::ffi::{OsString, OsStr};
+use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display};
 use std::str::FromStr;
-
 
 /// A list of possible errors.
 #[derive(Clone, Debug)]
@@ -75,7 +74,12 @@ impl Display for Error {
                 if key.second().is_empty() {
                     write!(f, "the '{}' option must be set", key.first())
                 } else {
-                    write!(f, "the '{}/{}' option must be set", key.first(), key.second())
+                    write!(
+                        f,
+                        "the '{}/{}' option must be set",
+                        key.first(),
+                        key.second()
+                    )
                 }
             }
             Error::OptionWithoutAValue(key) => {
@@ -93,14 +97,12 @@ impl Display for Error {
 
 impl std::error::Error for Error {}
 
-
 #[derive(Clone, Copy, PartialEq)]
 enum PairKind {
     #[cfg(any(feature = "eq-separator", feature = "short-space-opt"))]
     SingleArgument,
     TwoArguments,
 }
-
 
 /// An arguments parser.
 #[derive(Clone, Debug)]
@@ -146,7 +148,8 @@ impl Arguments {
             }
         }
 
-        self.0.remove(0)
+        self.0
+            .remove(0)
             .into_string()
             .map_err(|_| Error::NonUtf8Argument)
             .map(Some)
@@ -179,7 +182,8 @@ impl Arguments {
                     let short_flag = &keys.first()[1..2];
                     for (n, item) in self.0.iter().enumerate() {
                         if let Some(s) = item.to_str() {
-                            if s.starts_with('-') && !s.starts_with("--") && s.contains(short_flag) {
+                            if s.starts_with('-') && !s.starts_with("--") && s.contains(short_flag)
+                            {
                                 if s.len() == 2 {
                                     // last flag
                                     self.0.remove(n);
@@ -283,12 +287,10 @@ impl Arguments {
 
                         Ok(Some(value))
                     }
-                    Err(e) => {
-                        Err(Error::Utf8ArgumentParsingFailed {
-                            value: value.to_string(),
-                            cause: error_to_string(e),
-                        })
-                    }
+                    Err(e) => Err(Error::Utf8ArgumentParsingFailed {
+                        value: value.to_string(),
+                        cause: error_to_string(e),
+                    }),
                 }
             }
             None => Ok(None),
@@ -298,10 +300,7 @@ impl Arguments {
     // The whole logic must be type-independent to prevent monomorphization.
     #[cfg(any(feature = "eq-separator", feature = "short-space-opt"))]
     #[inline(never)]
-    fn find_value(
-        &mut self,
-        keys: Keys,
-    ) -> Result<Option<(&str, PairKind, usize)>, Error> {
+    fn find_value(&mut self, keys: Keys) -> Result<Option<(&str, PairKind, usize)>, Error> {
         if let Some((idx, key)) = self.index_of(keys) {
             // Parse a `--key value` pair.
 
@@ -370,10 +369,7 @@ impl Arguments {
     // The whole logic must be type-independent to prevent monomorphization.
     #[cfg(not(any(feature = "eq-separator", feature = "short-space-opt")))]
     #[inline(never)]
-    fn find_value(
-        &mut self,
-        keys: Keys,
-    ) -> Result<Option<(&str, PairKind, usize)>, Error> {
+    fn find_value(&mut self, keys: Keys) -> Result<Option<(&str, PairKind, usize)>, Error> {
         if let Some((idx, key)) = self.index_of(keys) {
             // Parse a `--key value` pair.
 
@@ -393,10 +389,10 @@ impl Arguments {
     ///
     /// This is a shorthand for `values_from_fn("--key", FromStr::from_str)`
     pub fn values_from_str<A, T>(&mut self, keys: A) -> Result<Vec<T>, Error>
-        where
-            A: Into<Keys>,
-            T: FromStr,
-            <T as FromStr>::Err: Display,
+    where
+        A: Into<Keys>,
+        T: FromStr,
+        <T as FromStr>::Err: Display,
     {
         self.values_from_fn(keys, FromStr::from_str)
     }
@@ -494,9 +490,9 @@ impl Arguments {
                     self.0.remove(idx);
                     Ok(Some(value))
                 }
-                Err(e) => {
-                    Err(Error::ArgumentParsingFailed { cause: error_to_string(e) })
-                }
+                Err(e) => Err(Error::ArgumentParsingFailed {
+                    cause: error_to_string(e),
+                }),
             }
         } else {
             Ok(None)
@@ -559,7 +555,11 @@ impl Arguments {
         }
 
         if !keys.second().is_empty() {
-            if let Some(i) = self.0.iter().position(|v| index_predicate(v, keys.second())) {
+            if let Some(i) = self
+                .0
+                .iter()
+                .position(|v| index_predicate(v, keys.second()))
+            {
                 return Some((i, keys.second()));
             }
         }
@@ -598,10 +598,7 @@ impl Arguments {
     ///
     /// [`free_from_os_str`]: struct.Arguments.html#method.free_from_os_str
     #[inline(never)]
-    pub fn free_from_fn<T, E: Display>(
-        &mut self,
-        f: fn(&str) -> Result<T, E>,
-    ) -> Result<T, Error> {
+    pub fn free_from_fn<T, E: Display>(&mut self, f: fn(&str) -> Result<T, E>) -> Result<T, Error> {
         self.opt_free_from_fn(f)?.ok_or(Error::MissingArgument)
     }
 
@@ -624,9 +621,9 @@ impl Arguments {
     ///
     /// [`free_from_str`]: struct.Arguments.html#method.free_from_str
     pub fn opt_free_from_str<T>(&mut self) -> Result<Option<T>, Error>
-        where
-            T: FromStr,
-            <T as FromStr>::Err: Display,
+    where
+        T: FromStr,
+        <T as FromStr>::Err: Display,
     {
         self.opt_free_from_fn(FromStr::from_str)
     }
@@ -672,7 +669,9 @@ impl Arguments {
             let value = self.0.remove(0);
             match f(value.as_os_str()) {
                 Ok(value) => Ok(Some(value)),
-                Err(e) => Err(Error::ArgumentParsingFailed { cause: error_to_string(e) }),
+                Err(e) => Err(Error::ArgumentParsingFailed {
+                    cause: error_to_string(e),
+                }),
             }
         }
     }
@@ -754,7 +753,6 @@ fn os_to_str(text: &OsStr) -> Result<&str, Error> {
     text.to_str().ok_or_else(|| Error::NonUtf8Argument)
 }
 
-
 /// A keys container.
 ///
 /// Should not be used directly.
@@ -791,8 +789,10 @@ impl From<[&'static str; 2]> for Keys {
 fn validate_shortflag(short_key: &'static str) {
     let mut chars = short_key[1..].chars();
     if let Some(first) = chars.next() {
-        debug_assert!(short_key.len() == 2 || chars.all(|c| c == first),
-            "short keys should be a single character or a repeated character");
+        debug_assert!(
+            short_key.len() == 2 || chars.all(|c| c == first),
+            "short keys should be a single character or a repeated character"
+        );
     }
 }
 

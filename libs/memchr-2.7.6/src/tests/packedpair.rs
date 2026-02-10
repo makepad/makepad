@@ -13,11 +13,31 @@ const SEEDS: &[Seed] = &[
     // Why not use different 'first' bytes? It seemed like a good idea to be
     // able to configure it, but when I wrote the test generator below, it
     // didn't seem necessary to use for reasons that I forget.
-    Seed { first: b'x', index1: b'y', index2: b'z' },
-    Seed { first: b'x', index1: b'x', index2: b'z' },
-    Seed { first: b'x', index1: b'y', index2: b'x' },
-    Seed { first: b'x', index1: b'x', index2: b'x' },
-    Seed { first: b'x', index1: b'y', index2: b'y' },
+    Seed {
+        first: b'x',
+        index1: b'y',
+        index2: b'z',
+    },
+    Seed {
+        first: b'x',
+        index1: b'x',
+        index2: b'z',
+    },
+    Seed {
+        first: b'x',
+        index1: b'y',
+        index2: b'x',
+    },
+    Seed {
+        first: b'x',
+        index1: b'x',
+        index2: b'x',
+    },
+    Seed {
+        first: b'x',
+        index1: b'y',
+        index2: b'y',
+    },
 ];
 
 /// Runs a host of "packed pair" search tests.
@@ -25,11 +45,7 @@ const SEEDS: &[Seed] = &[
 /// These tests specifically look for the occurrence of a possible substring
 /// match based on a pair of bytes matching at the right offsets.
 pub(crate) struct Runner {
-    fwd: Option<
-        Box<
-            dyn FnMut(&[u8], &[u8], u8, u8) -> Option<Option<usize>> + 'static,
-        >,
-    >,
+    fwd: Option<Box<dyn FnMut(&[u8], &[u8], u8, u8) -> Option<Option<usize>> + 'static>>,
 }
 
 impl Runner {
@@ -133,7 +149,13 @@ impl Test {
         if let Some(i) = crate::memchr(seed.index2, &needle) {
             index2 = u8::try_from(i).unwrap();
         }
-        Some(Test { haystack, needle, index1, index2, fwd })
+        Some(Test {
+            haystack,
+            needle,
+            index1,
+            index2,
+            fwd,
+        })
     }
 }
 
@@ -182,33 +204,20 @@ impl Seed {
             let index_start = len_start - 1;
             (index_start..needle_len).flat_map(move |index1| {
                 (index1..needle_len).flat_map(move |index2| {
-                    (needle_len..=Seed::HAYSTACK_LENGTH_LIMIT).flat_map(
-                        move |haystack_len| {
-                            Test::new(
-                                self,
-                                index1,
-                                index2,
-                                haystack_len,
-                                needle_len,
-                                None,
-                            )
+                    (needle_len..=Seed::HAYSTACK_LENGTH_LIMIT).flat_map(move |haystack_len| {
+                        Test::new(self, index1, index2, haystack_len, needle_len, None)
                             .into_iter()
-                            .chain(
-                                (0..=(haystack_len - needle_len)).flat_map(
-                                    move |output| {
-                                        Test::new(
-                                            self,
-                                            index1,
-                                            index2,
-                                            haystack_len,
-                                            needle_len,
-                                            Some(output),
-                                        )
-                                    },
-                                ),
-                            )
-                        },
-                    )
+                            .chain((0..=(haystack_len - needle_len)).flat_map(move |output| {
+                                Test::new(
+                                    self,
+                                    index1,
+                                    index2,
+                                    haystack_len,
+                                    needle_len,
+                                    Some(output),
+                                )
+                            }))
+                    })
                 })
             })
         })

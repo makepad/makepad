@@ -556,7 +556,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
                     // gives us a linear time disjointness check.
                     ptrs[i] = MaybeUninit::new(&mut *value);
                     *version ^= 1;
-                },
+                }
 
                 _ => break,
             }
@@ -569,7 +569,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
             match self.slots.get_mut(&k.data().idx) {
                 Some(Slot { version, .. }) => {
                     *version ^= 1;
-                },
+                }
                 _ => unsafe { core::hint::unreachable_unchecked() },
             }
         }
@@ -796,7 +796,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
                     kd,
                     _k: PhantomData,
                 })
-            },
+            }
             hash_map::Entry::Vacant(inner) => Entry::Vacant(VacantEntry {
                 inner,
                 kd,
@@ -1028,7 +1028,7 @@ impl<'a, K: Key, V> Entry<'a, K, V> {
             Entry::Occupied(mut entry) => {
                 f(entry.get_mut());
                 Entry::Occupied(entry)
-            },
+            }
             Entry::Vacant(entry) => Entry::Vacant(entry),
         }
     }

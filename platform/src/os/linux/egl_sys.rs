@@ -67,204 +67,190 @@ pub type EGLContext = *mut ::std::os::raw::c_void;
 pub type EGLClientBuffer = *mut ::std::os::raw::c_void;
 pub type EGLImageKHR = *mut ::std::os::raw::c_void;
 pub type __eglMustCastToProperFunctionPointerType = ::std::option::Option<unsafe extern "C" fn()>;
-pub type PFNEGLBINDAPIPROC = ::std::option::Option<unsafe extern "C" fn(api: EGLenum) -> EGLBoolean>;
+pub type PFNEGLBINDAPIPROC =
+    ::std::option::Option<unsafe extern "C" fn(api: EGLenum) -> EGLBoolean>;
 pub type PFNEGLCHOOSECONFIGPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    attrib_list: *const EGLint,
-    configs: *mut EGLConfig,
-    config_size: EGLint,
-    num_config: *mut EGLint,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        attrib_list: *const EGLint,
+        configs: *mut EGLConfig,
+        config_size: EGLint,
+        num_config: *mut EGLint,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLCOPYBUFFERSPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    surface: EGLSurface,
-    target: EGLNativePixmapType,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        surface: EGLSurface,
+        target: EGLNativePixmapType,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLCREATECONTEXTPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    config: EGLConfig,
-    share_context: EGLContext,
-    attrib_list: *const EGLint,
-) -> EGLContext,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        config: EGLConfig,
+        share_context: EGLContext,
+        attrib_list: *const EGLint,
+    ) -> EGLContext,
 >;
 pub type PFNEGLCREATEIMAGEKHRPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    ctx: EGLContext,
-    target: EGLenum,
-    buffer: EGLClientBuffer,
-    attrib_list: *const EGLint,
-) -> EGLImageKHR,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        ctx: EGLContext,
+        target: EGLenum,
+        buffer: EGLClientBuffer,
+        attrib_list: *const EGLint,
+    ) -> EGLImageKHR,
 >;
-pub type PFNEGLDESTROYIMAGEKHRPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    image: EGLImageKHR,
-) -> EGLBoolean,
->;
+pub type PFNEGLDESTROYIMAGEKHRPROC =
+    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, image: EGLImageKHR) -> EGLBoolean>;
 pub type PFNEGLCREATEPBUFFERSURFACEPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    config: EGLConfig,
-    attrib_list: *const EGLint,
-) -> EGLSurface,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        config: EGLConfig,
+        attrib_list: *const EGLint,
+    ) -> EGLSurface,
 >;
 pub type PFNEGLCREATEPIXMAPSURFACEPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    config: EGLConfig,
-    pixmap: EGLNativePixmapType,
-    attrib_list: *const EGLint,
-) -> EGLSurface,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        config: EGLConfig,
+        pixmap: EGLNativePixmapType,
+        attrib_list: *const EGLint,
+    ) -> EGLSurface,
 >;
 pub type PFNEGLCREATEWINDOWSURFACEPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    config: EGLConfig,
-    win: EGLNativeWindowType,
-    attrib_list: *const EGLint,
-) -> EGLSurface,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        config: EGLConfig,
+        win: EGLNativeWindowType,
+        attrib_list: *const EGLint,
+    ) -> EGLSurface,
 >;
 pub type PFNEGLDESTROYCONTEXTPROC =
-::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, ctx: EGLContext) -> EGLBoolean>;
+    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, ctx: EGLContext) -> EGLBoolean>;
 pub type PFNEGLDESTROYSURFACEPROC =
-::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface) -> EGLBoolean>;
+    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface) -> EGLBoolean>;
 pub type PFNEGLGETCONFIGATTRIBPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    config: EGLConfig,
-    attribute: EGLint,
-    value: *mut EGLint,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        config: EGLConfig,
+        attribute: EGLint,
+        value: *mut EGLint,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLGETCONFIGSPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    configs: *mut EGLConfig,
-    config_size: EGLint,
-    num_config: *mut EGLint,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        configs: *mut EGLConfig,
+        config_size: EGLint,
+        num_config: *mut EGLint,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLGETCURRENTDISPLAYPROC = ::std::option::Option<unsafe extern "C" fn() -> EGLDisplay>;
 pub type PFNEGLGETCURRENTSURFACEPROC =
-::std::option::Option<unsafe extern "C" fn(readdraw: EGLint) -> EGLSurface>;
+    ::std::option::Option<unsafe extern "C" fn(readdraw: EGLint) -> EGLSurface>;
 pub type PFNEGLGETDISPLAYPROC =
-::std::option::Option<unsafe extern "C" fn(display_id: EGLNativeDisplayType) -> EGLDisplay>;
+    ::std::option::Option<unsafe extern "C" fn(display_id: EGLNativeDisplayType) -> EGLDisplay>;
 pub type PFNEGLGETERRORPROC = ::std::option::Option<unsafe extern "C" fn() -> EGLint>;
 pub type PFNEGLGETPROCADDRESSPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    procname: *const ::std::os::raw::c_char,
-) -> *mut ::std::os::raw::c_void,
+    unsafe extern "C" fn(procname: *const ::std::os::raw::c_char) -> *mut ::std::os::raw::c_void,
 >;
 pub type PFNEGLINITIALIZEPROC = ::std::option::Option<
-unsafe extern "C" fn(dpy: EGLDisplay, major: *mut EGLint, minor: *mut EGLint) -> EGLBoolean,
+    unsafe extern "C" fn(dpy: EGLDisplay, major: *mut EGLint, minor: *mut EGLint) -> EGLBoolean,
 >;
 pub type PFNEGLMAKECURRENTPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    draw: EGLSurface,
-    read: EGLSurface,
-    ctx: EGLContext,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        draw: EGLSurface,
+        read: EGLSurface,
+        ctx: EGLContext,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLQUERYCONTEXTPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    ctx: EGLContext,
-    attribute: EGLint,
-    value: *mut EGLint,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        ctx: EGLContext,
+        attribute: EGLint,
+        value: *mut EGLint,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLQUERYSTRINGPROC = ::std::option::Option<
-unsafe extern "C" fn(dpy: EGLDisplay, name: EGLint) -> *const ::std::os::raw::c_char,
+    unsafe extern "C" fn(dpy: EGLDisplay, name: EGLint) -> *const ::std::os::raw::c_char,
 >;
 pub type PFNEGLQUERYSURFACEPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    surface: EGLSurface,
-    attribute: EGLint,
-    value: *mut EGLint,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        surface: EGLSurface,
+        attribute: EGLint,
+        value: *mut EGLint,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLSWAPBUFFERSPROC =
-::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface) -> EGLBoolean>;
+    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface) -> EGLBoolean>;
 pub type PFNEGLTERMINATEPROC =
-::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay) -> EGLBoolean>;
+    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay) -> EGLBoolean>;
 pub type PFNEGLWAITGLPROC = ::std::option::Option<unsafe extern "C" fn() -> EGLBoolean>;
 pub type PFNEGLWAITNATIVEPROC =
-::std::option::Option<unsafe extern "C" fn(engine: EGLint) -> EGLBoolean>;
+    ::std::option::Option<unsafe extern "C" fn(engine: EGLint) -> EGLBoolean>;
 pub type PFNEGLBINDTEXIMAGEPROC = ::std::option::Option<
-unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface, buffer: EGLint) -> EGLBoolean,
+    unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface, buffer: EGLint) -> EGLBoolean,
 >;
 pub type PFNEGLRELEASETEXIMAGEPROC = ::std::option::Option<
-unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface, buffer: EGLint) -> EGLBoolean,
+    unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface, buffer: EGLint) -> EGLBoolean,
 >;
 pub type PFNEGLSURFACEATTRIBPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    surface: EGLSurface,
-    attribute: EGLint,
-    value: EGLint,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        surface: EGLSurface,
+        attribute: EGLint,
+        value: EGLint,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLSWAPINTERVALPROC =
-::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, interval: EGLint) -> EGLBoolean>;
+    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, interval: EGLint) -> EGLBoolean>;
 
 pub type PFNEGLGETPLATFORMDISPLAYEXTPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    platform: EGLenum,
-    native_display: *mut ::std::os::raw::c_void,
-    attrib_list: *const EGLint,
-) -> EGLDisplay,
+    unsafe extern "C" fn(
+        platform: EGLenum,
+        native_display: *mut ::std::os::raw::c_void,
+        attrib_list: *const EGLint,
+    ) -> EGLDisplay,
 >;
 
 pub type PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    image: EGLImageKHR,
-    fourcc: *mut i32,
-    num_planes: *mut i32,
-    modifiers: *mut EGLuint64KHR,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        image: EGLImageKHR,
+        fourcc: *mut i32,
+        num_planes: *mut i32,
+        modifiers: *mut EGLuint64KHR,
+    ) -> EGLBoolean,
 >;
 pub type PFNEGLEXPORTDMABUFIMAGEMESAPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    image: EGLImageKHR,
-    fds: *mut i32,
-    strides: *mut EGLint,
-    offsets: *mut EGLint,
-) -> EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        image: EGLImageKHR,
+        fds: *mut i32,
+        strides: *mut EGLint,
+        offsets: *mut EGLint,
+    ) -> EGLBoolean,
 >;
 
 // HACK(eddyb) this is actually an OpenGL extension function.
-type PFNGLEGLIMAGETARGETTEXTURE2DOESPROC = ::std::option::Option<
-unsafe extern "C" fn(
-    super::gl_sys::GLenum,
-    EGLImageKHR,
-),
->;
+type PFNGLEGLIMAGETARGETTEXTURE2DOESPROC =
+    ::std::option::Option<unsafe extern "C" fn(super::gl_sys::GLenum, EGLImageKHR)>;
 
-type PFNEGLPRESENTATIONTIMEANDROID = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    surface: EGLSurface,
-    time: i64
-),
->;
+type PFNEGLPRESENTATIONTIMEANDROID =
+    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface, time: i64)>;
 
 type PFNEGLSURFACEATTRIB = ::std::option::Option<
-unsafe extern "C" fn(
-    dpy: EGLDisplay,
-    surface: EGLSurface,
-    attrib: EGLint,
-    value: EGLint
-)->EGLBoolean,
+    unsafe extern "C" fn(
+        dpy: EGLDisplay,
+        surface: EGLSurface,
+        attrib: EGLint,
+        value: EGLint,
+    ) -> EGLBoolean,
 >;
 
 pub struct LibEgl {
@@ -317,16 +303,22 @@ use crate::module_loader::ModuleLoader;
 
 impl LibEgl {
     pub fn try_load() -> Option<LibEgl> {
+        let module = ModuleLoader::load("libEGL.so")
+            .or_else(|_| ModuleLoader::load("libEGL.so.1"))
+            .ok()?;
 
-        let module = ModuleLoader::load("libEGL.so").or_else(|_| ModuleLoader::load("libEGL.so.1")).ok()?;
-
-        let eglGetProcAddress: PFNEGLGETPROCADDRESSPROC = module.get_symbol("eglGetProcAddress").ok();
+        let eglGetProcAddress: PFNEGLGETPROCADDRESSPROC =
+            module.get_symbol("eglGetProcAddress").ok();
         macro_rules! get_ext_fn {
             ($name:literal) => {
                 eglGetProcAddress.and_then(|gpa| unsafe {
-                    std::mem::transmute(gpa(CStr::from_bytes_with_nul(concat!($name, "\0").as_bytes()).unwrap().as_ptr()))
+                    std::mem::transmute(gpa(CStr::from_bytes_with_nul(
+                        concat!($name, "\0").as_bytes(),
+                    )
+                    .unwrap()
+                    .as_ptr()))
                 })
-            }
+            };
         }
 
         Some(LibEgl {
@@ -384,12 +376,11 @@ pub enum EglError {
 
 pub struct Egl {}
 
-#[cfg(target_os="android")]
+#[cfg(target_os = "android")]
 pub unsafe fn create_egl_context(
     egl: &mut LibEgl,
     display: *mut std::ffi::c_void,
 ) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
-
     let display = (egl.eglGetDisplay.unwrap())(display as _);
     if display == /* EGL_NO_DISPLAY */ null_mut() {
         return Err(EglError::NoDisplay);
@@ -476,12 +467,11 @@ pub unsafe fn create_egl_context(
     return Ok((context, config, display));
 }
 
-#[cfg(target_os="android")]
+#[cfg(target_os = "android")]
 pub unsafe fn create_egl_context_openxr(
     egl: &mut LibEgl,
     display: *mut std::ffi::c_void,
 ) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
-
     let display = (egl.eglGetDisplay.unwrap())(display as _);
     if display == /* EGL_NO_DISPLAY */ null_mut() {
         return Err(EglError::NoDisplay);
@@ -490,7 +480,6 @@ pub unsafe fn create_egl_context_openxr(
     if (egl.eglInitialize.unwrap())(display, null_mut(), null_mut()) == 0 {
         return Err(EglError::InitializeFailed);
     }
-
 
     #[rustfmt::skip]
     let cfg_attributes = vec![
@@ -514,10 +503,10 @@ pub unsafe fn create_egl_context_openxr(
     let mut cfg_count = 0;
 
     (egl.eglGetConfigs.unwrap())(
-         display,
-         available_cfgs.as_ptr() as _,
-         available_cfgs.len() as _,
-         &mut cfg_count as *mut _ as *mut _,
+        display,
+        available_cfgs.as_ptr() as _,
+        available_cfgs.len() as _,
+        &mut cfg_count as *mut _ as *mut _,
     );
     /*
     (egl.eglChooseConfig.unwrap())(
@@ -534,29 +523,43 @@ pub unsafe fn create_egl_context_openxr(
     let mut config: EGLConfig = null_mut();
     let mut exact_cfg_found = false;
 
-
     for c in &mut available_cfgs[0..cfg_count] {
         let mut value = 0u32;
-        (egl.eglGetConfigAttrib.unwrap())(display, *c, EGL_RENDERABLE_TYPE as _, &mut value as *mut _ as *mut _);
-        if (value & EGL_OPENGL_ES3_BIT_KHR) != EGL_OPENGL_ES3_BIT_KHR{
+        (egl.eglGetConfigAttrib.unwrap())(
+            display,
+            *c,
+            EGL_RENDERABLE_TYPE as _,
+            &mut value as *mut _ as *mut _,
+        );
+        if (value & EGL_OPENGL_ES3_BIT_KHR) != EGL_OPENGL_ES3_BIT_KHR {
             continue;
         }
-        (egl.eglGetConfigAttrib.unwrap())(display, *c, EGL_SURFACE_TYPE as _, &mut value as *mut _ as *mut _);
+        (egl.eglGetConfigAttrib.unwrap())(
+            display,
+            *c,
+            EGL_SURFACE_TYPE as _,
+            &mut value as *mut _ as *mut _,
+        );
         if (value & (EGL_WINDOW_BIT | EGL_PBUFFER_BIT)) != (EGL_WINDOW_BIT | EGL_PBUFFER_BIT) {
             continue;
         }
 
         let mut j = 0;
-        while cfg_attributes[j] != EGL_NONE{
+        while cfg_attributes[j] != EGL_NONE {
             let mut value = 0u32;
-            (egl.eglGetConfigAttrib.unwrap())(display, *c, cfg_attributes[j] as _, &mut value as *mut _ as *mut _);
-            if value != cfg_attributes[j+1]{
-                crate::log!("FAILED AT {} {} {}", value, cfg_attributes[j+1], j);
+            (egl.eglGetConfigAttrib.unwrap())(
+                display,
+                *c,
+                cfg_attributes[j] as _,
+                &mut value as *mut _ as *mut _,
+            );
+            if value != cfg_attributes[j + 1] {
+                crate::log!("FAILED AT {} {} {}", value, cfg_attributes[j + 1], j);
                 break;
             }
-            j+=2;
+            j += 2;
         }
-        if cfg_attributes[j] == EGL_NONE{
+        if cfg_attributes[j] == EGL_NONE {
             exact_cfg_found = true;
             config = *c;
             break;
@@ -580,17 +583,16 @@ pub unsafe fn create_egl_context_openxr(
     return Ok((context, config, display));
 }
 
-
-#[cfg(target_env="ohos")]
-pub unsafe  fn create_egl_context(
-    egl: &mut LibEgl
+#[cfg(target_env = "ohos")]
+pub unsafe fn create_egl_context(
+    egl: &mut LibEgl,
 ) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
     let display = (egl.eglGetDisplay.unwrap())(null_mut());
     if display == null_mut() {
         return Err(EglError::NoDisplay);
     }
 
-    if (egl.eglInitialize.unwrap())(display,null_mut(),null_mut()) == 0 {
+    if (egl.eglInitialize.unwrap())(display, null_mut(), null_mut()) == 0 {
         return Err(EglError::InitializeFailed);
     }
 
@@ -615,8 +617,10 @@ pub unsafe  fn create_egl_context(
         display,
         cfg_attributes.as_ptr() as _,
         available_cfgs.as_ptr() as _,
-        1,&mut cfg_count as *mut _ as *mut _,
-    ) == 0 {
+        1,
+        &mut cfg_count as *mut _ as *mut _,
+    ) == 0
+    {
         return Err(EglError::ChooseConfigFailed);
     }
 
@@ -626,12 +630,17 @@ pub unsafe  fn create_egl_context(
 
     #[cfg(ohos_sim)]
     let ctx_attributes = vec![
-        EGL_CONTEXT_MAJOR_VERSION, 2, // version 1 and 3 also work
-        EGL_CONTEXT_MINOR_VERSION_KHR , 0,
+        EGL_CONTEXT_MAJOR_VERSION,
+        2, // version 1 and 3 also work
+        EGL_CONTEXT_MINOR_VERSION_KHR,
+        0,
         // The rest of this was taken from servo's OpenGL config for OpenHarmony.
         EGL_CONTEXT_OPENGL_PROFILE_MASK,
         EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT, // allows use of deprecated features
-        EGL_NONE, 0, 0, 0,
+        EGL_NONE,
+        0,
+        0,
+        0,
     ];
 
     #[cfg(not(ohos_sim))]
@@ -641,7 +650,8 @@ pub unsafe  fn create_egl_context(
         3, // version 1 and 3 also work
         #[cfg(not(use_gles_3))]
         2, // version 1 and 3 also work
-        EGL_CONTEXT_MINOR_VERSION_KHR , 0,
+        EGL_CONTEXT_MINOR_VERSION_KHR,
+        0,
         EGL_NONE,
     ];
 
@@ -649,9 +659,9 @@ pub unsafe  fn create_egl_context(
         display,
         config,
         /* EGL_NO_CONTEXT */ null_mut(),
-        ctx_attributes.as_ptr() as _
+        ctx_attributes.as_ptr() as _,
     );
-    if context.is_null(){
+    if context.is_null() {
         return Err(EglError::CreateContextFailed);
     }
     crate::log!("create elg context success");

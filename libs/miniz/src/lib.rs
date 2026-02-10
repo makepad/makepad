@@ -24,8 +24,8 @@
 pub mod adler32;
 pub mod deflate;
 pub mod inflate;
-pub mod zip_file;
 mod shared;
+pub mod zip_file;
 
 pub use crate::deflate::compress_to_vec;
 pub use crate::deflate::compress_to_vec_zlib;

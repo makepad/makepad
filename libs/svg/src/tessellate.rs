@@ -827,10 +827,20 @@ impl Tessellator {
 
                 for s in eps_scales {
                     let eps = base_eps * s;
-                    let plus_filled =
-                        point_in_fill_rule(mx + nx * eps, my + ny * eps, &self.points, &valid_paths, fill_rule);
-                    let minus_filled =
-                        point_in_fill_rule(mx - nx * eps, my - ny * eps, &self.points, &valid_paths, fill_rule);
+                    let plus_filled = point_in_fill_rule(
+                        mx + nx * eps,
+                        my + ny * eps,
+                        &self.points,
+                        &valid_paths,
+                        fill_rule,
+                    );
+                    let minus_filled = point_in_fill_rule(
+                        mx - nx * eps,
+                        my - ny * eps,
+                        &self.points,
+                        &valid_paths,
+                        fill_rule,
+                    );
 
                     if plus_filled != minus_filled {
                         sign = if plus_filled { 1.0 } else { -1.0 };

@@ -4,8 +4,8 @@
 //! Color, or Mat4x4f values and supports component-wise operations with proper type promotion.
 
 use crate::heap::*;
-use crate::value::*;
 use crate::pod::*;
+use crate::value::*;
 use crate::vm::ScriptCode;
 use makepad_math::{Vec2f, Vec3f, Vec4f};
 
@@ -17,7 +17,7 @@ pub enum NumericValue {
     Vec2(Vec2f),
     Vec3(Vec3f),
     Vec4(Vec4f),
-    Color(Vec4f), // Color stored as Vec4f internally
+    Color(Vec4f),    // Color stored as Vec4f internally
     Mat4([f32; 16]), // 4x4 matrix in column-major order
 }
 
@@ -28,12 +28,12 @@ impl NumericValue {
         if let Some(c) = value.as_color() {
             return NumericValue::Color(Vec4f::from_u32(c));
         }
-        
+
         // Check for f64
         if let Some(f) = value.as_f64() {
             return NumericValue::F64(f);
         }
-        
+
         // Check for other number types
         if let Some(f) = value.as_f32() {
             return NumericValue::F64(f as f64);
@@ -44,7 +44,7 @@ impl NumericValue {
         if let Some(f) = value.as_i32() {
             return NumericValue::F64(f as f64);
         }
-        
+
         // Check for Pod (Vec and Mat types)
         if let Some(pod) = value.as_pod() {
             let pod_data = &heap.pods[pod];
@@ -110,11 +110,11 @@ impl NumericValue {
                 _ => {}
             }
         }
-        
+
         // Fallback: cast to f64
         NumericValue::F64(heap.cast_to_f64(value, ip))
     }
-    
+
     /// Convert back to ScriptValue (heap + code version)
     pub fn to_script_value_heap(self, heap: &mut ScriptHeap, code: &ScriptCode) -> ScriptValue {
         match self {
@@ -154,15 +154,32 @@ impl NumericValue {
             }
         }
     }
-    
+
     /// Apply a unary f32 operation component-wise
     pub fn map_f32<F: Fn(f32) -> f32>(self, f: F) -> Self {
         match self {
             NumericValue::F64(v) => NumericValue::F64(f(v as f32) as f64),
-            NumericValue::Vec2(v) => NumericValue::Vec2(Vec2f { x: f(v.x), y: f(v.y) }),
-            NumericValue::Vec3(v) => NumericValue::Vec3(Vec3f { x: f(v.x), y: f(v.y), z: f(v.z) }),
-            NumericValue::Vec4(v) => NumericValue::Vec4(Vec4f { x: f(v.x), y: f(v.y), z: f(v.z), w: f(v.w) }),
-            NumericValue::Color(v) => NumericValue::Color(Vec4f { x: f(v.x), y: f(v.y), z: f(v.z), w: f(v.w) }),
+            NumericValue::Vec2(v) => NumericValue::Vec2(Vec2f {
+                x: f(v.x),
+                y: f(v.y),
+            }),
+            NumericValue::Vec3(v) => NumericValue::Vec3(Vec3f {
+                x: f(v.x),
+                y: f(v.y),
+                z: f(v.z),
+            }),
+            NumericValue::Vec4(v) => NumericValue::Vec4(Vec4f {
+                x: f(v.x),
+                y: f(v.y),
+                z: f(v.z),
+                w: f(v.w),
+            }),
+            NumericValue::Color(v) => NumericValue::Color(Vec4f {
+                x: f(v.x),
+                y: f(v.y),
+                z: f(v.z),
+                w: f(v.w),
+            }),
             NumericValue::Mat4(m) => {
                 let mut result = [0.0f32; 16];
                 for i in 0..16 {
@@ -172,7 +189,7 @@ impl NumericValue {
             }
         }
     }
-    
+
     /// Apply a binary f32 operation component-wise with proper type promotion
     /// This handles +, -, and component-wise * and /
     pub fn zip_f32<F: Fn(f32, f32) -> f32>(self, other: Self, f: F) -> Self {
@@ -181,18 +198,27 @@ impl NumericValue {
             (NumericValue::F64(a), NumericValue::F64(b)) => {
                 NumericValue::F64(f(a as f32, b as f32) as f64)
             }
-            (NumericValue::Vec2(a), NumericValue::Vec2(b)) => {
-                NumericValue::Vec2(Vec2f { x: f(a.x, b.x), y: f(a.y, b.y) })
-            }
-            (NumericValue::Vec3(a), NumericValue::Vec3(b)) => {
-                NumericValue::Vec3(Vec3f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z) })
-            }
-            (NumericValue::Vec4(a), NumericValue::Vec4(b)) => {
-                NumericValue::Vec4(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z), w: f(a.w, b.w) })
-            }
-            (NumericValue::Color(a), NumericValue::Color(b)) => {
-                NumericValue::Color(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z), w: f(a.w, b.w) })
-            }
+            (NumericValue::Vec2(a), NumericValue::Vec2(b)) => NumericValue::Vec2(Vec2f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+            }),
+            (NumericValue::Vec3(a), NumericValue::Vec3(b)) => NumericValue::Vec3(Vec3f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+            }),
+            (NumericValue::Vec4(a), NumericValue::Vec4(b)) => NumericValue::Vec4(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+                w: f(a.w, b.w),
+            }),
+            (NumericValue::Color(a), NumericValue::Color(b)) => NumericValue::Color(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+                w: f(a.w, b.w),
+            }),
             (NumericValue::Mat4(a), NumericValue::Mat4(b)) => {
                 let mut result = [0.0f32; 16];
                 for i in 0..16 {
@@ -200,43 +226,77 @@ impl NumericValue {
                 }
                 NumericValue::Mat4(result)
             }
-            
+
             // Scalar * Vec -> Vec (broadcast)
             (NumericValue::F64(a), NumericValue::Vec2(b)) => {
                 let a = a as f32;
-                NumericValue::Vec2(Vec2f { x: f(a, b.x), y: f(a, b.y) })
+                NumericValue::Vec2(Vec2f {
+                    x: f(a, b.x),
+                    y: f(a, b.y),
+                })
             }
             (NumericValue::Vec2(a), NumericValue::F64(b)) => {
                 let b = b as f32;
-                NumericValue::Vec2(Vec2f { x: f(a.x, b), y: f(a.y, b) })
+                NumericValue::Vec2(Vec2f {
+                    x: f(a.x, b),
+                    y: f(a.y, b),
+                })
             }
             (NumericValue::F64(a), NumericValue::Vec3(b)) => {
                 let a = a as f32;
-                NumericValue::Vec3(Vec3f { x: f(a, b.x), y: f(a, b.y), z: f(a, b.z) })
+                NumericValue::Vec3(Vec3f {
+                    x: f(a, b.x),
+                    y: f(a, b.y),
+                    z: f(a, b.z),
+                })
             }
             (NumericValue::Vec3(a), NumericValue::F64(b)) => {
                 let b = b as f32;
-                NumericValue::Vec3(Vec3f { x: f(a.x, b), y: f(a.y, b), z: f(a.z, b) })
+                NumericValue::Vec3(Vec3f {
+                    x: f(a.x, b),
+                    y: f(a.y, b),
+                    z: f(a.z, b),
+                })
             }
             (NumericValue::F64(a), NumericValue::Vec4(b)) => {
                 let a = a as f32;
-                NumericValue::Vec4(Vec4f { x: f(a, b.x), y: f(a, b.y), z: f(a, b.z), w: f(a, b.w) })
+                NumericValue::Vec4(Vec4f {
+                    x: f(a, b.x),
+                    y: f(a, b.y),
+                    z: f(a, b.z),
+                    w: f(a, b.w),
+                })
             }
             (NumericValue::Vec4(a), NumericValue::F64(b)) => {
                 let b = b as f32;
-                NumericValue::Vec4(Vec4f { x: f(a.x, b), y: f(a.y, b), z: f(a.z, b), w: f(a.w, b) })
+                NumericValue::Vec4(Vec4f {
+                    x: f(a.x, b),
+                    y: f(a.y, b),
+                    z: f(a.z, b),
+                    w: f(a.w, b),
+                })
             }
-            
+
             // Scalar * Color -> Color (broadcast)
             (NumericValue::F64(a), NumericValue::Color(b)) => {
                 let a = a as f32;
-                NumericValue::Color(Vec4f { x: f(a, b.x), y: f(a, b.y), z: f(a, b.z), w: f(a, b.w) })
+                NumericValue::Color(Vec4f {
+                    x: f(a, b.x),
+                    y: f(a, b.y),
+                    z: f(a, b.z),
+                    w: f(a, b.w),
+                })
             }
             (NumericValue::Color(a), NumericValue::F64(b)) => {
                 let b = b as f32;
-                NumericValue::Color(Vec4f { x: f(a.x, b), y: f(a.y, b), z: f(a.z, b), w: f(a.w, b) })
+                NumericValue::Color(Vec4f {
+                    x: f(a.x, b),
+                    y: f(a.y, b),
+                    z: f(a.z, b),
+                    w: f(a.w, b),
+                })
             }
-            
+
             // Scalar * Mat -> Mat (broadcast)
             (NumericValue::F64(a), NumericValue::Mat4(b)) => {
                 let a = a as f32;
@@ -254,61 +314,95 @@ impl NumericValue {
                 }
                 NumericValue::Mat4(result)
             }
-            
+
             // Vec4 <-> Color operations preserve the first operand's type
-            (NumericValue::Vec4(a), NumericValue::Color(b)) => {
-                NumericValue::Vec4(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z), w: f(a.w, b.w) })
-            }
-            (NumericValue::Color(a), NumericValue::Vec4(b)) => {
-                NumericValue::Color(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z), w: f(a.w, b.w) })
-            }
-            
+            (NumericValue::Vec4(a), NumericValue::Color(b)) => NumericValue::Vec4(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+                w: f(a.w, b.w),
+            }),
+            (NumericValue::Color(a), NumericValue::Vec4(b)) => NumericValue::Color(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+                w: f(a.w, b.w),
+            }),
+
             // Mixed Vec sizes - use larger type
-            (NumericValue::Vec2(a), NumericValue::Vec3(b)) => {
-                NumericValue::Vec3(Vec3f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(0.0, b.z) })
-            }
-            (NumericValue::Vec3(a), NumericValue::Vec2(b)) => {
-                NumericValue::Vec3(Vec3f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, 0.0) })
-            }
-            (NumericValue::Vec2(a), NumericValue::Vec4(b)) => {
-                NumericValue::Vec4(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(0.0, b.z), w: f(0.0, b.w) })
-            }
-            (NumericValue::Vec4(a), NumericValue::Vec2(b)) => {
-                NumericValue::Vec4(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, 0.0), w: f(a.w, 0.0) })
-            }
-            (NumericValue::Vec3(a), NumericValue::Vec4(b)) => {
-                NumericValue::Vec4(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z), w: f(0.0, b.w) })
-            }
-            (NumericValue::Vec4(a), NumericValue::Vec3(b)) => {
-                NumericValue::Vec4(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z), w: f(a.w, 0.0) })
-            }
-            
+            (NumericValue::Vec2(a), NumericValue::Vec3(b)) => NumericValue::Vec3(Vec3f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(0.0, b.z),
+            }),
+            (NumericValue::Vec3(a), NumericValue::Vec2(b)) => NumericValue::Vec3(Vec3f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, 0.0),
+            }),
+            (NumericValue::Vec2(a), NumericValue::Vec4(b)) => NumericValue::Vec4(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(0.0, b.z),
+                w: f(0.0, b.w),
+            }),
+            (NumericValue::Vec4(a), NumericValue::Vec2(b)) => NumericValue::Vec4(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, 0.0),
+                w: f(a.w, 0.0),
+            }),
+            (NumericValue::Vec3(a), NumericValue::Vec4(b)) => NumericValue::Vec4(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+                w: f(0.0, b.w),
+            }),
+            (NumericValue::Vec4(a), NumericValue::Vec3(b)) => NumericValue::Vec4(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+                w: f(a.w, 0.0),
+            }),
+
             // Vec <-> Color mixed - convert to vec4 style operation
-            (NumericValue::Vec2(a), NumericValue::Color(b)) => {
-                NumericValue::Vec4(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(0.0, b.z), w: f(0.0, b.w) })
-            }
-            (NumericValue::Color(a), NumericValue::Vec2(b)) => {
-                NumericValue::Color(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, 0.0), w: f(a.w, 0.0) })
-            }
-            (NumericValue::Vec3(a), NumericValue::Color(b)) => {
-                NumericValue::Vec4(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z), w: f(0.0, b.w) })
-            }
-            (NumericValue::Color(a), NumericValue::Vec3(b)) => {
-                NumericValue::Color(Vec4f { x: f(a.x, b.x), y: f(a.y, b.y), z: f(a.z, b.z), w: f(a.w, 0.0) })
-            }
-            
+            (NumericValue::Vec2(a), NumericValue::Color(b)) => NumericValue::Vec4(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(0.0, b.z),
+                w: f(0.0, b.w),
+            }),
+            (NumericValue::Color(a), NumericValue::Vec2(b)) => NumericValue::Color(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, 0.0),
+                w: f(a.w, 0.0),
+            }),
+            (NumericValue::Vec3(a), NumericValue::Color(b)) => NumericValue::Vec4(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+                w: f(0.0, b.w),
+            }),
+            (NumericValue::Color(a), NumericValue::Vec3(b)) => NumericValue::Color(Vec4f {
+                x: f(a.x, b.x),
+                y: f(a.y, b.y),
+                z: f(a.z, b.z),
+                w: f(a.w, 0.0),
+            }),
+
             // Mat * Vec or Vec * Mat - for non-multiply ops, just return first operand
-            (NumericValue::Mat4(_), NumericValue::Vec4(_)) |
-            (NumericValue::Vec4(_), NumericValue::Mat4(_)) |
-            (NumericValue::Mat4(_), NumericValue::Vec3(_)) |
-            (NumericValue::Vec3(_), NumericValue::Mat4(_)) |
-            (NumericValue::Mat4(_), NumericValue::Vec2(_)) |
-            (NumericValue::Vec2(_), NumericValue::Mat4(_)) |
-            (NumericValue::Mat4(_), NumericValue::Color(_)) |
-            (NumericValue::Color(_), NumericValue::Mat4(_)) => self,
+            (NumericValue::Mat4(_), NumericValue::Vec4(_))
+            | (NumericValue::Vec4(_), NumericValue::Mat4(_))
+            | (NumericValue::Mat4(_), NumericValue::Vec3(_))
+            | (NumericValue::Vec3(_), NumericValue::Mat4(_))
+            | (NumericValue::Mat4(_), NumericValue::Vec2(_))
+            | (NumericValue::Vec2(_), NumericValue::Mat4(_))
+            | (NumericValue::Mat4(_), NumericValue::Color(_))
+            | (NumericValue::Color(_), NumericValue::Mat4(_)) => self,
         }
     }
-    
+
     /// Multiply operation with proper matrix-vector semantics
     pub fn multiply(self, other: Self) -> Self {
         match (self, other) {
@@ -326,15 +420,33 @@ impl NumericValue {
             }
             // Mat4 * Vec3 -> Vec3 (treat as Vec4 with w=1, return xyz)
             (NumericValue::Mat4(m), NumericValue::Vec3(v)) => {
-                let v4 = Vec4f { x: v.x, y: v.y, z: v.z, w: 1.0 };
+                let v4 = Vec4f {
+                    x: v.x,
+                    y: v.y,
+                    z: v.z,
+                    w: 1.0,
+                };
                 let result = mat4_mul_vec4(&m, &v4);
-                NumericValue::Vec3(Vec3f { x: result.x, y: result.y, z: result.z })
+                NumericValue::Vec3(Vec3f {
+                    x: result.x,
+                    y: result.y,
+                    z: result.z,
+                })
             }
             // Vec3 * Mat4 -> Vec3
             (NumericValue::Vec3(v), NumericValue::Mat4(m)) => {
-                let v4 = Vec4f { x: v.x, y: v.y, z: v.z, w: 1.0 };
+                let v4 = Vec4f {
+                    x: v.x,
+                    y: v.y,
+                    z: v.z,
+                    w: 1.0,
+                };
                 let result = vec4_mul_mat4(&v4, &m);
-                NumericValue::Vec3(Vec3f { x: result.x, y: result.y, z: result.z })
+                NumericValue::Vec3(Vec3f {
+                    x: result.x,
+                    y: result.y,
+                    z: result.z,
+                })
             }
             // Mat4 * Color -> Color (treat as Vec4)
             (NumericValue::Mat4(m), NumericValue::Color(c)) => {
@@ -363,10 +475,10 @@ impl NumericValue {
                 NumericValue::Mat4(result)
             }
             // All other cases: component-wise multiplication
-            _ => self.zip_f32(other, |a, b| a * b)
+            _ => self.zip_f32(other, |a, b| a * b),
         }
     }
-    
+
     /// Mix two values with a scalar alpha
     pub fn mix_scalar(self, other: Self, alpha: f64) -> Self {
         let a = alpha as f32;
@@ -400,7 +512,7 @@ impl NumericValue {
             _ => self,
         }
     }
-    
+
     /// Mix two values with component-wise alpha (alpha has same type as self/other)
     pub fn mix_componentwise(self, other: Self, alpha: Self) -> Self {
         match (self, other, alpha) {
@@ -451,20 +563,20 @@ impl NumericValue {
             }
         }
     }
-    
+
     /// Clamp with scalar min/max
     pub fn clamp_scalar(self, min_val: f64, max_val: f64) -> Self {
         let min_f = min_val as f32;
         let max_f = max_val as f32;
         self.map_f32(|v| v.max(min_f).min(max_f))
     }
-    
+
     /// Step function with scalar edge
     pub fn step_scalar(edge: f64, self_val: Self) -> Self {
         let edge_f = edge as f32;
         self_val.map_f32(|v| if v < edge_f { 0.0 } else { 1.0 })
     }
-    
+
     /// Smoothstep with scalar edges
     pub fn smoothstep_scalar(e0: f64, e1: f64, self_val: Self) -> Self {
         let e0_f = e0 as f32;
@@ -474,7 +586,7 @@ impl NumericValue {
             t * t * (3.0 - 2.0 * t)
         })
     }
-    
+
     /// Get the length (magnitude) of a vector, or absolute value for scalar
     pub fn length(&self) -> f64 {
         match self {
@@ -486,19 +598,25 @@ impl NumericValue {
             NumericValue::Mat4(_) => 0.0, // undefined for matrices
         }
     }
-    
+
     /// Dot product (returns scalar)
     pub fn dot(self, other: Self) -> f64 {
         match (self, other) {
             (NumericValue::F64(a), NumericValue::F64(b)) => a * b,
             (NumericValue::Vec2(a), NumericValue::Vec2(b)) => (a.x * b.x + a.y * b.y) as f64,
-            (NumericValue::Vec3(a), NumericValue::Vec3(b)) => (a.x * b.x + a.y * b.y + a.z * b.z) as f64,
-            (NumericValue::Vec4(a), NumericValue::Vec4(b)) => (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) as f64,
-            (NumericValue::Color(a), NumericValue::Color(b)) => (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) as f64,
+            (NumericValue::Vec3(a), NumericValue::Vec3(b)) => {
+                (a.x * b.x + a.y * b.y + a.z * b.z) as f64
+            }
+            (NumericValue::Vec4(a), NumericValue::Vec4(b)) => {
+                (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) as f64
+            }
+            (NumericValue::Color(a), NumericValue::Color(b)) => {
+                (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) as f64
+            }
             _ => 0.0, // Mismatched types
         }
     }
-    
+
     /// Normalize a vector (returns unit vector in same direction)
     pub fn normalize(self) -> Self {
         let len = self.length() as f32;
@@ -508,14 +626,31 @@ impl NumericValue {
         let inv_len = 1.0 / len;
         match self {
             NumericValue::F64(v) => NumericValue::F64(if v >= 0.0 { 1.0 } else { -1.0 }),
-            NumericValue::Vec2(v) => NumericValue::Vec2(Vec2f { x: v.x * inv_len, y: v.y * inv_len }),
-            NumericValue::Vec3(v) => NumericValue::Vec3(Vec3f { x: v.x * inv_len, y: v.y * inv_len, z: v.z * inv_len }),
-            NumericValue::Vec4(v) => NumericValue::Vec4(Vec4f { x: v.x * inv_len, y: v.y * inv_len, z: v.z * inv_len, w: v.w * inv_len }),
-            NumericValue::Color(v) => NumericValue::Color(Vec4f { x: v.x * inv_len, y: v.y * inv_len, z: v.z * inv_len, w: v.w * inv_len }),
+            NumericValue::Vec2(v) => NumericValue::Vec2(Vec2f {
+                x: v.x * inv_len,
+                y: v.y * inv_len,
+            }),
+            NumericValue::Vec3(v) => NumericValue::Vec3(Vec3f {
+                x: v.x * inv_len,
+                y: v.y * inv_len,
+                z: v.z * inv_len,
+            }),
+            NumericValue::Vec4(v) => NumericValue::Vec4(Vec4f {
+                x: v.x * inv_len,
+                y: v.y * inv_len,
+                z: v.z * inv_len,
+                w: v.w * inv_len,
+            }),
+            NumericValue::Color(v) => NumericValue::Color(Vec4f {
+                x: v.x * inv_len,
+                y: v.y * inv_len,
+                z: v.z * inv_len,
+                w: v.w * inv_len,
+            }),
             NumericValue::Mat4(m) => NumericValue::Mat4(m), // undefined for matrices
         }
     }
-    
+
     /// Cross product (only defined for Vec3)
     pub fn cross(self, other: Self) -> Self {
         match (self, other) {
@@ -527,15 +662,29 @@ impl NumericValue {
             _ => self.zero_like(), // Undefined for other types
         }
     }
-    
+
     /// Create a zero value of the same type
     pub fn zero_like(&self) -> Self {
         match self {
             NumericValue::F64(_) => NumericValue::F64(0.0),
             NumericValue::Vec2(_) => NumericValue::Vec2(Vec2f { x: 0.0, y: 0.0 }),
-            NumericValue::Vec3(_) => NumericValue::Vec3(Vec3f { x: 0.0, y: 0.0, z: 0.0 }),
-            NumericValue::Vec4(_) => NumericValue::Vec4(Vec4f { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }),
-            NumericValue::Color(_) => NumericValue::Color(Vec4f { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }),
+            NumericValue::Vec3(_) => NumericValue::Vec3(Vec3f {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            }),
+            NumericValue::Vec4(_) => NumericValue::Vec4(Vec4f {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 0.0,
+            }),
+            NumericValue::Color(_) => NumericValue::Color(Vec4f {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 0.0,
+            }),
             NumericValue::Mat4(_) => NumericValue::Mat4([0.0; 16]),
         }
     }
@@ -546,8 +695,8 @@ impl NumericValue {
 #[inline]
 pub fn mat4_mul_vec4(m: &[f32; 16], v: &Vec4f) -> Vec4f {
     Vec4f {
-        x: m[0] * v.x + m[4] * v.y + m[8]  * v.z + m[12] * v.w,
-        y: m[1] * v.x + m[5] * v.y + m[9]  * v.z + m[13] * v.w,
+        x: m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12] * v.w,
+        y: m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13] * v.w,
         z: m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14] * v.w,
         w: m[3] * v.x + m[7] * v.y + m[11] * v.z + m[15] * v.w,
     }
@@ -558,8 +707,8 @@ pub fn mat4_mul_vec4(m: &[f32; 16], v: &Vec4f) -> Vec4f {
 #[inline]
 pub fn vec4_mul_mat4(v: &Vec4f, m: &[f32; 16]) -> Vec4f {
     Vec4f {
-        x: v.x * m[0] + v.y * m[1] + v.z * m[2]  + v.w * m[3],
-        y: v.x * m[4] + v.y * m[5] + v.z * m[6]  + v.w * m[7],
+        x: v.x * m[0] + v.y * m[1] + v.z * m[2] + v.w * m[3],
+        y: v.x * m[4] + v.y * m[5] + v.z * m[6] + v.w * m[7],
         z: v.x * m[8] + v.y * m[9] + v.z * m[10] + v.w * m[11],
         w: v.x * m[12] + v.y * m[13] + v.z * m[14] + v.w * m[15],
     }

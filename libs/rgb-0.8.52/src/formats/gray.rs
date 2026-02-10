@@ -6,7 +6,9 @@
 #[allow(non_camel_case_types)]
 pub struct Gray_v08<T>(
     /// Grayscale Component. This field will be renamed to `v`.
-    #[deprecated(note = "Please use .value() or .value_mut() instead. This field will be renamed to .v in the next major version")]
+    #[deprecated(
+        note = "Please use .value() or .value_mut() instead. This field will be renamed to .v in the next major version"
+    )]
     pub T,
 );
 
@@ -63,9 +65,7 @@ impl<T> core::ops::Deref for Gray_v08<T> {
     type Target = Gray_v09<T>;
 
     fn deref(&self) -> &Gray_v09<T> {
-        unsafe {
-            &*(self as *const Self as *const Gray_v09::<T>)
-        }
+        unsafe { &*(self as *const Self as *const Gray_v09<T>) }
     }
 }
 
@@ -87,7 +87,10 @@ impl<T: Copy> Gray_v09<T> {
 
     /// Add alpha component to this pixel
     pub fn with_alpha(self, add_alpha_value: T) -> crate::formats::gray_a::GrayA<T> {
-        crate::formats::gray_a::GrayA { v: self.v, a: add_alpha_value }
+        crate::formats::gray_a::GrayA {
+            v: self.v,
+            a: add_alpha_value,
+        }
     }
 }
 

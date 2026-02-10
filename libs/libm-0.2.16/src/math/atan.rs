@@ -127,7 +127,11 @@ pub fn atan(x: f64) -> f64 {
 
     let z = i!(ATANHI, id as usize) - (x * (s1 + s2) - i!(ATANLO, id as usize) - x);
 
-    if sign != 0 { -z } else { z }
+    if sign != 0 {
+        -z
+    } else {
+        z
+    }
 }
 
 #[cfg(test)]

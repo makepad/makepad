@@ -1,11 +1,7 @@
 use {
-    std::rc::Rc,
+    crate::{makepad_math::*, window::WindowId}, //makepad_microserde::*,
     std::cell::Cell,
-    crate::{
-        makepad_math::*,
-        window::WindowId,
-    }
-    //makepad_microserde::*,
+    std::rc::Rc,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -13,13 +9,12 @@ pub struct WindowGeom {
     pub dpi_factor: f64,
     pub can_fullscreen: bool,
     pub xr_is_presenting: bool,
-    pub is_fullscreen: bool, 
+    pub is_fullscreen: bool,
     pub is_topmost: bool,
     pub position: Vec2d,
     pub inner_size: Vec2d,
     pub outer_size: Vec2d,
 }
- 
 
 #[derive(Clone, Debug)]
 pub struct WindowGeomChangeEvent {
@@ -38,12 +33,12 @@ pub struct WindowMovedEvent {
 #[derive(Clone, Debug)]
 pub struct WindowCloseRequestedEvent {
     pub window_id: WindowId,
-    pub accept_close: Rc<Cell<bool>>
+    pub accept_close: Rc<Cell<bool>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct WindowClosedEvent {
-    pub window_id: WindowId
+    pub window_id: WindowId,
 }
 /*
 #[derive(Clone, Debug)]

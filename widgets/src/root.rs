@@ -1,18 +1,11 @@
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-use {
-    crate::{
-        widget::*,
-        makepad_derive_widget::*,
-        makepad_draw::*,
-    }
-};
-
-live_design!{
+live_design! {
     link widgets;
-    
+
     use link::widgets::*;
     use link::designer::Designer;
-    
+
     pub RootBase = {{Root}} {}
     pub Root = <RootBase> {
         design_window = <Designer> {}
@@ -21,10 +14,14 @@ live_design!{
 
 #[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct Root {
-    #[rust] components: ComponentMap<LiveId, WidgetRef>,
-    #[rust(DrawList::new(cx))] xr_draw_list: DrawList,
-    #[live] xr_pass: Pass,
-    #[rust] draw_state: DrawStateWrap<DrawState>,
+    #[rust]
+    components: ComponentMap<LiveId, WidgetRef>,
+    #[rust(DrawList::new(cx))]
+    xr_draw_list: DrawList,
+    #[live]
+    xr_pass: Pass,
+    #[rust]
+    draw_state: DrawStateWrap<DrawState>,
 }
 
 #[derive(Clone)]
@@ -33,50 +30,59 @@ enum DrawState {
 }
 
 impl LiveHook for Root {
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(
+        &mut self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         let id = nodes[index].id;
         match apply.from {
-            ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
+            ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
-                    // only open the design window 
-                    if id == live_id!(design_window) && !cx.in_makepad_studio(){
+                    // only open the design window
+                    if id == live_id!(design_window) && !cx.in_makepad_studio() {
                         return nodes.skip_node(index);
                     }
-                    if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode(){
+                    if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode() {
                         return nodes.skip_node(index);
                     }
-                    return self.components.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
+                    return self
+                        .components
+                        .get_or_insert(cx, id, |cx| WidgetRef::new(cx))
                         .apply(cx, apply, index, nodes);
-                }
-                else {
+                } else {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                 }
             }
-            _ => ()
+            _ => (),
         }
         nodes.skip_node(index)
     }
 }
 
-
-impl WidgetNode for Root{
+impl WidgetNode for Root {
     fn redraw(&mut self, cx: &mut Cx) {
         for component in self.components.values_mut() {
             component.redraw(cx);
         }
     }
-    
-    fn area(&self)->Area{Area::Empty}
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
-        
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
-        if path.len() != 0{
+
+    fn area(&self) -> Area {
+        Area::Empty
+    }
+
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        Walk::default()
+    }
+
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        if path.len() != 0 {
             if let Some(component) = self.components.get(&path[0]) {
-                if path.len() == 1{
+                if path.len() == 1 {
                     results.push(component.clone());
-                }
-                else{
+                } else {
                     component.find_widgets(&path[1..], cached, results);
                 }
             }
@@ -85,24 +91,24 @@ impl WidgetNode for Root{
             component.find_widgets(path, cached, results);
         }
     }
-    
-    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+
+    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
         for component in self.components.values() {
             let x = component.uid_to_widget(uid);
-            if !x.is_empty(){return x}
+            if !x.is_empty() {
+                return x;
+            }
         }
         WidgetRef::empty()
     }
-        
 }
 
 impl Widget for Root {
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Draw(e) = event {
-            if cx.in_xr_mode(){
-                if  !e.xr_state.is_some(){
-                    return
+            if cx.in_xr_mode() {
+                if !e.xr_state.is_some() {
+                    return;
                 }
                 let mut cx_draw = CxDraw::new(cx, e);
                 let cx = &mut Cx3d::new(&mut cx_draw);
@@ -113,39 +119,36 @@ impl Widget for Root {
                 self.draw_3d_all(cx, scope);
                 self.xr_draw_list.end(cx);
                 cx.end_pass(&self.xr_pass);
-                return
-            }
-            else{
+                return;
+            } else {
                 let mut cx_draw = CxDraw::new(cx, e);
                 let cx = &mut Cx2d::new(&mut cx_draw);
                 self.draw_all(cx, scope);
-                return
+                return;
             }
         }
-        
+
         for component in self.components.values_mut() {
             component.handle_event(cx, event, scope);
         }
     }
-    
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope:&mut Scope)->DrawStep{
-        for component in self.components.values(){
+
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        for component in self.components.values() {
             component.draw_3d_all(cx, scope);
         }
         DrawStep::done()
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         self.draw_state.begin(cx, DrawState::Component(0));
-                
+
         while let Some(DrawState::Component(step)) = self.draw_state.get() {
-                        
-            if let Some(component) = self.components.values_mut().nth(step){
+            if let Some(component) = self.components.values_mut().nth(step) {
                 let walk = component.walk(cx);
-                component.draw_walk(cx, scope, walk)?; 
-                self.draw_state.set(DrawState::Component(step+1));
-            }
-            else{
+                component.draw_walk(cx, scope, walk)?;
+                self.draw_state.set(DrawState::Component(step + 1));
+            } else {
                 self.draw_state.end();
             }
         }

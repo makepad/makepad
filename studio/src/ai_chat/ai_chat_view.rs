@@ -347,8 +347,7 @@ impl AiChatView {
                     doc.file.set_model(self.history_slot, model);
                 }
 
-                if let Some(project_id) = self.drop_down(ids!(project_dropdown)).selected(actions)
-                {
+                if let Some(project_id) = self.drop_down(ids!(project_dropdown)).selected(actions) {
                     let model = &data.ai_chat_manager.projects[project_id].name;
                     doc.file.set_project(self.history_slot, model);
                 }

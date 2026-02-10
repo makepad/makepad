@@ -1,4 +1,4 @@
-use crate::legacy::internal::pixel::{ComponentMap, ColorComponentMap, ComponentSlice};
+use crate::legacy::internal::pixel::{ColorComponentMap, ComponentMap, ComponentSlice};
 use core::slice;
 
 pub use crate::formats::gray::Gray_v08 as Gray;
@@ -52,21 +52,28 @@ pub type ARGB16 = crate::Argb<u16>;
 pub type GRB8 = crate::formats::grb::Grb<u8>;
 
 /// 8-bit gray
-#[deprecated(note = "Refer to ::rgb::alt::Gray<u8> directly (this type alias will change in the next major version)")]
+#[deprecated(
+    note = "Refer to ::rgb::alt::Gray<u8> directly (this type alias will change in the next major version)"
+)]
 pub type GRAY8 = Gray<u8>;
 
 /// 16-bit gray in machine's native endian
-#[deprecated(note = "Refer to ::rgb::alt::Gray<u16> directly (this type alias will change in the next major version)")]
+#[deprecated(
+    note = "Refer to ::rgb::alt::Gray<u16> directly (this type alias will change in the next major version)"
+)]
 pub type GRAY16 = Gray<u16>;
 
 /// 8-bit gray with alpha in machine's native endian
-#[deprecated(note = "Refer to ::rgb::alt::GrayAlpha<u8> directly (this type alias will change in the next major version)")]
+#[deprecated(
+    note = "Refer to ::rgb::alt::GrayAlpha<u8> directly (this type alias will change in the next major version)"
+)]
 pub type GRAYA8 = GrayAlpha<u8>;
 
 /// 16-bit gray with alpha in machine's native endian
-#[deprecated(note = "Refer to ::rgb::alt::GrayAlpha<u16> directly (this type alias will change in the next major version)")]
+#[deprecated(
+    note = "Refer to ::rgb::alt::GrayAlpha<u16> directly (this type alias will change in the next major version)"
+)]
 pub type GRAYA16 = GrayAlpha<u16>;
-
 
 #[cfg(not(feature = "unstable-experimental"))]
 impl<T> core::ops::Deref for Gray<T> {
@@ -122,7 +129,8 @@ impl<T: Copy, A: Clone> GrayAlpha<T, A> {
     #[inline(always)]
     #[allow(deprecated)]
     pub fn map_alpha<F, B>(&self, f: F) -> GrayAlpha<T, B>
-        where F: FnOnce(A) -> B
+    where
+        F: FnOnce(A) -> B,
     {
         GrayAlpha(self.0, f(self.1.clone()))
     }
@@ -131,7 +139,11 @@ impl<T: Copy, A: Clone> GrayAlpha<T, A> {
     #[inline(always)]
     #[allow(deprecated)]
     pub fn map_gray<F, U, B>(&self, f: F) -> GrayAlpha<U, B>
-        where F: FnOnce(T) -> U, U: Clone, B: From<A> + Clone {
+    where
+        F: FnOnce(T) -> U,
+        U: Clone,
+        B: From<A> + Clone,
+    {
         GrayAlpha(f(self.0), self.1.clone().into())
     }
 }
@@ -139,7 +151,10 @@ impl<T: Copy, A: Clone> GrayAlpha<T, A> {
 impl<T: Copy, B> ComponentMap<Gray<B>, T, B> for Gray<T> {
     #[inline(always)]
     #[allow(deprecated)]
-    fn map<F>(&self, mut f: F) -> Gray<B> where F: FnMut(T) -> B {
+    fn map<F>(&self, mut f: F) -> Gray<B>
+    where
+        F: FnMut(T) -> B,
+    {
         Gray(f(self.0))
     }
 }
@@ -147,7 +162,10 @@ impl<T: Copy, B> ComponentMap<Gray<B>, T, B> for Gray<T> {
 impl<T: Copy, B> ColorComponentMap<Gray<B>, T, B> for Gray<T> {
     #[inline(always)]
     #[allow(deprecated)]
-    fn map_colors<F>(&self, mut f: F) -> Gray<B> where F: FnMut(T) -> B {
+    fn map_colors<F>(&self, mut f: F) -> Gray<B>
+    where
+        F: FnMut(T) -> B,
+    {
         Gray(f(self.0))
     }
 }
@@ -156,7 +174,9 @@ impl<T: Copy, B> ComponentMap<GrayAlpha<B>, T, B> for GrayAlpha<T> {
     #[inline(always)]
     #[allow(deprecated)]
     fn map<F>(&self, mut f: F) -> GrayAlpha<B>
-    where F: FnMut(T) -> B {
+    where
+        F: FnMut(T) -> B,
+    {
         GrayAlpha(f(self.0), f(self.1))
     }
 }
@@ -165,7 +185,9 @@ impl<T: Copy, A: Copy, B> ColorComponentMap<GrayAlpha<B, A>, T, B> for GrayAlpha
     #[inline(always)]
     #[allow(deprecated)]
     fn map_colors<F>(&self, mut f: F) -> GrayAlpha<B, A>
-    where F: FnMut(T) -> B {
+    where
+        F: FnMut(T) -> B,
+    {
         GrayAlpha(f(self.0), self.1)
     }
 }
@@ -173,32 +195,24 @@ impl<T: Copy, A: Copy, B> ColorComponentMap<GrayAlpha<B, A>, T, B> for GrayAlpha
 impl<T> ComponentSlice<T> for GrayAlpha<T> {
     #[inline(always)]
     fn as_slice(&self) -> &[T] {
-        unsafe {
-            slice::from_raw_parts((self as *const Self).cast::<T>(), 2)
-        }
+        unsafe { slice::from_raw_parts((self as *const Self).cast::<T>(), 2) }
     }
 
     #[inline(always)]
     fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe {
-            slice::from_raw_parts_mut((self as *mut Self).cast::<T>(), 2)
-        }
+        unsafe { slice::from_raw_parts_mut((self as *mut Self).cast::<T>(), 2) }
     }
 }
 
 impl<T> ComponentSlice<T> for [GrayAlpha<T>] {
     #[inline]
     fn as_slice(&self) -> &[T] {
-        unsafe {
-            slice::from_raw_parts(self.as_ptr().cast(), self.len() * 2)
-        }
+        unsafe { slice::from_raw_parts(self.as_ptr().cast(), self.len() * 2) }
     }
 
     #[inline]
     fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe {
-            slice::from_raw_parts_mut(self.as_mut_ptr().cast::<T>(), self.len() * 2)
-        }
+        unsafe { slice::from_raw_parts_mut(self.as_mut_ptr().cast::<T>(), self.len() * 2) }
     }
 }
 
@@ -219,16 +233,12 @@ impl<T> ComponentSlice<T> for Gray<T> {
 impl<T> ComponentSlice<T> for [Gray<T>] {
     #[inline]
     fn as_slice(&self) -> &[T] {
-        unsafe {
-            slice::from_raw_parts(self.as_ptr().cast(), self.len())
-        }
+        unsafe { slice::from_raw_parts(self.as_ptr().cast(), self.len()) }
     }
 
     #[inline]
     fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe {
-            slice::from_raw_parts_mut(self.as_mut_ptr().cast::<T>(), self.len())
-        }
+        unsafe { slice::from_raw_parts_mut(self.as_mut_ptr().cast::<T>(), self.len()) }
     }
 }
 
@@ -284,7 +294,10 @@ fn gray() {
     assert_eq!(g2.map_alpha(|x| x + 3), GrayAlpha(3, 5));
 
     assert_eq!((&[Gray(1u16), Gray(2)][..]).as_slice(), &[1, 2]);
-    assert_eq!((&[GrayAlpha(1u16, 2), GrayAlpha(3, 4)][..]).as_slice(), &[1, 2, 3, 4]);
+    assert_eq!(
+        (&[GrayAlpha(1u16, 2), GrayAlpha(3, 4)][..]).as_slice(),
+        &[1, 2, 3, 4]
+    );
 
     let rgba: crate::RGBA<_> = ga.into();
     assert_eq!(rgba.r, 1);

@@ -1,7 +1,4 @@
-use std::os::raw::{
-    c_void,
-    c_int,
-};
+use std::os::raw::{c_int, c_void};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -33,10 +30,7 @@ pub union gbm_bo_handle {
 
 const fn gbm_four_char_as_u32(s: &str) -> u32 {
     let b = s.as_bytes();
-    ((b[3] as u32) << 24)
-        | ((b[2] as u32) << 16)
-        | ((b[1] as u32) << 8)
-        | ((b[0] as u32))
+    ((b[3] as u32) << 24) | ((b[2] as u32) << 16) | ((b[1] as u32) << 8) | (b[0] as u32)
 }
 
 pub const GBM_FORMAT_XRGB8888: u32 = gbm_four_char_as_u32("XR24");
@@ -59,4 +53,3 @@ extern "C" {
     pub fn gbm_bo_get_user_data(bo: *mut gbm_bo) -> *mut c_void;
     pub fn gbm_bo_get_handle(bo: *mut gbm_bo) -> gbm_bo_handle;
 }
-

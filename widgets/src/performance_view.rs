@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
-use makepad_derive_widget::*;
 use crate::{label::*, makepad_draw::*, view::*, widget::*};
+use makepad_derive_widget::*;
 
 live_design! {
     use link::theme::*;
@@ -89,7 +89,7 @@ impl LiveHook for PerformanceView {
 }
 
 impl Widget for PerformanceView {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope,  walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let _ = self.view.draw_walk(cx, scope, walk);
         DrawStep::done()
     }
@@ -122,11 +122,14 @@ impl PerformanceView {
 
 #[derive(Live, Widget)]
 pub struct PerformanceLiveGraph {
-    #[redraw] #[deref]
+    #[redraw]
+    #[deref]
     view: View,
-    #[redraw] #[live]
+    #[redraw]
+    #[live]
     draw_graph: DrawColor,
-    #[redraw] #[live]
+    #[redraw]
+    #[live]
     draw_bar: DrawColor,
     #[rust]
     data: VecDeque<i64>,
@@ -148,7 +151,7 @@ impl LiveHook for PerformanceLiveGraph {
 }
 
 impl Widget for PerformanceLiveGraph {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let _ = self.view.draw_walk(cx, scope, walk);
         let _ = self.draw_walk(cx, walk);
         DrawStep::done()

@@ -1,9 +1,7 @@
-use {
-    crate::{
-        makepad_micro_serde::*,
-        makepad_script::*,
-        //cx::Cx,
-    }
+use crate::{
+    makepad_micro_serde::*,
+    makepad_script::*,
+    //cx::Cx,
 };
 
 // Note: Using manual SerJson/DeJson impl with integer encoding to reduce code bloat
@@ -12,7 +10,7 @@ use {
 pub enum MouseCursor {
     // don't show the cursor
     Hidden,
-    
+
     //  *
     //  *  *
     //  *    *
@@ -20,15 +18,16 @@ pub enum MouseCursor {
     //  *   *
     //  *    *
     //        *
-    #[pick] Default,
-    
+    #[pick]
+    Default,
+
     //     |
     //     |
     //  ---+---
     //     |
     //     |
     Crosshair,
-    
+
     //    *
     //    *
     //    * * * *
@@ -37,7 +36,7 @@ pub enum MouseCursor {
     //  * *     *
     //  *      *
     Hand,
-    
+
     //  *
     //  *  *
     //  *    *
@@ -46,20 +45,20 @@ pub enum MouseCursor {
     //  *    *
     //        *
     Arrow,
-    
+
     //     ^
     //     |
     //  <--+-->
     //     |
     //     v
     Move,
-    
+
     //   --+--
     //     |
     //     |
     //   __|__
     Text,
-    
+
     //  |******|
     //   \****/
     //    \**/
@@ -67,7 +66,7 @@ pub enum MouseCursor {
     //   /****\
     //  |******|
     Wait,
-    
+
     //  *
     //  *  *
     //  *    *
@@ -76,35 +75,34 @@ pub enum MouseCursor {
     //  *    *   ?
     //        *
     Help,
-    
-    
+
     //    _____
     //   / \   \
     //  |   \  |
     //   \___\/
     NotAllowed,
 
-    //     
+    //
     //    * * * *
     //    * * * *
-    // *  * * * * 
+    // *  * * * *
     // *  *     *
-    //  * *     * 
+    //  * *     *
     //  *      *
     Grab,
-    
-    //      
-    //    
+
+    //
+    //
     //    * * * *
-    //  * * * * * 
+    //  * * * * *
     // *  *     *
-    //  * *     * 
+    //  * *     *
     //  *      *
     Grabbing,
-    
+
     /*
-    
-    //  * 
+
+    //  *
     //  *  *
     //  *    *
     //  *      * |----|
@@ -113,7 +111,7 @@ pub enum MouseCursor {
     //        *  |----|
     Progress,
 
-    //  * 
+    //  *
     //  *  *
     //  *    *
     //  *      *
@@ -121,39 +119,39 @@ pub enum MouseCursor {
     //  *    *  |----|
     //        * |----|
     ContextMenu,
-    
-    //     | | 
+
+    //     | |
     //     | |
     //  ---+ +---
     //  ---+ +---
     //     | |
     //     | |
-    
+
     Cell,
     //   |     |
     //   |-----|
     //   |     |
     VerticalText,
-    
-    //  * 
+
+    //  *
     //  *  *
     //  *    *
     //  *      *
     //  *   *    |  ^ |
     //  *    *   | /  |
-    //        *      
+    //        *
     Alias,
-    
-    //  * 
+
+    //  *
     //  *  *
     //  *    *
     //  *      *
-    //  *   *   
+    //  *   *
     //  *    *   |+|
-    //        *       
+    //        *
     Copy,
-    
-    //    * 
+
+    //    *
     //    *
     //    * * * *
     // *  * * * *    _____
@@ -161,12 +159,12 @@ pub enum MouseCursor {
     //  * *     *  |   \  |
     //  *      *    \___\/
     NoDrop,
-    
+
     //     ^
     //   < * >
-    //     v 	
+    //     v
     AllScroll,
-    
+
     //   _____
     //  /  |  \
     //  | -+- |
@@ -174,7 +172,7 @@ pub enum MouseCursor {
     //     |
     //     |
     ZoomIn,
-    
+
     //   _____
     //  /     \
     //  | --- |
@@ -183,66 +181,64 @@ pub enum MouseCursor {
     //     |
     ZoomOut,
     */
-    
-    
     //     ^
     //     |
     NResize,
-    
+
     //     ^
     //    /
     NeResize,
-    
+
     //    -->
     EResize,
-    
+
     //    \
     //     v
     SeResize,
-    
+
     //     |
     //     v
     SResize,
-    
+
     //    /
     //   v
     SwResize,
-    
+
     //    <--
     WResize,
-    
+
     //   ^
     //    \
     NwResize,
-    
+
     //     ^
     //     |
-    //     v 	
+    //     v
     NsResize,
-    
+
     //     ^
     //    /
     //   v
     NeswResize,
-    
+
     //  <--->
     EwResize,
-    
+
     //   ^
     //    \
     //     v
     NwseResize,
-    
+
     //     ||
     //   <-||->
     //     ||
     ColResize,
-    
+
     //     ^
     //     |
     //   =====
     //     |
-    //     v 	
+    //     v
     RowResize,
 }
 
@@ -255,21 +251,41 @@ impl Default for MouseCursor {
 
 // Const array for efficient index-to-variant conversion
 const MOUSECURSOR_VARIANTS: [MouseCursor; 26] = [
-    MouseCursor::Hidden, MouseCursor::Default, MouseCursor::Crosshair,
-    MouseCursor::Hand, MouseCursor::Arrow, MouseCursor::Move, MouseCursor::Text,
-    MouseCursor::Wait, MouseCursor::Help, MouseCursor::NotAllowed,
-    MouseCursor::Grab, MouseCursor::Grabbing,
-    MouseCursor::NResize, MouseCursor::NeResize, MouseCursor::EResize,
-    MouseCursor::SeResize, MouseCursor::SResize, MouseCursor::SwResize,
-    MouseCursor::WResize, MouseCursor::NwResize, MouseCursor::NsResize,
-    MouseCursor::NeswResize, MouseCursor::EwResize, MouseCursor::NwseResize,
-    MouseCursor::ColResize, MouseCursor::RowResize,
+    MouseCursor::Hidden,
+    MouseCursor::Default,
+    MouseCursor::Crosshair,
+    MouseCursor::Hand,
+    MouseCursor::Arrow,
+    MouseCursor::Move,
+    MouseCursor::Text,
+    MouseCursor::Wait,
+    MouseCursor::Help,
+    MouseCursor::NotAllowed,
+    MouseCursor::Grab,
+    MouseCursor::Grabbing,
+    MouseCursor::NResize,
+    MouseCursor::NeResize,
+    MouseCursor::EResize,
+    MouseCursor::SeResize,
+    MouseCursor::SResize,
+    MouseCursor::SwResize,
+    MouseCursor::WResize,
+    MouseCursor::NwResize,
+    MouseCursor::NsResize,
+    MouseCursor::NeswResize,
+    MouseCursor::EwResize,
+    MouseCursor::NwseResize,
+    MouseCursor::ColResize,
+    MouseCursor::RowResize,
 ];
 
 // Manual SerJson/DeJson implementations using integer encoding
 impl SerJson for MouseCursor {
     fn ser_json(&self, _d: usize, s: &mut SerJsonState) {
-        let idx = MOUSECURSOR_VARIANTS.iter().position(|c| c == self).unwrap_or(0);
+        let idx = MOUSECURSOR_VARIANTS
+            .iter()
+            .position(|c| c == self)
+            .unwrap_or(0);
         s.out.push_str(&idx.to_string());
     }
 }

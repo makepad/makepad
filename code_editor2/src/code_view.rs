@@ -1,12 +1,7 @@
 use crate::{
-    code_editor::KeepCursorInView,
-    decoration::DecorationSet,
-    history::NewGroup,
-    makepad_widgets::*,
-    selection::Affinity,
-    session::SelectionMode,
-    text::Position,
-    CodeDocument, CodeEditor, CodeSession,
+    code_editor::KeepCursorInView, decoration::DecorationSet, history::NewGroup,
+    makepad_widgets::*, selection::Affinity, session::SelectionMode, text::Position, CodeDocument,
+    CodeEditor, CodeSession,
 };
 
 script_mod! {
@@ -91,7 +86,12 @@ impl WidgetNode for CodeView {
         let anchor_pos = CodeView::byte_offset_to_position(&text, anchor);
         let cursor_pos = CodeView::byte_offset_to_position(&text, cursor);
         if let Some(session) = &self.session {
-            session.set_selection(anchor_pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+            session.set_selection(
+                anchor_pos,
+                Affinity::Before,
+                SelectionMode::Simple,
+                NewGroup::Yes,
+            );
             session.move_to(cursor_pos, Affinity::Before, NewGroup::Yes);
         }
         // When receiving external selection, use focus colors even without key focus
@@ -105,7 +105,9 @@ impl WidgetNode for CodeView {
             // Extract cursor position, then drop the Ref before mutating
             let pos = {
                 let selections = session.selections();
-                if selections.is_empty() { return; }
+                if selections.is_empty() {
+                    return;
+                }
                 selections[0].cursor.position
             };
             session.set_selection(pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
@@ -116,10 +118,18 @@ impl WidgetNode for CodeView {
         self.lazy_init_session();
         let text = self.text.as_ref();
         let text_len = text.len();
-        let start = Position { line_index: 0, byte_index: 0 };
+        let start = Position {
+            line_index: 0,
+            byte_index: 0,
+        };
         let end = CodeView::byte_offset_to_position(text, text_len);
         if let Some(session) = &self.session {
-            session.set_selection(start, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+            session.set_selection(
+                start,
+                Affinity::Before,
+                SelectionMode::Simple,
+                NewGroup::Yes,
+            );
             session.move_to(end, Affinity::Before, NewGroup::Yes);
         }
         // When receiving external selection, use focus colors even without key focus

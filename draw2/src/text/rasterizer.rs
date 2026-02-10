@@ -1,6 +1,8 @@
 use super::{
     font::{Font, GlyphId},
-    font_atlas::{ColorAtlas, GlyphImage, GlyphImageKey, GlyphImageKind, GrayscaleAtlas, MsdfAtlas},
+    font_atlas::{
+        ColorAtlas, GlyphImage, GlyphImageKey, GlyphImageKind, GrayscaleAtlas, MsdfAtlas,
+    },
     geom::{Point, Rect, Size},
     glyph_outline::{Command, GlyphOutline},
     image::{Bgra, Image, R},
@@ -238,7 +240,10 @@ impl Rasterizer {
         glyph_id: GlyphId,
         mut dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
-        debug_assert_eq!(self.sdfer.settings().padding, self.msdfer.settings().padding);
+        debug_assert_eq!(
+            self.sdfer.settings().padding,
+            self.msdfer.settings().padding
+        );
         dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
         let mut outline = None;
         let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;

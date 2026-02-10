@@ -1,25 +1,19 @@
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    designer_data::*,
-    view::View,
-    widget::*,
-};
+use crate::{designer_data::*, makepad_derive_widget::*, makepad_draw::*, view::View, widget::*};
 
-live_design!{
+live_design! {
     use link::theme::*;
     use makepad_draw::shader::std::*;
     use link::widgets::*;
     use crate::designer_theme::*;
-        
+
     pub DesignerToolboxBase = {{DesignerToolbox}}{
     }
-    
+
     pub DesignerToolbox = <DesignerToolboxBase>{
         width: Fill,
         height: Fill
         show_bg: false
-        
+
         <DockToolbar> {
             content = {
                 align: { x: 0., y: 0. }
@@ -59,14 +53,14 @@ live_design!{
                     spacing: 0.
                     <Labelbold> { text: "Size" }
                     <Label> { text: "11 pt" }
-                } 
+                }
                 <View> {
                     align: { x: 0., y: 0. }
                     flow: Right, width: Fit,
                     spacing: 0.
                     <Labelbold> { text: "Line height" }
                     <Label> { text: "1.2" }
-                } 
+                }
                 <Vr> {}
                 <View> {
                     align: { x: 0., y: 0. }
@@ -139,7 +133,7 @@ live_design!{
                 }
             }
         }
-        
+
         <RoundedShadowView>{
             abs_pos: vec2(25., 65.)
             width: 36., height: Fit,
@@ -147,7 +141,7 @@ live_design!{
             align: { x: 0.5, y: 0.0 }
             flow: Down,
             clip_x: false, clip_y: false,
-            
+
             draw_bg: {
                 border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_OUTSET_1)
@@ -157,7 +151,7 @@ live_design!{
                 shadow_offset: vec2(0.0, 0.0)
                 color: (THEME_COLOR_FG_APP)
             }
-            
+
             <View> {
                 width: Fit, height: Fit,
                 align: { x: 0.5, y: 0. }
@@ -274,7 +268,7 @@ live_design!{
             align: { x: 0.5, y: 0.0 }
             flow: Down,
             clip_x: false, clip_y: false,
-            
+
             draw_bg: {
                 border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_OUTSET_1)
@@ -284,10 +278,10 @@ live_design!{
                 border_radius: 2.5
                 color: (THEME_COLOR_FG_APP),
             }
-                        
+
             <View> {
                 flow: Right,
-                width: Fill, height: Fit, 
+                width: Fill, height: Fit,
                 align: { x: 0.0, y: 0.5 }
                 <RoundedView> {
                     margin: { left: (THEME_SPACE_2), right: (THEME_SPACE_1), top: 5. }
@@ -302,7 +296,7 @@ live_design!{
             <Hr> { margin: <THEME_MSPACE_1> {} }
             <ColorPicker>{}
             <View> {
-                width: Fill, height: Fit, 
+                width: Fill, height: Fit,
                 spacing: (THEME_SPACE_2)
                 align: { x: 0.5, y: 0.5 }
                 flow: Right,
@@ -312,7 +306,7 @@ live_design!{
             }
             <View> {
                 align: { x: 0.5, y: 0.5 }
-                width: Fill, height: Fit, 
+                width: Fill, height: Fit,
                 flow: Right,
                 spacing: (THEME_SPACE_1),
                 margin: { bottom: 10. }
@@ -379,18 +373,18 @@ live_design!{
 
 #[derive(Live, Widget, LiveHook)]
 pub struct DesignerToolbox {
-    #[deref] view: View
+    #[deref]
+    view: View,
 }
 
 impl Widget for DesignerToolbox {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
     }
-    
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         let _data = scope.data.get::<DesignerData>().unwrap();
-        while let Some(_next) = self.view.draw(cx, &mut Scope::empty()).step() {
-        }
+        while let Some(_next) = self.view.draw(cx, &mut Scope::empty()).step() {}
         DrawStep::done()
     }
 }

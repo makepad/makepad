@@ -1,11 +1,10 @@
-
 use makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
-        
+
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
@@ -55,27 +54,28 @@ live_design!{
             }
         }
     }
-}  
+}
 
-app_main!(App); 
- 
+app_main!(App);
+
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
-    #[rust] counter: usize,
+    #[live]
+    ui: WidgetRef,
+    #[rust]
+    counter: usize,
 }
- 
+
 impl LiveRegister for App {
-    fn live_register(cx: &mut Cx) { 
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
     }
 }
 
-impl MatchEvent for App{
-    fn handle_startup(&mut self, _cx:&mut Cx){
-    }
-        
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+impl MatchEvent for App {
+    fn handle_startup(&mut self, _cx: &mut Cx) {}
+
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(ids!(button_1)).clicked(&actions) {
             self.ui.button(ids!(button_1)).set_text(cx, "Clicked 😀");
             log!("hi");
@@ -86,7 +86,7 @@ impl MatchEvent for App{
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::XrUpdate(_e) = event{
+        if let Event::XrUpdate(_e) = event {
             //log!("{:?}", e.now.left.trigger.analog);
         }
         self.match_event(cx, event);

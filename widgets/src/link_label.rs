@@ -1,23 +1,18 @@
-use crate::{
-    makepad_derive_widget::*,
-    widget::*,
-    makepad_draw::*,
-    button::Button,
-};
+use crate::{button::Button, makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-live_design!{
+live_design! {
     link widgets;
-    
+
     use link::theme::*;
     use makepad_draw::shader::std::*;
     use crate::button::ButtonBase
-    
+
     pub LinkLabelBase = {{LinkLabel}}<ButtonBase> {}
     pub LinkLabel = <LinkLabelBase> {
         width: Fit, height: Fit,
         margin: <THEME_MSPACE_V_2> {}
         padding: 0.,
-        
+
         label_walk: { width: Fit, height: Fit },
 
         draw_icon: {
@@ -81,7 +76,7 @@ live_design!{
                 );
             }
         }
-        
+
         draw_bg: {
             instance down: 0.0
             instance hover: 0.0
@@ -96,13 +91,13 @@ live_design!{
             uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)
             uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
             uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
-            
+
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform color_2_hover: #F00
             uniform color_2_down: #000
             uniform color_2_focus: #f00
             uniform color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -150,7 +145,7 @@ live_design!{
                     ), mix(.7, 1., self.hover));
             }
         }
-        
+
         draw_text: {
             instance down: 0.0
             instance hover: 0.0
@@ -218,7 +213,7 @@ live_design!{
                     );
             }
         }
-        
+
         animator: {
             disabled = {
                 default: off,
@@ -264,7 +259,7 @@ live_design!{
                         draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -276,7 +271,7 @@ live_design!{
                         draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
-                
+
                 down = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -338,9 +333,9 @@ live_design!{
             color_2_down: #000
             color_2_focus: #f00
             color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
-            
+
         }
-        
+
         draw_text: {
             color: #0ff,
             color_hover: #0ff,
@@ -356,7 +351,7 @@ live_design!{
 
         }
     }
-    
+
     pub LinkLabelGradientX = <LinkLabel> {
         draw_icon: {
             gradient_fill_horizontal: 1.0
@@ -421,36 +416,41 @@ live_design!{
 /// This is a wrapper around (and derefs to) a [`Button`] widget.
 #[derive(Live, LiveHook, Widget)]
 pub struct LinkLabel {
-    #[deref] button: Button,
-    #[live] pub url: String,
-    #[live] pub open_in_place: bool,
+    #[deref]
+    button: Button,
+    #[live]
+    pub url: String,
+    #[live]
+    pub open_in_place: bool,
 }
 
 impl Widget for LinkLabel {
-    fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        scope: &mut Scope,
-    ) {
-        let actions = cx.capture_actions(|cx|{
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let actions = cx.capture_actions(|cx| {
             self.button.handle_event(cx, event, scope);
         });
-        if self.url.len()>0 && self.clicked(&actions){
-            cx.open_url(&self.url, if self.open_in_place{OpenUrlInPlace::Yes}else{OpenUrlInPlace::No});
+        if self.url.len() > 0 && self.clicked(&actions) {
+            cx.open_url(
+                &self.url,
+                if self.open_in_place {
+                    OpenUrlInPlace::Yes
+                } else {
+                    OpenUrlInPlace::No
+                },
+            );
         }
         cx.extend_actions(actions);
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.button.draw_walk(cx, scope, walk)
     }
-    
-    fn text(&self)->String{
+
+    fn text(&self) -> String {
         self.button.text()
     }
-    
-    fn set_text(&mut self, cx:&mut Cx, v:&str){
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.button.set_text(cx, v);
     }
 }

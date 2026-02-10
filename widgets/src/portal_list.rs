@@ -1,18 +1,18 @@
 use crate::{
-    widget::*,
     makepad_derive_widget::*,
     makepad_draw::*,
-    scroll_bar::{ScrollBar, ScrollAxis, ScrollBarAction}
+    scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
+    widget::*,
 };
 
-live_design!{
+live_design! {
     link widgets;
     use link::theme::*;
     use link::shaders::*;
     use crate::scroll_bar::ScrollBar;
-    
+
     pub PortalListBase = {{PortalList}} {}
-        
+
     pub PortalList = <PortalListBase> {
         width: Fill, height: Fill,
         capture_overload: true
@@ -24,92 +24,154 @@ live_design!{
 /// The maximum number of items that will be shown as part of a smooth scroll animation.
 const SMOOTH_SCROLL_MAXIMUM_WINDOW: usize = 20;
 
-#[derive(Clone,Copy)]
-struct ScrollSample{
+#[derive(Clone, Copy)]
+struct ScrollSample {
     abs: f64,
     time: f64,
 }
 
 enum ScrollState {
     Stopped,
-    Drag{samples:Vec<ScrollSample>},
-    Flick {delta: f64, next_frame: NextFrame},
-    Pulldown {next_frame: NextFrame},
-    ScrollingTo {target_id: usize, delta: f64, next_frame: NextFrame},
+    Drag {
+        samples: Vec<ScrollSample>,
+    },
+    Flick {
+        delta: f64,
+        next_frame: NextFrame,
+    },
+    Pulldown {
+        next_frame: NextFrame,
+    },
+    ScrollingTo {
+        target_id: usize,
+        delta: f64,
+        next_frame: NextFrame,
+    },
 }
 
 #[derive(Clone)]
 enum ListDrawState {
     Begin,
-    Down {index: usize, pos: f64, viewport: Rect},
-    Up {index: usize, pos: f64, hit_bottom: bool, viewport: Rect},
-    DownAgain {index: usize, pos: f64, viewport: Rect},
-    End {viewport: Rect}
+    Down {
+        index: usize,
+        pos: f64,
+        viewport: Rect,
+    },
+    Up {
+        index: usize,
+        pos: f64,
+        hit_bottom: bool,
+        viewport: Rect,
+    },
+    DownAgain {
+        index: usize,
+        pos: f64,
+        viewport: Rect,
+    },
+    End {
+        viewport: Rect,
+    },
 }
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum PortalListAction {
     Scroll,
     SmoothScrollReached,
-    None
+    None,
 }
 impl ListDrawState {
     fn is_down_again(&self) -> bool {
         match self {
-            Self::DownAgain {..} => true,
-            _ => false
+            Self::DownAgain { .. } => true,
+            _ => false,
         }
     }
 }
 #[derive(Live, Widget)]
 pub struct PortalList {
-    #[redraw] #[rust] area: Area,
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
-    
-    #[rust] range_start: usize,
-    #[rust(usize::MAX)] range_end: usize,
-    #[rust(0usize)] view_window: usize,
-    #[rust(0usize)] visible_items: usize,
-    #[live(0.2)] flick_scroll_minimum: f64,
-    #[live(80.0)] flick_scroll_maximum: f64,
-    #[live(0.005)] flick_scroll_scaling: f64,
-    #[live(0.97)] flick_scroll_decay: f64,
-    #[live(80.0)] max_pull_down: f64,
-    #[live(true)] align_top_when_empty: bool,
-    #[live(false)] grab_key_focus: bool,
-    #[live(true)] drag_scrolling: bool,
-    #[rust] first_id: usize,
-    #[rust] first_scroll: f64,
-    #[rust(Vec2Index::X)] vec_index: Vec2Index,
-    #[live] scroll_bar: ScrollBar,
-    #[live] capture_overload: bool,
-    #[live(false)] keep_invisible: bool,
-    #[rust] draw_state: DrawStateWrap<ListDrawState>,
-    #[rust] draw_align_list: Vec<AlignItem>,
-    #[rust] detect_tail_in_draw: bool,
-    #[live(false)] auto_tail: bool,
-    #[live(false)] draw_caching: bool,
-    
-    #[rust(false)] tail_range: bool,
-    #[rust(false)] at_end: bool,
-    #[rust(true)] not_filling_viewport: bool,
-    #[live(false)] reuse_items: bool,
-    
-    #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<usize, WidgetItem>,
-    #[rust] reusable_items: Vec<WidgetItem>,
-    #[rust] _draw_list_cache: Vec<DrawList>,
-    
+    #[redraw]
+    #[rust]
+    area: Area,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+
+    #[rust]
+    range_start: usize,
+    #[rust(usize::MAX)]
+    range_end: usize,
+    #[rust(0usize)]
+    view_window: usize,
+    #[rust(0usize)]
+    visible_items: usize,
+    #[live(0.2)]
+    flick_scroll_minimum: f64,
+    #[live(80.0)]
+    flick_scroll_maximum: f64,
+    #[live(0.005)]
+    flick_scroll_scaling: f64,
+    #[live(0.97)]
+    flick_scroll_decay: f64,
+    #[live(80.0)]
+    max_pull_down: f64,
+    #[live(true)]
+    align_top_when_empty: bool,
+    #[live(false)]
+    grab_key_focus: bool,
+    #[live(true)]
+    drag_scrolling: bool,
+    #[rust]
+    first_id: usize,
+    #[rust]
+    first_scroll: f64,
+    #[rust(Vec2Index::X)]
+    vec_index: Vec2Index,
+    #[live]
+    scroll_bar: ScrollBar,
+    #[live]
+    capture_overload: bool,
+    #[live(false)]
+    keep_invisible: bool,
+    #[rust]
+    draw_state: DrawStateWrap<ListDrawState>,
+    #[rust]
+    draw_align_list: Vec<AlignItem>,
+    #[rust]
+    detect_tail_in_draw: bool,
+    #[live(false)]
+    auto_tail: bool,
+    #[live(false)]
+    draw_caching: bool,
+
+    #[rust(false)]
+    tail_range: bool,
+    #[rust(false)]
+    at_end: bool,
+    #[rust(true)]
+    not_filling_viewport: bool,
+    #[live(false)]
+    reuse_items: bool,
+
+    #[rust]
+    templates: ComponentMap<LiveId, LivePtr>,
+    #[rust]
+    items: ComponentMap<usize, WidgetItem>,
+    #[rust]
+    reusable_items: Vec<WidgetItem>,
+    #[rust]
+    _draw_list_cache: Vec<DrawList>,
+
     //#[rust(DragState::None)] drag_state: DragState,
-    #[rust(ScrollState::Stopped)] scroll_state: ScrollState,
+    #[rust(ScrollState::Stopped)]
+    scroll_state: ScrollState,
     /// Whether the PortalList was actively scrolling during the most recent finger down hit.
-    #[rust] was_scrolling: bool,
+    #[rust]
+    was_scrolling: bool,
 }
 
-
 #[derive(Default)]
-struct WidgetItem{
+struct WidgetItem {
     widget: WidgetRef,
     template: LiveId,
 }
@@ -118,20 +180,32 @@ struct AlignItem {
     align_range: TurtleAlignRange,
     size: Vec2d,
     shift: f64,
-    index: usize
+    index: usize,
 }
 
 impl LiveHook for PortalList {
-    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
+    fn before_apply(
+        &mut self,
+        _cx: &mut Cx,
+        apply: &mut Apply,
+        _index: usize,
+        _nodes: &[LiveNode],
+    ) {
+        if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
             self.templates.clear();
         }
     }
-    
+
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(
+        &mut self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         if nodes[index].is_instance_prop() {
-            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index){
+            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index) {
                 let id = nodes[index].id;
                 self.templates.insert(id, live_ptr);
                 // lets apply this thing over all our childnodes with that template
@@ -141,35 +215,38 @@ impl LiveHook for PortalList {
                     }
                 }
             }
-        }
-        else {
+        } else {
             cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
         }
         nodes.skip_node(index)
     }
-    
-    fn after_apply(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+
+    fn after_apply(
+        &mut self,
+        _cx: &mut Cx,
+        _applyl: &mut Apply,
+        _index: usize,
+        _nodes: &[LiveNode],
+    ) {
         if let Flow::Down = self.layout.flow {
             self.vec_index = Vec2Index::Y
-        }
-        else {
+        } else {
             self.vec_index = Vec2Index::X
         }
-        if self.auto_tail{
+        if self.auto_tail {
             self.tail_range = true;
         }
     }
 }
 
 impl PortalList {
-    
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
         self.draw_align_list.clear();
     }
-    
+
     fn end(&mut self, cx: &mut Cx2d) {
-        // in this code we position all the drawn items 
+        // in this code we position all the drawn items
 
         self.at_end = false;
         self.not_filling_viewport = false;
@@ -177,22 +254,22 @@ impl PortalList {
         let vi = self.vec_index;
         let mut visible_items = 0;
 
-        if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
+        if let Some(ListDrawState::End { viewport }) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
             if list.len() > 0 {
-                list.sort_by( | a, b | a.index.cmp(&b.index));
-                let first_index = list.iter().position( | v | v.index == self.first_id).unwrap();
-                
+                list.sort_by(|a, b| a.index.cmp(&b.index));
+                let first_index = list.iter().position(|v| v.index == self.first_id).unwrap();
+
                 // find the position of the first item in our set
-                
+
                 let mut first_pos = self.first_scroll;
                 for i in (0..first_index).rev() {
                     let item = &list[i];
                     first_pos -= item.size.index(vi);
                 }
-                
+
                 // find the position of the last item in the range
-                // note that the listview requests items beyond the range so you can pad out the listview 
+                // note that the listview requests items beyond the range so you can pad out the listview
                 // when there is not enough data
 
                 let mut last_pos = self.first_scroll;
@@ -202,12 +279,11 @@ impl PortalList {
                     last_pos += item.size.index(vi);
                     if item.index < self.range_end {
                         last_item_pos = Some(last_pos);
-                    }
-                    else {
+                    } else {
                         break;
                     }
                 }
-                
+
                 // compute if we are filling the viewport
                 // if not we have to trigger a stick-to-top
                 if list[0].index == self.range_start {
@@ -220,42 +296,41 @@ impl PortalList {
                     }
                     self.not_filling_viewport = total < viewport.size.index(vi);
                 }
-                
+
                 // in this case we manage the 'pull down' situation when we are at the top
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0 {
                     let min = if let ScrollState::Stopped = self.scroll_state {
                         0.0
-                    }
-                    else {
+                    } else {
                         self.max_pull_down
                     };
-                    
+
                     let mut pos = first_pos.min(min); // lets do a maximum for first scroll
                     for item in list {
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift - Vec2d::from_index_pair(vi, item.shift, 0.0));
+                        cx.shift_align_range(
+                            &item.align_range,
+                            shift - Vec2d::from_index_pair(vi, item.shift, 0.0),
+                        );
                         pos += item.size.index(vi);
                         visible_items += 1;
                     }
                     self.first_scroll = first_pos.min(min);
                     self.first_id = self.range_start;
-                }
-                else {
+                } else {
                     // this is the normal case, however we have to here compute
-                    // the 'stick to bottom' case 
+                    // the 'stick to bottom' case
                     let shift = if let Some(last_item_pos) = last_item_pos {
                         if self.align_top_when_empty && self.not_filling_viewport {
                             -first_pos
-                        }
-                        else {
+                        } else {
                             let ret = viewport.size.index(vi) - last_item_pos;
                             if ret >= 0.0 {
                                 self.at_end = true;
                             }
                             ret.max(0.0)
                         }
-                    }
-                    else {
+                    } else {
                         0.0
                     };
                     // first we scan upwards and move items in place
@@ -267,8 +342,12 @@ impl PortalList {
                         let visible = pos > 0.0;
                         pos -= item.size.index(vi);
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift - Vec2d::from_index_pair(vi, item.shift, 0.0));
-                        if visible { // move up
+                        cx.shift_align_range(
+                            &item.align_range,
+                            shift - Vec2d::from_index_pair(vi, item.shift, 0.0),
+                        );
+                        if visible {
+                            // move up
                             self.first_scroll = pos;
                             self.first_id = item.index;
                             first_id_changed = true;
@@ -282,15 +361,18 @@ impl PortalList {
                     for i in first_index..list.len() {
                         let item = &list[i];
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift - Vec2d::from_index_pair(vi, item.shift, 0.0));
+                        cx.shift_align_range(
+                            &item.align_range,
+                            shift - Vec2d::from_index_pair(vi, item.shift, 0.0),
+                        );
                         pos += item.size.index(vi);
                         let invisible = pos < 0.0;
-                        if invisible { // move down
+                        if invisible {
+                            // move down
                             self.first_scroll = pos - item.size.index(vi);
                             self.first_id = item.index;
                             first_id_changed = true;
-                        }
-                        else if item.index < self.range_end {
+                        } else if item.index < self.range_end {
                             visible_items += 1;
                         }
                     }
@@ -299,42 +381,50 @@ impl PortalList {
                         self.first_scroll = start_pos;
                     }
                 }
-                if !self.scroll_bar.animator_in_state(cx, ids!(hover.pressed)){
+                if !self.scroll_bar.animator_in_state(cx, ids!(hover.pressed)) {
                     self.update_scroll_bar(cx);
                 }
             }
-        }
-        else {
+        } else {
             //log!("Draw state not at end in listview, please review your next_visible_item loop")
         }
         let rect = cx.turtle().rect();
-        if self.at_end || self.view_window == 0 || self.view_window > visible_items{
+        if self.at_end || self.view_window == 0 || self.view_window > visible_items {
             self.view_window = visible_items.max(4) - 3;
         }
-        if self.detect_tail_in_draw{
+        if self.detect_tail_in_draw {
             self.detect_tail_in_draw = false;
-            if self.auto_tail && self.at_end{
+            if self.auto_tail && self.at_end {
                 self.tail_range = true;
             }
         }
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         match self.vec_index {
             Vec2Index::Y => {
-                self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
+                self.scroll_bar.draw_scroll_bar(
+                    cx,
+                    ScrollAxis::Vertical,
+                    rect,
+                    dvec2(100.0, rect.size.y * total_views),
+                );
             }
             Vec2Index::X => {
-                self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Horizontal, rect, dvec2(rect.size.x * total_views, 100.0));
+                self.scroll_bar.draw_scroll_bar(
+                    cx,
+                    ScrollAxis::Horizontal,
+                    rect,
+                    dvec2(rect.size.x * total_views, 100.0),
+                );
             }
-        }        
-        
-        if !self.keep_invisible{
-            if self.reuse_items{
+        }
+
+        if !self.keep_invisible {
+            if self.reuse_items {
                 let reusable_items = &mut self.reusable_items;
-                self.items.retain_visible_with(|v|{
+                self.items.retain_visible_with(|v| {
                     reusable_items.push(v);
                 });
-            }
-            else{
+            } else {
                 self.items.retain_visible();
             }
         }
@@ -342,12 +432,15 @@ impl PortalList {
         cx.end_turtle_with_area(&mut self.area);
         self.visible_items = visible_items;
     }
-    
-    
+
     /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         let vi = self.vec_index;
-        let layout = if vi == Vec2Index::Y { Layout::flow_down() } else { Layout::flow_right() };
+        let layout = if vi == Vec2Index::Y {
+            Layout::flow_down()
+        } else {
+            Layout::flow_right()
+        };
         if let Some(draw_state) = self.draw_state.get() {
             match draw_state {
                 ListDrawState::Begin => {
@@ -356,9 +449,11 @@ impl PortalList {
                     // the item range properly until right before looping over `next_visible_items()`.
                     #[cfg(debug_assertions)]
                     if self.fails_sanity_check_first_id_within_item_range() {
-                        warning!("PortalList: first_id {} is greater than range_end {}.\n\
+                        warning!(
+                            "PortalList: first_id {} is greater than range_end {}.\n\
                             --> Check that you have set the correct item range and first item ID!",
-                            self.first_id, self.range_end,
+                            self.first_id,
+                            self.range_end,
                         );
                     }
 
@@ -370,111 +465,153 @@ impl PortalList {
                     });
                     match vi {
                         Vec2Index::Y => {
-                            cx.begin_turtle(Walk {
-                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.first_scroll)),
-                                margin: Default::default(),
-                                width: Size::fill(),
-                                height: Size::fit(),
-                                metrics: Metrics::default(),
-                            }, layout);
+                            cx.begin_turtle(
+                                Walk {
+                                    abs_pos: Some(dvec2(
+                                        viewport.pos.x,
+                                        viewport.pos.y + self.first_scroll,
+                                    )),
+                                    margin: Default::default(),
+                                    width: Size::fill(),
+                                    height: Size::fit(),
+                                    metrics: Metrics::default(),
+                                },
+                                layout,
+                            );
                         }
                         Vec2Index::X => {
-                            cx.begin_turtle(Walk {
-                                abs_pos: Some(dvec2(viewport.pos.x + self.first_scroll, viewport.pos.y)),
-                                margin: Default::default(),
-                                width: Size::fit(),
-                                height: Size::fill(),
-                                metrics: Metrics::default(),
-                            }, layout);
+                            cx.begin_turtle(
+                                Walk {
+                                    abs_pos: Some(dvec2(
+                                        viewport.pos.x + self.first_scroll,
+                                        viewport.pos.y,
+                                    )),
+                                    margin: Default::default(),
+                                    width: Size::fit(),
+                                    height: Size::fill(),
+                                    metrics: Metrics::default(),
+                                },
+                                layout,
+                            );
                         }
                     }
                     return Some(self.first_id);
                 }
-                ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
+                ListDrawState::Down {
+                    index,
+                    pos,
+                    viewport,
+                }
+                | ListDrawState::DownAgain {
+                    index,
+                    pos,
+                    viewport,
+                } => {
                     let is_down_again = draw_state.is_down_again();
                     let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
                         align_range,
-                        shift: pos, 
+                        shift: pos,
                         size: rect.size,
-                        index
+                        index,
                     });
-                    
+
                     if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) {
                         // lets scan upwards
-                        if self.first_id>0 && !is_down_again {
+                        if self.first_id > 0 && !is_down_again {
                             self.draw_state.set(ListDrawState::Up {
                                 index: self.first_id - 1,
                                 pos: self.first_scroll,
                                 hit_bottom: index >= self.range_end,
-                                viewport
+                                viewport,
                             });
                             match vi {
                                 Vec2Index::Y => {
-                                    cx.begin_turtle(Walk {
-                                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
-                                        margin: Default::default(),
-                                        width: Size::fill(),
-                                        height: Size::fit(),
-                                        metrics: Metrics::default(),
-                                    }, layout);
+                                    cx.begin_turtle(
+                                        Walk {
+                                            abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                            margin: Default::default(),
+                                            width: Size::fill(),
+                                            height: Size::fit(),
+                                            metrics: Metrics::default(),
+                                        },
+                                        layout,
+                                    );
                                 }
                                 Vec2Index::X => {
-                                    cx.begin_turtle(Walk {
-                                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
-                                        margin: Default::default(),
-                                        width: Size::fit(),
-                                        height: Size::fill(),
-                                        metrics: Metrics::default(),
-                                    }, layout);
+                                    cx.begin_turtle(
+                                        Walk {
+                                            abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                            margin: Default::default(),
+                                            width: Size::fit(),
+                                            height: Size::fill(),
+                                            metrics: Metrics::default(),
+                                        },
+                                        layout,
+                                    );
                                 }
                             }
                             return Some(self.first_id - 1);
-                        }
-                        else {
-                            self.draw_state.set(ListDrawState::End {viewport});
-                            return None
+                        } else {
+                            self.draw_state.set(ListDrawState::End { viewport });
+                            return None;
                         }
                     }
                     if is_down_again {
                         self.draw_state.set(ListDrawState::DownAgain {
                             index: index + 1,
                             pos: pos + rect.size.index(vi),
-                            viewport
+                            viewport,
                         });
-                    }
-                    else {
+                    } else {
                         self.draw_state.set(ListDrawState::Down {
                             index: index + 1,
                             pos: pos + rect.size.index(vi),
-                            viewport
+                            viewport,
                         });
                     }
                     match vi {
                         Vec2Index::Y => {
-                            cx.begin_turtle(Walk {
-                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + pos + rect.size.index(vi))),
-                                margin: Default::default(),
-                                width: Size::fill(),
-                                height: Size::fit(),
-                                metrics: Metrics::default(),
-                            }, layout);
+                            cx.begin_turtle(
+                                Walk {
+                                    abs_pos: Some(dvec2(
+                                        viewport.pos.x,
+                                        viewport.pos.y + pos + rect.size.index(vi),
+                                    )),
+                                    margin: Default::default(),
+                                    width: Size::fill(),
+                                    height: Size::fit(),
+                                    metrics: Metrics::default(),
+                                },
+                                layout,
+                            );
                         }
                         Vec2Index::X => {
-                            cx.begin_turtle(Walk {
-                                abs_pos: Some(dvec2(viewport.pos.x + pos + rect.size.index(vi), viewport.pos.y)),
-                                margin: Default::default(),
-                                width: Size::fit(),
-                                height: Size::fill(),
-                                metrics: Metrics::default(),
-                            }, layout);
+                            cx.begin_turtle(
+                                Walk {
+                                    abs_pos: Some(dvec2(
+                                        viewport.pos.x + pos + rect.size.index(vi),
+                                        viewport.pos.y,
+                                    )),
+                                    margin: Default::default(),
+                                    width: Size::fit(),
+                                    height: Size::fill(),
+                                    metrics: Metrics::default(),
+                                },
+                                layout,
+                            );
                         }
                     }
                     return Some(index + 1);
                 }
-                ListDrawState::Up {index, pos, hit_bottom, viewport} => {
+                ListDrawState::Up {
+                    index,
+                    pos,
+                    hit_bottom,
+                    viewport,
+                } => {
                     let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
@@ -482,64 +619,83 @@ impl PortalList {
                         align_range,
                         size: rect.size,
                         shift: 0.0,
-                        index
+                        index,
                     });
                     if index == self.range_start {
                         // we are at range start, but if we snap to top, we might need to walk further down as well
                         // therefore we now go 'down again' to make sure we have enough visible items
-                        // if we snap to the top 
+                        // if we snap to the top
                         if pos - rect.size.index(vi) > 0.0 {
                             // scan the tail
-                            if let Some(last_index) = self.draw_align_list.iter().map( | v | v.index).max() {
+                            if let Some(last_index) =
+                                self.draw_align_list.iter().map(|v| v.index).max()
+                            {
                                 // lets sum up all the items
-                                let total_height: f64 = self.draw_align_list.iter().map( | v | v.size.index(vi)).sum();
+                                let total_height: f64 =
+                                    self.draw_align_list.iter().map(|v| v.size.index(vi)).sum();
                                 self.draw_state.set(ListDrawState::DownAgain {
                                     index: last_index + 1,
                                     pos: total_height,
-                                    viewport
+                                    viewport,
                                 });
-                                cx.begin_turtle(Walk {
-                                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + total_height)),
-                                    margin: Default::default(),
-                                    width: Size::fill(),
-                                    height: Size::fit(),
-                                    metrics: Metrics::default(),
-                                }, Layout::flow_down());
+                                cx.begin_turtle(
+                                    Walk {
+                                        abs_pos: Some(dvec2(
+                                            viewport.pos.x,
+                                            viewport.pos.y + total_height,
+                                        )),
+                                        margin: Default::default(),
+                                        width: Size::fill(),
+                                        height: Size::fit(),
+                                        metrics: Metrics::default(),
+                                    },
+                                    Layout::flow_down(),
+                                );
                                 return Some(last_index + 1);
                             }
                         }
-                        self.draw_state.set(ListDrawState::End {viewport});
-                        return None
+                        self.draw_state.set(ListDrawState::End { viewport });
+                        return None;
                     }
-                    
-                    if !did_draw || pos < if hit_bottom {-viewport.size.index(vi)} else {0.0} {
-                        self.draw_state.set(ListDrawState::End {viewport});
-                        return None
+
+                    if !did_draw
+                        || pos
+                            < if hit_bottom {
+                                -viewport.size.index(vi)
+                            } else {
+                                0.0
+                            }
+                    {
+                        self.draw_state.set(ListDrawState::End { viewport });
+                        return None;
                     }
-                    
+
                     self.draw_state.set(ListDrawState::Up {
                         index: index - 1,
                         hit_bottom,
                         pos: pos - rect.size.index(vi),
-                        viewport
+                        viewport,
                     });
-                    
-                    cx.begin_turtle(Walk {
-                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
-                        margin: Default::default(),
-                        width: Size::fill(),
-                        height: Size::fit(),
-                        metrics: Metrics::default(),
-                    }, Layout::flow_down());
-                    
+
+                    cx.begin_turtle(
+                        Walk {
+                            abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                            margin: Default::default(),
+                            width: Size::fill(),
+                            height: Size::fit(),
+                            metrics: Metrics::default(),
+                        },
+                        Layout::flow_down(),
+                    );
+
                     return Some(index - 1);
                 }
-                _ => ()
+                _ => (),
             }
         }
         None
     }
-    
+
     /// Creates a new widget from the given `template` or returns an existing widget,
     /// if one already exists with the same `entry_id`.
     ///
@@ -568,7 +724,12 @@ impl PortalList {
     ///   did not exist or because the existing item with the given `entry_id` did not use the given `template`,
     ///   this returns a tuple of that widget and `false`.
     /// * If the given `template` could not be found, this returns `None`.
-    pub fn item_with_existed(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> (WidgetRef, bool) {
+    pub fn item_with_existed(
+        &mut self,
+        cx: &mut Cx,
+        entry_id: usize,
+        template: LiveId,
+    ) -> (WidgetRef, bool) {
         use std::collections::hash_map::Entry;
         if let Some(ptr) = self.templates.get(&template) {
             match self.items.entry(entry_id) {
@@ -576,29 +737,35 @@ impl PortalList {
                     if occ.get().template == template {
                         (occ.get().widget.clone(), true)
                     } else {
-                        let widget_ref =  if let Some(pos) = self.reusable_items.iter().position(|v| v.template == template){
+                        let widget_ref = if let Some(pos) = self
+                            .reusable_items
+                            .iter()
+                            .position(|v| v.template == template)
+                        {
                             self.reusable_items.remove(pos).widget
-                        }
-                        else{
+                        } else {
                             WidgetRef::new_from_ptr(cx, Some(*ptr))
                         };
-                        occ.insert(WidgetItem{
-                            template, 
-                            widget:widget_ref.clone(),
+                        occ.insert(WidgetItem {
+                            template,
+                            widget: widget_ref.clone(),
                             ..Default::default()
                         });
                         (widget_ref, false)
                     }
                 }
                 Entry::Vacant(vac) => {
-                    let widget_ref =  if let Some(pos) = self.reusable_items.iter().position(|v| v.template == template){
+                    let widget_ref = if let Some(pos) = self
+                        .reusable_items
+                        .iter()
+                        .position(|v| v.template == template)
+                    {
                         self.reusable_items.remove(pos).widget
-                    }
-                    else{
+                    } else {
                         WidgetRef::new_from_ptr(cx, Some(*ptr))
                     };
-                    vac.insert(WidgetItem{
-                        template, 
+                    vac.insert(WidgetItem {
+                        template,
                         widget: widget_ref.clone(),
                         ..Default::default()
                     });
@@ -625,7 +792,10 @@ impl PortalList {
     /// TODO: FIXME: this may not properly handle bottom-up lists
     ///              or lists that go from right to left.
     pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
-        const ZEROED: Rect = Rect { pos: Vec2d { x: 0.0, y: 0.0 }, size: Vec2d { x: 0.0, y: 0.0 } };
+        const ZEROED: Rect = Rect {
+            pos: Vec2d { x: 0.0, y: 0.0 },
+            size: Vec2d { x: 0.0, y: 0.0 },
+        };
 
         if let Some(item) = self.items.get(&entry_id) {
             let item_rect = item.widget.area().rect(cx);
@@ -642,31 +812,33 @@ impl PortalList {
             None
         }
     }
-    
+
     /// Returns a reference to the template and widget for the given `entry_id`.
-    pub fn get_item(&self, entry_id: usize) -> Option<(LiveId,WidgetRef)> {
-        if let Some(item) = self.items.get(&entry_id){
+    pub fn get_item(&self, entry_id: usize) -> Option<(LiveId, WidgetRef)> {
+        if let Some(item) = self.items.get(&entry_id) {
             Some((item.template.clone(), item.widget.clone()))
-        }
-        else{
+        } else {
             None
         }
     }
-    
+
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
         self.range_start = range_start;
         if self.range_end != range_end {
             self.range_end = range_end;
-            if self.tail_range{
+            if self.tail_range {
                 self.first_id = self.range_end.max(1) - 1;
                 self.first_scroll = 0.0;
             }
             self.update_scroll_bar(cx);
         }
     }
-    
+
     pub fn update_scroll_bar(&mut self, cx: &mut Cx) {
-        let scroll_pos = ((self.first_id - self.range_start) as f64 / ((self.range_end - self.range_start).max(self.view_window + 1) - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
+        let scroll_pos = ((self.first_id - self.range_start) as f64
+            / ((self.range_end - self.range_start).max(self.view_window + 1) - self.view_window)
+                as f64)
+            * self.scroll_bar.get_scroll_view_total();
         // move the scrollbar to the right 'top' position
         self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
     }
@@ -690,15 +862,16 @@ impl PortalList {
     ) {
         if self.range_start == self.range_end {
             self.first_scroll = 0.0
-        }
-        else {
+        } else {
             self.first_scroll += delta;
         }
 
         if self.first_id == self.range_start {
             self.first_scroll = self.first_scroll.min(self.max_pull_down);
             if transition_to_pulldown && self.first_scroll > 0.0 {
-                self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
+                self.scroll_state = ScrollState::Pulldown {
+                    next_frame: cx.new_next_frame(),
+                };
             }
         }
         if clip_top && self.first_id == self.range_start && self.first_scroll > 0.0 {
@@ -728,8 +901,7 @@ impl PortalList {
     ///
     /// Returns `false` if the sanity check passes as expected.
     pub fn fails_sanity_check_first_id_within_item_range(&self) -> bool {
-        !self.tail_range
-            && (self.first_id > self.range_end)
+        !self.tail_range && (self.first_id > self.range_end)
     }
 
     /// Initiates a smooth scrolling animation to the specified target item in the list.
@@ -747,9 +919,19 @@ impl PortalList {
     /// // Scrolls to item 42 at speed 100.0, including at most 30 items in the scroll animation.
     /// smooth_scroll_to(&mut cx, 42, 100.0, Some(30));
     /// ```
-    pub fn smooth_scroll_to(&mut self, cx: &mut Cx, target_id: usize, speed: f64, max_items_to_show: Option<usize>) {
-        if self.items.is_empty() { return };
-        if target_id < self.range_start || target_id > self.range_end { return };
+    pub fn smooth_scroll_to(
+        &mut self,
+        cx: &mut Cx,
+        target_id: usize,
+        speed: f64,
+        max_items_to_show: Option<usize>,
+    ) {
+        if self.items.is_empty() {
+            return;
+        };
+        if target_id < self.range_start || target_id > self.range_end {
+            return;
+        };
 
         let max_items_to_show = max_items_to_show.unwrap_or(SMOOTH_SCROLL_MAXIMUM_WINDOW);
         let scroll_direction: f64;
@@ -774,7 +956,7 @@ impl PortalList {
         self.scroll_state = ScrollState::ScrollingTo {
             target_id,
             delta: speed.abs() * scroll_direction as f64,
-            next_frame: cx.new_next_frame()
+            next_frame: cx.new_next_frame(),
         };
     }
 
@@ -787,8 +969,15 @@ impl PortalList {
     ///    is always reached, no matter the speed value.
     /// * `max_items_to_show`: The maximum number of items to show during the scrolling animation.
     ///    If `None`, the default value of 20 is used.
-    pub fn smooth_scroll_to_end(&mut self, cx: &mut Cx, speed: f64, max_items_to_show: Option<usize>) {
-        if self.items.is_empty() { return };
+    pub fn smooth_scroll_to_end(
+        &mut self,
+        cx: &mut Cx,
+        speed: f64,
+        max_items_to_show: Option<usize>,
+    ) {
+        if self.items.is_empty() {
+            return;
+        };
         let speed = speed * self.range_end as f64;
         self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show);
     }
@@ -799,21 +988,25 @@ impl PortalList {
     }
 }
 
-
 impl Widget for PortalList {
-
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        
+
         let mut scroll_to = None;
-        self.scroll_bar.handle_event_with(cx, event, &mut | _cx, action | {
-            // snap the scrollbar to a top-index with scroll_pos 0
-            if let ScrollBarAction::Scroll {scroll_pos, view_total, view_visible} = action {
-                scroll_to = Some((scroll_pos, scroll_pos+0.5 >= view_total - view_visible))
-            }
-        });
+        self.scroll_bar
+            .handle_event_with(cx, event, &mut |_cx, action| {
+                // snap the scrollbar to a top-index with scroll_pos 0
+                if let ScrollBarAction::Scroll {
+                    scroll_pos,
+                    view_total,
+                    view_visible,
+                } = action
+                {
+                    scroll_to = Some((scroll_pos, scroll_pos + 0.5 >= view_total - view_visible))
+                }
+            });
         if let Some((scroll_to, at_end)) = scroll_to {
-            if at_end && self.auto_tail{
+            if at_end && self.auto_tail {
                 self.first_id = self.range_end.max(1) - 1;
                 self.first_scroll = 0.0;
                 self.tail_range = true;
@@ -821,7 +1014,8 @@ impl Widget for PortalList {
                 self.tail_range = false;
             }
 
-            self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as usize;
+            self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
+                * self.view_window as f64) as usize;
             self.first_scroll = 0.0;
             cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
             self.was_scrolling = false;
@@ -830,13 +1024,17 @@ impl Widget for PortalList {
 
         for item in self.items.values_mut() {
             let item_uid = item.widget.widget_uid();
-            cx.group_widget_actions(uid, item_uid, |cx|{
+            cx.group_widget_actions(uid, item_uid, |cx| {
                 item.widget.handle_event(cx, event, scope)
             });
         }
-        
+
         match &mut self.scroll_state {
-            ScrollState::ScrollingTo {target_id, delta, next_frame} => {
+            ScrollState::ScrollingTo {
+                target_id,
+                delta,
+                next_frame,
+            } => {
                 if let Some(_) = next_frame.is_event(event) {
                     let target_id = *target_id;
 
@@ -870,10 +1068,10 @@ impl Widget for PortalList {
                     }
                 }
             }
-            ScrollState::Flick {delta, next_frame} => {
+            ScrollState::Flick { delta, next_frame } => {
                 if let Some(_) = next_frame.is_event(event) {
                     *delta = *delta * self.flick_scroll_decay;
-                    if delta.abs()>self.flick_scroll_minimum {
+                    if delta.abs() > self.flick_scroll_minimum {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
                         self.delta_top_scroll(cx, delta, false, true);
@@ -885,7 +1083,7 @@ impl Widget for PortalList {
                     }
                 }
             }
-            ScrollState::Pulldown {next_frame} => {
+            ScrollState::Pulldown { next_frame } => {
                 if let Some(_) = next_frame.is_event(event) {
                     // we have to bounce back
                     if self.first_id == self.range_start && self.first_scroll > 0.0 {
@@ -895,27 +1093,29 @@ impl Widget for PortalList {
                             // the pulldown animation is finished
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
-                        }
-                        else {
+                        } else {
                             *next_frame = cx.new_next_frame();
                             cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                         }
                         self.area.redraw(cx);
-                    }
-                    else {
+                    } else {
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
                     }
                 }
             }
-            _=>()
+            _ => (),
         }
         let vi = self.vec_index;
-        let is_scroll = if let Event::Scroll(_) = event {true} else {false};
-        if self.scroll_bar.is_area_captured(cx){
+        let is_scroll = if let Event::Scroll(_) = event {
+            true
+        } else {
+            false
+        };
+        if self.scroll_bar.is_area_captured(cx) {
             self.scroll_state = ScrollState::Stopped;
         }
-        if !self.scroll_bar.is_area_captured(cx) || is_scroll{ 
+        if !self.scroll_bar.is_area_captured(cx) || is_scroll {
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
                     self.tail_range = false;
@@ -925,8 +1125,8 @@ impl Widget for PortalList {
                     self.delta_top_scroll(cx, -e.scroll.index(vi), false, true);
                     cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                     self.area.redraw(cx);
-                },
-                
+                }
+
                 Hit::KeyDown(ke) => match ke.key_code {
                     KeyCode::Home => {
                         self.first_id = 0;
@@ -934,7 +1134,7 @@ impl Widget for PortalList {
                         self.tail_range = false;
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
-                    },
+                    }
                     KeyCode::End => {
                         self.first_id = self.range_end.max(1) - 1;
                         self.first_scroll = 0.0;
@@ -943,14 +1143,14 @@ impl Widget for PortalList {
                         }
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
-                    },
+                    }
                     KeyCode::PageUp => {
                         self.first_id = self.first_id.max(self.view_window) - self.view_window;
                         self.first_scroll = 0.0;
                         self.tail_range = false;
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
-                    },
+                    }
                     KeyCode::PageDown => {
                         self.first_id += self.view_window;
                         self.first_scroll = 0.0;
@@ -960,7 +1160,7 @@ impl Widget for PortalList {
                         self.detect_tail_in_draw = true;
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
-                    },
+                    }
                     KeyCode::ArrowDown => {
                         self.first_id += 1;
                         if self.first_id >= self.range_end.max(1) {
@@ -970,7 +1170,7 @@ impl Widget for PortalList {
                         self.first_scroll = 0.0;
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
-                    },
+                    }
                     KeyCode::ArrowUp => {
                         if self.first_id > 0 {
                             self.first_id -= 1;
@@ -982,9 +1182,9 @@ impl Widget for PortalList {
                             self.tail_range = false;
                             self.update_scroll_bar(cx);
                         }
-                    },
-                    _ => ()
-                }
+                    }
+                    _ => (),
+                },
                 Hit::FingerDown(fe) => {
                     // We allow other mouse buttons to grab key focus and stop the tail range behavior,
                     // but we only want the primary button (or touch) to actually scroll via dragging.
@@ -1001,7 +1201,10 @@ impl Widget for PortalList {
                     };
                     if self.drag_scrolling && fe.is_primary_hit() {
                         self.scroll_state = ScrollState::Drag {
-                            samples: vec![ScrollSample{abs: fe.abs.index(vi), time: fe.time}]
+                            samples: vec![ScrollSample {
+                                abs: fe.abs.index(vi),
+                                time: fe.time,
+                            }],
                         };
                     }
                 }
@@ -1009,71 +1212,75 @@ impl Widget for PortalList {
                     //log!("Finger move {} {}", e.time, e.abs);
                     cx.set_cursor(MouseCursor::Default);
                     match &mut self.scroll_state {
-                        ScrollState::Drag {samples}=>{
+                        ScrollState::Drag { samples } => {
                             let new_abs = e.abs.index(vi);
                             let old_sample = *samples.last().unwrap();
-                            samples.push(ScrollSample{abs:new_abs, time:e.time});
-                            if samples.len()>4{
+                            samples.push(ScrollSample {
+                                abs: new_abs,
+                                time: e.time,
+                            });
+                            if samples.len() > 4 {
                                 samples.remove(0);
                             }
                             self.delta_top_scroll(cx, new_abs - old_sample.abs, false, false);
                             self.area.redraw(cx);
                         }
-                        _=>()
+                        _ => (),
                     }
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     //log!("Finger up {} {}", e.time, e.abs);
                     match &mut self.scroll_state {
-                        ScrollState::Drag {samples}=>{
+                        ScrollState::Drag { samples } => {
                             // alright so we need to see if in the last couple of samples
                             // we have a certain distance per time
                             let mut last = None;
                             let mut scaled_delta = 0.0;
                             let mut total_delta = 0.0;
-                            for sample in samples.iter().rev(){
-                                if last.is_none(){
+                            for sample in samples.iter().rev() {
+                                if last.is_none() {
                                     last = Some(sample);
-                                }
-                                else{
+                                } else {
                                     total_delta += last.unwrap().abs - sample.abs;
-                                    scaled_delta += (last.unwrap().abs - sample.abs)/ (last.unwrap().time - sample.time)
+                                    scaled_delta += (last.unwrap().abs - sample.abs)
+                                        / (last.unwrap().time - sample.time)
                                 }
                             }
                             scaled_delta *= self.flick_scroll_scaling;
                             if self.first_id == self.range_start && self.first_scroll > 0.0 {
-                                self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
-                            }
-                            else if total_delta.abs() > 10.0 && scaled_delta.abs() > self.flick_scroll_minimum{
-                                
-                                self.scroll_state = ScrollState::Flick {
-                                    delta: scaled_delta.min(self.flick_scroll_maximum).max(-self.flick_scroll_maximum),
-                                    next_frame: cx.new_next_frame()
+                                self.scroll_state = ScrollState::Pulldown {
+                                    next_frame: cx.new_next_frame(),
                                 };
-                            }
-                            else {
+                            } else if total_delta.abs() > 10.0
+                                && scaled_delta.abs() > self.flick_scroll_minimum
+                            {
+                                self.scroll_state = ScrollState::Flick {
+                                    delta: scaled_delta
+                                        .min(self.flick_scroll_maximum)
+                                        .max(-self.flick_scroll_maximum),
+                                    next_frame: cx.new_next_frame(),
+                                };
+                            } else {
                                 self.was_scrolling = false;
                                 self.scroll_state = ScrollState::Stopped;
                             }
                         }
-                        _=>()
+                        _ => (),
                     }
                     // ok so. lets check our gap from 'drag'
                     // here we kinda have to take our last delta and animate it
                 }
-                Hit::KeyFocus(_) => {
-                }
-                Hit::KeyFocusLost(_) => {
-                }
-                _ => ()
+                Hit::KeyFocus(_) => {}
+                Hit::KeyFocusLost(_) => {}
+                _ => (),
             }
         }
     }
-    
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
-            return DrawStep::make_step()
+            return DrawStep::make_step();
         }
         // ok so if we are
         if let Some(_) = self.draw_state.get() {
@@ -1097,24 +1304,23 @@ impl PortalListRef {
             inner.first_scroll = s;
         }
     }
-    
+
     /// Sets the first item to be shown by this PortalList to the item with the given `id`.
     pub fn set_first_id(&self, id: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
         }
     }
-    
+
     /// Returns the ID of the item currently shown as the first item in this PortalList.
     pub fn first_id(&self) -> usize {
         if let Some(inner) = self.borrow() {
             inner.first_id
-        }
-        else {
+        } else {
             0
         }
     }
-    
+
     /// Enables whether the PortalList auto-tracks the last item in the list.
     ///
     /// If `true`, the PortalList will continually scroll to the last item in the list
@@ -1128,7 +1334,9 @@ impl PortalListRef {
 
     /// See [`PortalList::is_at_end()`].
     pub fn is_at_end(&self) -> bool {
-        let Some(inner) = self.borrow() else { return false };
+        let Some(inner) = self.borrow() else {
+            return false;
+        };
         inner.is_at_end()
     }
 
@@ -1155,56 +1363,65 @@ impl PortalListRef {
     ///
     /// See [`PortalListRef::set_first_id_and_scroll()`] for more information.
     pub fn scroll_position(&self) -> f64 {
-        let Some(inner) = self.borrow_mut() else { return 0.0 };
+        let Some(inner) = self.borrow_mut() else {
+            return 0.0;
+        };
         inner.first_scroll
     }
-    
+
     /// See [`PortalList::item()`].
     pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> WidgetRef {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.item(cx, entry_id, template)
-        }
-        else{
+        } else {
             WidgetRef::empty()
         }
     }
 
     /// See [`PortalList::item_with_existed()`].
-    pub fn item_with_existed(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> (WidgetRef, bool) {
-        if let Some(mut inner) = self.borrow_mut(){
+    pub fn item_with_existed(
+        &self,
+        cx: &mut Cx,
+        entry_id: usize,
+        template: LiveId,
+    ) -> (WidgetRef, bool) {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.item_with_existed(cx, entry_id, template)
-        }
-        else{
+        } else {
             (WidgetRef::empty(), false)
         }
     }
 
     /// See [`PortalList::get_item()`].
     pub fn get_item(&self, entry_id: usize) -> Option<(LiveId, WidgetRef)> {
-        let Some(inner) = self.borrow() else { return None };
+        let Some(inner) = self.borrow() else {
+            return None;
+        };
         inner.get_item(entry_id)
     }
-    
-    pub fn position_of_item(&self, cx:&Cx, entry_id: usize) -> Option<f64>{
-        let Some(inner) = self.borrow() else { return None };
+
+    pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
+        let Some(inner) = self.borrow() else {
+            return None;
+        };
         inner.position_of_item(cx, entry_id)
     }
-    
+
     pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);
         set
     }
-    
+
     fn items_with_actions_vec(&self, actions: &Actions, set: &mut ItemsWithActions) {
         let uid = self.widget_uid();
         if let Some(inner) = self.borrow() {
             for action in actions {
-                if let Some(action) = action.as_widget_action(){
-                    if let Some(group) = &action.group{
-                        if group.group_uid == uid{
+                if let Some(action) = action.as_widget_action() {
+                    if let Some(group) = &action.group {
+                        if group.group_uid == uid {
                             for (item_id, item) in inner.items.iter() {
-                                if group.item_uid == item.widget.widget_uid(){
+                                if group.item_uid == item.widget.widget_uid() {
                                     set.push((*item_id, item.widget.clone()))
                                 }
                             }
@@ -1214,14 +1431,14 @@ impl PortalListRef {
             }
         }
     }
-    
-    pub fn any_items_with_actions(&self, actions: &Actions)->bool {
+
+    pub fn any_items_with_actions(&self, actions: &Actions) -> bool {
         let uid = self.widget_uid();
         for action in actions {
-            if let Some(action) = action.as_widget_action(){
-                if let Some(group) = &action.group{
-                    if group.group_uid == uid{
-                        return true
+            if let Some(action) = action.as_widget_action() {
+                if let Some(group) = &action.group {
+                    if group.group_uid == uid {
+                        return true;
                     }
                 }
             }
@@ -1244,14 +1461,24 @@ impl PortalListRef {
     /// // Scrolls to item 42 at speed 100.0, including at most 30 items in the scroll animation.
     /// smooth_scroll_to(&mut cx, 42, 100.0, Some(30));
     /// ```
-    pub fn smooth_scroll_to(&self, cx: &mut Cx, target_id: usize, speed: f64, max_items_to_show: Option<usize>) {
-        let Some(mut inner) = self.borrow_mut() else { return };
-	    inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
+    pub fn smooth_scroll_to(
+        &self,
+        cx: &mut Cx,
+        target_id: usize,
+        speed: f64,
+        max_items_to_show: Option<usize>,
+    ) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
     }
 
     /// Returns the ID of the item that is currently being smoothly scrolled to, if any.
     pub fn is_smooth_scrolling(&self) -> Option<usize> {
-        let Some(inner) = self.borrow_mut() else { return None };
+        let Some(inner) = self.borrow_mut() else {
+            return None;
+        };
         if let ScrollState::ScrollingTo { target_id, .. } = inner.scroll_state {
             Some(target_id)
         } else {
@@ -1262,7 +1489,9 @@ impl PortalListRef {
     /// Returns whether the given `actions` contain an action indicating that this PortalList completed
     /// a smooth scroll, reaching the target.
     pub fn smooth_scroll_reached(&self, actions: &Actions) -> bool {
-        if let PortalListAction::SmoothScrollReached = actions.find_widget_action(self.widget_uid()).cast() {
+        if let PortalListAction::SmoothScrollReached =
+            actions.find_widget_action(self.widget_uid()).cast()
+        {
             return true;
         }
         false
@@ -1278,13 +1507,17 @@ impl PortalListRef {
     /// * `max_items_to_show`: The maximum number of items to show during the scrolling animation.
     ///    If `None`, the default value of 20 is used.
     pub fn smooth_scroll_to_end(&self, cx: &mut Cx, speed: f64, max_items_to_show: Option<usize>) {
-        let Some(mut inner) = self.borrow_mut() else { return };
-	    inner.smooth_scroll_to_end(cx, speed, max_items_to_show);
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.smooth_scroll_to_end(cx, speed, max_items_to_show);
     }
 
     /// Returns whether this PortalList is currently filling the viewport.
     pub fn is_filling_viewport(&self) -> bool {
-        let Some(inner) = self.borrow() else { return false };
+        let Some(inner) = self.borrow() else {
+            return false;
+        };
         inner.is_filling_viewport()
     }
 
@@ -1292,7 +1525,9 @@ impl PortalListRef {
     /// For instance, it is useful to show or hide a "jump to the most recent" button
     /// on a chat messages list
     pub fn further_items_bellow_exist(&self) -> bool {
-        let Some(inner) = self.borrow() else { return false };
+        let Some(inner) = self.borrow() else {
+            return false;
+        };
         !(inner.at_end || inner.not_filling_viewport)
     }
 }
@@ -1305,8 +1540,7 @@ impl PortalListSet {
             list.set_first_id(id)
         }
     }
-    
-    
+
     pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
         let mut set = Vec::new();
         for list in self.iter() {

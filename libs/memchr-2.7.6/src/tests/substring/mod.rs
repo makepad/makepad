@@ -64,19 +64,18 @@ const SEEDS: &'static [Seed] = &[
 /// search implementation only works for haystacks of some minimum length based
 /// of the pair of bytes selected and the size of the vector used.
 pub(crate) struct Runner {
-    fwd: Option<
-        Box<dyn FnMut(&[u8], &[u8]) -> Option<Option<usize>> + 'static>,
-    >,
-    rev: Option<
-        Box<dyn FnMut(&[u8], &[u8]) -> Option<Option<usize>> + 'static>,
-    >,
+    fwd: Option<Box<dyn FnMut(&[u8], &[u8]) -> Option<Option<usize>> + 'static>>,
+    rev: Option<Box<dyn FnMut(&[u8], &[u8]) -> Option<Option<usize>> + 'static>>,
 }
 
 impl Runner {
     /// Create a new test runner for forward and reverse substring search
     /// implementations.
     pub(crate) fn new() -> Runner {
-        Runner { fwd: None, rev: None }
+        Runner {
+            fwd: None,
+            rev: None,
+        }
     }
 
     /// Run all tests. This panics on the first failure.
@@ -191,12 +190,20 @@ impl Seed {
         fwd: Option<usize>,
         rev: Option<usize>,
     ) -> Seed {
-        Seed { needle, haystack, fwd, rev }
+        Seed {
+            needle,
+            haystack,
+            fwd,
+            rev,
+        }
     }
 
     fn generate(self) -> impl Iterator<Item = Test> {
         assert!(!self.needle.contains('#'), "needle must not contain '#'");
-        assert!(!self.haystack.contains('#'), "haystack must not contain '#'");
+        assert!(
+            !self.haystack.contains('#'),
+            "haystack must not contain '#'"
+        );
         (0..=Seed::MAX_PAD)
             // Generate tests for padding at the beginning of haystack.
             .map(move |pad| {
@@ -213,7 +220,12 @@ impl Seed {
                 } else {
                     self.rev.map(|i| pad + i)
                 };
-                Test { needle, haystack, fwd, rev }
+                Test {
+                    needle,
+                    haystack,
+                    fwd,
+                    rev,
+                }
             })
             // Generate tests for padding at the end of haystack.
             .chain((1..=Seed::MAX_PAD).map(move |pad| {
@@ -226,7 +238,12 @@ impl Seed {
                 } else {
                     self.rev
                 };
-                Test { needle, haystack, fwd, rev }
+                Test {
+                    needle,
+                    haystack,
+                    fwd,
+                    rev,
+                }
             }))
     }
 }

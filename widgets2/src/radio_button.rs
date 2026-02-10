@@ -1,33 +1,33 @@
 use crate::{
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
-    animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
 };
 
 use crate::makepad_draw::DrawSvg;
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.RadioButtonBase = #(RadioButton::register_widget(vm))
-    
+
     mod.widgets.RadioButtonFlat = set_type_default() do mod.widgets.RadioButtonBase{
         width: Fit
         height: Fit
         align: Align{x: 0., y: 0.}
         padding: theme.mspace_v_2{left: theme.space_2}
-        
+
         icon_walk: Walk{margin: Inset{left: 20.}}
-        
+
         label_walk: Walk{
             width: Fit
             height: Fit
             margin: theme.mspace_h_1{left: 13.}
         }
         label_align: Align{y: 0.0}
-        
+
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
@@ -96,7 +96,7 @@ script_mod!{
                 return sdf.result
             }
         }
-            
+
         draw_text +: {
             focus: instance(0.0)
             hover: instance(0.0)
@@ -123,7 +123,7 @@ script_mod!{
                 font_size: theme.font_size_p
             }
         }
-            
+
         animator: Animator{
             disabled: {
                 default: @off
@@ -296,46 +296,61 @@ script_mod!{
 pub enum RadioButtonAction {
     Clicked,
     #[default]
-    None
+    None,
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct RadioButton {
-    #[source] source: ScriptObjectRef,
-    
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
+    #[source]
+    source: ScriptObjectRef,
+
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
     #[apply_default]
     animator: Animator,
-    
-    #[live] icon_walk: Walk,
-    #[live] label_walk: Walk,
-    #[live] label_align: Align,
-    
-    #[redraw] #[live] draw_bg: DrawQuad,
-    #[live] draw_text: DrawText,
-    #[live] draw_icon: DrawSvg,
-    
-    #[live] text: ArcStringMut,
 
-    #[visible] #[live(true)]
+    #[live]
+    icon_walk: Walk,
+    #[live]
+    label_walk: Walk,
+    #[live]
+    label_align: Align,
+
+    #[redraw]
+    #[live]
+    draw_bg: DrawQuad,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_icon: DrawSvg,
+
+    #[live]
+    text: ArcStringMut,
+
+    #[visible]
+    #[live(true)]
     pub visible: bool,
-    
-    #[live] bind: String,
-    #[action_data] #[rust] action_data: WidgetActionData,
+
+    #[live]
+    bind: String,
+    #[action_data]
+    #[rust]
+    action_data: WidgetActionData,
 }
 
 impl RadioButton {
-    
     pub fn draw_radio_button(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
+        self.draw_text
+            .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
-        DrawStep::done() 
+        DrawStep::done()
     }
-    
+
     pub fn clicked(&self, actions: &Actions) -> bool {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             matches!(item.cast(), RadioButtonAction::Clicked)
@@ -343,32 +358,37 @@ impl RadioButton {
             false
         }
     }
-    
+
     pub fn active(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(active.on))
     }
-    
+
     pub fn set_active(&mut self, cx: &mut Cx, value: bool) {
         self.animator_toggle(cx, value, Animate::Yes, ids!(active.on), ids!(active.off));
     }
 }
 
 impl Widget for RadioButton {
-
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
-        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
+        self.animator_toggle(
+            cx,
+            disabled,
+            Animate::Yes,
+            ids!(disabled.on),
+            ids!(disabled.off),
+        );
     }
-                
+
     fn disabled(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(disabled.on))
     }
-    
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
-                
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -384,38 +404,42 @@ impl Widget for RadioButton {
             Hit::FingerHoverOut(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animator_play(cx, ids!(hover.off));
-            },
+            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, ids!(active.off)) {
                     self.animator_play(cx, ids!(hover.down));
                 }
                 self.set_key_focus(cx);
-            },
+            }
             Hit::FingerUp(_fe) => {
                 self.animator_play(cx, ids!(hover.on));
                 if self.animator_in_state(cx, ids!(active.off)) {
                     self.animator_play(cx, ids!(active.on));
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, RadioButtonAction::Clicked);
+                    cx.widget_action_with_data(
+                        &self.action_data,
+                        uid,
+                        &scope.path,
+                        RadioButtonAction::Clicked,
+                    );
                 }
                 // Radio buttons don't toggle off when clicked again
             }
-            Hit::FingerMove(_fe) => {
-            }
-            _ => ()
+            Hit::FingerMove(_fe) => {}
+            _ => (),
         }
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
         }
         self.draw_radio_button(cx, walk)
     }
-    
+
     fn text(&self) -> String {
         self.text.as_ref().to_string()
     }
-    
+
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
@@ -426,7 +450,7 @@ impl RadioButtonRef {
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.borrow().is_some_and(|inner| inner.clicked(actions))
     }
-    
+
     pub fn unselect(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.animator_play(cx, ids!(active.off));
@@ -437,18 +461,23 @@ impl RadioButtonRef {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.animator_in_state(cx, ids!(active.off)) {
                 inner.animator_play(cx, ids!(active.on));
-                cx.widget_action_with_data(&inner.action_data, inner.widget_uid(), &scope.path, RadioButtonAction::Clicked);
+                cx.widget_action_with_data(
+                    &inner.action_data,
+                    inner.widget_uid(),
+                    &scope.path,
+                    RadioButtonAction::Clicked,
+                );
             }
         }
     }
-    
+
     pub fn set_text(&self, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             let s = inner.text.as_mut_empty();
             s.push_str(text);
         }
     }
-    
+
     pub fn active(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
             inner.active(cx)
@@ -456,7 +485,7 @@ impl RadioButtonRef {
             false
         }
     }
-    
+
     pub fn set_active(&self, cx: &mut Cx, value: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_active(cx, value);

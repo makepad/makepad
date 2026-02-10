@@ -78,96 +78,96 @@ use super::*;
 /// - There exist no two values between `MIN_VALUE` and `MAX_VALUE` such that
 ///   when interpreted as a `C` they are considered identical (by, say, match).
 pub unsafe trait Contiguous: Copy + 'static {
-  /// The primitive integer type with an identical representation to this
-  /// type.
-  ///
-  /// Contiguous is broadly intended for use with fieldless enums, and for
-  /// these the correct integer type is easy: The enum should have a
-  /// `#[repr(Int)]` or `#[repr(C)]` attribute, (if it does not, it is
-  /// *unsound* to implement `Contiguous`!).
-  ///
-  /// - For `#[repr(Int)]`, use the listed `Int`. e.g. `#[repr(u8)]` should use
-  ///   `type Int = u8`.
-  ///
-  /// - For `#[repr(C)]`, use whichever type the C compiler will use to
-  ///   represent the given enum. This is usually `c_int` (from `std::os::raw`
-  ///   or `libc`), but it's up to you to make the determination as the
-  ///   implementer of the unsafe trait.
-  ///
-  /// For precise rules, see the list under "Safety" above.
-  type Int: Copy + Ord;
+    /// The primitive integer type with an identical representation to this
+    /// type.
+    ///
+    /// Contiguous is broadly intended for use with fieldless enums, and for
+    /// these the correct integer type is easy: The enum should have a
+    /// `#[repr(Int)]` or `#[repr(C)]` attribute, (if it does not, it is
+    /// *unsound* to implement `Contiguous`!).
+    ///
+    /// - For `#[repr(Int)]`, use the listed `Int`. e.g. `#[repr(u8)]` should use
+    ///   `type Int = u8`.
+    ///
+    /// - For `#[repr(C)]`, use whichever type the C compiler will use to
+    ///   represent the given enum. This is usually `c_int` (from `std::os::raw`
+    ///   or `libc`), but it's up to you to make the determination as the
+    ///   implementer of the unsafe trait.
+    ///
+    /// For precise rules, see the list under "Safety" above.
+    type Int: Copy + Ord;
 
-  /// The upper *inclusive* bound for valid instances of this type.
-  const MAX_VALUE: Self::Int;
+    /// The upper *inclusive* bound for valid instances of this type.
+    const MAX_VALUE: Self::Int;
 
-  /// The lower *inclusive* bound for valid instances of this type.
-  const MIN_VALUE: Self::Int;
+    /// The lower *inclusive* bound for valid instances of this type.
+    const MIN_VALUE: Self::Int;
 
-  /// If `value` is within the range for valid instances of this type,
-  /// returns `Some(converted_value)`, otherwise, returns `None`.
-  ///
-  /// This is a trait method so that you can write `value.into_integer()` in
-  /// your code. It is a contract of this trait that if you implement
-  /// `Contiguous` on your type you **must not** override this method.
-  ///
-  /// # Panics
-  ///
-  /// We will not panic for any correct implementation of `Contiguous`, but
-  /// *may* panic if we detect an incorrect one.
-  ///
-  /// This is undefined behavior regardless, so it could have been the nasal
-  /// demons at that point anyway ;).
-  #[inline]
-  #[cfg_attr(feature = "track_caller", track_caller)]
-  fn from_integer(value: Self::Int) -> Option<Self> {
-    // Guard against an illegal implementation of Contiguous. Annoyingly we
-    // can't rely on `transmute` to do this for us (see below), but
-    // whatever, this gets compiled into nothing in release.
-    assert!(size_of::<Self>() == size_of::<Self::Int>());
-    if Self::MIN_VALUE <= value && value <= Self::MAX_VALUE {
-      // SAFETY: We've checked their bounds (and their size, even though
-      // they've sworn under the Oath Of Unsafe Rust that that already
-      // matched) so this is allowed by `Contiguous`'s unsafe contract.
-      //
-      // So, the `transmute!`. ideally we'd use transmute here, which
-      // is more obviously safe. Sadly, we can't, as these types still
-      // have unspecified sizes.
-      Some(unsafe { transmute!(value) })
-    } else {
-      None
+    /// If `value` is within the range for valid instances of this type,
+    /// returns `Some(converted_value)`, otherwise, returns `None`.
+    ///
+    /// This is a trait method so that you can write `value.into_integer()` in
+    /// your code. It is a contract of this trait that if you implement
+    /// `Contiguous` on your type you **must not** override this method.
+    ///
+    /// # Panics
+    ///
+    /// We will not panic for any correct implementation of `Contiguous`, but
+    /// *may* panic if we detect an incorrect one.
+    ///
+    /// This is undefined behavior regardless, so it could have been the nasal
+    /// demons at that point anyway ;).
+    #[inline]
+    #[cfg_attr(feature = "track_caller", track_caller)]
+    fn from_integer(value: Self::Int) -> Option<Self> {
+        // Guard against an illegal implementation of Contiguous. Annoyingly we
+        // can't rely on `transmute` to do this for us (see below), but
+        // whatever, this gets compiled into nothing in release.
+        assert!(size_of::<Self>() == size_of::<Self::Int>());
+        if Self::MIN_VALUE <= value && value <= Self::MAX_VALUE {
+            // SAFETY: We've checked their bounds (and their size, even though
+            // they've sworn under the Oath Of Unsafe Rust that that already
+            // matched) so this is allowed by `Contiguous`'s unsafe contract.
+            //
+            // So, the `transmute!`. ideally we'd use transmute here, which
+            // is more obviously safe. Sadly, we can't, as these types still
+            // have unspecified sizes.
+            Some(unsafe { transmute!(value) })
+        } else {
+            None
+        }
     }
-  }
 
-  /// Perform the conversion from `C` into the underlying integral type. This
-  /// mostly exists otherwise generic code would need unsafe for the `value as
-  /// integer`
-  ///
-  /// This is a trait method so that you can write `value.into_integer()` in
-  /// your code. It is a contract of this trait that if you implement
-  /// `Contiguous` on your type you **must not** override this method.
-  ///
-  /// # Panics
-  ///
-  /// We will not panic for any correct implementation of `Contiguous`, but
-  /// *may* panic if we detect an incorrect one.
-  ///
-  /// This is undefined behavior regardless, so it could have been the nasal
-  /// demons at that point anyway ;).
-  #[inline]
-  #[cfg_attr(feature = "track_caller", track_caller)]
-  fn into_integer(self) -> Self::Int {
-    // Guard against an illegal implementation of Contiguous. Annoyingly we
-    // can't rely on `transmute` to do the size check for us (see
-    // `from_integer's comment`), but whatever, this gets compiled into
-    // nothing in release. Note that we don't check the result of cast
-    assert!(size_of::<Self>() == size_of::<Self::Int>());
+    /// Perform the conversion from `C` into the underlying integral type. This
+    /// mostly exists otherwise generic code would need unsafe for the `value as
+    /// integer`
+    ///
+    /// This is a trait method so that you can write `value.into_integer()` in
+    /// your code. It is a contract of this trait that if you implement
+    /// `Contiguous` on your type you **must not** override this method.
+    ///
+    /// # Panics
+    ///
+    /// We will not panic for any correct implementation of `Contiguous`, but
+    /// *may* panic if we detect an incorrect one.
+    ///
+    /// This is undefined behavior regardless, so it could have been the nasal
+    /// demons at that point anyway ;).
+    #[inline]
+    #[cfg_attr(feature = "track_caller", track_caller)]
+    fn into_integer(self) -> Self::Int {
+        // Guard against an illegal implementation of Contiguous. Annoyingly we
+        // can't rely on `transmute` to do the size check for us (see
+        // `from_integer's comment`), but whatever, this gets compiled into
+        // nothing in release. Note that we don't check the result of cast
+        assert!(size_of::<Self>() == size_of::<Self::Int>());
 
-    // SAFETY: The unsafe contract requires that these have identical
-    // representations, and that the range be entirely valid. Using
-    // transmute! instead of transmute here is annoying, but is required
-    // as `Self` and `Self::Int` have unspecified sizes still.
-    unsafe { transmute!(self) }
-  }
+        // SAFETY: The unsafe contract requires that these have identical
+        // representations, and that the range be entirely valid. Using
+        // transmute! instead of transmute here is annoying, but is required
+        // as `Self` and `Self::Int` have unspecified sizes still.
+        unsafe { transmute!(self) }
+    }
 }
 
 macro_rules! impl_contiguous {

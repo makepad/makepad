@@ -1,8 +1,10 @@
-use super::linux_media::CxLinuxMedia;
 use super::super::cx_stdin::PollTimers;
+use super::linux_media::CxLinuxMedia;
 
-use std::{time::Instant, rc::Rc, cell::RefCell};
-use crate::{cx::Cx, opengl_cx::OpenglCx, x11::xlib_app::get_xlib_app_global, CxOsApi, OpenUrlInPlace};
+use crate::{
+    cx::Cx, opengl_cx::OpenglCx, x11::xlib_app::get_xlib_app_global, CxOsApi, OpenUrlInPlace,
+};
+use std::{cell::RefCell, rc::Rc, time::Instant};
 // Import OpenglCx from x11 for the unified type
 
 // Protocol detection for windowing system
@@ -26,7 +28,6 @@ pub enum WindowingProtocol {
     X11,
     Wayland,
 }
-
 
 impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
@@ -72,12 +73,8 @@ impl Cx {
 
         // Launch appropriate backend
         match protocol {
-            WindowingProtocol::Wayland => {
-                Self::wayland_event_loop(cx)
-            }
-            WindowingProtocol::X11 => {
-                Self::x11_event_loop(cx)
-            }
+            WindowingProtocol::Wayland => Self::wayland_event_loop(cx),
+            WindowingProtocol::X11 => Self::x11_event_loop(cx),
         }
     }
 
@@ -89,15 +86,13 @@ impl Cx {
         super::x11::linux_x11::x11_event_loop(cx)
     }
 
-    pub(crate) fn handle_networking_events(&mut self) {
-
-    }
+    pub(crate) fn handle_networking_events(&mut self) {}
 }
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR"){
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
             self.live_registry.borrow_mut().package_root = Some(item.to_string());
         }
         self.live_expand();
@@ -108,15 +103,20 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
     }
 
-    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
+    fn spawn_thread<F>(&mut self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
         std::thread::spawn(f);
     }
 
-    fn seconds_since_app_start(&self)->f64{
-        Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    fn seconds_since_app_start(&self) -> f64 {
+        Instant::now()
+            .duration_since(self.os.start_time.unwrap())
+            .as_secs_f64()
     }
 
-    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+    fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {
         crate::error!("open_url not implemented on this platform");
     }
 }

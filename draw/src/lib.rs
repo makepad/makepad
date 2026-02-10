@@ -2,62 +2,37 @@
 pub use makepad_platform;
 pub use makepad_platform::*;
 pub use makepad_vector;
-pub mod match_event;
-pub mod overlay;
 pub mod cx_2d;
-pub mod draw_list_2d;
 pub mod cx_3d;
 pub mod cx_draw;
-pub mod shader;
-pub mod turtle;
+pub mod draw_list_2d;
 pub mod geometry;
-pub mod nav;
 pub mod icon_atlas;
+pub mod match_event;
+pub mod nav;
+pub mod overlay;
+pub mod shader;
 pub mod text;
- 
+pub mod turtle;
+
 pub use crate::{
-    match_event::MatchEvent, 
-    turtle::{
-        Layout,
-        Walk,
-        Metrics,
-        Align,
-        Padding,
-        Flow,
-        Size,
-        TurtleAlignRange,
-        DeferredWalk
-    },
-    overlay::Overlay,
-    nav::{
-        NavRole,
-        NavOrder,
-        NavStop,
-        NavItem,
-        NavScrollIndex
-    },
-    draw_list_2d::{
-        DrawListExt,
-        DrawList2d,
-        ManyInstances,
-        Redrawing,
-        RedrawingApi,
-    },
-    cx_draw::CxDraw,
     cx_2d::Cx2d,
     cx_3d::Cx3d,
+    cx_draw::CxDraw,
+    draw_list_2d::{DrawList2d, DrawListExt, ManyInstances, Redrawing, RedrawingApi},
+    geometry::{GeometryGen, GeometryQuad2D},
+    match_event::MatchEvent,
+    nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
+    overlay::Overlay,
     shader::{
+        draw_color::DrawColor,
         //draw_shape::{DrawShape, Shape, Fill},
         draw_icon::DrawIcon,
-        draw_quad::DrawQuad,
         draw_line::DrawLine,
+        draw_quad::DrawQuad,
         draw_text::DrawText,
-        draw_color::DrawColor,
     },
-    geometry::{
-        GeometryGen,
-        GeometryQuad2D,
-    },
+    turtle::{Align, DeferredWalk, Flow, Layout, Metrics, Padding, Size, TurtleAlignRange, Walk},
 };
 
 pub fn live_design(cx: &mut Cx) {

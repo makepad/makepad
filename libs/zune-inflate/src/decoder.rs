@@ -21,26 +21,26 @@ use crate::constants::{
     FASTCOPY_BYTES, FASTLOOP_MAX_BYTES_WRITTEN, HUFFDEC_END_OF_BLOCK, HUFFDEC_EXCEPTIONAL,
     HUFFDEC_LITERAL, HUFFDEC_SUITABLE_POINTER, LITLEN_DECODE_BITS, LITLEN_DECODE_RESULTS,
     LITLEN_ENOUGH, LITLEN_TABLE_BITS, OFFSET_DECODE_RESULTS, OFFSET_ENOUGH, OFFSET_TABLEBITS,
-    PRECODE_DECODE_RESULTS, PRECODE_ENOUGH, PRECODE_TABLE_BITS
+    PRECODE_DECODE_RESULTS, PRECODE_ENOUGH, PRECODE_TABLE_BITS,
 };
 use crate::errors::{DecodeErrorStatus, InflateDecodeErrors};
 #[cfg(feature = "gzip")]
 use crate::gzip_constants::{
     GZIP_CM_DEFLATE, GZIP_FCOMMENT, GZIP_FEXTRA, GZIP_FHCRC, GZIP_FNAME, GZIP_FOOTER_SIZE,
-    GZIP_FRESERVED, GZIP_ID1, GZIP_ID2
+    GZIP_FRESERVED, GZIP_ID1, GZIP_ID2,
 };
 use crate::utils::{copy_rep_matches, fixed_copy_within, make_decode_table_entry};
 
 struct DeflateHeaderTables {
     litlen_decode_table: [u32; LITLEN_ENOUGH],
-    offset_decode_table: [u32; OFFSET_ENOUGH]
+    offset_decode_table: [u32; OFFSET_ENOUGH],
 }
 
 impl Default for DeflateHeaderTables {
     fn default() -> Self {
         DeflateHeaderTables {
             litlen_decode_table: [0; LITLEN_ENOUGH],
-            offset_decode_table: [0; OFFSET_ENOUGH]
+            offset_decode_table: [0; OFFSET_ENOUGH],
         }
     }
 }
@@ -52,17 +52,17 @@ impl Default for DeflateHeaderTables {
 /// the deflate decoder.
 #[derive(Copy, Clone)]
 pub struct DeflateOptions {
-    limit:            usize,
+    limit: usize,
     confirm_checksum: bool,
-    size_hint:        usize
+    size_hint: usize,
 }
 
 impl Default for DeflateOptions {
     fn default() -> Self {
         DeflateOptions {
-            limit:            1 << 30,
+            limit: 1 << 30,
             confirm_checksum: true,
-            size_hint:        37000
+            size_hint: 37000,
         }
     }
 }
@@ -151,13 +151,13 @@ impl DeflateOptions {
 ///
 /// [options]: DeflateOptions
 pub struct DeflateDecoder<'a> {
-    data:                  &'a [u8],
-    position:              usize,
-    stream:                BitStreamReader<'a>,
-    is_last_block:         bool,
-    static_codes_loaded:   bool,
+    data: &'a [u8],
+    position: usize,
+    stream: BitStreamReader<'a>,
+    is_last_block: bool,
+    static_codes_loaded: bool,
     deflate_header_tables: DeflateHeaderTables,
-    options:               DeflateOptions
+    options: DeflateOptions,
 }
 
 impl<'a> DeflateDecoder<'a> {
@@ -221,7 +221,7 @@ impl<'a> DeflateDecoder<'a> {
             is_last_block: false,
             static_codes_loaded: false,
             deflate_header_tables: DeflateHeaderTables::default(),
-            options
+            options,
         }
     }
     /// Decode zlib-encoded data returning the uncompressed in a `Vec<u8>`
@@ -258,7 +258,7 @@ impl<'a> DeflateDecoder<'a> {
         /* Deflate */
         {
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::InsufficientData
+                DecodeErrorStatus::InsufficientData,
             ));
         }
 
@@ -283,21 +283,21 @@ impl<'a> DeflateDecoder<'a> {
                 )));
             }
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::GenericStr(format!("Unknown zlib compression method {cm}"))
+                DecodeErrorStatus::GenericStr(format!("Unknown zlib compression method {cm}")),
             ));
         }
         if cinfo > 7 {
             return Err(InflateDecodeErrors::new_with_error(
                 DecodeErrorStatus::GenericStr(format!(
                     "Unknown cinfo `{cinfo}` greater than 7, not allowed"
-                ))
+                )),
             ));
         }
         let flag_checks = (u16::from(cmf) * 256) + u16::from(flg);
 
         if flag_checks % 31 != 0 {
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::Generic("FCHECK integrity not preserved")
+                DecodeErrorStatus::Generic("FCHECK integrity not preserved"),
             ));
         }
 
@@ -361,26 +361,26 @@ impl<'a> DeflateDecoder<'a> {
     pub fn decode_gzip(&mut self) -> Result<Vec<u8>, InflateDecodeErrors> {
         if self.data.len() < 18 {
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::InsufficientData
+                DecodeErrorStatus::InsufficientData,
             ));
         }
 
         if self.data[self.position] != GZIP_ID1 {
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::CorruptData
+                DecodeErrorStatus::CorruptData,
             ));
         }
         self.position += 1;
         if self.data[self.position] != GZIP_ID2 {
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::CorruptData
+                DecodeErrorStatus::CorruptData,
             ));
         }
         self.position += 1;
 
         if self.data[self.position] != GZIP_CM_DEFLATE {
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::CorruptData
+                DecodeErrorStatus::CorruptData,
             ));
         }
         self.position += 1;
@@ -397,7 +397,7 @@ impl<'a> DeflateDecoder<'a> {
 
         if (flg & GZIP_FRESERVED) != 0 {
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::CorruptData
+                DecodeErrorStatus::CorruptData,
             ));
         }
         // extra field
@@ -411,7 +411,7 @@ impl<'a> DeflateDecoder<'a> {
 
             if self.data.len().saturating_sub(self.position) < xlen + GZIP_FOOTER_SIZE {
                 return Err(InflateDecodeErrors::new_with_error(
-                    DecodeErrorStatus::CorruptData
+                    DecodeErrorStatus::CorruptData,
                 ));
             }
             self.position += xlen;
@@ -427,7 +427,7 @@ impl<'a> DeflateDecoder<'a> {
                     }
                 } else {
                     return Err(InflateDecodeErrors::new_with_error(
-                        DecodeErrorStatus::InsufficientData
+                        DecodeErrorStatus::InsufficientData,
                     ));
                 }
             }
@@ -443,7 +443,7 @@ impl<'a> DeflateDecoder<'a> {
                     }
                 } else {
                     return Err(InflateDecodeErrors::new_with_error(
-                        DecodeErrorStatus::InsufficientData
+                        DecodeErrorStatus::InsufficientData,
                     ));
                 }
             }
@@ -455,7 +455,7 @@ impl<'a> DeflateDecoder<'a> {
 
         if self.position + GZIP_FOOTER_SIZE > self.data.len() {
             return Err(InflateDecodeErrors::new_with_error(
-                DecodeErrorStatus::InsufficientData
+                DecodeErrorStatus::InsufficientData,
             ));
         }
 
@@ -543,7 +543,8 @@ impl<'a> DeflateDecoder<'a> {
     }
     #[allow(unused_assignments)]
     fn start_deflate_block_inner(
-        &mut self, out_block: &mut Vec<u8>
+        &mut self,
+        out_block: &mut Vec<u8>,
     ) -> Result<(), InflateDecodeErrors> {
         // start deflate decode
         // re-read the stream so that we can remove code read by zlib
@@ -914,7 +915,7 @@ impl<'a> DeflateDecoder<'a> {
                                 fixed_copy_within::<FASTCOPY_BYTES>(
                                     out_block,
                                     src_position,
-                                    dest_position
+                                    dest_position,
                                 );
 
                                 src_position += offset;
@@ -950,7 +951,7 @@ impl<'a> DeflateDecoder<'a> {
                                 fixed_copy_within::<FASTCOPY_BYTES>(
                                     out_block,
                                     dest_src_offset,
-                                    current_position
+                                    current_position,
                                 );
 
                                 dest_src_offset += FASTCOPY_BYTES;
@@ -967,7 +968,7 @@ impl<'a> DeflateDecoder<'a> {
 
                             let err_msg = DecodeErrorStatus::OutputLimitExceeded(
                                 self.options.limit,
-                                dest_offset
+                                dest_offset,
                             );
                             let error = InflateDecodeErrors::new(err_msg, out_block);
 
@@ -1183,7 +1184,7 @@ impl<'a> DeflateDecoder<'a> {
                 &mut precode_decode_table,
                 PRECODE_TABLE_BITS,
                 DEFLATE_NUM_PRECODE_SYMS,
-                DEFLATE_MAX_CODEWORD_LENGTH
+                DEFLATE_MAX_CODEWORD_LENGTH,
             )?;
 
             /* Decode the litlen and offset codeword lengths. */
@@ -1302,7 +1303,7 @@ impl<'a> DeflateDecoder<'a> {
             &mut offset_decode_table,
             OFFSET_TABLEBITS,
             num_offset_syms,
-            DEFLATE_MAX_OFFSET_CODEWORD_LENGTH
+            DEFLATE_MAX_OFFSET_CODEWORD_LENGTH,
         )?;
 
         self.build_decode_table_inner(
@@ -1311,7 +1312,7 @@ impl<'a> DeflateDecoder<'a> {
             &mut litlen_decode_table,
             LITLEN_TABLE_BITS,
             num_litlen_syms,
-            DEFLATE_MAX_LITLEN_CODEWORD_LENGTH
+            DEFLATE_MAX_LITLEN_CODEWORD_LENGTH,
         )?;
 
         self.deflate_header_tables.offset_decode_table = offset_decode_table;
@@ -1322,8 +1323,13 @@ impl<'a> DeflateDecoder<'a> {
     /// Build the decode table for the precode
     #[allow(clippy::needless_range_loop)]
     fn build_decode_table_inner(
-        &mut self, lens: &[u8], decode_results: &[u32], decode_table: &mut [u32],
-        table_bits: usize, num_syms: usize, mut max_codeword_len: usize
+        &mut self,
+        lens: &[u8],
+        decode_results: &[u32],
+        decode_table: &mut [u32],
+        table_bits: usize,
+        num_syms: usize,
+        mut max_codeword_len: usize,
     ) -> Result<(), DecodeErrorStatus> {
         const BITS: u32 = usize::BITS - 1;
 
@@ -1412,7 +1418,7 @@ impl<'a> DeflateDecoder<'a> {
                  */
                 if codespace_used != 1 << (max_codeword_len - 1) || len_counts[1] != 1 {
                     return Err(DecodeErrorStatus::Generic(
-                        "Cannot work with empty pre-code table"
+                        "Cannot work with empty pre-code table",
                     ));
                 }
                 make_decode_table_entry(decode_results, usize::from(sorted_syms[i]), 1)
@@ -1471,7 +1477,7 @@ impl<'a> DeflateDecoder<'a> {
                 let entry = make_decode_table_entry(
                     decode_results,
                     usize::from(sorted_syms[i]),
-                    len as u32
+                    len as u32,
                 );
                 i += 1;
                 // fill first entry for current codeword
@@ -1597,7 +1603,7 @@ impl<'a> DeflateDecoder<'a> {
             let entry = make_decode_table_entry(
                 decode_results,
                 sorted_syms[i] as usize,
-                (len - table_bits) as u32
+                (len - table_bits) as u32,
             );
             i += 1;
 

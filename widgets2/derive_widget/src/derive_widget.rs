@@ -117,13 +117,23 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 .add(".widget_tree_walk(nodes)");
             tb.add("   }");
             // Selection API delegation through wrap field
-            tb.add("    fn selection_text_len(&self) -> usize { self.").ident(wrap_field).add(".selection_text_len() }");
+            tb.add("    fn selection_text_len(&self) -> usize { self.")
+                .ident(wrap_field)
+                .add(".selection_text_len() }");
             tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> { self.").ident(wrap_field).add(".selection_point_to_char_index(cx, abs) }");
-            tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.").ident(wrap_field).add(".selection_set(anchor, cursor) }");
-            tb.add("    fn selection_clear(&mut self) { self.").ident(wrap_field).add(".selection_clear() }");
-            tb.add("    fn selection_select_all(&mut self) { self.").ident(wrap_field).add(".selection_select_all() }");
+            tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.")
+                .ident(wrap_field)
+                .add(".selection_set(anchor, cursor) }");
+            tb.add("    fn selection_clear(&mut self) { self.")
+                .ident(wrap_field)
+                .add(".selection_clear() }");
+            tb.add("    fn selection_select_all(&mut self) { self.")
+                .ident(wrap_field)
+                .add(".selection_select_all() }");
             tb.add("    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String { self.").ident(wrap_field).add(".selection_get_text_for_range(start, end) }");
-            tb.add("    fn selection_get_full_text(&self) -> String { self.").ident(wrap_field).add(".selection_get_full_text() }");
+            tb.add("    fn selection_get_full_text(&self) -> String { self.")
+                .ident(wrap_field)
+                .add(".selection_get_full_text() }");
         } else {
             if let Some(visible_field) = &visible_field {
                 tb.add("    fn visible(&self)->bool{ self.")
@@ -217,27 +227,37 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 // Selection API delegation through find fields (first non-default wins)
                 tb.add("    fn selection_text_len(&self) -> usize {");
                 for find_field in &find_fields {
-                    tb.add("        { let v = self.").ident(find_field).add(".selection_text_len(); if v > 0 { return v; } }");
+                    tb.add("        { let v = self.")
+                        .ident(find_field)
+                        .add(".selection_text_len(); if v > 0 { return v; } }");
                 }
                 tb.add("        0 }");
                 tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {");
                 for find_field in &find_fields {
-                    tb.add("        if let Some(v) = self.").ident(find_field).add(".selection_point_to_char_index(cx, abs) { return Some(v); }");
+                    tb.add("        if let Some(v) = self.")
+                        .ident(find_field)
+                        .add(".selection_point_to_char_index(cx, abs) { return Some(v); }");
                 }
                 tb.add("        None }");
                 tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) {");
                 for find_field in &find_fields {
-                    tb.add("        self.").ident(find_field).add(".selection_set(anchor, cursor);");
+                    tb.add("        self.")
+                        .ident(find_field)
+                        .add(".selection_set(anchor, cursor);");
                 }
                 tb.add("    }");
                 tb.add("    fn selection_clear(&mut self) {");
                 for find_field in &find_fields {
-                    tb.add("        self.").ident(find_field).add(".selection_clear();");
+                    tb.add("        self.")
+                        .ident(find_field)
+                        .add(".selection_clear();");
                 }
                 tb.add("    }");
                 tb.add("    fn selection_select_all(&mut self) {");
                 for find_field in &find_fields {
-                    tb.add("        self.").ident(find_field).add(".selection_select_all();");
+                    tb.add("        self.")
+                        .ident(find_field)
+                        .add(".selection_select_all();");
                 }
                 tb.add("    }");
                 tb.add("    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {");
@@ -247,7 +267,9 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 tb.add("        String::new() }");
                 tb.add("    fn selection_get_full_text(&self) -> String {");
                 for find_field in &find_fields {
-                    tb.add("        { let v = self.").ident(find_field).add(".selection_get_full_text(); if !v.is_empty() { return v; } }");
+                    tb.add("        { let v = self.")
+                        .ident(find_field)
+                        .add(".selection_get_full_text(); if !v.is_empty() { return v; } }");
                 }
                 tb.add("        String::new() }");
             } else if let Some(deref_field) = &deref_field {
@@ -268,13 +290,23 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                     .add(".widget_tree_walk(nodes)");
                 tb.add("   }");
                 // Selection API delegation through deref field
-                tb.add("    fn selection_text_len(&self) -> usize { self.").ident(deref_field).add(".selection_text_len() }");
+                tb.add("    fn selection_text_len(&self) -> usize { self.")
+                    .ident(deref_field)
+                    .add(".selection_text_len() }");
                 tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> { self.").ident(deref_field).add(".selection_point_to_char_index(cx, abs) }");
-                tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.").ident(deref_field).add(".selection_set(anchor, cursor) }");
-                tb.add("    fn selection_clear(&mut self) { self.").ident(deref_field).add(".selection_clear() }");
-                tb.add("    fn selection_select_all(&mut self) { self.").ident(deref_field).add(".selection_select_all() }");
+                tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.")
+                    .ident(deref_field)
+                    .add(".selection_set(anchor, cursor) }");
+                tb.add("    fn selection_clear(&mut self) { self.")
+                    .ident(deref_field)
+                    .add(".selection_clear() }");
+                tb.add("    fn selection_select_all(&mut self) { self.")
+                    .ident(deref_field)
+                    .add(".selection_select_all() }");
                 tb.add("    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String { self.").ident(deref_field).add(".selection_get_text_for_range(start, end) }");
-                tb.add("    fn selection_get_full_text(&self) -> String { self.").ident(deref_field).add(".selection_get_full_text() }");
+                tb.add("    fn selection_get_full_text(&self) -> String { self.")
+                    .ident(deref_field)
+                    .add(".selection_get_full_text() }");
             } else {
                 tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){}");
                 tb.add("    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");

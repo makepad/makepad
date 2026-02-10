@@ -1,9 +1,9 @@
-use crate::{Abgr, Argb, Bgr, Bgra, Grb, Rgb, Rgba};
-use crate::formats::gray_a::GrayA;
 use crate::formats::gray::Gray_v08;
 #[cfg(feature = "unstable-experimental")]
 use crate::formats::gray::Gray_v09;
+use crate::formats::gray_a::GrayA;
 use crate::formats::gray_alpha::GrayAlpha_v08;
+use crate::{Abgr, Argb, Bgr, Bgra, Grb, Rgb, Rgba};
 
 macro_rules! inherent_impls {
     ($name:ident, $new_fn:ident, [$($field:tt $var:ident),*]) => {

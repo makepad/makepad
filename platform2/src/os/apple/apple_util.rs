@@ -1,33 +1,19 @@
-use {
-    crate::{
-        os::{
-            apple::apple_sys::*,
-        },
-        event::{
-            KeyCode,
-            KeyModifiers
-        },
-        cursor::MouseCursor
-    }
+use crate::{
+    cursor::MouseCursor,
+    event::{KeyCode, KeyModifiers},
+    os::apple::apple_sys::*,
 };
-
 
 pub const fn four_char_as_u32(s: &str) -> u32 {
     let b = s.as_bytes();
-    ((b[0] as u32) << 24)
-        | ((b[1] as u32) << 16)
-        | ((b[2] as u32) << 8)
-        | ((b[3] as u32))
+    ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
 }
 
 pub fn nsstring_to_string(string: ObjcId) -> String {
     unsafe {
         let utf8_string: *const std::os::raw::c_uchar = msg_send![string, UTF8String];
         let utf8_len: usize = msg_send![string, lengthOfBytesUsingEncoding: UTF8_ENCODING];
-        let slice = std::slice::from_raw_parts(
-            utf8_string,
-            utf8_len,
-        );
+        let slice = std::slice::from_raw_parts(utf8_string, utf8_len);
         std::str::from_utf8_unchecked(slice).to_owned()
     }
 }
@@ -48,7 +34,7 @@ pub fn str_to_nsstring(str: &str) -> ObjcId {
 
 pub fn load_native_cursor(cursor_name: &str) -> ObjcId {
     let sel = Sel::register(cursor_name);
-    let id: ObjcId = unsafe {msg_send![class!(NSCursor), performSelector: sel]};
+    let id: ObjcId = unsafe { msg_send![class!(NSCursor), performSelector: sel] };
     id
 }
 
@@ -69,21 +55,42 @@ pub unsafe fn ccfstr_from_str(inp: &str) -> CFStringRef {
 
 pub unsafe fn cfstring_ref_to_string(cfstring: CFStringRef) -> String {
     let length = CFStringGetLength(cfstring);
-    let range = CFRange {location: 0, length};
+    let range = CFRange {
+        location: 0,
+        length,
+    };
     let mut num_bytes = 0u64;
-    let converted = CFStringGetBytes(cfstring, range, kCFStringEncodingUTF8, 0, false, 0 as *mut u8, 0, &mut num_bytes);
-    if converted == 0 || num_bytes == 0 {return String::new()}
+    let converted = CFStringGetBytes(
+        cfstring,
+        range,
+        kCFStringEncodingUTF8,
+        0,
+        false,
+        0 as *mut u8,
+        0,
+        &mut num_bytes,
+    );
+    if converted == 0 || num_bytes == 0 {
+        return String::new();
+    }
     let mut buffer = Vec::new();
     buffer.resize(num_bytes as usize, 0u8);
-    CFStringGetBytes(cfstring, range, kCFStringEncodingUTF8, 0, false, buffer.as_mut_ptr() as *mut u8, num_bytes, 0 as *mut u64);
+    CFStringGetBytes(
+        cfstring,
+        range,
+        kCFStringEncodingUTF8,
+        0,
+        false,
+        buffer.as_mut_ptr() as *mut u8,
+        num_bytes,
+        0 as *mut u64,
+    );
     if let Ok(val) = String::from_utf8(buffer) {
         val
-    }
-    else {
+    } else {
         String::new()
     }
 }
-
 
 pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
     unsafe {
@@ -94,17 +101,19 @@ pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
         let cursor_plist = str_to_nsstring("info.plist");
         let key_x = str_to_nsstring("hotx");
         let key_y = str_to_nsstring("hoty");
-        
-        let cursor_path: ObjcId = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
+
+        let cursor_path: ObjcId =
+            msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
         let pdf_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
-        let info_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
-        
+        let info_path: ObjcId =
+            msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
+
         let ns_image: ObjcId = msg_send![class!(NSImage), alloc];
         let () = msg_send![ns_image, initByReferencingFile: pdf_path];
         let info: ObjcId = msg_send![class!(NSDictionary), dictionaryWithContentsOfFile: info_path];
         //let image = NSImage::alloc(nil).initByReferencingFile_(pdf_path);
         // let info = NSDictionary::dictionaryWithContentsOfFile_(nil, info_path);
-        
+
         let x: ObjcId = msg_send![info, valueForKey: key_x]; //info.valueForKey_(key_x);
         let y: ObjcId = msg_send![info, valueForKey: key_y]; //info.valueForKey_(key_y);
         let point = NSPoint {
@@ -116,24 +125,23 @@ pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
     }
 }
 
-
 pub fn get_event_char(event: ObjcId) -> char {
     unsafe {
         let characters: ObjcId = msg_send![event, characters];
         if characters == nil {
-            return '\0'
+            return '\0';
         }
         let chars = nsstring_to_string(characters);
-        
+
         if chars.len() == 0 {
-            return '\0'
+            return '\0';
         }
         chars.chars().next().unwrap()
     }
 }
 
 pub fn get_event_key_modifier(event: ObjcId) -> KeyModifiers {
-    let flags: u64 = unsafe {msg_send![event, modifierFlags]};
+    let flags: u64 = unsafe { msg_send![event, modifierFlags] };
     KeyModifiers {
         shift: flags & NSEventModifierFlags::NSShiftKeyMask as u64 != 0,
         control: flags & NSEventModifierFlags::NSControlKeyMask as u64 != 0,
@@ -143,10 +151,8 @@ pub fn get_event_key_modifier(event: ObjcId) -> KeyModifiers {
 }
 
 pub fn get_event_keycode(event: ObjcId) -> Option<KeyCode> {
-    let scan_code: std::os::raw::c_ushort = unsafe {
-        msg_send![event, keyCode]
-    };
-    
+    let scan_code: std::os::raw::c_ushort = unsafe { msg_send![event, keyCode] };
+
     Some(match scan_code {
         0x00 => KeyCode::KeyA,
         0x01 => KeyCode::KeyS,
@@ -298,7 +304,7 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::Key9 => "9",
             KeyCode::Minus => "-",
             KeyCode::Equals => "=",
-            
+
             KeyCode::KeyQ => "q",
             KeyCode::KeyW => "w",
             KeyCode::KeyE => "e",
@@ -311,7 +317,7 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::KeyP => "p",
             KeyCode::LBracket => "[",
             KeyCode::RBracket => "]",
-            
+
             KeyCode::KeyA => "a",
             KeyCode::KeyS => "s",
             KeyCode::KeyD => "d",
@@ -324,7 +330,7 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::Semicolon => ";",
             KeyCode::Quote => "'",
             KeyCode::Backslash => "\\",
-            
+
             KeyCode::KeyZ => "z",
             KeyCode::KeyX => "x",
             KeyCode::KeyC => "c",
@@ -335,10 +341,9 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::Comma => ",",
             KeyCode::Period => ".",
             KeyCode::Slash => "/",
-            _ => ""
+            _ => "",
         }
-    }
-    else {
+    } else {
         match keycode {
             KeyCode::Backtick => "~",
             KeyCode::Key0 => "!",
@@ -353,7 +358,7 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::Key9 => ")",
             KeyCode::Minus => "_",
             KeyCode::Equals => "+",
-            
+
             KeyCode::KeyQ => "Q",
             KeyCode::KeyW => "W",
             KeyCode::KeyE => "E",
@@ -366,7 +371,7 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::KeyP => "P",
             KeyCode::LBracket => "{",
             KeyCode::RBracket => "}",
-            
+
             KeyCode::KeyA => "A",
             KeyCode::KeyS => "S",
             KeyCode::KeyD => "D",
@@ -379,7 +384,7 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::Semicolon => ":",
             KeyCode::Quote => "\"",
             KeyCode::Backslash => "|",
-            
+
             KeyCode::KeyZ => "Z",
             KeyCode::KeyX => "X",
             KeyCode::KeyC => "C",
@@ -390,7 +395,7 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::Comma => "<",
             KeyCode::Period => ">",
             KeyCode::Slash => "?",
-            _ => ""
+            _ => "",
         }
     }
 }
@@ -401,7 +406,7 @@ pub unsafe fn superclass<'a>(this: &'a Object) -> &'a Class {
 }
 
 pub fn bottom_left_to_top_left(rect: NSRect) -> f64 {
-    let height = unsafe {CGDisplayPixelsHigh(CGMainDisplayID())};
+    let height = unsafe { CGDisplayPixelsHigh(CGMainDisplayID()) };
     height as f64 - (rect.origin.y + rect.size.height)
 }
 
@@ -414,7 +419,7 @@ pub fn bottom_left_to_top_left(rect: NSRect) -> f64 {
 /// * 3: Fourth mouse button, commonly the "back" button
 /// * 4: Fifth mouse button, commonly the "forward" button
 pub fn get_event_mouse_button(event: ObjcId) -> usize {
-    let button_number: usize = unsafe {msg_send![event, buttonNumber]};
+    let button_number: usize = unsafe { msg_send![event, buttonNumber] };
     button_number
 }
 
@@ -472,23 +477,21 @@ pub fn load_mouse_cursor(cursor: MouseCursor) -> ObjcId {
     }
 }
 
-
 #[derive(Debug)]
 #[repr(i32)]
 pub enum OSError {
-    
     Unimplemented = -4,
     FileNotFound = -43,
     FilePermission = -54,
     TooManyFilesOpen = -42,
-    
+
     Unspecified = -1500,
     SystemSoundClientMessageTimeout = -1501,
-    
+
     BadFilePath = 561017960,
     Param = -50,
     MemFull = -108,
-    
+
     FormatUnspecified = 2003329396,
     UnknownProperty = 2003332927,
     BadPropertySize = 561211770,
@@ -496,9 +499,9 @@ pub enum OSError {
     UnsupportedFormat = 560226676,
     State = 561214580,
     NotEnoughBufferSpace = 560100710,
-    
+
     UnsupportedDataFormat = 1718449215,
-    
+
     InvalidProperty = -10879,
     InvalidParameter = -10878,
     InvalidElement = -10877,
@@ -516,9 +519,9 @@ pub enum OSError {
     Initialized = -10849,
     InvalidOfflineRender = -10848,
     Unauthorized = -10847,
-    
+
     NoMatchingDefaultAudioUnitFound,
-    
+
     Unknown,
 }
 
@@ -530,14 +533,16 @@ impl OSError {
             x if x == Self::FileNotFound as i32 => Self::FileNotFound,
             x if x == Self::FilePermission as i32 => Self::FilePermission,
             x if x == Self::TooManyFilesOpen as i32 => Self::TooManyFilesOpen,
-            
+
             x if x == Self::Unspecified as i32 => Self::Unspecified,
-            x if x == Self::SystemSoundClientMessageTimeout as i32 => Self::SystemSoundClientMessageTimeout,
-            
+            x if x == Self::SystemSoundClientMessageTimeout as i32 => {
+                Self::SystemSoundClientMessageTimeout
+            }
+
             x if x == Self::BadFilePath as i32 => Self::BadFilePath,
             x if x == Self::Param as i32 => Self::Param,
             x if x == Self::MemFull as i32 => Self::MemFull,
-            
+
             x if x == Self::FormatUnspecified as i32 => Self::FormatUnspecified,
             x if x == Self::UnknownProperty as i32 => Self::UnknownProperty,
             x if x == Self::BadPropertySize as i32 => Self::BadPropertySize,
@@ -545,9 +550,9 @@ impl OSError {
             x if x == Self::UnsupportedFormat as i32 => Self::UnsupportedFormat,
             x if x == Self::State as i32 => Self::State,
             x if x == Self::NotEnoughBufferSpace as i32 => Self::NotEnoughBufferSpace,
-            
+
             x if x == Self::UnsupportedDataFormat as i32 => Self::UnsupportedDataFormat,
-            
+
             x if x == Self::InvalidProperty as i32 => Self::InvalidProperty,
             x if x == Self::InvalidParameter as i32 => Self::InvalidParameter,
             x if x == Self::InvalidElement as i32 => Self::InvalidElement,
@@ -565,18 +570,16 @@ impl OSError {
             x if x == Self::Initialized as i32 => Self::Initialized,
             x if x == Self::InvalidOfflineRender as i32 => Self::InvalidOfflineRender,
             x if x == Self::Unauthorized as i32 => Self::Unauthorized,
-            _ => Self::Unknown
+            _ => Self::Unknown,
         })
     }
-    
+
     pub fn from_nserror(ns_error: ObjcId) -> Result<(), Self> {
         if ns_error != nil {
-            let code: i32 = unsafe {msg_send![ns_error, code]};
+            let code: i32 = unsafe { msg_send![ns_error, code] };
             Self::from(code)
-        }
-        else {
+        } else {
             Ok(())
         }
     }
 }
-

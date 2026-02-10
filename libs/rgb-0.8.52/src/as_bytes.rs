@@ -1,7 +1,7 @@
-use crate::{RGB, RGBA};
 use crate::alt::{Gray, GrayAlpha, BGR, BGRA};
-use crate::alt::{ARGB, ABGR};
+use crate::alt::{ABGR, ARGB};
 use crate::ComponentBytes;
+use crate::{RGB, RGBA};
 
 #[cfg(feature = "as-bytes")]
 unsafe impl<T> crate::Pod for RGB<T> where T: crate::Pod {}
@@ -14,7 +14,11 @@ unsafe impl<T> crate::Zeroable for BGR<T> where T: crate::Zeroable {}
 
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Zeroable for ABGR<T, A> where T: crate::Zeroable, A: crate::Zeroable {
+unsafe impl<T, A> crate::Zeroable for ABGR<T, A>
+where
+    T: crate::Zeroable,
+    A: crate::Zeroable,
+{
     #[track_caller]
     #[inline(always)]
     fn zeroed() -> Self {
@@ -34,15 +38,29 @@ const fn assert_no_padding<T, A, S>() {
 
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Pod for RGBA<T, A> where T: crate::Pod, A: crate::Pod {}
+unsafe impl<T, A> crate::Pod for RGBA<T, A>
+where
+    T: crate::Pod,
+    A: crate::Pod,
+{
+}
 
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Pod for BGRA<T, A> where T: crate::Pod, A: crate::Pod {}
+unsafe impl<T, A> crate::Pod for BGRA<T, A>
+where
+    T: crate::Pod,
+    A: crate::Pod,
+{
+}
 
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Zeroable for RGBA<T, A> where T: crate::Zeroable, A: crate::Zeroable {
+unsafe impl<T, A> crate::Zeroable for RGBA<T, A>
+where
+    T: crate::Zeroable,
+    A: crate::Zeroable,
+{
     #[track_caller]
     #[inline(always)]
     fn zeroed() -> Self {
@@ -55,15 +73,29 @@ unsafe impl<T, A> crate::Zeroable for RGBA<T, A> where T: crate::Zeroable, A: cr
 
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Pod for ARGB<T, A> where T: crate::Pod, A: crate::Pod {}
+unsafe impl<T, A> crate::Pod for ARGB<T, A>
+where
+    T: crate::Pod,
+    A: crate::Pod,
+{
+}
 
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Pod for ABGR<T, A> where T: crate::Pod, A: crate::Pod {}
+unsafe impl<T, A> crate::Pod for ABGR<T, A>
+where
+    T: crate::Pod,
+    A: crate::Pod,
+{
+}
 
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Zeroable for ARGB<T, A> where T: crate::Zeroable, A: crate::Zeroable {
+unsafe impl<T, A> crate::Zeroable for ARGB<T, A>
+where
+    T: crate::Zeroable,
+    A: crate::Zeroable,
+{
     #[track_caller]
     #[inline(always)]
     fn zeroed() -> Self {
@@ -76,7 +108,11 @@ unsafe impl<T, A> crate::Zeroable for ARGB<T, A> where T: crate::Zeroable, A: cr
 
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Zeroable for BGRA<T, A> where T: crate::Zeroable, A: crate::Zeroable {
+unsafe impl<T, A> crate::Zeroable for BGRA<T, A>
+where
+    T: crate::Zeroable,
+    A: crate::Zeroable,
+{
     #[track_caller]
     #[inline(always)]
     fn zeroed() -> Self {
@@ -91,17 +127,27 @@ unsafe impl<T, A> crate::Zeroable for BGRA<T, A> where T: crate::Zeroable, A: cr
 unsafe impl<T> crate::Pod for Gray<T> where T: crate::Pod {}
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Pod for GrayAlpha<T, A> where T: crate::Pod, A: crate::Pod {}
+unsafe impl<T, A> crate::Pod for GrayAlpha<T, A>
+where
+    T: crate::Pod,
+    A: crate::Pod,
+{
+}
 #[cfg(feature = "as-bytes")]
 unsafe impl<T> crate::Zeroable for Gray<T> where T: crate::Zeroable {}
 #[cfg(feature = "as-bytes")]
 /// This is unsound. You can disable `as-bytes` feature, enable `bytemuck`, and use `bytemuck::cast_slice()` instead.
-unsafe impl<T, A> crate::Zeroable for GrayAlpha<T, A> where T: crate::Zeroable, A: crate::Zeroable {
+unsafe impl<T, A> crate::Zeroable for GrayAlpha<T, A>
+where
+    T: crate::Zeroable,
+    A: crate::Zeroable,
+{
     #[track_caller]
     #[inline(always)]
     fn zeroed() -> Self {
         unsafe {
-            if core::mem::size_of::<A>() + core::mem::size_of::<T>() != core::mem::size_of::<Self>() {
+            if core::mem::size_of::<A>() + core::mem::size_of::<T>() != core::mem::size_of::<Self>()
+            {
                 panic!("type has padding");
             }
             core::mem::zeroed()
@@ -132,7 +178,7 @@ fn shared_impl() {
     }
 
     let b = SharedPixelBuffer {
-        data: [crate::RGB8::new(0,0,0)],
+        data: [crate::RGB8::new(0, 0, 0)],
     };
     let _ = b.as_bytes();
 }

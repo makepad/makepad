@@ -33,7 +33,7 @@ impl<T: io::BufRead + io::Seek> ZByteReaderTrait for T {
                 Ok(bytes) => {
                     bytes_read += bytes;
                 }
-                Err(e) => return Err(ZByteIoError::from(e))
+                Err(e) => return Err(ZByteIoError::from(e)),
             }
         }
 
@@ -124,7 +124,7 @@ impl<T: AsRef<[u8]>> std::io::Seek for ZCursor<T> {
                 return Ok(n);
             }
             std::io::SeekFrom::End(n) => (self.stream.as_ref().len(), n as isize),
-            std::io::SeekFrom::Current(n) => (self.position, n as isize)
+            std::io::SeekFrom::Current(n) => (self.position, n as isize),
         };
         match base_pos.checked_add_signed(offset) {
             Some(n) => {
@@ -133,8 +133,8 @@ impl<T: AsRef<[u8]>> std::io::Seek for ZCursor<T> {
             }
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                "Negative seek"
-            ))
+                "Negative seek",
+            )),
         }
     }
 }

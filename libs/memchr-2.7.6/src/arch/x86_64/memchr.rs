@@ -171,11 +171,7 @@ macro_rules! unsafe_ifunc {
 ///
 /// Pointers must be valid. See `One::find_raw`.
 #[inline(always)]
-pub(crate) fn memchr_raw(
-    n1: u8,
-    start: *const u8,
-    end: *const u8,
-) -> Option<*const u8> {
+pub(crate) fn memchr_raw(n1: u8, start: *const u8, end: *const u8) -> Option<*const u8> {
     // SAFETY: We provide a valid function pointer type.
     unsafe_ifunc!(
         One,
@@ -194,11 +190,7 @@ pub(crate) fn memchr_raw(
 ///
 /// Pointers must be valid. See `One::rfind_raw`.
 #[inline(always)]
-pub(crate) fn memrchr_raw(
-    n1: u8,
-    start: *const u8,
-    end: *const u8,
-) -> Option<*const u8> {
+pub(crate) fn memrchr_raw(n1: u8, start: *const u8, end: *const u8) -> Option<*const u8> {
     // SAFETY: We provide a valid function pointer type.
     unsafe_ifunc!(
         One,
@@ -217,12 +209,7 @@ pub(crate) fn memrchr_raw(
 ///
 /// Pointers must be valid. See `Two::find_raw`.
 #[inline(always)]
-pub(crate) fn memchr2_raw(
-    n1: u8,
-    n2: u8,
-    start: *const u8,
-    end: *const u8,
-) -> Option<*const u8> {
+pub(crate) fn memchr2_raw(n1: u8, n2: u8, start: *const u8, end: *const u8) -> Option<*const u8> {
     // SAFETY: We provide a valid function pointer type.
     unsafe_ifunc!(
         Two,
@@ -242,12 +229,7 @@ pub(crate) fn memchr2_raw(
 ///
 /// Pointers must be valid. See `Two::rfind_raw`.
 #[inline(always)]
-pub(crate) fn memrchr2_raw(
-    n1: u8,
-    n2: u8,
-    start: *const u8,
-    end: *const u8,
-) -> Option<*const u8> {
+pub(crate) fn memrchr2_raw(n1: u8, n2: u8, start: *const u8, end: *const u8) -> Option<*const u8> {
     // SAFETY: We provide a valid function pointer type.
     unsafe_ifunc!(
         Two,

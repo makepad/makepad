@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoIcon = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/icon.md") } 
+            <Markdown> { body: dep("crate://self/resources/icon.md") }
         }
         demos = {
             <H4> { text: "Standard" }
@@ -24,7 +22,7 @@ live_design!{
                 icon_walk: { width: 100.  }
                 draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
             }
-            
+
             <Hr> {}
             <H4> { text: "IconGradientY" }
             <IconGradientY> {

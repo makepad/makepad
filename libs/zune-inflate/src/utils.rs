@@ -23,7 +23,9 @@ pub(crate) fn make_decode_table_entry(decode_results: &[u32], sym: usize, len: u
 /// A safe version of src.copy_within that helps me because I tend to always
 /// confuse the arguments
 pub fn fixed_copy_within<const SIZE: usize>(
-    dest: &mut [u8], src_offset: usize, dest_offset: usize
+    dest: &mut [u8],
+    src_offset: usize,
+    dest_offset: usize,
 ) {
     // for debug builds ensure we don't go out of bounds
     debug_assert!(

@@ -28,7 +28,7 @@ pub struct InflateDecodeErrors {
     /// reason why decompression fails
     pub error: DecodeErrorStatus,
     /// Decoded data up until that decompression error
-    pub data:  Vec<u8>
+    pub data: Vec<u8>,
 }
 
 impl InflateDecodeErrors {
@@ -44,7 +44,7 @@ impl InflateDecodeErrors {
     pub fn new(error: DecodeErrorStatus, data: &Vec<u8>) -> InflateDecodeErrors {
         InflateDecodeErrors {
             error,
-            data: data.clone()
+            data: data.clone(),
         }
     }
     /// Create a new decode wrapper with an empty vector
@@ -83,7 +83,7 @@ pub enum DecodeErrorStatus {
     /// Output Adler does not match stored adler
     ///
     /// Only present for gzip
-    MismatchedAdler(u32, u32)
+    MismatchedAdler(u32, u32),
 }
 
 impl Debug for DecodeErrorStatus {

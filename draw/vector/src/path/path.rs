@@ -1,8 +1,8 @@
-use crate::path::PathCommand;
 use crate::geometry::{Point, Transform, Transformation};
 use crate::internal_iter::{
     ExtendFromInternalIterator, FromInternalIterator, InternalIterator, IntoInternalIterator,
 };
+use crate::path::PathCommand;
 use std::iter::Cloned;
 use std::slice::Iter;
 
@@ -51,7 +51,7 @@ impl Path {
         self.verbs.push(Verb::ArcTo);
         self.points.push(e);
         self.points.push(r);
-        self.arc_params.push(ArcParams{ xr, l, s });
+        self.arc_params.push(ArcParams { xr, l, s });
     }
 
     /// Adds a new contour, starting at the given point.
@@ -81,7 +81,6 @@ impl Path {
         self.points.push(p);
     }
 
-
     /// Closes the current contour.
     pub fn close(&mut self) {
         self.verbs.push(Verb::Close);
@@ -106,7 +105,7 @@ impl ExtendFromInternalIterator<PathCommand> for Path {
                 PathCommand::LineTo(p) => self.line_to(p),
                 PathCommand::ArcTo(e, r, xr, l, s) => self.arc(e, r, xr, l, s),
                 PathCommand::QuadraticTo(p1, p) => self.quadratic_to(p1, p),
-                PathCommand::CubicTo(p1, p2,  p) => self.cubic_to(p1, p2, p),
+                PathCommand::CubicTo(p1, p2, p) => self.cubic_to(p1, p2, p),
                 PathCommand::Close => self.close(),
             }
             true
@@ -160,8 +159,14 @@ impl<'a> Iterator for Commands<'a> {
             Verb::MoveTo => PathCommand::MoveTo(self.points.next().unwrap()),
             Verb::LineTo => PathCommand::LineTo(self.points.next().unwrap()),
             Verb::ArcTo => {
-                let ArcParams{ xr, l, s } = self.arc_params.next().unwrap();
-                PathCommand::ArcTo(self.points.next().unwrap(), self.points.next().unwrap(), xr, l, s)
+                let ArcParams { xr, l, s } = self.arc_params.next().unwrap();
+                PathCommand::ArcTo(
+                    self.points.next().unwrap(),
+                    self.points.next().unwrap(),
+                    xr,
+                    l,
+                    s,
+                )
             }
             Verb::QuadraticTo => {
                 PathCommand::QuadraticTo(self.points.next().unwrap(), self.points.next().unwrap())

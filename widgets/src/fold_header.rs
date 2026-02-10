@@ -1,21 +1,16 @@
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*,
-    fold_button::*
-};
+use crate::{fold_button::*, makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-live_design!{
+live_design! {
     link widgets;
     use link::theme::*;
-    
+
     pub FoldHeaderBase = {{FoldHeader}} {}
     pub FoldHeader = <FoldHeaderBase> {
         width: Fill, height: Fit,
         body_walk: { width: Fill, height: Fit}
-        
+
         flow: Down,
-        
+
         animator: {
             active = {
                 default: on
@@ -38,28 +33,42 @@ live_design!{
             }
         }
     }
-    
+
 }
 
 #[derive(Live, LiveHook, Widget)]
 pub struct FoldHeader {
-    #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] rect_size: f64,
-    #[rust] area: Area,
-    #[find] #[redraw] #[live] header: WidgetRef,
-    #[find] #[redraw] #[live] body: WidgetRef,
-    #[animator] animator: Animator,
+    #[rust]
+    draw_state: DrawStateWrap<DrawState>,
+    #[rust]
+    rect_size: f64,
+    #[rust]
+    area: Area,
+    #[find]
+    #[redraw]
+    #[live]
+    header: WidgetRef,
+    #[find]
+    #[redraw]
+    #[live]
+    body: WidgetRef,
+    #[animator]
+    animator: Animator,
 
-    #[live] opened: f64,
-    #[layout] layout: Layout,
-    #[walk] walk: Walk,
-    #[live] body_walk: Walk,
+    #[live]
+    opened: f64,
+    #[layout]
+    layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[live]
+    body_walk: Walk,
 }
 
 #[derive(Clone)]
 enum DrawState {
     DrawHeader,
-    DrawBody
+    DrawBody,
 }
 
 impl Widget for FoldHeader {
@@ -69,40 +78,37 @@ impl Widget for FoldHeader {
                 self.area.redraw(cx);
             }
         };
-        
-        self.header.handle_event(cx,  event, scope);
-        
-        if let Event::Actions(actions) = event{
-            match actions.find_widget_action(self.header.widget(ids!(fold_button)).widget_uid()).cast() {
-                FoldButtonAction::Opening => {
-                    self.animator_play(cx, ids!(active.on))
-                }
-                FoldButtonAction::Closing => {
-                    self.animator_play(cx, ids!(active.off))
-                }
-                _ => ()
+
+        self.header.handle_event(cx, event, scope);
+
+        if let Event::Actions(actions) = event {
+            match actions
+                .find_widget_action(self.header.widget(ids!(fold_button)).widget_uid())
+                .cast()
+            {
+                FoldButtonAction::Opening => self.animator_play(cx, ids!(active.on)),
+                FoldButtonAction::Closing => self.animator_play(cx, ids!(active.off)),
+                _ => (),
             }
         }
     }
 
-    
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
         if let Some(DrawState::DrawHeader) = self.draw_state.get() {
             let walk = self.header.walk(cx);
-            self.header.draw_walk(cx, scope, walk) ?;
+            self.header.draw_walk(cx, scope, walk)?;
             cx.begin_turtle(
                 self.body_walk,
-                Layout::flow_down()
-                .with_scroll(dvec2(0.0, self.rect_size * (1.0 - self.opened)))
+                Layout::flow_down().with_scroll(dvec2(0.0, self.rect_size * (1.0 - self.opened))),
             );
             self.draw_state.set(DrawState::DrawBody);
         }
         if let Some(DrawState::DrawBody) = self.draw_state.get() {
             let walk = self.body.walk(cx);
-            self.body.draw_walk(cx, scope, walk) ?;
+            self.body.draw_walk(cx, scope, walk)?;
             self.rect_size = cx.turtle().used().y;
             cx.end_turtle();
             cx.end_turtle_with_area(&mut self.area);
@@ -116,5 +122,5 @@ impl Widget for FoldHeader {
 pub enum FoldHeaderAction {
     Opening,
     Closing,
-    None
+    None,
 }

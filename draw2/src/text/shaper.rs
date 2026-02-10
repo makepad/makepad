@@ -4,7 +4,7 @@ use {
         slice::SliceExt,
         substr::Substr,
     },
-    rustybuzz as rustybuzz,
+    rustybuzz,
     rustybuzz::UnicodeBuffer,
     std::{
         collections::{HashMap, VecDeque},
@@ -143,9 +143,7 @@ impl Shaper {
         // grapheme with a single character. This is not ideal, but it works for now.
         if out_glyphs[out_glyph_start..]
             .windows(2)
-            .any(|glyphs| {
-                glyphs[0].cluster > glyphs[1].cluster
-            })
+            .any(|glyphs| glyphs[0].cluster > glyphs[1].cluster)
         {
             out_glyphs.truncate(out_glyph_start);
             let mut unicode_buffer = glyph_buffer.clear();

@@ -1,24 +1,25 @@
 use {
-    std::{
-        fmt::Write,
-        fmt,
-        collections::{BTreeMap, BTreeSet}
-    },
     crate::{
-        makepad_live_compiler::*,
-        makepad_live_id::*,
-        shader_ast::*,
-        generate::*,
+        generate::*, makepad_live_compiler::*, makepad_live_id::*, shader_ast::*,
         shader_registry::ShaderRegistry,
-    }
+    },
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        fmt,
+        fmt::Write,
+    },
 };
 
-pub struct MetalGeneratedShader{
+pub struct MetalGeneratedShader {
     pub mtlsl: String,
-    pub fields_as_uniform_blocks:BTreeMap<Ident, Vec<(usize, Ident) >>   
-} 
+    pub fields_as_uniform_blocks: BTreeMap<Ident, Vec<(usize, Ident)>>,
+}
 
-pub fn generate_shader(draw_shader_def: &DrawShaderDef, const_table:&DrawShaderConstTable, shader_registry: &ShaderRegistry) -> MetalGeneratedShader {
+pub fn generate_shader(
+    draw_shader_def: &DrawShaderDef,
+    const_table: &DrawShaderConstTable,
+    shader_registry: &ShaderRegistry,
+) -> MetalGeneratedShader {
     let mut string = String::new();
     let fields_as_uniform_blocks = draw_shader_def.fields_as_uniform_blocks();
     DrawShaderGenerator {
@@ -27,12 +28,16 @@ pub fn generate_shader(draw_shader_def: &DrawShaderDef, const_table:&DrawShaderC
         const_table,
         string: &mut string,
         fields_as_uniform_blocks: &fields_as_uniform_blocks,
-        backend_writer: &MetalBackendWriter {shader_registry, draw_shader_def, const_table}
+        backend_writer: &MetalBackendWriter {
+            shader_registry,
+            draw_shader_def,
+            const_table,
+        },
     }
     .generate_shader();
-    MetalGeneratedShader{
-        mtlsl:string, 
-        fields_as_uniform_blocks
+    MetalGeneratedShader {
+        mtlsl: string,
+        fields_as_uniform_blocks,
     }
 }
 
@@ -40,42 +45,75 @@ struct DrawShaderGenerator<'a> {
     draw_shader_def: &'a DrawShaderDef,
     shader_registry: &'a ShaderRegistry,
     string: &'a mut String,
-    fields_as_uniform_blocks: &'a BTreeMap<Ident, Vec<(usize, Ident) >>,
+    fields_as_uniform_blocks: &'a BTreeMap<Ident, Vec<(usize, Ident)>>,
     backend_writer: &'a dyn BackendWriter,
-    const_table: &'a DrawShaderConstTable
+    const_table: &'a DrawShaderConstTable,
 }
 
 impl<'a> DrawShaderGenerator<'a> {
     fn generate_shader(&mut self) {
         writeln!(self.string, "#include <metal_stdlib>").unwrap();
         writeln!(self.string, "using namespace metal;").unwrap();
-        
+
         let mut all_constructor_fns = BTreeSet::new();
-        
+
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
-            all_constructor_fns.extend(fn_def.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
+            all_constructor_fns.extend(
+                fn_def
+                    .constructor_fn_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .cloned(),
+            );
         }
-        
+
         let mut sample_2d = false;
         let mut depth_clip = false;
         let mut sample_2d_rt = false;
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
-            if !sample_2d && fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
+            if !sample_2d
+                && fn_def
+                    .builtin_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&Ident(live_id!(sample2d)))
+            {
                 writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
                 sample_2d = true;
             }
-            if !depth_clip && fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(depth_clip))) {
-                writeln!(self.string, "float4 depth_clip(float4 w, float4 c, float clip){{return c;}}").unwrap();
+            if !depth_clip
+                && fn_def
+                    .builtin_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&Ident(live_id!(depth_clip)))
+            {
+                writeln!(
+                    self.string,
+                    "float4 depth_clip(float4 w, float4 c, float clip){{return c;}}"
+                )
+                .unwrap();
                 depth_clip = true;
             }
-            if !sample_2d_rt && fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
+            if !sample_2d_rt
+                && fn_def
+                    .builtin_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&Ident(live_id!(sample2d_rt)))
+            {
                 writeln!(self.string, "float4 sample2d_rt(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
                 sample_2d_rt = true;
             }
-        };
-        
+        }
+
         self.generate_struct_defs();
         //let fields_as_uniform_blocks = self.draw_shader_def.fields_as_uniform_blocks();
         self.generate_uniform_structs();
@@ -83,14 +121,14 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_geometry_struct();
         self.generate_instance_struct();
         self.generate_varying_struct();
-        
+
         //let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
         //let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap();
 
-        for (ty_lit, ref param_tys) in all_constructor_fns{
+        for (ty_lit, ref param_tys) in all_constructor_fns {
             generate_cons_fn(self.backend_writer, self.string, ty_lit, &param_tys);
         }
-        
+
         let all_fns = self.draw_shader_def.all_fns.borrow();
         for fn_iter in all_fns.iter().rev() {
             let const_table_offset = self.const_table.offsets.get(fn_iter).cloned();
@@ -99,18 +137,24 @@ impl<'a> DrawShaderGenerator<'a> {
                 for call_iter in all_fns.iter().rev() {
                     // any function that depends on us, will have the closures we need
                     let call_def = self.shader_registry.all_fns.get(call_iter).unwrap();
-                    if call_def.callees.borrow().as_ref().unwrap().contains(&fn_iter) {
+                    if call_def
+                        .callees
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .contains(&fn_iter)
+                    {
                         FnDefWithClosureArgsGenerator::generate_fn_def_with_all_closures(
                             &mut self.string,
                             self.shader_registry,
                             fn_def,
                             call_def,
                             self.backend_writer,
-                            const_table_offset
+                            const_table_offset,
                         );
                     }
                 }
-                continue
+                continue;
             }
             FnDefGenerator {
                 fn_def,
@@ -124,7 +168,7 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_vertex_main();
         self.generate_pixel_main();
     }
-    
+
     fn generate_struct_defs(&mut self) {
         // we have all the structs already from analyse
         for struct_ptr in self.draw_shader_def.all_structs.borrow().iter().rev() {
@@ -134,15 +178,18 @@ impl<'a> DrawShaderGenerator<'a> {
                 writeln!(self.string).unwrap();
                 for field in &struct_def.fields {
                     write!(self.string, "    ").unwrap();
-                    self.write_var_decl(&DisplayStructField(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                    self.write_var_decl(
+                        &DisplayStructField(field.ident),
+                        field.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
                     writeln!(self.string, ";").unwrap();
                 }
             }
             writeln!(self.string, "}};").unwrap();
         }
     }
-    
-    fn generate_uniform_structs(&mut self,) {
+
+    fn generate_uniform_structs(&mut self) {
         writeln!(self.string, "struct LiveUniforms {{").unwrap();
         for (value_node_ptr, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
             // we have a span and an ident_path.
@@ -154,26 +201,33 @@ impl<'a> DrawShaderGenerator<'a> {
             writeln!(self.string, ";").unwrap();
         }
         writeln!(self.string, "}};").unwrap();
-        
+
         for (ident, vec) in self.fields_as_uniform_blocks {
             writeln!(self.string, "struct Uniforms_{} {{", ident).unwrap();
             for (index, _item) in vec {
                 let field = &self.draw_shader_def.fields[*index];
                 write!(self.string, "    ").unwrap();
-                self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                self.write_var_decl(
+                    &DisplayDsIdent(field.ident),
+                    field.ty_expr.ty.borrow().as_ref().unwrap(),
+                );
                 writeln!(self.string, ";").unwrap();
             }
             writeln!(self.string, "}};").unwrap();
         }
     }
-    
+
     fn generate_texture_struct(&mut self) {
         let mut index = 0;
         writeln!(self.string, "struct Textures {{").unwrap();
         for field in &self.draw_shader_def.fields {
             match field.kind {
-                DrawShaderFieldKind::Texture {..} => {
-                    assert_ne!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::TextureOES, "TextureOES is only available on Android");
+                DrawShaderFieldKind::Texture { .. } => {
+                    assert_ne!(
+                        *field.ty_expr.ty.borrow().as_ref().unwrap(),
+                        Ty::TextureOES,
+                        "TextureOES is only available on Android"
+                    );
                     assert_eq!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
                     write!(self.string, "    texture2d<float> ").unwrap();
                     write!(self.string, "{}", &DisplayDsIdent(field.ident)).unwrap();
@@ -185,71 +239,85 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
     }
-    
+
     fn generate_geometry_struct(&mut self) {
         writeln!(self.string, "struct Geometries {{").unwrap();
         for field in &self.draw_shader_def.fields {
             match field.kind {
-                DrawShaderFieldKind::Geometry {..} => {
+                DrawShaderFieldKind::Geometry { .. } => {
                     write!(self.string, "    ").unwrap();
-                    self.write_var_decl_packed(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                    self.write_var_decl_packed(
+                        &DisplayDsIdent(field.ident),
+                        field.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
                     writeln!(self.string, ";").unwrap();
                 }
-                _ => ()
+                _ => (),
             }
         }
         writeln!(self.string, "}};").unwrap();
     }
-    
+
     fn generate_instance_struct(&mut self) {
         let mut padding = 0;
         writeln!(self.string, "struct Instances {{").unwrap();
         for field in &self.draw_shader_def.fields {
             match field.kind {
-                DrawShaderFieldKind::Instance {..} => {
+                DrawShaderFieldKind::Instance { .. } => {
                     match field.ty_expr.ty.borrow().as_ref().unwrap() {
                         Ty::Float | Ty::Vec2f | Ty::Vec3f | Ty::Vec4f => {
                             write!(self.string, "    ").unwrap();
-                            if field.ident == Ident(LiveId(0)){
-                                self.write_var_decl_packed(&DisplayPadding(padding), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            if field.ident == Ident(LiveId(0)) {
+                                self.write_var_decl_packed(
+                                    &DisplayPadding(padding),
+                                    field.ty_expr.ty.borrow().as_ref().unwrap(),
+                                );
                                 padding += 1;
-                            }
-                            else{
-                                self.write_var_decl_packed(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            } else {
+                                self.write_var_decl_packed(
+                                    &DisplayDsIdent(field.ident),
+                                    field.ty_expr.ty.borrow().as_ref().unwrap(),
+                                );
                             }
                             writeln!(self.string, ";").unwrap();
                             //write!(self.string, "    ").unwrap();
                             //self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
                             //writeln!(self.string, ";").unwrap();
-                        },
+                        }
                         Ty::Mat4f => {
                             for i in 0..4 {
                                 write!(self.string, "    ").unwrap();
-                                self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Vec4f);
+                                self.write_var_decl_packed(
+                                    &DisplayDsIdent(field.ident),
+                                    &Ty::Vec4f,
+                                );
                                 writeln!(self.string, " {};", i).unwrap();
                             }
-                        },
+                        }
                         Ty::Mat3 => {
                             for i in 0..3 {
                                 write!(self.string, "    ").unwrap();
-                                self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Vec3f);
+                                self.write_var_decl_packed(
+                                    &DisplayDsIdent(field.ident),
+                                    &Ty::Vec3f,
+                                );
                                 writeln!(self.string, " {};", i).unwrap();
                             }
-                        },
+                        }
                         Ty::Mat2 => {
                             write!(self.string, "    ").unwrap();
                             self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Vec4f);
                             writeln!(self.string, ";").unwrap();
-                        },
-                        Ty::Enum(v) =>{
+                        }
+                        Ty::Enum(v) => {
                             write!(self.string, "    ").unwrap();
                             self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Enum(*v));
                             writeln!(self.string, ";").unwrap();
                         }
-                        _ => panic!("unsupported type in generate_instance_struct")
+                        _ => panic!("unsupported type in generate_instance_struct"),
                     }
                 }
-                /*                
+                /*
                 DrawShaderFieldKind::Instance {..} => {
                     write!(self.string, "    ").unwrap();
                     self.write_var_decl_packed(
@@ -258,59 +326,76 @@ impl<'a> DrawShaderGenerator<'a> {
                     );
                     writeln!(self.string, ";").unwrap();
                 }*/
-                _ => ()
+                _ => (),
             }
         }
         writeln!(self.string, "}};").unwrap();
     }
-    
+
     fn generate_varying_struct(&mut self) {
         writeln!(self.string, "struct Varyings {{").unwrap();
         writeln!(self.string, "    float4 position [[position]];").unwrap();
         for field in &self.draw_shader_def.fields {
             match &field.kind {
-                DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
+                DrawShaderFieldKind::Geometry {
+                    is_used_in_pixel_shader,
+                    ..
+                } if is_used_in_pixel_shader.get() => {
                     write!(self.string, "    ").unwrap();
-                    self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                    self.write_var_decl(
+                        &DisplayDsIdent(field.ident),
+                        field.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
                     writeln!(self.string, ";").unwrap();
                 }
-                DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
+                DrawShaderFieldKind::Instance {
+                    is_used_in_pixel_shader,
+                    ..
+                } if is_used_in_pixel_shader.get() => {
                     match field.ty_expr.ty.borrow().as_ref().unwrap() {
                         Ty::Float | Ty::Vec2f | Ty::Vec3f | Ty::Vec4f => {
                             write!(self.string, "    ").unwrap();
-                            self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            self.write_var_decl(
+                                &DisplayDsIdent(field.ident),
+                                field.ty_expr.ty.borrow().as_ref().unwrap(),
+                            );
                             writeln!(self.string, ";").unwrap();
-                        },
+                        }
                         Ty::Mat4f => {
                             for i in 0..4 {
                                 write!(self.string, "    ").unwrap();
                                 self.write_ty_lit(TyLit::Vec4f);
-                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i).unwrap();
+                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i)
+                                    .unwrap();
                             }
-                        },
+                        }
                         Ty::Mat3 => {
                             for i in 0..3 {
                                 write!(self.string, "    ").unwrap();
                                 self.write_ty_lit(TyLit::Vec3f);
-                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i).unwrap();
+                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i)
+                                    .unwrap();
                             }
-                        },
+                        }
                         Ty::Mat2 => {
                             write!(self.string, "    ").unwrap();
                             self.write_ty_lit(TyLit::Vec4f);
                             writeln!(self.string, " {};", &DisplayDsIdent(field.ident)).unwrap();
-                        },
-                        Ty::Enum(v) =>{
+                        }
+                        Ty::Enum(v) => {
                             write!(self.string, "    ").unwrap();
                             self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Enum(*v));
                             writeln!(self.string, ";").unwrap();
                         }
-                        _ => panic!("unsupported type in generate_varying_struct")
+                        _ => panic!("unsupported type in generate_varying_struct"),
                     }
                 }
-                DrawShaderFieldKind::Varying {..} => {
+                DrawShaderFieldKind::Varying { .. } => {
                     write!(self.string, "    ").unwrap();
-                    self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                    self.write_var_decl(
+                        &DisplayDsIdent(field.ident),
+                        field.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
                     writeln!(self.string, ";").unwrap();
                 }
                 _ => {}
@@ -318,7 +403,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
     }
-    
+
     fn generate_fn_def(&mut self, fn_def: &FnDef, const_table_offset: Option<usize>) {
         FnDefGenerator {
             fn_def,
@@ -329,18 +414,38 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         .generate_fn_def()
     }
-    
+
     fn generate_vertex_main(&mut self) {
-        
         write!(self.string, "vertex Varyings vertex_main(").unwrap();
         writeln!(self.string, "Textures textures").unwrap();
-        writeln!(self.string, ", const device Geometries *in_geometries [[buffer(0)]]").unwrap();
-        writeln!(self.string, ", const device Instances *in_instances [[buffer(1)]]").unwrap();
-        writeln!(self.string, ", constant LiveUniforms &live_uniforms [[buffer(2)]]").unwrap();
-        writeln!(self.string, ", constant const float *const_table [[buffer(3)]]").unwrap();
+        writeln!(
+            self.string,
+            ", const device Geometries *in_geometries [[buffer(0)]]"
+        )
+        .unwrap();
+        writeln!(
+            self.string,
+            ", const device Instances *in_instances [[buffer(1)]]"
+        )
+        .unwrap();
+        writeln!(
+            self.string,
+            ", constant LiveUniforms &live_uniforms [[buffer(2)]]"
+        )
+        .unwrap();
+        writeln!(
+            self.string,
+            ", constant const float *const_table [[buffer(3)]]"
+        )
+        .unwrap();
         let mut buffer_id = 4;
         for (field, _set) in self.fields_as_uniform_blocks {
-            writeln!(self.string, ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]", field, buffer_id).unwrap();
+            writeln!(
+                self.string,
+                ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]",
+                field, buffer_id
+            )
+            .unwrap();
             buffer_id += 1;
         }
         writeln!(self.string, ", uint vtx_id [[vertex_id]]").unwrap();
@@ -349,79 +454,145 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(
             self.string,
             "    Geometries geometries = in_geometries[vtx_id];"
-        ).unwrap();
+        )
+        .unwrap();
         writeln!(
             self.string,
             "    Instances instances = in_instances[inst_id];"
-        ).unwrap();
+        )
+        .unwrap();
         writeln!(self.string, "    Varyings varyings;").unwrap();
-        
+
         for decl in &self.draw_shader_def.fields {
             match &decl.kind {
-                DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    writeln!(self.string, "    varyings.{0} = geometries.{0};", DisplayDsIdent(decl.ident)).unwrap();
+                DrawShaderFieldKind::Geometry {
+                    is_used_in_pixel_shader,
+                    ..
+                } if is_used_in_pixel_shader.get() => {
+                    writeln!(
+                        self.string,
+                        "    varyings.{0} = geometries.{0};",
+                        DisplayDsIdent(decl.ident)
+                    )
+                    .unwrap();
                 }
-                DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
+                DrawShaderFieldKind::Instance {
+                    is_used_in_pixel_shader,
+                    ..
+                } if is_used_in_pixel_shader.get() => {
                     match decl.ty_expr.ty.borrow().as_ref().unwrap() {
                         Ty::Mat4f => {
                             for i in 0..4 {
-                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", DisplayDsIdent(decl.ident), i).unwrap();
+                                writeln!(
+                                    self.string,
+                                    "    varyings.{0}{1} = instances.{0}{1};",
+                                    DisplayDsIdent(decl.ident),
+                                    i
+                                )
+                                .unwrap();
                             }
                         }
                         Ty::Mat3 => {
                             for i in 0..3 {
-                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", DisplayDsIdent(decl.ident), i).unwrap();
+                                writeln!(
+                                    self.string,
+                                    "    varyings.{0}{1} = instances.{0}{1};",
+                                    DisplayDsIdent(decl.ident),
+                                    i
+                                )
+                                .unwrap();
                             }
                         }
                         _ => {
-                            writeln!(self.string, "    varyings.{0} = instances.{0};", DisplayDsIdent(decl.ident)).unwrap();
+                            writeln!(
+                                self.string,
+                                "    varyings.{0} = instances.{0};",
+                                DisplayDsIdent(decl.ident)
+                            )
+                            .unwrap();
                         }
                     }
                 }
                 _ => {}
             }
         }
-        
-        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
-        write!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_ptr, vertex_def.ident)).unwrap();
-        
+
+        let vertex_def = self
+            .shader_registry
+            .draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex)))
+            .unwrap();
+        write!(
+            self.string,
+            "    varyings.position = {}",
+            DisplayFnName(vertex_def.fn_ptr, vertex_def.ident)
+        )
+        .unwrap();
+
         write!(self.string, "(").unwrap();
-        self.backend_writer.write_call_expr_hidden_args(self.string, vertex_def.hidden_args.borrow().as_ref().unwrap(), "");
-        
+        self.backend_writer.write_call_expr_hidden_args(
+            self.string,
+            vertex_def.hidden_args.borrow().as_ref().unwrap(),
+            "",
+        );
+
         writeln!(self.string, ");").unwrap();
-        
+
         writeln!(self.string, "    return varyings;").unwrap();
         writeln!(self.string, "}}").unwrap();
     }
-    
+
     fn generate_pixel_main(&mut self) {
-        
         write!(self.string, "fragment float4 fragment_main(").unwrap();
         writeln!(self.string, "Varyings varyings[[stage_in]]").unwrap();
         writeln!(self.string, ", Textures textures").unwrap();
-        writeln!(self.string, ", constant LiveUniforms &live_uniforms [[buffer(2)]]").unwrap();
-        writeln!(self.string, ", constant const float *const_table [[buffer(3)]]").unwrap();
+        writeln!(
+            self.string,
+            ", constant LiveUniforms &live_uniforms [[buffer(2)]]"
+        )
+        .unwrap();
+        writeln!(
+            self.string,
+            ", constant const float *const_table [[buffer(3)]]"
+        )
+        .unwrap();
         let mut buffer_id = 4;
         for (field, _set) in self.fields_as_uniform_blocks {
-            writeln!(self.string, ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]", field, buffer_id).unwrap();
+            writeln!(
+                self.string,
+                ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]",
+                field, buffer_id
+            )
+            .unwrap();
             buffer_id += 1;
         }
-        
+
         writeln!(self.string, ") {{").unwrap();
-        
+
         write!(self.string, "    return ").unwrap();
-        
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap();
-        write!(self.string, "    {}", DisplayFnName(pixel_def.fn_ptr, pixel_def.ident)).unwrap();
-        
+
+        let pixel_def = self
+            .shader_registry
+            .draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment)))
+            .unwrap();
+        write!(
+            self.string,
+            "    {}",
+            DisplayFnName(pixel_def.fn_ptr, pixel_def.ident)
+        )
+        .unwrap();
+
         write!(self.string, "(").unwrap();
-        self.backend_writer.write_call_expr_hidden_args(self.string, pixel_def.hidden_args.borrow().as_ref().unwrap(), "");
-        
+        self.backend_writer.write_call_expr_hidden_args(
+            self.string,
+            pixel_def.hidden_args.borrow().as_ref().unwrap(),
+            "",
+        );
+
         writeln!(self.string, ");").unwrap();
-        
+
         writeln!(self.string, "}}").unwrap();
     }
-    
+
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             fn_def: None,
@@ -434,19 +605,20 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         .generate_expr(expr)
     }
-    
+
     fn write_var_decl_packed(&mut self, ident: &dyn fmt::Display, ty: &Ty) {
-        self.backend_writer.write_var_decl(&mut self.string, "", false, true, ident, ty);
+        self.backend_writer
+            .write_var_decl(&mut self.string, "", false, true, ident, ty);
     }
-    
+
     fn write_var_decl(&mut self, ident: &dyn fmt::Display, ty: &Ty) {
-        self.backend_writer.write_var_decl(&mut self.string, "", false, false, ident, ty);
+        self.backend_writer
+            .write_var_decl(&mut self.string, "", false, false, ident, ty);
     }
-    
+
     fn write_ty_lit(&mut self, ty_lit: TyLit) {
         self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
     }
-    
 }
 
 struct MetalBackendWriter<'a> {
@@ -456,38 +628,35 @@ struct MetalBackendWriter<'a> {
 }
 
 impl<'a> BackendWriter for MetalBackendWriter<'a> {
-    
     fn get_struct_cons_type(&self) -> StructConsType {
         StructConsType::Brace
     }
 
-    
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
         false
     }
-    
+
     fn needs_unpack_for_matrix_multiplication(&self) -> bool {
         true
     }
 
-    fn enum_is_float(&self)->bool{
+    fn enum_is_float(&self) -> bool {
         false
     }
-    
+
     fn const_table_is_vec4(&self) -> bool {
         false
     }
-    
-    
+
     fn use_cons_fn(&self, what: &str) -> bool {
         match what {
             "consfn_mat3_mat4" => true,
             "consfn_mat2_mat4" => true,
             "consfn_mat2_mat3" => true,
-            _ => false
+            _ => false,
         }
     }
-    
+
     fn write_var_decl(
         &self,
         string: &mut String,
@@ -497,20 +666,16 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
         ident: &dyn fmt::Display,
         ty: &Ty,
     ) -> bool {
-        let ref_prefix = if is_inout {
-            "&"
-        } else {
-            ""
-        };
-        
+        let ref_prefix = if is_inout { "&" } else { "" };
+
         fn prefix(string: &mut String, sep: &'static str, is_inout: bool) {
             write!(string, "{}", sep).unwrap();
             if is_inout {
                 write!(string, "thread ").unwrap();
             }
         }
-        
-        let packed_prefix = if is_packed {"packed_"} else {""};
+
+        let packed_prefix = if is_packed { "packed_" } else { "" };
         match *ty {
             Ty::Void => {
                 write!(string, "{}void {}", sep, ident).unwrap();
@@ -600,7 +765,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 write!(string, " {}{}", ref_prefix, ident).unwrap();
             }
             Ty::Texture2D | Ty::TextureOES => panic!(), // TODO
-            Ty::Array {ref elem_ty, len} => {
+            Ty::Array { ref elem_ty, len } => {
                 self.write_var_decl(string, sep, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
             }
@@ -612,27 +777,26 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 prefix(string, sep, is_inout);
                 write!(string, "uint32_t {} {}", ref_prefix, ident).unwrap();
             }
-            Ty::DrawShader(_) => {
-                return false
-            }
-            Ty::ClosureDef {..} => {
-                return false
-            }
-            Ty::ClosureDecl => {
-                return false
-            }
+            Ty::DrawShader(_) => return false,
+            Ty::ClosureDef { .. } => return false,
+            Ty::ClosureDecl => return false,
         }
         true
     }
-    
-    fn write_call_expr_hidden_args(&self, string: &mut String, hidden_args: &BTreeSet<HiddenArgKind >, sep: &str) {
+
+    fn write_call_expr_hidden_args(
+        &self,
+        string: &mut String,
+        hidden_args: &BTreeSet<HiddenArgKind>,
+        sep: &str,
+    ) {
         let mut sep = sep;
-        if self.const_table.table.len()>0 {
+        if self.const_table.table.len() > 0 {
             write!(string, "{}", sep).unwrap();
             sep = ", ";
             write!(string, "const_table").unwrap();
         }
-        
+
         for hidden_arg in hidden_args {
             write!(string, "{}", sep).unwrap();
             match hidden_arg {
@@ -658,15 +822,20 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
             sep = ", ";
         }
     }
-    
-    fn write_fn_def_hidden_params(&self, string: &mut String, hidden_args: &BTreeSet<HiddenArgKind >, sep: &str) {
+
+    fn write_fn_def_hidden_params(
+        &self,
+        string: &mut String,
+        hidden_args: &BTreeSet<HiddenArgKind>,
+        sep: &str,
+    ) {
         let mut sep = sep;
-        if self.const_table.table.len()>0 {
+        if self.const_table.table.len() > 0 {
             write!(string, "{}", sep).unwrap();
             sep = ", ";
             write!(string, "constant const float *const_table").unwrap();
         }
-        
+
         for hidden_arg in hidden_args {
             write!(string, "{}", sep).unwrap();
             match hidden_arg {
@@ -692,31 +861,35 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
             sep = ", ";
         }
     }
-    
+
     fn generate_live_value_prefix(&self, string: &mut String) {
         write!(string, "live_uniforms.").unwrap();
     }
-    
+
     fn generate_draw_shader_field_expr(&self, string: &mut String, field_ident: Ident, ty: &Ty) {
         let field_def = self.draw_shader_def.find_field(field_ident).unwrap();
-        
+
         match &field_def.kind {
-            DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} => {
+            DrawShaderFieldKind::Geometry {
+                is_used_in_pixel_shader,
+                ..
+            } => {
                 if is_used_in_pixel_shader.get() {
                     write!(string, "varyings.").unwrap()
-                }
-                else {
+                } else {
                     write!(string, "geometries.").unwrap()
                 }
             }
-            DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} => {
+            DrawShaderFieldKind::Instance {
+                is_used_in_pixel_shader,
+                ..
+            } => {
                 let prefix = if is_used_in_pixel_shader.get() {
                     "varyings"
-                }
-                else {
+                } else {
                     "instances"
                 };
-                
+
                 match ty {
                     Ty::Mat4f => {
                         write!(string, "float4x4(").unwrap();
@@ -731,13 +904,13 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                                     0 => write!(string, ".x").unwrap(),
                                     1 => write!(string, ".y").unwrap(),
                                     2 => write!(string, ".z").unwrap(),
-                                    _ => write!(string, ".w").unwrap()
+                                    _ => write!(string, ".w").unwrap(),
                                 }
                             }
                         }
                         write!(string, ")").unwrap();
-                        return
-                    },
+                        return;
+                    }
                     Ty::Mat3 => {
                         write!(string, "float3x3(").unwrap();
                         for i in 0..3 {
@@ -755,30 +928,32 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                             }
                         }
                         write!(string, ")").unwrap();
-                        return
-                    },
+                        return;
+                    }
                     Ty::Mat2 => {
-                        write!(string, "float2x2({0}.{1}.x, {0}.{1}.y, {0}.{1}.z, {0}.{1}.w)", prefix, DisplayDsIdent(field_ident)).unwrap();
-                        return
-                    },
+                        write!(
+                            string,
+                            "float2x2({0}.{1}.x, {0}.{1}.y, {0}.{1}.z, {0}.{1}.w)",
+                            prefix,
+                            DisplayDsIdent(field_ident)
+                        )
+                        .unwrap();
+                        return;
+                    }
                     _ => {
-                        write!(string, "{}.",prefix).unwrap();
+                        write!(string, "{}.", prefix).unwrap();
                     }
                 }
             }
-            DrawShaderFieldKind::Varying {..} => {
-                write!(string, "varyings.").unwrap()
-            }
-            DrawShaderFieldKind::Texture {..} => {
-                write!(string, "textures.").unwrap()
-            }
-            DrawShaderFieldKind::Uniform {block_ident, ..} => {
+            DrawShaderFieldKind::Varying { .. } => write!(string, "varyings.").unwrap(),
+            DrawShaderFieldKind::Texture { .. } => write!(string, "textures.").unwrap(),
+            DrawShaderFieldKind::Uniform { block_ident, .. } => {
                 write!(string, "uniforms_{}.", block_ident).unwrap()
             }
         }
         write!(string, "{}", &DisplayDsIdent(field_ident)).unwrap();
     }
-    
+
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
         write!(
             string,
@@ -802,16 +977,15 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 TyLit::Texture2D | TyLit::TextureOES => panic!(), // TODO
             }
         )
-            .unwrap();
+        .unwrap();
     }
-    
+
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]) {
         match ident {
             Ident(live_id!(atan)) => {
                 if arg_exprs.len() == 2 {
                     write!(string, "atan2").unwrap();
-                }
-                else {
+                } else {
                     write!(string, "atan").unwrap();
                 }
             }
@@ -824,9 +998,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
             Ident(live_id!(dFdy)) => {
                 write!(string, "dfdy").unwrap();
             }
-            _ => {
-                write!(string, "{}", ident).unwrap()
-            }
+            _ => write!(string, "{}", ident).unwrap(),
         }
     }
 }

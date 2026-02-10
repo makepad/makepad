@@ -1,11 +1,6 @@
-use {
-    crate::{
-        window::WindowId,
-        event::{
-            WindowGeomChangeEvent,
-            TimerEvent,
-        },
-    }
+use crate::{
+    event::{TimerEvent, WindowGeomChangeEvent},
+    window::WindowId,
 };
 
 #[derive(Debug, Clone)]

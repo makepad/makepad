@@ -9,16 +9,16 @@ pub struct GoogleAiChatPrompt {
 pub struct GoogleAiContent {
     pub role: Option<String>,
     pub parts: Vec<GoogleAiPart>,
-} 
+}
 
 #[derive(Debug, SerJson, DeJson)]
 pub struct GoogleAiPart {
     pub text: String,
-} 
+}
 
 #[allow(non_snake_case)]
 #[derive(Debug, SerJson, DeJson)]
-pub struct GoogleAiResponse{
+pub struct GoogleAiResponse {
     pub candidates: Vec<GoogleAiCandidate>,
     pub usageMetadata: GoogleAiMetadata,
     pub modelVersion: String,
@@ -29,7 +29,7 @@ pub struct GoogleAiResponse{
 #[derive(Debug, SerJson, DeJson)]
 pub struct GoogleAiCitation {
     pub citationSources: Vec<GoogleAiCitationSource>,
-} 
+}
 
 #[allow(non_snake_case)]
 #[derive(Debug, SerJson, DeJson)]
@@ -38,7 +38,7 @@ pub struct GoogleAiCitationSource {
     pub endIndex: usize,
     pub uri: String,
     pub license: String,
-} 
+}
 
 #[allow(non_snake_case)]
 #[derive(Debug, SerJson, DeJson)]
@@ -49,14 +49,14 @@ pub struct GoogleAiMetadata {
     pub thoughtsTokenCount: usize,
     pub cachedContentTokenCount: Option<usize>,
     pub promptTokensDetails: Vec<GoogleAiTokenDetail>,
-    pub cacheTokensDetails: Option<Vec<GoogleAiTokenDetail>>
-} 
+    pub cacheTokensDetails: Option<Vec<GoogleAiTokenDetail>>,
+}
 
 #[allow(non_snake_case)]
 #[derive(Debug, SerJson, DeJson)]
 pub struct GoogleAiTokenDetail {
     modality: String,
-    tokenCount: usize
+    tokenCount: usize,
 }
 
 #[allow(non_snake_case)]
@@ -66,4 +66,4 @@ pub struct GoogleAiCandidate {
     pub finishReason: Option<String>,
     pub index: usize,
     pub citationMetadata: Option<GoogleAiCitation>,
-} 
+}

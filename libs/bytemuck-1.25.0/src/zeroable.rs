@@ -23,15 +23,15 @@ use super::*;
 ///   but is available under the `zeroable_atomics` feature flag.
 /// * `[T; N]` for arbitrary `N` requires the `min_const_generics` feature flag.
 pub unsafe trait Zeroable: Sized {
-  /// Calls [`zeroed`](core::mem::zeroed).
-  ///
-  /// This is a trait method so that you can write `MyType::zeroed()` in your
-  /// code. It is a contract of this trait that if you implement it on your type
-  /// you **must not** override this method.
-  #[inline]
-  fn zeroed() -> Self {
-    unsafe { core::mem::zeroed() }
-  }
+    /// Calls [`zeroed`](core::mem::zeroed).
+    ///
+    /// This is a trait method so that you can write `MyType::zeroed()` in your
+    /// code. It is a contract of this trait that if you implement it on your type
+    /// you **must not** override this method.
+    #[inline]
+    fn zeroed() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
 }
 unsafe impl Zeroable for () {}
 unsafe impl Zeroable for bool {}
@@ -79,88 +79,69 @@ unsafe impl<T: Zeroable> Zeroable for core::cell::Cell<T> {}
 #[cfg(feature = "zeroable_atomics")]
 #[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "zeroable_atomics")))]
 mod atomic_impls {
-  use super::Zeroable;
+    use super::Zeroable;
 
-  #[cfg(target_has_atomic = "8")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicBool {}
-  #[cfg(target_has_atomic = "8")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicU8 {}
-  #[cfg(target_has_atomic = "8")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicI8 {}
+    #[cfg(target_has_atomic = "8")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicBool {}
+    #[cfg(target_has_atomic = "8")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicU8 {}
+    #[cfg(target_has_atomic = "8")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicI8 {}
 
-  #[cfg(target_has_atomic = "16")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicU16 {}
-  #[cfg(target_has_atomic = "16")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicI16 {}
+    #[cfg(target_has_atomic = "16")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicU16 {}
+    #[cfg(target_has_atomic = "16")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicI16 {}
 
-  #[cfg(target_has_atomic = "32")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicU32 {}
-  #[cfg(target_has_atomic = "32")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicI32 {}
+    #[cfg(target_has_atomic = "32")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicU32 {}
+    #[cfg(target_has_atomic = "32")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicI32 {}
 
-  #[cfg(target_has_atomic = "64")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicU64 {}
-  #[cfg(target_has_atomic = "64")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicI64 {}
+    #[cfg(target_has_atomic = "64")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicU64 {}
+    #[cfg(target_has_atomic = "64")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicI64 {}
 
-  #[cfg(target_has_atomic = "ptr")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicUsize {}
-  #[cfg(target_has_atomic = "ptr")]
-  unsafe impl Zeroable for core::sync::atomic::AtomicIsize {}
+    #[cfg(target_has_atomic = "ptr")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicUsize {}
+    #[cfg(target_has_atomic = "ptr")]
+    unsafe impl Zeroable for core::sync::atomic::AtomicIsize {}
 
-  #[cfg(target_has_atomic = "ptr")]
-  unsafe impl<T> Zeroable for core::sync::atomic::AtomicPtr<T> {}
+    #[cfg(target_has_atomic = "ptr")]
+    unsafe impl<T> Zeroable for core::sync::atomic::AtomicPtr<T> {}
 }
 
 #[cfg(feature = "zeroable_maybe_uninit")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "zeroable_maybe_uninit"))
-)]
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "zeroable_maybe_uninit")))]
 unsafe impl<T> Zeroable for core::mem::MaybeUninit<T> {}
 
 unsafe impl<A: Zeroable> Zeroable for (A,) {}
 unsafe impl<A: Zeroable, B: Zeroable> Zeroable for (A, B) {}
 unsafe impl<A: Zeroable, B: Zeroable, C: Zeroable> Zeroable for (A, B, C) {}
-unsafe impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable> Zeroable
-  for (A, B, C, D)
+unsafe impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable> Zeroable for (A, B, C, D) {}
+unsafe impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable, E: Zeroable> Zeroable
+    for (A, B, C, D, E)
 {
 }
-unsafe impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable, E: Zeroable>
-  Zeroable for (A, B, C, D, E)
+unsafe impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable, E: Zeroable, F: Zeroable> Zeroable
+    for (A, B, C, D, E, F)
 {
 }
-unsafe impl<
-    A: Zeroable,
-    B: Zeroable,
-    C: Zeroable,
-    D: Zeroable,
-    E: Zeroable,
-    F: Zeroable,
-  > Zeroable for (A, B, C, D, E, F)
+unsafe impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable, E: Zeroable, F: Zeroable, G: Zeroable>
+    Zeroable for (A, B, C, D, E, F, G)
 {
 }
 unsafe impl<
-    A: Zeroable,
-    B: Zeroable,
-    C: Zeroable,
-    D: Zeroable,
-    E: Zeroable,
-    F: Zeroable,
-    G: Zeroable,
-  > Zeroable for (A, B, C, D, E, F, G)
-{
-}
-unsafe impl<
-    A: Zeroable,
-    B: Zeroable,
-    C: Zeroable,
-    D: Zeroable,
-    E: Zeroable,
-    F: Zeroable,
-    G: Zeroable,
-    H: Zeroable,
-  > Zeroable for (A, B, C, D, E, F, G, H)
+        A: Zeroable,
+        B: Zeroable,
+        C: Zeroable,
+        D: Zeroable,
+        E: Zeroable,
+        F: Zeroable,
+        G: Zeroable,
+        H: Zeroable,
+    > Zeroable for (A, B, C, D, E, F, G, H)
 {
 }
 
@@ -170,9 +151,8 @@ unsafe impl<T, const N: usize> Zeroable for [T; N] where T: Zeroable {}
 
 #[cfg(not(feature = "min_const_generics"))]
 impl_unsafe_marker_for_array!(
-  Zeroable, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-  19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48, 64, 96, 128, 256,
-  512, 1024, 2048, 4096
+    Zeroable, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    24, 25, 26, 27, 28, 29, 30, 31, 32, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096
 );
 
 impl_unsafe_marker_for_simd!(
@@ -224,26 +204,19 @@ impl_unsafe_marker_for_simd!(
 
 #[rustversion::before(2026-01-27)] // See https://github.com/Lokathor/bytemuck/issues/343
 #[cfg(feature = "nightly_portable_simd")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "nightly_portable_simd"))
-)]
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "nightly_portable_simd")))]
 unsafe impl<T, const N: usize> Zeroable for core::simd::Simd<T, N>
 where
-  T: core::simd::SimdElement + Zeroable,
-  core::simd::LaneCount<N>: core::simd::SupportedLaneCount,
+    T: core::simd::SimdElement + Zeroable,
+    core::simd::LaneCount<N>: core::simd::SupportedLaneCount,
 {
 }
 
 #[rustversion::since(2026-01-27)] // See https://github.com/Lokathor/bytemuck/issues/343
 #[cfg(feature = "nightly_portable_simd")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "nightly_portable_simd"))
-)]
-unsafe impl<T, const N: usize> Zeroable for core::simd::Simd<T, N>
-where
-  T: core::simd::SimdElement + Zeroable,
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "nightly_portable_simd")))]
+unsafe impl<T, const N: usize> Zeroable for core::simd::Simd<T, N> where
+    T: core::simd::SimdElement + Zeroable
 {
 }
 

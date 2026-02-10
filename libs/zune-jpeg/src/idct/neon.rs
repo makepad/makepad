@@ -36,7 +36,6 @@ use crate::unsafe_utils::{transpose, YmmRegister};
 
 const SCALE_BITS: i32 = 512 + 65536 + (128 << 17);
 
-
 #[inline]
 #[target_feature(enable = "neon")]
 unsafe fn pack_16(a: int32x4x2_t) -> int16x8_t {
@@ -58,9 +57,7 @@ unsafe fn condense_bottom_16(a: int32x4x2_t, b: int32x4x2_t) -> int16x8x2_t {
     unused_assignments,
     clippy::zero_prefixed_literal
 )]
-pub unsafe fn idct_neon(
-    in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize
-) {
+pub unsafe fn idct_neon(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize) {
     let mut pos = 0;
 
     // load into registers
@@ -110,7 +107,7 @@ pub unsafe fn idct_neon(
                         .unwrap()
                         .as_mut_ptr()
                         .cast(),
-                    $value
+                    $value,
                 );
                 $pos += stride;
             };
@@ -188,13 +185,13 @@ pub unsafe fn idct_neon(
     // Process rows
     dct_pass!(512, 10);
     transpose(
-        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7
+        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7,
     );
 
     // process columns
     dct_pass!(SCALE_BITS, 17);
     transpose(
-        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7
+        &mut row0, &mut row1, &mut row2, &mut row3, &mut row4, &mut row5, &mut row6, &mut row7,
     );
 
     // Pack i32 to i16's,
@@ -217,7 +214,7 @@ pub unsafe fn idct_neon(
                     .unwrap()
                     .as_mut_ptr()
                     .cast(),
-                b.0
+                b.0,
             );
             $index += stride;
             // second vector
@@ -227,7 +224,7 @@ pub unsafe fn idct_neon(
                     .unwrap()
                     .as_mut_ptr()
                     .cast(),
-                b.1
+                b.1,
             );
             $index += stride;
         };

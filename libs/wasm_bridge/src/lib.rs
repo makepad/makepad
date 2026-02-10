@@ -1,13 +1,13 @@
+pub use makepad_derive_wasm_bridge::*;
 pub use makepad_live_id;
 pub use makepad_live_id::*;
-pub use makepad_derive_wasm_bridge::*;
 
 #[macro_use]
 #[cfg(target_arch = "wasm32")]
 mod wasm_exports;
-mod wasm_types;
 mod from_wasm;
 mod to_wasm;
+mod wasm_types;
 
 pub use from_wasm::*;
 pub use to_wasm::*;

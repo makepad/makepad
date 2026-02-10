@@ -368,7 +368,12 @@ mod tests {
     fn test_string_eq() {
         assert_eq!(
             Level::vec(&[0, 1, 4, 125]),
-            vec!["0".to_string(), "1".to_string(), "x".to_string(), "125".to_string()]
+            vec![
+                "0".to_string(),
+                "1".to_string(),
+                "x".to_string(),
+                "125".to_string()
+            ]
         );
     }
 }

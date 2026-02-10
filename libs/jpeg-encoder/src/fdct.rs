@@ -134,14 +134,8 @@ pub fn fdct(data: &mut [i16; 64]) {
         data2[offset + 4] = (tmp10 - tmp11) << PASS1_BITS;
 
         let z1 = (tmp12 + tmp13) * FIX_0_541196100;
-        data2[offset + 2] = descale(
-            z1 + (tmp13 * FIX_0_765366865),
-            CONST_BITS - PASS1_BITS,
-        );
-        data2[offset + 6] = descale(
-            z1 + (tmp12 * -FIX_1_847759065),
-            CONST_BITS - PASS1_BITS,
-        );
+        data2[offset + 2] = descale(z1 + (tmp13 * FIX_0_765366865), CONST_BITS - PASS1_BITS);
+        data2[offset + 6] = descale(z1 + (tmp12 * -FIX_1_847759065), CONST_BITS - PASS1_BITS);
 
         /* Odd part per figure 8 --- note paper omits factor of sqrt(2).
          * cK represents cos(K*pi/16).

@@ -66,7 +66,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 
 use crate::constants::{
-    DEFLATE_MAX_BLOCK_SIZE, DEFLATE_MAX_MATCH_LEN, DEFLATE_MIN_LENGTH, DEFLATE_WINDOW_SIZE
+    DEFLATE_MAX_BLOCK_SIZE, DEFLATE_MAX_MATCH_LEN, DEFLATE_MIN_LENGTH, DEFLATE_WINDOW_SIZE,
 };
 use crate::encoder::{v_hash, EncodedSequences, MatchSequence};
 
@@ -78,7 +78,10 @@ const HASH_FOUR_SIZE: usize = 1 << HASH_FOUR_LOG_SIZE;
 #[inline(never)]
 #[allow(clippy::too_many_lines, unused_assignments)]
 pub fn compress_block(
-    src: &[u8], _dest: &mut [u8], table: &mut HcMatchFinder, sequences: &mut EncodedSequences
+    src: &[u8],
+    _dest: &mut [u8],
+    table: &mut HcMatchFinder,
+    sequences: &mut EncodedSequences,
 ) {
     let mut window_start = 0;
     let mut literals_before_match = 0;
@@ -138,18 +141,21 @@ pub fn compress_block(
 }
 
 pub struct HcMatchFinder {
-    next_hash:    [usize; 2],
-    hc_tab:       [u32; 1 << HASH_FOUR_LOG_SIZE],
-    next_tab:     Box<[u32; DEFLATE_MAX_BLOCK_SIZE]>,
+    next_hash: [usize; 2],
+    hc_tab: [u32; 1 << HASH_FOUR_LOG_SIZE],
+    next_tab: Box<[u32; DEFLATE_MAX_BLOCK_SIZE]>,
     search_depth: i32,
-    min_length:   usize,
-    nice_length:  usize
+    min_length: usize,
+    nice_length: usize,
 }
 
 impl HcMatchFinder {
     /// create a new match finder
     pub fn new(
-        buf_size: usize, search_depth: i32, min_length: usize, nice_length: usize
+        buf_size: usize,
+        search_depth: i32,
+        min_length: usize,
+        nice_length: usize,
     ) -> HcMatchFinder {
         let n_tab = vec![0; buf_size].into_boxed_slice();
         //debug_assert!(min_length == 4);
@@ -159,7 +165,7 @@ impl HcMatchFinder {
             next_tab: n_tab.try_into().expect("Uh oh, fix values bro :)"),
             search_depth,
             nice_length,
-            min_length
+            min_length,
         }
     }
 
@@ -169,7 +175,11 @@ impl HcMatchFinder {
     }
     #[inline(always)]
     pub fn longest_four_match(
-        &mut self, bytes: &[u8], start: usize, literal_length: usize, sequence: &mut MatchSequence
+        &mut self,
+        bytes: &[u8],
+        start: usize,
+        literal_length: usize,
+        sequence: &mut MatchSequence,
     ) -> bool {
         let curr_start = &bytes[start..];
         // store the current first byte in the hash, we use this to

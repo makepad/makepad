@@ -535,7 +535,9 @@ mod tests {
 
     #[test]
     fn test_not_removed_by_x9() {
-        let non_x9_classes = &[L, R, AL, EN, ES, ET, AN, CS, NSM, B, S, WS, ON, LRI, RLI, FSI, PDI];
+        let non_x9_classes = &[
+            L, R, AL, EN, ES, ET, AN, CS, NSM, B, S, WS, ON, LRI, RLI, FSI, PDI,
+        ];
         for x in non_x9_classes {
             assert_eq!(not_removed_by_x9(&x), true);
         }

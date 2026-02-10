@@ -3,28 +3,28 @@ use crate::{
     makepad_draw::*,
     makepad_platform::{KeyCode, KeyEvent},
     view::*,
-    widget::*
+    widget::*,
 };
 
-live_design!{
+live_design! {
     link widgets;
     use link::widgets::*;
     use link::theme::*;
     use makepad_draw::shader::std::*;
-    
+
     pub ModalBase = {{Modal}} {}
     pub Modal = <ModalBase> {
         width: Fill
         height: Fill
         flow: Overlay
         align: {x: 0.5, y: 0.5}
-        
+
         draw_bg: {
             fn pixel(self) -> vec4 {
                 return vec4(0., 0., 0., 0.0)
             }
         }
-        
+
         bg_view: <View> {
             width: Fill
             height: Fill
@@ -36,7 +36,7 @@ live_design!{
                 }
             }
         }
-        
+
         content: <View> {
             width: Fit
             height: Fit
@@ -53,20 +53,31 @@ pub enum ModalAction {
 
 #[derive(Live, Widget)]
 pub struct Modal {
-    #[live] #[find] content: View,
-    #[live] #[area] bg_view: View,
+    #[live]
+    #[find]
+    content: View,
+    #[live]
+    #[area]
+    bg_view: View,
 
-    #[redraw] #[rust(DrawList2d::new(cx))] draw_list: DrawList2d,
+    #[redraw]
+    #[rust(DrawList2d::new(cx))]
+    draw_list: DrawList2d,
 
-    #[live] draw_bg: DrawQuad,
-    #[layout] layout: Layout,
-    #[walk] walk: Walk,
+    #[live]
+    draw_bg: DrawQuad,
+    #[layout]
+    layout: Layout,
+    #[walk]
+    walk: Walk,
 
-    #[rust] is_open: bool,
+    #[rust]
+    is_open: bool,
     /// Whether the modal can be dismissed via an external interaction, including:
     /// clicking outside the content view, pressing Escape, or performing
     /// the back navigational gesture (e.g., on Android).
-    #[live(true)] can_dismiss: bool,
+    #[live(true)]
+    can_dismiss: bool,
 }
 
 impl LiveHook for Modal {
@@ -97,19 +108,28 @@ impl Widget for Modal {
             // * If the back navigational action/gesture was triggered (e.g., on Android),
             // * If the Escape key was pressed while either the `bg_view` or `content` has key focus,
             // * If there was a click/press in the background area, outside of the inner `content` view.
-            let should_close = 
-                event.back_pressed()
+            let should_close = event.back_pressed()
                 || match bg_area_hit {
-                    Hit::KeyDown(KeyEvent { key_code: KeyCode::Escape, .. }) => true,
+                    Hit::KeyDown(KeyEvent {
+                        key_code: KeyCode::Escape,
+                        ..
+                    }) => true,
                     Hit::FingerUp(fe) => !self.content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
                 || match content_area_hit {
-                    Hit::KeyDown(KeyEvent { key_code: KeyCode::Escape, .. }) => true,
+                    Hit::KeyDown(KeyEvent {
+                        key_code: KeyCode::Escape,
+                        ..
+                    }) => true,
                     _ => false,
                 };
             if should_close {
-                cx.widget_action(self.content.widget_uid(), &scope.path, ModalAction::Dismissed);
+                cx.widget_action(
+                    self.content.widget_uid(),
+                    &scope.path,
+                    ModalAction::Dismissed,
+                );
                 self.close(cx);
             }
         }

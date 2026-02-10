@@ -28,13 +28,13 @@ pub struct HuffmanTable {
     /// offset for codes of length k
     /// Answers the question, where do code-lengths of length k end
     /// Element 0 is unused
-    pub(crate) offset:  [i32; 18],
+    pub(crate) offset: [i32; 18],
     /// lookup table for fast decoding
     ///
     /// top  bits above HUFF_LOOKAHEAD contain the code length.
     ///
     /// Lower (8) bits contain the symbol in order of increasing code length.
-    pub(crate) lookup:  [i32; 1 << HUFF_LOOKAHEAD],
+    pub(crate) lookup: [i32; 1 << HUFF_LOOKAHEAD],
 
     /// A table which can be used to decode small AC coefficients and
     /// do an equivalent of receive_extend
@@ -45,12 +45,15 @@ pub struct HuffmanTable {
     /// \# number of symbols with codes of length `k` bits
     // bits[0] is unused
     /// Symbols in order of increasing code length
-    pub(crate) values: [u8; 256]
+    pub(crate) values: [u8; 256],
 }
 
 impl HuffmanTable {
     pub fn new(
-        codes: &[u8; 17], values: [u8; 256], is_dc: bool, is_progressive: bool
+        codes: &[u8; 17],
+        values: [u8; 256],
+        is_dc: bool,
+        is_progressive: bool,
     ) -> Result<HuffmanTable, DecodeErrors> {
         let too_long_code = (i32::from(HUFF_LOOKAHEAD) + 1) << HUFF_LOOKAHEAD;
         let mut p = HuffmanTable {
@@ -58,7 +61,7 @@ impl HuffmanTable {
             offset: [0; 18],
             lookup: [too_long_code; 1 << HUFF_LOOKAHEAD],
             values,
-            ac_lookup: None
+            ac_lookup: None,
         };
 
         p.make_derived_table(is_dc, is_progressive, codes)?;
@@ -69,7 +72,10 @@ impl HuffmanTable {
     /// Create a new huffman tables with values that aren't fixed
     /// used by fill_mjpeg_tables
     pub fn new_unfilled(
-        codes: &[u8; 17], values: &[u8], is_dc: bool, is_progressive: bool
+        codes: &[u8; 17],
+        values: &[u8],
+        is_dc: bool,
+        is_progressive: bool,
     ) -> Result<HuffmanTable, DecodeErrors> {
         let mut buf = [0; 256];
         buf[..values.len()].copy_from_slice(values);
@@ -87,7 +93,10 @@ impl HuffmanTable {
         clippy::needless_range_loop
     )]
     fn make_derived_table(
-        &mut self, is_dc: bool, _is_progressive: bool, bits: &[u8; 17]
+        &mut self,
+        is_dc: bool,
+        _is_progressive: bool,
+        bits: &[u8; 17],
     ) -> Result<(), DecodeErrors> {
         // build a list of code size
         let mut huff_size = [0; 257];

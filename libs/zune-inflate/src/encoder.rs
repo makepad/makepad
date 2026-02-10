@@ -20,9 +20,9 @@ const _SEQ_LITRUNLEN_MASK: u32 = (1_u32 << _SEQ_LENGTH_SHIFT) - 1;
 #[derive(Default, Copy, Clone)]
 pub struct MatchSequence {
     pub start: usize,
-    pub ll:    usize,
-    pub ml:    usize,
-    pub ol:    usize
+    pub ll: usize,
+    pub ml: usize,
+    pub ol: usize,
 }
 
 pub(crate) struct _Sequence {
@@ -36,15 +36,15 @@ pub(crate) struct _Sequence {
      * if this literal run was the last in the block, so there is no match
      * which follows it.
      */
-    litrunlen_and_length: u32
+    litrunlen_and_length: u32,
 }
 
 pub struct EncodedSequences {
     pub literals: Box<[u32; MAX_SEQ_PER_BLOCK]>,
-    pub matches:  Box<[u32; MAX_SEQ_PER_BLOCK]>,
-    pub offsets:  Box<[u32; MAX_SEQ_PER_BLOCK]>,
+    pub matches: Box<[u32; MAX_SEQ_PER_BLOCK]>,
+    pub offsets: Box<[u32; MAX_SEQ_PER_BLOCK]>,
 
-    pub current_pos: usize
+    pub current_pos: usize,
 }
 
 impl EncodedSequences {
@@ -63,10 +63,10 @@ impl EncodedSequences {
         let t3 = vec![0_u32; MAX_SEQ_PER_BLOCK].into_boxed_slice();
 
         EncodedSequences {
-            literals:    Box::try_from(t1).unwrap(),
-            matches:     Box::try_from(t2).unwrap(),
-            offsets:     Box::try_from(t3).unwrap(),
-            current_pos: 0
+            literals: Box::try_from(t1).unwrap(),
+            matches: Box::try_from(t2).unwrap(),
+            offsets: Box::try_from(t3).unwrap(),
+            current_pos: 0,
         }
     }
     /// Reset the sequences
@@ -77,26 +77,26 @@ impl EncodedSequences {
 
 #[derive(Debug, Copy, Clone)]
 pub enum DeflateEncodingStrategy {
-    NoCompression
+    NoCompression,
 }
 
 impl DeflateEncodingStrategy {
     #[allow(dead_code)]
     fn to_level(self) -> u8 {
         match self {
-            Self::NoCompression => 0
+            Self::NoCompression => 0,
         }
     }
 }
 
 pub struct DeflateEncodingOptions {
-    strategy: DeflateEncodingStrategy
+    strategy: DeflateEncodingStrategy,
 }
 
 impl Default for DeflateEncodingOptions {
     fn default() -> Self {
         DeflateEncodingOptions {
-            strategy: DeflateEncodingStrategy::NoCompression
+            strategy: DeflateEncodingStrategy::NoCompression,
         }
     }
 }
@@ -105,11 +105,11 @@ impl Default for DeflateEncodingOptions {
 ///
 /// Not yet complete
 pub struct DeflateEncoder<'a> {
-    data:            &'a [u8],
-    options:         DeflateEncodingOptions,
+    data: &'a [u8],
+    options: DeflateEncodingOptions,
     output_position: usize,
-    input_position:  usize,
-    output:          Vec<u8>
+    input_position: usize,
+    output: Vec<u8>,
 }
 
 impl<'a> DeflateEncoder<'a> {
@@ -128,7 +128,7 @@ impl<'a> DeflateEncoder<'a> {
             options,
             output_position: 0,
             input_position: 0,
-            output: out_array
+            output: out_array,
         }
     }
 

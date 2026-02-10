@@ -1,36 +1,26 @@
 use {
-    std::cell::Cell,
     crate::{
-        makepad_live_id::*,
-        makepad_wasm_bridge::*,
-        makepad_math::{dvec2, Vec2d},
-        cx::{OsType, XrCapabilities, WebParams},
-        window::CxWindowPool,
         area::Area,
+        cx::{OsType, WebParams, XrCapabilities},
         //midi::{MidiData},
         event::{
-            KeyCode,
-            KeyModifiers,
-            MouseButton,
-            MouseDownEvent,
-            MouseMoveEvent,
-            MouseUpEvent,
-            TouchPoint,
-            TouchState,
-            TouchUpdateEvent,
-            ScrollEvent,
-            KeyEvent,
-            TextInputEvent,
-            WindowGeom
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+            MouseUpEvent, ScrollEvent, TextInputEvent, TouchPoint, TouchState, TouchUpdateEvent,
+            WindowGeom,
         },
-    }
+        makepad_live_id::*,
+        makepad_math::{dvec2, Vec2d},
+        makepad_wasm_bridge::*,
+        window::CxWindowPool,
+    },
+    std::cell::Cell,
 };
 
 #[derive(ToWasm)]
 pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
     pub vendor: String,
-    pub renderer: String
+    pub renderer: String,
 }
 
 #[derive(ToWasm)]
@@ -46,7 +36,7 @@ pub struct WBrowserInfo {
 
 impl Into<OsType> for WBrowserInfo {
     fn into(self) -> OsType {
-        OsType::Web(WebParams{
+        OsType::Web(WebParams {
             protocol: self.protocol,
             hostname: self.hostname,
             host: self.host,
@@ -68,7 +58,7 @@ pub struct ToWasmGetDeps {
 #[derive(ToWasm)]
 pub struct WDepLoaded {
     pub path: String,
-    pub data: WasmDataU8
+    pub data: WasmDataU8,
 }
 
 #[derive(ToWasm)]
@@ -80,7 +70,7 @@ pub struct WWindowInfo {
     pub ar_supported: bool,
     pub dpi_factor: f64,
     pub inner_width: f64,
-    pub inner_height: f64
+    pub inner_height: f64,
 }
 
 impl Into<WindowGeom> for WWindowInfo {
@@ -88,12 +78,15 @@ impl Into<WindowGeom> for WWindowInfo {
         WindowGeom {
             is_fullscreen: self.is_fullscreen,
             is_topmost: false,
-            inner_size: Vec2d {x: self.inner_width, y: self.inner_height},
+            inner_size: Vec2d {
+                x: self.inner_width,
+                y: self.inner_height,
+            },
             dpi_factor: self.dpi_factor,
-            outer_size: Vec2d {x: 0., y: 0.},
-            position: Vec2d {x: 0., y: 0.},
+            outer_size: Vec2d { x: 0., y: 0. },
+            position: Vec2d { x: 0., y: 0. },
             xr_is_presenting: self.xr_is_presenting,
-            can_fullscreen: self.can_fullscreen
+            can_fullscreen: self.can_fullscreen,
         }
     }
 }
@@ -116,43 +109,36 @@ impl Into<XrCapabilities> for WXrCapabilities {
 #[derive(ToWasm)]
 pub struct ToWasmInit {
     pub deps: Vec<WDepLoaded>,
-    pub window_info: WWindowInfo
+    pub window_info: WWindowInfo,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmResizeWindow {
-    pub window_info: WWindowInfo
+    pub window_info: WWindowInfo,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmAnimationFrame {
-    pub time: f64
+    pub time: f64,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmTimerFired {
-    pub timer_id: usize
+    pub timer_id: usize,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmSignal {
-    pub flags:u32
+    pub flags: u32,
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmPaintDirty {
-}
+pub struct ToWasmPaintDirty {}
 
 #[derive(ToWasm)]
 pub struct ToWasmRedrawAll {}
 
-
-
-
-
 // Touch API
-
-
 
 #[derive(ToWasm, Clone, Debug)]
 pub struct WTouchPoint {
@@ -168,16 +154,16 @@ pub struct WTouchPoint {
 }
 
 impl From<WTouchPoint> for TouchPoint {
-    fn from(v:WTouchPoint) -> Self {
+    fn from(v: WTouchPoint) -> Self {
         Self {
             abs: dvec2(v.x, v.y),
-            state: match v.state{
-                0=>TouchState::Stable,
-                1=>TouchState::Start,
-                2=>TouchState::Move,
-                _=>TouchState::Stop,
+            state: match v.state {
+                0 => TouchState::Stable,
+                1 => TouchState::Start,
+                2 => TouchState::Move,
+                _ => TouchState::Stop,
             },
-            time: v.time, 
+            time: v.time,
             uid: v.uid as u64,
             force: v.force,
             radius: dvec2(v.radius_x, v.radius_y),
@@ -196,12 +182,12 @@ pub struct ToWasmTouchUpdate {
 }
 
 impl From<ToWasmTouchUpdate> for TouchUpdateEvent {
-    fn from(v:ToWasmTouchUpdate) -> Self {
+    fn from(v: ToWasmTouchUpdate) -> Self {
         Self {
             time: v.time,
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.modifiers),
-            touches: v.touches.iter().map(|v| v.clone().into()).collect()
+            touches: v.touches.iter().map(|v| v.clone().into()).collect(),
         }
     }
 }
@@ -211,13 +197,11 @@ fn unpack_key_modifier(modifiers: u32) -> KeyModifiers {
         shift: (modifiers & 1) != 0,
         control: (modifiers & 2) != 0,
         alt: (modifiers & 4) != 0,
-        logo: (modifiers & 8) != 0
+        logo: (modifiers & 8) != 0,
     }
 }
 
-
 // Mouse API
-
 
 #[derive(ToWasm)]
 pub struct WMouse {
@@ -244,14 +228,14 @@ pub struct ToWasmMouseDown {
 }
 
 impl From<ToWasmMouseDown> for MouseDownEvent {
-    fn from(v:ToWasmMouseDown) -> Self {
+    fn from(v: ToWasmMouseDown) -> Self {
         Self {
             abs: dvec2(v.mouse.x, v.mouse.y),
             button: wmouse_to_mouse_button(v.mouse.button),
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.mouse.modifiers),
             handled: Cell::new(Area::Empty),
-            time: v.mouse.time
+            time: v.mouse.time,
         }
     }
 }
@@ -263,17 +247,16 @@ pub struct ToWasmMouseMove {
 }
 
 impl From<ToWasmMouseMove> for MouseMoveEvent {
-    fn from(v:ToWasmMouseMove) -> Self {
+    fn from(v: ToWasmMouseMove) -> Self {
         Self {
             abs: dvec2(v.mouse.x, v.mouse.y),
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.mouse.modifiers),
             handled: Cell::new(Area::Empty),
-            time: v.mouse.time
+            time: v.mouse.time,
         }
     }
 }
-
 
 #[derive(ToWasm)]
 pub struct ToWasmMouseUp {
@@ -281,13 +264,13 @@ pub struct ToWasmMouseUp {
 }
 
 impl From<ToWasmMouseUp> for MouseUpEvent {
-    fn from(v:ToWasmMouseUp) -> Self {
+    fn from(v: ToWasmMouseUp) -> Self {
         Self {
             abs: dvec2(v.mouse.x, v.mouse.y),
             button: wmouse_to_mouse_button(v.mouse.button),
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.mouse.modifiers),
-            time: v.mouse.time
+            time: v.mouse.time,
         }
     }
 }
@@ -302,11 +285,11 @@ pub struct ToWasmScroll {
     pub is_touch: bool,
     pub scroll_x: f64,
     pub scroll_y: f64,
-    pub time: f64
+    pub time: f64,
 }
 
 impl From<ToWasmScroll> for ScrollEvent {
-    fn from(v:ToWasmScroll) -> Self {
+    fn from(v: ToWasmScroll) -> Self {
         Self {
             window_id: CxWindowPool::id_zero(),
             scroll: dvec2(v.scroll_x, v.scroll_y),
@@ -321,7 +304,6 @@ impl From<ToWasmScroll> for ScrollEvent {
 }
 
 // Keyboard API
-
 
 fn web_to_key_code(key_code: u32) -> KeyCode {
     match key_code {
@@ -341,10 +323,10 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         189 => KeyCode::Minus,
         61 => KeyCode::Equals,
         187 => KeyCode::Equals,
-        
+
         8 => KeyCode::Backspace,
         9 => KeyCode::Tab,
-        
+
         81 => KeyCode::KeyQ,
         87 => KeyCode::KeyW,
         69 => KeyCode::KeyE,
@@ -358,7 +340,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         219 => KeyCode::LBracket,
         221 => KeyCode::RBracket,
         13 => KeyCode::ReturnKey,
-        
+
         65 => KeyCode::KeyA,
         83 => KeyCode::KeyS,
         68 => KeyCode::KeyD,
@@ -368,12 +350,12 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         74 => KeyCode::KeyJ,
         75 => KeyCode::KeyK,
         76 => KeyCode::KeyL,
-        
+
         59 => KeyCode::Semicolon,
         186 => KeyCode::Semicolon,
         222 => KeyCode::Quote,
         220 => KeyCode::Backslash,
-        
+
         90 => KeyCode::KeyZ,
         88 => KeyCode::KeyX,
         67 => KeyCode::KeyC,
@@ -384,18 +366,18 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         188 => KeyCode::Comma,
         190 => KeyCode::Period,
         191 => KeyCode::Slash,
-        
+
         17 => KeyCode::Control,
         18 => KeyCode::Alt,
         16 => KeyCode::Shift,
         224 => KeyCode::Logo,
         91 => KeyCode::Logo,
-        
+
         //RightControl,
         //RightShift,
         //RightAlt,
         93 => KeyCode::Logo,
-        
+
         32 => KeyCode::Space,
         20 => KeyCode::Capslock,
         112 => KeyCode::F1,
@@ -410,19 +392,18 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         121 => KeyCode::F10,
         122 => KeyCode::F11,
         123 => KeyCode::F12,
-        
+
         44 => KeyCode::PrintScreen,
         124 => KeyCode::PrintScreen,
         //Scrolllock,
         //Pause,
-        
         45 => KeyCode::Insert,
         46 => KeyCode::Delete,
         36 => KeyCode::Home,
         35 => KeyCode::End,
         33 => KeyCode::PageUp,
         34 => KeyCode::PageDown,
-        
+
         96 => KeyCode::Numpad0,
         97 => KeyCode::Numpad1,
         98 => KeyCode::Numpad2,
@@ -433,7 +414,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         103 => KeyCode::Numpad7,
         104 => KeyCode::Numpad8,
         105 => KeyCode::Numpad9,
-        
+
         //NumpadEquals,
         109 => KeyCode::NumpadSubtract,
         107 => KeyCode::NumpadAdd,
@@ -442,12 +423,11 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         111 => KeyCode::NumpadDivide,
         12 => KeyCode::Numlock,
         //NumpadEnter,
-        
         38 => KeyCode::ArrowUp,
         40 => KeyCode::ArrowDown,
         37 => KeyCode::ArrowLeft,
         39 => KeyCode::ArrowRight,
-        _ => KeyCode::Unknown
+        _ => KeyCode::Unknown,
     }
 }
 
@@ -457,7 +437,7 @@ pub struct WKey {
     pub key_code: u32,
     pub modifiers: u32,
     pub time: f64,
-    pub is_repeat: bool
+    pub is_repeat: bool,
 }
 
 impl Into<KeyEvent> for WKey {
@@ -473,14 +453,13 @@ impl Into<KeyEvent> for WKey {
 
 #[derive(ToWasm)]
 pub struct ToWasmKeyDown {
-    pub key: WKey
+    pub key: WKey,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmKeyUp {
-    pub key: WKey
+    pub key: WKey,
 }
-
 
 #[derive(ToWasm)]
 pub struct ToWasmTextInput {
@@ -503,11 +482,9 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmTextCopy {
-}
+pub struct ToWasmTextCopy {}
 
 // Keyboard API
-
 
 #[derive(ToWasm)]
 pub struct ToWasmWindowGotFocus {}
@@ -523,7 +500,7 @@ pub struct ToWasmHTTPResponse {
     pub metadata_id_lo: u32,
     pub status: u32,
     pub headers: String,
-    pub body: WasmDataU8
+    pub body: WasmDataU8,
 }
 
 #[derive(ToWasm)]
@@ -532,7 +509,7 @@ pub struct ToWasmHttpRequestError {
     pub request_id_hi: u32,
     pub metadata_id_hi: u32,
     pub metadata_id_lo: u32,
-    pub error: String
+    pub error: String,
 }
 
 #[derive(ToWasm)]
@@ -542,7 +519,7 @@ pub struct ToWasmHttpResponseProgress {
     pub metadata_id_hi: u32,
     pub metadata_id_lo: u32,
     pub loaded: u32,
-    pub total: u32
+    pub total: u32,
 }
 
 #[derive(ToWasm)]
@@ -550,7 +527,7 @@ pub struct ToWasmHttpUploadProgress {
     pub request_id_lo: u32,
     pub request_id_hi: u32,
     pub loaded: u32,
-    pub total: u32
+    pub total: u32,
 }
 
 #[derive(ToWasm)]
@@ -603,7 +580,7 @@ pub struct ToWasmMidiInputData {
 pub struct WMidiPortInfo {
     pub name: String,
     pub uid: String,
-    pub is_output: bool
+    pub is_output: bool,
 }
 
 #[derive(ToWasm)]
@@ -620,5 +597,5 @@ pub struct WAudioDevice {
 
 #[derive(ToWasm)]
 pub struct ToWasmAudioDeviceList {
-    pub devices: Vec<WAudioDevice>
+    pub devices: Vec<WAudioDevice>,
 }

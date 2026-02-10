@@ -117,11 +117,7 @@ impl One {
     pub fn find(&self, haystack: &[u8]) -> Option<usize> {
         // SAFETY: `find_raw` guarantees that if a pointer is returned, it
         // falls within the bounds of the start and end pointers.
-        unsafe {
-            generic::search_slice_with_raw(haystack, |s, e| {
-                self.find_raw(s, e)
-            })
-        }
+        unsafe { generic::search_slice_with_raw(haystack, |s, e| self.find_raw(s, e)) }
     }
 
     /// Return the last occurrence of one of the needle bytes in the given
@@ -133,11 +129,7 @@ impl One {
     pub fn rfind(&self, haystack: &[u8]) -> Option<usize> {
         // SAFETY: `find_raw` guarantees that if a pointer is returned, it
         // falls within the bounds of the start and end pointers.
-        unsafe {
-            generic::search_slice_with_raw(haystack, |s, e| {
-                self.rfind_raw(s, e)
-            })
-        }
+        unsafe { generic::search_slice_with_raw(haystack, |s, e| self.rfind_raw(s, e)) }
     }
 
     /// Counts all occurrences of this byte in the given haystack.
@@ -176,11 +168,7 @@ impl One {
     /// Note that callers may pass a pair of pointers such that `start >= end`.
     /// In that case, `None` will always be returned.
     #[inline]
-    pub unsafe fn find_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub unsafe fn find_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         if start >= end {
             return None;
         }
@@ -189,9 +177,7 @@ impl One {
             return if len < __m128i::BYTES {
                 // SAFETY: We require the caller to pass valid start/end
                 // pointers.
-                generic::fwd_byte_by_byte(start, end, |b| {
-                    b == self.sse2.needle1()
-                })
+                generic::fwd_byte_by_byte(start, end, |b| b == self.sse2.needle1())
             } else {
                 // SAFETY: We require the caller to pass valid start/end
                 // pointers.
@@ -242,11 +228,7 @@ impl One {
     /// Note that callers may pass a pair of pointers such that `start >= end`.
     /// In that case, `None` will always be returned.
     #[inline]
-    pub unsafe fn rfind_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub unsafe fn rfind_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         if start >= end {
             return None;
         }
@@ -255,9 +237,7 @@ impl One {
             return if len < __m128i::BYTES {
                 // SAFETY: We require the caller to pass valid start/end
                 // pointers.
-                generic::rev_byte_by_byte(start, end, |b| {
-                    b == self.sse2.needle1()
-                })
+                generic::rev_byte_by_byte(start, end, |b| b == self.sse2.needle1())
             } else {
                 // SAFETY: We require the caller to pass valid start/end
                 // pointers.
@@ -305,9 +285,7 @@ impl One {
             return if len < __m128i::BYTES {
                 // SAFETY: We require the caller to pass valid start/end
                 // pointers.
-                generic::count_byte_by_byte(start, end, |b| {
-                    b == self.sse2.needle1()
-                })
+                generic::count_byte_by_byte(start, end, |b| b == self.sse2.needle1())
             } else {
                 // SAFETY: We require the caller to pass valid start/end
                 // pointers.
@@ -333,11 +311,7 @@ impl One {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "sse2")]
     #[inline]
-    unsafe fn find_raw_sse2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn find_raw_sse2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.sse2.find_raw(start, end)
     }
 
@@ -353,11 +327,7 @@ impl One {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "sse2")]
     #[inline]
-    unsafe fn rfind_raw_sse2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn rfind_raw_sse2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.sse2.rfind_raw(start, end)
     }
 
@@ -373,11 +343,7 @@ impl One {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "sse2")]
     #[inline]
-    unsafe fn count_raw_sse2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> usize {
+    unsafe fn count_raw_sse2(&self, start: *const u8, end: *const u8) -> usize {
         self.sse2.count_raw(start, end)
     }
 
@@ -393,11 +359,7 @@ impl One {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "avx2")]
     #[inline]
-    unsafe fn find_raw_avx2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn find_raw_avx2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.avx2.find_raw(start, end)
     }
 
@@ -413,11 +375,7 @@ impl One {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "avx2")]
     #[inline]
-    unsafe fn rfind_raw_avx2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn rfind_raw_avx2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.avx2.rfind_raw(start, end)
     }
 
@@ -433,11 +391,7 @@ impl One {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "avx2")]
     #[inline]
-    unsafe fn count_raw_avx2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> usize {
+    unsafe fn count_raw_avx2(&self, start: *const u8, end: *const u8) -> usize {
         self.avx2.count_raw(start, end)
     }
 
@@ -448,7 +402,10 @@ impl One {
     /// can also be used to find occurrences in reverse order.
     #[inline]
     pub fn iter<'a, 'h>(&'a self, haystack: &'h [u8]) -> OneIter<'a, 'h> {
-        OneIter { searcher: self, it: generic::Iter::new(haystack) }
+        OneIter {
+            searcher: self,
+            it: generic::Iter::new(haystack),
+        }
     }
 }
 
@@ -604,11 +561,7 @@ impl Two {
     pub fn find(&self, haystack: &[u8]) -> Option<usize> {
         // SAFETY: `find_raw` guarantees that if a pointer is returned, it
         // falls within the bounds of the start and end pointers.
-        unsafe {
-            generic::search_slice_with_raw(haystack, |s, e| {
-                self.find_raw(s, e)
-            })
-        }
+        unsafe { generic::search_slice_with_raw(haystack, |s, e| self.find_raw(s, e)) }
     }
 
     /// Return the last occurrence of one of the needle bytes in the given
@@ -620,11 +573,7 @@ impl Two {
     pub fn rfind(&self, haystack: &[u8]) -> Option<usize> {
         // SAFETY: `find_raw` guarantees that if a pointer is returned, it
         // falls within the bounds of the start and end pointers.
-        unsafe {
-            generic::search_slice_with_raw(haystack, |s, e| {
-                self.rfind_raw(s, e)
-            })
-        }
+        unsafe { generic::search_slice_with_raw(haystack, |s, e| self.rfind_raw(s, e)) }
     }
 
     /// Like `find`, but accepts and returns raw pointers.
@@ -651,11 +600,7 @@ impl Two {
     /// Note that callers may pass a pair of pointers such that `start >= end`.
     /// In that case, `None` will always be returned.
     #[inline]
-    pub unsafe fn find_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub unsafe fn find_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         if start >= end {
             return None;
         }
@@ -717,11 +662,7 @@ impl Two {
     /// Note that callers may pass a pair of pointers such that `start >= end`.
     /// In that case, `None` will always be returned.
     #[inline]
-    pub unsafe fn rfind_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub unsafe fn rfind_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         if start >= end {
             return None;
         }
@@ -761,11 +702,7 @@ impl Two {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "sse2")]
     #[inline]
-    unsafe fn find_raw_sse2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn find_raw_sse2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.sse2.find_raw(start, end)
     }
 
@@ -781,11 +718,7 @@ impl Two {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "sse2")]
     #[inline]
-    unsafe fn rfind_raw_sse2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn rfind_raw_sse2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.sse2.rfind_raw(start, end)
     }
 
@@ -801,11 +734,7 @@ impl Two {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "avx2")]
     #[inline]
-    unsafe fn find_raw_avx2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn find_raw_avx2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.avx2.find_raw(start, end)
     }
 
@@ -821,11 +750,7 @@ impl Two {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "avx2")]
     #[inline]
-    unsafe fn rfind_raw_avx2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn rfind_raw_avx2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.avx2.rfind_raw(start, end)
     }
 
@@ -836,7 +761,10 @@ impl Two {
     /// can also be used to find occurrences in reverse order.
     #[inline]
     pub fn iter<'a, 'h>(&'a self, haystack: &'h [u8]) -> TwoIter<'a, 'h> {
-        TwoIter { searcher: self, it: generic::Iter::new(haystack) }
+        TwoIter {
+            searcher: self,
+            it: generic::Iter::new(haystack),
+        }
     }
 }
 
@@ -932,11 +860,7 @@ impl Three {
     /// 100% of cases.
     #[target_feature(enable = "sse2", enable = "avx2")]
     #[inline]
-    pub unsafe fn new_unchecked(
-        needle1: u8,
-        needle2: u8,
-        needle3: u8,
-    ) -> Three {
+    pub unsafe fn new_unchecked(needle1: u8, needle2: u8, needle3: u8) -> Three {
         Three {
             sse2: generic::Three::new(needle1, needle2, needle3),
             avx2: generic::Three::new(needle1, needle2, needle3),
@@ -987,11 +911,7 @@ impl Three {
     pub fn find(&self, haystack: &[u8]) -> Option<usize> {
         // SAFETY: `find_raw` guarantees that if a pointer is returned, it
         // falls within the bounds of the start and end pointers.
-        unsafe {
-            generic::search_slice_with_raw(haystack, |s, e| {
-                self.find_raw(s, e)
-            })
-        }
+        unsafe { generic::search_slice_with_raw(haystack, |s, e| self.find_raw(s, e)) }
     }
 
     /// Return the last occurrence of one of the needle bytes in the given
@@ -1003,11 +923,7 @@ impl Three {
     pub fn rfind(&self, haystack: &[u8]) -> Option<usize> {
         // SAFETY: `find_raw` guarantees that if a pointer is returned, it
         // falls within the bounds of the start and end pointers.
-        unsafe {
-            generic::search_slice_with_raw(haystack, |s, e| {
-                self.rfind_raw(s, e)
-            })
-        }
+        unsafe { generic::search_slice_with_raw(haystack, |s, e| self.rfind_raw(s, e)) }
     }
 
     /// Like `find`, but accepts and returns raw pointers.
@@ -1034,11 +950,7 @@ impl Three {
     /// Note that callers may pass a pair of pointers such that `start >= end`.
     /// In that case, `None` will always be returned.
     #[inline]
-    pub unsafe fn find_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub unsafe fn find_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         if start >= end {
             return None;
         }
@@ -1048,9 +960,7 @@ impl Three {
                 // SAFETY: We require the caller to pass valid start/end
                 // pointers.
                 generic::fwd_byte_by_byte(start, end, |b| {
-                    b == self.sse2.needle1()
-                        || b == self.sse2.needle2()
-                        || b == self.sse2.needle3()
+                    b == self.sse2.needle1() || b == self.sse2.needle2() || b == self.sse2.needle3()
                 })
             } else {
                 // SAFETY: We require the caller to pass valid start/end
@@ -1102,11 +1012,7 @@ impl Three {
     /// Note that callers may pass a pair of pointers such that `start >= end`.
     /// In that case, `None` will always be returned.
     #[inline]
-    pub unsafe fn rfind_raw(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    pub unsafe fn rfind_raw(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         if start >= end {
             return None;
         }
@@ -1116,9 +1022,7 @@ impl Three {
                 // SAFETY: We require the caller to pass valid start/end
                 // pointers.
                 generic::rev_byte_by_byte(start, end, |b| {
-                    b == self.sse2.needle1()
-                        || b == self.sse2.needle2()
-                        || b == self.sse2.needle3()
+                    b == self.sse2.needle1() || b == self.sse2.needle2() || b == self.sse2.needle3()
                 })
             } else {
                 // SAFETY: We require the caller to pass valid start/end
@@ -1148,11 +1052,7 @@ impl Three {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "sse2")]
     #[inline]
-    unsafe fn find_raw_sse2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn find_raw_sse2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.sse2.find_raw(start, end)
     }
 
@@ -1168,11 +1068,7 @@ impl Three {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "sse2")]
     #[inline]
-    unsafe fn rfind_raw_sse2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn rfind_raw_sse2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.sse2.rfind_raw(start, end)
     }
 
@@ -1188,11 +1084,7 @@ impl Three {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "avx2")]
     #[inline]
-    unsafe fn find_raw_avx2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn find_raw_avx2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.avx2.find_raw(start, end)
     }
 
@@ -1208,11 +1100,7 @@ impl Three {
     /// when it is safe to call `sse2`/`avx2` routines.)
     #[target_feature(enable = "avx2")]
     #[inline]
-    unsafe fn rfind_raw_avx2(
-        &self,
-        start: *const u8,
-        end: *const u8,
-    ) -> Option<*const u8> {
+    unsafe fn rfind_raw_avx2(&self, start: *const u8, end: *const u8) -> Option<*const u8> {
         self.avx2.rfind_raw(start, end)
     }
 
@@ -1223,7 +1111,10 @@ impl Three {
     /// can also be used to find occurrences in reverse order.
     #[inline]
     pub fn iter<'a, 'h>(&'a self, haystack: &'h [u8]) -> ThreeIter<'a, 'h> {
-        ThreeIter { searcher: self, it: generic::Iter::new(haystack) }
+        ThreeIter {
+            searcher: self,
+            it: generic::Iter::new(haystack),
+        }
     }
 }
 
@@ -1281,72 +1172,58 @@ mod tests {
 
     #[test]
     fn forward_one() {
-        crate::tests::memchr::Runner::new(1).forward_iter(
-            |haystack, needles| {
-                Some(One::new(needles[0])?.iter(haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(1)
+            .forward_iter(|haystack, needles| Some(One::new(needles[0])?.iter(haystack).collect()))
     }
 
     #[test]
     fn reverse_one() {
-        crate::tests::memchr::Runner::new(1).reverse_iter(
-            |haystack, needles| {
-                Some(One::new(needles[0])?.iter(haystack).rev().collect())
-            },
-        )
-    }
-
-    #[test]
-    fn count_one() {
-        crate::tests::memchr::Runner::new(1).count_iter(|haystack, needles| {
-            Some(One::new(needles[0])?.iter(haystack).count())
+        crate::tests::memchr::Runner::new(1).reverse_iter(|haystack, needles| {
+            Some(One::new(needles[0])?.iter(haystack).rev().collect())
         })
     }
 
     #[test]
+    fn count_one() {
+        crate::tests::memchr::Runner::new(1)
+            .count_iter(|haystack, needles| Some(One::new(needles[0])?.iter(haystack).count()))
+    }
+
+    #[test]
     fn forward_two() {
-        crate::tests::memchr::Runner::new(2).forward_iter(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                Some(Two::new(n1, n2)?.iter(haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(2).forward_iter(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            Some(Two::new(n1, n2)?.iter(haystack).collect())
+        })
     }
 
     #[test]
     fn reverse_two() {
-        crate::tests::memchr::Runner::new(2).reverse_iter(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                Some(Two::new(n1, n2)?.iter(haystack).rev().collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(2).reverse_iter(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            Some(Two::new(n1, n2)?.iter(haystack).rev().collect())
+        })
     }
 
     #[test]
     fn forward_three() {
-        crate::tests::memchr::Runner::new(3).forward_iter(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                let n3 = needles.get(2).copied()?;
-                Some(Three::new(n1, n2, n3)?.iter(haystack).collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(3).forward_iter(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            let n3 = needles.get(2).copied()?;
+            Some(Three::new(n1, n2, n3)?.iter(haystack).collect())
+        })
     }
 
     #[test]
     fn reverse_three() {
-        crate::tests::memchr::Runner::new(3).reverse_iter(
-            |haystack, needles| {
-                let n1 = needles.get(0).copied()?;
-                let n2 = needles.get(1).copied()?;
-                let n3 = needles.get(2).copied()?;
-                Some(Three::new(n1, n2, n3)?.iter(haystack).rev().collect())
-            },
-        )
+        crate::tests::memchr::Runner::new(3).reverse_iter(|haystack, needles| {
+            let n1 = needles.get(0).copied()?;
+            let n2 = needles.get(1).copied()?;
+            let n3 = needles.get(2).copied()?;
+            Some(Three::new(n1, n2, n3)?.iter(haystack).rev().collect())
+        })
     }
 }

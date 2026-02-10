@@ -1,6 +1,4 @@
-use {
-    crate::makepad_platform::*
-};
+use crate::makepad_platform::*;
 
 live_design! {
     use link::theme::*;
@@ -11,7 +9,7 @@ live_design! {
     pub STUDIO_PALETTE_5 = #FF80BF
     pub STUDIO_PALETTE_6 = #FFB368
     pub STUDIO_PALETTE_7 = #FFD864
-    
+
     pub STUDIO_COLOR_FILE = (THEME_COLOR_LABEL_OUTER)
     pub STUDIO_COLOR_FOLDER = (THEME_COLOR_LABEL_OUTER)
     pub STUDIO_COLOR_LAYOUT = (STUDIO_PALETTE_6)

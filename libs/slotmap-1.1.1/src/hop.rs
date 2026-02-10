@@ -124,7 +124,7 @@ impl<T: Clone> Clone for Slot<T> {
                 self.u = SlotUnion {
                     value: ManuallyDrop::new(value.clone()),
                 }
-            },
+            }
         }
         self.version = source.version;
     }
@@ -515,7 +515,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
                     next: 0,
                     prev: old_tail,
                 };
-            },
+            }
 
             (false, true) => {
                 // Prepend to vacant block on right.
@@ -526,14 +526,14 @@ impl<K: Key, V> HopSlotMap<K, V> {
                 self.freelist(front_data.prev).next = i;
                 self.freelist(front_data.next).prev = i;
                 *self.freelist(i) = front_data;
-            },
+            }
 
             (true, false) => {
                 // Append to vacant block on left.
                 let front = self.freelist(i - 1).other_end;
                 self.freelist(i).other_end = front;
                 self.freelist(front).other_end = i;
-            },
+            }
 
             (true, true) => {
                 // We must merge left and right.
@@ -547,7 +547,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
                 let back = right.other_end;
                 self.freelist(front).other_end = back;
                 self.freelist(back).other_end = front;
-            },
+            }
         }
 
         self.num_elems -= 1;
@@ -1177,7 +1177,7 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
                     return None;
                 }
                 idx
-            },
+            }
         };
 
         self.cur = idx + 1;
@@ -1237,7 +1237,7 @@ impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
                     return None;
                 }
                 idx
-            },
+            }
         };
 
         self.cur = idx + 1;

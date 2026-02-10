@@ -1,9 +1,9 @@
-use{
-    std::collections::HashMap,
+use {
     crate::{
-        makepad_live_id::{LiveId, live_id},
-        shader_ast::{Ident, ShaderTy}
+        makepad_live_id::{live_id, LiveId},
+        shader_ast::{Ident, ShaderTy},
     },
+    std::collections::HashMap,
 };
 type Ty = ShaderTy;
 
@@ -25,9 +25,9 @@ macro_rules! builtin {
     }
 }
 
-pub struct Builtin2<'a>{
+pub struct Builtin2<'a> {
     id: LiveId,
-    maps: &'a [(&'a [Ty], Ty)]
+    maps: &'a [(&'a [Ty], Ty)],
 }
 
 #[derive(Clone, Debug)]
@@ -35,17 +35,15 @@ pub struct Builtin {
     pub return_tys: HashMap<Vec<Ty>, Ty>,
 }
 
-pub fn generate_builtins()-> HashMap<Ident, Builtin>{
-    fn generate_builtins(x:&[Builtin2])->HashMap<Ident, Builtin>{
+pub fn generate_builtins() -> HashMap<Ident, Builtin> {
+    fn generate_builtins(x: &[Builtin2]) -> HashMap<Ident, Builtin> {
         let mut map = HashMap::new();
-        for b in x{
+        for b in x {
             let mut map2 = HashMap::new();
-            for item in b.maps{
+            for item in b.maps {
                 map2.insert(item.0.to_vec(), item.1.clone());
             }
-            map.insert(Ident(b.id), Builtin{
-                return_tys: map2
-            });
+            map.insert(Ident(b.id), Builtin { return_tys: map2 });
         }
         map
     }
@@ -58,7 +56,7 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
             (Ty::Int) -> Ty::Int,
             (Ty::Ivec2) -> Ty::Ivec2,
             (Ty::Ivec3) -> Ty::Ivec3,
-            (Ty::Ivec4) -> Ty::Ivec4 
+            (Ty::Ivec4) -> Ty::Ivec4
         ]),
         builtin!(acos, [
             (Ty::Float) -> Ty::Float,
@@ -397,7 +395,6 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
             (Ty::Mat4f) -> Ty::Mat4f,
             (Ty::Mat3) -> Ty::Mat3
         ]),
-
     ];
     generate_builtins(&x)
 }

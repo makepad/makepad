@@ -387,7 +387,7 @@ pub fn get_mirrored(c: char) -> Option<char> {
 ///
 /// Based on <https://www.unicode.org/Public/UNIDATA/BidiMirroring.txt>.
 pub fn is_mirroring(c: char) -> bool {
-    PAIRS.binary_search_by(|v| v.0.cmp(&c)).is_ok() ||
-    PAIRS.binary_search_by(|v| v.1.cmp(&c)).is_ok() ||
-    OTHER.binary_search_by(|v| v.cmp(&c)).is_ok()
+    PAIRS.binary_search_by(|v| v.0.cmp(&c)).is_ok()
+        || PAIRS.binary_search_by(|v| v.1.cmp(&c)).is_ok()
+        || OTHER.binary_search_by(|v| v.cmp(&c)).is_ok()
 }

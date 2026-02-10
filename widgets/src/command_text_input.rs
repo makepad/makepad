@@ -248,12 +248,12 @@ impl Widget for CommandTextInput {
                             // Clear mouse hover when using up/down keys
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, 1);
-                        },
+                        }
                         KeyCode::ArrowUp => {
                             // Clear mouse hover when using up/down keys
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, -1);
-                        },
+                        }
                         KeyCode::ReturnKey => {
                             self.on_keyboard_controller_input_submit(cx, scope);
                         }
@@ -467,11 +467,14 @@ impl CommandTextInput {
         };
 
         // Rebuild the string
-        let new_text = text_graphemes[..start_grapheme_idx].join("") +
-                        &text_graphemes[end_grapheme_idx..].join("");
+        let new_text = text_graphemes[..start_grapheme_idx].join("")
+            + &text_graphemes[end_grapheme_idx..].join("");
 
         // Calculate the new cursor position (grapheme)
-        let new_cursor_pos = text_graphemes[..start_grapheme_idx].join("").graphemes(true).count();
+        let new_cursor_pos = text_graphemes[..start_grapheme_idx]
+            .join("")
+            .graphemes(true)
+            .count();
 
         self.text_input_ref().set_cursor(
             cx,
@@ -479,7 +482,7 @@ impl CommandTextInput {
                 index: new_cursor_pos,
                 prefer_next_row: false,
             },
-            false
+            false,
         );
         self.set_text(cx, &new_text);
     }
@@ -514,7 +517,7 @@ impl CommandTextInput {
                 index: 0,
                 prefer_next_row: false,
             },
-            false
+            false,
         );
         self.clear_items();
     }
@@ -615,14 +618,19 @@ impl CommandTextInput {
                             // Check length limit
                             let length = h_idx - t_idx;
                             if length > MAX_SEARCH_TEXT_LENGTH {
-                                log!("Warning: Search text length({}) exceeds maximum limit({})", length, MAX_SEARCH_TEXT_LENGTH);
+                                log!(
+                                    "Warning: Search text length({}) exceeds maximum limit({})",
+                                    length,
+                                    MAX_SEARCH_TEXT_LENGTH
+                                );
                                 // Still return text but truncated to the maximum length
-                                return text_graphemes[t_idx..t_idx + MAX_SEARCH_TEXT_LENGTH].join("");
+                                return text_graphemes[t_idx..t_idx + MAX_SEARCH_TEXT_LENGTH]
+                                    .join("");
                             }
 
                             // Optimized string building with pre-allocated capacity
                             let mut result = String::with_capacity(
-                                text_graphemes[t_idx..h_idx].iter().map(|g| g.len()).sum()
+                                text_graphemes[t_idx..h_idx].iter().map(|g| g.len()).sum(),
                             );
                             for g in &text_graphemes[t_idx..h_idx] {
                                 result.push_str(g);

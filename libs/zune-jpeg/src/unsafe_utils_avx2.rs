@@ -28,7 +28,7 @@ const fn shuffle(z: i32, y: i32, x: i32, w: i32) -> i32 {
 #[derive(Clone, Copy)]
 pub struct YmmRegister {
     /// An AVX register
-    pub(crate) mm256: __m256i
+    pub(crate) mm256: __m256i,
 }
 
 impl Add for YmmRegister {
@@ -38,7 +38,7 @@ impl Add for YmmRegister {
     fn add(self, rhs: Self) -> Self::Output {
         unsafe {
             return YmmRegister {
-                mm256: _mm256_add_epi32(self.mm256, rhs.mm256)
+                mm256: _mm256_add_epi32(self.mm256, rhs.mm256),
             };
         }
     }
@@ -53,7 +53,7 @@ impl Add<i32> for YmmRegister {
             let tmp = _mm256_set1_epi32(rhs);
 
             return YmmRegister {
-                mm256: _mm256_add_epi32(self.mm256, tmp)
+                mm256: _mm256_add_epi32(self.mm256, tmp),
             };
         }
     }
@@ -66,7 +66,7 @@ impl Sub for YmmRegister {
     fn sub(self, rhs: Self) -> Self::Output {
         unsafe {
             return YmmRegister {
-                mm256: _mm256_sub_epi32(self.mm256, rhs.mm256)
+                mm256: _mm256_sub_epi32(self.mm256, rhs.mm256),
             };
         }
     }
@@ -99,7 +99,7 @@ impl Mul for YmmRegister {
     fn mul(self, rhs: Self) -> Self::Output {
         unsafe {
             YmmRegister {
-                mm256: _mm256_mullo_epi32(self.mm256, rhs.mm256)
+                mm256: _mm256_mullo_epi32(self.mm256, rhs.mm256),
             }
         }
     }
@@ -114,7 +114,7 @@ impl Mul<i32> for YmmRegister {
             let tmp = _mm256_set1_epi32(rhs);
 
             YmmRegister {
-                mm256: _mm256_mullo_epi32(self.mm256, tmp)
+                mm256: _mm256_mullo_epi32(self.mm256, tmp),
             }
         }
     }
@@ -158,8 +158,14 @@ type Reg = YmmRegister;
 #[target_feature(enable = "avx2")]
 #[inline]
 pub unsafe fn transpose(
-    v0: &mut Reg, v1: &mut Reg, v2: &mut Reg, v3: &mut Reg, v4: &mut Reg, v5: &mut Reg,
-    v6: &mut Reg, v7: &mut Reg
+    v0: &mut Reg,
+    v1: &mut Reg,
+    v2: &mut Reg,
+    v3: &mut Reg,
+    v4: &mut Reg,
+    v5: &mut Reg,
+    v6: &mut Reg,
+    v7: &mut Reg,
 ) {
     macro_rules! merge_epi32 {
         ($v0:tt,$v1:tt,$v2:tt,$v3:tt) => {

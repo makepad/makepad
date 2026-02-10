@@ -9,7 +9,7 @@ pub enum HostOs {
     WindowsX64,
     MacOS,
     Linux,
-    Unsupported
+    Unsupported,
 }
 
 pub enum OpenHarmonyTarget {
@@ -31,28 +31,34 @@ impl FromStr for OpenHarmonyTarget {
         match s.to_lowercase().as_str() {
             "aarch64" => Ok(OpenHarmonyTarget::Aarch64),
             "x86_64" => Ok(OpenHarmonyTarget::X86_64),
-            _ => Err(())
+            _ => Err(()),
         }
     }
 }
 impl OpenHarmonyTarget {
     fn from_current_target_arch() -> Result<Self, ()> {
-        #[cfg(target_arch = "aarch64")] {
+        #[cfg(target_arch = "aarch64")]
+        {
             Ok(Self::Aarch64)
         }
-        #[cfg(target_arch = "x86_64")] {
+        #[cfg(target_arch = "x86_64")]
+        {
             Ok(Self::X86_64)
         }
-        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))] {
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
             Err(())
         }
     }
 }
 
 pub fn handle_open_harmony(mut args: &[String]) -> Result<(), String> {
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))] let host_os = HostOs::WindowsX64;
-    #[cfg(all(target_os = "macos"))] let host_os = HostOs::MacOS;
-    #[cfg(all(target_os = "linux"))] let host_os = HostOs::Linux;
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    let host_os = HostOs::WindowsX64;
+    #[cfg(all(target_os = "macos"))]
+    let host_os = HostOs::MacOS;
+    #[cfg(all(target_os = "linux"))]
+    let host_os = HostOs::Linux;
     let mut targets = Vec::new();
     let mut deveco_home = None;
     let mut hdc_remote = None;
@@ -61,19 +67,16 @@ pub fn handle_open_harmony(mut args: &[String]) -> Result<(), String> {
         let v = &args[i];
         if let Some(opt) = v.strip_prefix("--deveco-home=") {
             deveco_home = Some(opt.to_string());
-        }
-        else if let Some(opt) = v.strip_prefix("--arch=") {
+        } else if let Some(opt) = v.strip_prefix("--arch=") {
             targets.push(
                 OpenHarmonyTarget::from_str(opt.trim())
-                    .map_err(|_| format!("Invalid --arch argument: '{}'", opt))?
+                    .map_err(|_| format!("Invalid --arch argument: '{}'", opt))?,
             );
-        }
-        else if let Some(remote) = v.strip_prefix("--remote=") {
+        } else if let Some(remote) = v.strip_prefix("--remote=") {
             hdc_remote = Some(remote.to_string());
-        }
-        else {
+        } else {
             args = &args[i..];
-            break
+            break;
         }
     }
 
@@ -92,35 +95,30 @@ pub fn handle_open_harmony(mut args: &[String]) -> Result<(), String> {
     if targets.is_empty() {
         targets.push(
             OpenHarmonyTarget::from_current_target_arch()
-                .inspect(|target| println!("Using current target arch: '{}'", target.target_triple_str()))
-                .map_err(|_| format!("Current target arch is unsupported. Try passing in the '--arch' argument"))?
+                .inspect(|target| {
+                    println!(
+                        "Using current target arch: '{}'",
+                        target.target_triple_str()
+                    )
+                })
+                .map_err(|_| {
+                    format!(
+                        "Current target arch is unsupported. Try passing in the '--arch' argument"
+                    )
+                })?,
         );
     }
 
     if args.len() < 1 {
-        return Err(format!("not enough args"))
+        return Err(format!("not enough args"));
     }
     match args[0].as_ref() {
-        "toolchain-install" | "install-toolchain" => {
-            sdk::rustup_toolchain_install(&targets)
-        }
-        "deveco" => {
-            compile::deveco(&deveco_home, &args[1..], &host_os, &targets)
-        }
-        "build" => {
-            compile::build(&deveco_home, &args[1..], &host_os, &targets)
-        }
-        "run" => {
-            compile::run(&deveco_home, &args[1..], &host_os, &targets, &hdc_remote)
-        }
-        "cdylib" => {
-            compile::rust_build(&deveco_home, &host_os,&args[1..], &targets)
-        }
-        "hilog" => {
-            compile::hilog(&deveco_home, &args[1..], &host_os, &hdc_remote)
-        }
-        _ => Err(format!("{} is not a valid command or option", args[0]))
-
+        "toolchain-install" | "install-toolchain" => sdk::rustup_toolchain_install(&targets),
+        "deveco" => compile::deveco(&deveco_home, &args[1..], &host_os, &targets),
+        "build" => compile::build(&deveco_home, &args[1..], &host_os, &targets),
+        "run" => compile::run(&deveco_home, &args[1..], &host_os, &targets, &hdc_remote),
+        "cdylib" => compile::rust_build(&deveco_home, &host_os, &args[1..], &targets),
+        "hilog" => compile::hilog(&deveco_home, &args[1..], &host_os, &hdc_remote),
+        _ => Err(format!("{} is not a valid command or option", args[0])),
     }
 }
-

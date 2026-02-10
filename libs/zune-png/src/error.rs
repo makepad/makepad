@@ -30,7 +30,7 @@ pub enum PngDecodeErrors {
     UnsupportedAPNGImage,
     /// Too small output slice
     TooSmallOutput(usize, usize),
-    IoErrors(ZByteIoError)
+    IoErrors(ZByteIoError),
 }
 
 impl Display for PngDecodeErrors {

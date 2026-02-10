@@ -1,10 +1,10 @@
 use {
     super::{
         char::CharExt,
+        input::Cursor,
         leb128,
         prog::{Inst, InstPtr, Pred, Prog},
         sparse_set::SparseSet,
-        input::Cursor,
     },
     std::{collections::HashMap, rc::Rc, result},
 };

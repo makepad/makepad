@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoButton = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/button.md") } 
+            <Markdown> { body: dep("crate://self/resources/button.md") }
         }
         demos = {
             <H4> { text: "Standard"}
@@ -242,7 +240,7 @@ live_design!{
                         color_down: (THEME_COLOR_LABEL_INNER_DOWN)
                         color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
                         color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
-                    
+
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
 

@@ -1,4 +1,7 @@
-use {std::ops::Range, super::{input, input::Input}};
+use {
+    super::{input, input::Input},
+    std::ops::Range,
+};
 
 impl<'a> Input<'a> for &'a str {
     type Cursor = Cursor<'a>;
@@ -83,7 +86,7 @@ impl<'a> input::Cursor for Cursor<'a> {
         self.index -= 1;
         true
     }
-    
+
     fn move_prev_char(&mut self) -> bool {
         if self.move_prev_byte() {
             while !self.str.is_char_boundary(self.index) {

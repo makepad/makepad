@@ -33,7 +33,7 @@ pub enum PngChunkType {
     fcTL,
     acTL,
     fdAT,
-    unkn
+    unkn,
 }
 
 impl PngChunkType {
@@ -82,7 +82,7 @@ pub enum FilterMethod {
     PaethFirst,
     AvgFirst,
     // Unknown type of filter
-    Unknown
+    Unknown,
 }
 
 impl FilterMethod {
@@ -93,7 +93,7 @@ impl FilterMethod {
             2 => Some(FilterMethod::Up),
             3 => Some(FilterMethod::Average),
             4 => Some(FilterMethod::Paeth),
-            _ => None
+            _ => None,
         }
     }
     pub fn to_int(self) -> u8 {
@@ -103,7 +103,7 @@ impl FilterMethod {
             FilterMethod::Up => 2,
             FilterMethod::Average => 3,
             FilterMethod::Paeth => 4,
-            _ => unimplemented!("Should not match")
+            _ => unimplemented!("Should not match"),
         }
     }
 }
@@ -125,7 +125,7 @@ pub enum InterlaceMethod {
     /// Adam7 interlacing
     Adam7,
     /// The interlacing of the image is currently unknown
-    Unknown
+    Unknown,
 }
 
 impl Default for InterlaceMethod {
@@ -139,7 +139,7 @@ impl InterlaceMethod {
         match int {
             0 => Some(Self::Standard),
             1 => Some(Self::Adam7),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -151,7 +151,7 @@ pub enum PngColor {
     LumaA,
     RGB,
     RGBA,
-    Unknown
+    Unknown,
 }
 
 impl Default for PngColor {
@@ -168,7 +168,7 @@ impl PngColor {
             PngColor::LumaA => 2,
             PngColor::RGB => 3,
             PngColor::RGBA => 4,
-            PngColor::Unknown => unreachable!()
+            PngColor::Unknown => unreachable!(),
         }
     }
     pub(crate) fn has_alpha(&self) -> bool {
@@ -181,7 +181,7 @@ impl PngColor {
             3 => Some(Self::Palette),
             4 => Some(Self::LumaA),
             6 => Some(Self::RGBA),
-            _ => None
+            _ => None,
         }
     }
 }

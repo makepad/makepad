@@ -1,15 +1,32 @@
 use {
     self::super::{
         super::{
-        dma_buf,
-        egl_sys::{self, LibEgl},
-        gl_sys::{self, LibGl},
-    }, x11_sys, xlib_window::XlibWindow
-    }, crate::{
-        cx::Cx, event::*, makepad_math::Vec2d, opengl_cx::OpenglCx, draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId}, texture::{CxTexture, Texture}, window::WindowId, x11::linux_x11::X11Cx
-    }, std::{
-        ffi::CString, mem, os::{self, fd::{AsRawFd as _, FromRawFd as _, OwnedFd}, raw::{c_long, c_void}}
-    }
+            dma_buf,
+            egl_sys::{self, LibEgl},
+            gl_sys::{self, LibGl},
+        },
+        x11_sys,
+        xlib_window::XlibWindow,
+    },
+    crate::{
+        cx::Cx,
+        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
+        event::*,
+        makepad_math::Vec2d,
+        opengl_cx::OpenglCx,
+        texture::{CxTexture, Texture},
+        window::WindowId,
+        x11::linux_x11::X11Cx,
+    },
+    std::{
+        ffi::CString,
+        mem,
+        os::{
+            self,
+            fd::{AsRawFd as _, FromRawFd as _, OwnedFd},
+            raw::{c_long, c_void},
+        },
+    },
 };
 
 impl Cx {
@@ -33,10 +50,10 @@ impl Cx {
 
             let (mut fourcc, mut num_planes) = (0, 0);
             assert!(
-                (
-                    opengl_cx.libegl.eglExportDMABUFImageQueryMESA
-                        .expect("eglExportDMABUFImageQueryMESA unsupported")
-                )(
+                (opengl_cx
+                    .libegl
+                    .eglExportDMABUFImageQueryMESA
+                    .expect("eglExportDMABUFImageQueryMESA unsupported"))(
                     opengl_cx.egl_display,
                     egl_image,
                     &mut fourcc as *mut u32 as *mut i32,
@@ -78,18 +95,13 @@ impl Cx {
             );
 
             assert!(
-                (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(
-                    opengl_cx.egl_display,
-                    egl_image,
-                ) != 0,
+                (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(opengl_cx.egl_display, egl_image,)
+                    != 0,
                 "eglDestroyImageKHR failed",
             );
 
             dma_buf::Image {
-                drm_format: dma_buf::DrmFormat {
-                    fourcc,
-                    modifiers,
-                },
+                drm_format: dma_buf::DrmFormat { fourcc, modifiers },
                 planes: dma_buf::ImagePlane {
                     dma_buf_fd: os::fd::OwnedFd::from_raw_fd(dma_buf_fd),
                     offset,
@@ -100,11 +112,10 @@ impl Cx {
     }
 }
 
-
 impl CxTexture {
-    fn update_shared_texture(&mut self, gl:&LibGl) {
-        if !self.alloc_shared(){
-            return
+    fn update_shared_texture(&mut self, gl: &LibGl) {
+        if !self.alloc_shared() {
+            return;
         }
         let alloc = self.alloc.as_ref().unwrap();
 
@@ -120,8 +131,16 @@ impl CxTexture {
 
             (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
 
-            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+            (gl.glTexParameteri)(
+                gl_sys::TEXTURE_2D,
+                gl_sys::TEXTURE_MIN_FILTER,
+                gl_sys::NEAREST as i32,
+            );
+            (gl.glTexParameteri)(
+                gl_sys::TEXTURE_2D,
+                gl_sys::TEXTURE_MAG_FILTER,
+                gl_sys::NEAREST as i32,
+            );
             (gl.glTexImage2D)(
                 gl_sys::TEXTURE_2D,
                 0,
@@ -131,21 +150,27 @@ impl CxTexture {
                 0,
                 gl_sys::RGBA,
                 gl_sys::UNSIGNED_BYTE,
-                std::ptr::null()
+                std::ptr::null(),
             );
-            assert_eq!((gl.glGetError)(), 0, "glTexImage2D({}, {}) failed", alloc.width, alloc.height);
+            assert_eq!(
+                (gl.glGetError)(),
+                0,
+                "glTexImage2D({}, {}) failed",
+                alloc.width,
+                alloc.height
+            );
             (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
         }
     }
 
     pub fn update_from_shared_dma_buf_image(
         &mut self,
-        gl:&LibGl,
+        gl: &LibGl,
         opengl_cx: &OpenglCx,
         dma_buf_image: &dma_buf::Image<os::fd::OwnedFd>,
     ) {
-        if !self.alloc_shared(){
-            return
+        if !self.alloc_shared() {
+            return;
         }
         let alloc = self.alloc.as_ref().unwrap();
 
@@ -154,7 +179,10 @@ impl CxTexture {
         opengl_cx.make_current();
         while unsafe { (gl.glGetError)() } != 0 {}
 
-        let dma_buf::Image { drm_format, planes: ref plane0 } = *dma_buf_image;
+        let dma_buf::Image {
+            drm_format,
+            planes: ref plane0,
+        } = *dma_buf_image;
 
         let image_attribs = [
             egl_sys::EGL_LINUX_DRM_FOURCC_EXT,
@@ -175,13 +203,15 @@ impl CxTexture {
             (drm_format.modifiers >> 32) as u32,
             egl_sys::EGL_NONE,
         ];
-        let egl_image = unsafe { (opengl_cx.libegl.eglCreateImageKHR.unwrap())(
-            opengl_cx.egl_display,
-            std::ptr::null_mut(),
-            egl_sys::EGL_LINUX_DMA_BUF_EXT,
-            std::ptr::null_mut(),
-            image_attribs.as_ptr() as _,
-        ) };
+        let egl_image = unsafe {
+            (opengl_cx.libegl.eglCreateImageKHR.unwrap())(
+                opengl_cx.egl_display,
+                std::ptr::null_mut(),
+                egl_sys::EGL_LINUX_DMA_BUF_EXT,
+                std::ptr::null_mut(),
+                image_attribs.as_ptr() as _,
+            )
+        };
         assert!(!egl_image.is_null(), "eglCreateImageKHR failed");
 
         unsafe {
@@ -263,7 +293,14 @@ impl OpenglWindow {
         };
 
         let custom_window_chrome = false;
-        xlib_window.init(title, inner_size, position, is_fullscreen, visual_info, custom_window_chrome);
+        xlib_window.init(
+            title,
+            inner_size,
+            position,
+            is_fullscreen,
+            visual_info,
+            custom_window_chrome,
+        );
 
         let egl_surface = unsafe {
             (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(
@@ -289,16 +326,14 @@ impl OpenglWindow {
     pub fn resize_buffers(&mut self) -> bool {
         let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
-            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
+            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor,
         };
         if self.cal_size != cal_size {
             self.cal_size = cal_size;
             // resize the framebuffer
             true
-        }
-        else {
+        } else {
             false
         }
     }
-
 }

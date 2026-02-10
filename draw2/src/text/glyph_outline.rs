@@ -4,7 +4,7 @@ use {
         image::{SubimageMut, R},
         num::Zero,
     },
-    rustybuzz as rustybuzz,
+    rustybuzz,
     rustybuzz::ttf_parser,
 };
 

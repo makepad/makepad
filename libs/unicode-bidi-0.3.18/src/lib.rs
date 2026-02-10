@@ -1434,8 +1434,9 @@ mod tests {
 
     #[test]
     fn test_utf16_text_source() {
-        let text: &[u16] =
-            &[0x41, 0xD801, 0xDC01, 0x20, 0xD800, 0x20, 0xDFFF, 0x20, 0xDC00, 0xD800];
+        let text: &[u16] = &[
+            0x41, 0xD801, 0xDC01, 0x20, 0xD800, 0x20, 0xDFFF, 0x20, 0xDC00, 0xD800,
+        ];
         assert_eq!(text.char_at(0), Some(('A', 1)));
         assert_eq!(text.char_at(1), Some(('\u{10401}', 2)));
         assert_eq!(text.char_at(2), None);
@@ -1451,8 +1452,9 @@ mod tests {
 
     #[test]
     fn test_utf16_char_iter() {
-        let text: &[u16] =
-            &[0x41, 0xD801, 0xDC01, 0x20, 0xD800, 0x20, 0xDFFF, 0x20, 0xDC00, 0xD800];
+        let text: &[u16] = &[
+            0x41, 0xD801, 0xDC01, 0x20, 0xD800, 0x20, 0xDFFF, 0x20, 0xDC00, 0xD800,
+        ];
         assert_eq!(text.len(), 10);
         assert_eq!(text.chars().count(), 9);
         let mut chars = text.chars();

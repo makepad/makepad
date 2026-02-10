@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoSlider = <UIZooTabLayout_B> {
             desc = {
-                <Markdown> { body: dep("crate://self/resources/slider.md") } 
+                <Markdown> { body: dep("crate://self/resources/slider.md") }
             }
             demos = {
                 <H4> { text: "Slider"}
@@ -28,7 +26,7 @@ live_design!{
                 <Slider> { text: "min/max", min: 0., max: 100. }
                 <Slider> { text: "precision", precision: 20 }
                 <Slider> { text: "stepped", step: 0.1 }
-                
+
                 <Hr> {}
                 <H4> { text: "SliderGradientY"}
                 <SliderGradientY> { text: "Default" }
@@ -44,7 +42,7 @@ live_design!{
                 <SliderGradientY> { text: "min/max", min: 0., max: 100. }
                 <SliderGradientY> { text: "precision", precision: 20 }
                 <SliderGradientY> { text: "stepped", step: 0.1 }
-                
+
                 <Hr> {}
                 <H4> { text: "SliderGradientY"}
                 <SliderGradientX> { text: "Default" }
@@ -60,7 +58,7 @@ live_design!{
                 <SliderGradientX> { text: "min/max", min: 0., max: 100. }
                 <SliderGradientX> { text: "precision", precision: 20 }
                 <SliderGradientX> { text: "stepped", step: 0.1 }
-                
+
                 <Hr> {}
                 <H4> { text: "SliderFlat"}
                 <SliderFlat> { text: "Default" }
@@ -263,7 +261,7 @@ live_design!{
             //             color_empty_hover: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
             //             color_empty_focus: (THEME_COLOR_TEXT_FOCUS)
             //         }
-                    
+
             //         draw_bg: {
             //             border_radius: 0.
             //             border_size: 0.
@@ -401,7 +399,7 @@ live_design!{
             //             color_empty_hover: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
             //             color_empty_focus: (THEME_COLOR_TEXT_FOCUS)
             //         }
-                    
+
             //         draw_bg: {
             //             border_radius: 0.
             //             border_size: 0.
@@ -452,7 +450,7 @@ live_design!{
             //         color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
             //         color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
             //         color_2_drag: (THEME_COLOR_INSET_2_DRAG)
-                    
+
             //         border_color: (THEME_COLOR_BEVEL_OUTSET_1)
             //         border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1)
             //         border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1)
@@ -485,7 +483,7 @@ live_design!{
 
             //     height: 18.,
             //     margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
-                
+
             //     min: 0.0, max: 1.0,
             //     step: 0.0,
             //     label_align: { x: 0., y: 0. }
@@ -516,7 +514,7 @@ live_design!{
 
             //         width: Fit,
             //         padding: 0.,
-            //         margin: { right: 7.5, top: (SLIDER_ALT1_DATA_FONT_TOPMARGIN) } 
+            //         margin: { right: 7.5, top: (SLIDER_ALT1_DATA_FONT_TOPMARGIN) }
 
             //         draw_text: {
             //             color: (THEME_COLOR_TEXT_VAL)
@@ -532,7 +530,7 @@ live_design!{
             //                 line_spacing: 1.2
             //             }
             //         }
-    
+
             //         draw_bg: {
             //             border_size: 0.
 

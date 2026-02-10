@@ -1,11 +1,11 @@
 use crate::makepad_widgets::*;
 
 //#[cfg(feature = "nightly")]
- 
-live_design!{ 
+
+live_design! {
     use link::widgets::*;
     use link::theme::*;
-    
+
     use crate::mandelbrot::Mandelbrot;
     App = {{App}} {
         ui: <Root>{
@@ -14,15 +14,16 @@ live_design!{
                 body = <Mandelbrot> {
                     width: Fill, height: Fill
                 }
-            } 
-        }  
+            }
+        }
     }
 }
 app_main!(App);
-  
+
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
+    #[live]
+    ui: WidgetRef,
 }
 
 impl LiveRegister for App {

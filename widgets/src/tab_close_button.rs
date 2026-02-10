@@ -1,12 +1,12 @@
 use crate::makepad_draw::*;
 
-live_design!{
+live_design! {
     link widgets;
     use link::theme::*;
     use makepad_draw::shader::std::*;
-    
+
     pub TabCloseButtonBase = {{TabCloseButton}} {}
-    
+
     pub TabCloseButton = <TabCloseButtonBase> {
         height: 10.0, width: 10.0,
         margin: { right: (THEME_SPACE_2), left: -3.5 },
@@ -19,7 +19,7 @@ live_design!{
             uniform color: (#8)
             uniform color_hover: (#C)
             uniform color_active: (#A)
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
@@ -41,7 +41,7 @@ live_design!{
                 )
             }
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -51,7 +51,7 @@ live_design!{
                         draw_button: {hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     cursor: Hand,
                     from: {all: Snap}
@@ -66,39 +66,34 @@ live_design!{
 
 #[derive(Live, LiveHook, LiveRegister)]
 pub struct TabCloseButton {
-    #[live] draw_button: DrawQuad,
-    #[animator] animator: Animator,
+    #[live]
+    draw_button: DrawQuad,
+    #[animator]
+    animator: Animator,
 
-    #[walk] walk: Walk
+    #[walk]
+    walk: Walk,
 }
 
 impl TabCloseButton {
-    
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        self.draw_button.draw_walk(
-            cx,
-            self.walk
-        );
+        self.draw_button.draw_walk(cx, self.walk);
     }
-    
-    pub fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-    ) -> TabCloseButtonAction {
+
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> TabCloseButtonAction {
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_button.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
                 return TabCloseButtonAction::HoverIn;
             }
-            Hit::FingerHoverOut(_)=>{
+            Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
                 return TabCloseButtonAction::HoverOut;
             }
             // Pressing the tab close button with a primary button/touch
             // or the middle mouse button are both recognized as a close tab action.
-            Hit::FingerDown(fe) 
+            Hit::FingerDown(fe)
                 if fe.is_primary_hit() || fe.mouse_button().is_some_and(|b| b.is_middle()) =>
             {
                 return TabCloseButtonAction::WasPressed;

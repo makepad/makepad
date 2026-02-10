@@ -4,9 +4,9 @@ use makepad_live_id::*;
 
 use crate::color::parse_color;
 use crate::document::{GradientUnits, SpreadMethod, SvgGradient};
+use crate::paint::GradientStop;
 use crate::transform::parse_transform;
 use crate::units::parse_number;
-use crate::paint::GradientStop;
 
 pub fn parse_linear_gradient(walker: &HtmlWalker) -> (Option<String>, SvgGradient) {
     let mut grad = SvgGradient::new_linear();

@@ -4,8 +4,8 @@
  * Ported to Rust in 2025 by Trevor Gross.
  */
 
+use super::support::{cold_path, FpResult, Round};
 use super::Float;
-use super::support::{FpResult, Round, cold_path};
 
 /// Compute the cube root of the argument.
 #[cfg_attr(assert_no_panic, no_panic::no_panic)]

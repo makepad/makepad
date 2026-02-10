@@ -2,12 +2,11 @@ use super::{
     font::{Font, GlyphId},
     font_atlas::{ColorAtlas, GlyphImage, GlyphImageKey, GrayscaleAtlas},
     geom::{Point, Rect, Size},
-    image::{Image},
+    image::Image,
     sdfer,
     sdfer::Sdfer,
 };
 //use std::{fs::File, io::BufWriter, path::Path, slice};
-
 
 #[derive(Debug)]
 pub struct Rasterizer {
@@ -105,7 +104,7 @@ impl Rasterizer {
                     );
                     // lets plunk this thing to disk
                     /*Self::save_to_png(&coverage, "./test.png");*/
-                    
+
                     self.sdfer
                         .coverage_to_sdf(&coverage.subimage(atlas_image_size.into()), &mut sdf);
                     sdf.bounds()

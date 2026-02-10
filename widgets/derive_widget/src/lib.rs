@@ -3,24 +3,16 @@ use proc_macro::TokenStream;
 mod derive_widget;
 use crate::derive_widget::*;
 
-
 /*
 #[proc_macro_derive(Widget)]
 pub fn derive_widget(input: TokenStream) -> TokenStream {
     derive_widget_impl(input)
-}*/ 
+}*/
 
-#[proc_macro_derive(Widget, attributes(
-    walk,
-    deref,
-    redraw,
-    find,
-    wrap,
-    area,
-    event,
-    visible,
-    action_data
-))]
+#[proc_macro_derive(
+    Widget,
+    attributes(walk, deref, redraw, find, wrap, area, event, visible, action_data)
+)]
 pub fn derive_widget(input: TokenStream) -> TokenStream {
     derive_widget_impl(input)
 }

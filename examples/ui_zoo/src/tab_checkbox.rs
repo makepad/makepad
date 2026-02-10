@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,12 +8,12 @@ live_design!{
 
     pub DemoCheckBox = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/checkbox.md") } 
+            <Markdown> { body: dep("crate://self/resources/checkbox.md") }
         }
         demos = {
             <H4> { text: "Checkbox"}
             <CheckBox> { text:"<CheckBox>" }
-            
+
             <Hr> {}
             <H4> { text: "Checkbox, disabled"}
             <CheckBox> {
@@ -64,7 +62,7 @@ live_design!{
                 <ToggleGradientY> {text:"<ToggleGradientY>" }
             }
 
-            <Hr> {} 
+            <Hr> {}
             <H4> { text: "Output demo"}
             <UIZooRowH> {
                 height: Fit
@@ -88,13 +86,13 @@ live_design!{
                         margin: <THEME_MSPACE_H_1> { left: 5.5 }
                     }
 
-                    // draw_bg: { check_type: None }  
+                    // draw_bg: { check_type: None }
 
                     draw_icon: {
                         // color: #0
                         // color_active: #f00
                         // color_disabled: #8
-                    
+
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
 
@@ -159,8 +157,8 @@ live_design!{
                         mark_color_active_hover: (THEME_COLOR_MARK_ACTIVE_HOVER)
                         mark_color_focus: (THEME_COLOR_MARK_FOCUS)
                         mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
-                    }  
-                
+                    }
+
                 draw_text: {
                     color: (THEME_COLOR_LABEL_OUTER)
                     color_hover: (THEME_COLOR_LABEL_OUTER_HOVER)

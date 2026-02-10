@@ -1,21 +1,21 @@
 mod android;
-mod wasm;
-mod utils;
 mod apple;
 mod check;
 mod open_harmony;
+mod utils;
+mod wasm;
 
 use android::*;
-use open_harmony::*;
-use wasm::*;
 use apple::*;
 use check::*;
-pub use makepad_shell;
 pub use makepad_http;
+pub use makepad_shell;
 pub use makepad_wasm_strip;
+use open_harmony::*;
+use wasm::*;
 
-fn show_help(err: &str){
-    if !err.is_empty(){
+fn show_help(err: &str) {
+    if !err.is_empty() {
         println!("{}", err);
     }
     println!("Makepad's cargo extension");
@@ -33,16 +33,24 @@ fn show_help(err: &str){
     println!();
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
-    println!("       --strip                                   Strip the wasm file of debug symbols");
-    println!("       --brotli                                  Use brotli to compress the wasm file");
+    println!(
+        "       --strip                                   Strip the wasm file of debug symbols"
+    );
+    println!(
+        "       --brotli                                  Use brotli to compress the wasm file"
+    );
     println!("       --bindgen                                 Enable wasm-bindgen compatibility");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();
-    println!("    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup");
+    println!(
+        "    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup"
+    );
     println!("    apple <ios|tvos> --org=x --app=x run-sim <cargo args>    runs the project on the aarch64 simulator");
     println!("    apple <ios|tvos> --org=x --app=x run-device <cargo args>   runs the project on a real device");
-    println!("    apple list                                   Lists all certificates/profiles/devices");
+    println!(
+        "    apple list                                   Lists all certificates/profiles/devices"
+    );
     println!(" in order for makepad to be able to install an ios application on a real device a provisioning");
     println!(" profile is needed. To create one make an empty application in xcode and give it an organisation");
     println!(" name and product name you copy exactly and without spaces/odd characters into --org=x and --app=x");
@@ -67,7 +75,9 @@ fn show_help(err: &str){
     println!("                                                 Be sure to add this also to install-toolchain");
     println!("       --package-name=\"package\"                The package name");
     println!("       --app-label=\"applabel\"                  The app label");
-    println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
+    println!(
+        "       --sdk-path=./android_33_sdk               The path to read/write the android SDK"
+    );
     println!("       --full-ndk                                Install the full NDK prebuilts for the selected Host OS (default is a minimal subset).");
     println!("                                                 This is required for building apps that compile native code as part of the Rust build process.");
     println!("       --keep-sdk-sources                        Keep downloaded SDK source files (default is to remove them).");
@@ -81,7 +91,9 @@ fn show_help(err: &str){
     println!();
     println!("Open Harmony commands:");
     println!();
-    println!("    ohos [options] install-toolchain             Install the toolchain needed with rustup");
+    println!(
+        "    ohos [options] install-toolchain             Install the toolchain needed with rustup"
+    );
     println!("    ohos [options] deveco <cargo args>           Create a DevEco project for Open Harmony OS");
     println!("    ohos [options] build <cargo args>            Build  DevEco project and output the Hap package for the Open Harmony OS");
     println!("    ohos [options] run <cargo args>              Run the Hap package on a open harmony device via hdc");
@@ -99,13 +111,17 @@ fn show_help(err: &str){
     println!("    linux apt-get-install-makepad-deps           Call apt-get install with all dependencies needed for makepad.");
     println!();
     println!();
-    }
+}
 
 fn main() {
-    let args:Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
 
     // Skip the first argument if it's the binary path or 'cargo'
-    let args = if args.len() > 1 && (args[0].ends_with("cargo-makepad") || args[0] == "cargo" || args[0].ends_with("cargo-makepad.exe")) {
+    let args = if args.len() > 1
+        && (args[0].ends_with("cargo-makepad")
+            || args[0] == "cargo"
+            || args[0].ends_with("cargo-makepad.exe"))
+    {
         // If it's 'cargo makepad', then skip the second argument as well
         if args.len() > 2 && args[1] == "makepad" {
             args[2..].to_vec()
@@ -119,22 +135,32 @@ fn main() {
     if args.len() <= 1 {
         return show_help("not enough arguments");
     }
-    match args[0].as_ref(){
-        "android" => if let Err(e) = handle_android(&args[1..]){
-            println!("Got error: {}", e);
+    match args[0].as_ref() {
+        "android" => {
+            if let Err(e) = handle_android(&args[1..]) {
+                println!("Got error: {}", e);
+            }
         }
-        "wasm" => if let Err(e) = handle_wasm(&args[1..]){
-            println!("Got error: {}", e);
+        "wasm" => {
+            if let Err(e) = handle_wasm(&args[1..]) {
+                println!("Got error: {}", e);
+            }
         }
-        "apple" => if let Err(e) = handle_apple(&args[1..]){
-            println!("Got error: {}", e);
+        "apple" => {
+            if let Err(e) = handle_apple(&args[1..]) {
+                println!("Got error: {}", e);
+            }
         }
-        "ohos" => if let Err(e) = handle_open_harmony(&args[1..]){
-            println!("Got error: {}", e);
+        "ohos" => {
+            if let Err(e) = handle_open_harmony(&args[1..]) {
+                println!("Got error: {}", e);
+            }
         }
-        "check" => if let Err(e) = handle_check(&args[1..]){
-            println!("Got error: {}", e);
+        "check" => {
+            if let Err(e) = handle_check(&args[1..]) {
+                println!("Got error: {}", e);
+            }
         }
-        _=> show_help("not implemented yet")
+        _ => show_help("not implemented yet"),
     }
 }

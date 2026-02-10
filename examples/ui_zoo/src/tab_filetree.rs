@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -11,7 +9,7 @@ live_design!{
 
     pub DemoFT = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/filetree.md") } 
+            <Markdown> { body: dep("crate://self/resources/filetree.md") }
         }
         demos = {
             <DemoFileTree> { file_tree:{ width: Fill, height: Fill } }

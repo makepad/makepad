@@ -100,12 +100,12 @@ impl<T: Clone> Clone for Slot<T> {
             },
             (VacantMut(self_next_free), Vacant(&source_next_free)) => {
                 *self_next_free = source_next_free
-            },
+            }
             (VacantMut(_), Occupied(value)) => {
                 self.u = SlotUnion {
                     value: ManuallyDrop::new(value.clone()),
                 }
-            },
+            }
         }
         self.version = source.version;
     }

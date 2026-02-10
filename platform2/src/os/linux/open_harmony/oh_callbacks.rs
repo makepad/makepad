@@ -134,7 +134,7 @@ extern "C" fn on_dispatch_touch_event_cb(component: *mut OH_NativeXComponent, wi
                 TouchState::Move
             }
         };
-        touches.push(TouchPoint{
+        touches.push(TouchPoint {
             state: touch_state,
             abs: dvec2(point.x as f64, point.y as f64),
             time: point.timeStamp as f64 / 1000000000.0,
@@ -145,7 +145,6 @@ extern "C" fn on_dispatch_touch_event_cb(component: *mut OH_NativeXComponent, wi
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
         })
-
     }
     send_from_ohos_message(FromOhosMessage::Touch(touches));
     //crate::log!("OnDispatchTouchEventCallBack");

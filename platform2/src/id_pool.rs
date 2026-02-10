@@ -1,17 +1,15 @@
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    ops::Deref,
-    ops::DerefMut,
-};
+use std::{cell::RefCell, ops::Deref, ops::DerefMut, rc::Rc};
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct IdPoolFree(Rc<RefCell<Vec<usize >> >);
+pub struct IdPoolFree(Rc<RefCell<Vec<usize>>>);
 
 #[derive(Default, Debug)]
-pub struct IdPool<T> where T: Default {
-    pub pool: Vec<IdPoolItem<T >>,
-    pub free: IdPoolFree
+pub struct IdPool<T>
+where
+    T: Default,
+{
+    pub pool: Vec<IdPoolItem<T>>,
+    pub free: IdPoolFree,
 }
 
 #[derive(Debug, PartialEq)]
@@ -22,22 +20,26 @@ pub struct IdPoolItem<T> {
 
 impl<T> Deref for IdPoolItem<T> {
     type Target = T;
-    fn deref(&self) -> &Self::Target {&self.item}
+    fn deref(&self) -> &Self::Target {
+        &self.item
+    }
 }
 
 impl<T> DerefMut for IdPoolItem<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.item}
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.item
+    }
 }
 
 #[derive(Debug, PartialEq)]
 pub struct PoolId {
     pub id: usize,
     pub generation: u64,
-    pub free: IdPoolFree
+    pub free: IdPoolFree,
 }
 
-impl PoolId{
-    pub fn free(&mut self){
+impl PoolId {
+    pub fn free(&mut self) {
         self.free.0.borrow_mut().push(self.id)
     }
 }
@@ -48,7 +50,10 @@ impl Drop for PoolId {
     }
 }
 
-impl<T> IdPool<T> where T: Default {
+impl<T> IdPool<T>
+where
+    T: Default,
+{
     pub fn alloc(&mut self) -> PoolId {
         let last_from_free_pool = self.free.0.borrow_mut().pop();
         if let Some(id) = last_from_free_pool {
@@ -56,10 +61,9 @@ impl<T> IdPool<T> where T: Default {
             PoolId {
                 id,
                 generation: self.pool[id].generation,
-                free: self.free.clone()
+                free: self.free.clone(),
             }
-        }
-        else {
+        } else {
             self.alloc_new(None)
         }
     }
@@ -68,12 +72,12 @@ impl<T> IdPool<T> where T: Default {
         let id = self.pool.len();
         self.pool.push(IdPoolItem {
             generation: 0,
-            item: item.unwrap_or_else(|| T::default())
+            item: item.unwrap_or_else(|| T::default()),
         });
         PoolId {
             id,
             generation: 0,
-            free: self.free.clone()
+            free: self.free.clone(),
         }
     }
 
@@ -91,8 +95,13 @@ impl<T> IdPool<T> where T: Default {
     /// - `PoolId`: The ID of the allocated or reused slot.
     /// - `Option<T>`: The previous item if a slot was reused, or None if a new slot was allocated.
     pub fn alloc_with_reuse_filter<F>(&mut self, mut filter: F, item: T) -> (PoolId, Option<T>)
-    where F: FnMut(&IdPoolItem<T>) -> bool {
-        let maybe_free_id = self.free.0.borrow_mut()
+    where
+        F: FnMut(&IdPoolItem<T>) -> bool,
+    {
+        let maybe_free_id = self
+            .free
+            .0
+            .borrow_mut()
             .iter()
             .enumerate()
             .find_map(|(index, &id)| {
@@ -102,7 +111,7 @@ impl<T> IdPool<T> where T: Default {
                     None
                 }
             });
-    
+
         if let Some((index, id)) = maybe_free_id {
             self.free.0.borrow_mut().remove(index);
             self.pool[id].generation += 1;
@@ -111,7 +120,7 @@ impl<T> IdPool<T> where T: Default {
             let pool_id = PoolId {
                 id,
                 generation: self.pool[id].generation,
-                free: self.free.clone()
+                free: self.free.clone(),
             };
             (pool_id, Some(old_item))
         } else {

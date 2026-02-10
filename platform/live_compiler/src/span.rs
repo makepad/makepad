@@ -1,28 +1,28 @@
-use{
-    std::fmt,
+use {
     crate::{
-   //     makepad_live_tokenizer::Position,
+        live_ptr::LiveFileId,
+        //     makepad_live_tokenizer::Position,
         live_token::LiveTokenId,
-        live_ptr::LiveFileId
-    }
+    },
+    std::fmt,
 };
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct TextPos {
     pub line: u32,
-    pub column: u32
+    pub column: u32,
 }
 
-impl TextPos{
-    pub fn to_byte_offset(&self, s:&str)->Option<usize>{
+impl TextPos {
+    pub fn to_byte_offset(&self, s: &str) -> Option<usize> {
         let mut line = 0;
         let mut col = 0;
-        for (byte_index, c) in s.char_indices(){
-            if line == self.line as usize && col == self.column as usize{
-                return Some(byte_index)
+        for (byte_index, c) in s.char_indices() {
+            if line == self.line as usize && col == self.column as usize {
+                return Some(byte_index);
             }
             col += 1;
-            if c == '\n'{
+            if c == '\n' {
                 line += 1;
                 col = 0;
             }
@@ -43,30 +43,45 @@ impl From<TextPos> for Position {
 pub struct TextSpan {
     pub file_id: LiveFileId,
     pub start: TextPos,
-    pub end: TextPos
+    pub end: TextPos,
 }
 
-#[derive(Clone, Copy, Default, Debug,  Eq, Ord, PartialOrd, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, Eq, Ord, PartialOrd, PartialEq)]
 pub struct TokenSpan {
     pub token_id: LiveTokenId,
-    pub len: usize
+    pub len: usize,
 }
 
 impl From<LiveTokenId> for TokenSpan {
     fn from(val: LiveTokenId) -> Self {
-        TokenSpan { token_id: val, len: 1 }
+        TokenSpan {
+            token_id: val,
+            len: 1,
+        }
     }
 }
 
 impl fmt::Display for TextSpan {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Span(start:{}, end:{}, file_id:{})", self.start, self.end, self.file_id.to_index())
+        write!(
+            f,
+            "Span(start:{}, end:{}, file_id:{})",
+            self.start,
+            self.end,
+            self.file_id.to_index()
+        )
     }
 }
 
 impl fmt::Debug for TextSpan {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Span(start:{}, end:{}, file_id:{})", self.start, self.end, self.file_id.to_index())
+        write!(
+            f,
+            "Span(start:{}, end:{}, file_id:{})",
+            self.start,
+            self.end,
+            self.file_id.to_index()
+        )
     }
 }
 
@@ -81,4 +96,3 @@ impl fmt::Debug for TextPos {
         write!(f, "{}:{}", self.line, self.column)
     }
 }
-

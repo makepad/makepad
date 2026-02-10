@@ -1,7 +1,12 @@
 use crate::{
     event::{
-        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent, WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent, GameInputConnectedEvent
-    }, makepad_live_id::*, permission::PermissionResult, window::WindowId
+        DragEvent, DropEvent, GameInputConnectedEvent, KeyEvent, MouseDownEvent, MouseMoveEvent,
+        MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
+        WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
+    },
+    makepad_live_id::*,
+    permission::PermissionResult,
+    window::WindowId,
 };
 
 #[derive(Debug, Clone)]
@@ -13,12 +18,12 @@ pub enum MacosEvent {
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
     Paint,
-    
+
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
     Scroll(ScrollEvent),
-    
+
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     TextInput(TextInputEvent),

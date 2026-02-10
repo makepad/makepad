@@ -9,11 +9,7 @@ use {
         rasterizer::{CompletedMsdfJob, OutlineRasterizationMode, QueuedMsdfJob, Rasterizer},
     },
     crate::makepad_platform::*,
-    std::{
-        cell::RefCell,
-        mem,
-        rc::Rc,
-    },
+    std::{cell::RefCell, mem, rc::Rc},
 };
 
 pub struct Fonts {
@@ -29,7 +25,10 @@ impl Fonts {
         let layouter = Layouter::new(settings);
         let (atlas_size, msdfer_settings) = {
             let rasterizer = layouter.rasterizer().borrow();
-            (rasterizer.color_atlas().size(), rasterizer.msdfer().settings())
+            (
+                rasterizer.color_atlas().size(),
+                rasterizer.msdfer().settings(),
+            )
         };
 
         let mut msdf_job_sender: FromUISender<QueuedMsdfJob> = Default::default();
@@ -181,7 +180,11 @@ impl Fonts {
     }
 
     fn dispatch_msdf_jobs(&mut self) {
-        let jobs = self.layouter.rasterizer().borrow_mut().take_queued_msdf_jobs();
+        let jobs = self
+            .layouter
+            .rasterizer()
+            .borrow_mut()
+            .take_queued_msdf_jobs();
         for job in jobs {
             let _ = self.msdf_job_sender.send(job);
         }

@@ -1,17 +1,17 @@
 /*const SOURCE: &'static str = r#"
     DrawQuad: DrawShader {
         uniform uni1: float
-        
+
         rust_type= {{0}},
-        
+
         const cnst1: float = 1.0
         live: 1.0
-        
+
         Struct2: Struct {
             field c: float
             fn struct_2_set(inout self, x: float) {self.c = x;}
         }
-        
+
         Struct1: Struct {
             field a: float
             field b: Struct2
@@ -20,16 +20,16 @@
             }
             fn struct_1_set(inout self) {self.a = 2.0; self.b.struct_2_set(self.struct_1_closure( | x | x + 1.0));}
         }
-        
+
         fn pixel(self) -> vec4 {
             let x = Struct1 {a: 1.0, b: Struct2 {c: 1.0 + self.dinst}};
             let x = vec3(1.0) * self.dmat;
             x.struct_1_set();
             return #f;
         }
-        
+
         fn override(self) {}
-        
+
         fn vertex(self) -> vec4 {
             let x = Struct2 {c: self.uni1 + cnst1 + live};
             x.struct_2_set(3.0);
@@ -226,11 +226,11 @@ const METAL_OUTPUT: &'static str = r#"
     fragment float4 fragment_main(Varyings varyings[[stage_in]], Textures textures, constant LiveUniforms & live_uniforms [[buffer(2)]], constant const float * const_table [[buffer(3)]], constant Uniforms_user & uniforms_user [[buffer(4)]]) {
         return fn_0_1_15_pixel(varyings);
     }
-    
+
 "#;
 
 const HLSL_OUTPUT: &'static str = r#"
-    
+
     struct struct_0_1_4 {
         float f_c;
     };
@@ -306,8 +306,8 @@ const HLSL_OUTPUT: &'static str = r#"
     float4 pixel_main(Varyings varyings): SV_TARGET {
         return fn_0_1_15_pixel(varyings);
     }
-    
-    
+
+
 "#;
 
 use makepad_live_compiler::*;
@@ -325,10 +325,10 @@ fn compare_no_ws(a: &str, b: &str) -> Option<String> {
     b.retain( | c | !c.is_whitespace());
     let mut a = a.to_string();
     a.retain( | c | !c.is_whitespace());
-    
+
     let b = b.as_bytes();
     let a = a.as_bytes();
-    
+
     let mut start = 0;
     let mut changed = false;
     let len = b.len().min(a.len());
@@ -370,29 +370,29 @@ fn compare_no_ws(a: &str, b: &str) -> Option<String> {
 #[test]
 fn main() {
     let mut sr = ShaderRegistry::new();
-    
+
     struct FakeType();
-    
+
     let fake_typeof = LiveType(std::any::TypeId::of::<FakeType>());
     let module_path = ModulePath::from_str("test").unwrap();
     match sr.live_registry.parse_live_file("test.live", module_path, SOURCE.to_string(), vec![fake_typeof]) {
         Err(why) => panic!("Couldnt parse file {}", why),
         _ => ()
     }
-    
+
     let mut errors = Vec::new();
     sr.live_registry.expand_all_documents(&mut errors);
-    
+
     for msg in errors {
         println!("{}\n", msg.to_live_file_error("", SOURCE));
     }
-    
+
     let shader_ptr = DrawShaderPtr(sr.live_registry.live_ptr_from_path(
         module_path,
         &[live_id!(DrawQuad2)]
     ).unwrap());
     // lets just call the shader compiler on this thing
-    
+
     let result = sr.analyse_draw_shader(shader_ptr, | span, id, _live_type, draw_shader_def | {
         if id == live_id!(rust_type) {
             draw_shader_def.add_uniform(Id::from_str("duni").unwrap(), Ty::Float, span);
@@ -400,10 +400,10 @@ fn main() {
             draw_shader_def.add_instance(Id::from_str("dmat").unwrap(), Ty::Mat3, span);
         }
         if id == live_id!(geometry) {
-            
+
         }
     });
-    
+
     match result {
         Err(e) => {
             println!("Error {}", e.to_live_file_error("", SOURCE));
@@ -412,7 +412,7 @@ fn main() {
             println!("OK!");
         }
     }
-    
+
     /*
     pub fn generate_glsl_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> (String, String) {
         // lets find the FullPointer
@@ -422,21 +422,21 @@ fn main() {
         let pixel = generate_glsl::generate_pixel_shader(draw_shader_decl, self);
         return (vertex, pixel)
     }
-    
+
     pub fn generate_metal_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> String{
         // lets find the FullPointer
         let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
         let shader = generate_metal::generate_shader(draw_shader_decl, self);
         return shader
     }
-    
+
     pub fn generate_hlsl_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> String{
         // lets find the FullPointer
         let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
         let shader = generate_hlsl::generate_shader(draw_shader_decl, self);
         return shader
     }*/
-    
+
     // ok the shader is analysed.
     // now we will generate the glsl shader.
     let draw_shader_def = sr.draw_shader_defs.get(&shader_ptr).unwrap();
@@ -450,7 +450,7 @@ fn main() {
         println!("########## ALL ##########\n{}\n########## END ##########", compare);
         assert_eq!(true, false);
     }
-    
+
     let shader = generate_metal::generate_shader(draw_shader_def, &const_table, &sr);
     let compare = format!("\n{}", shader.mtlsl);
     if let Some(change) = compare_no_ws(METAL_OUTPUT, &compare) {
@@ -458,7 +458,7 @@ fn main() {
         println!("########## ALL ##########\n{}\n########## END ##########", compare);
         assert_eq!(true, false);
     }
-    
+
     let shader = generate_hlsl::generate_shader(draw_shader_def, &const_table, &sr);
     let compare = format!("\n{}", shader);
     if let Some(change) = compare_no_ws(HLSL_OUTPUT, &compare) {
@@ -466,9 +466,8 @@ fn main() {
         println!("########## ALL ##########\n{}\n########## END ##########", compare);
         assert_eq!(true, false);
     }
-    
+
 }*/
 
 #[test]
-fn main() {
-}
+fn main() {}

@@ -1,133 +1,74 @@
 use {
-    std::{
-        ffi::OsStr,
-        os::windows::ffi::OsStrExt,
-        mem,
-        cell::{
-            Cell,
-            RefCell,
-        },
-    },
     crate::{
-        log,
-        error,
-        windows::{
-            core::HRESULT,
-            core::PCWSTR,
-            core::PCSTR,
-            //core::IntoParam,
-            Win32::{
-                UI::{
-                    WindowsAndMessaging::{
-                        WNDCLASSEXW,
-                        PM_REMOVE,
-                        LoadIconW,
-                        RegisterClassExW,
-                        IsGUIThread,
-                        GetMessageW,
-                        TranslateMessage,
-                        DispatchMessageW,
-                        PeekMessageW,
-                        SetTimer,
-                        KillTimer,
-                        ShowCursor,
-                        SetCursor,
-                        LoadCursorW,
-                        IsProcessDPIAware,
-                        IDC_ARROW,
-                        IDC_CROSS,
-                        IDC_HAND,
-                        IDC_SIZEALL,
-                        IDC_IBEAM,
-                        IDC_HELP,
-                        IDC_NO,
-                        IDC_SIZEWE,
-                        IDC_SIZENS,
-                        IDC_SIZENESW,
-                        IDC_SIZENWSE,
-                        WM_QUIT,
-                        CS_HREDRAW,
-                        CS_VREDRAW,
-                        CS_OWNDC,
-                        IDI_WINLOGO,
-                    },
-                    HiDpi::{
-                        PROCESS_DPI_AWARENESS,
-                        DPI_AWARENESS_CONTEXT,
-                        MONITOR_DPI_TYPE,
-                        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-                        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
-                        PROCESS_PER_MONITOR_DPI_AWARE,
-                        MDT_EFFECTIVE_DPI
-                    },
-                },
-                Graphics::Gdi::{
-                    CreateSolidBrush,
-                    HMONITOR,
-                    GetDC,
-                    MonitorFromWindow,
-                    GetDeviceCaps,
-                    MONITOR_DEFAULTTONEAREST,
-                    LOGPIXELSX
-                },
-                Foundation::{
-                    COLORREF,
-                    S_OK,
-                    HWND,
-                    BOOL,
-                    FARPROC,
-                    DRAGDROP_S_DROP,
-                    DRAGDROP_S_CANCEL,
-                },
-                System::{
-                    Threading::ExitProcess,
-                    LibraryLoader::{
-                        GetModuleHandleW,
-                        LoadLibraryA,
-                        GetProcAddress,
-                    },
-                    Performance::{
-                        QueryPerformanceCounter,
-                        QueryPerformanceFrequency,
-                    },
-                    Com::IDataObject,
-                    Ole::{
-                        OleInitialize,
-                        DoDragDrop,
-                        IDropSource,
-                        DROPEFFECT,
-                        DROPEFFECT_COPY,
-                        DROPEFFECT_MOVE,
-                    },
-                },
-            },
-        },
-        event::*,
         cursor::MouseCursor,
+        error,
+        event::*,
+        log,
         os::{
             cx_native::EventFlow,
             windows::{
-                dropsource::*,
-                dataobject::DragItemWindows,
-                win32_event::Win32Event,
+                dataobject::DragItemWindows, dropsource::*, win32_event::Win32Event,
                 win32_window::Win32Window,
             },
         },
         window::WindowId,
+        windows::{
+            core::HRESULT,
+            core::PCSTR,
+            core::PCWSTR,
+            //core::IntoParam,
+            Win32::{
+                Foundation::{
+                    BOOL, COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK,
+                },
+                Graphics::Gdi::{
+                    CreateSolidBrush, GetDC, GetDeviceCaps, MonitorFromWindow, HMONITOR,
+                    LOGPIXELSX, MONITOR_DEFAULTTONEAREST,
+                },
+                System::{
+                    Com::IDataObject,
+                    LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA},
+                    Ole::{
+                        DoDragDrop, IDropSource, OleInitialize, DROPEFFECT, DROPEFFECT_COPY,
+                        DROPEFFECT_MOVE,
+                    },
+                    Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
+                    Threading::ExitProcess,
+                },
+                UI::{
+                    HiDpi::{
+                        DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
+                        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
+                        MONITOR_DPI_TYPE, PROCESS_DPI_AWARENESS, PROCESS_PER_MONITOR_DPI_AWARE,
+                    },
+                    WindowsAndMessaging::{
+                        DispatchMessageW, GetMessageW, IsGUIThread, IsProcessDPIAware, KillTimer,
+                        LoadCursorW, LoadIconW, PeekMessageW, RegisterClassExW, SetCursor,
+                        SetTimer, ShowCursor, TranslateMessage, CS_HREDRAW, CS_OWNDC, CS_VREDRAW,
+                        IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
+                        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, PM_REMOVE,
+                        WM_QUIT, WNDCLASSEXW,
+                    },
+                },
+            },
+        },
+    },
+    std::{
+        cell::{Cell, RefCell},
+        ffi::OsStr,
+        mem,
+        os::windows::ffi::OsStrExt,
     },
 };
 pub const FALSE: BOOL = BOOL(0);
 pub const TRUE: BOOL = BOOL(1);
-
 
 thread_local! {
     pub static WIN32_APP: RefCell<Option<Win32App>> = RefCell::new(None);
 }
 
 pub fn with_win32_app<R>(f: impl FnOnce(&mut Win32App) -> R) -> R {
-    WIN32_APP.with_borrow_mut(|app| {
-        f(app.as_mut().unwrap())
-    })
+    WIN32_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
 }
 
 pub fn init_win32_app_global(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) {
@@ -148,7 +89,7 @@ P1: IntoParam<IDropSource>,
 }*/
 
 pub struct Win32App {
-    event_callback: Option<Box<dyn FnMut(Win32Event) -> EventFlow >>,
+    event_callback: Option<Box<dyn FnMut(Win32Event) -> EventFlow>>,
     pub window_class_name: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub time: Win32Time,
@@ -157,39 +98,50 @@ pub struct Win32App {
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: Option<MouseCursor>,
-    pub currently_clicked_window_id: Option<WindowId >,
-    pub start_dragging_items: Option<Vec<DragItem >>,
+    pub currently_clicked_window_id: Option<WindowId>,
+    pub start_dragging_items: Option<Vec<DragItem>>,
     pub is_dragging_internal: Cell<bool>,
 }
 
 #[derive(Clone)]
 pub enum Win32Timer {
     Free,
-    Timer {win32_id: usize, timer_id: u64, interval: f64, repeats: bool},
-    Resize {win32_id: usize},
-    DragDrop {win32_id: usize},
-    SignalPoll {win32_id: usize},
+    Timer {
+        win32_id: usize,
+        timer_id: u64,
+        interval: f64,
+        repeats: bool,
+    },
+    Resize {
+        win32_id: usize,
+    },
+    DragDrop {
+        win32_id: usize,
+    },
+    SignalPoll {
+        win32_id: usize,
+    },
 }
 
-pub struct Win32Time{
+pub struct Win32Time {
     pub time_start: i64,
     pub time_freq: i64,
 }
 
-impl Win32Time{
-    pub fn new()->Self{
+impl Win32Time {
+    pub fn new() -> Self {
         let mut time_start = 0i64;
-        unsafe {QueryPerformanceCounter(&mut time_start).unwrap()};
-                
+        unsafe { QueryPerformanceCounter(&mut time_start).unwrap() };
+
         let mut time_freq = 0i64;
-        unsafe {QueryPerformanceFrequency(&mut time_freq).unwrap()};
-        Self{
+        unsafe { QueryPerformanceFrequency(&mut time_freq).unwrap() };
+        Self {
             time_start,
             time_freq,
         }
     }
-    
-    pub fn time_now(&self)->f64{
+
+    pub fn time_now(&self) -> f64 {
         unsafe {
             let mut time_now = 0i64;
             QueryPerformanceCounter(&mut time_now).unwrap();
@@ -200,37 +152,32 @@ impl Win32Time{
 
 impl Win32App {
     pub fn new(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) -> Win32App {
-        
         let window_class_name = encode_wide("MakepadWindow\0");
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW
-                | CS_VREDRAW
-                | CS_OWNDC,
+            style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
-            hInstance: unsafe {GetModuleHandleW(None).unwrap().into()},
-            hIcon: unsafe {LoadIconW(None, IDI_WINLOGO).unwrap()}, //h_icon,
+            hInstance: unsafe { GetModuleHandleW(None).unwrap().into() },
+            hIcon: unsafe { LoadIconW(None, IDI_WINLOGO).unwrap() }, //h_icon,
             lpszClassName: PCWSTR(window_class_name.as_ptr()),
-            hbrBackground: unsafe {CreateSolidBrush(COLORREF(0x3f3f3f3f))},
-            ..Default::default()
-            /*            
-            cbClsExtra: 0,
-            cbWndExtra: 0,
-            hCursor: Default::default(), //unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
-            hbrBackground: Default::default(),
-            lpszMenuName: PCWSTR::null(),
-            hIconSm: Default::default(),*/
+            hbrBackground: unsafe { CreateSolidBrush(COLORREF(0x3f3f3f3f)) },
+            ..Default::default() /*
+                                 cbClsExtra: 0,
+                                 cbWndExtra: 0,
+                                 hCursor: Default::default(), //unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
+                                 hbrBackground: Default::default(),
+                                 lpszMenuName: PCWSTR::null(),
+                                 hIconSm: Default::default(),*/
         };
-        
+
         unsafe {
             RegisterClassExW(&class);
             let _ = IsGUIThread(TRUE);
-            
+
             // initialize COM using OleInitialize to allow Drag&Drop and other shell features
             OleInitialize(None).unwrap();
         }
-        
-        
+
         let win32_app = Win32App {
             start_dragging_items: None,
             window_class_name,
@@ -246,10 +193,10 @@ impl Win32App {
             is_dragging_internal: Cell::new(false),
         };
         win32_app.dpi_functions.become_dpi_aware();
-        
+
         win32_app
     }
-    
+
     pub fn event_loop() {
         unsafe {
             loop {
@@ -263,8 +210,7 @@ impl Win32App {
                             // Only happens if the message is `WM_QUIT`.
                             debug_assert_eq!(msg.message, WM_QUIT);
                             with_win32_app(|app| app.event_flow = EventFlow::Exit);
-                        }
-                        else {
+                        } else {
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                             if !with_win32_app(|app| app.was_signal_poll()) {
@@ -278,227 +224,256 @@ impl Win32App {
                         let msg = msg.assume_init();
                         if ret == FALSE {
                             Win32App::do_callback(Win32Event::Paint)
-                        }
-                        else {
+                        } else {
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                         }
                     }
-                    EventFlow::Exit => panic!()
+                    EventFlow::Exit => panic!(),
                 }
                 Win32App::poll_start_drag_drop();
             }
         }
     }
-    
+
     pub fn do_callback(event: Win32Event) {
         let cb = with_win32_app(|app| app.event_callback.take());
         if let Some(mut callback) = cb {
             let event_flow = callback(event);
             with_win32_app(|app| app.event_flow = event_flow);
             if let EventFlow::Exit = event_flow {
-                unsafe {ExitProcess(0);}
+                unsafe {
+                    ExitProcess(0);
+                }
             }
             with_win32_app(|app| app.event_callback = Some(callback));
         }
     }
-    
-    pub unsafe extern "system" fn timer_proc(_hwnd: HWND, _arg1: u32, in_win32_id: usize, _arg2: u32) {
+
+    pub unsafe extern "system" fn timer_proc(
+        _hwnd: HWND,
+        _arg1: u32,
+        in_win32_id: usize,
+        _arg2: u32,
+    ) {
         let hit_timer = {
-            with_win32_app(|app|{
+            with_win32_app(|app| {
                 let mut hit_timer = None;
                 for slot in 0..app.timers.len() {
                     match app.timers[slot] {
-                        Win32Timer::Timer {win32_id, repeats, ..} => if win32_id == in_win32_id {
-                            hit_timer = Some(app.timers[slot].clone());
-                            if !repeats {
-                                KillTimer(None, in_win32_id).unwrap();
-                                app.timers[slot] = Win32Timer::Free;
+                        Win32Timer::Timer {
+                            win32_id, repeats, ..
+                        } => {
+                            if win32_id == in_win32_id {
+                                hit_timer = Some(app.timers[slot].clone());
+                                if !repeats {
+                                    KillTimer(None, in_win32_id).unwrap();
+                                    app.timers[slot] = Win32Timer::Free;
+                                }
+                                break;
                             }
-                            break;
-                        },
-                        Win32Timer::DragDrop {win32_id, ..} => if win32_id == in_win32_id {
-                            hit_timer = Some(app.timers[slot].clone());
-                            break;
-                        },
-                        Win32Timer::Resize {win32_id, ..} => if win32_id == in_win32_id {
-                            hit_timer = Some(app.timers[slot].clone());
-                            break;
-                        },
-                        Win32Timer::SignalPoll {win32_id, ..} => if win32_id == in_win32_id {
-                            hit_timer = Some(app.timers[slot].clone());
-                            break;
                         }
-                        _ => ()
+                        Win32Timer::DragDrop { win32_id, .. } => {
+                            if win32_id == in_win32_id {
+                                hit_timer = Some(app.timers[slot].clone());
+                                break;
+                            }
+                        }
+                        Win32Timer::Resize { win32_id, .. } => {
+                            if win32_id == in_win32_id {
+                                hit_timer = Some(app.timers[slot].clone());
+                                break;
+                            }
+                        }
+                        Win32Timer::SignalPoll { win32_id, .. } => {
+                            if win32_id == in_win32_id {
+                                hit_timer = Some(app.timers[slot].clone());
+                                break;
+                            }
+                        }
+                        _ => (),
                     }
-                };
+                }
                 hit_timer
             })
         };
         // call the dependencies
-        let time =  with_win32_app(|app| app.time_now());
+        let time = with_win32_app(|app| app.time_now());
         if let Some(hit_timer) = hit_timer {
             match hit_timer {
-                Win32Timer::Timer {timer_id, ..} => {
+                Win32Timer::Timer { timer_id, .. } => {
                     Win32App::do_callback(Win32Event::Timer(TimerEvent {
                         time: Some(time),
-                        timer_id: timer_id
+                        timer_id: timer_id,
                     }));
-                },
-                Win32Timer::Resize {..} => {
+                }
+                Win32Timer::Resize { .. } => {
                     Win32App::do_callback(Win32Event::Paint);
-                },
-                Win32Timer::DragDrop {..} => {
+                }
+                Win32Timer::DragDrop { .. } => {
                     Win32App::do_callback(Win32Event::Paint);
-                },
-                Win32Timer::SignalPoll {..} => {
-                    Win32App::do_callback(
-                        Win32Event::Signal
-                    );
+                }
+                Win32Timer::SignalPoll { .. } => {
+                    Win32App::do_callback(Win32Event::Signal);
                     with_win32_app(|app| app.was_signal_poll = true);
                 }
-                _ => ()
+                _ => (),
             }
         }
     }
-    
+
     pub fn was_signal_poll(&mut self) -> bool {
         if self.was_signal_poll {
             self.was_signal_poll = false;
             true
-        }
-        else {
+        } else {
             false
         }
     }
-    
+
     pub fn get_free_timer_slot(&mut self) -> usize {
         //let win32_app = get_win32_app_global();
         for slot in 0..self.timers.len() {
             if let Win32Timer::Free = self.timers[slot] {
-                return slot
+                return slot;
             }
         }
         let slot = self.timers.len();
         self.timers.push(Win32Timer::Free);
         slot
     }
-    
+
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         let slot = self.get_free_timer_slot();
-        let win32_id = unsafe {SetTimer(None, 0, (interval * 1000.0) as u32, Some(Self::timer_proc))};
-        if timer_id == 0{
-            self.timers[slot] = Win32Timer::SignalPoll {
-                win32_id: win32_id,
-            };
-        }
-        else{
+        let win32_id =
+            unsafe { SetTimer(None, 0, (interval * 1000.0) as u32, Some(Self::timer_proc)) };
+        if timer_id == 0 {
+            self.timers[slot] = Win32Timer::SignalPoll { win32_id: win32_id };
+        } else {
             self.timers[slot] = Win32Timer::Timer {
                 timer_id: timer_id,
                 win32_id: win32_id,
                 interval: interval,
-                repeats: repeats
+                repeats: repeats,
             };
         }
     }
-    
+
     pub fn stop_timer(&mut self, which_timer_id: u64) {
         for slot in 0..self.timers.len() {
-            if let Win32Timer::Timer {win32_id, timer_id, ..} = self.timers[slot] {
+            if let Win32Timer::Timer {
+                win32_id, timer_id, ..
+            } = self.timers[slot]
+            {
                 if timer_id == which_timer_id {
                     self.timers[slot] = Win32Timer::Free;
-                    unsafe {KillTimer(None, win32_id).unwrap();}
+                    unsafe {
+                        KillTimer(None, win32_id).unwrap();
+                    }
                 }
             }
         }
     }
-    
+
     pub fn start_resize(&mut self) {
         let slot = self.get_free_timer_slot();
-        let win32_id = unsafe {SetTimer(None, 0, 8 as u32, Some(Self::timer_proc))};
-        self.timers[slot] = Win32Timer::Resize {win32_id: win32_id};
+        let win32_id = unsafe { SetTimer(None, 0, 8 as u32, Some(Self::timer_proc)) };
+        self.timers[slot] = Win32Timer::Resize { win32_id: win32_id };
     }
-    
+
     pub fn poll_start_drag_drop() {
         let items = with_win32_app(|app| app.start_dragging_items.take());
         if let Some(items) = items {
             with_win32_app(|app| {
                 let slot = app.get_free_timer_slot();
-                let win32_id = unsafe {SetTimer(None, 0, 8 as u32, Some(Self::timer_proc))};
-                app.timers[slot] = Win32Timer::DragDrop {win32_id: win32_id};
+                let win32_id = unsafe { SetTimer(None, 0, 8 as u32, Some(Self::timer_proc)) };
+                app.timers[slot] = Win32Timer::DragDrop { win32_id: win32_id };
             });
-            
+
             if items.len() > 1 {
                 error!("multi-item drag/drop operation not supported");
             }
             match &items[0] {
-                DragItem::FilePath {path, internal_id,} => {
-                    
+                DragItem::FilePath { path, internal_id } => {
                     //log!("win32: about to drag path \"{}\" with internal ID {:?}", path, internal_id);
-                    
+
                     // only drag if something is there
                     if (path.len() > 0) || internal_id.is_some() {
-                        
                         // create COM IDataObject that hosts the drag item
-                        let data_object: IDataObject = DragItemWindows(DragItem::FilePath {path: path.clone(), internal_id: internal_id.clone(),}).into();
-                        
+                        let data_object: IDataObject = DragItemWindows(DragItem::FilePath {
+                            path: path.clone(),
+                            internal_id: internal_id.clone(),
+                        })
+                        .into();
+
                         // create COM IDropSource to indicate when to stop dragging
                         let drop_source: IDropSource = DropSource {}.into();
-                        
+
                         with_win32_app(|app| app.is_dragging_internal.replace(true));
                         let mut effect = DROPEFFECT(0);
-                        match unsafe {DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect)} {
-                            DRAGDROP_S_DROP => {/*log!("DoDragDrop: succesful")*/},
-                            DRAGDROP_S_CANCEL => {/*log!("DoDragDrop: canceled")*/},
-                            _ => {log!("DoDragDrop: failed for some reason")},
+                        match unsafe {
+                            DoDragDrop(
+                                &data_object,
+                                &drop_source,
+                                DROPEFFECT_COPY | DROPEFFECT_MOVE,
+                                &mut effect,
+                            )
+                        } {
+                            DRAGDROP_S_DROP => { /*log!("DoDragDrop: succesful")*/ }
+                            DRAGDROP_S_CANCEL => { /*log!("DoDragDrop: canceled")*/ }
+                            _ => {
+                                log!("DoDragDrop: failed for some reason")
+                            }
                         }
                         with_win32_app(|app| app.is_dragging_internal.replace(false));
                     }
-                },
+                }
                 _ => {
                     error!("Only DragItem::FilePath supported");
                 }
             }
-            with_win32_app(|app|{
+            with_win32_app(|app| {
                 for slot in 0..app.timers.len() {
-                    if let Win32Timer::DragDrop {win32_id} = app.timers[slot] {
+                    if let Win32Timer::DragDrop { win32_id } = app.timers[slot] {
                         app.timers[slot] = Win32Timer::Free;
-                        unsafe {KillTimer(None, win32_id).unwrap();}
+                        unsafe {
+                            KillTimer(None, win32_id).unwrap();
+                        }
                     }
                 }
             })
         }
     }
-    
+
     pub fn start_signal_poll(&mut self) {
         let slot = self.get_free_timer_slot();
-        let win32_id = unsafe {SetTimer(None, 0, 8 as u32, Some(Self::timer_proc))};
-        self.timers[slot] = Win32Timer::SignalPoll {win32_id: win32_id};
+        let win32_id = unsafe { SetTimer(None, 0, 8 as u32, Some(Self::timer_proc)) };
+        self.timers[slot] = Win32Timer::SignalPoll { win32_id: win32_id };
     }
-    
+
     pub fn stop_resize(&mut self) {
         for slot in 0..self.timers.len() {
-            if let Win32Timer::Resize {win32_id} = self.timers[slot] {
+            if let Win32Timer::Resize { win32_id } = self.timers[slot] {
                 self.timers[slot] = Win32Timer::Free;
-                unsafe {KillTimer(None, win32_id).unwrap();}
+                unsafe {
+                    KillTimer(None, win32_id).unwrap();
+                }
             }
         }
     }
-    
+
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
         self.start_dragging_items = Some(items);
     }
-    
+
     pub fn time_now(&self) -> f64 {
         self.time.time_now()
     }
-    
+
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
         if self.current_cursor.is_none() || self.current_cursor.unwrap() != cursor {
             let win32_cursor = match cursor {
-                MouseCursor::Hidden => {
-                    PCWSTR::null()
-                },
+                MouseCursor::Hidden => PCWSTR::null(),
                 MouseCursor::Default => IDC_ARROW,
                 MouseCursor::Crosshair => IDC_CROSS,
                 MouseCursor::Hand => IDC_HAND,
@@ -510,7 +485,7 @@ impl Win32App {
                 MouseCursor::Wait => IDC_ARROW,
                 MouseCursor::Help => IDC_HELP,
                 MouseCursor::NotAllowed => IDC_NO,
-                
+
                 MouseCursor::EResize => IDC_SIZEWE,
                 MouseCursor::NResize => IDC_SIZENS,
                 MouseCursor::NeResize => IDC_SIZENESW,
@@ -519,13 +494,12 @@ impl Win32App {
                 MouseCursor::SeResize => IDC_SIZENWSE,
                 MouseCursor::SwResize => IDC_SIZENESW,
                 MouseCursor::WResize => IDC_SIZEWE,
-                
-                
+
                 MouseCursor::NsResize => IDC_SIZENS,
                 MouseCursor::NeswResize => IDC_SIZENESW,
                 MouseCursor::EwResize => IDC_SIZEWE,
                 MouseCursor::NwseResize => IDC_SIZENWSE,
-                
+
                 MouseCursor::ColResize => IDC_SIZEWE,
                 MouseCursor::RowResize => IDC_SIZENS,
             };
@@ -533,8 +507,7 @@ impl Win32App {
             unsafe {
                 if win32_cursor == PCWSTR::null() {
                     ShowCursor(FALSE);
-                }
-                else {
+                } else {
                     SetCursor(LoadCursorW(None, win32_cursor).unwrap());
                     ShowCursor(TRUE);
                 }
@@ -544,44 +517,53 @@ impl Win32App {
     }
 }
 
-
-
 // reworked from winit windows platform https://github.com/rust-windowing/winit/blob/eventloop-2.0/src/platform_impl/windows/dpi.rs
 
-type SetProcessDPIAware = unsafe extern "system" fn () -> BOOL;
-type SetProcessDpiAwareness = unsafe extern "system" fn (value: PROCESS_DPI_AWARENESS,) -> HRESULT;
-type SetProcessDpiAwarenessContext = unsafe extern "system" fn (value: DPI_AWARENESS_CONTEXT,) -> BOOL;
-type GetDpiForWindow = unsafe extern "system" fn (hwnd: HWND) -> u32;
-type GetDpiForMonitor = unsafe extern "system" fn (hmonitor: HMONITOR, dpi_type: MONITOR_DPI_TYPE, dpi_x: *mut u32, dpi_y: *mut u32) -> HRESULT;
-type EnableNonClientDpiScaling = unsafe extern "system" fn (hwnd: HWND) -> BOOL;
+type SetProcessDPIAware = unsafe extern "system" fn() -> BOOL;
+type SetProcessDpiAwareness = unsafe extern "system" fn(value: PROCESS_DPI_AWARENESS) -> HRESULT;
+type SetProcessDpiAwarenessContext =
+    unsafe extern "system" fn(value: DPI_AWARENESS_CONTEXT) -> BOOL;
+type GetDpiForWindow = unsafe extern "system" fn(hwnd: HWND) -> u32;
+type GetDpiForMonitor = unsafe extern "system" fn(
+    hmonitor: HMONITOR,
+    dpi_type: MONITOR_DPI_TYPE,
+    dpi_x: *mut u32,
+    dpi_y: *mut u32,
+) -> HRESULT;
+type EnableNonClientDpiScaling = unsafe extern "system" fn(hwnd: HWND) -> BOOL;
 
 // Helper function to dynamically load function pointer.
 // `library` and `function` must be zero-terminated.
 fn get_function_impl(library: &str, function: &str) -> FARPROC {
     // Library names we will use are ASCII so we can use the A version to avoid string conversion.
-    
-    let module = unsafe {LoadLibraryA(PCSTR::from_raw(library.as_ptr()))};
+
+    let module = unsafe { LoadLibraryA(PCSTR::from_raw(library.as_ptr())) };
     if module.is_err() {
         return None;
     }
-    
-    let function_ptr = unsafe {GetProcAddress(module.unwrap(), PCSTR::from_raw(function.as_ptr()))};
+
+    let function_ptr =
+        unsafe { GetProcAddress(module.unwrap(), PCSTR::from_raw(function.as_ptr())) };
     if function_ptr.is_none() {
         return None;
     }
-    
+
     function_ptr
 }
 
-macro_rules!get_function {
+macro_rules! get_function {
     ( $ lib: expr, $ func: ident) => {
-        get_function_impl(concat!( $ lib, '\0'), concat!(stringify!( $ func), '\0'))
-            .map( | f | unsafe {mem::transmute::<_, $ func>(f)})
-    }
+        get_function_impl(concat!($lib, '\0'), concat!(stringify!($func), '\0'))
+            .map(|f| unsafe { mem::transmute::<_, $func>(f) })
+    };
 }
 
 pub fn encode_wide(string: impl AsRef<OsStr>) -> Vec<u16> {
-    string.as_ref().encode_wide().chain(std::iter::once(0)).collect()
+    string
+        .as_ref()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /*
@@ -600,7 +582,7 @@ pub struct DpiFunctions {
     enable_nonclient_dpi_scaling: Option<EnableNonClientDpiScaling>,
     set_process_dpi_awareness_context: Option<SetProcessDpiAwarenessContext>,
     set_process_dpi_awareness: Option<SetProcessDpiAwareness>,
-    set_process_dpi_aware: Option<SetProcessDPIAware>
+    set_process_dpi_aware: Option<SetProcessDPIAware>,
 }
 
 const BASE_DPI: u32 = 96;
@@ -611,33 +593,38 @@ impl DpiFunctions {
             get_dpi_for_window: get_function!("user32.dll", GetDpiForWindow),
             get_dpi_for_monitor: get_function!("shcore.dll", GetDpiForMonitor),
             enable_nonclient_dpi_scaling: get_function!("user32.dll", EnableNonClientDpiScaling),
-            set_process_dpi_awareness_context: get_function!("user32.dll", SetProcessDpiAwarenessContext),
+            set_process_dpi_awareness_context: get_function!(
+                "user32.dll",
+                SetProcessDpiAwarenessContext
+            ),
             set_process_dpi_awareness: get_function!("shcore.dll", SetProcessDpiAwareness),
-            set_process_dpi_aware: get_function!("user32.dll", SetProcessDPIAware)
+            set_process_dpi_aware: get_function!("user32.dll", SetProcessDPIAware),
         }
     }
-    
+
     fn become_dpi_aware(&self) {
         unsafe {
-            if let Some(set_process_dpi_awareness_context) = self.set_process_dpi_awareness_context {
+            if let Some(set_process_dpi_awareness_context) = self.set_process_dpi_awareness_context
+            {
                 // We are on Windows 10 Anniversary Update (1607) or later.
-                if set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == FALSE {
+                if set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+                    == FALSE
+                {
                     // V2 only works with Windows 10 Creators Update (1703). Try using the older
                     // V1 if we can't set V2.
-                    let _ = set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+                    let _ =
+                        set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
                 }
-            }
-            else if let Some(set_process_dpi_awareness) = self.set_process_dpi_awareness {
+            } else if let Some(set_process_dpi_awareness) = self.set_process_dpi_awareness {
                 // We are on Windows 8.1 or later.
                 set_process_dpi_awareness(PROCESS_PER_MONITOR_DPI_AWARE).unwrap();
-            }
-            else if let Some(set_process_dpi_aware) = self.set_process_dpi_aware {
+            } else if let Some(set_process_dpi_aware) = self.set_process_dpi_aware {
                 // We are on Vista or later.
                 set_process_dpi_aware().unwrap();
             }
         }
     }
-    
+
     pub fn enable_non_client_dpi_scaling(&self, hwnd: HWND) {
         unsafe {
             if let Some(enable_nonclient_dpi_scaling) = self.enable_nonclient_dpi_scaling {
@@ -662,7 +649,7 @@ impl DpiFunctions {
         }
         None
     }*/
-    
+
     pub fn hwnd_dpi_factor(&self, hwnd: HWND) -> f32 {
         unsafe {
             let hdc = GetDC(hwnd);
@@ -675,24 +662,23 @@ impl DpiFunctions {
                     0 => BASE_DPI, // 0 is returned if hwnd is invalid
                     dpi => dpi as u32,
                 }
-            }
-            else if let Some(get_dpi_for_monitor) = self.get_dpi_for_monitor {
+            } else if let Some(get_dpi_for_monitor) = self.get_dpi_for_monitor {
                 // We are on Windows 8.1 or later.
                 let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                 if monitor.is_invalid() {
                     BASE_DPI
-                }
-                else {
+                } else {
                     let mut dpi_x = 0;
                     let mut dpi_y = 0;
-                    if get_dpi_for_monitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == S_OK {
+                    if get_dpi_for_monitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y)
+                        == S_OK
+                    {
                         dpi_x as u32
                     } else {
                         BASE_DPI
                     }
                 }
-            }
-            else {
+            } else {
                 // We are on Vista or later.
                 if IsProcessDPIAware() == TRUE {
                     // If the process is DPI aware, then scaling must be handled by the application using
@@ -708,5 +694,4 @@ impl DpiFunctions {
             dpi as f32 / BASE_DPI as f32
         }
     }
-    
 }

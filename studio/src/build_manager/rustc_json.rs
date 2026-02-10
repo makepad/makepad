@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use crate::{
-    makepad_micro_serde::*,
     makepad_code_editor::text::{Length, Position},
+    makepad_micro_serde::*,
 };
 
 // rust compiler output json structs
@@ -14,14 +14,14 @@ pub struct RustcTarget {
     pub edition: String,
     pub doc: Option<bool>,
     pub doctest: bool,
-    pub test: bool
+    pub test: bool,
 }
 
 #[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcText {
     pub text: String,
     pub highlight_start: usize,
-    pub highlight_end: usize
+    pub highlight_end: usize,
 }
 
 #[derive(Clone, DeJson, Debug, Default)]
@@ -38,22 +38,22 @@ pub struct RustcSpan {
     pub label: Option<String>,
     pub suggested_replacement: Option<String>,
     pub suggestion_applicability: Option<String>,
-    pub expansion: Option<Box<RustcExpansion >>,
-    pub level: Option<String>
+    pub expansion: Option<Box<RustcExpansion>>,
+    pub level: Option<String>,
 }
 
 impl RustcSpan {
     pub fn start(&self) -> Position {
         Position {
             line_index: self.line_start - 1,
-            byte_index: self.column_start - 1
+            byte_index: self.column_start - 1,
         }
     }
 
     pub fn end(&self) -> Position {
         Position {
             line_index: self.line_end - 1,
-            byte_index: self.column_end - 1
+            byte_index: self.column_end - 1,
         }
     }
 
@@ -66,13 +66,13 @@ impl RustcSpan {
 pub struct RustcExpansion {
     pub span: Option<RustcSpan>,
     pub macro_decl_name: String,
-    pub def_site_span: Option<RustcSpan>
+    pub def_site_span: Option<RustcSpan>,
 }
 
 #[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcCode {
     pub code: String,
-    pub explanation: Option<String>
+    pub explanation: Option<String>,
 }
 
 #[derive(Clone, DeJson, Debug, Default)]
@@ -84,7 +84,7 @@ pub struct RustcMessage {
     pub level: String,
     pub spans: Vec<RustcSpan>,
     pub children: Vec<RustcMessage>,
-    pub rendered: Option<String>
+    pub rendered: Option<String>,
 }
 
 #[derive(Clone, DeJson, Debug, Default)]
@@ -93,7 +93,7 @@ pub struct RustcProfile {
     pub debuginfo: Option<usize>,
     pub debug_assertions: bool,
     pub overflow_checks: bool,
-    pub test: bool
+    pub test: bool,
 }
 
 #[derive(Clone, DeJson, Debug, Default)]
@@ -103,16 +103,16 @@ pub struct RustcCompilerMessage {
     pub success: Option<bool>,
     pub package_id: Option<String>,
     pub manifest_path: Option<String>,
-    pub linked_libs: Option<Vec<String >>,
-    pub linked_paths: Option<Vec<String >>,
-    pub cfgs: Option<Vec<String >>,
-    pub env: Option<Vec<Vec<String >>>,
+    pub linked_libs: Option<Vec<String>>,
+    pub linked_paths: Option<Vec<String>>,
+    pub cfgs: Option<Vec<String>>,
+    pub env: Option<Vec<Vec<String>>>,
     pub target: Option<RustcTarget>,
     pub message: Option<RustcMessage>,
     pub profile: Option<RustcProfile>,
     pub out_dir: Option<String>,
-    pub features: Option<Vec<String >>,
-    pub filenames: Option<Vec<String >>,
+    pub features: Option<Vec<String>>,
+    pub filenames: Option<Vec<String>>,
     pub executable: Option<String>,
-    pub fresh: Option<bool>
+    pub fresh: Option<bool>,
 }
