@@ -104,6 +104,8 @@ pub mod slide_panel;
 
 pub mod flat_list;
 
+pub mod chart;
+
 // Commented out modules (not yet converted)
 // lets depricate these for now
 // pub mod toggle_panel;
@@ -211,6 +213,8 @@ pub use crate::pdf_view::*;
 pub use crate::svg::*;
 pub use crate::vector::*;
 
+pub use crate::chart::*;
+
 #[cfg(target_os = "android")]
 pub use crate::video::*;
 
@@ -317,6 +321,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::pdf_view::script_mod(vm);
     crate::svg::script_mod(vm);
     crate::vector::script_mod(vm);
+    crate::chart::script_mod(vm);
     crate::map_view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
