@@ -13,12 +13,8 @@ use {
         cell::RefCell,
         mem,
         rc::Rc,
-        sync::atomic::{AtomicU64, Ordering},
     },
 };
-
-static GLYPH_GEN_ASYNC_CUMULATIVE_US: AtomicU64 = AtomicU64::new(0);
-static GLYPH_GEN_ASYNC_CUMULATIVE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub struct Fonts {
     layouter: Layouter,
@@ -43,33 +39,11 @@ impl Fonts {
         cx.spawn_thread(move || {
             let mut msdfer = Msdfer::new(msdfer_settings);
             while let Ok(job) = worker_rx.recv() {
-                let start = std::time::Instant::now();
-                println!(
-                    "glyph-gen start mode=msdf-async font={:?} glyph={} dpxs_per_em={:.2}",
-                    job.key.font_id,
-                    job.key.glyph_id,
-                    job.dpxs_per_em
-                );
                 let mut msdf = Image::<Bgra>::new(job.key.size);
                 msdfer.outline_to_msdf(
                     &job.outline,
                     job.dpxs_per_em,
                     &mut msdf.subimage_mut(super::geom::Rect::from(job.key.size)),
-                );
-                let elapsed_us = start.elapsed().as_micros() as u64;
-                let cumulative_us = GLYPH_GEN_ASYNC_CUMULATIVE_US
-                    .fetch_add(elapsed_us, Ordering::Relaxed)
-                    .saturating_add(elapsed_us);
-                let cumulative_count = GLYPH_GEN_ASYNC_CUMULATIVE_COUNT
-                    .fetch_add(1, Ordering::Relaxed)
-                    .saturating_add(1);
-                println!(
-                    "glyph-gen end mode=msdf-async font={:?} glyph={} elapsed_us={} cumulative_us={} cumulative_count={}",
-                    job.key.font_id,
-                    job.key.glyph_id,
-                    elapsed_us,
-                    cumulative_us,
-                    cumulative_count
                 );
                 if worker_tx
                     .send(CompletedMsdfJob {
@@ -159,7 +133,6 @@ impl Fonts {
         assert!(!self.needs_prepare_atlases);
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         if rasterizer.color_atlas_mut().reset_if_needed() {
-            println!("glyph-gen atlas reset kind=shared-rgba reason=full");
             rasterizer.on_atlas_reset();
             return false;
         }

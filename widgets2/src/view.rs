@@ -1,7 +1,12 @@
 use {
     crate::makepad_draw::event::FingerLongPressEvent,
     crate::{
-        animator::*, makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*,
+        animator::*,
+        makepad_derive_widget::*,
+        makepad_draw::*,
+        makepad_script::{ScriptFnRef, ScriptRefOptionExt},
+        scroll_bars::ScrollBars,
+        widget::*,
     },
     std::cell::RefCell,
 };
@@ -108,6 +113,9 @@ pub struct View {
 
     #[live(false)]
     pub debug_stream: bool,
+
+    #[live]
+    render: Option<ScriptFnRef>,
 
     #[rust]
     find_cache: RefCell<SmallVec<[(u64, WidgetSet); 3]>>,

@@ -1,18 +1,19 @@
 use crate::{
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_script::{ScriptFnRef, ScriptRefOptionExt},
     widget::*,
-    animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
 };
 
 use crate::makepad_draw::DrawSvg;
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.ButtonBase = #(Button::register_widget(vm))
-    
+
     mod.widgets.ButtonFlat = set_type_default() do mod.widgets.ButtonBase{
         text: "Button"
         width: Fit
@@ -46,9 +47,9 @@ script_mod!{
                     .mix(self.color_disabled, self.disabled)
             }
         }
-        
+
         icon_walk: Walk{width: Fit, height: Fit}
-        
+
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
@@ -88,7 +89,7 @@ script_mod!{
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                
+
                 let border_sz_uv = vec2(
                     self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
@@ -111,7 +112,7 @@ script_mod!{
                     self.rect_size.y - self.border_size * 2.
                     self.border_radius
                 )
-                
+
                 let mut color_fill = self.color
                 let mut color_fill_hover = self.color_hover
                 let mut color_fill_down = self.color_down
@@ -151,25 +152,25 @@ script_mod!{
                     color_stroke_focus = mix(self.border_color_focus, self.border_color_2_focus, dir)
                     color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
                 }
-                
+
                 let fill = color_fill
                     .mix(color_fill_focus, self.focus)
                     .mix(color_fill_hover, self.hover)
                     .mix(color_fill_down, self.down)
                     .mix(color_fill_disabled, self.disabled)
-                
+
                 let stroke = color_stroke
                     .mix(color_stroke_focus, self.focus)
                     .mix(color_stroke_hover, self.hover)
                     .mix(color_stroke_down, self.down)
                     .mix(color_stroke_disabled, self.disabled)
-                
+
                 sdf.fill_keep(fill)
                 sdf.stroke(stroke, self.border_size)
                 return sdf.result
             }
         }
-        
+
         animator: Animator{
             disabled: {
                 default: @off
@@ -211,7 +212,7 @@ script_mod!{
                         draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
@@ -222,7 +223,7 @@ script_mod!{
                         draw_text: {down: 0.0, hover: snap(1.0)}
                     }
                 }
-                
+
                 down: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -282,7 +283,7 @@ script_mod!{
             border_color_2_disabled: theme.color_bevel_outset_2_disabled
         }
     }
- 
+
     mod.widgets.ButtonGradientX = mod.widgets.Button{
         draw_bg +: {
             color: theme.color_outset_1
@@ -298,27 +299,27 @@ script_mod!{
     mod.widgets.ButtonGradientY = mod.widgets.ButtonGradientX{
         draw_bg.gradient_fill_horizontal: 1.0
     }
-  
+
     mod.widgets.ButtonIcon = mod.widgets.Button{
         spacing: 0.
         text: ""
     }
-    
+
     mod.widgets.ButtonGradientXIcon = mod.widgets.ButtonGradientX{
         spacing: 0.
         text: ""
     }
-    
+
     mod.widgets.ButtonGradientYIcon = mod.widgets.ButtonGradientY{
         spacing: 0.
         text: ""
     }
-    
+
     mod.widgets.ButtonFlatIcon = mod.widgets.ButtonFlat{
         spacing: 0.
         text: ""
     }
-    
+
     mod.widgets.ButtonFlatterIcon = mod.widgets.ButtonFlatter{
         draw_bg.color_focus: theme.color_u_hidden
         spacing: 0.
@@ -354,7 +355,8 @@ pub enum ButtonAction {
 /// A clickable button widget that emits actions when pressed, and when either released or clicked.
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Button {
-    #[source] source: ScriptObjectRef,
+    #[source]
+    source: ScriptObjectRef,
     #[apply_default]
     animator: Animator,
 
@@ -382,7 +384,8 @@ pub struct Button {
     enabled: bool,
 
     #[live(true)]
-    #[visible] visible: bool,
+    #[visible]
+    visible: bool,
 
     /// Set the long-press handling behavior of this button.
     /// * If `false` (default), the button will ignore long-press events
@@ -411,15 +414,26 @@ pub struct Button {
 
     #[live]
     pub text: ArcStringMut,
-    
-    #[action_data] #[rust] action_data: WidgetActionData,
+
+    #[live]
+    on_click: Option<ScriptFnRef>,
+
+    #[action_data]
+    #[rust]
+    action_data: WidgetActionData,
 }
 
 impl Widget for Button {
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
-        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
+        self.animator_toggle(
+            cx,
+            disabled,
+            Animate::Yes,
+            ids!(disabled.on),
+            ids!(disabled.off),
+        );
     }
-                
+
     fn disabled(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(disabled.on))
     }
@@ -429,15 +443,17 @@ impl Widget for Button {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
-        
+
         match event.hit_designer(cx, self.draw_bg.area()) {
-            HitDesigner::DesignerPick(_e) => {
-                cx.widget_action_with_data(&self.action_data, uid, &scope.path, WidgetDesignAction::PickedBody)
-            }
-            _ => ()
+            HitDesigner::DesignerPick(_e) => cx.widget_action_with_data(
+                &self.action_data,
+                uid,
+                &scope.path,
+                WidgetDesignAction::PickedBody,
+            ),
+            _ => (),
         }
-        
-        
+
         // The button only handles hits when it's visible and enabled.
         // If it's not enabled, we still show the button, but we set
         // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
@@ -453,7 +469,12 @@ impl Widget for Button {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
-                cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
+                cx.widget_action_with_data(
+                    &self.action_data,
+                    uid,
+                    &scope.path,
+                    ButtonAction::Pressed(fe.modifiers),
+                );
                 self.animator_play(cx, ids!(hover.down));
                 self.set_key_focus(cx);
             }
@@ -469,12 +490,32 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerLongPress(_lp) if self.enabled && self.enable_long_press => {
-                cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::LongPressed);
+                cx.widget_action_with_data(
+                    &self.action_data,
+                    uid,
+                    &scope.path,
+                    ButtonAction::LongPressed,
+                );
             }
             Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
-                let was_clicked = fe.is_over && if self.enable_long_press { fe.was_tap() } else { true };
+                let was_clicked = fe.is_over
+                    && if self.enable_long_press {
+                        fe.was_tap()
+                    } else {
+                        true
+                    };
                 if was_clicked {
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                    cx.widget_action_with_data(
+                        &self.action_data,
+                        uid,
+                        &scope.path,
+                        ButtonAction::Clicked(fe.modifiers),
+                    );
+                    if let Some(handler) = self.on_click.as_object() {
+                        cx.with_vm(|vm| {
+                            vm.call(ScriptValue::from(handler), &[]);
+                        });
+                    }
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, ids!(hover.off));
                     } else if fe.has_hovers() {
@@ -483,7 +524,12 @@ impl Widget for Button {
                         self.animator_play(cx, ids!(hover.off));
                     }
                 } else {
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                    cx.widget_action_with_data(
+                        &self.action_data,
+                        uid,
+                        &scope.path,
+                        ButtonAction::Released(fe.modifiers),
+                    );
                     self.animator_play(cx, ids!(hover.off));
                 }
             }
@@ -516,7 +562,6 @@ impl Widget for Button {
 }
 
 impl Button {
-        
     pub fn draw_button(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
@@ -524,7 +569,7 @@ impl Button {
             .draw_walk(cx, self.label_walk, Align::default(), label);
         self.draw_bg.end(cx);
     }
-    
+
     /// Returns `true` if this button was clicked.
     ///
     /// See [`ButtonAction`] for more details.
@@ -609,7 +654,8 @@ impl ButtonRef {
 
     /// See [`Button::long_pressed()`].
     pub fn long_pressed(&self, actions: &Actions) -> bool {
-        self.borrow().is_some_and(|inner| inner.long_pressed(actions))
+        self.borrow()
+            .is_some_and(|inner| inner.long_pressed(actions))
     }
 
     /// See [`Button::released()`].
@@ -619,17 +665,20 @@ impl ButtonRef {
 
     /// See [`Button::clicked_modifiers()`].
     pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        self.borrow().and_then(|inner| inner.clicked_modifiers(actions))
+        self.borrow()
+            .and_then(|inner| inner.clicked_modifiers(actions))
     }
 
     /// See [`Button::pressed_modifiers()`].
     pub fn pressed_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        self.borrow().and_then(|inner| inner.pressed_modifiers(actions))
+        self.borrow()
+            .and_then(|inner| inner.pressed_modifiers(actions))
     }
 
     /// See [`Button::released_modifiers()`].
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        self.borrow().and_then(|inner| inner.released_modifiers(actions))
+        self.borrow()
+            .and_then(|inner| inner.released_modifiers(actions))
     }
 
     pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
@@ -648,7 +697,7 @@ impl ButtonRef {
 
     /// Resets the hover state of this button.
     ///
-    /// This is useful in certain cases where the hover state should be reset 
+    /// This is useful in certain cases where the hover state should be reset
     /// (cleared) regardelss of whether the mouse is over it.
     pub fn reset_hover(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -673,11 +722,11 @@ impl ButtonSet {
             item.reset_hover(cx)
         }
     }
-    
+
     pub fn which_clicked_modifiers(&self, actions: &Actions) -> Option<(usize, KeyModifiers)> {
         for (index, btn) in self.iter().enumerate() {
             if let Some(km) = btn.clicked_modifiers(actions) {
-                return Some((index, km))
+                return Some((index, km));
             }
         }
         None
