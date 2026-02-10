@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false }
 typst = "0.13.1"
 typst-render = "0.13.1"
 mitex = "0.2.4"
+
+[features]
+default = ["bundled-fonts"]
+bundled-fonts = ["makepad-widgets/bundled-fonts"]
+system-fonts = ["makepad-widgets/system-fonts"]
 

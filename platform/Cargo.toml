@@ -9,6 +9,10 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
+[features]
+default = []
+system-fonts = []
+
 [dependencies]
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
 makepad-shader-compiler = { path = "./shader_compiler", version = "1.0.0" }
@@ -98,6 +102,7 @@ features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_DirectWrite",
     "Win32_Media_Audio",
     "Win32_Media_Multimedia",
     "Win32_Media_KernelStreaming",

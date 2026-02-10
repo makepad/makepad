@@ -10,4 +10,9 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "B5GwTEaMIZlein6K-VyZDRiCKek="
 
 [dependencies]
-makepad-widgets = { path = "../widgets", version="1.0.0"}
+makepad-widgets = { path = "../widgets", version="1.0.0", default-features = false}
+
+[features]
+default = ["bundled-fonts"]
+bundled-fonts = ["makepad-widgets/bundled-fonts"]
+system-fonts = ["makepad-widgets/system-fonts"]

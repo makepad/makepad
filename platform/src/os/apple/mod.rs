@@ -24,6 +24,10 @@ pub mod audio_unit;
 pub mod core_midi;
 pub mod apple_media;
 pub mod av_capture;
+
+#[cfg(feature = "system-fonts")]
+pub mod system_fonts;
+
 pub(crate) use self::metal::*;
 #[cfg(target_os = "macos")]
 pub(crate) use self::macos::*;

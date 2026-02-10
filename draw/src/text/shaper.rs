@@ -80,6 +80,7 @@ impl Shaper {
         let (font, fonts) = fonts.split_first().unwrap();
         let mut glyphs = self.reusable_glyphs.pop().unwrap_or(Vec::new());
         self.shape_step(text, font, start, end, &mut glyphs);
+
         let mut glyph_groups = glyphs
             .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
             .peekable();

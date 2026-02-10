@@ -47,3 +47,69 @@ Or install it from cargo (might be behind the repo)
 `cargo install makepad-studio`  
 
 If you build the wasm applications, you can open it on: [http://127.0.0.1:8010](http://127.0.0.1:8010)
+
+## Font Configuration
+
+This fork supports two font loading modes via Cargo feature flags.
+
+### Bundled Fonts (Default)
+
+By default, Makepad includes embedded Chinese and emoji fonts (~80MB). This ensures consistent rendering across all platforms.
+
+```toml
+# Cargo.toml - uses bundled fonts by default
+[dependencies]
+makepad-widgets = "1.0"
+```
+
+### System Fonts
+
+For smaller distribution size, you can use operating system fonts instead:
+
+```toml
+# Cargo.toml - use system fonts
+[dependencies]
+makepad-widgets = { version = "1.0", default-features = false, features = ["system-fonts"] }
+makepad-code-editor = { version = "1.0", default-features = false, features = ["system-fonts"] }
+```
+
+When using path dependencies:
+
+```toml
+[dependencies]
+makepad-widgets = { path = "path/to/makepad-fonts/widgets", default-features = false, features = ["system-fonts"] }
+```
+
+### Running Examples
+
+```bash
+# With bundled fonts (default)
+cargo run -p makepad-example-ui-zoo --release
+
+# With system fonts
+cargo run -p makepad-example-ui-zoo --no-default-features --features system-fonts --release
+```
+
+### Font Test App
+
+A dedicated test app at `examples/fonts/` demonstrates multilingual text rendering (Chinese, Japanese, Russian, English):
+
+```bash
+# With bundled fonts (default)
+cargo run -p makepad-fonts --release
+
+# With system fonts
+cargo run -p makepad-fonts --no-default-features --features system-fonts --release
+```
+
+### Platform Notes
+
+When using `system-fonts`, CJK (Chinese/Japanese/Korean) text is rendered using:
+
+| Platform | CJK Font |
+|----------|----------|
+| macOS | STHeiti |
+| Windows | Microsoft YaHei |
+| Linux | Noto Sans CJK SC |
+
+**macOS users:** PingFang SC and other modern Apple fonts are "stub fonts" without glyph outlines. The system uses STHeiti which has proper TrueType outlines.

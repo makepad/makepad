@@ -11,7 +11,14 @@ live_design!{
             main_window = <Window>{
                 window: {title: "你好，こんにちは, Привет, Hello"},
                 body = <View> {
-                    padding: 100,
+                    flow: Down,
+                    padding: 20,
+                    <Label> {
+                        text: "你好，こんにちは, Привет, Hello"
+                        draw_text: {
+                            text_style: { font_size: 24.0 }
+                        }
+                    }
                     <View> {
                         width: 300,
                         height: 750,

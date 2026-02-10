@@ -2,6 +2,9 @@
 //pub mod implement_com;
 #[macro_use]
 pub mod win32_app;
+
+#[cfg(feature = "system-fonts")]
+pub mod system_fonts;
 pub mod win32_window;
 pub mod win32_event;
 pub mod dropfiles;

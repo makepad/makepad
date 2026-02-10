@@ -1205,6 +1205,22 @@ pub type AudioObjectID = u32;
 pub type AudioDeviceID = u32;
 
 
+// Core Text API for system fonts
+
+#[link(name = "CoreText", kind = "framework")]
+extern "C" {
+    pub fn CTFontCreateWithName(name: CFStringRef, size: f64, matrix: *const ()) -> ObjcId;
+    pub fn CTFontCreateCopyWithAttributes(font: ObjcId, size: f64, matrix: *const (), attributes: ObjcId) -> ObjcId;
+    pub fn CTFontCopyAttribute(font: ObjcId, attribute: CFStringRef) -> ObjcId;
+    pub fn CTFontCopyFamilyName(font: ObjcId) -> CFStringRef;
+    pub fn CTFontCopyFullName(font: ObjcId) -> CFStringRef;
+    pub fn CTFontManagerCopyAvailableFontFamilyNames() -> ObjcId;
+
+    pub static kCTFontURLAttribute: CFStringRef;
+    pub static kCTFontFamilyNameAttribute: CFStringRef;
+    pub static kCTFontStyleNameAttribute: CFStringRef;
+}
+
 #[link(name = "CoreMidi", kind = "framework")]
 extern "C" {
     pub static kMIDIPropertyManufacturer: CFStringRef;

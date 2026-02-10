@@ -29,6 +29,11 @@ pub mod libc_sys;
 pub mod opengl;
 pub mod module_loader;
 
+#[cfg(all(feature = "system-fonts", not(any(target_env = "ohos", target_os = "android"))))]
+pub mod fontconfig_sys;
+#[cfg(all(feature = "system-fonts", not(any(target_env = "ohos", target_os = "android"))))]
+pub mod system_fonts;
+
 #[cfg(not(any(target_env="ohos", target_os="android")))]
 pub mod dma_buf;
 #[cfg(not(any(target_env="ohos", target_os="android")))]

@@ -7,6 +7,9 @@ pub mod cx_shared;
 
 pub mod cx_stdin;
 
+#[cfg(feature = "system-fonts")]
+pub mod system_fonts;
+
 #[cfg(any(target_os = "macos", target_os="ios", target_os="tvos"))]
 pub mod apple;
 
@@ -16,11 +19,17 @@ pub use crate::os::apple::*;
 #[cfg(any(target_os = "macos", target_os="ios", target_os="tvos"))]
 pub use crate::os::apple::apple_media::*;
 
+#[cfg(all(feature = "system-fonts", any(target_os = "macos", target_os="ios", target_os="tvos")))]
+pub use crate::os::apple::system_fonts::get_system_font_provider;
+
 #[cfg(target_os = "windows")]
 pub mod windows;
 
 #[cfg(target_os = "windows")]
 pub use crate::os::windows::*;
+
+#[cfg(all(feature = "system-fonts", target_os = "windows"))]
+pub use crate::os::windows::system_fonts::get_system_font_provider;
 
 //#[cfg(target_os = "windows")]
 //pub use crate::os::windows::windows_media::*;
@@ -37,22 +46,14 @@ pub use crate::os::linux::android::android_media::*;
 #[cfg(all(target_os = "linux", not(target_env="ohos")))]
 pub use crate::os::linux::linux_media::*;
 
+#[cfg(all(feature = "system-fonts", target_os = "linux", not(any(target_env = "ohos", target_os = "android"))))]
+pub use crate::os::linux::system_fonts::get_system_font_provider;
+
 #[cfg(target_env="ohos")]
 pub use crate::os::linux::open_harmony::oh_media::*;
-
-
-//#[cfg(target_os = "linux")]
-//pub use crate::os::linux::*;
-
-//#[cfg(target_os = "linux")]
-//pub use crate::os::linux::linux_media::*;
-
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
 #[cfg(target_arch = "wasm32")]
 pub use crate::os::web::*;
-
-
-
