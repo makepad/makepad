@@ -1,46 +1,48 @@
-
-use crate::event::Event;
 use crate::cx::Cx;
+use crate::event::Event;
 use crate::ui_runner::UiRunner;
 
 #[cfg(target_env = "ohos")]
 pub use napi_ohos;
 
-
-pub trait AppMain{
+pub trait AppMain {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
-    fn ui_runner(&self) -> UiRunner<Self> where Self: Sized + 'static {
+    fn ui_runner(&self) -> UiRunner<Self>
+    where
+        Self: Sized + 'static,
+    {
         // This assumes there is only one `AppMain`, and that `0` is reserved for it.
         UiRunner::new(0)
     }
 }
 
 #[macro_export]
-macro_rules!app_main {
+macro_rules! app_main {
     ( $ app: ident) => {
-        #[cfg(not(any(target_arch = "wasm32", target_os="android", target_env="ohos")))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         pub fn app_main() {
-            if Cx::pre_start(){
-                return
+            if Cx::pre_start() {
+                return;
             }
-                        
+
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(move | cx, event | {
-                
-                if let Event::Startup = event {
-                    *app.borrow_mut() = $app::new_main(cx);
-                }
-                if let Event::LiveEdit = event{
-                    app.borrow_mut().update_main(cx);
-                }
-                if let Some(app) = &mut *app.borrow_mut(){
-                    <dyn AppMain>::handle_event(app, cx, event);
-                }
-                  
-            }))));
+            let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(
+                move |cx, event| {
+                    if let Event::Startup = event {
+                        *app.borrow_mut() = $app::new_main(cx);
+                    }
+                    if let Event::LiveEdit = event {
+                        app.borrow_mut().update_main(cx);
+                    }
+                    if let Some(app) = &mut *app.borrow_mut() {
+                        <dyn AppMain>::handle_event(app, cx, event);
+                    }
+                },
+            ))));
             $app::register_main_module(&mut *cx.borrow_mut());
-            cx.borrow_mut().init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
-            if std::env::args().find( | v | v == "--stdin-loop").is_some() {
+            cx.borrow_mut()
+                .init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
+            if std::env::args().find(|v| v == "--stdin-loop").is_some() {
                 cx.borrow_mut().in_makepad_studio = true;
             }
             //cx.borrow_mut().init_websockets("");
@@ -48,7 +50,7 @@ macro_rules!app_main {
             cx.borrow_mut().init_cx_os();
             Cx::event_loop(cx);
         }
-        
+
         /*
         #[cfg(target_os = "android")]
         #[no_mangle]
@@ -70,7 +72,6 @@ macro_rules!app_main {
             })
         }*/
 
-        
         #[cfg(target_os = "android")]
         #[no_mangle]
         pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnCreate(
@@ -78,16 +79,16 @@ macro_rules!app_main {
             _: *const std::ffi::c_void,
             activity: *const std::ffi::c_void,
         ) {
-            Cx::android_entry(activity, ||{
+            Cx::android_entry(activity, || {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-                let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
+                let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {
                         *app.borrow_mut() = $app::new_main(cx);
                     }
-                    if let Event::LiveEdit = event{
+                    if let Event::LiveEdit = event {
                         app.borrow_mut().update_main(cx);
                     }
-                    if let Some(app) = &mut *app.borrow_mut(){
+                    if let Some(app) = &mut *app.borrow_mut() {
                         app.handle_event(cx, event);
                     }
                 })));
@@ -101,17 +102,20 @@ macro_rules!app_main {
 
         #[cfg(target_env = "ohos")]
         #[no_mangle]
-        extern "C" fn ohos_init_app_main(exports: $crate::napi_ohos::JsObject, env: $crate::napi_ohos::Env) -> $crate::napi_ohos::Result<()> {
+        extern "C" fn ohos_init_app_main(
+            exports: $crate::napi_ohos::JsObject,
+            env: $crate::napi_ohos::Env,
+        ) -> $crate::napi_ohos::Result<()> {
             Cx::ohos_init(exports, env, || {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-                let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
+                let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {
                         *app.borrow_mut() = $app::new_main(cx);
                     }
-                    if let Event::LiveEdit = event{
+                    if let Event::LiveEdit = event {
                         app.borrow_mut().update_main(cx);
                     }
-                    if let Some(app) = &mut *app.borrow_mut(){
+                    if let Some(app) = &mut *app.borrow_mut() {
                         app.handle_event(cx, event);
                     }
                 })));
@@ -123,23 +127,22 @@ macro_rules!app_main {
             });
             Ok(())
         }
-        
+
         #[cfg(target_arch = "wasm32")]
         pub fn app_main() {}
-        
+
         #[export_name = "wasm_create_app"]
         #[cfg(target_arch = "wasm32")]
         pub extern "C" fn create_wasm_app() -> u32 {
-            
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
+            let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                 if let Event::Startup = event {
                     *app.borrow_mut() = $app::new_main(cx);
                 }
-                if let Event::LiveEdit = event{
+                if let Event::LiveEdit = event {
                     app.borrow_mut().update_main(cx);
                 }
-                if let Some(app) = &mut *app.borrow_mut(){
+                if let Some(app) = &mut *app.borrow_mut() {
                     app.handle_event(cx, event);
                 }
             })));
@@ -149,23 +152,21 @@ macro_rules!app_main {
             cx.init_cx_os();
             Box::into_raw(cx) as u32
         }
-        
-                
+
         #[export_name = "wasm_process_msg"]
         #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, cx_ptr: u32) -> u32 {
             let cx = &mut *(cx_ptr as *mut Cx);
             cx.process_to_wasm(msg_ptr)
         }
-        
+
         #[export_name = "wasm_return_first_msg"]
         #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn wasm_return_first_msg(cx_ptr: u32) -> u32 {
-            let cx = &mut *(cx_ptr as *mut Cx); 
+            let cx = &mut *(cx_ptr as *mut Cx);
             cx.os.from_wasm.take().unwrap().release_ownership()
         }
-        
-    }
+    };
 }
 
 #[cfg(target_env = "ohos")]
@@ -173,7 +174,10 @@ macro_rules!app_main {
 fn init(exports: napi_ohos::JsObject, env: napi_ohos::Env) -> napi_ohos::Result<()> {
     #[allow(improper_ctypes)]
     extern "C" {
-        fn ohos_init_app_main(exports: napi_ohos::JsObject, env: napi_ohos::Env) -> napi_ohos::Result<()>;
+        fn ohos_init_app_main(
+            exports: napi_ohos::JsObject,
+            env: napi_ohos::Env,
+        ) -> napi_ohos::Result<()>;
     }
     unsafe { ohos_init_app_main(exports, env) }
 }

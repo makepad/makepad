@@ -638,7 +638,7 @@ impl ScriptHeap {
             object.vec.len()
         )
     }
-    
+
     fn value_deep_map(
         &self,
         obj_ptr: ScriptObject,

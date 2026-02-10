@@ -3,7 +3,7 @@ use crate::makepad_platform::*;
 live_design! {
     link theme_mobile_light;
     use link::shaders::*;
-    
+
     // GLOBAL PARAMETERS
     pub THEME_COLOR_CONTRAST = 1.0
     pub THEME_COLOR_TINT = #f00
@@ -19,7 +19,7 @@ live_design! {
     pub THEME_SPACE_2 = (1.0 * (THEME_SPACE_FACTOR))
     pub THEME_SPACE_3 = (1.5 * (THEME_SPACE_FACTOR))
 
-    pub THEME_MSPACE_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_1), bottom: (THEME_SPACE_1), left: (THEME_SPACE_1)} 
+    pub THEME_MSPACE_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_1), bottom: (THEME_SPACE_1), left: (THEME_SPACE_1)}
     pub THEME_MSPACE_H_1 = {top: 0., right: (THEME_SPACE_1), bottom: 0., left: (THEME_SPACE_1)}
     pub THEME_MSPACE_V_1 = {top: (THEME_SPACE_1), right: 0., bottom: (THEME_SPACE_1), left: 0.}
     pub THEME_MSPACE_2 = {top: (THEME_SPACE_2), right: (THEME_SPACE_2), bottom: (THEME_SPACE_2), left: (THEME_SPACE_2)}

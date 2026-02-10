@@ -943,9 +943,7 @@ const fn const_new_inline_args() -> SmallVec<[i32; 2]> {
 }
 #[cfg(feature = "const_new")]
 const fn const_new_with_len() -> SmallVec<[i32; 4]> {
-    unsafe {
-        SmallVec::<[i32; 4]>::from_const_with_len_unchecked([2, 5, 7, 0], 3)
-    }
+    unsafe { SmallVec::<[i32; 4]>::from_const_with_len_unchecked([2, 5, 7, 0], 3) }
 }
 
 #[test]

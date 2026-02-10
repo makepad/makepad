@@ -1,27 +1,21 @@
 use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*,
-    label::*,
-    button::*,
-    view::*,
-    WidgetMatchEvent,
-    WindowAction,
+    button::*, label::*, makepad_derive_widget::*, makepad_draw::*, view::*, widget::*,
+    WidgetMatchEvent, WindowAction,
 };
 
-live_design!{
+live_design! {
     link widgets;
     use link::widgets::*;
     use link::theme::*;
     use makepad_draw::shader::std::*;
-    
+
     pub StackNavigationViewBase = {{StackNavigationView}} {}
     pub StackNavigationBase = {{StackNavigation}} {}
-    
+
     // StackView DSL begin
-    
+
     HEADER_HEIGHT = 80.0
-    
+
     pub StackViewHeader = <View> {
         width: Fill, height: (HEADER_HEIGHT),
         padding: {bottom: 10., top: 50.}
@@ -29,22 +23,22 @@ live_design!{
         draw_bg: {
             color: (THEME_COLOR_APP_CAPTION_BAR)
         }
-        
+
         content = <View> {
             width: Fill, height: Fit,
             flow: Overlay,
-            
+
             title_container = <View> {
                 width: Fill, height: Fit,
                 align: {x: 0.5, y: 0.5}
-                
+
                 title = <H4> {
                     width: Fit, height: Fit,
                     margin: 0,
                     text: "Stack View Title"
                 }
             }
-            
+
             button_container = <View> {
                 left_button = <Button> {
                     width: Fit, height: 68,
@@ -64,35 +58,35 @@ live_design!{
             }
         }
     }
-    
+
     pub StackNavigationView = <StackNavigationViewBase> {
         visible: false
         width: Fill, height: Fill,
         flow: Overlay
-        
+
         show_bg: true
         draw_bg: {
             color: (THEME_COLOR_WHITE)
         }
-        
+
         // Empty slot to place a generic full-screen background
         background = <View> {
             width: Fill, height: Fill,
             visible: false
         }
-        
+
         body = <View> {
             width: Fill, height: Fill,
             flow: Down,
-            
+
             // THEME_SPACE between body and header can be adjusted overriding this margin
             margin: {top: (HEADER_HEIGHT)},
         }
-        
+
         header = <StackViewHeader> {}
-        
+
         offset: 4000.0
-        
+
         animator: {
             slide = {
                 default: hide,
@@ -104,7 +98,7 @@ live_design!{
                     // but we need a way to parametrize it
                     apply: {offset: 4000.0}
                 }
-                
+
                 show = {
                     redraw: true
                     ease: ExpDecay {d1: 0.82, d2: 0.95}
@@ -114,14 +108,14 @@ live_design!{
             }
         }
     }
-    
+
     pub StackNavigation = <StackNavigationBase> {
         width: Fill, height: Fill
         flow: Overlay
-        
+
         root_view = <View> {}
     }
-    
+
 }
 
 #[derive(Clone, DefaultNone, Eq, Hash, PartialEq, Debug)]
@@ -137,7 +131,8 @@ pub enum StackNavigationAction {
 
 #[derive(Clone, Default, Eq, Hash, PartialEq, Debug)]
 pub enum StackNavigationViewState {
-    #[default] Inactive,
+    #[default]
+    Inactive,
     Active,
 }
 
@@ -162,7 +157,7 @@ pub struct StackNavigationView {
     offset: f64,
 
     /// Wether the stack view should take over the entire screen.
-    /// 
+    ///
     /// If false, the stack view will be constrained to the size of the parent view,
     // and no animatons will be played when navigating (due to a current limitation of the animator and this implementation).
     #[live(true)]
@@ -196,7 +191,7 @@ impl Widget for StackNavigationView {
         self.finish_closure_animation_if_done(cx);
     }
 
-    fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk) -> DrawStep{
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let abs_pos = if self.full_screen {
             // In fully screen mode, position at the offset.
             Vec2d {
@@ -206,7 +201,7 @@ impl Widget for StackNavigationView {
         } else {
             let parent_rect = cx.peek_walk_turtle(walk);
 
-            // Not in fully screen mode, position at the parent ignoring the offset 
+            // Not in fully screen mode, position at the parent ignoring the offset
             // (offset ignored since we're not animating the slide-in).
             Vec2d {
                 x: parent_rect.pos.x,
@@ -214,11 +209,7 @@ impl Widget for StackNavigationView {
             }
         };
 
-        self.view.draw_walk(
-            cx,
-            scope,
-            walk.with_abs_pos(abs_pos),
-        )
+        self.view.draw_walk(cx, scope, walk.with_abs_pos(abs_pos))
     }
 }
 
@@ -230,7 +221,7 @@ impl StackNavigationView {
             // Cut straight into the hide state without animating the slide-out.
             self.animator_cut(cx, ids!(slide.hide));
         }
-        
+
         cx.widget_action(
             self.widget_uid(),
             &HeapLiveIdPath::default(),
@@ -238,7 +229,12 @@ impl StackNavigationView {
         );
     }
 
-    fn handle_stack_view_closure_request(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+    fn handle_stack_view_closure_request(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        _scope: &mut Scope,
+    ) {
         // Hide the active stack view if:
         // * the back navigation button/gesture occurred,
         // * the left_button was clicked,
@@ -269,7 +265,10 @@ impl StackNavigationView {
                 let hide_end_action = if let Some(parent_uid) = self.parent_navigation_uid {
                     StackNavigationTransitionAction::HideEnd(parent_uid)
                 } else {
-                    error!("No parent navigation UID found for stack view {:?}", self.widget_uid());
+                    error!(
+                        "No parent navigation UID found for stack view {:?}",
+                        self.widget_uid()
+                    );
                     return;
                 };
 
@@ -286,13 +285,13 @@ impl StackNavigationView {
     }
 
     fn trigger_action_post_opening_if_done(&mut self, cx: &mut Cx) {
-        if self.state == StackNavigationViewState::Inactive &&
-            self.animator.animator_in_state(cx, ids!(slide.show))
+        if self.state == StackNavigationViewState::Inactive
+            && self.animator.animator_in_state(cx, ids!(slide.show))
         {
             const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
             // If the stack view is not full screen, we can consider it fully opened at any offset (offset ignored in draw_walk).
             // Since for non-full screen we ignore the offset and animation, we "cut" to the fully opened state.
-            // TODO: Ideally this should be done by calling `self.animator_cut(cx, ids!(slide.show));` at self.show instead, 
+            // TODO: Ideally this should be done by calling `self.animator_cut(cx, ids!(slide.show));` at self.show instead,
             // however that introduces some bugs in the animator (it does work for slide.hide though).
             if self.offset < OPENING_OFFSET_THRESHOLD || !self.full_screen {
                 cx.widget_action(
@@ -453,20 +452,22 @@ impl Widget for StackNavigation {
         self.widget_match_event(cx, event, scope);
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep  {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         for widget_ref in self.get_visible_views(cx.cx).iter() {
-            widget_ref.draw_walk(cx, scope, walk) ?;
+            widget_ref.draw_walk(cx, scope, walk)?;
         }
         DrawStep::done()
     }
 }
 
 impl WidgetNode for StackNavigation {
-    fn walk(&mut self, cx:&mut Cx) -> Walk{
+    fn walk(&mut self, cx: &mut Cx) -> Walk {
         self.view.walk(cx)
     }
-    fn area(&self)->Area{self.view.area()}
-    
+    fn area(&self) -> Area {
+        self.view.area()
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         for widget_ref in self.get_visible_views(cx).iter() {
             widget_ref.redraw(cx);
@@ -476,11 +477,10 @@ impl WidgetNode for StackNavigation {
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.view.find_widgets(path, cached, results);
     }
-    
-    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+
+    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
         self.view.uid_to_widget(uid)
     }
-    
 }
 
 impl WidgetMatchEvent for StackNavigation {
@@ -514,8 +514,10 @@ impl WidgetMatchEvent for StackNavigation {
                     }
 
                     // Handle HideEnd actions only if they are specifically targeted at this navigation
-                    if let StackNavigationTransitionAction::HideEnd(target_parent_uid) = widget_action.cast() {
-                        // Checking the specific target_parent_uid is necessary, 
+                    if let StackNavigationTransitionAction::HideEnd(target_parent_uid) =
+                        widget_action.cast()
+                    {
+                        // Checking the specific target_parent_uid is necessary,
                         // because the above descendant check is not enough for nested StackNavigation's.
                         if target_parent_uid == self.widget_uid() {
                             // The current view has finished hiding, so we can remove it from the stack
@@ -528,20 +530,19 @@ impl WidgetMatchEvent for StackNavigation {
     }
 }
 
-
 impl StackNavigation {
     fn push_view(&mut self, view_id: LiveId, cx: &mut Cx) {
         // Prevent cycles by removing any existing instances of this view from the stack
         self.navigation_stack.remove_all(view_id);
-        
+
         // Add the new view to the stack
         self.navigation_stack.push(view_id);
 
         let stack_view_ref = self.stack_navigation_view(&[view_id]);
-        
+
         // Set the parent navigation UID so the view knows who its parent is
         stack_view_ref.set_parent_navigation_uid(self.widget_uid());
-        
+
         stack_view_ref.show(cx, self.screen_width);
 
         // Send a `Show` action to the view being shown so it can be aware of the transition.
@@ -583,7 +584,7 @@ impl StackNavigation {
             None => {
                 // No views in stack, show root view
                 vec![self.view.widget(ids!(root_view))]
-            },
+            }
             Some(current_entry) => {
                 let current_view_ref = self.stack_navigation_view(&[current_entry.view_id]);
                 let mut views = vec![];
@@ -592,7 +593,8 @@ impl StackNavigation {
                 if current_view_ref.is_showing(cx) && current_view_ref.is_animating(cx) {
                     if let Some(previous_entry) = self.navigation_stack.previous() {
                         // Show the previous stack view
-                        let previous_view_ref = self.stack_navigation_view(&[previous_entry.view_id]);
+                        let previous_view_ref =
+                            self.stack_navigation_view(&[previous_entry.view_id]);
                         views.push(previous_view_ref.0.clone());
                     } else {
                         // Show the root view if there's no previous stack view
@@ -610,13 +612,13 @@ impl StackNavigation {
 
 impl StackNavigationRef {
     /// Push a new view onto the navigation stack
-    /// 
+    ///
     /// This is the primary method for navigating to a new view.
     /// The view will slide in with an animation.
-    /// 
+    ///
     /// # Arguments
     /// * `view_id` - The LiveId of the view to push onto the stack
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// navigation.push(cx, live_id!(settings_view));
@@ -628,11 +630,11 @@ impl StackNavigationRef {
     }
 
     /// Pop the current view from the navigation stack
-    /// 
+    ///
     /// This removes the current view and returns to the previous view.
     /// If there's no previous view, it returns to the root view.
     /// The current view will slide out with an animation.
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// navigation.pop(cx);
@@ -644,10 +646,10 @@ impl StackNavigationRef {
     }
 
     /// Pop all views and return to the root view
-    /// 
+    ///
     /// This clears the entire navigation stack and returns to the root view.
     /// The current view will slide out with an animation.
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// navigation.pop_to_root(cx);
@@ -679,7 +681,7 @@ impl StackNavigationRef {
     }
 
     /// Set the title of a specific view in the navigation stack
-    /// 
+    ///
     /// # Arguments
     /// * `view_id` - The LiveId of the view whose title to set
     /// * `title` - The new title text
@@ -691,10 +693,10 @@ impl StackNavigationRef {
     }
 
     /// Get the current depth of the navigation stack
-    /// 
+    ///
     /// Returns 0 if only the root view is showing, 1 if there's one view
     /// pushed onto the stack, etc.
-    /// 
+    ///
     /// # Returns
     /// The number of views currently in the navigation stack
     pub fn depth(&self) -> usize {
@@ -706,9 +708,9 @@ impl StackNavigationRef {
     }
 
     /// Check if navigation back is possible
-    /// 
+    ///
     /// Returns true if there are views in the stack that can be popped.
-    /// 
+    ///
     /// # Returns
     /// true if pop() would do something, false if already at root
     pub fn can_pop(&self) -> bool {
@@ -720,9 +722,9 @@ impl StackNavigationRef {
     }
 
     /// Get the current view ID at the top of the stack
-    /// 
+    ///
     /// Returns None if the root view is currently showing.
-    /// 
+    ///
     /// # Returns
     /// The LiveId of the current view, or None if at root
     pub fn current_view(&self) -> Option<LiveId> {
@@ -734,11 +736,11 @@ impl StackNavigationRef {
     }
 
     /// Get all view IDs in the current navigation stack
-    /// 
+    ///
     /// Returns a vector of LiveIds representing the navigation history,
     /// with the first element being the oldest (bottom of stack) and
     /// the last element being the current view (top of stack).
-    /// 
+    ///
     /// # Returns
     /// Vector of LiveIds in the navigation stack
     pub fn stack_view_ids(&self) -> Vec<LiveId> {

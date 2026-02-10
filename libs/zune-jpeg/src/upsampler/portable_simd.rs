@@ -132,10 +132,10 @@ pub fn upsample_vertical_simd(
     // Upsample the remainder. This may have some overlap, but that's fine.
     // Edition upgrade will fix this nested awfulness.
     if let Some(rest) = input.last_chunk::<16>() {
-        if let Some( rest_near) = in_near.last_chunk::<16>() {
-            if let Some( rest_far) = in_far.last_chunk::<16>() {
-                if let Some( rest_top) = out_top.last_chunk_mut::<16>() {
-                    if let Some(  rest_bottom) = out_bottom.last_chunk_mut::<16>() {
+        if let Some(rest_near) = in_near.last_chunk::<16>() {
+            if let Some(rest_far) = in_far.last_chunk::<16>() {
+                if let Some(rest_top) = out_top.last_chunk_mut::<16>() {
+                    if let Some(rest_bottom) = out_bottom.last_chunk_mut::<16>() {
                         upsample16(rest, rest_near, rest_far, rest_top, rest_bottom);
                     }
                 }
@@ -152,10 +152,9 @@ pub fn upsample_hv_simd(
     output: &mut [i16],
 ) {
     assert_eq!(input.len() * 4, output.len());
-    
+
     assert!(input.len() * 2 <= scratch_space.len());
     let scratch_space = &mut scratch_space[..input.len() * 2];
-
 
     upsample_vertical_simd(input, in_near, in_far, &mut [], scratch_space);
 

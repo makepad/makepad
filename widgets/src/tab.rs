@@ -1,24 +1,22 @@
-use {
-    crate::{
-        tab_close_button::{TabCloseButtonAction, TabCloseButton},
-        makepad_draw::*,
-    }
+use crate::{
+    makepad_draw::*,
+    tab_close_button::{TabCloseButton, TabCloseButtonAction},
 };
 
-live_design!{
+live_design! {
     link widgets;
     use link::theme::*;
     use link::widgets::*;
     use makepad_draw::shader::std::*;
-    
+
     pub TabBase = {{Tab}} {}
     pub Tab = <TabBase> {
         width: Fit, height: (max(THEME_TAB_HEIGHT, 23.)),
-        
+
         align: {x: 0.0, y: 0.5}
         padding: <THEME_MSPACE_3> { top: (THEME_SPACE_2 * 1.2) }
         margin: {right: (THEME_SPACE_1), top: (THEME_SPACE_1)}
-        
+
         close_button: <TabCloseButton> {}
 
         draw_text: {
@@ -77,8 +75,8 @@ live_design!{
 
             uniform border_size: 1.
             uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0;
+            uniform gradient_fill_horizontal: 0.0;
             uniform color_dither: 1.
 
             uniform color: (THEME_COLOR_D_HIDDEN)
@@ -96,7 +94,7 @@ live_design!{
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color_2_hover: (THEME_COLOR_D_HIDDEN)
             uniform border_color_2_active: (THEME_COLOR_D_HIDDEN)
-              
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -196,7 +194,7 @@ live_design!{
                 return sdf.result
             }
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -207,7 +205,7 @@ live_design!{
                         draw_text: {hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     cursor: Hand,
                     from: {all: Forward {duration: 0.1}}
@@ -217,7 +215,7 @@ live_design!{
                     }
                 }
             }
-            
+
             active = {
                 default: off
                 off = {
@@ -228,7 +226,7 @@ live_design!{
                         draw_text: {active: 0.0}
                     }
                 }
-                
+
                 on = {
                     from: {all: Snap}
                     apply: {
@@ -261,7 +259,7 @@ live_design!{
             border_color_2: (THEME_COLOR_D_HIDDEN)
             border_color_2_hover: (THEME_COLOR_D_HIDDEN)
             border_color_2_active: (THEME_COLOR_FG_APP)
-            
+
             overlap_fix: 0.
         }
     }
@@ -270,8 +268,8 @@ live_design!{
         draw_bg: {
             border_size: 1.
             border_radius: (THEME_CORNER_RADIUS)
-            gradient_border_horizontal: 0.0; 
-            gradient_fill_horizontal: 1.0; 
+            gradient_border_horizontal: 0.0;
+            gradient_fill_horizontal: 1.0;
             color_dither: 1.
         }
 
@@ -291,79 +289,89 @@ live_design!{
             gradient_fill_horizontal: 1.0
         }
     }
-    
+
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
 pub struct Tab {
-    #[rust] is_active: bool,
-    #[rust] is_dragging: bool,
-    
-    #[live] draw_bg: DrawQuad,
-    #[live] draw_icon: DrawIcon,
-    #[live] draw_text: DrawText,
-    #[live] icon_walk: Walk,
+    #[rust]
+    is_active: bool,
+    #[rust]
+    is_dragging: bool,
+
+    #[live]
+    draw_bg: DrawQuad,
+    #[live]
+    draw_icon: DrawIcon,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    icon_walk: Walk,
     //#[live] draw_drag: DrawColor,
-    
-    #[animator] animator: Animator,
-    
-    #[live] close_button: TabCloseButton,
-    
+    #[animator]
+    animator: Animator,
+
+    #[live]
+    close_button: TabCloseButton,
+
     // height: f32,
-    #[live] closeable: bool,
-    #[live] hover: f32,
-    #[live] active: f32,
-    
-    #[live(10.0)] min_drag_dist: f64,
-    
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
-    
+    #[live]
+    closeable: bool,
+    #[live]
+    hover: f32,
+    #[live]
+    active: f32,
+
+    #[live(10.0)]
+    min_drag_dist: f64,
+
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
 }
 
 pub enum TabAction {
     WasPressed,
     CloseWasPressed,
     ShouldTabStartDrag,
-    ShouldTabStopDrag
-    //DragHit(DragHit)
+    ShouldTabStopDrag, //DragHit(DragHit)
 }
 
-
 impl Tab {
-    
     pub fn is_active(&self) -> bool {
         self.is_active
     }
-    
+
     pub fn set_is_active(&mut self, cx: &mut Cx, is_active: bool, animate: Animate) {
         self.is_active = is_active;
         self.animator_toggle(cx, is_active, animate, ids!(active.on), ids!(active.off));
     }
-    
+
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
         //self.bg_quad.color = self.color(self.is_active);
         self.draw_bg.begin(cx, self.walk, self.layout);
         //self.name_text.color = self.name_color(self.is_active);
-        if self.closeable{
+        if self.closeable {
             self.close_button.draw(cx);
         }
-        
+
         self.draw_icon.draw_walk(cx, self.icon_walk);
         //cx.turtle_align_y();
-        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_text
+            .draw_walk(cx, Walk::fit(), Align::default(), name);
         //cx.turtle_align_y();
         self.draw_bg.end(cx);
-        
+
         //if self.is_dragged {
         //    self.draw_drag.draw_abs(cx, self.draw_bg.area().get_clipped_rect(cx));
         //}
     }
-    
+
     pub fn area(&self) -> Area {
         self.draw_bg.area()
     }
-    
+
     pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
@@ -371,21 +379,25 @@ impl Tab {
         dispatch_action: &mut dyn FnMut(&mut Cx, TabAction),
     ) {
         self.animator_handle_event(cx, event);
-        
+
         let mut block_hover_out = false;
         match self.close_button.handle_event(cx, event) {
-            TabCloseButtonAction::WasPressed if self.closeable => dispatch_action(cx, TabAction::CloseWasPressed),
+            TabCloseButtonAction::WasPressed if self.closeable => {
+                dispatch_action(cx, TabAction::CloseWasPressed)
+            }
             TabCloseButtonAction::HoverIn => block_hover_out = true,
             TabCloseButtonAction::HoverOut => self.animator_play(cx, ids!(hover.off)),
-            _ => ()
+            _ => (),
         };
-        
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
             }
-            Hit::FingerHoverOut(_) => if !block_hover_out {
-                self.animator_play(cx, ids!(hover.off));
+            Hit::FingerHoverOut(_) => {
+                if !block_hover_out {
+                    self.animator_play(cx, ids!(hover.off));
+                }
             }
             Hit::FingerMove(e) => {
                 if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {
@@ -411,4 +423,3 @@ impl Tab {
         }
     }
 }
-

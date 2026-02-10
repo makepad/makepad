@@ -1,13 +1,13 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![cfg_attr(
-  feature = "nightly_slice_partition_dedup",
-  feature(slice_partition_dedup)
+    feature = "nightly_slice_partition_dedup",
+    feature(slice_partition_dedup)
 )]
 #![cfg_attr(
-  feature = "debugger_visualizer",
-  feature(debugger_visualizer),
-  debugger_visualizer(natvis_file = "../debug_metadata/tinyvec.natvis")
+    feature = "debugger_visualizer",
+    feature(debugger_visualizer),
+    debugger_visualizer(natvis_file = "../debug_metadata/tinyvec.natvis")
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(clippy::missing_inline_in_public_items)]
@@ -66,19 +66,18 @@
 
 #[allow(unused_imports)]
 use core::{
-  borrow::{Borrow, BorrowMut},
-  cmp::PartialEq,
-  convert::AsMut,
-  default::Default,
-  fmt::{
-    Binary, Debug, Display, Formatter, LowerExp, LowerHex, Octal, Pointer,
-    UpperExp, UpperHex,
-  },
-  hash::{Hash, Hasher},
-  iter::{Extend, FromIterator, FusedIterator, IntoIterator, Iterator},
-  mem::{needs_drop, replace},
-  ops::{Deref, DerefMut, Index, IndexMut, RangeBounds},
-  slice::SliceIndex,
+    borrow::{Borrow, BorrowMut},
+    cmp::PartialEq,
+    convert::AsMut,
+    default::Default,
+    fmt::{
+        Binary, Debug, Display, Formatter, LowerExp, LowerHex, Octal, Pointer, UpperExp, UpperHex,
+    },
+    hash::{Hash, Hasher},
+    iter::{Extend, FromIterator, FusedIterator, IntoIterator, Iterator},
+    mem::{needs_drop, replace},
+    ops::{Deref, DerefMut, Index, IndexMut, RangeBounds},
+    slice::SliceIndex,
 };
 
 #[cfg(feature = "alloc")]

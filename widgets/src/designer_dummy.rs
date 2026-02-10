@@ -1,10 +1,8 @@
-use crate::{
-    makepad_draw::*
-};
+use crate::makepad_draw::*;
 
-live_design!{
+live_design! {
     link designer_dummy
-    use link::widgets::*;    
+    use link::widgets::*;
     pub Designer = <View>{
     }
 }

@@ -1,14 +1,14 @@
 use makepad_draw2::*;
 
-app_main!(App); 
-script_mod!{
+app_main!(App);
+script_mod! {
     use mod.std.*;
     #(App::script_api(vm)){
     }
 }
 
-impl App{
-    fn run(vm:&mut ScriptVm)->Self{
+impl App {
+    fn run(vm: &mut ScriptVm) -> Self {
         crate::makepad_draw2::script_mod(vm);
         let r = App::from_script_mod(vm, script_mod);
         r
@@ -17,21 +17,25 @@ impl App{
 
 #[derive(Script, ScriptHook)]
 pub struct App {
-    #[new] window: WindowHandle,
-    #[new] pass: DrawPass,
-    #[new] depth_texture: Texture,
-   // #[script] draw_quad: DrawQuad,
-    #[new] main_draw_list: DrawList2d,
+    #[new]
+    window: WindowHandle,
+    #[new]
+    pass: DrawPass,
+    #[new]
+    depth_texture: Texture,
+    // #[script] draw_quad: DrawQuad,
+    #[new]
+    main_draw_list: DrawList2d,
 }
- 
-impl MatchEvent for App{
-    fn handle_startup(&mut self, cx:&mut Cx){
-        let code = script!{
+
+impl MatchEvent for App {
+    fn handle_startup(&mut self, cx: &mut Cx) {
+        let code = script! {
             use mod.net
             use mod.fs
             use mod.std
             use mod.run
-            
+
             let self_ip = "10.0.0.112"
             let comfy_ip = "10.0.0.165:8000"
             let openai_base = "http://127.0.0.1:8080"
@@ -42,7 +46,7 @@ impl MatchEvent for App{
                 Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.204" landscape:true} // door
                 Display{mac:"04:E4:B6:F4:1D:DC" ip:"10.0.0.124" landscape:true} // side
             ]
-            
+
             fn openai_completion(messages){
                 let task = std.task()
                 let req = net.HttpRequest{
@@ -71,7 +75,7 @@ impl MatchEvent for App{
                 }
                 task
             }
-                        
+
             fn comfy_image_download(image){
                 let task = std.task()
                 let req = net.HttpRequest{
@@ -87,7 +91,7 @@ impl MatchEvent for App{
                 }
                 task
             }
-                                        
+
             fn comfy_last_image(prompt_id, model){
                 let task = std.task()
                 let req = net.HttpRequest{
@@ -104,7 +108,7 @@ impl MatchEvent for App{
                 }
                 task
             }
-                
+
             let models = {
                 flux:{
                     file: "./examples/comfyui/flux_dev_full_text_to_image.json"
@@ -125,7 +129,7 @@ impl MatchEvent for App{
                     height: 928
                 }
             }
-                
+
             fn connect_comfy_websocket(model){
                 let task = std.task()
                 net.web_socket("ws://"+comfy_ip+"/ws?clientId=8a327a3e4961419ea7386c542f0ea491") do net.WebSocketEvents{
@@ -144,19 +148,19 @@ impl MatchEvent for App{
                 };
                 task
             }
-                                    
+
             fn comfy_render(prompt, display, model){
                 let task = std.task()
                 std.println("Rendering AI: ");
                 let flow = fs.read(model.file).parse_json()
-                        
+
                 flow[model.prompt].inputs.clip_l = prompt.style_and_keywords
                 flow[model.prompt].inputs.t5xxl = prompt.visual_description
-                        
+
                 flow[model.sampler].inputs.seed = std.random_u32()
-                flow[model.image].inputs.width = 
+                flow[model.image].inputs.width =
                 if display.landscape model.width else model.height
-                flow[model.image].inputs.height = 
+                flow[model.image].inputs.height =
                 if display.landscape model.height else model.width
                 ~flow.to_json()
                 let req = net.HttpRequest{
@@ -169,7 +173,7 @@ impl MatchEvent for App{
                 }
                 task
             }
-                                    
+
             fn eink_upload_image(display, path){
                 let task = std.task()
                 std.println("Uploading image: "+display.mac+" "+display.ip+" "+path)
@@ -190,18 +194,18 @@ impl MatchEvent for App{
                 }
                 task
             }
-                            
+
             // main application flow
-                            
+
             std.random_seed()
-                    
+
             let model = models.flux;
-                                
+
             let web_socket = connect_comfy_websocket(model)
-                            
+
             let display_iter = 0
             let messages = []
-            
+
             let http_body = "
             <body onclick='document.documentElement.requestFullscreen()' ondblclick='location.reload()' style='margin:0;padding:20;background:#fff;color:#000;display:flex;height:100vh;overflow:hidden'>
             <b id='d' style='font:5vw sans-serif'></b>
@@ -218,7 +222,7 @@ impl MatchEvent for App{
             </script>
             </body>
             "
-            
+
             let http_server = net.http_server(net.HttpServerOptions{
                 listen:"0.0.0.0:8081"
             }, net.HttpServerEvents{
@@ -231,16 +235,16 @@ impl MatchEvent for App{
                         else
                             http_body
                     }
-                    
+
                 }
             })
-            
-                        
-            fn post(){ 
+
+
+            fn post(){
                 // handle AI prompt messages
-                        
+
                 let prompt = fs.read("/Users/admin/prompt.txt").parse_json();
-                 
+
                 if messages.len() > 40 messages.clear()
                 if prompt.clear || messages.len() == 0{
                     messages.clear()
@@ -252,7 +256,7 @@ impl MatchEvent for App{
                     messages.push({content:prompt.prompt.trim() role:"user"})
                 }
                 // rotate displays
-                                           
+
                 let display = displays[display_iter % displays.len()]
                 display_iter += 1
                 let image_prompt = openai_completion(messages).last()
@@ -261,20 +265,20 @@ impl MatchEvent for App{
                     visual_description:prompt.prompt,
                     style_and_keywords:prompt.prompt
                 }*/
-                
+
                 // put the answer back in the messages array
                 messages.push({content:image_prompt role:"assistant"})
-                                
+
                 // flush the websocket queue
                 web_socket.queue.clear()
-                
+
                 let image_prompt = image_prompt.strip_prefix("```json").strip_suffix("```").parse_json();
-                
+
                 std.println(image_prompt);
-                
-                
+
+
                 std.println("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
-                        
+
                 let prompt_id = comfy_render(image_prompt display model).last()
                 // this loop needs some more features like match or a for loop with array destructuring'
                 loop{
@@ -290,7 +294,7 @@ impl MatchEvent for App{
                 let data = comfy_image_download(image).last()
                 let path = "/Users/admin/makepad/makepad/local/eink.png"
                 fs.write(path data)
-                        
+
                 std.println("Uploading to " + display.ip)
                 eink_upload_image(display path).last()
                 let set_prompt = image_prompt.visual_description + " - " + image_prompt.style_and_keywords
@@ -298,44 +302,47 @@ impl MatchEvent for App{
                 std.println("DONE!")
                 std.start_timeout(17, || set_display.prompt = set_prompt)
             }
-                            
+
             std.start_interval(60) do fn{
                 post()
             }
             post()
         };
         cx.eval(code);
-        
-        
+
         self.window.set_pass(cx, &self.pass);
-        self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32{
-            size: TextureSize::Auto,
-            initial: true,
-        });
-        self.pass.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        self.pass.set_window_clear_color(cx, vec4(0.0, 0.0, 1.0, 0.0));
+        self.depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        self.pass
+            .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
+        self.pass
+            .set_window_clear_color(cx, vec4(0.0, 0.0, 1.0, 0.0));
     }
-    
-    fn handle_draw_2d(&mut self, cx: &mut Cx2d){
+
+    fn handle_draw_2d(&mut self, cx: &mut Cx2d) {
         if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
-            return
+            return;
         }
-        
+
         cx.begin_pass(&self.pass, None);
         self.main_draw_list.begin_always(cx);
-        
+
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
-        
+
         // draw things here
-        
+
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
     }
-            
-    fn handle_actions(&mut self, _cx: &mut Cx, _actions:&Actions){
-    }
+
+    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
 }
 
 impl AppMain for App {

@@ -46,8 +46,8 @@ impl Trapezoidator {
                 }
             }
             true
-        }){
-            return None
+        }) {
+            return None;
         };
         Some(Trapezoidate {
             trapezoidator: self,
@@ -71,7 +71,7 @@ impl Trapezoidator {
                 // This can happen if the semgent has NaN coordinates. In this case, the input
                 // as a whole is invalid, so we bail out early.
                 return false;
-            },
+            }
             Some(Ordering::Less) => (1, segment.p0, segment.p1),
             Some(Ordering::Equal) => {
                 // The endpoints of the segment are equal, so the segment is empty. Empty segments
@@ -97,7 +97,7 @@ impl Trapezoidator {
     }
 
     /// Removes all events at the next point where an event occurs from the event queue.
-    /// 
+    ///
     /// Returns the point at which the events occur, or `None` if the event queue is empty.
     /// Appends the pending segments that start intersecting the sweepline at this point to
     /// `pending_segments`.
@@ -214,7 +214,10 @@ impl Trapezoidator {
         incident_segment_start: usize,
     ) -> Option<ActiveSegment> {
         if incident_segment_start == 0
-            || !self.active_segments[incident_segment_start - 1].region_above.is_inside {
+            || !self.active_segments[incident_segment_start - 1]
+                .region_above
+                .is_inside
+        {
             return None;
         }
         let intersection = self.active_segments[incident_segment_start - 1]
@@ -320,8 +323,10 @@ impl Trapezoidator {
         incident_segment_end: usize,
     ) -> Option<ActiveSegment> {
         if incident_segment_end == self.active_segments.len()
-            || incident_segment_end == 0 
-            || !self.active_segments[incident_segment_end - 1].region_above.is_inside
+            || incident_segment_end == 0
+            || !self.active_segments[incident_segment_end - 1]
+                .region_above
+                .is_inside
         {
             return None;
         }
@@ -381,7 +386,10 @@ impl<'a> InternalIterator for Trapezoidate<'a> {
     {
         let mut right_segments = Vec::new();
         let mut trapezoid_segments = Vec::new();
-        while let Some(point) = self.trapezoidator.pop_events_for_next_point(&mut right_segments) {
+        while let Some(point) = self
+            .trapezoidator
+            .pop_events_for_next_point(&mut right_segments)
+        {
             let ok = self.trapezoidator.handle_events_for_point(
                 point,
                 &mut right_segments,
@@ -535,8 +543,12 @@ mod tests {
             .trapezoidate(path.commands().linearize(0.1))
             .unwrap()
             .collect();
-        assert_eq!(trapezoids, [
-            Trapezoid { xs: [0.0, 1.0], ys: [0.0, 0.0, 1.0, 1.0] }
-        ]);
+        assert_eq!(
+            trapezoids,
+            [Trapezoid {
+                xs: [0.0, 1.0],
+                ys: [0.0, 0.0, 1.0, 1.0]
+            }]
+        );
     }
 }

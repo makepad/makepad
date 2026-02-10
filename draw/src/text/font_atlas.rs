@@ -2,7 +2,7 @@ use {
     super::{
         font::{FontId, GlyphId},
         geom::{Point, Rect, Size},
-        image::{Image, Bgra, Subimage, SubimageMut, R},
+        image::{Bgra, Image, Subimage, SubimageMut, R},
         num::Zero,
     },
     std::{collections::HashMap, fs::File, io::BufWriter, path::Path, slice},

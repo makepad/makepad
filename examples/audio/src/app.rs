@@ -440,16 +440,22 @@ impl AppMain for App {
                 match pr.status {
                     PermissionStatus::Granted => {
                         self.initialize(cx);
-                        self.ui.view(ids!(permission_warning)).set_visible(cx, false);
+                        self.ui
+                            .view(ids!(permission_warning))
+                            .set_visible(cx, false);
                     }
                     PermissionStatus::DeniedPermanent => {
                         self.ui.label(ids!(permission_warning_label)).set_text(cx, "⚠️ Microphone permission denied.\nPlease enable microphone access in the system settings.");
                         self.ui.view(ids!(permission_warning)).set_visible(cx, true);
-                        self.ui.button(ids!(request_permission_button)).set_visible(cx, false);
+                        self.ui
+                            .button(ids!(request_permission_button))
+                            .set_visible(cx, false);
                     }
                     PermissionStatus::DeniedCanRetry => {
                         self.ui.view(ids!(permission_warning)).set_visible(cx, true);
-                        self.ui.button(ids!(request_permission_button)).set_visible(cx, true);
+                        self.ui
+                            .button(ids!(request_permission_button))
+                            .set_visible(cx, true);
                     }
                     _ => {}
                 }
@@ -660,7 +666,8 @@ impl App {
                         }
 
                         // Calculate how many input samples were consumed
-                        let consumed = ((frame_count as f64 * ratio) as usize).min(passthrough_audio.len());
+                        let consumed =
+                            ((frame_count as f64 * ratio) as usize).min(passthrough_audio.len());
                         if consumed > 0 {
                             passthrough_audio.drain(..consumed);
                         }

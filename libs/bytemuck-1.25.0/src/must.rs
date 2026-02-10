@@ -8,13 +8,11 @@ use core::mem::{align_of, size_of};
 
 struct Cast<A, B>((A, B));
 impl<A, B> Cast<A, B> {
-  const ASSERT_ALIGN_GREATER_THAN_EQUAL: () =
-    assert!(align_of::<A>() >= align_of::<B>());
-  const ASSERT_SIZE_EQUAL: () = assert!(size_of::<A>() == size_of::<B>());
-  const ASSERT_SIZE_MULTIPLE_OF_OR_INPUT_ZST: () = assert!(
-    (size_of::<A>() == 0)
-      || (size_of::<B>() != 0 && size_of::<A>() % size_of::<B>() == 0)
-  );
+    const ASSERT_ALIGN_GREATER_THAN_EQUAL: () = assert!(align_of::<A>() >= align_of::<B>());
+    const ASSERT_SIZE_EQUAL: () = assert!(size_of::<A>() == size_of::<B>());
+    const ASSERT_SIZE_MULTIPLE_OF_OR_INPUT_ZST: () = assert!(
+        (size_of::<A>() == 0) || (size_of::<B>() != 0 && size_of::<A>() % size_of::<B>() == 0)
+    );
 }
 
 /// Cast `A` into `B` if infalliable, or fail to compile.
@@ -39,8 +37,8 @@ impl<A, B> Cast<A, B> {
 /// ```
 #[inline]
 pub const fn must_cast<A: NoUninit, B: AnyBitPattern>(a: A) -> B {
-  let _ = Cast::<A, B>::ASSERT_SIZE_EQUAL;
-  unsafe { transmute!(A; B; a) }
+    let _ = Cast::<A, B>::ASSERT_SIZE_EQUAL;
+    unsafe { transmute!(A; B; a) }
 }
 
 /// Convert `&A` into `&B` if infalliable, or fail to compile.
@@ -65,9 +63,9 @@ pub const fn must_cast<A: NoUninit, B: AnyBitPattern>(a: A) -> B {
 /// ```
 #[inline]
 pub const fn must_cast_ref<A: NoUninit, B: AnyBitPattern>(a: &A) -> &B {
-  let _ = Cast::<A, B>::ASSERT_SIZE_EQUAL;
-  let _ = Cast::<A, B>::ASSERT_ALIGN_GREATER_THAN_EQUAL;
-  unsafe { &*(a as *const A as *const B) }
+    let _ = Cast::<A, B>::ASSERT_SIZE_EQUAL;
+    let _ = Cast::<A, B>::ASSERT_ALIGN_GREATER_THAN_EQUAL;
+    unsafe { &*(a as *const A as *const B) }
 }
 
 maybe_const_fn! {
@@ -147,14 +145,14 @@ maybe_const_fn! {
 /// ```
 #[inline]
 pub const fn must_cast_slice<A: NoUninit, B: AnyBitPattern>(a: &[A]) -> &[B] {
-  let _ = Cast::<A, B>::ASSERT_SIZE_MULTIPLE_OF_OR_INPUT_ZST;
-  let _ = Cast::<A, B>::ASSERT_ALIGN_GREATER_THAN_EQUAL;
-  let new_len = if size_of::<A>() == size_of::<B>() {
-    a.len()
-  } else {
-    a.len() * (size_of::<A>() / size_of::<B>())
-  };
-  unsafe { core::slice::from_raw_parts(a.as_ptr() as *const B, new_len) }
+    let _ = Cast::<A, B>::ASSERT_SIZE_MULTIPLE_OF_OR_INPUT_ZST;
+    let _ = Cast::<A, B>::ASSERT_ALIGN_GREATER_THAN_EQUAL;
+    let new_len = if size_of::<A>() == size_of::<B>() {
+        a.len()
+    } else {
+        a.len() * (size_of::<A>() / size_of::<B>())
+    };
+    unsafe { core::slice::from_raw_parts(a.as_ptr() as *const B, new_len) }
 }
 
 maybe_const_fn! {

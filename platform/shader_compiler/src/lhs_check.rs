@@ -1,10 +1,6 @@
-use{
+use {
+    crate::{makepad_live_compiler::*, shader_ast::*, shader_registry::ShaderRegistry},
     std::cell::Cell,
-    crate::{
-        makepad_live_compiler::*,
-        shader_ast::*,
-        shader_registry::ShaderRegistry
-    }
 };
 
 pub struct LhsChecker<'a> {
@@ -29,7 +25,7 @@ impl<'a> LhsChecker<'a> {
                 ref right_expr,
                 ..
             } => self.lhs_check_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un {span, op, ref expr} => self.lhs_check_un_expr(span, op, expr),
+            ExprKind::Un { span, op, ref expr } => self.lhs_check_un_expr(span, op, expr),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -40,51 +36,29 @@ impl<'a> LhsChecker<'a> {
                 ref expr,
                 ref index_expr,
             } => self.lhs_check_index_expr(span, expr, index_expr),
-            ExprKind::MethodCall {
-                span,
-                ..
-            } => self.lhs_check_all_call_expr(span),
-            ExprKind::PlainCall {
-                span,
-                ..
-            } => self.lhs_check_all_call_expr(span),
-           /* ExprKind::ClosureCall {
+            ExprKind::MethodCall { span, .. } => self.lhs_check_all_call_expr(span),
+            ExprKind::PlainCall { span, .. } => self.lhs_check_all_call_expr(span),
+            /* ExprKind::ClosureCall {
                 span,
                 ..
             } => self.lhs_check_all_call_expr(span),*/
             ExprKind::ClosureDef(_) => self.lhs_check_closure(expr.span),
-            ExprKind::BuiltinCall {
-                span,
-                ..
-            } => self.lhs_check_all_call_expr(span),
-            ExprKind::ConsCall {
-                span,
-                ..
-            } => self.lhs_check_all_call_expr(span),
-            ExprKind::StructCons {
-                span,
-                ..
-            } => self.lhs_check_all_call_expr(span),
-            ExprKind::Var {
-                span,
-                ref kind,
-                ..
-            } => self.lhs_check_var_expr(span, kind),
-            ExprKind::Lit {span, lit} => self.lhs_check_lit_expr(span, lit),
+            ExprKind::BuiltinCall { span, .. } => self.lhs_check_all_call_expr(span),
+            ExprKind::ConsCall { span, .. } => self.lhs_check_all_call_expr(span),
+            ExprKind::StructCons { span, .. } => self.lhs_check_all_call_expr(span),
+            ExprKind::Var { span, ref kind, .. } => self.lhs_check_var_expr(span, kind),
+            ExprKind::Lit { span, lit } => self.lhs_check_lit_expr(span, lit),
         }
     }
-    
-    fn lhs_check_closure(
-        &mut self,
-        span: TokenSpan,
-    ) -> Result<(), LiveError> {
+
+    fn lhs_check_closure(&mut self, span: TokenSpan) -> Result<(), LiveError> {
         return Err(LiveError {
             origin: live_error_origin!(),
-            span:span.into(),
+            span: span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
-    
+
     fn lhs_check_cond_expr(
         &mut self,
         span: TokenSpan,
@@ -94,11 +68,11 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin: live_error_origin!(),
-            span:span.into(),
+            span: span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
-    
+
     fn lhs_check_bin_expr(
         &mut self,
         span: TokenSpan,
@@ -107,31 +81,33 @@ impl<'a> LhsChecker<'a> {
         _right_expr: &Expr,
     ) -> Result<(), LiveError> {
         return Err(LiveError {
-            origin:live_error_origin!(),
-            span:span.into(),
+            origin: live_error_origin!(),
+            span: span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
-    
-    fn lhs_check_un_expr(&mut self, span: TokenSpan, _op: UnOp, _expr: &Expr) -> Result<(), LiveError> {
-        return Err(LiveError {
-            origin:live_error_origin!(),
-            span:span.into(),
-            message: String::from("expression is not a valid left hand side"),
-        });
-    }
-    
-    fn lhs_check_all_call_expr(
+
+    fn lhs_check_un_expr(
         &mut self,
         span: TokenSpan,
+        _op: UnOp,
+        _expr: &Expr,
     ) -> Result<(), LiveError> {
         return Err(LiveError {
-            origin:live_error_origin!(),
-            span:span.into(),
+            origin: live_error_origin!(),
+            span: span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
-    
+
+    fn lhs_check_all_call_expr(&mut self, span: TokenSpan) -> Result<(), LiveError> {
+        return Err(LiveError {
+            origin: live_error_origin!(),
+            span: span.into(),
+            message: String::from("expression is not a valid left hand side"),
+        });
+    }
+
     fn lhs_check_field_expr(
         &mut self,
         span: TokenSpan,
@@ -139,28 +115,28 @@ impl<'a> LhsChecker<'a> {
         field_ident: Ident,
     ) -> Result<(), LiveError> {
         // lets grab the ty from expr
-        match expr.ty.borrow().as_ref().unwrap(){
-            Ty::DrawShader(shader_ptr)=>{
-                let field_decl = self.shader_registry.draw_shader_defs.get(shader_ptr).unwrap().find_field(field_ident) .unwrap();
-                match &field_decl.kind{
-                    DrawShaderFieldKind::Varying{..}=>{
-                        Ok(())
-                    }
-                    _=>{
-                        Err(LiveError {
-                            origin:live_error_origin!(),
-                            span:span.into(),
-                            message: String::from("Can only assign to varying values for shader self"),
-                        })
-                    }
+        match expr.ty.borrow().as_ref().unwrap() {
+            Ty::DrawShader(shader_ptr) => {
+                let field_decl = self
+                    .shader_registry
+                    .draw_shader_defs
+                    .get(shader_ptr)
+                    .unwrap()
+                    .find_field(field_ident)
+                    .unwrap();
+                match &field_decl.kind {
+                    DrawShaderFieldKind::Varying { .. } => Ok(()),
+                    _ => Err(LiveError {
+                        origin: live_error_origin!(),
+                        span: span.into(),
+                        message: String::from("Can only assign to varying values for shader self"),
+                    }),
                 }
             }
-            _=>{
-                 self.lhs_check_expr(expr)
-            }
+            _ => self.lhs_check_expr(expr),
         }
     }
-    
+
     fn lhs_check_index_expr(
         &mut self,
         _span: TokenSpan,
@@ -169,7 +145,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), LiveError> {
         self.lhs_check_expr(expr)
     }
-    
+
     fn lhs_check_call_expr(
         &mut self,
         span: TokenSpan,
@@ -177,24 +153,23 @@ impl<'a> LhsChecker<'a> {
         _arg_exprs: &[Expr],
     ) -> Result<(), LiveError> {
         return Err(LiveError {
-            origin:live_error_origin!(),
-            span:span.into(),
+            origin: live_error_origin!(),
+            span: span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
-    
+
     fn lhs_check_var_expr(
         &mut self,
         span: TokenSpan,
-        kind: &Cell<Option<VarKind >>,
+        kind: &Cell<Option<VarKind>>,
     ) -> Result<(), LiveError> {
-        if let VarKind::MutLocal{..} = kind.get().unwrap(){
+        if let VarKind::MutLocal { .. } = kind.get().unwrap() {
             Ok(())
-        }
-        else{
+        } else {
             Err(LiveError {
-                origin:live_error_origin!(),
-                span:span.into(),
+                origin: live_error_origin!(),
+                span: span.into(),
                 message: String::from("expression is not a valid left hand side"),
             })
         }
@@ -212,7 +187,7 @@ impl<'a> LhsChecker<'a> {
             message: String::from("liveid is not a valid left hand side"),
         });
     }*/
-    
+
     fn lhs_check_lit_expr(&mut self, _span: TokenSpan, _lit: Lit) -> Result<(), LiveError> {
         Ok(())
     }

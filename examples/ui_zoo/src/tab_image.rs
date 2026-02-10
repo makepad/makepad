@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoImage = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/image.md") } 
+            <Markdown> { body: dep("crate://self/resources/image.md") }
         }
         demos = {
             <H4> { text: "Default" }
@@ -61,7 +59,7 @@ live_design!{
                 show_bg: true, draw_bg: { color: (THEME_COLOR_INSET_1)}, width: Fill, height: 150,
                 <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Smallest }
             }
-            
+
             <Hr> {}
             <H4> { text: "fit: Biggest" }
             <View> {

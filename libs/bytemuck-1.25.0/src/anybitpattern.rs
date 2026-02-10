@@ -48,30 +48,20 @@ use crate::{Pod, Zeroable};
 ///   it to deal with atomic and cells etc. We require the sharing predicate to
 ///   be trivial and permit only read-only access.
 /// * There's probably more, don't mess it up (I mean it).
-pub unsafe trait AnyBitPattern:
-  Zeroable + Sized + Copy + 'static
-{
-}
+pub unsafe trait AnyBitPattern: Zeroable + Sized + Copy + 'static {}
 
 unsafe impl<T: Pod> AnyBitPattern for T {}
 
 #[cfg(feature = "zeroable_maybe_uninit")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "zeroable_maybe_uninit"))
-)]
-unsafe impl<T> AnyBitPattern for core::mem::MaybeUninit<T> where T: AnyBitPattern
-{}
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "zeroable_maybe_uninit")))]
+unsafe impl<T> AnyBitPattern for core::mem::MaybeUninit<T> where T: AnyBitPattern {}
 
 #[cfg(all(feature = "zeroable_maybe_uninit", feature = "min_const_generics"))]
 #[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(all(
-    feature = "zeroable_maybe_uninit",
-    feature = "min_const_generics"
-  )))
+    feature = "nightly_docs",
+    doc(cfg(all(feature = "zeroable_maybe_uninit", feature = "min_const_generics")))
 )]
 unsafe impl<T, const N: usize> AnyBitPattern for [core::mem::MaybeUninit<T>; N] where
-  T: AnyBitPattern
+    T: AnyBitPattern
 {
 }

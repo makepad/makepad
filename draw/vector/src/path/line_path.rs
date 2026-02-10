@@ -1,8 +1,8 @@
-use crate::path::LinePathCommand;
 use crate::geometry::{Point, Transform, Transformation};
 use crate::internal_iter::{
     ExtendFromInternalIterator, FromInternalIterator, InternalIterator, IntoInternalIterator,
 };
+use crate::path::LinePathCommand;
 use std::iter::Cloned;
 use std::slice::Iter;
 

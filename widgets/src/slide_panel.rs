@@ -1,13 +1,8 @@
 use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    view::*,
-    widget::*,
-    WidgetMatchEvent,
-    WindowAction,
+    makepad_derive_widget::*, makepad_draw::*, view::*, widget::*, WidgetMatchEvent, WindowAction,
 };
 
-live_design!{
+live_design! {
     link widgets
     pub SlidePanelBase = {{SlidePanel}} {}
     pub SlidePanel = <SlidePanelBase>{
@@ -24,7 +19,7 @@ live_design!{
                         active: 0.0
                     }
                 }
-                                
+
                 off = {
                     redraw: true,
                     from: {
@@ -42,12 +37,18 @@ live_design!{
 
 #[derive(Live, LiveHook, Widget)]
 pub struct SlidePanel {
-    #[deref] frame: View,
-    #[animator] animator: Animator,
-    #[live] active: f64,
-    #[live] side: SlideSide,
-    #[rust] screen_width: f64,
-    #[rust] next_frame: NextFrame
+    #[deref]
+    frame: View,
+    #[animator]
+    animator: Animator,
+    #[live]
+    active: f64,
+    #[live]
+    side: SlideSide,
+    #[rust]
+    screen_width: f64,
+    #[rust]
+    next_frame: NextFrame,
 }
 
 #[derive(Clone, DefaultNone)]
@@ -64,27 +65,30 @@ impl Widget for SlidePanel {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.frame.redraw(cx);
         }
-        
+
         match event {
             Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
                 self.frame.redraw(cx);
             }
-            _ => ()
+            _ => (),
         }
     }
-    
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, mut walk: Walk) -> DrawStep {
-        // we need to make this thing work with a 
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, mut walk: Walk) -> DrawStep {
+        // we need to make this thing work with a
         let rect = cx.peek_walk_turtle(walk);
-        match self.side{
-            SlideSide::Top=>{
+        match self.side {
+            SlideSide::Top => {
                 walk.abs_pos = Some(dvec2(0.0, -rect.size.y * self.active));
             }
-            SlideSide::Left=>{
+            SlideSide::Left => {
                 walk.abs_pos = Some(dvec2(-rect.size.x * self.active, 0.0));
             }
             SlideSide::Right => {
-                walk.abs_pos = Some(dvec2(self.screen_width - rect.size.x + rect.size.x * self.active, 0.0));
+                walk.abs_pos = Some(dvec2(
+                    self.screen_width - rect.size.x + rect.size.x * self.active,
+                    0.0,
+                ));
             }
         }
         self.frame.draw_walk(cx, scope, walk)
@@ -104,22 +108,22 @@ impl WidgetMatchEvent for SlidePanel {
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
-pub enum SlideSide{
-    #[pick] Left,
+pub enum SlideSide {
+    #[pick]
+    Left,
     Right,
-    Top
+    Top,
 }
 
 impl SlidePanel {
-
     pub fn open(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
     }
-    
+
     pub fn close(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
     }
-    
+
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
     }
@@ -138,10 +142,9 @@ impl SlidePanelRef {
     }
     pub fn toggle(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            if inner.animator_in_state(cx, ids!(active.on)){
+            if inner.animator_in_state(cx, ids!(active.on)) {
                 inner.animator_play(cx, ids!(active.on))
-            }
-            else{
+            } else {
                 inner.animator_play(cx, ids!(active.off))
             }
         }
@@ -167,4 +170,3 @@ impl SlidePanelSet {
         }
     }
 }
-

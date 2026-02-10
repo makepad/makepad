@@ -14,7 +14,7 @@ live_design! {
     use makepad_audio_graph::mixer::Mixer;
     use makepad_audio_graph::instrument::Instrument;
     use makepad_synth_ironfish::ironfish::IronFish;
-    
+
     use makepad_draw::shader::std::*;
 /*
     BlurStage = <ViewBase> {
@@ -118,13 +118,13 @@ live_design! {
 
             varying o0: vec2,
             varying oShadow: vec2,
-            
+
             fn vertex(self) -> vec4
             {
-                
+
                 let dpi = self.dpi_factor;
-                
-               
+
+
                 let pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size);
 
                 self.o0 = self.pos;
@@ -134,14 +134,14 @@ live_design! {
             }
 
             fn pixel(self) -> vec4{
-                
+
                 let shadow = sample2d(self.image, self.oShadow);
                 let main = sample2d(self.image, self.o0);
 
                 let col =  (vec4(0.0,0.0,0.0,self.shadowopacity)  * shadow.a ) * ( 1 - main.a) + main;
 
                 //col +=  (sample2d(self.image, self.o0) )*0.3;
-                
+
 
                 return col;
             }
@@ -189,10 +189,10 @@ live_design! {
                 body = <AppDesktop> {}
                 /*<View>
                 {
-                    
+
                     width: Fill,
                     height: Fill,
-                    
+
                     shadowstep = <ShadowStage> {
                         width: Fill,
                         height: Fill,
@@ -236,22 +236,22 @@ impl LiveRegister for App {
     }
 }
 
-impl LiveHook for App{
+impl LiveHook for App {
     fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        if apply.from.is_update_from_doc(){
+        if apply.from.is_update_from_doc() {
             self.init_ui_state(cx);
         }
     }
 }
 
 impl App {
-    pub fn init_ui_state(&mut self, cx:&mut Cx){
+    pub fn init_ui_state(&mut self, cx: &mut Cx) {
         let ui = self.ui.clone();
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
         let db = DataBindingStore::from_nodes(ironfish.settings.live_read());
         Self::data_bind(db.data_to_widgets(cx, &ui));
     }
-    
+
     pub fn data_bind(mut db: DataBindingMap) {
         // sequencer
         db.bind(ids!(sequencer.playing), ids_array!(playpause));
@@ -294,7 +294,7 @@ impl App {
         db.bind(ids!(lfo.rate), ids_array!(rate.slider));
         db.bind(ids!(filter1.lfo_amount), ids_array!(lfoamount.slider));
         db.bind(ids!(lfo.synconkey), ids_array!(sync.checkbox));
-        
+
         //Volume Envelope
         db.bind(ids!(volume_envelope.a), ids_array!(vol_env.attack.slider));
         db.bind(ids!(volume_envelope.h), ids_array!(vol_env.hold.slider));
@@ -316,12 +316,30 @@ impl App {
         db.bind(ids!(filter1.resonance), ids_array!(resonance.slider));
 
         // Osc1 panel
-        db.bind(ids!(supersaw1.spread), ids_array!(osc1.supersaw.spread.slider));
-        db.bind(ids!(supersaw1.diffuse), ids_array!(osc1.supersaw.diffuse.slider));
-        db.bind(ids!(supersaw1.spread), ids_array!(osc1.supersaw.spread.slider));
-        db.bind(ids!(supersaw1.diffuse), ids_array!(osc1.supersaw.diffuse.slider));
-        db.bind(ids!(supersaw1.spread), ids_array!(osc1.hypersaw.spread.slider));
-        db.bind(ids!(supersaw1.diffuse), ids_array!(osc1.hypersaw.diffuse.slider));
+        db.bind(
+            ids!(supersaw1.spread),
+            ids_array!(osc1.supersaw.spread.slider),
+        );
+        db.bind(
+            ids!(supersaw1.diffuse),
+            ids_array!(osc1.supersaw.diffuse.slider),
+        );
+        db.bind(
+            ids!(supersaw1.spread),
+            ids_array!(osc1.supersaw.spread.slider),
+        );
+        db.bind(
+            ids!(supersaw1.diffuse),
+            ids_array!(osc1.supersaw.diffuse.slider),
+        );
+        db.bind(
+            ids!(supersaw1.spread),
+            ids_array!(osc1.hypersaw.spread.slider),
+        );
+        db.bind(
+            ids!(supersaw1.diffuse),
+            ids_array!(osc1.hypersaw.diffuse.slider),
+        );
 
         db.bind(ids!(osc1.osc_type), ids_array!(osc1.type.dropdown));
         db.bind(ids!(osc1.transpose), ids_array!(osc1.transpose.slider));
@@ -331,12 +349,30 @@ impl App {
         db.bind(ids!(osc1.harmoniclfo), ids_array!(osc1.harmoniclfo.slider));
 
         // Osc2 panel
-        db.bind(ids!(supersaw2.spread), ids_array!(osc2.supersaw.spread.slider));
-        db.bind(ids!(supersaw2.diffuse), ids_array!(osc2.supersaw.diffuse.slider));
-        db.bind(ids!(supersaw2.spread), ids_array!(osc2.supersaw.spread.slider));
-        db.bind(ids!(supersaw2.diffuse), ids_array!(osc2.supersaw.diffuse.slider));
-        db.bind(ids!(supersaw2.spread), ids_array!(osc2.hypersaw.spread.slider));
-        db.bind(ids!(supersaw2.diffuse), ids_array!(osc2.hypersaw.diffuse.slider));
+        db.bind(
+            ids!(supersaw2.spread),
+            ids_array!(osc2.supersaw.spread.slider),
+        );
+        db.bind(
+            ids!(supersaw2.diffuse),
+            ids_array!(osc2.supersaw.diffuse.slider),
+        );
+        db.bind(
+            ids!(supersaw2.spread),
+            ids_array!(osc2.supersaw.spread.slider),
+        );
+        db.bind(
+            ids!(supersaw2.diffuse),
+            ids_array!(osc2.supersaw.diffuse.slider),
+        );
+        db.bind(
+            ids!(supersaw2.spread),
+            ids_array!(osc2.hypersaw.spread.slider),
+        );
+        db.bind(
+            ids!(supersaw2.diffuse),
+            ids_array!(osc2.hypersaw.diffuse.slider),
+        );
 
         db.bind(ids!(osc2.osc_type), ids_array!(osc2.type.dropdown));
         db.bind(ids!(osc2.transpose), ids_array!(osc2.transpose.slider));
@@ -348,9 +384,6 @@ impl App {
         db.bind(ids!(blur.size), ids_array!(blursize.slider));
         db.bind(ids!(blur.std), ids_array!(blurstd.slider));
 
-
-
-
         db.bind(ids!(shadow.opacity), ids_array!(shadowopacity.slider));
         db.bind(ids!(shadow.x), ids_array!(shadowx.slider));
         db.bind(ids!(shadow.y), ids_array!(shadowy.slider));
@@ -358,24 +391,36 @@ impl App {
         // sequencer
         db.bind(ids!(sequencer.steps), ids_array!(sequencer));
 
-        db.apply(ids!(osc1.osc_type), ids_array!(osc1.supersaw, visible), |v| {
-            v.enum_eq(ids!(SuperSaw))
-        });
-        db.apply(ids!(osc2.osc_type), ids_array!(osc2.supersaw, visible), |v| {
-            v.enum_eq(ids!(SuperSaw))
-        });
-        db.apply(ids!(osc1.osc_type), ids_array!(osc1.hypersaw, visible), |v| {
-            v.enum_eq(ids!(HyperSaw))
-        });
-        db.apply(ids!(osc2.osc_type), ids_array!(osc2.hypersaw, visible), |v| {
-            v.enum_eq(ids!(HyperSaw))
-        });
-        db.apply(ids!(osc1.osc_type), ids_array!(osc1.harmonic, visible), |v| {
-            v.enum_eq(ids!(HarmonicSeries))
-        });
-        db.apply(ids!(osc2.osc_type), ids_array!(osc2.harmonic, visible), |v| {
-            v.enum_eq(ids!(HarmonicSeries))
-        });
+        db.apply(
+            ids!(osc1.osc_type),
+            ids_array!(osc1.supersaw, visible),
+            |v| v.enum_eq(ids!(SuperSaw)),
+        );
+        db.apply(
+            ids!(osc2.osc_type),
+            ids_array!(osc2.supersaw, visible),
+            |v| v.enum_eq(ids!(SuperSaw)),
+        );
+        db.apply(
+            ids!(osc1.osc_type),
+            ids_array!(osc1.hypersaw, visible),
+            |v| v.enum_eq(ids!(HyperSaw)),
+        );
+        db.apply(
+            ids!(osc2.osc_type),
+            ids_array!(osc2.hypersaw, visible),
+            |v| v.enum_eq(ids!(HyperSaw)),
+        );
+        db.apply(
+            ids!(osc1.osc_type),
+            ids_array!(osc1.harmonic, visible),
+            |v| v.enum_eq(ids!(HarmonicSeries)),
+        );
+        db.apply(
+            ids!(osc2.osc_type),
+            ids_array!(osc2.harmonic, visible),
+            |v| v.enum_eq(ids!(HarmonicSeries)),
+        );
 
         db.apply(
             ids!(mod_envelope.a),
@@ -445,18 +490,22 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        self.preset(cx,0,false);
+        self.preset(cx, 0, false);
         self.ui.piano(ids!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        
         let ui = self.ui.clone();
         let piano = ui.piano(ids!(piano));
 
         ui.radio_button_set(ids_array!(oscillators.tab1, oscillators.tab2,))
-            .selected_to_visible(cx, &ui, actions, ids_array!(oscillators.osc1, oscillators.osc2,));
+            .selected_to_visible(
+                cx,
+                &ui,
+                actions,
+                ids_array!(oscillators.osc1, oscillators.osc2,),
+            );
 
         ui.radio_button_set(ids_array!(filter_modes.tab1, filter_modes.tab2,))
             .selected_to_visible(
@@ -514,16 +563,19 @@ impl MatchEvent for App {
         if ui.button_set(ids_array!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx);
         }
-        
-      
-        if let Some((index,km)) = ui.button_set(ids_array!(preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7,preset_8)).which_clicked_modifiers(&actions){
+
+        if let Some((index, km)) = ui
+            .button_set(ids_array!(
+                preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7, preset_8
+            ))
+            .which_clicked_modifiers(&actions)
+        {
             self.preset(cx, index, km.shift);
         }
-        
+
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &ui, Self::data_bind);
 
-        
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
 
         //sequencer.set_step(ironfish.sequencer);
@@ -549,19 +601,17 @@ impl MatchEvent for App {
         }
     }
 }
-impl App{
+impl App {
     #[cfg(target_arch = "wasm32")]
-    pub fn preset(&mut self, _cx: &mut Cx, _index: usize, _save: bool) {
-        
-    }
-    
+    pub fn preset(&mut self, _cx: &mut Cx, _index: usize, _save: bool) {}
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
         use std::fs::File;
         use std::io::prelude::*;
-        
+
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        
+
         let file_name = format!("examples/ironfish/preset_{}.txt", index);
         if save {
             let nodes = ironfish.settings.live_read();
@@ -571,8 +621,7 @@ impl App{
             log!("Saving preset {}", file_name);
             let mut file = File::create(&file_name).unwrap();
             file.write_all(&data).unwrap();
-        }
-        else if let Ok(mut file) = std::fs::File::open(&file_name) {
+        } else if let Ok(mut file) = std::fs::File::open(&file_name) {
             log!("Loading preset {}", file_name);
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
@@ -583,12 +632,10 @@ impl App{
                     ironfish.settings.apply_over(cx, &nodes);
                     self.init_ui_state(cx);
                     //self.imgui.root_frame().bind_read(cx, &nodes);
-                }
-                else {
+                } else {
                     log!("Error decompressing preset");
                 }
-            }
-            else {
+            } else {
                 log!("Error base64 decoding preset");
             }
         }

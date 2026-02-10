@@ -113,23 +113,23 @@
 /// feature (to maintain minimum rust version support).
 #[macro_export]
 macro_rules! offset_of {
-  ($instance:expr, $Type:path, $field:tt) => {{
-    #[forbid(safe_packed_borrows)]
-    {
-      // This helps us guard against field access going through a Deref impl.
-      #[allow(clippy::unneeded_field_pattern)]
-      let $Type { $field: _, .. };
-      let reference: &$Type = &$instance;
-      let address = reference as *const _ as usize;
-      let field_pointer = &reference.$field as *const _ as usize;
-      // These asserts/unwraps are compiled away at release, and defend against
-      // the case where somehow a deref impl is still invoked.
-      let result = field_pointer.checked_sub(address).unwrap();
-      assert!(result <= $crate::__core::mem::size_of::<$Type>());
-      result
-    }
-  }};
-  ($Type:path, $field:tt) => {{
-    $crate::offset_of!(<$Type as Default>::default(), $Type, $field)
-  }};
+    ($instance:expr, $Type:path, $field:tt) => {{
+        #[forbid(safe_packed_borrows)]
+        {
+            // This helps us guard against field access going through a Deref impl.
+            #[allow(clippy::unneeded_field_pattern)]
+            let $Type { $field: _, .. };
+            let reference: &$Type = &$instance;
+            let address = reference as *const _ as usize;
+            let field_pointer = &reference.$field as *const _ as usize;
+            // These asserts/unwraps are compiled away at release, and defend against
+            // the case where somehow a deref impl is still invoked.
+            let result = field_pointer.checked_sub(address).unwrap();
+            assert!(result <= $crate::__core::mem::size_of::<$Type>());
+            result
+        }
+    }};
+    ($Type:path, $field:tt) => {{
+        $crate::offset_of!(<$Type as Default>::default(), $Type, $field)
+    }};
 }

@@ -1,14 +1,6 @@
 #![allow(non_camel_case_types)]
 
-use std::os::raw::{
-    c_int,
-    c_uint,
-    c_long,
-    c_ulong,
-    c_void,
-    c_char,
-    c_uchar,
-};
+use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 
 pub type snd_pcm_info_t = _snd_pcm_info;
 pub type _snd_pcm_format = c_int;
@@ -28,7 +20,7 @@ pub type snd_pcm_sframes_t = c_long;
 pub type snd_output_t = _snd_output;
 pub type snd_seq_t = _snd_seq;
 pub const SND_SEQ_OPEN_OUTPUT: i32 = 1;
-pub const SND_SEQ_OPEN_INPUT: i32 = 2; 
+pub const SND_SEQ_OPEN_INPUT: i32 = 2;
 pub const SND_SEQ_OPEN_DUPLEX: i32 = SND_SEQ_OPEN_OUTPUT | SND_SEQ_OPEN_INPUT;
 
 pub const SND_SEQ_PORT_CAP_READ: c_uint = 1 << 0;
@@ -37,7 +29,7 @@ pub const SND_SEQ_PORT_CAP_SUBS_READ: c_uint = 1 << 5;
 pub const SND_SEQ_PORT_CAP_SUBS_WRITE: c_uint = 1 << 6;
 pub const SND_SEQ_PORT_CAP_NO_EXPORT: c_uint = 1 << 7;
 pub const SND_SEQ_PORT_TYPE_APPLICATION: c_uint = 1 << 20;
-pub const SND_SEQ_PORT_TYPE_MIDI_GENERIC:c_uint = 1 << 1;
+pub const SND_SEQ_PORT_TYPE_MIDI_GENERIC: c_uint = 1 << 1;
 pub const SND_SEQ_CLIENT_SYSTEM: u8 = 0;
 pub const SND_SEQ_PORT_SYSTEM_ANNOUNCE: u8 = 1;
 pub const SND_SEQ_USER_CLIENT: snd_seq_client_type = 1;
@@ -46,8 +38,8 @@ pub type snd_seq_client_type = c_uint;
 pub use self::snd_seq_client_type as snd_seq_client_type_t;
 
 pub const SND_SEQ_ADDRESS_SUBSCRIBERS: c_uint = 254;
-pub const SND_SEQ_ADDRESS_UNKNOWN: c_uint =	253;
-pub const SND_SEQ_QUEUE_DIRECT: c_uint =	253;
+pub const SND_SEQ_ADDRESS_UNKNOWN: c_uint = 253;
+pub const SND_SEQ_QUEUE_DIRECT: c_uint = 253;
 
 pub type snd_seq_event_type = u8;
 pub const SND_SEQ_EVENT_NOTEON: snd_seq_event_type = 6;
@@ -281,122 +273,106 @@ pub type snd_seq_port_info_t = _snd_seq_port_info;
 
 #[link(name = "asound")]
 extern "C" {
-    
+
     pub fn snd_seq_open(
         handle: *mut *mut snd_seq_t,
         name: *const u8,
         streams: c_int,
         mode: c_int,
     ) -> c_int;
-    
+
     pub fn snd_card_next(card: *mut c_int) -> c_int;
-    
+
     pub fn snd_strerror(errnum: c_int) -> *const c_char;
-    
-    pub fn snd_ctl_open(
-        ctl: *mut *mut snd_ctl_t,
-        name: *const u8,
-        mode: c_int,
-    ) -> c_int;
-    
-    pub fn snd_ctl_pcm_next_device(
-        ctl: *mut snd_ctl_t,
-        device: *mut c_int,
-    ) -> c_int;
-    
+
+    pub fn snd_ctl_open(ctl: *mut *mut snd_ctl_t, name: *const u8, mode: c_int) -> c_int;
+
+    pub fn snd_ctl_pcm_next_device(ctl: *mut snd_ctl_t, device: *mut c_int) -> c_int;
+
     pub fn snd_device_name_hint(
         card: c_int,
         iface: *const u8,
         hints: *mut *mut *mut c_void,
     ) -> c_int;
-    
-    pub fn snd_device_name_get_hint(
-        hint: *const c_void,
-        id: *const u8,
-    ) -> *mut c_char;
-    
+
+    pub fn snd_device_name_get_hint(hint: *const c_void, id: *const u8) -> *mut c_char;
+
     pub fn snd_pcm_open(
         pcm: *mut *mut snd_pcm_t,
         name: *const u8,
         stream: snd_pcm_stream_t,
         mode: c_int,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_malloc(ptr: *mut *mut snd_pcm_hw_params_t) -> c_int;
-    
-    pub fn snd_pcm_hw_params_any(
-        pcm: *mut snd_pcm_t,
-        params: *mut snd_pcm_hw_params_t,
-    ) -> c_int;
-    
+
+    pub fn snd_pcm_hw_params_any(pcm: *mut snd_pcm_t, params: *mut snd_pcm_hw_params_t) -> c_int;
+
     pub fn snd_pcm_hw_params_set_access(
         pcm: *mut snd_pcm_t,
         params: *mut snd_pcm_hw_params_t,
         _access: snd_pcm_access_t,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_set_format(
         pcm: *mut snd_pcm_t,
         params: *mut snd_pcm_hw_params_t,
         val: snd_pcm_format_t,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_set_rate_near(
         pcm: *mut snd_pcm_t,
         params: *mut snd_pcm_hw_params_t,
         val: *mut c_uint,
         dir: *mut c_int,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_set_channels(
         pcm: *mut snd_pcm_t,
         params: *mut snd_pcm_hw_params_t,
         val: c_uint,
     ) -> c_int;
-    
-    pub fn snd_pcm_hw_params(
-        pcm: *mut snd_pcm_t,
-        params: *mut snd_pcm_hw_params_t,
-    ) -> c_int;
-    
+
+    pub fn snd_pcm_hw_params(pcm: *mut snd_pcm_t, params: *mut snd_pcm_hw_params_t) -> c_int;
+
     pub fn snd_pcm_hw_params_set_rate_resample(
         pcm: *mut snd_pcm_t,
         params: *mut snd_pcm_hw_params_t,
         val: c_uint,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_get_buffer_size(
         params: *const snd_pcm_hw_params_t,
         val: *mut snd_pcm_uframes_t,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_free(obj: *mut snd_pcm_hw_params_t);
-    
+
     pub fn snd_pcm_prepare(pcm: *mut snd_pcm_t) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_get_channels(
         params: *const snd_pcm_hw_params_t,
         val: *mut c_uint,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_get_rate(
         params: *const snd_pcm_hw_params_t,
         val: *mut c_uint,
         dir: *mut c_int,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_get_period_size(
         params: *const snd_pcm_hw_params_t,
         frames: *mut snd_pcm_uframes_t,
         dir: *mut c_int,
     ) -> c_int;
-    
+
     pub fn snd_pcm_hw_params_get_period_time(
         params: *const snd_pcm_hw_params_t,
         val: *mut c_uint,
         dir: *mut c_int,
     ) -> c_int;
-    
+
     pub fn snd_pcm_writei(
         pcm: *mut snd_pcm_t,
         buffer: *const c_void,
@@ -413,110 +389,80 @@ extern "C" {
         params: *mut snd_pcm_hw_params_t,
         val: *mut snd_pcm_uframes_t,
     ) -> c_int;
-    
+
     pub fn snd_pcm_readi(
         pcm: *mut snd_pcm_t,
         buffer: *mut c_void,
         size: snd_pcm_uframes_t,
     ) -> snd_pcm_sframes_t;
-    
-    pub fn snd_seq_set_client_name(
-        seq: *mut snd_seq_t,
-        name: *const u8,
-    ) -> c_int;
-    
+
+    pub fn snd_seq_set_client_name(seq: *mut snd_seq_t, name: *const u8) -> c_int;
+
     pub fn snd_seq_create_simple_port(
         seq: *mut snd_seq_t,
         name: *const u8,
         caps: c_uint,
         type_: c_uint,
     ) -> c_int;
-    
-    pub fn snd_seq_port_subscribe_malloc(
-        ptr: *mut *mut snd_seq_port_subscribe_t,
-    ) -> c_int;
-    
-    
-    pub fn snd_seq_client_info_malloc(
-        ptr: *mut *mut snd_seq_client_info_t,
-    ) -> c_int;
-    
+
+    pub fn snd_seq_port_subscribe_malloc(ptr: *mut *mut snd_seq_port_subscribe_t) -> c_int;
+
+    pub fn snd_seq_client_info_malloc(ptr: *mut *mut snd_seq_client_info_t) -> c_int;
+
     pub fn snd_seq_port_info_malloc(ptr: *mut *mut snd_seq_port_info_t) -> c_int;
-    
+
     pub fn snd_seq_port_subscribe_set_sender(
         info: *mut snd_seq_port_subscribe_t,
         addr: *const snd_seq_addr_t,
     );
-    
+
     pub fn snd_seq_port_subscribe_set_dest(
         info: *mut snd_seq_port_subscribe_t,
         addr: *const snd_seq_addr_t,
     );
-    
+
     pub fn snd_seq_subscribe_port(
         handle: *mut snd_seq_t,
         sub: *mut snd_seq_port_subscribe_t,
     ) -> c_int;
-    
+
     pub fn snd_seq_client_id(handle: *mut snd_seq_t) -> c_int;
-    
-    pub fn snd_seq_client_info_set_client(
-        info: *mut snd_seq_client_info_t,
-        client: c_int,
-    );
-    
+
+    pub fn snd_seq_client_info_set_client(info: *mut snd_seq_client_info_t, client: c_int);
+
     pub fn snd_seq_query_next_client(
         handle: *mut snd_seq_t,
         info: *mut snd_seq_client_info_t,
     ) -> c_int;
-    
-    pub fn snd_seq_client_info_get_client(
-        info: *const snd_seq_client_info_t,
-    ) -> c_int;
-    
-    pub fn snd_seq_port_info_set_client(
-        info: *mut snd_seq_port_info_t,
-        client: c_int,
-    );
-    
+
+    pub fn snd_seq_client_info_get_client(info: *const snd_seq_client_info_t) -> c_int;
+
+    pub fn snd_seq_port_info_set_client(info: *mut snd_seq_port_info_t, client: c_int);
+
     pub fn snd_seq_port_info_set_port(info: *mut snd_seq_port_info_t, port: c_int);
-    
-    pub fn snd_seq_query_next_port(
-        handle: *mut snd_seq_t,
-        info: *mut snd_seq_port_info_t,
-    ) -> c_int;
-    
+
+    pub fn snd_seq_query_next_port(handle: *mut snd_seq_t, info: *mut snd_seq_port_info_t)
+        -> c_int;
+
     pub fn snd_seq_port_info_get_addr(info: *const snd_seq_port_info_t) -> *const snd_seq_addr_t;
-    
-    pub fn snd_seq_client_info_get_name(
-        info: *mut snd_seq_client_info_t,
-    ) -> *const c_char;
-    
+
+    pub fn snd_seq_client_info_get_name(info: *mut snd_seq_client_info_t) -> *const c_char;
+
     pub fn snd_seq_client_info_get_type(
         info: *const snd_seq_client_info_t,
     ) -> snd_seq_client_type_t;
-    
-    pub fn snd_seq_port_info_get_capability(
-        info: *const snd_seq_port_info_t,
-    ) -> c_uint;
-    
-    pub fn snd_seq_port_info_get_name(
-        info: *const snd_seq_port_info_t,
-    ) -> *const c_char;
-    
+
+    pub fn snd_seq_port_info_get_capability(info: *const snd_seq_port_info_t) -> c_uint;
+
+    pub fn snd_seq_port_info_get_name(info: *const snd_seq_port_info_t) -> *const c_char;
+
     pub fn snd_seq_unsubscribe_port(
         handle: *mut snd_seq_t,
         sub: *mut snd_seq_port_subscribe_t,
     ) -> c_int;
-    
-    pub fn snd_seq_event_input(
-        handle: *mut snd_seq_t,
-        ev: *mut *mut snd_seq_event_t,
-    ) -> c_int;
-    pub fn snd_midi_event_new(
-        bufsize: usize,
-        rdev: *mut *mut snd_midi_event_t,
-    ) -> c_int;
+
+    pub fn snd_seq_event_input(handle: *mut snd_seq_t, ev: *mut *mut snd_seq_event_t) -> c_int;
+    pub fn snd_midi_event_new(bufsize: usize, rdev: *mut *mut snd_midi_event_t) -> c_int;
     pub fn snd_midi_event_free(dev: *mut snd_midi_event_t);
     pub fn snd_midi_event_init(dev: *mut snd_midi_event_t);
     pub fn snd_midi_event_reset_encode(dev: *mut snd_midi_event_t);
@@ -526,9 +472,5 @@ extern "C" {
         count: c_long,
         ev: *mut snd_seq_event_t,
     ) -> c_long;
-    pub fn snd_seq_event_output_direct(
-        handle: *mut snd_seq_t,
-        ev: *mut snd_seq_event_t,
-    ) -> c_int;
+    pub fn snd_seq_event_output_direct(handle: *mut snd_seq_t, ev: *mut snd_seq_event_t) -> c_int;
 }
-

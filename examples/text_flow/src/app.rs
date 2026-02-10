@@ -1,24 +1,24 @@
 use makepad_widgets::*;
-   
-live_design!{
+
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
-    
+
     App = {{App}} {
 
-        ui: <Window>{ 
+        ui: <Window>{
             show_bg: true
             width: Fill,
             height: Fill
-            
+
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     // test
                     return mix(#7, #3, self.pos.y);
                 }
             }
-            
+
             body = <ScrollXYView>{
                 flow: Down,
                 spacing:10,
@@ -50,8 +50,8 @@ live_design!{
                     Button = <Button> {
                         height:40
                         text: "Helloworld"
-                    }  
-                    body:" 
+                    }
+                    body:"
                     <h1>hi</h1>
                     <p>hello</p>
                     Normal <u>underlined html</u> <s>strike</s> text hello world<ol>
@@ -105,15 +105,17 @@ live_design!{
             }
         }
     }
-}  
-              
-app_main!(App); 
- 
+}
+
+app_main!(App);
+
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
-    #[rust] counter: usize,
- }
+    #[live]
+    ui: WidgetRef,
+    #[rust]
+    counter: usize,
+}
 
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
@@ -121,15 +123,14 @@ impl LiveRegister for App {
     }
 }
 
-impl MatchEvent for App{
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+impl MatchEvent for App {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(ids!(button1)).clicked(&actions) {
-            log!("BUTTON CLICKED {}", self.counter); 
+            log!("BUTTON CLICKED {}", self.counter);
             self.counter += 1;
             let label = self.ui.label(ids!(label1));
-            label.set_text(cx,&format!("Counter: {}", self.counter));
+            label.set_text(cx, &format!("Counter: {}", self.counter));
             //log!("TOTAL : {}",TrackingHeap.total());
-            
         }
     }
 }
@@ -139,7 +140,7 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
-} 
+}
 /*
 
 
@@ -162,12 +163,12 @@ impl TrackingHeapWrap {
             total: AtomicU64::new(0)
         }
     }
-    
+
     // Returns the current count.
     pub fn count(&self) -> u64 {
         self.count.load(Ordering::Relaxed)
     }
-    
+
     pub fn total(&self) -> u64 {
         self.total.load(Ordering::Relaxed)
     }
@@ -176,13 +177,13 @@ impl TrackingHeapWrap {
 unsafe impl GlobalAlloc for TrackingHeapWrap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Pass everything to System.
-        self.count.fetch_add(1, Ordering::Relaxed); 
+        self.count.fetch_add(1, Ordering::Relaxed);
         self.total.fetch_add(layout.size() as u64, Ordering::Relaxed);
         System.alloc(layout)
     }
-        
+
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.count.fetch_sub(1, Ordering::Relaxed); 
+        self.count.fetch_sub(1, Ordering::Relaxed);
         self.total.fetch_sub(layout.size() as u64, Ordering::Relaxed);
         System.dealloc(ptr, layout)
     }

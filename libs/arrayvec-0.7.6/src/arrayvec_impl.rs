@@ -16,17 +16,13 @@ pub(crate) trait ArrayVecImpl {
     /// Return a slice containing all elements of the vector.
     fn as_slice(&self) -> &[Self::Item] {
         let len = self.len();
-        unsafe {
-            slice::from_raw_parts(self.as_ptr(), len)
-        }
+        unsafe { slice::from_raw_parts(self.as_ptr(), len) }
     }
 
     /// Return a mutable slice containing all elements of the vector.
     fn as_mut_slice(&mut self) -> &mut [Self::Item] {
         let len = self.len();
-        unsafe {
-            std::slice::from_raw_parts_mut(self.as_mut_ptr(), len)
-        }
+        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), len) }
     }
 
     /// Return a raw pointer to the vector's buffer.
@@ -84,4 +80,3 @@ pub(crate) trait ArrayVecImpl {
         }
     }
 }
-

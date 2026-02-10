@@ -87,14 +87,9 @@ impl Arc {
             - rx.powi(2) * transformed_point.y.powi(2)
             - ry.powi(2) * transformed_point.x.powi(2);
         let c_square_denominator =
-            rx.powi(2) * transformed_point.y.powi(2)
-            + ry.powi(2) * transformed_point.x.powi(2);
+            rx.powi(2) * transformed_point.y.powi(2) + ry.powi(2) * transformed_point.x.powi(2);
         let c_radicand = (c_square_numerator / c_square_denominator).max(0.0);
-        let c_coefficient = if sweep != large_arc {
-            1.0
-        } else {
-            -1.0
-        } * c_radicand.sqrt();
+        let c_coefficient = if sweep != large_arc { 1.0 } else { -1.0 } * c_radicand.sqrt();
         let transformed_center = Point {
             x: c_coefficient * ((rx * transformed_point.y) / ry),
             y: c_coefficient * (-(ry * transformed_point.x) / rx),
@@ -190,22 +185,24 @@ impl Arc {
         let split_at = self.point_on_curve(t);
         let angle = self.start_angle + self.sweep_angle * t;
 
-        (Arc::new(
-            self.from,
-            split_at,
-            self.radius,
-            self.x_axis_rotation,
-            (angle - self.start_angle) > PI,
-            self.sweep,
-        ),
-        Arc::new(
-            split_at,
-            self.to,
-            self.radius,
-            self.x_axis_rotation,
-            (self.end_angle - angle) > PI,
-            self.sweep,
-        ))
+        (
+            Arc::new(
+                self.from,
+                split_at,
+                self.radius,
+                self.x_axis_rotation,
+                (angle - self.start_angle) > PI,
+                self.sweep,
+            ),
+            Arc::new(
+                split_at,
+                self.to,
+                self.radius,
+                self.x_axis_rotation,
+                (self.end_angle - angle) > PI,
+                self.sweep,
+            ),
+        )
     }
 
     pub fn linearize(self, epsilon: f64) -> Linearize {
@@ -218,9 +215,7 @@ impl Arc {
 
 fn angle_between(v0: Point, v1: Point) -> f64 {
     let adjacent = v0.x * v1.x + v0.y * v1.y;
-    let hypotenuse = (
-        (v0.x.powi(2) + v0.y.powi(2)) * (v1.x.powi(2) + v1.y.powi(2))
-    ).sqrt();
+    let hypotenuse = ((v0.x.powi(2) + v0.y.powi(2)) * (v1.x.powi(2) + v1.y.powi(2))).sqrt();
     let sign = if v0.x * v1.y - v0.y * v1.x < 0.0 {
         -1.0
     } else {

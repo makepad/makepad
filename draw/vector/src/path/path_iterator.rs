@@ -1,6 +1,6 @@
-use crate::path::{LinePathCommand, PathCommand};
 use crate::geometry::{Arc, CubicSegment, QuadraticSegment};
 use crate::internal_iter::InternalIterator;
+use crate::path::{LinePathCommand, PathCommand};
 
 /// An extension trait for iterators over path commands.
 pub trait PathIterator: InternalIterator<Item = PathCommand> {

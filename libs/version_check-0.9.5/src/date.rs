@@ -118,9 +118,7 @@ impl Date {
     /// assert!(!date.at_least("2024-08-18"));
     /// ```
     pub fn at_least(&self, date: &str) -> bool {
-        Date::parse(date)
-            .map(|date| self >= &date)
-            .unwrap_or(false)
+        Date::parse(date).map(|date| self >= &date).unwrap_or(false)
     }
 
     /// Returns `true` if `self` occurs on or before `date`.
@@ -143,9 +141,7 @@ impl Date {
     /// assert!(!date.at_most("2014-04-31"));
     /// ```
     pub fn at_most(&self, date: &str) -> bool {
-        Date::parse(date)
-            .map(|date| self <= &date)
-            .unwrap_or(false)
+        Date::parse(date).map(|date| self <= &date).unwrap_or(false)
     }
 
     /// Returns `true` if `self` occurs exactly on `date`.
@@ -168,9 +164,7 @@ impl Date {
     /// assert!(!date.exactly("2024-08-18"));
     /// ```
     pub fn exactly(&self, date: &str) -> bool {
-        Date::parse(date)
-            .map(|date| self == &date)
-            .unwrap_or(false)
+        Date::parse(date).map(|date| self == &date).unwrap_or(false)
     }
 }
 
@@ -186,9 +180,9 @@ mod tests {
     use super::Date;
 
     macro_rules! reflexive_display {
-        ($string:expr) => (
+        ($string:expr) => {
             assert_eq!(Date::parse($string).unwrap().to_string(), $string);
-        )
+        };
     }
 
     #[test]

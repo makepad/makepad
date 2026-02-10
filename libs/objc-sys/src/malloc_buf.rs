@@ -54,9 +54,7 @@ impl<T> Deref for MallocBuffer<T> {
         } else {
             self.ptr.0 as *const T
         };
-        unsafe {
-            slice::from_raw_parts(ptr, self.len)
-        }
+        unsafe { slice::from_raw_parts(ptr, self.len) }
     }
 }
 /*

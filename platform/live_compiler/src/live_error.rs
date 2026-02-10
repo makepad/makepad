@@ -1,21 +1,21 @@
 use {
-    std::fmt,
     crate::live_token::LiveTokenId,
-    crate::span::{TextSpan,TokenSpan},
-    makepad_live_tokenizer::{LiveErrorOrigin},
+    crate::span::{TextSpan, TokenSpan},
+    makepad_live_tokenizer::LiveErrorOrigin,
+    std::fmt,
 };
 
 #[derive(Clone)]
 pub enum LiveErrorSpan {
     Text(TextSpan),
-    Token(TokenSpan)
+    Token(TokenSpan),
 }
 
-impl LiveErrorSpan{
-    fn into_text_span(self)->Option<TextSpan>{
-        match self{
-            Self::Text(span)=>Some(span),
-            _=>None
+impl LiveErrorSpan {
+    fn into_text_span(self) -> Option<TextSpan> {
+        match self {
+            Self::Text(span) => Some(span),
+            _ => None,
         }
     }
 }
@@ -34,7 +34,10 @@ impl From<TokenSpan> for LiveErrorSpan {
 
 impl From<LiveTokenId> for LiveErrorSpan {
     fn from(val: LiveTokenId) -> Self {
-        LiveErrorSpan::Token(TokenSpan { token_id: val, len: 1 })
+        LiveErrorSpan::Token(TokenSpan {
+            token_id: val,
+            len: 1,
+        })
     }
 }
 
@@ -60,19 +63,16 @@ impl fmt::Display for LiveFileError {
             f,
             "{}:{}:{} - {}\n   origin: {}",
             self.file,
-            self.span.start.line+1,
-            self.span.start.column+1,
+            self.span.start.line + 1,
+            self.span.start.column + 1,
             self.message,
             self.origin
         )
     }
 }
 
-
-
-impl LiveError{
-    
-    pub fn into_live_file_error(self, file:&str)->LiveFileError{
+impl LiveError {
+    pub fn into_live_file_error(self, file: &str) -> LiveFileError {
         LiveFileError {
             origin: self.origin.clone(),
             file: file.to_string(),
@@ -88,10 +88,8 @@ impl fmt::Display for LiveError {
     }
 }
 
-
 impl fmt::Debug for LiveError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{} - origin: {} ", self.message, self.origin)
     }
 }
-

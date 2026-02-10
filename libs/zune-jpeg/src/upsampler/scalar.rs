@@ -7,7 +7,11 @@
  */
 
 pub fn upsample_horizontal(
-    input: &[i16], _ref: &[i16], _in_near: &[i16], _scratch: &mut [i16], output: &mut [i16]
+    input: &[i16],
+    _ref: &[i16],
+    _in_near: &[i16],
+    _scratch: &mut [i16],
+    output: &mut [i16],
 ) {
     assert_eq!(
         input.len() * 2,
@@ -54,7 +58,11 @@ pub fn upsample_horizontal(
     f_out[1] = i_last[1];
 }
 pub fn upsample_vertical(
-    input: &[i16], in_near: &[i16], in_far: &[i16], _scratch_space: &mut [i16], output: &mut [i16]
+    input: &[i16],
+    in_near: &[i16],
+    in_far: &[i16],
+    _scratch_space: &mut [i16],
+    output: &mut [i16],
 ) {
     assert_eq!(input.len() * 2, output.len());
     assert_eq!(in_near.len(), input.len());
@@ -75,14 +83,16 @@ pub fn upsample_vertical(
 }
 
 pub fn upsample_hv(
-    input: &[i16], in_near: &[i16], in_far: &[i16], scratch_space: &mut [i16], output: &mut [i16]
+    input: &[i16],
+    in_near: &[i16],
+    in_far: &[i16],
+    scratch_space: &mut [i16],
+    output: &mut [i16],
 ) {
-
     assert_eq!(input.len() * 4, output.len());
 
     assert!(input.len() * 2 <= scratch_space.len());
     let scratch_space = &mut scratch_space[..input.len() * 2];
-
 
     let mut t = [0];
     upsample_vertical(input, in_near, in_far, &mut t, scratch_space);
@@ -102,7 +112,7 @@ pub fn upsample_hv(
         &[],
         &[],
         &mut t,
-        &mut output[..output_half]
+        &mut output[..output_half],
     );
 
     upsample_horizontal(
@@ -110,13 +120,16 @@ pub fn upsample_hv(
         &[],
         &[],
         &mut t,
-        &mut output[output_half..]
+        &mut output[output_half..],
     );
 }
 
 pub fn upsample_generic(
-    input: &[i16], _in_near: &[i16], _in_far: &[i16], _scratch_space: &mut [i16],
-    output: &mut [i16]
+    input: &[i16],
+    _in_near: &[i16],
+    _in_far: &[i16],
+    _scratch_space: &mut [i16],
+    output: &mut [i16],
 ) {
     // use nearest sample
     let difference = output.len() / input.len();

@@ -101,9 +101,8 @@ impl Fonts {
     fn prepare_grayscale_texture(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let dirty_rect = rasterizer.grayscale_atlas_mut().take_dirty_image().bounds();
-        let pixels: Vec<u8> = unsafe {
-            mem::transmute(rasterizer.grayscale_atlas_mut().replace_pixels(Vec::new()))
-        };
+        let pixels: Vec<u8> =
+            unsafe { mem::transmute(rasterizer.grayscale_atlas_mut().replace_pixels(Vec::new())) };
         self.grayscale_texture.put_back_vec_u8(
             cx,
             pixels,
@@ -117,9 +116,8 @@ impl Fonts {
     fn prepare_color_texture(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let dirty_rect = rasterizer.color_atlas_mut().take_dirty_image().bounds();
-        let pixels: Vec<u32> = unsafe {
-            mem::transmute(rasterizer.color_atlas_mut().replace_pixels(Vec::new()))
-        };
+        let pixels: Vec<u32> =
+            unsafe { mem::transmute(rasterizer.color_atlas_mut().replace_pixels(Vec::new())) };
         self.color_texture.put_back_vec_u32(
             cx,
             pixels,
@@ -143,7 +141,9 @@ impl Fonts {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let pixels = self.grayscale_texture.take_vec_u8(cx);
         unsafe {
-            rasterizer.grayscale_atlas_mut().replace_pixels(mem::transmute(pixels))
+            rasterizer
+                .grayscale_atlas_mut()
+                .replace_pixels(mem::transmute(pixels))
         };
     }
 
@@ -151,7 +151,9 @@ impl Fonts {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let pixels = self.color_texture.take_vec_u32(cx);
         unsafe {
-            rasterizer.color_atlas_mut().replace_pixels(mem::transmute(pixels))
+            rasterizer
+                .color_atlas_mut()
+                .replace_pixels(mem::transmute(pixels))
         };
     }
 }

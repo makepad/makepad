@@ -38,11 +38,7 @@ macro_rules! defraw {
 ///
 /// Pointers must be valid. See `One::find_raw`.
 #[inline(always)]
-pub(crate) unsafe fn memchr_raw(
-    n1: u8,
-    start: *const u8,
-    end: *const u8,
-) -> Option<*const u8> {
+pub(crate) unsafe fn memchr_raw(n1: u8, start: *const u8, end: *const u8) -> Option<*const u8> {
     defraw!(One, find_raw, start, end, n1)
 }
 
@@ -52,11 +48,7 @@ pub(crate) unsafe fn memchr_raw(
 ///
 /// Pointers must be valid. See `One::rfind_raw`.
 #[inline(always)]
-pub(crate) unsafe fn memrchr_raw(
-    n1: u8,
-    start: *const u8,
-    end: *const u8,
-) -> Option<*const u8> {
+pub(crate) unsafe fn memrchr_raw(n1: u8, start: *const u8, end: *const u8) -> Option<*const u8> {
     defraw!(One, rfind_raw, start, end, n1)
 }
 
@@ -128,10 +120,6 @@ pub(crate) unsafe fn memrchr3_raw(
 ///
 /// Pointers must be valid. See `One::count_raw`.
 #[inline(always)]
-pub(crate) unsafe fn count_raw(
-    n1: u8,
-    start: *const u8,
-    end: *const u8,
-) -> usize {
+pub(crate) unsafe fn count_raw(n1: u8, start: *const u8, end: *const u8) -> usize {
     defraw!(One, count_raw, start, end, n1)
 }

@@ -19,7 +19,7 @@ impl Transform for PathCommand {
         match self {
             PathCommand::ArcTo(e, r, xr, l, s) => {
                 let rv = Vector { x: r.x, y: r.y }.transform(t);
-                let rn = Point { x: rv.x, y: rv. y };
+                let rn = Point { x: rv.x, y: rv.y };
                 PathCommand::ArcTo(e.transform(t), rn, xr, l, s)
             }
             PathCommand::MoveTo(p) => PathCommand::MoveTo(p.transform(t)),
@@ -41,4 +41,3 @@ impl Transform for PathCommand {
         *self = self.transform(t);
     }
 }
-

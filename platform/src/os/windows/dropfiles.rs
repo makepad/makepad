@@ -1,21 +1,16 @@
 use crate::{
-    log,
-    live_id::LiveId,
     event::DragItem,
+    live_id::LiveId,
+    log,
     windows::Win32::{
+        Foundation::HGLOBAL,
         System::{
             Com::STGMEDIUM,
-            Ole::ReleaseStgMedium,
             Memory::{
-                GlobalAlloc,
-                GlobalLock,
-                GlobalUnlock,
-                GlobalSize,
-                GMEM_ZEROINIT,
-                GMEM_FIXED,
+                GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_FIXED, GMEM_ZEROINIT,
             },
+            Ole::ReleaseStgMedium,
         },
-        Foundation::HGLOBAL,
     },
 };
 
@@ -23,7 +18,6 @@ use crate::{
 
 // convert incoming STGMEDIUM from internal or external source to DragItem
 pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
-
     // get size and raw pointer
     let hglobal_size = unsafe { GlobalSize(medium.u.hGlobal) };
     let hglobal_raw_ptr = unsafe { GlobalLock(medium.u.hGlobal) };
@@ -48,10 +42,10 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
     */
 
     // read DROPFILES part
-    let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32,7) };
+    let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32, 7) };
     let names_offset = u32_slice[0];
     let has_wide_strings = u32_slice[4];
-    
+
     // guard against non-wide strings or unknown objects
     if has_wide_strings == 0 {
         log!("drag object should have wide strings");
@@ -70,17 +64,26 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
     let mut internal_id: Option<LiveId> = None;
     let u16_slice = if names_offset == 20 {
         // regular DROPFILES from external source
-        unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u16,(hglobal_size - 20) / 2) }
-    }
-    else {
-        let id = LiveId(((u32_slice[6] as u64)<<32)|(u32_slice[5] as u64));
-        if id.0 != 0{
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                (hglobal_raw_ptr as *mut u8).offset(20) as *mut u16,
+                (hglobal_size - 20) / 2,
+            )
+        }
+    } else {
+        let id = LiveId(((u32_slice[6] as u64) << 32) | (u32_slice[5] as u64));
+        if id.0 != 0 {
             internal_id = Some(id);
         }
         // internal DROPFILES with internal ID as well
         //let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
         //internal_id = Some(LiveId(u64_slice[0]));
-        unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(28) as *mut u16,(hglobal_size - 28) / 2) }            
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                (hglobal_raw_ptr as *mut u8).offset(28) as *mut u16,
+                (hglobal_size - 28) / 2,
+            )
+        }
     };
 
     // extract/decode filenames
@@ -93,9 +96,8 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
                 None => char::REPLACEMENT_CHARACTER,
             };
             filename.push(c);
-        }
-        else {
-            if (filename.len() == 0) && (filenames.len() > 0) { 
+        } else {
+            if (filename.len() == 0) && (filenames.len() > 0) {
                 break;
             }
             filenames.push(filename);
@@ -117,14 +119,15 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
         return None;
     }
 
-    Some(DragItem::FilePath { path: filenames[0].clone(),internal_id, })
+    Some(DragItem::FilePath {
+        path: filenames[0].clone(),
+        internal_id,
+    })
 }
 
 // create new internal DROPFILES structure from DragItem
 pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
-
-    if let DragItem::FilePath { path,internal_id, } = drag_item {
-
+    if let DragItem::FilePath { path, internal_id } = drag_item {
         // encode filename
         let mut encoded_filename: Vec<u16> = path.encode_utf16().collect();
         encoded_filename.push(0);
@@ -134,11 +137,11 @@ pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
 
         // create HGLOBAL to contain DROPFILES structure, the internal ID and this encoded filename
         let size_in_bytes = 28 + encoded_filename.len() * 2;
-        let hglobal = unsafe { GlobalAlloc(GMEM_ZEROINIT | GMEM_FIXED,size_in_bytes) }.unwrap();
+        let hglobal = unsafe { GlobalAlloc(GMEM_ZEROINIT | GMEM_FIXED, size_in_bytes) }.unwrap();
         let hglobal_raw_ptr = unsafe { GlobalLock(hglobal) };
 
         // initialize DROPFILES part
-        let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32,7) };
+        let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32, 7) };
         u32_slice[0] = 28; // offset to filename
         u32_slice[1] = 0;
         u32_slice[2] = 0;
@@ -147,8 +150,8 @@ pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
 
         // initialize internal ID
         if let Some(internal_id) = internal_id {
-            u32_slice[6] = (internal_id.0>>32) as u32;
-            u32_slice[5] = (internal_id.0&0xffff_ffff) as u32 ;
+            u32_slice[6] = (internal_id.0 >> 32) as u32;
+            u32_slice[5] = (internal_id.0 & 0xffff_ffff) as u32;
             //let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
             //u64_slice[0] = internal_id.0;
         }
@@ -166,9 +169,7 @@ pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
         unsafe { GlobalUnlock(hglobal) }.unwrap();
 
         Some(hglobal)
-    }
-
-    else {
+    } else {
         log!("only DragItem::FilePath supported");
         None
     }

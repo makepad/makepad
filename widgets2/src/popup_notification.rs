@@ -1,33 +1,28 @@
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    view::*,
-    widget::*
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, view::*, widget::*};
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.PopupNotificationBase = #(PopupNotification::register_widget(vm))
-    
+
     mod.widgets.PopupNotification = mod.widgets.PopupNotificationBase{
         width: Fill
         height: Fill
         flow: Overlay
         align: Align{x: 1.0 y: 0.0}
-        
+
         draw_bg +: {
             pixel: fn() {
                 return vec4(0. 0. 0. 0.0)
             }
         }
-        
+
         content := View{
             flow: Overlay
             width: Fit
             height: Fit
-            
+
             cursor: MouseCursor.Default
             capture_overload: true
         }
@@ -36,24 +31,34 @@ script_mod!{
 
 #[derive(Script, Widget)]
 pub struct PopupNotification {
-    #[source] source: ScriptObjectRef,
-    
+    #[source]
+    source: ScriptObjectRef,
+
     #[deref]
     view: View,
 
-    #[rust] draw_list: Option<DrawList2d>,
+    #[rust]
+    draw_list: Option<DrawList2d>,
 
-    #[live] draw_bg: DrawQuad,
+    #[live]
+    draw_bg: DrawQuad,
 
-    #[rust] opened: bool,
+    #[rust]
+    opened: bool,
 }
 
 impl ScriptHook for PopupNotification {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.draw_list = Some(DrawList2d::script_new(vm));
     }
-    
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         vm.with_cx_mut(|cx| {
             if let Some(draw_list) = &self.draw_list {
                 draw_list.redraw(cx);
@@ -74,7 +79,7 @@ impl Widget for PopupNotification {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         let draw_list = self.draw_list.as_mut().unwrap();
         draw_list.begin_overlay_reuse(cx);
-        
+
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, self.view.layout);
         self.draw_bg.begin(cx, self.view.walk, self.view.layout);

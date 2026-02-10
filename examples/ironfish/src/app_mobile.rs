@@ -1,34 +1,34 @@
 use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::widgets::*
     use link::theme::*
     use link::shaders::*
-    
+
     use makepad_example_ironfish::sequencer::Sequencer;
     use makepad_audio_widgets::display_audio::DisplayAudio;
     use makepad_audio_widgets::piano::Piano;
-    
+
     SPACING_OS = 40.0;
     SPACING_CONTROLS = 7.5;
     SPACING_BASE_PADDING = 6.0;
-    
+
     SSPACING_0 = 0.0
     SSPACING_1 = 4.0
     SSPACING_2 = (SSPACING_1 * 2)
     SSPACING_3 = (SSPACING_1 * 3)
     SSPACING_4 = (SSPACING_1 * 4)
-    
+
     SPACING_0 = {top: (SSPACING_0), right: (SSPACING_0), bottom: (SSPACING_0), left: (SSPACING_0)}
     SPACING_1 = {top: (SSPACING_1), right: (SSPACING_1), bottom: (SSPACING_1), left: (SSPACING_1)}
     SPACING_2 = {top: (SSPACING_2), right: (SSPACING_2), bottom: (SSPACING_2), left: (SSPACING_2)}
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
-    
+
     COLOR_CLEAR = #x3;
-    
+
     COLOR_PLAYARROW_INNER = #xFFFDDDFF;
-    
+
     COLOR_DOWN_OFF = #x00000000;
     COLOR_DOWN_1 = #x00000022;
     COLOR_DOWN_2 = #x00000044;
@@ -36,7 +36,7 @@ live_design!{
     COLOR_DOWN_4 = #x00000088;
     COLOR_DOWN_5 = #x000000AA;
     COLOR_DOWN_FULL = #x000000FF;
-    
+
     COLOR_UP_OFF = #xFFFFFF00;
     COLOR_UP_2 = #xFFFFFF11;
     COLOR_UP_3 = #xFFFFFF22;
@@ -46,29 +46,29 @@ live_design!{
     COLOR_UP_7 = #xFFFFFF88;
     COLOR_UP_8 = #xFFFFFFCC;
     COLOR_UP_FULL = #xFFFFFFFF;
-    
+
     GRADIENT_A = #x08221D;
     GRADIENT_B = #x3F3769;
-    
+
     FONT_SIZE_H1 = 15.0;
     FONT_SIZE_H2 = 12.0;
     FONT_SIZE_H3 = 9.0;
-    
+
     H2_TEXT_BOLD = {
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
-    
+
     H2_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
-    
+
     H3_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H3),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
-    
+
     ICO_ARP = dep("crate://self/resources/icons/Icon_Arp.svg")
     ICO_BROWSE = dep("crate://self/resources/icons/Icon_Browse.svg")
     ICO_DOWN = dep("crate://self/resources/icons/Icon_Down.svg")
@@ -97,10 +97,10 @@ live_design!{
     ICO_SETTINGS = dep("crate://self/resources/icons/Icon_Settings.svg")
     ICO_SHARE = dep("crate://self/resources/icons/Icon_Share.svg")
     ICO_UP = dep("crate://self/resources/icons/Icon_Up.svg")
-    
-    
+
+
     // WIDGETS
-    
+
     DividerX = <View> {
         width: Fit, height: Fill, margin: {top: 2.5, right: 1.0, bottom: 2.5, left: 1.0}
         flow: Right
@@ -109,7 +109,7 @@ live_design!{
             draw_bg: {color: (COLOR_UP_2)}
         }
     }
-    
+
     DividerY = <View> {
         width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
         flow: Down
@@ -118,27 +118,27 @@ live_design!{
             draw_bg: {color: (COLOR_DOWN_5)}
         }
     }
-    
+
     FillerX = <View> {
         width: Fill, height: Fit
     }
-    
+
     FillerY = <RoundedView> {
         width: Fit, height: 10
         draw_bg: {color: #f00}
     }
-    
+
     ElementBox = <View> {
         width: Fill, height: Fit
         flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}
         spacing: (SPACING_CONTROLS)
     }
-    
+
     FishPanelContainer = <View> {
         flow: Down
         width: Fill, height: Fit
     }
-    
+
     FishTab = <RadioButton> {
         height: Fill, width: Fit
         align: {x: 0.0, y: 0.5}
@@ -153,11 +153,11 @@ live_design!{
             text_style: <H3_TEXT_REGULAR> {}
         }
     }
-    
+
     FishDropDown = <DropDown> {
         width: Fit
         padding: {top: (SPACING_BASE_PADDING), right: 18.0, bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
-        
+
         draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
@@ -172,12 +172,12 @@ live_design!{
                 )
             }
         }
-        
+
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
                 width: Fit, height: Fit
-                
+
                     padding: {left: 15, top: 5, bottom: 5, right: 15
                 }
             }
@@ -199,23 +199,23 @@ live_design!{
             }
         }
     }
-    
+
     FishButton = <Button> {
-        
+
             align: {x: 0.5, y: 0.5
             padding: 10
         }
-        
+
         draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
             }
         }
-        
+
         draw_bg: {
             // instance pressed: 0.0
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -225,7 +225,7 @@ live_design!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                
+
                 sdf.fill(
                     mix(
                         (COLOR_UP_OFF),
@@ -233,13 +233,13 @@ live_design!{
                         self.pressed
                     )
                 );
-                
+
                 return sdf.result
             }
         }
-        
+
     }
-    
+
     IconLabelButton = <Button> {
         draw_icon: {
             svg_file: (ICO_REDO)
@@ -268,9 +268,9 @@ live_design!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                
+
                 sdf.fill((COLOR_UP_OFF));
-                
+
                 return sdf.result
             }
         }
@@ -288,7 +288,7 @@ live_design!{
     //         // }
     //     }
     // }
-    
+
     IconButton = <Button> {
         draw_icon: {
             svg_file: (ICO_REDO)
@@ -316,19 +316,19 @@ live_design!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                
+
                 sdf.fill((COLOR_UP_OFF));
-                
+
                 return sdf.result
             }
         }
     }
-    
-    
+
+
     FishSlider = <Slider> {
-        
+
             height: 36,
-        
+
         text: "Change Me"
         label_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_6)}
         text_input: {
@@ -350,26 +350,26 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let top = 25.0;
-                
+
                 let in_side = 5.0;
                 let x_offset = 5.0
-                
+
                 sdf.move_to(mix(in_side + x_offset, self.rect_size.x, self.bipolar), top);
-                
+
                 sdf.box(in_side, top - 5, self.rect_size.x - 2 - 2 * in_side, 10, 2) // ridge
                 sdf.fill(mix((COLOR_DOWN_1), (COLOR_DOWN_2), self.drag)); // ridge color
-                
+
                 let fill_x = self.slide_pos * (self.rect_size.x - in_side * 2 - 9) + x_offset;
                 sdf.line_to(fill_x + in_side, top);
-                
+
                 sdf.stroke_keep(mix((COLOR_UP_OFF), self.line_color, self.drag), 3.0);
                 sdf.stroke(mix(self.line_color, (COLOR_UP_4), self.drag), 2.0)
-                
+
                 return sdf.result
             }
         }
     }
-    
+
     TextSlider = <ElementBox> {
         slider = <FishSlider> {
             draw_bg: {
@@ -377,33 +377,33 @@ live_design!{
                 instance bipolar: 0.0
                 fn pixel(self) -> vec4 {
                     let nub_size = 3
-                    
+
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     let top = 25.0;
-                    
+
                     let in_side = 5.0;
                     let x_offset = 5.0
-                    
+
                     sdf.move_to(mix(in_side + x_offset, self.rect_size.x, self.bipolar), top);
-                    
+
                     return sdf.result
                 }
             }
         }
     }
-    
+
     InstrumentSlider = <ElementBox> {
         slider = <FishSlider> {
             draw_bg: {bipolar: 0.0}
         }
     }
-    
+
     InstrumentBipolarSlider = <ElementBox> {
         slider = <FishSlider> {
             draw_bg: {bipolar: 1.0}
         }
     }
-    
+
     InstrumentCheckbox = <ElementBox> {
         checkbox = <CheckBox> {
             padding: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}
@@ -417,7 +417,7 @@ live_design!{
                     sdf.box(left, c.y - sz, sz * 2.0, sz * 2.2, 1.5); // rounding = 3rd value
                     sdf.fill_keep(#f00)
                     sdf.stroke(mix((COLOR_DOWN_3), (COLOR_UP_FULL), pow(self.pos.y, 3.0)), 1.0) // outline
-                    
+
                     let szs = sz * 0.5;
                     let dx = 1.0;
                     sdf.move_to(left + 4.0, c.y);
@@ -433,7 +433,7 @@ live_design!{
             }
         }
     }
-    
+
     InstrumentDropdown = <ElementBox> {
         align: {y: 0.5 padding: 0, flow: Right}
         label = <Label> {
@@ -447,7 +447,7 @@ live_design!{
             margin: {left: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}
         }
     }
-    
+
     PlayPause = <InstrumentCheckbox> {
         width: Fit, height: Fit, margin: {top: 10, right: 0, bottom: 0, left: 0}
         align: {x: 0.0, y: 0.5}
@@ -462,7 +462,7 @@ live_design!{
                     let sz = 15.0;
                     let c = vec2(left + sz, sz);
                     // let c = vec2(left + sz, self.rect_size.y);
-                    
+
                     sdf.move_to(0.0, 0.0);
                     sdf.line_to(c.x * 0.75, c.y * 0.5);
                     sdf.line_to(0.0, c.y);
@@ -481,7 +481,7 @@ live_design!{
             }
         }
     }
-    
+
     FishToggle = <ElementBox> {
         padding: <SPACING_0> {}
         checkbox = <CheckBox> {
@@ -513,9 +513,9 @@ live_design!{
                     let left = sz + 1.;
                     let c = vec2(left + sz, self.rect_size.y * 0.5);
                     sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-                    
+
                     sdf.stroke_keep((COLOR_UP_3), 1.25)
-                    
+
                     sdf.fill((COLOR_UP_OFF))
                     let isz = sz * 0.65;
                     sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
@@ -533,21 +533,21 @@ live_design!{
             }
         }
     }
-    
+
     PresetFavorite = <CheckBox> {
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                
+
                 let left = 1;
                 let sz = self.rect_size.x / 2;
                 let c = vec2(sz, sz);
-                
+
                 let csz = 4.0;
                 sdf.circle(csz, csz, csz);
                 sdf.circle(csz * 3, csz, csz);
                 sdf.union();
-                
+
                 let squeeze = sz * 0.025;
                 let top_offset = 0.6;
                 // let top_offset = 0.6;
@@ -556,9 +556,9 @@ live_design!{
                 sdf.line_to(c.x - squeeze, c.y - (sz * top_offset));
                 sdf.line_to(c.x * 0.5, c.y);
                 sdf.close_path();
-                
+
                 sdf.fill_keep(mix(#141414, #888, self.active))
-                
+
                 return sdf.result
             }
         }
@@ -567,19 +567,19 @@ live_design!{
             color: (COLOR_UP_6)
         }
     }
-    
+
     SequencerControls = <View> {
         flow: Down, padding: 0, spacing: 0.0, align: {x: 0.0, y: 0.5}
         width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}
-        
+
         <View> {
             width: Fill, height: Fit, margin: 0.0
             align: {x: 0.0, y: 0.5}
-            spacing: (SPACING_CONTROLS), 
+            spacing: (SPACING_CONTROLS),
             padding: 0.0
 
             playpause = <PlayPause> {}
-            
+
             speed = <TextSlider> {
                 width: 110, height: 35, margin: 0.0
                 draw_bg: {color: (COLOR_UP_OFF)}
@@ -589,14 +589,14 @@ live_design!{
                     text: "BPM"
                 }
             }
-            
+
             <FillerX> {}
 
             <Image> {
                 source: dep("crate://self/resources/tinrs_mobile.png"),
                 width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0  }
             }
-            
+
             share = <IconButton> {
                 draw_icon: {
                     svg_file: (ICO_SHARE),
@@ -610,15 +610,15 @@ live_design!{
                 margin: { top: 0.0, right: -5, bottom: 0, left: 0 }
                 padding: 10.0
             }
-            
+
         }
-        
+
         <View> {
             width: Fill, height: Fit, margin: 0.0
             align: {x: 0.0, y: 0.5}
             spacing: 0.0,
             padding: 0.0
-            
+
             arp = <FishToggle> {
                 margin: 0.0
                 padding: <SPACING_0> {}
@@ -629,7 +629,7 @@ live_design!{
                 }
                 width: Fit, height: Fit, margin: <SPACING_0> {}
             }
-            
+
             rootnote = <InstrumentDropdown> {
                 height: Fit, width: Fit, margin: 0
                 align: {x: 0.0, y: 0.5 padding: 0}
@@ -640,7 +640,7 @@ live_design!{
                     values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
                 }
             }
-            
+
             scaletype = <InstrumentDropdown> {
                 height: Fit, width: 90.0
                 align: {x: 0.0, y: 0.5}
@@ -651,25 +651,25 @@ live_design!{
                     values: [Minor, Major, Dorian, Pentatonic]
                 }
             }
-            
+
             <FillerX> {}
-            
+
             grid_up = <IconButton> { draw_icon: { svg_file: (ICO_UP) }, icon_walk: {height: 7.5, width: Fit},  margin: 0.0  padding: 10.0 }
             grid_down = <IconButton> { draw_icon: { svg_file: (ICO_DOWN) }, icon_walk: {height: 7.5, width: Fit},  margin: 0.0  padding: 10.0 }
             clear_grid = <IconButton> { draw_icon: { svg_file: (ICO_SEQ_SWEEP) },  margin: { top: 0.0, right: -5, bottom: 0.0, left: 0.0  }, padding: 10.0  }
-            
+
         }
-        
+
     }
-    
+
     SequencerPanel = <View> {
         width: Fill, height: Fill, margin: 0.0
         flow: Down, spacing: 0.0
-        
+
         sequencer = <Sequencer> {
             width: Fill, height: Fill, margin: {top: 0, right: 0, bottom: 10, left: 0}
             //padding: 0.0
-            
+
             button: {
                 draw_button: {
                     fn pixel(self) -> vec4 {
@@ -708,33 +708,33 @@ live_design!{
                         )
                         return sdf.result
                     }
-                    
+
                 }
             }
         }
     }
-    
+
     ModeSequencer = <View> {
         width: Fill, height: Fill, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}
         flow: Down
-        
+
         <SequencerPanel> {height: Fill, width: Fill}
-        
+
         PresetNavigation = <View> {
             width: Fill, height: Fit
             flow: Right, align: {x: 0.0, y: 0.5}
-            
+
             <IconButton> {
                 draw_icon: {svg_file: (ICO_PREV)}
                 icon_walk: {width: 10, height: Fit}
             }
-            
+
             <View> {}
-            
+
             <View> {
                 width: Fit, height: Fit
                 flow: Right, align: {x: 0.0, y: 0.5}
-                
+
                 label = <Label> {
                     draw_text: {
                         text_style: {font_size: (FONT_SIZE_H1)},
@@ -743,33 +743,33 @@ live_design!{
                     text: "Preset Name"
                 }
             }
-            
+
             <View> {}
-            
+
             <IconButton> {
                 draw_icon: {svg_file: (ICO_NEXT)}
                 icon_walk: {width: 10, height: Fit}
             }
         }
     }
-    
+
     ChordButtonA = <Button> {
         width: Fill, height: Fill, margin: 2.5
         align: {x: 0.5, y: 0.5}
         padding: 0.0
-        
+
         draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
             }
         }
-        
+
         draw_bg: {
             instance pressed: 0.0
             instance color_default: 0.0
             instance COLOR_UP_3: 0.0
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -779,7 +779,7 @@ live_design!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                
+
                 sdf.fill(
                     mix(
                         self.color_default,
@@ -787,16 +787,16 @@ live_design!{
                         self.pressed
                     )
                 );
-                
+
                 return sdf.result
             }
-            
+
             color_default: (COLOR_UP_2),
             COLOR_UP_3: (COLOR_UP_3);
         }
-        
+
     }
-    
+
     ChordButtonB = <Button> {
         width: Fill, height: Fill, margin: {top: 2.5, right: 0.0, bottom: 2.5, left: 0}
         align: {x: 0.5, y: 0.5 }
@@ -807,12 +807,12 @@ live_design!{
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
             }
         }
-        
+
         draw_bg: {
             instance pressed: 0.0
             instance color_default: 0.0
             instance COLOR_UP_3: 0.0
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -822,7 +822,7 @@ live_design!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                
+
                 sdf.fill(
                     mix(
                         self.color_default,
@@ -830,16 +830,16 @@ live_design!{
                         self.pressed
                     )
                 );
-                
+
                 return sdf.result
             }
-            
+
             color_default: (COLOR_UP_OFF),
             COLOR_UP_3: (COLOR_UP_3);
         }
-        
+
     }
-    
+
     ChordStrip = <RoundedView> {
         width: Fill, height: Fill
         flow: Right, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5}
@@ -848,8 +848,8 @@ live_design!{
             color: (COLOR_UP_2),
             radius: 2.5
         }
-        
-        
+
+
         label = <Label> {
             width: 40, height: Fill, margin: 5.0
             draw_text: {
@@ -858,7 +858,7 @@ live_design!{
             }
             text: "change me"
         }
-        
+
         <ChordButtonA> {}
         <ChordButtonA> {}
         <ChordButtonA> {}
@@ -870,12 +870,12 @@ live_design!{
         <ChordButtonB> {}
         <DividerX> {}
         <ChordButtonB> {}
-        
+
     }
-    
+
     ChordPiano = <View> {
         flow: Down, spacing: (SPACING_CONTROLS), padding: {left: (SPACING_OS), right: (SPACING_OS)}
-        
+
         <ChordStrip> {label = {text: "Em"}}
         <ChordStrip> {label = {text: "Am"}}
         <ChordStrip> {label = {text: "Dm"}}
@@ -885,18 +885,18 @@ live_design!{
         <ChordStrip> {label = {text: "Bb"}}
         <ChordStrip> {label = {text: "Bdim"}}
     }
-    
+
     ModePlay = <View> {
         flow: Down, spacing: (SPACING_CONTROLS)
         width: Fill, height: Fill, margin: {top: 20}
-        
+
         <ChordPiano> {}
-        
+
         <View> {
             flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}
             spacing: 10
             width: Fill, height: Fit
-            
+
             <RoundedView> {
                 flow: Down
                 width: Fill, height: 200
@@ -904,26 +904,26 @@ live_design!{
                     color: (COLOR_UP_2),
                     radius: 5.0
                 }
-                
+
             }
-            
+
             <View> {
                 flow: Down
                 width: Fill, height: Fill
                 draw_bg: {color: #f00}
-                
+
                 crushamount = <FishSlider> {
                     text: "Crush"
                     slider = {
                         min: 0.0
                         max: 1.0
                         text: "Amount"
-                        
+
                     }
                 }
-                
+
                 <FillerY> {}
-                
+
                 chorusmix = <FishSlider> {
                     text: "Chorus"
                     slider = {
@@ -932,9 +932,9 @@ live_design!{
                         text: "Mix"
                     }
                 }
-                
+
                 <FillerY> {}
-                
+
                 delaysend = <FishSlider> {
                     text: "Delay",
                     slider = {
@@ -943,9 +943,9 @@ live_design!{
                         text: "Delay Send"
                     }
                 }
-                
+
                 <FillerY> {}
-                
+
                 porta = <FishSlider> {
                     text: "Portamento",
                     slider = {
@@ -954,38 +954,38 @@ live_design!{
                         text: "Portamento"
                     }
                 }
-                
+
             }
         }
-        
+
     }
-    
+
     FishCheckbox = <CheckBox> {
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                
+
                 let left = 1;
                 let sz = 8.0;
-                
+
                 let c = vec2(left + sz, self.rect_size.y * 0.5 - 2.0);
-                
+
                 sdf.box(left, c.y - sz, sz * 2.5, sz * 2.5, 2.0); // 3rd parameter == corner radius
                 sdf.fill_keep(mix((COLOR_UP_2), (COLOR_UP_7), self.active))
                 sdf.stroke(#x888, 0.0) // outline
-                
+
                 let szs = sz * 0.5;
                 let dx = 1.0;
-                
+
                 let offset = 1.5;
-                
+
                 sdf.move_to(left + 4.0 + offset, c.y + offset);
                 sdf.line_to(c.x + offset, c.y + szs + offset);
                 sdf.line_to(c.x + szs + offset, c.y - szs + offset);
-                
+
                 sdf.stroke_keep(mix(#fff0, (COLOR_DOWN_FULL), self.active), 1.75);
-                
-                
+
+
                 return sdf.result
             }
         }
@@ -997,15 +997,15 @@ live_design!{
     /*
     PresetListEntry = <SwipeListEntry> {
         flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5 align: {x: 0.5, y: 0.5}}
-         width: Fill, height: Fit, margin: 0 
-        
+         width: Fill, height: Fit, margin: 0
+
         center: <View> {
             flow: Down, align: {x: 0.5, y: 0.0 padding: {top: 0, right: 0, bottom: 0, left: 0}}
             width: Fill, height: Fit, margin: 0.0
             <View> {
                 flow: Right, align: {x: 0.5, y: 0.0 padding: 0.0}
                  width: Fill, height: Fit, margin: {top: 2.5, right: 0, bottom: 7.5, left: 0}
-                
+
                 label = <Button> {
                      width: Fill, height: Fill, margin: {top: 5 }
                     align: {x: 0.0, y: 0.5 padding: { left: 5 }}
@@ -1023,16 +1023,16 @@ live_design!{
                         }
                     }
                 }
-                
+
                 <RoundedView> {
                     width: Fit, height: Fit
-                    
+
                     align: {x: 0.0, y: 0.5}
                     // presetfavorite = <PresetFavorite> {
                     //     width: 30, height: 30, margin: {top: 15 }
                     //     text: " "
                     // }
-                    
+
                 <IconButton> {
                     draw_icon: {
                         svg_file: (ICO_FAV),
@@ -1050,7 +1050,7 @@ live_design!{
                     },
                     icon_walk: {height: 11.0, width: Fit}
             }
-                    
+
                 share = <IconButton> {
                     draw_icon: {
                         svg_file: (ICO_SHARE),
@@ -1068,21 +1068,21 @@ live_design!{
                     },
                     icon_walk: {height: 12.5, width: Fit}
                 }
-                    
+
                 }
             }
             <DividerY> { margin: 0.0 padding: 0.0}
         }
     }*/
-    
+
     PaginationButton = <FishButton> {
         text: "1"
         width: 40, height: 40, margin: {top: 20}
         draw_text: {text_style: {font_size: (FONT_SIZE_H2)}}
-        
+
         draw_bg: {
             // instance pressed: 0.0
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -1092,18 +1092,18 @@ live_design!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                
+
                 sdf.fill(mix((COLOR_UP_2), (COLOR_UP_3), self.pressed));
-                
+
                 return sdf.result;
             }
         }
     }
-    
+
     Pagination = <View> {
         width: Fill, height: Fit, margin: {bottom: (SPACING_OS)}
         flow: Right, align: {x: 0.5, y: 0.0 spacing: 10}
-        
+
         <PaginationButton> {text: "…"}
         <PaginationButton> {text: "3"}
         <PaginationButton> {text: "4"}
@@ -1119,24 +1119,24 @@ live_design!{
     }
     */
     PresetListFavs = <ScrollYView> {
-        
+
         width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}
         flow: Down, align: {x: 0.5, y: 0.0}
     }
-    
+
     ModePresetmanager = <RoundedView> {
         width: Fill, height: Fill
         flow: Down
-        
+
         <GradientYView> {
             draw_bg: {color: (COLOR_DOWN_OFF), color2: (COLOR_DOWN_2)}
             width: Fill, height: 50
             flow: Right
-            
+
             <View> {
                 width: Fill, margin: {top: 0, right: (SPACING_OS), bottom: 0, left: (SPACING_OS)}
                 align: {x: 0.0, y: 1.0}
-                
+
                 <TextInput> {
                     width: Fill, height: 50
                     align: {x: 0.0, y: 0.5}
@@ -1148,7 +1148,7 @@ live_design!{
                 filter_modes = <View> {
                     width: Fit
                     spacing: 10, align: {x: 0.0, y: 1.0}
-                    
+
                     tab1 = <FishTab> {
                         text: "All",
                         height: Fit, margin: 10
@@ -1162,49 +1162,49 @@ live_design!{
                     }
                 }
             }
-            
+
         }
         preset_pages = <View> {
             /*preset_list = <PresetList> {}*/
             tab2_frame = <PresetListFavs> {visible: false}
         }
-        
+
         // <Pagination> {}
     }
-    
+
     pub AppMobile = <View> {
         design_mode: false,
         width: Fill, height: Fill
         padding: 0, align: {x: 0.0, y: 0.0}
-        spacing: 0., 
+        spacing: 0.,
         flow: Down
-        
+
         <GradientYView> {
             draw_bg: {color: (GRADIENT_A), color2: (GRADIENT_B)}
             flow: Down, spacing: (SPACING_BASE_PADDING)
-            
+
             os_header_placeholder = <RoundedView> {
                 width: Fill, height: 50, margin: 0
                 flow: Right, spacing: (SPACING_BASE_PADDING), padding: 0
                 draw_bg: {color: (COLOR_DOWN_1)}
             }
-            
+
             <SequencerControls> {}
-            
+
             application_pages = <View> {
                 margin: 0.0
                 padding: 0.0
-                
+
                 tab1_frame = <ModeSequencer> {}
                 tab2_frame = <ModePlay> {visible: false} // TODO: enable again
                 tab3_frame = <ModePresetmanager> {visible: false} // TODO: enable again
             }
-            
+
             mobile_menu = <RoundedView> {
                 width: Fill, height: 120
                 flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20
                 draw_bg: {color: (COLOR_DOWN_2)}
-                
+
                 mobile_modes = <View> {
                     tab1 = <FishTab> {
                         animator: {active = {default: on}},

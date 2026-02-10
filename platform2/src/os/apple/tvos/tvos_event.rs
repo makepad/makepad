@@ -1,12 +1,6 @@
-use {
-    crate::{
-        window::WindowId,
-        event::{
-            WindowGeomChangeEvent,
-            TimerEvent,
-            GamepadConnectedEvent
-        },
-    }
+use crate::{
+    event::{GamepadConnectedEvent, TimerEvent, WindowGeomChangeEvent},
+    window::WindowId,
 };
 
 #[derive(Debug, Clone)]

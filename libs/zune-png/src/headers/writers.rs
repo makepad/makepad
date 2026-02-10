@@ -27,7 +27,7 @@ pub(crate) fn write_ihdr(ctx: &PngEncoder, output: &mut ZWriter<&mut Vec<u8>>) {
         ColorSpace::RGB => 2,
         ColorSpace::LumaA => 4,
         ColorSpace::RGBA => 6,
-        _ => unreachable!()
+        _ => unreachable!(),
     };
     output.write_u8(color_int);
     //compression method
@@ -63,7 +63,10 @@ pub fn write_iend(_: &PngEncoder, _: &mut ZWriter<&mut Vec<u8>>) {}
 /// This should be called with the appropriate inner function to write data
 ///
 pub fn write_header_fn<T: ZByteWriterTrait, F: Fn(&PngEncoder, &mut ZWriter<&mut Vec<u8>>)>(
-    v: &PngEncoder, writer: &mut ZWriter<T>, name: &[u8; 4], func: F
+    v: &PngEncoder,
+    writer: &mut ZWriter<T>,
+    name: &[u8; 4],
+    func: F,
 ) -> Result<(), ZByteIoError> {
     // We use a vec so that we make crc calculations easier for myself
     // and the problem is that how png chunks work is that you have to go back and write length
@@ -92,7 +95,9 @@ pub fn write_header_fn<T: ZByteWriterTrait, F: Fn(&PngEncoder, &mut ZWriter<&mut
 }
 
 pub(crate) fn write_chunk<T: ZByteWriterTrait>(
-    chunk: PngChunk, data: &[u8], writer: &mut ZWriter<T>
+    chunk: PngChunk,
+    data: &[u8],
+    writer: &mut ZWriter<T>,
 ) -> Result<(), ZByteIoError> {
     // write length
     writer.write_u32_be_err(chunk.length as u32)?;

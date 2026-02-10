@@ -24,14 +24,30 @@ pub struct StudioCodeEditor {
 }
 
 impl WidgetNode for StudioCodeEditor {
-    fn walk(&mut self, cx: &mut Cx) -> Walk { self.editor.walk(cx) }
-    fn area(&self) -> Area { self.editor.area() }
-    fn redraw(&mut self, cx: &mut Cx) { self.editor.redraw(cx) }
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef { self.editor.uid_to_widget(uid) }
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) { self.editor.find_widgets(path, cached, results) }
-    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) { self.editor.find_widgets_from_point(cx, point, found) }
-    fn visible(&self) -> bool { self.editor.visible() }
-    fn set_visible(&mut self, cx: &mut Cx, visible: bool) { self.editor.set_visible(cx, visible) }
+    fn walk(&mut self, cx: &mut Cx) -> Walk {
+        self.editor.walk(cx)
+    }
+    fn area(&self) -> Area {
+        self.editor.area()
+    }
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.editor.redraw(cx)
+    }
+    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
+        self.editor.uid_to_widget(uid)
+    }
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        self.editor.find_widgets(path, cached, results)
+    }
+    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
+        self.editor.find_widgets_from_point(cx, point, found)
+    }
+    fn visible(&self) -> bool {
+        self.editor.visible()
+    }
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.editor.set_visible(cx, visible)
+    }
 }
 
 impl Widget for StudioCodeEditor {

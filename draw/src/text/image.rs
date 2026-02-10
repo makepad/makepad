@@ -3,7 +3,10 @@ use {
         geom::{Point, Rect, Size},
         num::Zero,
     },
-    std::{mem, ops::{Index, IndexMut}},
+    std::{
+        mem,
+        ops::{Index, IndexMut},
+    },
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -227,7 +230,9 @@ impl Bgra {
         let g = u32::from(g);
         let r = u32::from(r);
         let a = u32::from(a);
-        Self { bits: (a << 24) | (r << 16) | (g << 8) | b }
+        Self {
+            bits: (a << 24) | (r << 16) | (g << 8) | b,
+        }
     }
 
     pub fn b(self) -> u8 {

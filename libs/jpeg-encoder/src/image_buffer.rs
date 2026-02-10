@@ -122,11 +122,11 @@ impl<'a> ImageBuffer for GrayImage<'a> {
 }
 
 #[inline(always)]
-fn get_line(data: &[u8], y: u16, width:u16, num_colors: usize) -> &[u8] {
-    let width= usize::from(width);
+fn get_line(data: &[u8], y: u16, width: u16, num_colors: usize) -> &[u8] {
+    let width = usize::from(width);
     let y = usize::from(y);
 
-    let start = y *width * num_colors;
+    let start = y * width * num_colors;
     let end = start + width * num_colors;
 
     &data[start..end]
@@ -154,11 +154,7 @@ macro_rules! ycbcr_image {
                 let line = get_line(self.0, y, self.width(), $num_colors);
 
                 for pixel in line.chunks_exact($num_colors) {
-                    let (y, cb, cr) = rgb_to_ycbcr(
-                        pixel[$o1],
-                        pixel[$o2],
-                        pixel[$o3],
-                    );
+                    let (y, cb, cr) = rgb_to_ycbcr(pixel[$o1], pixel[$o2], pixel[$o3]);
 
                     buffers[0].push(y);
                     buffers[1].push(cb);
@@ -246,13 +242,7 @@ impl<'a> ImageBuffer for CmykAsYcckImage<'a> {
         let line = get_line(self.0, y, self.width(), 4);
 
         for pixel in line.chunks_exact(4) {
-
-            let (y, cb, cr, k) = cmyk_to_ycck(
-                pixel[0],
-                pixel[1],
-                pixel[2],
-                pixel[3],
-            );
+            let (y, cb, cr, k) = cmyk_to_ycck(pixel[0], pixel[1], pixel[2], pixel[3]);
 
             buffers[0].push(y);
             buffers[1].push(cb);
@@ -281,7 +271,6 @@ impl<'a> ImageBuffer for YcckImage<'a> {
         let line = get_line(self.0, y, self.width(), 4);
 
         for pixel in line.chunks_exact(4) {
-
             buffers[0].push(pixel[0]);
             buffers[1].push(pixel[1]);
             buffers[2].push(pixel[2]);
@@ -301,7 +290,6 @@ mod tests {
 
     #[test]
     fn test_rgb_to_ycbcr() {
-
         assert_rgb_to_ycbcr([0, 0, 0], [0, 128, 128]);
         assert_rgb_to_ycbcr([255, 255, 255], [255, 128, 128]);
         assert_rgb_to_ycbcr([255, 0, 0], [76, 85, 255]);

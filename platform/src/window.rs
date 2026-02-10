@@ -1,18 +1,14 @@
-use {
-    crate::{
-        makepad_live_compiler::*,
-        makepad_live_id::*,
-        makepad_math::*,
-        makepad_error_log::*,
-        id_pool::*,
-        event::{
-            WindowGeom
-        },
-        pass::{Pass, PassId, CxPassParent},
-        cx::Cx,
-        cx_api::CxOsOp,
-        live_traits::*,
-    }
+use crate::{
+    cx::Cx,
+    cx_api::CxOsOp,
+    event::WindowGeom,
+    id_pool::*,
+    live_traits::*,
+    makepad_error_log::*,
+    makepad_live_compiler::*,
+    makepad_live_id::*,
+    makepad_math::*,
+    pass::{CxPassParent, Pass, PassId},
 };
 
 pub struct WindowHandle(PoolId);
@@ -20,12 +16,16 @@ pub struct WindowHandle(PoolId);
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct WindowId(pub usize, pub u64);
 
-impl WindowId{
-    pub fn id(&self)->usize{self.0}
+impl WindowId {
+    pub fn id(&self) -> usize {
+        self.0
+    }
 }
 
 impl WindowHandle {
-    pub fn window_id(&self) -> WindowId {WindowId(self.0.id, self.0.generation)}
+    pub fn window_id(&self) -> WindowId {
+        WindowId(self.0.id, self.0.generation)
+    }
 }
 
 #[derive(Default)]
@@ -34,48 +34,61 @@ impl CxWindowPool {
     fn alloc(&mut self) -> WindowHandle {
         WindowHandle(self.0.alloc())
     }
-    
-    pub fn window_id_contains(&self, pos:Vec2d)->(WindowId, Vec2d){
-        for (index,item) in self.0.pool.iter().enumerate(){
+
+    pub fn window_id_contains(&self, pos: Vec2d) -> (WindowId, Vec2d) {
+        for (index, item) in self.0.pool.iter().enumerate() {
             let window = &item.item;
-            if pos.x>= window.window_geom.position.x &&
-                pos.y>= window.window_geom.position.y && 
-                pos.x<= window.window_geom.position.x+window.window_geom.inner_size.x  &&
-                pos.y<= window.window_geom.position.y+window.window_geom.inner_size.y{
-                return (WindowId(index, item.generation), window.window_geom.position)
+            if pos.x >= window.window_geom.position.x
+                && pos.y >= window.window_geom.position.y
+                && pos.x <= window.window_geom.position.x + window.window_geom.inner_size.x
+                && pos.y <= window.window_geom.position.y + window.window_geom.inner_size.y
+            {
+                return (
+                    WindowId(index, item.generation),
+                    window.window_geom.position,
+                );
             }
         }
-        return (WindowId(0, self.0.pool[0].generation), self.0.pool[0].item.window_geom.position)
+        return (
+            WindowId(0, self.0.pool[0].generation),
+            self.0.pool[0].item.window_geom.position,
+        );
     }
-    
-    
-    pub fn relative_to_window_id(&self, pos:Vec2d)->(WindowId, Vec2d){
-        for (index,item) in self.0.pool.iter().enumerate(){
+
+    pub fn relative_to_window_id(&self, pos: Vec2d) -> (WindowId, Vec2d) {
+        for (index, item) in self.0.pool.iter().enumerate() {
             let window = &item.item;
-            if pos.x>= window.window_geom.position.x &&
-            pos.y>= window.window_geom.position.y && 
-            pos.x<= window.window_geom.position.x+window.window_geom.inner_size.x  &&
-            pos.y<= window.window_geom.position.x+window.window_geom.inner_size.y{
-                return (WindowId(index, item.generation), window.window_geom.position)
+            if pos.x >= window.window_geom.position.x
+                && pos.y >= window.window_geom.position.y
+                && pos.x <= window.window_geom.position.x + window.window_geom.inner_size.x
+                && pos.y <= window.window_geom.position.x + window.window_geom.inner_size.y
+            {
+                return (
+                    WindowId(index, item.generation),
+                    window.window_geom.position,
+                );
             }
         }
-        return (WindowId(0, self.0.pool[0].generation), self.0.pool[0].item.window_geom.position)
+        return (
+            WindowId(0, self.0.pool[0].generation),
+            self.0.pool[0].item.window_geom.position,
+        );
     }
-    
-    pub fn is_valid(&self, v: WindowId)->bool{
-        if v.0 < self.0.pool.len(){
-            if self.0.pool[v.0].generation == v.1{
-                return true
+
+    pub fn is_valid(&self, v: WindowId) -> bool {
+        if v.0 < self.0.pool.len() {
+            if self.0.pool[v.0].generation == v.1 {
+                return true;
             }
         }
         false
     }
-    
-    pub fn id_zero()->WindowId{
+
+    pub fn id_zero() -> WindowId {
         WindowId(0, 0)
     }
-    
-    pub fn from_usize(v:usize)->WindowId{
+
+    pub fn from_usize(v: usize) -> WindowId {
         WindowId(v, 0)
     }
 }
@@ -84,8 +97,11 @@ impl std::ops::Index<WindowId> for CxWindowPool {
     type Output = CxWindow;
     fn index(&self, index: WindowId) -> &Self::Output {
         let d = &self.0.pool[index.0];
-        if d.generation != index.1{
-            error!("Window id generation wrong {} {} {}", index.0, d.generation, index.1)
+        if d.generation != index.1 {
+            error!(
+                "Window id generation wrong {} {} {}",
+                index.0, d.generation, index.1
+            )
         }
         &d.item
     }
@@ -94,8 +110,11 @@ impl std::ops::Index<WindowId> for CxWindowPool {
 impl std::ops::IndexMut<WindowId> for CxWindowPool {
     fn index_mut(&mut self, index: WindowId) -> &mut Self::Output {
         let d = &mut self.0.pool[index.0];
-        if d.generation != index.1{
-            error!("Window id generation wrong {} {} {}", index.0, d.generation, index.1)
+        if d.generation != index.1 {
+            error!(
+                "Window id generation wrong {} {} {}",
+                index.0, d.generation, index.1
+            )
         }
         &mut d.item
     }
@@ -103,7 +122,6 @@ impl std::ops::IndexMut<WindowId> for CxWindowPool {
 
 impl LiveHook for WindowHandle {}
 impl LiveNew for WindowHandle {
-
     fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
@@ -111,30 +129,41 @@ impl LiveNew for WindowHandle {
         cxwindow.create_title = "Makepad".to_string();
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
-        cx.platform_ops.push(CxOsOp::CreateWindow(window.window_id()));
+        cx.platform_ops
+            .push(CxOsOp::CreateWindow(window.window_id()));
         window
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
             fields: Vec::new(),
             live_ignore: true,
-            type_name: id_lut!(Window)
+            type_name: id_lut!(Window),
         }
     }
 }
 
 impl LiveApply for WindowHandle {
     //fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
-    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
-        
+    fn apply(
+        &mut self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        start_index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
         if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(View));
+            cx.apply_error_wrong_type_for_struct(
+                live_error_origin!(),
+                start_index,
+                nodes,
+                live_id!(View),
+            );
             return nodes.skip_node(start_index);
         }
-        
+
         let mut index = start_index + 1;
         loop {
             if nodes[index].value.is_close() {
@@ -143,9 +172,9 @@ impl LiveApply for WindowHandle {
             }
             match nodes[index].id {
                 live_id!(inner_size) => {
-                    let v:Vec2f = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
+                    let v: Vec2f = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_inner_size = Some(v.into());
-                },
+                }
                 live_id!(title) => {
                     let v = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_title = v;
@@ -155,16 +184,16 @@ impl LiveApply for WindowHandle {
                     cx.windows[self.window_id()].kind_id = v;
                 }
                 live_id!(position) => {
-                    let v:Vec2f = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
+                    let v: Vec2f = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_position = Some(v.into());
                 }
                 live_id!(dpi_override) => {
-                    let v:f64 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
+                    let v: f64 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     //log!("DPI OVERRIDE {}", v);
                     cx.windows[self.window_id()].dpi_override = Some(v);
                 }
                 live_id!(topmost) => {
-                    let v:bool = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
+                    let v: bool = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     self.set_topmost(cx, v);
                 }
                 _ => {
@@ -182,7 +211,14 @@ impl WindowHandle {
         cx.windows[self.window_id()].main_pass_id = Some(pass.pass_id());
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
     }
-    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: Vec2d, position: Vec2d, is_fullscreen: bool, title: String) {
+    pub fn configure_window(
+        &mut self,
+        cx: &mut Cx,
+        inner_size: Vec2d,
+        position: Vec2d,
+        is_fullscreen: bool,
+        title: String,
+    ) {
         let window = &mut cx.windows[self.window_id()];
         window.create_title = title;
         window.create_position = Some(position);
@@ -192,51 +228,51 @@ impl WindowHandle {
     pub fn get_inner_size(&self, cx: &Cx) -> Vec2d {
         cx.windows[self.window_id()].get_inner_size()
     }
-    
+
     pub fn get_position(&self, cx: &Cx) -> Vec2d {
         cx.windows[self.window_id()].get_position()
     }
-    
-    pub fn set_kind_id(&mut self, cx: &mut Cx,kind_id:usize) {
+
+    pub fn set_kind_id(&mut self, cx: &mut Cx, kind_id: usize) {
         cx.windows[self.window_id()].kind_id = kind_id;
     }
-    
+
     pub fn minimize(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::MinimizeWindow(self.window_id()));
     }
-    
+
     pub fn maximize(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::MaximizeWindow(self.window_id()));
     }
-    
+
     pub fn fullscreen(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::FullscreenWindow(self.window_id()));
     }
-    
+
     pub fn normal(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::NormalizeWindow(self.window_id()));
     }
-    
+
     pub fn can_fullscreen(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.can_fullscreen
     }
-    
+
     pub fn is_fullscreen(&self, cx: &Cx) -> bool {
         cx.windows[self.window_id()].window_geom.is_fullscreen
     }
-    
+
     pub fn xr_is_presenting(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.xr_is_presenting
     }
-    
+
     pub fn is_topmost(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.is_topmost
     }
-    
+
     pub fn set_topmost(&mut self, cx: &mut Cx, set_topmost: bool) {
         cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
     }
-    
+
     pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
         cx.push_unique_platform_op(CxOsOp::ResizeWindow(self.window_id(), size));
     }
@@ -248,7 +284,7 @@ impl WindowHandle {
     pub fn restore(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::RestoreWindow(self.window_id()));
     }
-    
+
     pub fn close(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::CloseWindow(self.window_id()));
     }
@@ -269,19 +305,19 @@ pub struct CxWindow {
 }
 
 impl CxWindow {
-    pub fn remap_dpi_override(&self, pos:Vec2d)->Vec2d{
-        if let Some(dpi_override) = self.dpi_override{
-            if let Some(os_dpi_factor) = self.os_dpi_factor{
-                return pos * ( os_dpi_factor / dpi_override)
+    pub fn remap_dpi_override(&self, pos: Vec2d) -> Vec2d {
+        if let Some(dpi_override) = self.dpi_override {
+            if let Some(os_dpi_factor) = self.os_dpi_factor {
+                return pos * (os_dpi_factor / dpi_override);
             }
         }
-        return pos
+        return pos;
     }
-    
+
     pub fn get_inner_size(&self) -> Vec2d {
         self.window_geom.inner_size
     }
-    
+
     pub fn get_position(&self) -> Vec2d {
         self.window_geom.position
     }

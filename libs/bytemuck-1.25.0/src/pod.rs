@@ -58,25 +58,16 @@ unsafe impl Pod for f128 {}
 unsafe impl<T: Pod> Pod for Wrapping<T> {}
 
 #[cfg(feature = "pod_saturating")]
-unsafe impl<T: Pod> Pod for core::num::Saturating<T>{}
+unsafe impl<T: Pod> Pod for core::num::Saturating<T> {}
 
 #[cfg(feature = "unsound_ptr_pod_impl")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "unsound_ptr_pod_impl"))
-)]
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "unsound_ptr_pod_impl")))]
 unsafe impl<T: 'static> Pod for *mut T {}
 #[cfg(feature = "unsound_ptr_pod_impl")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "unsound_ptr_pod_impl"))
-)]
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "unsound_ptr_pod_impl")))]
 unsafe impl<T: 'static> Pod for *const T {}
 #[cfg(feature = "unsound_ptr_pod_impl")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "unsound_ptr_pod_impl"))
-)]
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "unsound_ptr_pod_impl")))]
 unsafe impl<T: 'static> PodInOption for NonNull<T> {}
 
 unsafe impl<T: ?Sized + 'static> Pod for PhantomData<T> {}
@@ -91,9 +82,8 @@ unsafe impl<T, const N: usize> Pod for [T; N] where T: Pod {}
 
 #[cfg(not(feature = "min_const_generics"))]
 impl_unsafe_marker_for_array!(
-  Pod, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-  20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48, 64, 96, 128, 256,
-  512, 1024, 2048, 4096
+    Pod, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28, 29, 30, 31, 32, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096
 );
 
 impl_unsafe_marker_for_simd!(
@@ -145,28 +135,18 @@ impl_unsafe_marker_for_simd!(
 
 #[rustversion::before(2026-01-27)] // See https://github.com/Lokathor/bytemuck/issues/343
 #[cfg(feature = "nightly_portable_simd")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "nightly_portable_simd"))
-)]
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "nightly_portable_simd")))]
 unsafe impl<T, const N: usize> Pod for core::simd::Simd<T, N>
 where
-  T: core::simd::SimdElement + Pod,
-  core::simd::LaneCount<N>: core::simd::SupportedLaneCount,
+    T: core::simd::SimdElement + Pod,
+    core::simd::LaneCount<N>: core::simd::SupportedLaneCount,
 {
 }
 
 #[rustversion::since(2026-01-27)] // See https://github.com/Lokathor/bytemuck/issues/343
 #[cfg(feature = "nightly_portable_simd")]
-#[cfg_attr(
-  feature = "nightly_docs",
-  doc(cfg(feature = "nightly_portable_simd"))
-)]
-unsafe impl<T, const N: usize> Pod for core::simd::Simd<T, N>
-where
-  T: core::simd::SimdElement + Pod,
-{
-}
+#[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "nightly_portable_simd")))]
+unsafe impl<T, const N: usize> Pod for core::simd::Simd<T, N> where T: core::simd::SimdElement + Pod {}
 
 impl_unsafe_marker_for_simd!(
   #[cfg(all(target_arch = "x86", feature = "avx512_simd"))]

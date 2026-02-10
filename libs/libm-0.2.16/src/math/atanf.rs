@@ -104,5 +104,9 @@ pub fn atanf(mut x: f32) -> f32 {
     }
     let id = id as usize;
     let z = i!(ATAN_HI, id) - ((x * (s1 + s2) - i!(ATAN_LO, id)) - x);
-    if sign { -z } else { z }
+    if sign {
+        -z
+    } else {
+        z
+    }
 }

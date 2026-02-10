@@ -11,7 +11,7 @@
 // #[doc(hidden)] + "pub use" is a workaround to namespace a macro.
 pub use crate::{
     __debug as debug, __error as error, __info as info, __log_enabled as log_enabled,
-    __trace as trace, __warn as warn
+    __trace as trace, __warn as warn,
 };
 
 #[repr(usize)]
@@ -21,7 +21,7 @@ pub enum Level {
     Warn,
     Info,
     Debug,
-    Trace
+    Trace,
 }
 
 #[doc(hidden)]

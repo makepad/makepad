@@ -99,8 +99,8 @@ pub fn idct_int(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize
         t1 = wa(t1, wa(p2, p4));
         t0 = wa(t0, wa(p1, p3));
 
-        in_vector[ptr]      = ws(wa(x0, t3), 0) >> 10;
-        in_vector[ptr + 8]  = ws(wa(x1, t2), 0) >> 10;
+        in_vector[ptr] = ws(wa(x0, t3), 0) >> 10;
+        in_vector[ptr + 8] = ws(wa(x1, t2), 0) >> 10;
         in_vector[ptr + 16] = ws(wa(x2, t1), 0) >> 10;
         in_vector[ptr + 24] = ws(wa(x3, t0), 0) >> 10;
         in_vector[ptr + 32] = ws(ws(x3, t0), 0) >> 10;
@@ -155,11 +155,11 @@ pub fn idct_int(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize
         t1 = wa(t1, wa(p2, p4));
         t0 = wa(t0, wa(p1, p3));
 
-            let out: &mut [i16; 8] = out_vector
-                .get_mut(pos..pos + 8)
-                .unwrap()
-                .try_into()
-                .unwrap();
+        let out: &mut [i16; 8] = out_vector
+            .get_mut(pos..pos + 8)
+            .unwrap()
+            .try_into()
+            .unwrap();
 
         out[0] = clamp(wa(x0, t3) >> 17);
         out[1] = clamp(wa(x1, t2) >> 17);
@@ -227,8 +227,8 @@ pub fn idct4x4(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize)
         let t1 = wa(p2, wm(i3, -1597));
         let t0 = wa(p1, wm(i4, -8034));
 
-        in_vector[ptr]      = wa(x0, t3) >> 10;
-        in_vector[ptr + 8]  = wa(x1, t2) >> 10;
+        in_vector[ptr] = wa(x0, t3) >> 10;
+        in_vector[ptr + 8] = wa(x1, t2) >> 10;
         in_vector[ptr + 16] = wa(x2, t1) >> 10;
         in_vector[ptr + 24] = wa(x3, t0) >> 10;
         in_vector[ptr + 32] = ws(x3, t0) >> 10;

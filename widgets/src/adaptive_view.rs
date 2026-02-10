@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{
-    makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent, WindowAction
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent, WindowAction};
 
 live_design! {
     link widgets;
@@ -12,7 +10,7 @@ live_design! {
     pub AdaptiveViewBase = {{AdaptiveView}} {}
     pub AdaptiveView = <AdaptiveViewBase> {
         width: Fill, height: Fill
-    
+
         Mobile = <View> {}
         Desktop = <View> {}
     }
@@ -237,7 +235,7 @@ impl Widget for AdaptiveView {
 impl WidgetMatchEvent for AdaptiveView {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         for action in actions {
-            // Window geometry has changed, reapply the selector. 
+            // Window geometry has changed, reapply the selector.
             // Will use the most recent parent size, might be updated on next draw call.
             if let WindowAction::WindowGeomChange(_ce) = action.as_widget_action().cast() {
                 self.apply_selector(cx);
@@ -325,10 +323,7 @@ impl AdaptiveView {
 impl AdaptiveViewRef {
     /// Set a variant selector for this widget.
     /// The selector is a closure that takes a `DisplayContext` and returns a `LiveId`, corresponding to the template to use.
-    pub fn set_variant_selector(
-        &self,
-        selector: impl FnMut(&mut Cx, &Vec2d) -> LiveId + 'static,
-    ) {
+    pub fn set_variant_selector(&self, selector: impl FnMut(&mut Cx, &Vec2d) -> LiveId + 'static) {
         let Some(mut inner) = self.borrow_mut() else {
             return;
         };

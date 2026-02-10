@@ -1,49 +1,43 @@
 use crate::makepad_draw::event::TouchUpdateEvent;
 
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    view::*,
-    label::*,
-    widget::*
-};
+use crate::{label::*, makepad_derive_widget::*, makepad_draw::*, view::*, widget::*};
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.TooltipBase = #(Tooltip::register_widget(vm))
-    
+
     mod.widgets.Tooltip = mod.widgets.TooltipBase{
         width: Fill
         height: Fill
-        
+
         flow: Overlay
         align: Align{x: 0.0 y: 0.0}
-        
+
         draw_bg +: {
             pixel: fn() {
                 return vec4(0. 0. 0. 0.0)
             }
         }
-        
+
         flow: Overlay
         width: Fit
         height: Fit
-            
+
         RoundedView{
             width: Fit
             height: Fit
-                
+
             padding: 16
-                
+
             draw_bg +: {
                 color: #fff
                 border_size: 1.0
                 border_color: #D0D5DD
                 radius: 2.
             }
-                
+
             tooltip_label := Label{
                 width: 270
                 draw_text +: {
@@ -58,27 +52,38 @@ script_mod!{
 
 #[derive(Script, Widget)]
 pub struct Tooltip {
-    #[source] source: ScriptObjectRef,
-    
+    #[source]
+    source: ScriptObjectRef,
+
     #[deref]
     view: View,
 
-    #[rust] draw_list: Option<DrawList2d>,
+    #[rust]
+    draw_list: Option<DrawList2d>,
 
-    #[live] draw_bg: DrawQuad,
+    #[live]
+    draw_bg: DrawQuad,
 
-    #[rust] opened: bool,
-    
+    #[rust]
+    opened: bool,
+
     /// The position where the tooltip should be displayed
-    #[rust] tooltip_pos: Vec2d,
+    #[rust]
+    tooltip_pos: Vec2d,
 }
 
 impl ScriptHook for Tooltip {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.draw_list = Some(DrawList2d::script_new(vm));
     }
-    
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         vm.with_cx_mut(|cx| {
             if let Some(draw_list) = &self.draw_list {
                 draw_list.redraw(cx);
@@ -106,21 +111,24 @@ impl Widget for Tooltip {
             | Event::MouseDown(_)
             | Event::MouseUp(_)
             | Event::Scroll(_) => {
-               // self.hide(cx);
+                // self.hide(cx);
             }
             Event::TouchUpdate(TouchUpdateEvent { touches, .. }) => {
-                if touches.iter().any(|tp| matches!(tp.state, event::TouchState::Start)) {
-                   //self.hide(cx);
+                if touches
+                    .iter()
+                    .any(|tp| matches!(tp.state, event::TouchState::Start))
+                {
+                    //self.hide(cx);
                 }
             }
-            _ => { }
+            _ => {}
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         let draw_list = self.draw_list.as_mut().unwrap();
         draw_list.begin_overlay_reuse(cx);
-        
+
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, self.view.layout);
         self.draw_bg.begin(cx, self.view.walk, self.view.layout);

@@ -3,7 +3,7 @@ use {
         geom::{Point, Rect, Size},
         image::{Bgra, SubimageMut},
     },
-    rustybuzz as rustybuzz,
+    rustybuzz,
     rustybuzz::ttf_parser,
 };
 
@@ -105,7 +105,9 @@ impl<'a> GlyphRasterImage<'a> {
                             }
                         }
                     }
-                    _ => println!("WARNING: encountered rasterized glyph with unsupported bit depth"),
+                    _ => {
+                        println!("WARNING: encountered rasterized glyph with unsupported bit depth")
+                    }
                 }
             }
             _ => println!("WARNING: encountered rasterized glyph with unsupported color type"),

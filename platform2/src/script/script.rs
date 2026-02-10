@@ -1,11 +1,11 @@
 use crate::script::net::*;
+use crate::script::res::*;
+use crate::script::run::*;
 use crate::script::task::*;
 use crate::script::timer::*;
-use crate::script::run::*;
-use crate::script::res::*;
 
 #[derive(Default)]
-pub struct CxScriptData{
+pub struct CxScriptData {
     pub random_seed: u64,
     pub tasks: CxScriptTasks,
     pub timers: CxScriptTimers,

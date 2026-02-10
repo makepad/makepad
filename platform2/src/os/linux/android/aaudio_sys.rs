@@ -26,21 +26,21 @@ pub type aaudio_performance_mode_t = i32;
 
 #[allow(non_snake_case)]
 pub type AAudioStream_dataCallback = ::std::option::Option<
-unsafe extern "C" fn(
-    stream: *mut AAudioStream,
-    userData: *mut c_void,
-    audioData: *mut c_void,
-    numFrames: i32,
-) -> aaudio_data_callback_result_t,
+    unsafe extern "C" fn(
+        stream: *mut AAudioStream,
+        userData: *mut c_void,
+        audioData: *mut c_void,
+        numFrames: i32,
+    ) -> aaudio_data_callback_result_t,
 >;
 
 #[allow(non_snake_case)]
 pub type AAudioStream_errorCallback = ::std::option::Option<
-unsafe extern "C" fn(
-    stream: *mut AAudioStream,
-    userData: *mut ::std::os::raw::c_void,
-    error: aaudio_result_t,
-),
+    unsafe extern "C" fn(
+        stream: *mut AAudioStream,
+        userData: *mut ::std::os::raw::c_void,
+        error: aaudio_result_t,
+    ),
 >;
 
 #[link(name = "aaudio")]
@@ -72,7 +72,7 @@ extern "C" {
         builder: *mut AAudioStreamBuilder,
         stream: *mut *mut AAudioStream,
     ) -> aaudio_result_t;
-    
+
     pub fn AAudioStream_requestStart(stream: *mut AAudioStream) -> aaudio_result_t;
     pub fn AAudioStream_close(stream: *mut AAudioStream) -> aaudio_result_t;
     pub fn AAudioStream_requestStop(stream: *mut AAudioStream) -> aaudio_result_t;
@@ -83,7 +83,7 @@ extern "C" {
         nextState: *mut aaudio_stream_state_t,
         timeoutNanoseconds: i64,
     ) -> aaudio_result_t;
-    
+
     pub fn AAudioStreamBuilder_setDataCallback(
         builder: *mut AAudioStreamBuilder,
         callback: AAudioStream_dataCallback,

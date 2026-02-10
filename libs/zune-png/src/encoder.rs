@@ -15,18 +15,18 @@ use crate::decoder::PngChunk;
 use crate::enums::{FilterMethod, PngChunkType};
 use crate::filters::{choose_compression_filter, filter_scanline};
 use crate::headers::writers::{
-    write_chunk, write_exif, write_gamma, write_header_fn, write_iend, write_ihdr
+    write_chunk, write_exif, write_gamma, write_header_fn, write_iend, write_ihdr,
 };
 
 #[derive(Default)]
 pub struct PngEncoder<'a> {
-    pub(crate) options:         EncoderOptions,
-    pub(crate) data:            &'a [u8],
-    pub(crate) row_filter:      FilterMethod,
-    pub(crate) encoded_chunks:  Vec<u8>,
+    pub(crate) options: EncoderOptions,
+    pub(crate) data: &'a [u8],
+    pub(crate) row_filter: FilterMethod,
+    pub(crate) encoded_chunks: Vec<u8>,
     pub(crate) filter_scanline: Vec<u8>,
-    pub(crate) gamma:           Option<f32>,
-    pub(crate) exif:            Option<&'a [u8]>
+    pub(crate) gamma: Option<f32>,
+    pub(crate) exif: Option<&'a [u8]>,
 }
 
 impl<'a> PngEncoder<'a> {
@@ -52,7 +52,8 @@ impl<'a> PngEncoder<'a> {
     }
 
     pub fn encode_headers<T: ZByteWriterTrait>(
-        &self, writer: &mut ZWriter<T>
+        &self,
+        writer: &mut ZWriter<T>,
     ) -> Result<(), ZByteIoError> {
         // write signature
         writer.write_u64_be(PNG_SIGNATURE);
@@ -85,7 +86,7 @@ impl<'a> PngEncoder<'a> {
         if self.data.len() != expected_data_size {
             return Err(ZByteIoError::NotEnoughBytes(
                 expected_data_size,
-                self.data.len()
+                self.data.len(),
             ));
         }
         let mut writer = ZWriter::new(sink);
@@ -146,14 +147,15 @@ impl<'a> PngEncoder<'a> {
                 previous_scanline,
                 filter_s,
                 filter,
-                components
+                components,
             );
         }
         // encode filtered scanline
         self.encoded_chunks = DeflateEncoder::new(&self.filter_scanline).encode_zlib();
     }
     fn write_idat_chunks<T: ZByteWriterTrait>(
-        &self, writer: &mut ZWriter<T>
+        &self,
+        writer: &mut ZWriter<T>,
     ) -> Result<(), ZByteIoError> {
         debug_assert!(!self.encoded_chunks.is_empty());
         // Most decoders love data in 8KB chunks, since
@@ -161,10 +163,10 @@ impl<'a> PngEncoder<'a> {
         // so let's try emulating that
         for chunk in self.encoded_chunks.chunks(8192) {
             let chunk_type = PngChunk {
-                length:     chunk.len(),
+                length: chunk.len(),
                 chunk_type: PngChunkType::IDAT, // not needed
-                chunk:      *b"IDAT",
-                crc:        0 // not needed
+                chunk: *b"IDAT",
+                crc: 0, // not needed
             };
             write_chunk(chunk_type, chunk, writer)?;
         }

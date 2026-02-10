@@ -100,10 +100,10 @@ use core::arch::x86;
 use core::arch::x86_64;
 //
 use core::{
-  marker::*,
-  mem::{align_of, size_of},
-  num::*,
-  ptr::*,
+    marker::*,
+    mem::{align_of, size_of},
+    num::*,
+    ptr::*,
 };
 
 // Used from macros to ensure we aren't using some locally defined name and
@@ -122,23 +122,25 @@ macro_rules! impl_unsafe_marker_for_array {
 /// A macro to transmute between two types without requiring knowing size
 /// statically.
 macro_rules! transmute {
-  ($val:expr) => {
-    ::core::mem::transmute_copy(&::core::mem::ManuallyDrop::new($val))
-  };
-  // This arm is for use in const contexts, where the borrow required to use
-  // transmute_copy poses an issue since the compiler hedges that the type
-  // being borrowed could have interior mutability.
-  ($srcty:ty; $dstty:ty; $val:expr) => {{
-    #[repr(C)]
-    union Transmute<A, B> {
-      src: ::core::mem::ManuallyDrop<A>,
-      dst: ::core::mem::ManuallyDrop<B>,
-    }
-    ::core::mem::ManuallyDrop::into_inner(
-      Transmute::<$srcty, $dstty> { src: ::core::mem::ManuallyDrop::new($val) }
-        .dst,
-    )
-  }};
+    ($val:expr) => {
+        ::core::mem::transmute_copy(&::core::mem::ManuallyDrop::new($val))
+    };
+    // This arm is for use in const contexts, where the borrow required to use
+    // transmute_copy poses an issue since the compiler hedges that the type
+    // being borrowed could have interior mutability.
+    ($srcty:ty; $dstty:ty; $val:expr) => {{
+        #[repr(C)]
+        union Transmute<A, B> {
+            src: ::core::mem::ManuallyDrop<A>,
+            dst: ::core::mem::ManuallyDrop<B>,
+        }
+        ::core::mem::ManuallyDrop::into_inner(
+            Transmute::<$srcty, $dstty> {
+                src: ::core::mem::ManuallyDrop::new($val),
+            }
+            .dst,
+        )
+    }};
 }
 
 /// A macro to implement marker traits for various simd types.
@@ -233,36 +235,36 @@ pub mod derive;
 #[cfg(feature = "derive")]
 #[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "derive")))]
 pub use bytemuck_derive::{
-  AnyBitPattern, ByteEq, ByteHash, CheckedBitPattern, Contiguous, NoUninit,
-  Pod, TransparentWrapper, Zeroable,
+    AnyBitPattern, ByteEq, ByteHash, CheckedBitPattern, Contiguous, NoUninit, Pod,
+    TransparentWrapper, Zeroable,
 };
 
 /// The things that can go wrong when casting between [`Pod`] data forms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PodCastError {
-  /// You tried to cast a reference into a reference to a type with a higher
-  /// alignment requirement but the input reference wasn't aligned.
-  TargetAlignmentGreaterAndInputNotAligned,
-  /// If the element size of a slice changes, then the output slice changes
-  /// length accordingly. If the output slice wouldn't be a whole number of
-  /// elements, then the conversion fails.
-  OutputSliceWouldHaveSlop,
-  /// When casting an individual `T`, `&T`, or `&mut T` value the
-  /// source size and destination size must be an exact match.
-  SizeMismatch,
-  /// For this type of cast the alignments must be exactly the same and they
-  /// were not so now you're sad.
-  ///
-  /// This error is generated **only** by operations that cast allocated types
-  /// (such as `Box` and `Vec`), because in that case the alignment must stay
-  /// exact.
-  AlignmentMismatch,
+    /// You tried to cast a reference into a reference to a type with a higher
+    /// alignment requirement but the input reference wasn't aligned.
+    TargetAlignmentGreaterAndInputNotAligned,
+    /// If the element size of a slice changes, then the output slice changes
+    /// length accordingly. If the output slice wouldn't be a whole number of
+    /// elements, then the conversion fails.
+    OutputSliceWouldHaveSlop,
+    /// When casting an individual `T`, `&T`, or `&mut T` value the
+    /// source size and destination size must be an exact match.
+    SizeMismatch,
+    /// For this type of cast the alignments must be exactly the same and they
+    /// were not so now you're sad.
+    ///
+    /// This error is generated **only** by operations that cast allocated types
+    /// (such as `Box` and `Vec`), because in that case the alignment must stay
+    /// exact.
+    AlignmentMismatch,
 }
 #[cfg(not(target_arch = "spirv"))]
 impl core::fmt::Display for PodCastError {
-  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-    write!(f, "{:?}", self)
-  }
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 #[cfg(feature = "extern_crate_std")]
 #[cfg_attr(feature = "nightly_docs", doc(cfg(feature = "extern_crate_std")))]
@@ -278,7 +280,7 @@ impl core::error::Error for PodCastError {}
 /// empty slice might not match the pointer value of the input reference.
 #[inline]
 pub fn bytes_of<T: NoUninit>(t: &T) -> &[u8] {
-  unsafe { internal::bytes_of(t) }
+    unsafe { internal::bytes_of(t) }
 }
 
 /// Re-interprets `&mut T` as `&mut [u8]`.
@@ -287,7 +289,7 @@ pub fn bytes_of<T: NoUninit>(t: &T) -> &[u8] {
 /// empty slice might not match the pointer value of the input reference.
 #[inline]
 pub fn bytes_of_mut<T: NoUninit + AnyBitPattern>(t: &mut T) -> &mut [u8] {
-  unsafe { internal::bytes_of_mut(t) }
+    unsafe { internal::bytes_of_mut(t) }
 }
 
 /// Re-interprets `&[u8]` as `&T`.
@@ -298,7 +300,7 @@ pub fn bytes_of_mut<T: NoUninit + AnyBitPattern>(t: &mut T) -> &mut [u8] {
 #[inline]
 #[cfg_attr(feature = "track_caller", track_caller)]
 pub fn from_bytes<T: AnyBitPattern>(s: &[u8]) -> &T {
-  unsafe { internal::from_bytes(s) }
+    unsafe { internal::from_bytes(s) }
 }
 
 /// Re-interprets `&mut [u8]` as `&mut T`.
@@ -309,7 +311,7 @@ pub fn from_bytes<T: AnyBitPattern>(s: &[u8]) -> &T {
 #[inline]
 #[cfg_attr(feature = "track_caller", track_caller)]
 pub fn from_bytes_mut<T: NoUninit + AnyBitPattern>(s: &mut [u8]) -> &mut T {
-  unsafe { internal::from_bytes_mut(s) }
+    unsafe { internal::from_bytes_mut(s) }
 }
 
 /// Reads from the bytes as if they were a `T`.
@@ -320,10 +322,8 @@ pub fn from_bytes_mut<T: NoUninit + AnyBitPattern>(s: &mut [u8]) -> &mut T {
 /// ## Failure
 /// * If the `bytes` length is not equal to `size_of::<T>()`.
 #[inline]
-pub fn try_pod_read_unaligned<T: AnyBitPattern>(
-  bytes: &[u8],
-) -> Result<T, PodCastError> {
-  unsafe { internal::try_pod_read_unaligned(bytes) }
+pub fn try_pod_read_unaligned<T: AnyBitPattern>(bytes: &[u8]) -> Result<T, PodCastError> {
+    unsafe { internal::try_pod_read_unaligned(bytes) }
 }
 
 /// Reads the slice into a `T` value.
@@ -336,7 +336,7 @@ pub fn try_pod_read_unaligned<T: AnyBitPattern>(
 #[inline]
 #[cfg_attr(feature = "track_caller", track_caller)]
 pub fn pod_read_unaligned<T: AnyBitPattern>(bytes: &[u8]) -> T {
-  unsafe { internal::pod_read_unaligned(bytes) }
+    unsafe { internal::pod_read_unaligned(bytes) }
 }
 
 /// Re-interprets `&[u8]` as `&T`.
@@ -347,7 +347,7 @@ pub fn pod_read_unaligned<T: AnyBitPattern>(bytes: &[u8]) -> T {
 /// * If the slice's length isn’t exactly the size of the new type
 #[inline]
 pub fn try_from_bytes<T: AnyBitPattern>(s: &[u8]) -> Result<&T, PodCastError> {
-  unsafe { internal::try_from_bytes(s) }
+    unsafe { internal::try_from_bytes(s) }
 }
 
 /// Re-interprets `&mut [u8]` as `&mut T`.
@@ -358,9 +358,9 @@ pub fn try_from_bytes<T: AnyBitPattern>(s: &[u8]) -> Result<&T, PodCastError> {
 /// * If the slice's length isn’t exactly the size of the new type
 #[inline]
 pub fn try_from_bytes_mut<T: NoUninit + AnyBitPattern>(
-  s: &mut [u8],
+    s: &mut [u8],
 ) -> Result<&mut T, PodCastError> {
-  unsafe { internal::try_from_bytes_mut(s) }
+    unsafe { internal::try_from_bytes_mut(s) }
 }
 
 /// Cast `A` into `B`
@@ -371,7 +371,7 @@ pub fn try_from_bytes_mut<T: NoUninit + AnyBitPattern>(
 #[inline]
 #[cfg_attr(feature = "track_caller", track_caller)]
 pub fn cast<A: NoUninit, B: AnyBitPattern>(a: A) -> B {
-  unsafe { internal::cast(a) }
+    unsafe { internal::cast(a) }
 }
 
 /// Cast `&mut A` into `&mut B`.
@@ -381,10 +381,8 @@ pub fn cast<A: NoUninit, B: AnyBitPattern>(a: A) -> B {
 /// This is [`try_cast_mut`] but will panic on error.
 #[inline]
 #[cfg_attr(feature = "track_caller", track_caller)]
-pub fn cast_mut<A: NoUninit + AnyBitPattern, B: NoUninit + AnyBitPattern>(
-  a: &mut A,
-) -> &mut B {
-  unsafe { internal::cast_mut(a) }
+pub fn cast_mut<A: NoUninit + AnyBitPattern, B: NoUninit + AnyBitPattern>(a: &mut A) -> &mut B {
+    unsafe { internal::cast_mut(a) }
 }
 
 /// Cast `&A` into `&B`.
@@ -395,7 +393,7 @@ pub fn cast_mut<A: NoUninit + AnyBitPattern, B: NoUninit + AnyBitPattern>(
 #[inline]
 #[cfg_attr(feature = "track_caller", track_caller)]
 pub fn cast_ref<A: NoUninit, B: AnyBitPattern>(a: &A) -> &B {
-  unsafe { internal::cast_ref(a) }
+    unsafe { internal::cast_ref(a) }
 }
 
 /// Cast `&[A]` into `&[B]`.
@@ -406,7 +404,7 @@ pub fn cast_ref<A: NoUninit, B: AnyBitPattern>(a: &A) -> &B {
 #[inline]
 #[cfg_attr(feature = "track_caller", track_caller)]
 pub fn cast_slice<A: NoUninit, B: AnyBitPattern>(a: &[A]) -> &[B] {
-  unsafe { internal::cast_slice(a) }
+    unsafe { internal::cast_slice(a) }
 }
 
 /// Cast `&mut [A]` into `&mut [B]`.
@@ -416,34 +414,26 @@ pub fn cast_slice<A: NoUninit, B: AnyBitPattern>(a: &[A]) -> &[B] {
 /// This is [`try_cast_slice_mut`] but will panic on error.
 #[inline]
 #[cfg_attr(feature = "track_caller", track_caller)]
-pub fn cast_slice_mut<
-  A: NoUninit + AnyBitPattern,
-  B: NoUninit + AnyBitPattern,
->(
-  a: &mut [A],
+pub fn cast_slice_mut<A: NoUninit + AnyBitPattern, B: NoUninit + AnyBitPattern>(
+    a: &mut [A],
 ) -> &mut [B] {
-  unsafe { internal::cast_slice_mut(a) }
+    unsafe { internal::cast_slice_mut(a) }
 }
 
 /// As [`align_to`](https://doc.rust-lang.org/std/primitive.slice.html#method.align_to),
 /// but safe because of the [`Pod`] bound.
 #[inline]
-pub fn pod_align_to<T: NoUninit, U: AnyBitPattern>(
-  vals: &[T],
-) -> (&[T], &[U], &[T]) {
-  unsafe { vals.align_to::<U>() }
+pub fn pod_align_to<T: NoUninit, U: AnyBitPattern>(vals: &[T]) -> (&[T], &[U], &[T]) {
+    unsafe { vals.align_to::<U>() }
 }
 
 /// As [`align_to_mut`](https://doc.rust-lang.org/std/primitive.slice.html#method.align_to_mut),
 /// but safe because of the [`Pod`] bound.
 #[inline]
-pub fn pod_align_to_mut<
-  T: NoUninit + AnyBitPattern,
-  U: NoUninit + AnyBitPattern,
->(
-  vals: &mut [T],
+pub fn pod_align_to_mut<T: NoUninit + AnyBitPattern, U: NoUninit + AnyBitPattern>(
+    vals: &mut [T],
 ) -> (&mut [T], &mut [U], &mut [T]) {
-  unsafe { vals.align_to_mut::<U>() }
+    unsafe { vals.align_to_mut::<U>() }
 }
 
 /// Try to cast `A` into `B`.
@@ -457,10 +447,8 @@ pub fn pod_align_to_mut<
 ///
 /// * If the types don't have the same size this fails.
 #[inline]
-pub fn try_cast<A: NoUninit, B: AnyBitPattern>(
-  a: A,
-) -> Result<B, PodCastError> {
-  unsafe { internal::try_cast(a) }
+pub fn try_cast<A: NoUninit, B: AnyBitPattern>(a: A) -> Result<B, PodCastError> {
+    unsafe { internal::try_cast(a) }
 }
 
 /// Try to convert a `&A` into `&B`.
@@ -470,23 +458,18 @@ pub fn try_cast<A: NoUninit, B: AnyBitPattern>(
 /// * If the reference isn't aligned in the new type
 /// * If the source type and target type aren't the same size.
 #[inline]
-pub fn try_cast_ref<A: NoUninit, B: AnyBitPattern>(
-  a: &A,
-) -> Result<&B, PodCastError> {
-  unsafe { internal::try_cast_ref(a) }
+pub fn try_cast_ref<A: NoUninit, B: AnyBitPattern>(a: &A) -> Result<&B, PodCastError> {
+    unsafe { internal::try_cast_ref(a) }
 }
 
 /// Try to convert a `&mut A` into `&mut B`.
 ///
 /// As [`try_cast_ref`], but `mut`.
 #[inline]
-pub fn try_cast_mut<
-  A: NoUninit + AnyBitPattern,
-  B: NoUninit + AnyBitPattern,
->(
-  a: &mut A,
+pub fn try_cast_mut<A: NoUninit + AnyBitPattern, B: NoUninit + AnyBitPattern>(
+    a: &mut A,
 ) -> Result<&mut B, PodCastError> {
-  unsafe { internal::try_cast_mut(a) }
+    unsafe { internal::try_cast_mut(a) }
 }
 
 /// Try to convert `&[A]` into `&[B]` (possibly with a change in length).
@@ -505,10 +488,8 @@ pub fn try_cast_mut<
 /// * Similarly, you can't convert between a [ZST](https://doc.rust-lang.org/nomicon/exotic-sizes.html#zero-sized-types-zsts)
 ///   and a non-ZST.
 #[inline]
-pub fn try_cast_slice<A: NoUninit, B: AnyBitPattern>(
-  a: &[A],
-) -> Result<&[B], PodCastError> {
-  unsafe { internal::try_cast_slice(a) }
+pub fn try_cast_slice<A: NoUninit, B: AnyBitPattern>(a: &[A]) -> Result<&[B], PodCastError> {
+    unsafe { internal::try_cast_slice(a) }
 }
 
 /// Try to convert `&mut [A]` into `&mut [B]` (possibly with a change in
@@ -516,13 +497,10 @@ pub fn try_cast_slice<A: NoUninit, B: AnyBitPattern>(
 ///
 /// As [`try_cast_slice`], but `&mut`.
 #[inline]
-pub fn try_cast_slice_mut<
-  A: NoUninit + AnyBitPattern,
-  B: NoUninit + AnyBitPattern,
->(
-  a: &mut [A],
+pub fn try_cast_slice_mut<A: NoUninit + AnyBitPattern, B: NoUninit + AnyBitPattern>(
+    a: &mut [A],
 ) -> Result<&mut [B], PodCastError> {
-  unsafe { internal::try_cast_slice_mut(a) }
+    unsafe { internal::try_cast_slice_mut(a) }
 }
 
 /// Fill all bytes of `target` with zeroes (see [`Zeroable`]).
@@ -533,20 +511,20 @@ pub fn try_cast_slice_mut<
 /// See also [`fill_zeroes`], if you have a slice rather than a single value.
 #[inline]
 pub fn write_zeroes<T: Zeroable>(target: &mut T) {
-  struct EnsureZeroWrite<T>(*mut T);
-  impl<T> Drop for EnsureZeroWrite<T> {
-    #[inline(always)]
-    fn drop(&mut self) {
-      unsafe {
-        core::ptr::write_bytes(self.0, 0u8, 1);
-      }
+    struct EnsureZeroWrite<T>(*mut T);
+    impl<T> Drop for EnsureZeroWrite<T> {
+        #[inline(always)]
+        fn drop(&mut self) {
+            unsafe {
+                core::ptr::write_bytes(self.0, 0u8, 1);
+            }
+        }
     }
-  }
-  unsafe {
-    let guard = EnsureZeroWrite(target);
-    core::ptr::drop_in_place(guard.0);
-    drop(guard);
-  }
+    unsafe {
+        let guard = EnsureZeroWrite(target);
+        core::ptr::drop_in_place(guard.0);
+        drop(guard);
+    }
 }
 
 /// Fill all bytes of `slice` with zeroes (see [`Zeroable`]).
@@ -558,15 +536,15 @@ pub fn write_zeroes<T: Zeroable>(target: &mut T) {
 /// than a slice.
 #[inline]
 pub fn fill_zeroes<T: Zeroable>(slice: &mut [T]) {
-  if core::mem::needs_drop::<T>() {
-    // If `T` needs to be dropped then we have to do this one item at a time, in
-    // case one of the intermediate drops does a panic.
-    slice.iter_mut().for_each(write_zeroes);
-  } else {
-    // Otherwise we can be really fast and just fill everything with zeros.
-    let len = slice.len();
-    unsafe { core::ptr::write_bytes(slice.as_mut_ptr(), 0u8, len) }
-  }
+    if core::mem::needs_drop::<T>() {
+        // If `T` needs to be dropped then we have to do this one item at a time, in
+        // case one of the intermediate drops does a panic.
+        slice.iter_mut().for_each(write_zeroes);
+    } else {
+        // Otherwise we can be really fast and just fill everything with zeros.
+        let len = slice.len();
+        unsafe { core::ptr::write_bytes(slice.as_mut_ptr(), 0u8, len) }
+    }
 }
 
 /// Same as [`Zeroable::zeroed`], but as a `const fn` const.
@@ -574,5 +552,5 @@ pub fn fill_zeroes<T: Zeroable>(slice: &mut [T]) {
 #[inline]
 #[must_use]
 pub const fn zeroed<T: Zeroable>() -> T {
-  unsafe { core::mem::zeroed() }
+    unsafe { core::mem::zeroed() }
 }

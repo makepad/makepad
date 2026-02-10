@@ -1,13 +1,13 @@
-use proc_macro::{TokenStream};
+use proc_macro::TokenStream;
 
-mod script;
 mod derive_scriptable;
-mod swizzle;
 mod error;
-use script::*;
+mod script;
+mod swizzle;
 use derive_scriptable::*;
-use swizzle::*;
 use error::*;
+use script::*;
+use swizzle::*;
 
 #[proc_macro]
 pub fn script(input: TokenStream) -> TokenStream {
@@ -29,24 +29,25 @@ pub fn script_err_gen(input: TokenStream) -> TokenStream {
     script_err_gen_impl(input)
 }
 
-
-#[proc_macro_derive(Script, attributes(
-    apply_default,
-    source,
-    new,
-    live,
-    rust,
-    pick,
-    splat,
-    walk,
-    layout,
-    deref,
-))]
+#[proc_macro_derive(
+    Script,
+    attributes(
+        apply_default,
+        source,
+        new,
+        live,
+        rust,
+        pick,
+        splat,
+        walk,
+        layout,
+        deref,
+    )
+)]
 
 pub fn derive_script(input: TokenStream) -> TokenStream {
     derive_script_impl(input)
 }
-
 
 #[proc_macro_derive(ScriptHook, attributes())]
 pub fn derive_script_hook(input: TokenStream) -> TokenStream {

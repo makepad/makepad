@@ -48,10 +48,14 @@ pub use image_buffer::{cmyk_to_ycck, rgb_to_ycbcr, ImageBuffer};
 pub use quantization::QuantizationTableType;
 pub use writer::{Density, JfifWrite};
 
+#[cfg(all(
+    feature = "benchmark",
+    feature = "simd",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+pub use avx2::fdct_avx2;
 #[cfg(feature = "benchmark")]
 pub use fdct::fdct;
-#[cfg(all(feature = "benchmark", feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-pub use avx2::fdct_avx2;
 
 #[cfg(test)]
 mod tests {

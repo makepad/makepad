@@ -14,7 +14,6 @@ assert_eq!(char_orientation('本'), Orientation::Upright);
 */
 
 #![doc(html_root_url = "https://docs.rs/unicode-vo/0.1.0")]
-
 #![forbid(unsafe_code)]
 
 /// Character orientation.

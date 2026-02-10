@@ -1,5 +1,5 @@
 use crate::makepad_widgets::*;
- 
+
 live_design! {
     use link::widgets::*
     use link::theme::*
@@ -24,11 +24,11 @@ live_design! {
     SPACING_2 = {top: (SSPACING_2), right: (SSPACING_2), bottom: (SSPACING_2), left: (SSPACING_2)}
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
-    
+
     H2_TEXT_BOLD = <THEME_FONT_BOLD>{
         font_size: (FONT_SIZE_H2),
     }
-    
+
     H2_TEXT_REGULAR = <THEME_FONT_REGULAR>{
         font_size: (FONT_SIZE_H2),
     }
@@ -479,7 +479,7 @@ live_design! {
                     return sdf.result
                 }
             }
-            
+
             draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
@@ -792,7 +792,7 @@ live_design! {
         clip_y: true,
         align: {y: 0.5},
         text: "Search"
-        
+
         draw_bg: {
             instance radius: 3.0
             instance border_width: 0.0
@@ -1512,7 +1512,7 @@ live_design! {
                 height: Fit
 
                 delaylength = <InstrumentSlider> {
-                    
+
 
                     slider = {
                         draw_bg: {line_color: (COLOR_FX)}
@@ -2188,7 +2188,7 @@ live_design! {
             <DelayFXPanel> {}
         }
     }
- 
+
     PresetHeader = <View> {
         width: Fill,
         height: Fit,
@@ -2408,7 +2408,7 @@ live_design! {
         <PresetHeader> {}
         preset_list = <PresetList> {}
     }*/
-    
+
     pub AppDesktop = <View>{
         flow: Right
         width: Fill,

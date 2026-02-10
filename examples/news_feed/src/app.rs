@@ -1,10 +1,10 @@
 use makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::widgets::*;
     use link::theme::*;
     use link::shaders::*;
-    
+
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     LOGO = dep("crate://self/resources/logo.svg")
@@ -61,7 +61,7 @@ live_design!{
                 )
             }
         }
-        
+
         draw_icon: {
             svg_file: (ICO_FAV),
             fn get_color(self) -> vec4 {
@@ -597,7 +597,7 @@ live_design!{
                             sdf.circle(c.x, c.y, c.x - 2.)
                             sdf.fill_keep(self.get_color());
                             sdf.stroke((#f), 1);
-                            return sdf.result 
+                            return sdf.result
                         }
                     }
                 }
@@ -834,11 +834,11 @@ live_design!{
         draw_bg: {
             instance down: 0.0
             instance hover: 0.0
-            
+
             instance color: #888,
             instance color_hover: #999
             instance color_down: #666
-            
+
             uniform size: 6.0
             uniform border_radius: 1.5
 
@@ -863,7 +863,7 @@ live_design!{
                     );
                 }
                 sdf.fill(mix(
-                    self.color, 
+                    self.color,
                     mix(
                         self.color_hover,
                         self.color_down,
@@ -889,7 +889,7 @@ live_design!{
     App = {{App}} {
         ui: <Root>{
                 <Window> {
-    
+
                 window: {inner_size: vec2(428, 926)},
                 show_bg: true
                 draw_bg: {
@@ -905,19 +905,19 @@ live_design!{
                         x: 0.0,
                         y: 0.0
                     },
-    
-    
+
+
                     <View> {
                         flow: Down
                         <Header> {}
                         <Filler> {}
                         <Menu> {}
                     }
-    
+
                     news_feed = <NewsFeed> {
                         padding: {top: 60., bottom: 90.}
                     }
-    
+
                 }
             }
         }
@@ -927,20 +927,21 @@ live_design!{
 app_main!(App);
 
 #[derive(Live, LiveHook, Widget)]
-struct NewsFeed{
-    #[deref] view:View,
+struct NewsFeed {
+    #[deref]
+    view: View,
 }
 
-impl Widget for NewsFeed{
-    fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
-        while let Some(item) =  self.view.draw_walk(cx, scope, walk).step(){
+impl Widget for NewsFeed {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 1000);
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let template = match item_id{
+                    let template = match item_id {
                         0 => live_id!(TopSpace),
                         x if x % 5 == 0 => live_id!(PostImage),
-                        _ => live_id!(Post)
+                        _ => live_id!(Post),
                     };
                     let item = list.item(cx, item_id, template);
                     let text = match item_id % 4 {
@@ -950,22 +951,25 @@ impl Widget for NewsFeed{
                         _ => format!("Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. 4 id {}", item_id),
                     };
                     item.label(ids!(content.text)).set_text(cx, &text);
-                    item.button(ids!(likes)).set_text(cx, &format!("{}", item_id % 23));
-                    item.button(ids!(comments)).set_text(cx, &format!("{}", item_id % 6));
+                    item.button(ids!(likes))
+                        .set_text(cx, &format!("{}", item_id % 23));
+                    item.button(ids!(comments))
+                        .set_text(cx, &format!("{}", item_id % 6));
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }
         }
         DrawStep::done()
     }
-    fn handle_event(&mut self, cx:&mut Cx, event:&Event, scope:&mut Scope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope)
     }
 }
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
+    #[live]
+    ui: WidgetRef,
 }
 
 impl LiveRegister for App {
@@ -975,12 +979,9 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App {
-    fn handle_startup(&mut self, _cx:&mut Cx){
-    }
-    fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
-        if self.ui.button(ids!(find)).clicked(actions) {
-            
-        }
+    fn handle_startup(&mut self, _cx: &mut Cx) {}
+    fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(ids!(find)).clicked(actions) {}
     }
 }
 

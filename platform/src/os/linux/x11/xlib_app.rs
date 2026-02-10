@@ -1,32 +1,22 @@
 use {
+    self::super::{
+        super::select_timer::SelectTimers, x11_sys, xlib_event::XlibEvent, xlib_window::*,
+    },
+    crate::{cursor::MouseCursor, event::*, makepad_math::Vec2d, os::cx_native::EventFlow},
     std::{
+        cell::{Cell, RefCell},
         collections::HashMap,
         mem,
-        rc::Rc,
-        cell::{Cell, RefCell},
-        os::raw::{c_char, c_int, c_uint, c_ulong, c_void, c_uchar, c_long},
+        os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void},
         ptr,
-    },
-    self::super::{
-        x11_sys,
-        xlib_event::XlibEvent,
-        xlib_window::*,
-        super::select_timer::SelectTimers,
-    },
-    crate::{
-        makepad_math::Vec2d,
-        event::*,
-        cursor::MouseCursor,
-        os::cx_native::EventFlow,
+        rc::Rc,
     },
 };
 
 static mut XLIB_APP: *mut XlibApp = 0 as *mut _;
 
 pub fn get_xlib_app_global() -> &'static mut XlibApp {
-    unsafe {
-        &mut *(XLIB_APP)
-    }
+    unsafe { &mut *(XLIB_APP) }
 }
 
 pub fn init_xlib_app_global(event_callback: Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>) {
@@ -49,7 +39,7 @@ pub struct XlibApp {
     pub last_scroll_time: f64,
     pub last_click_time: f64,
     pub last_click_pos: (i32, i32),
-    pub event_callback: Option<Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow >>,
+    pub event_callback: Option<Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>>,
     //pub free_timers: Vec<usize>,
     pub event_flow: EventFlow,
     pub current_cursor: MouseCursor,
@@ -91,7 +81,7 @@ impl XlibApp {
             }
         }
     }
-    
+
     pub unsafe fn event_loop_poll(&mut self) {
         // Update the current time, and compute the amount of time that elapsed since we
         // last recorded the current time.
@@ -123,7 +113,7 @@ impl XlibApp {
                             actual_format.as_mut_ptr(),
                             n_items.as_mut_ptr(),
                             bytes_to_read.as_mut_ptr(),
-                            ret.as_mut_ptr()
+                            ret.as_mut_ptr(),
                         );
                         //let actual_type = actual_type.assume_init();
                         //let actual_format = actual_format.assume_init();
@@ -143,12 +133,15 @@ impl XlibApp {
                             actual_format.as_mut_ptr(),
                             n_items.as_mut_ptr(),
                             bytes_after.as_mut_ptr(),
-                            ret.as_mut_ptr()
+                            ret.as_mut_ptr(),
                         );
                         let ret = ret.assume_init();
                         //let bytes_after = bytes_after.assume_init();
                         if ret != ptr::null_mut() && bytes_to_read > 0 {
-                            let utf8_slice = std::slice::from_raw_parts::<u8>(ret as *const _ as *const u8, bytes_to_read as usize);
+                            let utf8_slice = std::slice::from_raw_parts::<u8>(
+                                ret as *const _ as *const u8,
+                                bytes_to_read as usize,
+                            );
                             if let Ok(utf8_string) = String::from_utf8(utf8_slice.to_vec()) {
                                 self.do_callback(XlibEvent::TextInput(TextInputEvent {
                                     input: utf8_string,
@@ -162,7 +155,7 @@ impl XlibApp {
                             x11_sys::XFree(ret as *mut _ as *mut c_void);
                         }
                     }
-                },
+                }
                 x11_sys::SelectionRequest => {
                     let request = event.xselectionrequest;
                     let mut response = x11_sys::XSelectionEvent {
@@ -186,10 +179,9 @@ impl XlibApp {
                             32,
                             x11_sys::PropModeReplace as i32,
                             targets.as_mut() as *mut _ as *mut c_uchar,
-                            targets.len() as i32
+                            targets.len() as i32,
                         );
-                    }
-                    else if request.target == self.atoms.utf8_string {
+                    } else if request.target == self.atoms.utf8_string {
                         x11_sys::XChangeProperty(
                             self.display,
                             request.requestor,
@@ -198,15 +190,21 @@ impl XlibApp {
                             8,
                             x11_sys::PropModeReplace as i32,
                             self.clipboard.as_ptr() as *const _ as *const c_uchar,
-                            self.clipboard.len() as i32
+                            self.clipboard.len() as i32,
                         );
-                    }
-                    else {
+                    } else {
                         response.property = 0;
                     }
-                    x11_sys::XSendEvent(self.display, request.requestor, 1, 0, &mut response as *mut _ as *mut x11_sys::XEvent);
-                },
-                x11_sys::DestroyNotify => { // our window got destroyed
+                    x11_sys::XSendEvent(
+                        self.display,
+                        request.requestor,
+                        1,
+                        0,
+                        &mut response as *mut _ as *mut x11_sys::XEvent,
+                    );
+                }
+                x11_sys::DestroyNotify => {
+                    // our window got destroyed
                     let destroy_window = event.xdestroywindow;
                     if let Some(window_ptr) = self.window_map.get(&destroy_window.window) {
                         let window = &mut (**window_ptr);
@@ -214,7 +212,7 @@ impl XlibApp {
                             window_id: window.window_id,
                         }));
                     }
-                },
+                }
                 x11_sys::ConfigureNotify => {
                     let cfg = event.xconfigure;
                     if let Some(window_ptr) = self.window_map.get(&cfg.window) {
@@ -223,8 +221,8 @@ impl XlibApp {
                             window.send_change_event();
                         }
                     }
-                },
-                x11_sys::EnterNotify => {},
+                }
+                x11_sys::EnterNotify => {}
                 x11_sys::LeaveNotify => {
                     let crossing = event.xcrossing;
                     if crossing.detail == 4 {
@@ -247,8 +245,9 @@ impl XlibApp {
                             */
                         }
                     }
-                },
-                x11_sys::MotionNotify => { // mousemove
+                }
+                x11_sys::MotionNotify => {
+                    // mousemove
                     let motion = event.xmotion;
                     if let Some(window_ptr) = self.window_map.get(&motion.window) {
                         let window = &mut (**window_ptr);
@@ -268,15 +267,18 @@ impl XlibApp {
                                 }
                             }*/
                         }
-                        
-                        let pos = Vec2d {x: x as f64 / window.last_window_geom.dpi_factor, y: y as f64 / window.last_window_geom.dpi_factor};
-                        
+
+                        let pos = Vec2d {
+                            x: x as f64 / window.last_window_geom.dpi_factor,
+                            y: y as f64 / window.last_window_geom.dpi_factor,
+                        };
+
                         // query window for chrome
                         let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
                         window.do_callback(XlibEvent::WindowDragQuery(WindowDragQueryEvent {
                             window_id: window.window_id,
                             abs: window.last_mouse_pos,
-                            response: response.clone()
+                            response: response.clone(),
                         }));
                         // otherwise lets check if we are hover the window edge to resize the window
                         //println!("{} {}", window.last_window_geom.inner_size.x, pos.x);
@@ -285,40 +287,32 @@ impl XlibApp {
                         if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= 0.0 && pos.y < 10.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOPLEFT);
                             self.set_internal_mouse_cursor(MouseCursor::NwResize);
-                        }
-                        else if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= window_size.y - 10.0 {
+                        } else if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= window_size.y - 10.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT);
                             self.set_internal_mouse_cursor(MouseCursor::SwResize);
-                        }
-                        else if pos.x >= 0.0 && pos.x < 5.0 {
+                        } else if pos.x >= 0.0 && pos.x < 5.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_LEFT);
                             self.set_internal_mouse_cursor(MouseCursor::WResize);
-                        }
-                        else if pos.x >= window_size.x - 10.0 && pos.y >= 0.0 && pos.y < 10.0 {
+                        } else if pos.x >= window_size.x - 10.0 && pos.y >= 0.0 && pos.y < 10.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOPRIGHT);
                             self.set_internal_mouse_cursor(MouseCursor::NeResize);
-                        }
-                        else if pos.x >= window_size.x - 10.0 && pos.y >= window_size.y - 10.0 {
+                        } else if pos.x >= window_size.x - 10.0 && pos.y >= window_size.y - 10.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT);
                             self.set_internal_mouse_cursor(MouseCursor::SeResize);
-                        }
-                        else if pos.x >= window_size.x - 5.0 {
+                        } else if pos.x >= window_size.x - 5.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_RIGHT);
                             self.set_internal_mouse_cursor(MouseCursor::EResize);
-                        }
-                        else if pos.y <= 5.0 {
+                        } else if pos.y <= 5.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOP);
                             self.set_internal_mouse_cursor(MouseCursor::NResize);
-                        }
-                        else if pos.y > window_size.y - 5.0 {
+                        } else if pos.y > window_size.y - 5.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOM);
                             self.set_internal_mouse_cursor(MouseCursor::SResize);
-                        }
-                        else {
+                        } else {
                             match response.get() {
                                 WindowDragQueryResponse::Caption => {
                                     window.last_nc_mode = Some(_NET_WM_MOVERESIZE_MOVE);
-                                },
+                                }
                                 _ => {
                                     window.last_nc_mode = None;
                                 }
@@ -326,8 +320,9 @@ impl XlibApp {
                             self.restore_mouse_cursor(self.current_cursor);
                         }
                     }
-                },
-                x11_sys::ButtonPress => { // mouse down
+                }
+                x11_sys::ButtonPress => {
+                    // mouse down
                     let button = event.xbutton;
                     let time_now = self.time_now();
                     if let Some(window_ptr) = self.window_map.get(&button.window) {
@@ -336,48 +331,58 @@ impl XlibApp {
                             self.display,
                             window.window.unwrap(),
                             x11_sys::None as i32,
-                            x11_sys::CurrentTime as c_ulong
+                            x11_sys::CurrentTime as c_ulong,
                         );
-                        
+
                         if button.button >= 4 && button.button <= 7 {
                             let last_scroll_time = self.last_scroll_time;
                             self.last_scroll_time = time_now;
                             // completely arbitrary scroll acceleration curve.
-                            let speed = 1200.0 * (0.2 - 2. * (self.last_scroll_time - last_scroll_time)).max(0.01);
-                            
+                            let speed = 1200.0
+                                * (0.2 - 2. * (self.last_scroll_time - last_scroll_time)).max(0.01);
+
                             self.do_callback(XlibEvent::Scroll(ScrollEvent {
                                 window_id: window.window_id,
                                 scroll: Vec2d {
-                                    x: if button.button == 6 {-speed} else if button.button == 7 {speed} else {0.},
-                                    y: if button.button == 4 {-speed} else if button.button == 5 {speed} else {0.}
+                                    x: if button.button == 6 {
+                                        -speed
+                                    } else if button.button == 7 {
+                                        speed
+                                    } else {
+                                        0.
+                                    },
+                                    y: if button.button == 4 {
+                                        -speed
+                                    } else if button.button == 5 {
+                                        speed
+                                    } else {
+                                        0.
+                                    },
                                 },
                                 abs: window.last_mouse_pos,
                                 modifiers: self.xkeystate_to_modifiers(button.state),
                                 is_mouse: true,
                                 handled_x: Cell::new(false),
                                 handled_y: Cell::new(false),
-                                time: self.last_scroll_time
+                                time: self.last_scroll_time,
                             }))
-                            
-                        }
-                        else {
+                        } else {
                             // do all the 'nonclient' area messaging to the window manager
                             if let Some(last_nc_mode) = window.last_nc_mode {
                                 if (time_now - self.last_click_time) < 0.35
                                     && (button.x_root - self.last_click_pos.0).abs() < 5
                                     && (button.y_root - self.last_click_pos.1).abs() < 5
-                                    && last_nc_mode == _NET_WM_MOVERESIZE_MOVE {
+                                    && last_nc_mode == _NET_WM_MOVERESIZE_MOVE
+                                {
                                     if window.get_is_maximized() {
                                         window.restore();
-                                    }
-                                    else {
+                                    } else {
                                         window.maximize();
                                     }
-                                }
-                                else {
-                                    
+                                } else {
                                     let default_screen = x11_sys::XDefaultScreen(self.display);
-                                    let root_window = x11_sys::XRootWindow(self.display, default_screen);
+                                    let root_window =
+                                        x11_sys::XRootWindow(self.display, default_screen);
                                     x11_sys::XUngrabPointer(self.display, 0);
                                     x11_sys::XFlush(self.display);
                                     let mut xclient = x11_sys::XClientMessageEvent {
@@ -389,34 +394,39 @@ impl XlibApp {
                                         message_type: self.atoms.net_wm_moveresize,
                                         format: 32,
                                         data: {
-                                            let mut msg = mem::zeroed::<x11_sys::XClientMessageEvent__bindgen_ty_1>();
+                                            let mut msg = mem::zeroed::<
+                                                x11_sys::XClientMessageEvent__bindgen_ty_1,
+                                            >(
+                                            );
                                             msg.l[0] = button.x_root as c_long;
                                             msg.l[1] = button.y_root as c_long;
                                             msg.l[2] = last_nc_mode;
                                             msg
-                                        }
+                                        },
                                     };
                                     x11_sys::XSendEvent(
                                         self.display,
                                         root_window,
                                         0,
-                                        (x11_sys::SubstructureRedirectMask | x11_sys::SubstructureNotifyMask) as c_long,
-                                        &mut xclient as *mut _ as *mut x11_sys::XEvent
+                                        (x11_sys::SubstructureRedirectMask
+                                            | x11_sys::SubstructureNotifyMask)
+                                            as c_long,
+                                        &mut xclient as *mut _ as *mut x11_sys::XEvent,
                                     );
                                 }
-                            }
-                            else {
+                            } else {
                                 window.send_mouse_down(
                                     self.xbutton_to_mouse_button(button.button),
-                                    self.xkeystate_to_modifiers(button.state)
+                                    self.xkeystate_to_modifiers(button.state),
                                 );
                             }
                         }
                     }
                     self.last_click_time = time_now;
                     self.last_click_pos = (button.x_root, button.y_root);
-                },
-                x11_sys::ButtonRelease => { // mouse up
+                }
+                x11_sys::ButtonRelease => {
+                    // mouse up
                     let button = event.xbutton;
                     if let Some(window_ptr) = self.window_map.get(&button.window) {
                         let window = &mut (**window_ptr);
@@ -425,17 +435,18 @@ impl XlibApp {
                             self.xkeystate_to_modifiers(button.state),
                         );
                     }
-                },
+                }
                 x11_sys::KeyPress => {
                     if let Some(window_ptr) = self.window_map.get(&event.xkey.window) {
                         let window = &mut (**window_ptr);
                         let block_text = if event.xkey.keycode != 0 {
                             let key_code = self.xkeyevent_to_keycode(&mut event.xkey);
                             let modifiers = self.xkeystate_to_modifiers(event.xkey.state);
-                            
+
                             if modifiers.control || modifiers.logo {
                                 match key_code {
-                                    KeyCode::KeyV => { // paste
+                                    KeyCode::KeyV => {
+                                        // paste
                                         // request the pasteable text from the other side
                                         x11_sys::XConvertSelection(
                                             self.display,
@@ -443,7 +454,7 @@ impl XlibApp {
                                             self.atoms.utf8_string,
                                             self.atoms.clipboard,
                                             window.window.unwrap(),
-                                            event.xkey.time
+                                            event.xkey.time,
                                         );
                                         /*
                                         self.do_callback(&mut vec![
@@ -458,38 +469,48 @@ impl XlibApp {
                                     KeyCode::KeyC => {
                                         let response = Rc::new(RefCell::new(None));
                                         self.do_callback(XlibEvent::TextCopy(TextClipboardEvent {
-                                            response: response.clone()
+                                            response: response.clone(),
                                         }));
                                         let response = response.borrow();
                                         if let Some(response) = response.as_ref() {
-                                            self.copy_to_clipboard(response, window.window.unwrap(), event.xkey.time);
+                                            self.copy_to_clipboard(
+                                                response,
+                                                window.window.unwrap(),
+                                                event.xkey.time,
+                                            );
                                         }
                                     }
                                     KeyCode::KeyX => {
                                         let response = Rc::new(RefCell::new(None));
                                         self.do_callback(XlibEvent::TextCut(TextClipboardEvent {
-                                            response: response.clone()
+                                            response: response.clone(),
                                         }));
                                         let response = response.borrow();
                                         if let Some(response) = response.as_ref() {
-                                            self.copy_to_clipboard(response, window.window.unwrap(), event.xkey.time);
+                                            self.copy_to_clipboard(
+                                                response,
+                                                window.window.unwrap(),
+                                                event.xkey.time,
+                                            );
                                         }
                                     }
-                                    _ => ()
+                                    _ => (),
                                 }
                             }
-                            
+
                             let block_text = modifiers.control || modifiers.logo || modifiers.alt;
                             self.do_callback(XlibEvent::KeyDown(KeyEvent {
                                 key_code: key_code,
                                 is_repeat: self.next_keypress_is_repeat,
                                 modifiers: modifiers,
-                                time: self.time_now()
+                                time: self.time_now(),
                             }));
                             self.next_keypress_is_repeat = false;
                             block_text
-                        }else {false};
-                        
+                        } else {
+                            false
+                        };
+
                         if !block_text {
                             // decode the character
                             let mut buffer = [0u8; 32];
@@ -506,7 +527,9 @@ impl XlibApp {
                             //let keysym = keysym.assume_init();
                             let status = status.assume_init();
                             if status != x11_sys::XBufferOverflow {
-                                let utf8 = std::str::from_utf8(&buffer[..count as usize]).unwrap_or("").to_string();
+                                let utf8 = std::str::from_utf8(&buffer[..count as usize])
+                                    .unwrap_or("")
+                                    .to_string();
                                 let char_code = utf8.chars().next().unwrap_or('\0');
                                 if char_code >= ' ' && char_code != 127 as char {
                                     self.do_callback(XlibEvent::TextInput(TextInputEvent {
@@ -521,7 +544,7 @@ impl XlibApp {
                             }
                         }
                     }
-                },
+                }
                 x11_sys::KeyRelease => {
                     // if the next event is a keypress, this comes from a repeat
                     // Therefore, forget both this event and the next
@@ -531,7 +554,8 @@ impl XlibApp {
                         let nev = nev.assume_init();
                         if nev.type_ as u32 == x11_sys::KeyPress
                             && nev.xkey.time == event.xkey.time
-                            && nev.xkey.keycode == event.xkey.keycode {
+                            && nev.xkey.keycode == event.xkey.keycode
+                        {
                             self.next_keypress_is_repeat = true;
                         }
                     }
@@ -540,10 +564,10 @@ impl XlibApp {
                             key_code: self.xkeyevent_to_keycode(&mut event.xkey),
                             is_repeat: false,
                             modifiers: self.xkeystate_to_modifiers(event.xkey.state),
-                            time: self.time_now()
+                            time: self.time_now(),
                         }));
                     }
-                },
+                }
                 x11_sys::ClientMessage => {
                     let event = event.xclient;
                     if event.message_type == self.atoms.wm_protocols {
@@ -561,15 +585,15 @@ impl XlibApp {
                     } else if event.message_type == self.dnd.atoms.position {
                         self.dnd.handle_position_event(&event);
                     }
-                },
+                }
                 x11_sys::Expose => {
-                    /* 
+                    /*
                     (glx.glXMakeCurrent)(display, window, context);
                     gl::ClearColor(1.0, 0.0, 0.0, 1.0);
                     gl::Clear(gl::COLOR_BUFFER_BIT);
                     (glx.glXSwapBuffers)(display, window);
                     */
-                },
+                }
                 x11_sys::VisibilityNotify => {
                     let event = event.xvisibility;
                     if event.state != x11_sys::VisibilityFullyObscured {
@@ -585,12 +609,11 @@ impl XlibApp {
         }
         self.do_callback(XlibEvent::Paint);
     }
-    
+
     pub fn event_loop(&mut self) {
         unsafe {
-            
             self.do_callback(XlibEvent::Paint);
-            
+
             let mut timer_ids = Vec::new();
             while self.event_loop_running {
                 match self.event_flow {
@@ -600,27 +623,23 @@ impl XlibApp {
                     EventFlow::Wait => {
                         let time = self.time_now();
                         self.timers.update_timers(&mut timer_ids);
-                        for timer_id in &timer_ids{
-                            self.do_callback(
-                                XlibEvent::Timer(TimerEvent {
-                                    timer_id:*timer_id,
-                                    time: Some(time)
-                                })
-                            );
+                        for timer_id in &timer_ids {
+                            self.do_callback(XlibEvent::Timer(TimerEvent {
+                                timer_id: *timer_id,
+                                time: Some(time),
+                            }));
                         }
                         self.timers.select(self.display_fd);
                         self.event_flow = EventFlow::Poll;
                     }
-                    EventFlow::Poll => { 
+                    EventFlow::Poll => {
                         let time = self.time_now();
                         self.timers.update_timers(&mut timer_ids);
-                        for timer_id in &timer_ids{
-                            self.do_callback(
-                                XlibEvent::Timer(TimerEvent {
-                                    timer_id:*timer_id,
-                                    time: Some(time)
-                                })
-                            );
+                        for timer_id in &timer_ids {
+                            self.do_callback(XlibEvent::Timer(TimerEvent {
+                                timer_id: *timer_id,
+                                time: Some(time),
+                            }));
                         }
                         self.event_loop_poll();
                     }
@@ -628,7 +647,7 @@ impl XlibApp {
             }
         }
     }
-    
+
     pub fn do_callback(&mut self, event: XlibEvent) {
         if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, event);
@@ -638,44 +657,42 @@ impl XlibApp {
             self.event_callback = Some(callback);
         }
     }
-    
+
     pub fn terminate_event_loop(&mut self) {
         self.event_loop_running = false;
         if !self.xim.is_null() {
-            unsafe {x11_sys::XCloseIM(self.xim)};
+            unsafe { x11_sys::XCloseIM(self.xim) };
             self.xim = ptr::null_mut();
         }
         if !self.display.is_null() {
-            unsafe {x11_sys::XCloseDisplay(self.display)};
+            unsafe { x11_sys::XCloseDisplay(self.display) };
             self.display = ptr::null_mut();
         }
     }
-    
+
     pub fn start_timer(&mut self, id: u64, timeout: f64, repeats: bool) {
         self.timers.start_timer(id, timeout, repeats);
     }
-    
+
     pub fn stop_timer(&mut self, id: u64) {
         self.timers.stop_timer(id);
     }
-    
+
     pub fn time_now(&self) -> f64 {
         self.timers.time_now()
     }
-    
+
     pub fn load_first_cursor(&self, names: &[&[u8]]) -> Option<c_ulong> {
         unsafe {
             for name in names {
-                let cursor = x11_sys::XcursorLibraryLoadCursor(
-                    self.display,
-                    name.as_ptr() as *const c_char,
-                );
+                let cursor =
+                    x11_sys::XcursorLibraryLoadCursor(self.display, name.as_ptr() as *const c_char);
                 if cursor != 0 {
-                    return Some(cursor)
+                    return Some(cursor);
                 }
             }
         }
-        return None
+        return None;
     }
 
     pub fn set_internal_mouse_cursor(&mut self, cursor: MouseCursor) {
@@ -700,7 +717,7 @@ impl XlibApp {
         let x11_cursor = match cursor {
             MouseCursor::Hidden => {
                 return;
-            },
+            }
             MouseCursor::EResize => self.load_first_cursor(&[b"right_side\0"]),
             MouseCursor::NResize => self.load_first_cursor(&[b"top_side\0"]),
             MouseCursor::NeResize => self.load_first_cursor(&[b"top_right_corner\0"]),
@@ -720,9 +737,13 @@ impl XlibApp {
             MouseCursor::Wait => self.load_first_cursor(&[b"watch\0"]),
             MouseCursor::Help => self.load_first_cursor(&[b"question_arrow\0"]),
             MouseCursor::NsResize => self.load_first_cursor(&[b"v_double_arrow\0"]),
-            MouseCursor::NeswResize => self.load_first_cursor(&[b"fd_double_arrow\0", b"size_fdiag\0"]),
+            MouseCursor::NeswResize => {
+                self.load_first_cursor(&[b"fd_double_arrow\0", b"size_fdiag\0"])
+            }
             MouseCursor::EwResize => self.load_first_cursor(&[b"h_double_arrow\0"]),
-            MouseCursor::NwseResize => self.load_first_cursor(&[b"bd_double_arrow\0", b"size_bdiag\0"]),
+            MouseCursor::NwseResize => {
+                self.load_first_cursor(&[b"bd_double_arrow\0", b"size_bdiag\0"])
+            }
             MouseCursor::ColResize => self.load_first_cursor(&[b"split_h\0", b"h_double_arrow\0"]),
             MouseCursor::RowResize => self.load_first_cursor(&[b"split_v\0", b"v_double_arrow\0"]),
             MouseCursor::Grab => self.load_first_cursor(&[b"grab\0"]),
@@ -742,12 +763,12 @@ impl XlibApp {
 
     fn xbutton_to_mouse_button(&self, button: u32) -> MouseButton {
         match button {
-            0 => MouseButton::empty(), 
+            0 => MouseButton::empty(),
             1 => MouseButton::PRIMARY,
             2 => MouseButton::MIDDLE,
             3 => MouseButton::SECONDARY,
             // Button values 4, 5, 6, 7 are scroll directions
-            4..=7 => MouseButton::empty(), 
+            4..=7 => MouseButton::empty(),
             8 => MouseButton::BACK,
             9 => MouseButton::FORWARD,
             10.. => MouseButton::from_raw_button(button as usize - 4),
@@ -762,17 +783,11 @@ impl XlibApp {
             logo: state & x11_sys::Mod4Mask != 0,
         }
     }
-    
+
     fn xkeyevent_to_keycode(&self, key_event: &mut x11_sys::XKeyEvent) -> KeyCode {
         let mut keysym = 0;
         unsafe {
-            x11_sys::XLookupString(
-                key_event,
-                ptr::null_mut(),
-                0,
-                &mut keysym,
-                ptr::null_mut(),
-            );
+            x11_sys::XLookupString(key_event, ptr::null_mut(), 0, &mut keysym, ptr::null_mut());
         }
         match keysym as u32 {
             x11_sys::XK_a => KeyCode::KeyA,
@@ -827,7 +842,7 @@ impl XlibApp {
             x11_sys::XK_Y => KeyCode::KeyY,
             x11_sys::XK_z => KeyCode::KeyZ,
             x11_sys::XK_Z => KeyCode::KeyZ,
-            
+
             x11_sys::XK_0 => KeyCode::Key0,
             x11_sys::XK_1 => KeyCode::Key1,
             x11_sys::XK_2 => KeyCode::Key2,
@@ -838,7 +853,7 @@ impl XlibApp {
             x11_sys::XK_7 => KeyCode::Key7,
             x11_sys::XK_8 => KeyCode::Key8,
             x11_sys::XK_9 => KeyCode::Key9,
-            
+
             x11_sys::XK_Alt_L => KeyCode::Alt,
             x11_sys::XK_Alt_R => KeyCode::Alt,
             x11_sys::XK_Meta_L => KeyCode::Logo,
@@ -847,7 +862,7 @@ impl XlibApp {
             x11_sys::XK_Shift_R => KeyCode::Shift,
             x11_sys::XK_Control_L => KeyCode::Control,
             x11_sys::XK_Control_R => KeyCode::Control,
-            
+
             x11_sys::XK_equal => KeyCode::Equals,
             x11_sys::XK_minus => KeyCode::Minus,
             x11_sys::XK_bracketright => KeyCode::RBracket,
@@ -883,7 +898,7 @@ impl XlibApp {
             x11_sys::XK_KP_7 => KeyCode::Numpad7,
             x11_sys::XK_KP_8 => KeyCode::Numpad8,
             x11_sys::XK_KP_9 => KeyCode::Numpad9,
-            
+
             x11_sys::XK_F1 => KeyCode::F1,
             x11_sys::XK_F2 => KeyCode::F2,
             x11_sys::XK_F3 => KeyCode::F3,
@@ -896,7 +911,7 @@ impl XlibApp {
             x11_sys::XK_F10 => KeyCode::F10,
             x11_sys::XK_F11 => KeyCode::F11,
             x11_sys::XK_F12 => KeyCode::F12,
-            
+
             x11_sys::XK_Print => KeyCode::PrintScreen,
             x11_sys::XK_Home => KeyCode::Home,
             x11_sys::XK_Page_Up => KeyCode::PageUp,
@@ -915,12 +930,7 @@ impl XlibApp {
         // store the text on the clipboard
         self.clipboard = text.clone();
         // lets set the owner
-        x11_sys::XSetSelectionOwner(
-            self.display,
-            self.atoms.clipboard,
-            window_id,
-            time
-        );
+        x11_sys::XSetSelectionOwner(self.display, self.atoms.clipboard, window_id, time);
         x11_sys::XFlush(self.display);
     }
 }
@@ -946,24 +956,53 @@ pub struct XlibAtoms {
 
 impl XlibAtoms {
     fn new(display: *mut x11_sys::Display) -> Self {
-        unsafe {Self {
-            clipboard: x11_sys::XInternAtom(display, "CLIPBOARD\0".as_ptr() as *const _, 0),
-            net_wm_moveresize: x11_sys::XInternAtom(display, "_NET_WM_MOVERESIZE\0".as_ptr() as *const _, 0),
-            wm_delete_window: x11_sys::XInternAtom(display, "WM_DELETE_WINDOW\0".as_ptr() as *const _, 0),
-            wm_protocols: x11_sys::XInternAtom(display, "WM_PROTOCOLS\0".as_ptr() as *const _, 0),
-            wm_class: x11_sys::XInternAtom(display, "WM_CLASS\0".as_ptr() as *const _, 0),
-            motif_wm_hints: x11_sys::XInternAtom(display, "_MOTIF_WM_HINTS\0".as_ptr() as *const _, 0),
-            net_wm_state: x11_sys::XInternAtom(display, "_NET_WM_STATE\0".as_ptr() as *const _, 0),
-            new_wm_state_maximized_horz: x11_sys::XInternAtom(display, "_NET_WM_STATE_MAXIMIZED_HORZ\0".as_ptr() as *const _, 0),
-            new_wm_state_maximized_vert: x11_sys::XInternAtom(display, "_NET_WM_STATE_MAXIMIZED_VERT\0".as_ptr() as *const _, 0),
-            targets: x11_sys::XInternAtom(display, "TARGETS\0".as_ptr() as *const _, 0),
-            string: x11_sys::XInternAtom(display, "STRING\0".as_ptr() as *const _, 0),
-            utf8_string: x11_sys::XInternAtom(display, "UTF8_STRING\0".as_ptr() as *const _, 1),
-            atom: x11_sys::XInternAtom(display, "ATOM\0".as_ptr() as *const _, 0),
-            text: x11_sys::XInternAtom(display, "TEXT\0".as_ptr() as *const _, 0),
-            text_plain: x11_sys::XInternAtom(display, "text/plain\0".as_ptr() as *const _, 0),
-            multiple: x11_sys::XInternAtom(display, "MULTIPLE\0".as_ptr() as *const _, 0),
-        }}
+        unsafe {
+            Self {
+                clipboard: x11_sys::XInternAtom(display, "CLIPBOARD\0".as_ptr() as *const _, 0),
+                net_wm_moveresize: x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_MOVERESIZE\0".as_ptr() as *const _,
+                    0,
+                ),
+                wm_delete_window: x11_sys::XInternAtom(
+                    display,
+                    "WM_DELETE_WINDOW\0".as_ptr() as *const _,
+                    0,
+                ),
+                wm_protocols: x11_sys::XInternAtom(
+                    display,
+                    "WM_PROTOCOLS\0".as_ptr() as *const _,
+                    0,
+                ),
+                wm_class: x11_sys::XInternAtom(display, "WM_CLASS\0".as_ptr() as *const _, 0),
+                motif_wm_hints: x11_sys::XInternAtom(
+                    display,
+                    "_MOTIF_WM_HINTS\0".as_ptr() as *const _,
+                    0,
+                ),
+                net_wm_state: x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_STATE\0".as_ptr() as *const _,
+                    0,
+                ),
+                new_wm_state_maximized_horz: x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_STATE_MAXIMIZED_HORZ\0".as_ptr() as *const _,
+                    0,
+                ),
+                new_wm_state_maximized_vert: x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_STATE_MAXIMIZED_VERT\0".as_ptr() as *const _,
+                    0,
+                ),
+                targets: x11_sys::XInternAtom(display, "TARGETS\0".as_ptr() as *const _, 0),
+                string: x11_sys::XInternAtom(display, "STRING\0".as_ptr() as *const _, 0),
+                utf8_string: x11_sys::XInternAtom(display, "UTF8_STRING\0".as_ptr() as *const _, 1),
+                atom: x11_sys::XInternAtom(display, "ATOM\0".as_ptr() as *const _, 0),
+                text: x11_sys::XInternAtom(display, "TEXT\0".as_ptr() as *const _, 0),
+                text_plain: x11_sys::XInternAtom(display, "text/plain\0".as_ptr() as *const _, 0),
+                multiple: x11_sys::XInternAtom(display, "MULTIPLE\0".as_ptr() as *const _, 0),
+            }
+        }
     }
 }
-

@@ -3,27 +3,27 @@ use crate::{
     makepad_draw::*,
     makepad_platform::{KeyCode, KeyEvent},
     view::*,
-    widget::*
+    widget::*,
 };
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.ModalBase = #(Modal::register_widget(vm))
-    
+
     mod.widgets.Modal = mod.widgets.ModalBase{
         width: Fill
         height: Fill
         flow: Overlay
         align: Center
-        
+
         draw_bg +: {
             pixel: fn() {
                 return vec4(0. 0. 0. 0.0)
             }
         }
-        
+
         bg_view := View{
             width: Fill
             height: Fill
@@ -35,7 +35,7 @@ script_mod!{
                 }
             }
         }
-        
+
         content := View{
             width: Fit
             height: Fit
@@ -53,28 +53,39 @@ pub enum ModalAction {
 
 #[derive(Script, Widget)]
 pub struct Modal {
-    #[source] source: ScriptObjectRef,
-    
+    #[source]
+    source: ScriptObjectRef,
+
     #[deref]
     view: View,
 
-    #[rust] draw_list: Option<DrawList2d>,
+    #[rust]
+    draw_list: Option<DrawList2d>,
 
-    #[live] draw_bg: DrawQuad,
+    #[live]
+    draw_bg: DrawQuad,
 
-    #[rust] is_open: bool,
+    #[rust]
+    is_open: bool,
     /// Whether the modal can be dismissed via an external interaction, including:
     /// clicking outside the content view, pressing Escape, or performing
     /// the back navigational gesture (e.g., on Android).
-    #[live(true)] can_dismiss: bool,
+    #[live(true)]
+    can_dismiss: bool,
 }
 
 impl ScriptHook for Modal {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.draw_list = Some(DrawList2d::script_new(vm));
     }
-    
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         vm.with_cx_mut(|cx| {
             if let Some(draw_list) = &self.draw_list {
                 draw_list.redraw(cx);
@@ -106,15 +117,20 @@ impl Widget for Modal {
             // * If the back navigational action/gesture was triggered (e.g., on Android),
             // * If the Escape key was pressed while either the `bg_view` or `content` has key focus,
             // * If there was a click/press in the background area, outside of the inner `content` view.
-            let should_close = 
-                event.back_pressed()
+            let should_close = event.back_pressed()
                 || match bg_area_hit {
-                    Hit::KeyDown(KeyEvent { key_code: KeyCode::Escape, .. }) => true,
+                    Hit::KeyDown(KeyEvent {
+                        key_code: KeyCode::Escape,
+                        ..
+                    }) => true,
                     Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
                 || match content_area_hit {
-                    Hit::KeyDown(KeyEvent { key_code: KeyCode::Escape, .. }) => true,
+                    Hit::KeyDown(KeyEvent {
+                        key_code: KeyCode::Escape,
+                        ..
+                    }) => true,
                     _ => false,
                 };
             if should_close {
@@ -133,7 +149,7 @@ impl Widget for Modal {
         if self.is_open {
             let bg_view = self.view.widget(ids!(bg_view));
             let _ = bg_view.draw_walk(cx, scope, walk.with_abs_pos(Vec2d { x: 0., y: 0. }));
-            
+
             let content = self.view.widget(ids!(content));
             let _ = content.draw_all(cx, scope);
         }

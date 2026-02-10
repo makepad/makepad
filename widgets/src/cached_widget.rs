@@ -1,14 +1,10 @@
 use std::collections::HashMap;
 
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*,
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 live_design! {
     link widgets;
-    
+
     pub CachedWidget = {{CachedWidget}} {}
 }
 
@@ -32,7 +28,7 @@ live_design! {
 /// The child widget will be created once and cached.
 /// Subsequent uses of this `CachedWidget` with the same child id (`mid_widget`) will reuse the cached instance.
 /// Note that only one child is supported per `CachedWidget`.
-/// 
+///
 /// CachedWidget supports Makepad's widget finding mechanism, allowing child widgets to be located as expected.
 ///
 /// # Implementation Details
@@ -78,7 +74,7 @@ impl LiveHook for CachedWidget {
 
     /// Handles the application of instance properties to this CachedWidget.
     ///
-    /// In the case of `CachedWidget` This method is responsible for setting up the template 
+    /// In the case of `CachedWidget` This method is responsible for setting up the template
     /// for the child widget, and applying any changes to an existing widget instance.
     fn apply_value_instance(
         &mut self,
@@ -161,7 +157,9 @@ impl WidgetNode for CachedWidget {
 
     // Searches for widgets within this CachedWidget based on the given path.
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        let Some(widget) = self.widget.as_ref() else { return };
+        let Some(widget) = self.widget.as_ref() else {
+            return;
+        };
         if self.template_id == path[0] {
             if path.len() == 1 {
                 // If the child widget is the target widget, add it to the results

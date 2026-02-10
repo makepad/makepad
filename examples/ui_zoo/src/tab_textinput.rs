@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -10,7 +8,7 @@ live_design!{
 
     pub DemoTextInput = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/textinput.md") } 
+            <Markdown> { body: dep("crate://self/resources/textinput.md") }
         }
         demos = {
             <H4> { text: "TextInput" }
@@ -31,7 +29,7 @@ live_design!{
                     }
                 }
             }
-            
+
             <Hr> {}
             <H4> { text: "TextInput, customized" }
             <TextInput> {
@@ -44,7 +42,7 @@ live_design!{
                 is_password: false,
                 is_read_only: false,
                 empty_text: "Your text here",
-                
+
                 draw_bg: {
                     border_radius: (THEME_CORNER_RADIUS)
                     border_size: (THEME_BEVELING)
@@ -183,7 +181,7 @@ live_design!{
                     }
 
                 }
-                
+
                 draw_selection: {
                     border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
 

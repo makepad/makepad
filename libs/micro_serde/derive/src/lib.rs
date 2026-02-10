@@ -30,7 +30,6 @@ pub fn derive_de_json(input: TokenStream) -> TokenStream {
     derive_de_json_impl(input)
 }
 
-
 #[proc_macro_derive(SerRon)]
 pub fn derive_ser_ron(input: TokenStream) -> TokenStream {
     derive_ser_ron_impl(input)
@@ -40,4 +39,3 @@ pub fn derive_ser_ron(input: TokenStream) -> TokenStream {
 pub fn derive_de_ron(input: TokenStream) -> TokenStream {
     derive_de_ron_impl(input)
 }
-

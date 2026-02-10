@@ -2,7 +2,7 @@ use {
     crate::{
         char::CharExt,
         document::CodeDocument,
-        history::{EditKind,NewGroup},
+        history::{EditKind, NewGroup},
         layout::{BlockElement, Layout, WrappedElement},
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
@@ -102,7 +102,7 @@ impl CodeSession {
             selection_state.selections.as_selections()
         })
     }
-    
+
     pub fn last_added_selection_index(&self) -> Option<usize> {
         self.selection_state.borrow().last_added_selection_index
     }
@@ -163,7 +163,7 @@ impl CodeSession {
         let mut new_folding_lines = HashSet::new();
         let fold_state = &mut *fold_state_ref;
         for &line in &fold_state.folding_lines {
-            if let Some(scale) = layout.scale.get_mut(line){
+            if let Some(scale) = layout.scale.get_mut(line) {
                 *scale *= 0.9;
                 if *scale < 0.1 + 0.001 {
                     *scale = 0.1;
@@ -177,7 +177,7 @@ impl CodeSession {
         fold_state.folding_lines = new_folding_lines;
         let mut new_unfolding_lines = HashSet::new();
         for &line in &fold_state_ref.unfolding_lines {
-            if let Some(scale) = layout.scale.get_mut(line){
+            if let Some(scale) = layout.scale.get_mut(line) {
                 *scale = 1.0 - 0.9 * (1.0 - *scale);
                 if *scale > 1.0 - 0.001 {
                     *scale = 1.0;
@@ -194,7 +194,13 @@ impl CodeSession {
         true
     }
 
-    pub fn set_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode, new_group:NewGroup) {
+    pub fn set_selection(
+        &self,
+        position: Position,
+        affinity: Affinity,
+        mode: SelectionMode,
+        new_group: NewGroup,
+    ) {
         let position = self.clamp_position(position);
         let selection = grow_selection(
             Selection::from(Cursor {
@@ -213,12 +219,11 @@ impl CodeSession {
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
-        if let NewGroup::Yes = new_group{
+        if let NewGroup::Yes = new_group {
             self.document().force_new_group();
         }
     }
-    
-    
+
     pub fn clamp_position(&self, mut position: Position) -> Position {
         let text = self.document().as_text();
         let lines = text.as_lines();
@@ -255,7 +260,7 @@ impl CodeSession {
         self.document().force_new_group();
     }
 
-    pub fn move_to(&self, position: Position, affinity: Affinity, new_group:NewGroup) {
+    pub fn move_to(&self, position: Position, affinity: Affinity, new_group: NewGroup) {
         let mut selection_state = self.selection_state.borrow_mut();
         let last_added_selection_index = selection_state.last_added_selection_index.unwrap();
         let mode = selection_state.mode;
@@ -278,7 +283,7 @@ impl CodeSession {
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
-        if let NewGroup::Yes = new_group{
+        if let NewGroup::Yes = new_group {
             self.document().force_new_group();
         }
     }
@@ -320,7 +325,6 @@ impl CodeSession {
     }
 
     pub fn insert(&self, text: Text) {
-
         let mut edit_kind = EditKind::Insert;
         let mut inject_char = None;
         let mut uninject_char = None;
@@ -441,8 +445,8 @@ impl CodeSession {
             },
         );
     }
-    
-    pub fn paste_grouped(&self, text: Text, group:u64) {
+
+    pub fn paste_grouped(&self, text: Text, group: u64) {
         self.document.edit_selections(
             self.id,
             EditKind::Group(group),
@@ -460,7 +464,7 @@ impl CodeSession {
             },
         );
     }
-    
+
     pub fn enter(&self) {
         self.selection_state
             .borrow_mut()
@@ -830,20 +834,21 @@ impl CodeSession {
             let position = cursor.position;
             let text = self.document().as_text();
             let lines = text.as_lines();
-            
+
             // Handle empty document or invalid cursor position
             if lines.is_empty() || position.line_index >= lines.len() {
                 return None;
             }
-            
+
             let line = &lines[position.line_index];
             let word_separators = &self.settings.word_separators;
-            
+
             // Find word boundaries
-            let start_byte_index = line.find_prev_word_boundary(position.byte_index, word_separators);
+            let start_byte_index =
+                line.find_prev_word_boundary(position.byte_index, word_separators);
             let end_byte_index = line.find_next_word_boundary(position.byte_index, word_separators);
-            if start_byte_index!=end_byte_index{
-                return Some(line[start_byte_index..end_byte_index].to_string())
+            if start_byte_index != end_byte_index {
+                return Some(line[start_byte_index..end_byte_index].to_string());
             }
         }
         None
@@ -1047,28 +1052,32 @@ impl CodeSession {
         }
         selection_state.highlighted_delimiter_positions = highlighted_delimiter_positions;
     }
-    
-        
+
     pub fn set_cursor_at_file_end(&self) {
         let position = {
             let text = self.document().as_text();
             let lines = text.as_lines();
-                    
+
             if lines.is_empty() {
                 return;
             }
-                    
+
             let last_line_index = lines.len() - 1;
-            let last_line_byte_index = 0;//lines[last_line_index].len();
-                    
+            let last_line_byte_index = 0; //lines[last_line_index].len();
+
             let position = Position {
                 line_index: last_line_index,
                 byte_index: last_line_byte_index,
             };
             position
         };
-                    
-        self.set_selection(position, Affinity::After, SelectionMode::Simple, NewGroup::No);
+
+        self.set_selection(
+            position,
+            Affinity::After,
+            SelectionMode::Simple,
+            NewGroup::No,
+        );
     }
 }
 

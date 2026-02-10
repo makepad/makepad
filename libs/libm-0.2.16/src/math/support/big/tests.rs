@@ -2,7 +2,7 @@ extern crate std;
 use std::string::String;
 use std::{eprintln, format};
 
-use super::{HInt, MinInt, i256, u256};
+use super::{i256, u256, HInt, MinInt};
 use crate::support::{Int as _, NarrowingDiv};
 
 const LOHI_SPLIT: u128 = 0xaaaaaaaaaaaaaaaaffffffffffffffff;

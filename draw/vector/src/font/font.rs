@@ -14,4 +14,3 @@ pub struct TTFFont {
     pub cached_decoded_glyphs: Vec<Option<Box<Glyph>>>,
     pub cached_svg_images: Vec<Option<Option<Rc<Tree>>>>,
 }
-

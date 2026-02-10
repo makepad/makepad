@@ -24,7 +24,6 @@ impl Version {
             .and_then(|version| Version::parse(&version))
     }
 
-
     /// Parse a Rust release version (of the form
     /// `major[.minor[.patch[-channel]]]`), ignoring the release channel, if
     /// any. Returns `None` if `version` is not a valid Rust version string.
@@ -55,7 +54,8 @@ impl Version {
     /// assert!(Version::parse("1.2.3.4").is_none());
     /// ```
     pub fn parse(version: &str) -> Option<Version> {
-        let splits = version.split('-')
+        let splits = version
+            .split('-')
             .nth(0)
             .unwrap_or("")
             .split('.')
@@ -209,12 +209,12 @@ mod tests {
     macro_rules! assert_to_mmp {
         // We don't use `.into::<Option<_>>` because it's not available in 1.0.
         // We don't use the message part of `assert!` for the same reason.
-        ($s:expr, None) => (
+        ($s:expr, None) => {
             assert_eq!(Version::parse($s), None);
-        );
-        ($s:expr, $mmp:expr) => (
+        };
+        ($s:expr, $mmp:expr) => {
             assert_eq!(Version::parse($s).map(|v| v.to_mmp()), Some($mmp));
-        )
+        };
     }
 
     macro_rules! assert_from_mmp {
@@ -299,9 +299,9 @@ mod tests {
     }
 
     macro_rules! reflexive_display {
-        ($s:expr) => (
+        ($s:expr) => {
             assert_eq!(Version::parse($s).unwrap().to_string(), $s);
-        )
+        };
     }
 
     #[test]

@@ -1,4 +1,3 @@
-
 #[macro_export]
 macro_rules! approx_eq {
     ($typ:ty, $lhs:expr, $rhs:expr) => {
@@ -78,7 +77,7 @@ macro_rules! saturating_abs_i32 {
         if $val.is_negative() {
             match $val.checked_neg() {
                 Some(v) => v,
-                None => core::i32::MAX
+                None => core::i32::MAX,
             }
         } else {
             $val
@@ -90,7 +89,7 @@ macro_rules! saturating_abs_i64 {
         if $val.is_negative() {
             match $val.checked_neg() {
                 Some(v) => v,
-                None => core::i64::MAX
+                None => core::i64::MAX,
             }
         } else {
             $val
@@ -102,11 +101,11 @@ macro_rules! saturating_abs_i64 {
 fn test_macro() {
     let a: f32 = 0.15 + 0.15 + 0.15;
     let b: f32 = 0.1 + 0.1 + 0.25;
-    assert!( approx_eq!(f32, a, b) ); // uses the default
-    assert!( approx_eq!(f32, a, b, ulps = 2) );
-    assert!( approx_eq!(f32, a, b, epsilon = 0.00000003) );
-    assert!( approx_eq!(f32, a, b, epsilon = 0.00000003, ulps = 2) );
-    assert!( approx_eq!(f32, a, b, (0.0, 2)) );
+    assert!(approx_eq!(f32, a, b)); // uses the default
+    assert!(approx_eq!(f32, a, b, ulps = 2));
+    assert!(approx_eq!(f32, a, b, epsilon = 0.00000003));
+    assert!(approx_eq!(f32, a, b, epsilon = 0.00000003, ulps = 2));
+    assert!(approx_eq!(f32, a, b, (0.0, 2)));
 
     assert_approx_eq!(f32, a, b); // uses the default
     assert_approx_eq!(f32, a, b, ulps = 2);
@@ -117,15 +116,40 @@ fn test_macro() {
 
 #[test]
 fn test_macro_2() {
-    assert!( approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64) );
-    assert!( approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, ulps=3) );
-    assert!( approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, epsilon=0.0000000004) );
-    assert!( approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, (0.0000000004, 0)) );
-    assert!( approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, (0.0, 3)) );
+    assert!(approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64));
+    assert!(approx_eq!(
+        f64,
+        1000000_f64,
+        1000000.0000000003_f64,
+        ulps = 3
+    ));
+    assert!(approx_eq!(
+        f64,
+        1000000_f64,
+        1000000.0000000003_f64,
+        epsilon = 0.0000000004
+    ));
+    assert!(approx_eq!(
+        f64,
+        1000000_f64,
+        1000000.0000000003_f64,
+        (0.0000000004, 0)
+    ));
+    assert!(approx_eq!(
+        f64,
+        1000000_f64,
+        1000000.0000000003_f64,
+        (0.0, 3)
+    ));
 
     assert_approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64);
-    assert_approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, ulps=3);
-    assert_approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, epsilon=0.0000000004);
+    assert_approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, ulps = 3);
+    assert_approx_eq!(
+        f64,
+        1000000_f64,
+        1000000.0000000003_f64,
+        epsilon = 0.0000000004
+    );
     assert_approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, (0.0000000004, 0));
     assert_approx_eq!(f64, 1000000_f64, 1000000.0000000003_f64, (0.0, 3));
 }
@@ -136,10 +160,26 @@ fn test_macro_3() {
 
     let a: f32 = 0.15 + 0.15 + 0.15;
     let b: f32 = 0.1 + 0.1 + 0.25;
-    assert!( approx_eq!(f32, a, b, F32Margin { epsilon: 0.0, ulps: 2 }) );
-    assert!( approx_eq!(f32, a, b, F32Margin::default()) );
+    assert!(approx_eq!(
+        f32,
+        a,
+        b,
+        F32Margin {
+            epsilon: 0.0,
+            ulps: 2
+        }
+    ));
+    assert!(approx_eq!(f32, a, b, F32Margin::default()));
 
-    assert_approx_eq!(f32, a, b, F32Margin { epsilon: 0.0, ulps: 2 });
+    assert_approx_eq!(
+        f32,
+        a,
+        b,
+        F32Margin {
+            epsilon: 0.0,
+            ulps: 2
+        }
+    );
     assert_approx_eq!(f32, a, b, F32Margin::default());
 }
 

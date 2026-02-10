@@ -6,9 +6,9 @@ use {
             rustc_json::*,
         },
         makepad_code_editor::text::Position,
+        makepad_file_server::FileSystemRoots,
         makepad_live_id::*,
         makepad_micro_serde::*,
-        makepad_file_server::FileSystemRoots,
         makepad_platform::log::LogLevel,
     },
     std::{
@@ -81,10 +81,20 @@ impl BuildConnection {
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
-        let path = shared.read().unwrap().roots.find_root(&what.root).unwrap().clone();
+        let path = shared
+            .read()
+            .unwrap()
+            .roots
+            .find_root(&what.root)
+            .unwrap()
+            .clone();
 
         let http = format!("{}/{}", http, cmd_id.0);
-        let mut env = vec![("RUST_BACKTRACE","1"),("MAKEPAD_STUDIO_HTTP", http.as_str()), ("MAKEPAD", "lines")];
+        let mut env = vec![
+            ("RUST_BACKTRACE", "1"),
+            ("MAKEPAD_STUDIO_HTTP", http.as_str()),
+            ("MAKEPAD", "lines"),
+        ];
 
         let args: Vec<String> = match &what.target {
             BuildTarget::ReleaseStudio => vec![
@@ -434,7 +444,7 @@ pub trait MsgSender: Send {
                 start,
                 end,
                 message,
-                explanation
+                explanation,
             })),
         });
     }
@@ -469,7 +479,7 @@ pub trait MsgSender: Send {
                     span.start(),
                     span.end(),
                     msg.message,
-                    msg.rendered
+                    msg.rendered,
                 );
                 /*
                 if let Some(label) = &span.label {

@@ -25,7 +25,11 @@ pub fn choose_compression_filter(_previous_row: &[u8], _current_row: &[u8]) -> F
 }
 
 pub fn filter_scanline(
-    input: &[u8], previous_row: &[u8], output: &mut [u8], filter: FilterMethod, components: usize
+    input: &[u8],
+    previous_row: &[u8],
+    output: &mut [u8],
+    filter: FilterMethod,
+    components: usize,
 ) {
     let (filter_byte, filter_scanline) = output.split_at_mut(1);
     // add
@@ -36,6 +40,6 @@ pub fn filter_scanline(
         FilterMethod::Sub => filter::sub_filter(input, filter_scanline, components),
         FilterMethod::Up => filter::up_filter(input, previous_row, filter_scanline),
 
-        _ => unreachable!("Unexpected input")
+        _ => unreachable!("Unexpected input"),
     }
 }

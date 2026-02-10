@@ -1,11 +1,11 @@
 //! This module contains code for tokenizing Rust code.
-//! 
+//!
 //! The tokenizer in this module supports lazy tokenization. That is, it has an explicit state,
 //! which can be recorded at the start of each line. Running the tokenizer with the same starting
 //! state on the same line will always result in the same sequence of tokens. This means that if
 //! neither the contents nor the starting state of the tokenizer changed for a given line, that
-//! line does not need to be retokenized. 
-//! 
+//! line does not need to be retokenized.
+//!
 //! The tokenizer consumes one token at a time. The only exception to this are multiline tokens,
 //! such as comments and strings, which are broken up into separate tokens for each line.
 //! Consequently, the only time the tokenizer can end up in a state other than the initial state is
@@ -13,13 +13,13 @@
 //! before it finds the end of the token.
 
 use {
-    std::sync::Arc,
     crate::{
         char_ext::CharExt,
-        live_id::{LiveId},
-        full_token::{TokenWithLen, Delim, FullToken},
-        colorhex
+        colorhex,
+        full_token::{Delim, FullToken, TokenWithLen},
+        live_id::LiveId,
     },
+    std::sync::Arc,
 };
 
 /// The state of the tokenizer.
@@ -43,15 +43,15 @@ impl State {
     /// token in in that string, and moves the cursor forward by the number of characters in the
     /// token. Returns the new state of the tokenizer and the token recognised, or `None` if there
     /// are no more tokens in the string.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_live_tokenizer::{
     ///     full_token::{FullToken, TokenWithLen},
     ///     tokenizer::{Cursor, InitialState, State}
     /// };
-    /// 
+    ///
     /// let mut state = State::default();
     /// let mut scratch = String::new();
     /// let mut cursor = Cursor::new(&['1', '2', '3'], &mut scratch);
@@ -224,49 +224,60 @@ impl InitialState {
             }
         }
     }
-    
+
     fn line_comment(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
         cursor.skip(2);
-        while cursor.skip_if( | ch | ch != '\n' && ch != '\0') {}
+        while cursor.skip_if(|ch| ch != '\n' && ch != '\0') {}
         (State::Initial(InitialState), FullToken::Comment)
     }
-    
+
     fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '*');
         cursor.skip(2);
-        BlockCommentTailState {depth: 0}.next(cursor)
+        BlockCommentTailState { depth: 0 }.next(cursor)
     }
-    
+
     fn identifier_or_bool(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0).is_identifier_start());
         let start = cursor.index();
         match cursor.peek(0) {
             'f' => {
                 cursor.skip(1);
-                if "alse".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) && !cursor.peek(0).is_identifier_continue() {
+                if "alse"
+                    .chars()
+                    .all(|expected| cursor.skip_if(|actual| actual == expected))
+                    && !cursor.peek(0).is_identifier_continue()
+                {
                     return (State::Initial(InitialState), FullToken::Bool(false));
                 }
                 self.identifier_tail(start, cursor)
             }
             't' => {
                 cursor.skip(1);
-                if "rue".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) && !cursor.peek(0).is_identifier_continue() {
+                if "rue"
+                    .chars()
+                    .all(|expected| cursor.skip_if(|actual| actual == expected))
+                    && !cursor.peek(0).is_identifier_continue()
+                {
                     return (State::Initial(InitialState), FullToken::Bool(true));
                 }
                 self.identifier_tail(start, cursor)
-            },
+            }
             _ => self.identifier_tail(start, cursor),
         }
     }
-    
+
     fn identifier_tail(self, start: usize, cursor: &mut Cursor) -> (State, FullToken) {
-        while cursor.skip_if( | ch | ch.is_identifier_continue()) {}
-        (State::Initial(InitialState), FullToken::Ident(
-            LiveId::from_str_with_lut(cursor.from_start_to_scratch(start)).unwrap()
-        ))
+        while cursor.skip_if(|ch| ch.is_identifier_continue()) {}
+        (
+            State::Initial(InitialState),
+            FullToken::Ident(
+                LiveId::from_str_with_lut(cursor.from_start_to_scratch(start)).unwrap(),
+            ),
+        )
     }
-    
+
     fn number(self, cursor: &mut Cursor) -> (State, FullToken) {
         match (cursor.peek(0), cursor.peek(1)) {
             ('0', 'b') => {
@@ -297,21 +308,23 @@ impl InitialState {
                 //}
                 // normal number
                 cursor.skip_digits(10);
-                
+
                 match cursor.peek(0) {
                     '.' if cursor.peek(1) != '.' && !cursor.peek(0).is_identifier_start() => {
                         cursor.skip(1);
-                        if cursor.skip_digits(10) && (cursor.peek(0) == 'E' || cursor.peek(0) == 'e') && !cursor.skip_exponent() {
+                        if cursor.skip_digits(10)
+                            && (cursor.peek(0) == 'E' || cursor.peek(0) == 'e')
+                            && !cursor.skip_exponent()
+                        {
                             return (State::Initial(InitialState), FullToken::Unknown);
                         }
                         if cursor.skip_suffix() {
-                            return (State::Initial(InitialState), FullToken::OtherNumber)
+                            return (State::Initial(InitialState), FullToken::OtherNumber);
                         }
                         // parse as float
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<f64>() {
                             (State::Initial(InitialState), FullToken::Float(value))
-                        }
-                        else {
+                        } else {
                             (State::Initial(InitialState), FullToken::Unknown)
                         }
                     }
@@ -320,25 +333,23 @@ impl InitialState {
                             return (State::Initial(InitialState), FullToken::Unknown);
                         }
                         if cursor.skip_suffix() {
-                            return (State::Initial(InitialState), FullToken::OtherNumber)
+                            return (State::Initial(InitialState), FullToken::OtherNumber);
                         }
                         // parse as float
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<f64>() {
                             (State::Initial(InitialState), FullToken::Float(value))
-                        }
-                        else {
+                        } else {
                             (State::Initial(InitialState), FullToken::Unknown)
                         }
                     }
                     _ => {
                         if cursor.skip_suffix() {
-                            return (State::Initial(InitialState), FullToken::OtherNumber)
+                            return (State::Initial(InitialState), FullToken::OtherNumber);
                         }
                         // normal number
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<i64>() {
                             (State::Initial(InitialState), FullToken::Int(value))
-                        }
-                        else {
+                        } else {
                             (State::Initial(InitialState), FullToken::Unknown)
                         }
                     }
@@ -346,7 +357,7 @@ impl InitialState {
             }
         }
     }
-    
+
     fn color(self, cursor: &mut Cursor) -> (State, FullToken) {
         let start = match (cursor.peek(0), cursor.peek(1)) {
             ('#', 'x') => {
@@ -366,10 +377,10 @@ impl InitialState {
                 start
             }
         };
-        if let Ok(col) = colorhex::hex_bytes_to_u32(cursor.from_start_to_scratch(start).as_bytes()) {
+        if let Ok(col) = colorhex::hex_bytes_to_u32(cursor.from_start_to_scratch(start).as_bytes())
+        {
             (State::Initial(InitialState), FullToken::Color(col))
-        }
-        else {
+        } else {
             (State::Initial(InitialState), FullToken::Unknown)
         }
     }
@@ -390,13 +401,13 @@ impl InitialState {
             self.single_quoted_string(cursor)
         }
     }*/
-    
+
     /*fn byte(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
         self.single_quoted_string(cursor)
     }*/
-    
+
     fn string(self, cursor: &mut Cursor) -> (State, FullToken) {
         self.double_quoted_string(cursor)
     }
@@ -407,19 +418,19 @@ impl InitialState {
         self.double_quoted_dependency(cursor)
     }
     */
-    
+
     fn byte_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
         self.double_quoted_string(cursor)
     }
-    
+
     fn raw_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'r');
         cursor.skip(1);
         self.raw_double_quoted_string(cursor)
     }
-    
+
     fn raw_byte_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'b' && cursor.peek(1) == 'r');
         cursor.skip(2);
@@ -443,31 +454,31 @@ impl InitialState {
         }
         (State::Initial(InitialState), FullToken::String)
     }*/
-    
+
     fn double_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '"');
         cursor.skip(1);
         DoubleQuotedStringTailState.next(cursor)
     }
-/*
+    /*
     fn double_quoted_dependency(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '"');
         cursor.skip(1);
         DoubleQuotedDependencyTailState.next(cursor)
     }*/
-    
+
     fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         let mut start_hash_count = 0;
-        while cursor.skip_if( | ch | ch == '#') {
+        while cursor.skip_if(|ch| ch == '#') {
             start_hash_count += 1;
         }
-        RawDoubleQuotedStringTailState {start_hash_count}.next(cursor)
+        RawDoubleQuotedStringTailState { start_hash_count }.next(cursor)
     }
-    
+
     fn whitespace(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0).is_whitespace());
         cursor.skip(1);
-        while cursor.skip_if( | ch | ch.is_whitespace()) {}
+        while cursor.skip_if(|ch| ch.is_whitespace()) {}
         (State::Initial(InitialState), FullToken::Whitespace)
     }
 }
@@ -505,15 +516,15 @@ impl BlockCommentTailState {
 /// The state of the tokenizer when it is in the middle of a double quoted string.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DoubleQuotedStringTailState;
-  
+
 impl DoubleQuotedStringTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         let mut s = String::new();
-        enum Skip{
+        enum Skip {
             Scanning(bool, usize, usize),
-            Found(usize)
+            Found(usize),
         }
-        let mut skip = Skip::Scanning(true, 0,0);
+        let mut skip = Skip::Scanning(true, 0, 0);
         loop {
             match (cursor.peek(0), cursor.peek(1)) {
                 ('"', _) => {
@@ -528,58 +539,55 @@ impl DoubleQuotedStringTailState {
                     );
                 }
                 ('\\', '\\') => {
-                    if let Skip::Scanning(_,_,len) = skip{
+                    if let Skip::Scanning(_, _, len) = skip {
                         skip = Skip::Found(len);
                     }
                     s.push('\\');
                     cursor.skip(2);
-                },
+                }
                 ('\\', '"') => {
-                    if let Skip::Scanning(_,_,len) = skip{
+                    if let Skip::Scanning(_, _, len) = skip {
                         skip = Skip::Found(len);
                     }
                     s.push('"');
                     cursor.skip(2);
-                },
+                }
                 ('\\', 'n') => {
-                    if let Skip::Scanning(_,_,len) = skip{
+                    if let Skip::Scanning(_, _, len) = skip {
                         skip = Skip::Found(len);
                     }
                     s.push('\n');
                     cursor.skip(2);
-                },
-                ('\n',_)=>{ // first newline sets indent strip
+                }
+                ('\n', _) => {
+                    // first newline sets indent strip
                     s.push('\n');
-                    if let Skip::Scanning(first,_,len) = skip{
+                    if let Skip::Scanning(first, _, len) = skip {
                         skip = Skip::Scanning(first, 0, len);
-                    }
-                    else if let Skip::Found(len) = skip{
+                    } else if let Skip::Found(len) = skip {
                         skip = Skip::Scanning(false, 0, len);
                     }
                     cursor.skip(1);
                 }
-                (' ', _)=>{
-                    if let Skip::Scanning(first, count, len) = &mut skip{
-                        if *first{
+                (' ', _) => {
+                    if let Skip::Scanning(first, count, len) = &mut skip {
+                        if *first {
                             *len += 1;
-                        }
-                        else{
-                            if *count>=*len{
+                        } else {
+                            if *count >= *len {
                                 skip = Skip::Found(*len);
                                 s.push(' ');
-                            }
-                            else{
+                            } else {
                                 *count += 1;
                             }
                         }
-                    }
-                    else{
+                    } else {
                         s.push(' ');
                     }
                     cursor.skip(1);
                 }
-                (x,_) => {
-                    if let Skip::Scanning(_,_,len) = skip{
+                (x, _) => {
+                    if let Skip::Scanning(_, _, len) = skip {
                         skip = Skip::Found(len);
                     }
                     s.push(x);
@@ -630,7 +638,7 @@ impl RawDoubleQuotedStringTailState {
                 '"' => {
                     cursor.skip(1);
                     let mut end_hash_count = 0;
-                    while end_hash_count < self.start_hash_count && cursor.skip_if( | ch | ch == '#') {
+                    while end_hash_count < self.start_hash_count && cursor.skip_if(|ch| ch == '#') {
                         end_hash_count += 1;
                     }
                     if end_hash_count == self.start_hash_count {
@@ -639,7 +647,10 @@ impl RawDoubleQuotedStringTailState {
                     }
                 }
                 '\0' => {
-                    break (State::RawDoubleQuotedStringTail(self), FullToken::String(Arc::new(s)));
+                    break (
+                        State::RawDoubleQuotedStringTail(self),
+                        FullToken::String(Arc::new(s)),
+                    );
                 }
                 x => {
                     s.push(x);
@@ -661,23 +672,27 @@ pub struct Cursor<'a> {
 impl<'a> Cursor<'a> {
     /// Creates a cursor over a slice of chars. The `scratch` parameter provides scratch storage for
     /// building a string when necessary.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_live_tokenizer::tokenizer::Cursor;
-    /// 
+    ///
     /// let mut scratch = String::new();
     /// let cursor = Cursor::new(&['1', '2', '3'], &mut scratch);
     /// ```
     pub fn new(chars: &'a [char], scratch: &'a mut String) -> Cursor<'a> {
-        Cursor {chars, scratch, index: 0 }
+        Cursor {
+            chars,
+            scratch,
+            index: 0,
+        }
     }
-    
+
     pub fn index(&self) -> usize {
         self.index
     }
-    
+
     fn from_start_to_scratch(&mut self, start: usize) -> &str {
         self.scratch.clear();
         for i in start..self.index {
@@ -685,40 +700,49 @@ impl<'a> Cursor<'a> {
         }
         self.scratch
     }
-    
-    
+
     fn peek(&self, index: usize) -> char {
         self.chars.get(self.index + index).cloned().unwrap_or('\0')
     }
-    
+
     fn id_from_1(&self) -> LiveId {
-        LiveId::from_bytes(LiveId::SEED, &[
-            self.chars[self.index] as u8,
-        ], 0, 1, 0)
+        LiveId::from_bytes(LiveId::SEED, &[self.chars[self.index] as u8], 0, 1, 0)
     }
-    
+
     fn id_from_2(&self) -> LiveId {
-        LiveId::from_bytes(LiveId::SEED, &[
-            self.chars[self.index] as u8,
-            self.chars[self.index + 1] as u8,
-        ], 0, 2, 0)
+        LiveId::from_bytes(
+            LiveId::SEED,
+            &[
+                self.chars[self.index] as u8,
+                self.chars[self.index + 1] as u8,
+            ],
+            0,
+            2,
+            0,
+        )
     }
-    
+
     fn id_from_3(&self) -> LiveId {
-        LiveId::from_bytes(LiveId::SEED, &[
-            self.chars[self.index] as u8,
-            self.chars[self.index + 1] as u8,
-            self.chars[self.index + 2] as u8,
-        ], 0, 3, 0)
+        LiveId::from_bytes(
+            LiveId::SEED,
+            &[
+                self.chars[self.index] as u8,
+                self.chars[self.index + 1] as u8,
+                self.chars[self.index + 2] as u8,
+            ],
+            0,
+            3,
+            0,
+        )
     }
-    
+
     fn skip(&mut self, count: usize) {
         self.index += count;
     }
-    
+
     fn skip_if<P>(&mut self, predicate: P) -> bool
     where
-    P: FnOnce(char) -> bool,
+        P: FnOnce(char) -> bool,
     {
         if predicate(self.peek(0)) {
             self.skip(1);
@@ -727,7 +751,7 @@ impl<'a> Cursor<'a> {
             false
         }
     }
-    
+
     fn skip_exponent(&mut self) -> bool {
         debug_assert!(self.peek(0) == 'E' || self.peek(0) == 'e');
         self.skip(1);
@@ -736,7 +760,7 @@ impl<'a> Cursor<'a> {
         }
         self.skip_digits(10)
     }
-    
+
     fn skip_digits(&mut self, radix: u32) -> bool {
         let mut has_skip_digits = false;
         loop {
@@ -753,17 +777,16 @@ impl<'a> Cursor<'a> {
         }
         has_skip_digits
     }
-    
+
     fn skip_suffix(&mut self) -> bool {
         if self.peek(0).is_identifier_start() {
             self.skip(1);
-            while self.skip_if( | ch | ch.is_identifier_continue()) {}
-            return true
+            while self.skip_if(|ch| ch.is_identifier_continue()) {}
+            return true;
         }
         false
     }
 }
-
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TokenPos {
@@ -774,18 +797,19 @@ pub struct TokenPos {
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TokenRange {
     pub start: TokenPos,
-    pub end: TokenPos
+    pub end: TokenPos,
 }
 
-impl TokenRange{
-    pub fn is_in_range(&self, pos:TokenPos)->bool{
-        if self.start.line == self.end.line{
-            pos.line == self.start.line && pos.index >= self.start.index && pos.index < self.end.index
-        }
-        else{
-            pos.line == self.start.line && pos.index >= self.start.index ||
-            pos.line > self.start.line && pos.line < self.end.line ||
-            pos.line == self.end.line && pos.index < self.end.index
+impl TokenRange {
+    pub fn is_in_range(&self, pos: TokenPos) -> bool {
+        if self.start.line == self.end.line {
+            pos.line == self.start.line
+                && pos.index >= self.start.index
+                && pos.index < self.end.index
+        } else {
+            pos.line == self.start.line && pos.index >= self.start.index
+                || pos.line > self.start.line && pos.line < self.end.line
+                || pos.line == self.end.line && pos.index < self.end.index
         }
     }
 }

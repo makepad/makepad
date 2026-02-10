@@ -1,14 +1,12 @@
-use {
-    crate::{
-        makepad_math::*,
-        event::{TouchState, VirtualKeyboardEvent},
-        animator::Ease,
-        os::{
-            apple::ios_app::IosApp,
-            apple::apple_sys::*,
-            apple::ios_app::{with_ios_app, IOS_APP},
-            apple::ios::ios_event::IosEvent,
-        },
+use crate::{
+    animator::Ease,
+    event::{TouchState, VirtualKeyboardEvent},
+    makepad_math::*,
+    os::{
+        apple::apple_sys::*,
+        apple::ios::ios_event::IosEvent,
+        apple::ios_app::IosApp,
+        apple::ios_app::{with_ios_app, IOS_APP},
     },
 };
 
@@ -17,22 +15,26 @@ use {
 /// This is critical for callbacks from UIKit that can occur during borrows.
 ///
 /// This function is shared by ios_delegates and ios_text_input modules.
-pub fn try_with_ios_app<R>(f: impl FnOnce(&mut crate::os::apple::ios::ios_app::IosApp) -> R) -> Option<R> {
-    IOS_APP.try_with(|app| {
-        match app.try_borrow_mut() {
-            Ok(mut app_ref) => {
-                if let Some(app) = app_ref.as_mut() {
-                    return Some(f(app));
+pub fn try_with_ios_app<R>(
+    f: impl FnOnce(&mut crate::os::apple::ios::ios_app::IosApp) -> R,
+) -> Option<R> {
+    IOS_APP
+        .try_with(|app| {
+            match app.try_borrow_mut() {
+                Ok(mut app_ref) => {
+                    if let Some(app) = app_ref.as_mut() {
+                        return Some(f(app));
+                    }
+                }
+                Err(_) => {
+                    crate::log!("Warning: try_with_ios_app skipped due to re-entrant borrow");
                 }
             }
-            Err(_) => {
-                crate::log!("Warning: try_with_ios_app skipped due to re-entrant borrow");
-            }
-        }
-        None
-    }).ok().flatten()
+            None
+        })
+        .ok()
+        .flatten()
 }
-
 
 pub fn define_ios_app_delegate() -> *const Class {
     let superclass = class!(NSObject);
@@ -52,7 +54,7 @@ pub fn define_ios_app_delegate() -> *const Class {
         decl.add_method(
             sel!(application: didFinishLaunchingWithOptions:),
             did_finish_launching_with_options
-            as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> BOOL,
+                as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> BOOL,
         );
     }
 
@@ -139,8 +141,7 @@ pub fn define_mtk_view() -> *const Class {
                 let uid_obj: ObjcId = msg_send![ios_touch, estimationUpdateIndex];
                 let uid: u64 = if uid_obj != nil {
                     msg_send![uid_obj, intValue]
-                }
-                else {
+                } else {
                     touch_id as u64
                 };
                 let p: NSPoint = msg_send![ios_touch, locationInView: this];
@@ -150,13 +151,15 @@ pub fn define_mtk_view() -> *const Class {
                 let major_radius: f64 = msg_send![ios_touch, majorRadius];
                 let force: f64 = msg_send![ios_touch, force];
 
-                with_ios_app(|app| app.update_touch_with_details(
-                    uid,
-                    dvec2(p.x, p.y),
-                    state,
-                    dvec2(major_radius, major_radius),
-                    force
-                ));
+                with_ios_app(|app| {
+                    app.update_touch_with_details(
+                        uid,
+                        dvec2(p.x, p.y),
+                        state,
+                        dvec2(major_radius, major_radius),
+                        force,
+                    )
+                });
             }
         }
     }
@@ -267,14 +270,20 @@ pub fn define_mtk_view_delegate() -> *const Class {
 pub fn define_gesture_recognizer_handler() -> *const Class {
     let mut decl = ClassDecl::new("LongPressGestureRecognizerHandler", class!(NSObject)).unwrap();
 
-    extern "C" fn handle_long_press_gesture(_this: &Object, _: Sel, gesture_recognizer: ObjcId, _: ObjcId) {
+    extern "C" fn handle_long_press_gesture(
+        _this: &Object,
+        _: Sel,
+        gesture_recognizer: ObjcId,
+        _: ObjcId,
+    ) {
         unsafe {
             let state: i64 = msg_send![gesture_recognizer, state];
             // One might expect that we want to trigger on the "Recognized" or "Ended" state,
             // but that state is not triggered until the user lifts their finger.
             // We want to trigger on the "Began" state, which occurs only once the user has long-pressed
             // for a long-enough time interval to trigger the gesture (without having to lift their finger).
-            if state == 1 { // UIGestureRecognizerStateBegan
+            if state == 1 {
+                // UIGestureRecognizerStateBegan
                 let view: ObjcId = msg_send![gesture_recognizer, view];
                 let location_in_view: NSPoint = msg_send![gesture_recognizer, locationInView: view];
                 // There's no way to get the touch event's UID from within a default gesture recognizer
@@ -302,7 +311,6 @@ pub fn define_gesture_recognizer_handler() -> *const Class {
 }
 
 pub fn define_ios_timer_delegate() -> *const Class {
-
     extern "C" fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
         IosApp::send_timer_received(nstimer);
     }
@@ -316,8 +324,14 @@ pub fn define_ios_timer_delegate() -> *const Class {
 
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(receivedTimer:), received_timer as extern "C" fn(&Object, Sel, ObjcId));
-        decl.add_method(sel!(receivedLiveResize:), received_live_resize as extern "C" fn(&Object, Sel, ObjcId));
+        decl.add_method(
+            sel!(receivedTimer:),
+            received_timer as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(receivedLiveResize:),
+            received_live_resize as extern "C" fn(&Object, Sel, ObjcId),
+        );
     }
 
     return decl.register();
@@ -347,10 +361,15 @@ pub fn define_textfield_delegate() -> *const Class {
 
             let ease = match curve >> 16 {
                 // UIViewAnimationOptionCurveEaseInOut - approximated with bezier
-                0 => Ease::Bezier { cp0: 0.25, cp1: 0.1, cp2: 0.25, cp3: 0.1 },
-                1 => Ease::InExp, //UIViewAnimationOptionCurveEaseIn = 1 << 16,
+                0 => Ease::Bezier {
+                    cp0: 0.25,
+                    cp1: 0.1,
+                    cp2: 0.25,
+                    cp3: 0.1,
+                },
+                1 => Ease::InExp,  //UIViewAnimationOptionCurveEaseIn = 1 << 16,
                 2 => Ease::OutExp, //UIViewAnimationOptionCurveEaseOut = 2 << 16,
-                _ => Ease::Linear //UIViewAnimationOptionCurveLinear = 3 << 16,
+                _ => Ease::Linear, //UIViewAnimationOptionCurveLinear = 3 << 16,
             };
             (duration, ease)
         }
@@ -366,20 +385,22 @@ pub fn define_textfield_delegate() -> *const Class {
         let (duration, ease) = get_curve_duration(notif);
         // Now borrow to get time and queue event
         if let Some(time) = try_with_ios_app(|app| app.time_now()) {
-            try_with_ios_app(|app| app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
-                time,
-                ease,
-                height: -height,
-                duration
-            }));
+            try_with_ios_app(|app| {
+                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
+                    time,
+                    ease,
+                    height: -height,
+                    duration,
+                })
+            });
         }
     }
 
     extern "C" fn keyboard_did_hide(_: &Object, _: Sel, _notif: ObjcId) {
         if let Some(time) = try_with_ios_app(|app| app.time_now()) {
-            try_with_ios_app(|app| app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidHide {
-                time,
-            }));
+            try_with_ios_app(|app| {
+                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidHide { time })
+            });
         }
     }
 
@@ -389,12 +410,14 @@ pub fn define_textfield_delegate() -> *const Class {
         let (duration, ease) = get_curve_duration(notif);
         // Now borrow to get time and queue event
         if let Some(time) = try_with_ios_app(|app| app.time_now()) {
-            try_with_ios_app(|app| app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
-                time,
-                height,
-                ease,
-                duration
-            }));
+            try_with_ios_app(|app| {
+                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
+                    time,
+                    height,
+                    ease,
+                    duration,
+                })
+            });
         }
     }
 
@@ -403,10 +426,9 @@ pub fn define_textfield_delegate() -> *const Class {
         let height = get_height_delta(notif);
         // Now borrow to get time and queue event
         if let Some(time) = try_with_ios_app(|app| app.time_now()) {
-            try_with_ios_app(|app| app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidShow {
-                time,
-                height,
-            }));
+            try_with_ios_app(|app| {
+                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidShow { time, height })
+            });
         }
     }
     extern "C" fn input_mode_did_change(_: &Object, _: Sel, _notif: ObjcId) {
@@ -424,13 +446,34 @@ pub fn define_textfield_delegate() -> *const Class {
     }
 
     unsafe {
-        decl.add_method(sel!(keyboardDidChangeFrame:), keyboard_did_change_frame as extern "C" fn(&Object, Sel, ObjcId),);
-        decl.add_method(sel!(keyboardWillChangeFrame:), keyboard_will_change_frame as extern "C" fn(&Object, Sel, ObjcId),);
-        decl.add_method(sel!(keyboardWillShow:), keyboard_will_show as extern "C" fn(&Object, Sel, ObjcId),);
-        decl.add_method(sel!(keyboardDidShow:), keyboard_did_show as extern "C" fn(&Object, Sel, ObjcId),);
-        decl.add_method(sel!(keyboardWillHide:), keyboard_will_hide as extern "C" fn(&Object, Sel, ObjcId),);
-        decl.add_method(sel!(keyboardDidHide:), keyboard_did_hide as extern "C" fn(&Object, Sel, ObjcId),);
-        decl.add_method(sel!(inputModeDidChange:), input_mode_did_change as extern "C" fn(&Object, Sel, ObjcId));
+        decl.add_method(
+            sel!(keyboardDidChangeFrame:),
+            keyboard_did_change_frame as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(keyboardWillChangeFrame:),
+            keyboard_will_change_frame as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(keyboardWillShow:),
+            keyboard_will_show as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(keyboardDidShow:),
+            keyboard_did_show as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(keyboardWillHide:),
+            keyboard_will_hide as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(keyboardDidHide:),
+            keyboard_did_hide as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(inputModeDidChange:),
+            input_mode_did_change as extern "C" fn(&Object, Sel, ObjcId),
+        );
     }
     decl.add_ivar::<*mut c_void>("display_ptr");
     return decl.register();
@@ -457,7 +500,10 @@ pub fn define_edit_menu_interaction_delegate() -> *const Class {
             if mtk_view.is_null() {
                 return NSRect {
                     origin: NSPoint { x: 0.0, y: 0.0 },
-                    size: NSSize { width: 1.0, height: 1.0 },
+                    size: NSSize {
+                        width: 1.0,
+                        height: 1.0,
+                    },
                 };
             }
             let view = mtk_view as ObjcId;

@@ -206,7 +206,6 @@ pub struct BlurSettings {
     std: f32a,
 }
 
-
 #[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct ShadowSettings {
     #[live(0.4)]
@@ -214,7 +213,7 @@ pub struct ShadowSettings {
     #[live(2.0)]
     x: f32a,
     #[live(2.0)]
-    y: f32a
+    y: f32a,
 }
 
 #[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
@@ -229,7 +228,6 @@ pub struct DelaySettings {
     difference: f32a,
     #[live(0.7)]
     length: f32a,
-
 }
 
 #[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
@@ -318,11 +316,10 @@ pub struct IronFishSettings {
     noise: f32a,
     #[live(0.0)]
     portamento: f32a,
-
-//    #[live]
-//  blur: BlurSettings,
-//    #[live]
-//  shadow: ShadowSettings,
+    //    #[live]
+    //  blur: BlurSettings,
+    //    #[live]
+    //  shadow: ShadowSettings,
 }
 
 #[derive(Copy, Clone)]
@@ -1660,7 +1657,7 @@ pub struct IronFishState {
     g: IronFishGlobalVoiceState,
     chorus: ChorusState,
     reverb: ReverbState,
-    actual_delay_length: f32
+    actual_delay_length: f32,
 }
 
 impl IronFishState {
@@ -1817,13 +1814,19 @@ impl IronFishState {
 
         let mut l = self.settings.delay.length.get();
         let leftoffs = (self.settings.delay.difference.get()).powf(2.0);
-        
-        l = (l * l) *  (47000.0 - 15000.0) + 1000.0;
+
+        l = (l * l) * (47000.0 - 15000.0) + 1000.0;
         self.actual_delay_length += (l - self.actual_delay_length) * 0.3;
-        let delaylen: f32 = (self.actual_delay_length) as f32;  
-        
-        let mut delayreadposl:i32 = self.delaywritepos as i32 - (delaylen - (leftoffs * (48000.0 - delaylen))).max(1.0).min(47500.0) as i32;
-        let mut delayreadposr:i32 = self.delaywritepos as i32 - (delaylen + (leftoffs * (48000.0 - delaylen))).max(1.0).min(47500.0) as i32; 
+        let delaylen: f32 = (self.actual_delay_length) as f32;
+
+        let mut delayreadposl: i32 = self.delaywritepos as i32
+            - (delaylen - (leftoffs * (48000.0 - delaylen)))
+                .max(1.0)
+                .min(47500.0) as i32;
+        let mut delayreadposr: i32 = self.delaywritepos as i32
+            - (delaylen + (leftoffs * (48000.0 - delaylen)))
+                .max(1.0)
+                .min(47500.0) as i32;
 
         while delayreadposl >= 48000 {
             delayreadposl -= 48000;
@@ -1842,7 +1845,7 @@ impl IronFishState {
         let send = self.settings.delay.delaysend.get();
 
         for i in 0..frame_count {
-            let rr = self.delaylineright[delayreadposr as  usize];
+            let rr = self.delaylineright[delayreadposr as usize];
             let ll = self.delaylineleft[delayreadposl as usize];
 
             let mut r = ll * cross + rr * icross;
@@ -2339,7 +2342,7 @@ impl AudioComponent for IronFish {
             g: Default::default(),
             chorus: Default::default(),
             reverb: Default::default(),
-            actual_delay_length: 1.0
+            actual_delay_length: 1.0,
         })
     }
 

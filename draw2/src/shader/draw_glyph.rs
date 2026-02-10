@@ -741,7 +741,9 @@ impl DrawGlyph {
         };
         for (index, layer) in layers.iter().enumerate() {
             self.apply_layer(layer, index as f32);
-            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+            instances
+                .instances
+                .extend_from_slice(self.draw_vars.as_slice());
         }
         let new_area = cx.end_many_instances(instances);
         let old_area = self.draw_vars.area;
@@ -1040,9 +1042,18 @@ fn cubic_to_quads_recursive(
 ) {
     let qc = cubic_to_quad_control(p0, p1, p2, p3);
     let q = QuadCurve { p0, p1: qc, p2: p3 };
-    let e25 = distance(eval_cubic(p0, p1, p2, p3, 0.25), eval_quad(q.p0, q.p1, q.p2, 0.25));
-    let e50 = distance(eval_cubic(p0, p1, p2, p3, 0.50), eval_quad(q.p0, q.p1, q.p2, 0.50));
-    let e75 = distance(eval_cubic(p0, p1, p2, p3, 0.75), eval_quad(q.p0, q.p1, q.p2, 0.75));
+    let e25 = distance(
+        eval_cubic(p0, p1, p2, p3, 0.25),
+        eval_quad(q.p0, q.p1, q.p2, 0.25),
+    );
+    let e50 = distance(
+        eval_cubic(p0, p1, p2, p3, 0.50),
+        eval_quad(q.p0, q.p1, q.p2, 0.50),
+    );
+    let e75 = distance(
+        eval_cubic(p0, p1, p2, p3, 0.75),
+        eval_quad(q.p0, q.p1, q.p2, 0.75),
+    );
     let max_err = e25.max(e50).max(e75);
 
     if max_err <= CUBIC_TO_QUAD_TOLERANCE || depth >= MAX_CUBIC_SPLIT_DEPTH {

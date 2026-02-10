@@ -1,8 +1,4 @@
-use {
-    std::fmt,
-    std::slice,
-    crate::shader_ast::Ident
-};
+use {crate::shader_ast::Ident, std::fmt, std::slice};
 
 #[derive(Clone, Debug)]
 pub struct Swizzle {

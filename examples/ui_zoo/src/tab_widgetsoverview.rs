@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -23,7 +21,7 @@ live_design!{
 
                 <Image> { margin: {bottom: 10.}, width: 250, height: 36.5, source: dep("crate://self/resources/logo_makepad.png" ), fit: Biggest }
 
-                <H4> { text: "Makepad is an open-source, cross-platform UI framework written in and for Rust. It runs natively and on the web, supporting all major platforms: Windows, Linux, macOS, iOS, and Android." } 
+                <H4> { text: "Makepad is an open-source, cross-platform UI framework written in and for Rust. It runs natively and on the web, supporting all major platforms: Windows, Linux, macOS, iOS, and Android." }
                 <P> {
                     text: "Built on a shader-based architecture, Makepad delivers high performance, making it suitable for complex applications like Photoshop or even 3D/VR/AR experiences."
                 }

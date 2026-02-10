@@ -379,8 +379,7 @@ impl CommandTextInput {
     fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
         if self.view(ids!(popup)).visible() {
             if self.inline_search {
-                self.view(ids!(search_input_wrapper))
-                    .set_visible(cx, false);
+                self.view(ids!(search_input_wrapper)).set_visible(cx, false);
             } else {
                 self.view(ids!(search_input_wrapper)).set_visible(cx, true);
             }
@@ -407,8 +406,7 @@ impl CommandTextInput {
             self.trigger_position = Some(get_head(&self.text_input_ref()));
 
             if self.inline_search {
-                self.view(ids!(search_input_wrapper))
-                    .set_visible(cx, false);
+                self.view(ids!(search_input_wrapper)).set_visible(cx, false);
             } else {
                 self.view(ids!(search_input_wrapper)).set_visible(cx, true);
                 self.is_search_input_focus_pending = true;
@@ -493,8 +491,7 @@ impl CommandTextInput {
 
     fn show_popup(&mut self, cx: &mut Cx) {
         if self.inline_search {
-            self.view(ids!(search_input_wrapper))
-                .set_visible(cx, false);
+            self.view(ids!(search_input_wrapper)).set_visible(cx, false);
         } else {
             self.view(ids!(search_input_wrapper)).set_visible(cx, true);
         }

@@ -86,7 +86,8 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     )]
     #[inline(never)]
     pub(crate) fn decode_mcu_ycbcr_baseline(
-        &mut self, pixels: &mut [u8]
+        &mut self,
+        pixels: &mut [u8],
     ) -> Result<(), DecodeErrors> {
         setup_component_params(self)?;
 
@@ -150,7 +151,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             // components.
             if min(
                 self.options.jpeg_get_out_colorspace().num_components() - 1,
-                pos
+                pos,
             ) == pos
                 || comp_len == 4
             // Special colorspace
@@ -187,7 +188,14 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         let mut pixels_written = 0;
 
         let is_hv = usize::from(self.is_interleaved);
-        let upsampler_scratch_size = is_hv * self.components.iter().map(|x| x.width_stride).max().unwrap_or(0) * 8;
+        let upsampler_scratch_size = is_hv
+            * self
+                .components
+                .iter()
+                .map(|x| x.width_stride)
+                .max()
+                .unwrap_or(0)
+            * 8;
         let mut upsampler_scratch_space = vec![0; upsampler_scratch_size];
 
         'sos: loop {
@@ -217,7 +225,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         i,
                         &mut tmp,
                         &mut stream,
-                        &mut progressive_mcus
+                        &mut progressive_mcus,
                     )?
                 } else {
                     /* NB: (cae). This code was added due to the issue at https://github.com/etemesi254/zune-image/issues/277
@@ -242,7 +250,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         i,
                         &mut tmp,
                         &mut stream,
-                        &mut progressive_mcus
+                        &mut progressive_mcus,
                     )?
                 };
 
@@ -256,7 +264,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         width,
                         padded_width,
                         &mut pixels_written,
-                        &mut upsampler_scratch_space
+                        &mut upsampler_scratch_space,
                     )?;
                 }
 
@@ -325,7 +333,10 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::cast_sign_loss)]
     pub(crate) fn finish_baseline_decoding(
-        &mut self, block: &[Vec<i16>; MAX_COMPONENTS], _mcu_width: usize, pixels: &mut [u8]
+        &mut self,
+        block: &[Vec<i16>; MAX_COMPONENTS],
+        _mcu_width: usize,
+        pixels: &mut [u8],
     ) -> Result<(), DecodeErrors> {
         let mcu_height = self.mcu_y;
 
@@ -341,7 +352,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             // Mark only needed components for computing output colors.
             if min(
                 self.options.jpeg_get_out_colorspace().num_components() - 1,
-                pos
+                pos,
             ) == pos
                 || self.input_colorspace == ColorSpace::YCCK
                 || self.input_colorspace == ColorSpace::CMYK
@@ -387,7 +398,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 width,
                 padded_width,
                 &mut pixels_written,
-                &mut upsampler_scratch_space
+                &mut upsampler_scratch_space,
             )?;
         }
 
@@ -395,8 +406,12 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     }
 
     fn decode_mcu_width<const PROGRESSIVE: bool>(
-        &mut self, mcu_width: usize, mcu_height: usize, tmp: &mut [i32; 64],
-        stream: &mut BitStream, progressive: &mut [Vec<i16>; 4]
+        &mut self,
+        mcu_width: usize,
+        mcu_height: usize,
+        tmp: &mut [i32; 64],
+        stream: &mut BitStream,
+        progressive: &mut [Vec<i16>; 4],
     ) -> Result<McuContinuation, DecodeErrors> {
         let is_one_by_one = !self.scan_subsampled;
 
@@ -415,7 +430,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 mcu_height,
                 tmp,
                 stream,
-                progressive
+                progressive,
             )
         } else {
             self.inner_decode_mcu_width::<PROGRESSIVE, true>(
@@ -423,7 +438,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 mcu_height,
                 tmp,
                 stream,
-                progressive
+                progressive,
             )
         }
     }
@@ -434,8 +449,12 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     // when `not SAMPLED` then the inner loop has exactly one iteration per component in
     // the scan. The difference was ~1% or a bit more.
     fn inner_decode_mcu_width<const PROGRESSIVE: bool, const SAMPLED: bool>(
-        &mut self, mcu_width: usize, mcu_height: usize, tmp: &mut [i32; 64],
-        stream: &mut BitStream, progressive: &mut [Vec<i16>; 4]
+        &mut self,
+        mcu_width: usize,
+        mcu_height: usize,
+        tmp: &mut [i32; 64],
+        stream: &mut BitStream,
+        progressive: &mut [Vec<i16>; 4],
     ) -> Result<McuContinuation, DecodeErrors> {
         let z_order = self.z_order;
         let z_scans = &z_order[..usize::from(self.num_scans)];
@@ -498,12 +517,18 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 //
                 // For PROGRESSIVE (non-interleaved), we iterate data units directly so
                 // h_samp/v_samp loops run exactly once.
-                let v_step =
-                    if SAMPLED && !PROGRESSIVE { 0..component.vertical_sample } else { 0..1 };
+                let v_step = if SAMPLED && !PROGRESSIVE {
+                    0..component.vertical_sample
+                } else {
+                    0..1
+                };
 
                 for v_samp in v_step {
-                    let h_step =
-                        if SAMPLED && !PROGRESSIVE { 0..component.horizontal_sample } else { 0..1 };
+                    let h_step = if SAMPLED && !PROGRESSIVE {
+                        0..component.horizontal_sample
+                    } else {
+                        0..1
+                    };
 
                     for h_samp in h_step {
                         let result = if component_samples_needed {
@@ -525,7 +550,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                                 ac_table,
                                 qt_table,
                                 tmp,
-                                &mut component.dc_pred
+                                &mut component.dc_pred,
                             )
                         } else {
                             // We do not touch tmp so there is no need to reset it.
@@ -597,7 +622,8 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     }
 
     fn check_stream_marker_after_mcu_width(
-        &mut self, stream: &mut BitStream
+        &mut self,
+        stream: &mut BitStream,
     ) -> Result<McuContinuation, DecodeErrors> {
         // After all interleaved components, that's an MCU
         // handle stream markers
@@ -679,7 +705,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     fn advance_to_next_sos(
         &mut self,
         first_marker: Marker,
-        stream: &mut BitStream
+        stream: &mut BitStream,
     ) -> Result<bool, DecodeErrors> {
         // Limit iterations to prevent DoS from malicious files.
         const MAX_INTER_SCAN_MARKERS: usize = 64;
@@ -729,7 +755,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         }
 
         Err(DecodeErrors::FormatStatic(
-            "Too many markers between scans (exceeded limit of 64)"
+            "Too many markers between scans (exceeded limit of 64)",
         ))
     }
 
@@ -765,8 +791,14 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     }
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub(crate) fn post_process(
-        &mut self, pixels: &mut [u8], i: usize, mcu_height: usize, width: usize,
-        padded_width: usize, pixels_written: &mut usize, upsampler_scratch_space: &mut [i16]
+        &mut self,
+        pixels: &mut [u8],
+        i: usize,
+        mcu_height: usize,
+        width: usize,
+        padded_width: usize,
+        pixels_written: &mut usize,
+        upsampler_scratch_space: &mut [i16],
     ) -> Result<(), DecodeErrors> {
         let out_colorspace_components = self.options.jpeg_get_out_colorspace().num_components();
 
@@ -811,7 +843,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         self.options.jpeg_get_out_colorspace(),
                         output,
                         width,
-                        padded_width
+                        padded_width,
                     )?;
                     px += width * out_colorspace_components;
                 }
@@ -827,7 +859,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     mcu_height,
                     i,
                     upsampler_scratch_space,
-                    is_vertically_sampled
+                    is_vertically_sampled,
                 )?;
             }
 
@@ -932,5 +964,5 @@ enum McuContinuation {
     /// Found an inter-scan marker (DHT/DQT/DRI/COM/APP) that needs handling.
     /// The caller should parse it and scan for the next SOS.
     InterScanMarker(Marker),
-    Terminate
+    Terminate,
 }

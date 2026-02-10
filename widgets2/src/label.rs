@@ -1,15 +1,9 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*
-    }
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.LabelBase = #(Label::register_widget(vm))
     mod.widgets.Label = set_type_default() do mod.widgets.LabelBase{
         width: Fit
@@ -60,14 +54,14 @@ script_mod!{
             gradient_fill_horizontal: 1.0
         }
     }
-    
+
     mod.widgets.LabelGradientY = mod.widgets.Label{
         draw_text +: {
             color: #f00
             color_2: #ff0
         }
     }
-    
+
     mod.widgets.TextBox = mod.widgets.Label{
         width: Fill
         height: Fit
@@ -94,7 +88,7 @@ script_mod!{
         }
         text: "H1"
     }
-    
+
     mod.widgets.H1italic = mod.widgets.H1{
         draw_text +: {
             text_style: theme.font_bold_italic{
@@ -104,7 +98,7 @@ script_mod!{
         }
         text: "H1 italic"
     }
-    
+
     mod.widgets.H2 = mod.widgets.H1{
         draw_text +: {
             text_style: theme.font_bold{
@@ -114,7 +108,7 @@ script_mod!{
         }
         text: "H2"
     }
-    
+
     mod.widgets.H2italic = mod.widgets.H1{
         draw_text +: {
             text_style: theme.font_bold_italic{
@@ -124,7 +118,7 @@ script_mod!{
         }
         text: "H2 italic"
     }
-    
+
     mod.widgets.H3 = mod.widgets.H1{
         draw_text +: {
             text_style: theme.font_bold{
@@ -134,7 +128,7 @@ script_mod!{
         }
         text: "H3"
     }
-    
+
     mod.widgets.H3italic = mod.widgets.H1{
         draw_text +: {
             text_style: theme.font_bold_italic{
@@ -144,7 +138,7 @@ script_mod!{
         }
         text: "H3 italic"
     }
-    
+
     mod.widgets.H4 = mod.widgets.H1{
         draw_text +: {
             text_style: theme.font_bold{
@@ -154,7 +148,7 @@ script_mod!{
         }
         text: "H4"
     }
-    
+
     mod.widgets.H4italic = mod.widgets.H1{
         draw_text +: {
             text_style: theme.font_bold_italic{
@@ -164,11 +158,11 @@ script_mod!{
         }
         text: "H4 italic"
     }
- 
+
     mod.widgets.P = mod.widgets.TextBox{
         text: "Paragraph"
     }
-    
+
     mod.widgets.Pbold = mod.widgets.TextBox{
         draw_text +: {
             text_style: theme.font_bold{
@@ -177,7 +171,7 @@ script_mod!{
         }
         text: "Paragraph"
     }
-    
+
     mod.widgets.Pitalic = mod.widgets.TextBox{
         draw_text +: {
             text_style: theme.font_italic{
@@ -186,7 +180,7 @@ script_mod!{
         }
         text: "Paragraph"
     }
-    
+
     mod.widgets.Pbolditalic = mod.widgets.TextBox{
         draw_text +: {
             text_style: theme.font_bold_italic{
@@ -214,50 +208,62 @@ pub enum LabelAction {
     HoverIn(Rect),
     HoverOut,
     #[default]
-    None
+    None,
 }
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Label {
-    #[redraw] #[live] draw_text: DrawText,
-    
-    #[walk] walk: Walk,
-    #[live] align: Align,
-    #[live(Flow::right_wrap())] flow: Flow,
-    #[live] padding: Inset,
-    
-    #[rust] area: Area,
-    #[live] text: ArcStringMut,
+    #[redraw]
+    #[live]
+    draw_text: DrawText,
+
+    #[walk]
+    walk: Walk,
+    #[live]
+    align: Align,
+    #[live(Flow::right_wrap())]
+    flow: Flow,
+    #[live]
+    padding: Inset,
+
+    #[rust]
+    area: Area,
+    #[live]
+    text: ArcStringMut,
 
     // Indicates if this label responds to hover events
     // It is not turned on by default because it will consume finger events
     // and prevent other widgets from receiving them, if it is not considered with care
     // The primary use case for this kind of emitted actions is for tooltips displaying
-    #[live(false)] hover_actions_enabled: bool
-} 
+    #[live(false)]
+    hover_actions_enabled: bool,
+}
 
 impl Widget for Label {
-
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let walk = walk.with_add_padding(self.padding);
-        cx.begin_turtle(walk, Layout{
-            flow: self.flow,
-            ..Default::default()
-        });
+        cx.begin_turtle(
+            walk,
+            Layout {
+                flow: self.flow,
+                ..Default::default()
+            },
+        );
         // here we need to check if the text is empty, if so we need to set it to a space
         // or the text draw will not work(seems like lazy drawtext bug)
         let _ = self.text.as_ref().is_empty().then(|| {
             let _ = self.set_text(cx, " ");
         });
-        self.draw_text.draw_walk(cx, walk, self.align, self.text.as_ref());
+        self.draw_text
+            .draw_walk(cx, walk, self.align, self.text.as_ref());
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
-    
+
     fn text(&self) -> String {
         self.text.as_ref().to_string()
     }
-    
+
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
@@ -265,24 +271,23 @@ impl Widget for Label {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-                
+
         match event.hit_designer(cx, self.area) {
             HitDesigner::DesignerPick(_e) => {
                 cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
             }
-            _ => ()
+            _ => (),
         }
-        
+
         if self.hover_actions_enabled {
-            
             match event.hits_with_capture_overload(cx, self.area, true) {
                 Hit::FingerHoverIn(fh) => {
                     cx.widget_action(uid, &scope.path, LabelAction::HoverIn(fh.rect));
                 }
                 Hit::FingerHoverOut(_) => {
                     cx.widget_action(uid, &scope.path, LabelAction::HoverOut);
-                },
-                _ => ()
+                }
+                _ => (),
             }
         }
     }
@@ -293,7 +298,7 @@ impl LabelRef {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {
                 LabelAction::HoverIn(rect) => Some(rect),
-                _ => None
+                _ => None,
             }
         } else {
             None
@@ -304,13 +309,13 @@ impl LabelRef {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {
                 LabelAction::HoverOut => true,
-                _ => false
+                _ => false,
             }
         } else {
             false
         }
     }
-    
+
     pub fn set_text_with<F: FnOnce(&mut String)>(&self, f: F) {
         if let Some(mut inner) = self.borrow_mut() {
             f(inner.text.as_mut())

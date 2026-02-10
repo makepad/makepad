@@ -84,7 +84,8 @@ impl Layouter {
             .loader
             .get_or_load_font_family(params.style.font_family_id)
             .clone();
-        LayoutContext::new(font_family, params.text, params.style, params.options).layout_multiline()
+        LayoutContext::new(font_family, params.text, params.style, params.options)
+            .layout_multiline()
     }
 }
 
@@ -128,7 +129,12 @@ struct LayoutContext {
 }
 
 impl LayoutContext {
-    fn new(font_family: Rc<FontFamily>, text: Substr, style: Style, options: LayoutOptions) -> Self {
+    fn new(
+        font_family: Rc<FontFamily>,
+        text: Substr,
+        style: Style,
+        options: LayoutOptions,
+    ) -> Self {
         Self {
             font_family,
             text,
@@ -207,9 +213,7 @@ impl LayoutContext {
         );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
-                Some(text) => {
-                    self.append_text(&text)
-                },
+                Some(text) => self.append_text(&text),
                 None => {
                     let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
                     if next_word.chars().all(|char| char.is_whitespace()) {
@@ -255,7 +259,7 @@ impl LayoutContext {
     }
 
     fn append_text(&mut self, text: &ShapedText) {
-       for glyph in &text.glyphs {
+        for glyph in &text.glyphs {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
                 font: glyph.font.clone(),
@@ -276,12 +280,10 @@ impl LayoutContext {
     fn finish_current_row(&mut self, newline: bool) {
         let font = self.font_family.fonts().get(0);
         let font_size_in_lpxs = self.style.font_size_in_lpxs();
-        let ascender_in_lpxs =
-            font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
+        let ascender_in_lpxs = font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
         let descender_in_lpxs =
             font.map_or(0.0, |font| font.descender_in_ems()) * font_size_in_lpxs;
-        let line_gap_in_lpxs =
-            font.map_or(0.0, |font| font.line_gap_in_ems()) * font_size_in_lpxs;
+        let line_gap_in_lpxs = font.map_or(0.0, |font| font.line_gap_in_ems()) * font_size_in_lpxs;
 
         let text = self
             .text
@@ -743,7 +745,7 @@ impl LaidoutText {
                         start_row.ascender_in_lpxs - start_row.descender_in_lpxs,
                     ),
                 ),
-                ascender_in_lpxs: start_row.ascender_in_lpxs
+                ascender_in_lpxs: start_row.ascender_in_lpxs,
             });
             for row_index in start_row_index + 1..end_row_index {
                 let row = &self.rows[row_index];
@@ -758,7 +760,7 @@ impl LaidoutText {
                             row.ascender_in_lpxs - row.descender_in_lpxs,
                         ),
                     ),
-                    ascender_in_lpxs: row.ascender_in_lpxs
+                    ascender_in_lpxs: row.ascender_in_lpxs,
                 });
             }
             selection_rects.push(SelectionRect {
@@ -797,7 +799,8 @@ pub struct LaidoutRow {
 
 impl LaidoutRow {
     pub fn line_spacing_in_lpxs(&self, next_row: &LaidoutRow) -> f32 {
-        (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs) * next_row.line_spacing_scale
+        (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs)
+            * next_row.line_spacing_scale
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {

@@ -1,8 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-};
+use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
@@ -28,7 +26,7 @@ live_design!{
 
     pub DemoLayout = <UIZooTabLayout_B> {
         desc = {
-            <Markdown> { body: dep("crate://self/resources/layout.md") } 
+            <Markdown> { body: dep("crate://self/resources/layout.md") }
         }
         demos = {
             <H4> { text: "Width & Height"}
@@ -222,7 +220,7 @@ live_design!{
                                 <H3> { width: Fit, height: Fit, text: "Content"}
                             }
                         }
-                    } 
+                    }
 
                     Mobile = {
                         flow: Down,
@@ -262,7 +260,7 @@ live_design!{
 
                             <H3> { width: Fit, height: Fit, text: "Content"}
                         }
-                    } 
+                    }
 
                 }
             }

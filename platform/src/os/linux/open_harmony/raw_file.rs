@@ -1,9 +1,9 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+use super::oh_sys::*;
 use napi_ohos::sys::{napi_env, napi_value};
 use std::io::{Error, ErrorKind, Result};
-use super::oh_sys::*;
 
 #[derive(Clone, Debug)]
 pub struct RawFileMgr {

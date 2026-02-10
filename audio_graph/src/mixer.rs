@@ -1,12 +1,6 @@
-use {
-    crate::{
-        makepad_platform::*,
-        register_audio_component,
-        audio_traits::*
-    },
-};
+use crate::{audio_traits::*, makepad_platform::*, register_audio_component};
 
-live_design!{
+live_design! {
     pub Mixer = {{Mixer}} {
     }
 }
@@ -16,22 +10,31 @@ enum FromUI {}
 
 #[derive(Live)]
 struct Mixer {
-    #[rust] inputs: ComponentMap<LiveId, AudioComponentRef>,
-    #[rust] from_ui: FromUISender<FromUI>,
+    #[rust]
+    inputs: ComponentMap<LiveId, AudioComponentRef>,
+    #[rust]
+    from_ui: FromUISender<FromUI>,
 }
 
-impl LiveRegister for Mixer{
-    fn live_register(cx: &mut Cx){
+impl LiveRegister for Mixer {
+    fn live_register(cx: &mut Cx) {
         register_audio_component!(cx, Mixer)
     }
 }
-            
+
 impl LiveHook for Mixer {
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        self.inputs.get_or_insert(cx, nodes[index].id, | cx | {AudioComponentRef::new(cx)})
+    fn apply_value_instance(
+        &mut self,
+        cx: &mut Cx,
+        apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> usize {
+        self.inputs
+            .get_or_insert(cx, nodes[index].id, |cx| AudioComponentRef::new(cx))
             .apply(cx, apply, index, nodes)
     }
-    
+
     fn after_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         // so.. alright.. if we have a file_id we can gc the inputs
         if apply.from.is_from_doc() {
@@ -43,7 +46,7 @@ impl LiveHook for Mixer {
 struct Node {
     _from_ui: FromUIReceiver<FromUI>,
     buffer: AudioBuffer,
-    inputs: Vec<Box<dyn AudioGraphNode + Send >>
+    inputs: Vec<Box<dyn AudioGraphNode + Send>>,
 }
 
 // ok so how do we spawn this shit up.
@@ -55,19 +58,19 @@ impl AudioGraphNode for Node {
             input.all_notes_off();
         }
     }
-    
+
     fn handle_midi_data(&mut self, data: MidiData) {
         for input in &mut self.inputs {
             input.handle_midi_data(data);
         }
     }
-    
+
     fn render_to_audio_buffer(
         &mut self,
         info: AudioInfo,
         outputs: &mut [&mut AudioBuffer],
         _inputs: &[&AudioBuffer],
-        display: &mut DisplayAudioGraph
+        display: &mut DisplayAudioGraph,
     ) {
         let output = &mut outputs[0];
         self.buffer.resize_like(*output);
@@ -86,10 +89,8 @@ impl AudioGraphNode for Node {
     }
 }
 
-
 impl AudioComponent for Mixer {
     fn get_graph_node(&mut self, cx: &mut Cx) -> Box<dyn AudioGraphNode + Send> {
-        
         self.from_ui.new_channel();
         let mut inputs = Vec::new();
         for input in self.inputs.values_mut() {
@@ -100,24 +101,31 @@ impl AudioComponent for Mixer {
         Box::new(Node {
             inputs,
             buffer: AudioBuffer::default(),
-            _from_ui: self.from_ui.receiver()
+            _from_ui: self.from_ui.receiver(),
         })
     }
-    
-    fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+
+    fn handle_event_with(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction),
+    ) {
         for input in self.inputs.values_mut() {
             if let Some(input) = input.as_mut() {
                 input.handle_event_with(cx, event, dispatch_action)
             }
         }
     }
-    
-    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult<'_> {
+
+    fn audio_query(
+        &mut self,
+        query: &AudioQuery,
+        callback: &mut Option<AudioQueryCb>,
+    ) -> AudioResult<'_> {
         for input in self.inputs.values_mut() {
-            input.audio_query(query, callback) ?;
+            input.audio_query(query, callback)?;
         }
         AudioResult::not_found()
     }
-    
 }
-

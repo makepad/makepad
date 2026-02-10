@@ -1,24 +1,24 @@
 use crate::{
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    fold_button::FoldButtonAction,
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
-    animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
-    fold_button::FoldButtonAction
 };
 
-script_mod!{
+script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    
+
     mod.widgets.FoldHeaderBase = #(FoldHeader::register_widget(vm))
-    
+
     mod.widgets.FoldHeader = set_type_default() do mod.widgets.FoldHeaderBase{
         width: Fill
         height: Fit
         body_walk: Walk{width: Fill, height: Fit}
-        
+
         flow: Down
-        
+
         animator: Animator{
             active: {
                 default: @on
@@ -46,7 +46,7 @@ script_mod!{
 #[derive(Clone)]
 enum DrawState {
     DrawHeader,
-    DrawBody
+    DrawBody,
 }
 
 #[derive(Clone, Default)]
@@ -54,25 +54,39 @@ pub enum FoldHeaderAction {
     Opening,
     Closing,
     #[default]
-    None
+    None,
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct FoldHeader {
-    #[source] source: ScriptObjectRef,
-    
-    #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] rect_size: f64,
-    #[rust] area: Area,
-    #[find] #[redraw] #[live] header: WidgetRef,
-    #[find] #[redraw] #[live] body: WidgetRef,
+    #[source]
+    source: ScriptObjectRef,
+
+    #[rust]
+    draw_state: DrawStateWrap<DrawState>,
+    #[rust]
+    rect_size: f64,
+    #[rust]
+    area: Area,
+    #[find]
+    #[redraw]
+    #[live]
+    header: WidgetRef,
+    #[find]
+    #[redraw]
+    #[live]
+    body: WidgetRef,
     #[apply_default]
     animator: Animator,
 
-    #[live] opened: f64,
-    #[layout] layout: Layout,
-    #[walk] walk: Walk,
-    #[live] body_walk: Walk,
+    #[live]
+    opened: f64,
+    #[layout]
+    layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[live]
+    body_walk: Walk,
 }
 
 impl Widget for FoldHeader {
@@ -80,17 +94,21 @@ impl Widget for FoldHeader {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.area.redraw(cx);
         }
-        
+
         self.header.handle_event(cx, event, scope);
         self.body.handle_event(cx, event, scope);
-        
+
         // Check for FoldButton actions only from FoldButtons within our header
         if let Event::Actions(actions) = event {
             for action in actions {
                 if let Some(widget_action) = action.downcast_ref::<WidgetAction>() {
                     // Check if this action came from a widget within our header
                     // uid_to_widget returns empty if the uid isn't found in the subtree
-                    if !self.header.uid_to_widget(widget_action.widget_uid).is_empty() {
+                    if !self
+                        .header
+                        .uid_to_widget(widget_action.widget_uid)
+                        .is_empty()
+                    {
                         match widget_action.cast::<FoldButtonAction>() {
                             FoldButtonAction::Opening => {
                                 self.animator_play(cx, ids!(active.on));
@@ -98,7 +116,7 @@ impl Widget for FoldHeader {
                             FoldButtonAction::Closing => {
                                 self.animator_play(cx, ids!(active.off));
                             }
-                            _ => ()
+                            _ => (),
                         }
                     }
                 }
@@ -106,7 +124,6 @@ impl Widget for FoldHeader {
         }
     }
 
-    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
@@ -114,7 +131,7 @@ impl Widget for FoldHeader {
         if let Some(DrawState::DrawHeader) = self.draw_state.get() {
             let walk = self.header.walk(cx);
             self.header.draw_walk(cx, scope, walk)?;
-            
+
             // On first render (rect_size == 0), use the original body_walk to measure content
             // After that, use fixed height based on opened * rect_size
             let (body_walk, scroll_y) = if self.rect_size == 0.0 {
@@ -129,11 +146,10 @@ impl Widget for FoldHeader {
                 let scroll_y = self.rect_size * (1.0 - self.opened);
                 (body_walk, scroll_y)
             };
-            
+
             cx.begin_turtle(
                 body_walk,
-                Layout::flow_down()
-                .with_scroll(dvec2(0.0, scroll_y))
+                Layout::flow_down().with_scroll(dvec2(0.0, scroll_y)),
             );
             self.draw_state.set(DrawState::DrawBody);
         }
@@ -157,15 +173,19 @@ impl FoldHeader {
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
         self.animator_toggle(cx, is_open, animate, ids!(active.on), ids!(active.off));
         // Also toggle the fold button if it exists
-        if let Some(mut fold_button) = self.header.widget(ids!(fold_button)).borrow_mut::<crate::fold_button::FoldButton>() {
+        if let Some(mut fold_button) = self
+            .header
+            .widget(ids!(fold_button))
+            .borrow_mut::<crate::fold_button::FoldButton>()
+        {
             fold_button.set_is_open(cx, is_open, animate);
         }
     }
-    
+
     pub fn is_open(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(active.on))
     }
-    
+
     pub fn opened(&self) -> f64 {
         self.opened
     }
@@ -177,11 +197,11 @@ impl FoldHeaderRef {
             inner.set_is_open(cx, is_open, animate);
         }
     }
-    
+
     pub fn is_open(&self, cx: &Cx) -> bool {
         self.borrow().map_or(true, |inner| inner.is_open(cx))
     }
-    
+
     pub fn opened(&self) -> f64 {
         self.borrow().map_or(1.0, |inner| inner.opened())
     }
