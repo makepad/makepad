@@ -84,6 +84,10 @@ impl Loader {
         self.font_family_cache.get(&id).unwrap()
     }
 
+    pub fn get_or_load_font_family_rc(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
+        self.get_or_load_font_family(id).clone()
+    }
+
     fn load_font_family(&mut self, id: FontFamilyId) -> FontFamily {
         let definition = self
             .font_family_definitions

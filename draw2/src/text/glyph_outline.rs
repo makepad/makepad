@@ -28,6 +28,10 @@ impl GlyphOutline {
         Rect::new(self.origin_in_ems(), self.size_in_ems())
     }
 
+    pub fn commands(&self) -> &[Command] {
+        &self.commands
+    }
+
     pub fn rasterize(&self, dpxs_per_em: f32, output: &mut SubimageMut<R>) {
         use ab_glyph_rasterizer::Rasterizer;
 
