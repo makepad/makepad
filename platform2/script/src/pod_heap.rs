@@ -447,7 +447,8 @@ impl ScriptHeap {
         _trap: ScriptTrap,
     ) -> ScriptValue {
         let _pod = &self.pods[pod];
-        todo!("WANT TO SET FIELD {}", field);
+        println!("pod_heap::set_pod_field - Want to set pod field {}, but not impplemented", field);
+        NIL
     }
 
     pub fn pod_pop_to_me(

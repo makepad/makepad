@@ -244,7 +244,10 @@ script_mod! {
             } else {
                 let sd = 1.0 - abs(self.v_tcoord.x * 2.0 - 1.0);
                 let fw = length(vec2(dFdx(sd), dFdy(sd)));
-                alpha = clamp(sd / max(fw, 0.001), 0.0, 1.0) * min(1.0, self.v_tcoord.y) * self.get_stroke_mask();
+                let cap = self.v_tcoord.y;
+                let cap_fw = length(vec2(dFdx(cap), dFdy(cap)));
+                let cap_alpha = smoothstep(0.0, max(cap_fw, 0.001), cap);
+                alpha = clamp(sd / max(fw, 0.001), 0.0, 1.0) * cap_alpha * self.get_stroke_mask();
             }
             return color * alpha
         }

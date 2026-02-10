@@ -39,7 +39,8 @@ script_mod! {
     }
 
     // ---- UI ----
-
+    let results = []
+    
     let app = load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
@@ -61,12 +62,17 @@ script_mod! {
                         View{
                             width: Fill height: Fit flow: Right spacing: 8
                             align: Align{y: 0.5}
+                            let query=""
                             search_input := TextInput{
                                 width: Fill height: Fit
                                 empty_text: "Search the web..."
+                                on_change: |text| query = text
                             }
                             search_button := Button{
                                 text: "Search"
+                                on_click: ||{
+                                    do_search(query)    
+                                }
                             }
                         }
 
@@ -85,8 +91,13 @@ script_mod! {
                     ScrollYView{
                         width: Fill height: Fill
                         padding: 16 flow: Down spacing: 10
-
-                        EmptyState{}
+                        render: ||{
+                            if results.len() == 0
+                                EmptyState{}
+                            else for result in results{
+                                // turn result into resultcard
+                            }
+                        }
                     }
                 }
             }
@@ -108,16 +119,14 @@ script_mod! {
                 let doc = res.body.to_string().parse_html()
                 let links = doc.query("a.result__a").array()
                 let snippets = doc.query("a.result__snippet").array()
-                let results = []
-                for link, i in links {
+                for i, link in links {
                     results.push({
                         title: link.text
                         url: link.attr("href")
                         snippet: if i < snippets.len() snippets[i].text else ""
                     })
                 }
-            }
-            on_error: |e| {
+                render()
             }
         }
     }

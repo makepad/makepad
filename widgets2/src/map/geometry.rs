@@ -400,19 +400,18 @@ pub fn classify_polygon_rings(rings: &[FillRing], max_rings: usize) -> Vec<Vec<V
 
 // --- Screen-space polyline helpers ---
 
-pub fn build_screen_polyline(
+pub fn build_screen_polyline_into(
     path_points: &[(f32, f32)],
     scale: f32,
     map_offset: Vec2f,
-) -> Vec<Vec2d> {
-    let mut out = Vec::<Vec2d>::with_capacity(path_points.len());
+    out: &mut Vec<Vec2d>,
+) {
     for &(x, y) in path_points {
         out.push(dvec2(
             x as f64 * scale as f64 + map_offset.x as f64,
             y as f64 * scale as f64 + map_offset.y as f64,
         ));
     }
-    out
 }
 
 pub fn polyline_outside_rect(points: &[Vec2d], rect: Rect, margin: f64) -> bool {
@@ -435,8 +434,7 @@ pub fn polyline_outside_rect(points: &[Vec2d], rect: Rect, margin: f64) -> bool 
         || min_y > rect.pos.y + rect.size.y + margin
 }
 
-pub fn polyline_cumulative_lengths(points: &[Vec2d]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(points.len());
+pub fn polyline_cumulative_lengths_into(points: &[Vec2d], out: &mut Vec<f64>) {
     let mut sum = 0.0_f64;
     out.push(sum);
     for pair in points.windows(2) {
@@ -445,7 +443,6 @@ pub fn polyline_cumulative_lengths(points: &[Vec2d]) -> Vec<f64> {
         sum += (dx * dx + dy * dy).sqrt();
         out.push(sum);
     }
-    out
 }
 
 pub fn sample_polyline_point_at_distance(
