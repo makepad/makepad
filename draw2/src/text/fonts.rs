@@ -1,7 +1,7 @@
 use {
     super::{
         font::FontId,
-        font_family::FontFamilyId,
+        font_family::{FontFamily, FontFamilyId},
         layouter::{self, LaidoutText, LayoutParams, Layouter},
         loader::{FontDefinition, FontFamilyDefinition},
         rasterizer::Rasterizer,
@@ -76,6 +76,10 @@ impl Fonts {
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
         self.layouter.define_font(id, definition);
+    }
+
+    pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
+        self.layouter.get_or_load_font_family(id)
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
