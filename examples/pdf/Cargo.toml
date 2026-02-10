@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-pdf"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad PDF viewer example"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets2 = { path = "../../widgets2", version = "2.0.0" }
+makepad-pdf-parse = { path = "../../libs/pdf_parse", version = "1.0.0" }

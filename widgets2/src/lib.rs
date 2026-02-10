@@ -7,6 +7,7 @@ pub use makepad_platform::log;
 pub use makepad_platform::makepad_script;
 
 pub use makepad_html;
+pub use makepad_pdf_parse;
 
 pub use makepad_zune_jpeg;
 
@@ -73,7 +74,9 @@ pub mod tab_close_button;
 pub mod html;
 pub mod markdown;
 
+pub mod map_view;
 pub mod math_view;
+pub mod pdf_view;
 pub mod splash;
 pub mod svg;
 pub mod vector;
@@ -198,10 +201,13 @@ pub use crate::html::*;
 
 pub use crate::markdown::*;
 
+pub use crate::map_view::*;
+
 pub use crate::math_view::*;
 
 pub use crate::splash::*;
 
+pub use crate::pdf_view::*;
 pub use crate::svg::*;
 pub use crate::vector::*;
 
@@ -308,8 +314,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::markdown::script_mod(vm);
 
     crate::splash::script_mod(vm);
+    crate::pdf_view::script_mod(vm);
     crate::svg::script_mod(vm);
     crate::vector::script_mod(vm);
+    crate::map_view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
     // make the prelude.widgetst with all our components

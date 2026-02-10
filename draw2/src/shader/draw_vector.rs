@@ -251,8 +251,6 @@ script_mod! {
     }
 }
 
-const FLOATS_PER_VERTEX: usize = 19; // x,y,u,v, r,g,b,a, stroke_mult, stroke_dist, shape_id, param0-5, clip_radius, zbias
-
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawVector {
@@ -419,22 +417,22 @@ impl DrawVector {
         miter_limit: f32,
         aa: f32,
     ) {
-        self.tess.flatten(&self.path, 0.25);
         let mut tv = std::mem::take(&mut self.tess_verts);
         let mut ti = std::mem::take(&mut self.tess_indices);
-        self.tess
-            .stroke(stroke_width, cap, join, miter_limit, aa, &mut tv, &mut ti);
-        compute_clip_radii(&mut tv, &ti);
-        let sm = if aa > 0.0 {
-            (stroke_width * 0.5 + aa * 0.5) / aa
-        } else {
-            1e6
-        };
-        self.cur_stroke_mult = sm;
+        self.cur_stroke_mult = tessellate_path_stroke(
+            &mut self.path,
+            &mut self.tess,
+            &mut tv,
+            &mut ti,
+            stroke_width,
+            cap,
+            join,
+            miter_limit,
+            aa,
+        );
         self.append_geometry(&tv, &ti);
         self.tess_verts = tv;
         self.tess_indices = ti;
-        self.path.clear();
     }
 
     pub fn fill(&mut self) {
@@ -450,24 +448,23 @@ impl DrawVector {
         self.fill_opts_mode(join, miter_limit, aa, false);
     }
 
-    fn fill_opts_mode(
-        &mut self,
-        join: LineJoin,
-        miter_limit: f32,
-        aa: f32,
-        gpu_expand_fill: bool,
-    ) {
-        self.tess.flatten(&self.path, 0.25);
+    fn fill_opts_mode(&mut self, join: LineJoin, miter_limit: f32, aa: f32, gpu_expand_fill: bool) {
         let mut tv = std::mem::take(&mut self.tess_verts);
         let mut ti = std::mem::take(&mut self.tess_indices);
-        self.tess
-            .fill(aa, join, miter_limit, gpu_expand_fill, &mut tv, &mut ti);
-        compute_clip_radii(&mut tv, &ti);
+        tessellate_path_fill(
+            &mut self.path,
+            &mut self.tess,
+            &mut tv,
+            &mut ti,
+            join,
+            miter_limit,
+            aa,
+            gpu_expand_fill,
+        );
         self.cur_stroke_mult = 1e6;
         self.append_geometry(&tv, &ti);
         self.tess_verts = tv;
         self.tess_indices = ti;
-        self.path.clear();
     }
 
     /// Draw a geometry-based shadow for any filled path (stars, polygons, etc).
@@ -512,7 +509,7 @@ impl DrawVector {
         let x1 = cx + hx + pad;
         let y1 = cy + hy + pad;
         let color = self.cur_paint.color_at(cx, cy);
-        let base = (self.acc_verts.len() / FLOATS_PER_VERTEX) as u32;
+        let base = (self.acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
         // emit 4 corner verts for the shadow quad
         let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
         for &(vx, vy) in &corners {
@@ -551,7 +548,6 @@ impl DrawVector {
         if verts.is_empty() || indices.is_empty() {
             return;
         }
-        let base = (self.acc_verts.len() / FLOATS_PER_VERTEX) as u32;
         // compute gradient params and color from current paint
         let (grad_type, grad_params, color0) = match &self.cur_paint {
             VectorPaint::Solid { color } => {
@@ -593,33 +589,27 @@ impl DrawVector {
                 (2.0, [*cx, *cy, *rx, *ry], c0)
             }
         };
-        for v in verts {
-            self.acc_verts.push(v.x);
-            self.acc_verts.push(v.y);
-            self.acc_verts.push(v.u);
-            self.acc_verts.push(v.v);
-            // color (first stop for gradients, solid color otherwise)
-            self.acc_verts.push(color0[0]);
-            self.acc_verts.push(color0[1]);
-            self.acc_verts.push(color0[2]);
-            self.acc_verts.push(color0[3]);
-            self.acc_verts.push(self.cur_stroke_mult);
-            self.acc_verts.push(v.stroke_dist);
-            self.acc_verts.push(self.cur_shape_id);
-            // params: grad_type, then 4 gradient geometry params, then gradient texture row V
-            self.acc_verts.push(grad_type);
-            self.acc_verts.push(grad_params[0]);
-            self.acc_verts.push(grad_params[1]);
-            self.acc_verts.push(grad_params[2]);
-            self.acc_verts.push(grad_params[3]);
-            self.acc_verts.push(self.cur_gradient_row_v);
-            self.acc_verts.push(v.clip_radius);
-            self.acc_verts.push(self.cur_zbias);
-        }
-        for &i in indices {
-            self.acc_indices.push(base + i);
-        }
-        self.cur_zbias += 0.000001;
+        append_tessellated_geometry(
+            verts,
+            indices,
+            &mut self.acc_verts,
+            &mut self.acc_indices,
+            VectorRenderParams {
+                color: color0,
+                stroke_mult: self.cur_stroke_mult,
+                shape_id: self.cur_shape_id,
+                params: [
+                    grad_type,
+                    grad_params[0],
+                    grad_params[1],
+                    grad_params[2],
+                    grad_params[3],
+                    self.cur_gradient_row_v,
+                ],
+                zbias: self.cur_zbias,
+            },
+        );
+        self.cur_zbias += VECTOR_ZBIAS_STEP;
     }
 
     /// Flush accumulated geometry as a single draw call
@@ -661,9 +651,9 @@ impl DrawVector {
             // Non-gradient vertices have param5 = -1.0 (sentinel), gradient vertices
             // have param5 >= 0.0 (row index).
             let param5_offset = 16; // x,y,u,v, r,g,b,a, sm,sd,sid, p0,p1,p2,p3,p4,p5 -> p5 is at 16
-            let num_verts = self.acc_verts.len() / FLOATS_PER_VERTEX;
+            let num_verts = self.acc_verts.len() / VECTOR_FLOATS_PER_VERTEX;
             for vi in 0..num_verts {
-                let idx = vi * FLOATS_PER_VERTEX + param5_offset;
+                let idx = vi * VECTOR_FLOATS_PER_VERTEX + param5_offset;
                 let row_idx = self.acc_verts[idx];
                 if row_idx >= 0.0 {
                     // Map row index to center of texel in V
