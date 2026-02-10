@@ -1468,6 +1468,9 @@ impl PortalList {
                 // Middle item - select all
                 item.widget.selection_select_all();
             }
+            // Required for cached item templates (e.g. View with new_batch),
+            // where selection mutations do not automatically invalidate draw caches.
+            item.widget.redraw(cx);
         }
 
         self.area.redraw(cx);
@@ -1783,7 +1786,8 @@ impl Widget for PortalList {
         }
 
         if !self.scroll_bar.is_area_captured(cx) || is_scroll {
-            match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
+            let hit = event.hits_with_capture_overload(cx, self.area, self.capture_overload);
+            match hit {
                 Hit::FingerScroll(e) => {
                     self.tail_range = false;
                     self.detect_tail_in_draw = true;
