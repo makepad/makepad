@@ -190,6 +190,57 @@ impl DrawText {
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
     }
 
+    pub fn draw_rasterized_glyphs_abs(
+        &mut self,
+        cx: &mut Cx2d,
+        glyphs: &[(Point<f32>, f32, RasterizedGlyph)],
+        color: Vec4f,
+    ) {
+        if glyphs.is_empty() {
+            return;
+        }
+        self.update_draw_vars(cx);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return;
+        };
+
+        self.glyph_depth = self.draw_depth;
+        self.color = color;
+        for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
+            self.draw_rasterized_glyph(
+                *origin_in_lpxs,
+                *font_size_in_lpxs,
+                None,
+                *rasterized_glyph,
+                &mut instances.instances,
+            );
+        }
+
+        let new_area = cx.end_many_instances(instances);
+        let old_area = self.draw_vars.area;
+        if self.extend_area {
+            let extended = old_area.extend_with(cx, new_area);
+            self.draw_vars.area = cx.update_area_refs(old_area, extended);
+        } else {
+            self.draw_vars.area = cx.update_area_refs(old_area, new_area);
+        }
+    }
+
+    pub fn draw_rasterized_glyph_abs(
+        &mut self,
+        cx: &mut Cx2d,
+        origin_in_lpxs: Point<f32>,
+        font_size_in_lpxs: f32,
+        rasterized_glyph: RasterizedGlyph,
+        color: Vec4f,
+    ) {
+        self.draw_rasterized_glyphs_abs(
+            cx,
+            &[(origin_in_lpxs, font_size_in_lpxs, rasterized_glyph)],
+            color,
+        );
+    }
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
         let turtle_rect = cx.turtle().inner_rect();
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
@@ -625,6 +676,12 @@ pub struct FontFamily {
 impl FontFamily {
     fn to_font_family_id(&self) -> FontFamilyId {
         (self.id.0).into()
+    }
+}
+
+impl TextStyle {
+    pub fn font_family_id(&self) -> FontFamilyId {
+        self.font_family.to_font_family_id()
     }
 }
 

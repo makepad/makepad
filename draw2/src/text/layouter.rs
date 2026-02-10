@@ -64,6 +64,10 @@ impl Layouter {
         self.loader.define_font(id, definition);
     }
 
+    pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
+        self.loader.get_or_load_font_family_rc(id)
+    }
+
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
         if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
             return result.clone();
