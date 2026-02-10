@@ -1,0 +1,12 @@
+[package]
+name = "makepad-csg-sdf"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["threads"]
+threads = ["makepad-csg-math/threads"]
+
+[dependencies]
+makepad-csg-math = { path = "../csg_math" }
+makepad-csg-mesh = { path = "../csg_mesh" }

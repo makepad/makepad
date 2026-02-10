@@ -130,7 +130,7 @@ script_mod! {
             self.fb0 = self.pixel();
         }
 
-        pixel: fn() {
+        sample_text_pixel: fn() {
             let dxt = length(dFdx(self.t))
             let dyt = length(dFdy(self.t))
             if self.texture_index == 0 {
@@ -156,6 +156,10 @@ script_mod! {
                 let s = self.msdf(scale, p, c)
                 return s * vec4(c.rgb * c.a, c.a)
             }
+        }
+
+        pixel: fn() {
+            return self.sample_text_pixel()
         }
     }
 }
@@ -206,6 +210,23 @@ pub struct DrawText {
     pub t_min: Vec2f,
     #[live]
     pub t_max: Vec2f,
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedTextGlyph {
+    pub pen_x_in_lpxs: f32,
+    pub offset_x_in_lpxs: f32,
+    pub advance_in_lpxs: f32,
+    pub font_size_in_lpxs: f32,
+    pub rasterized: RasterizedGlyph,
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedTextRun {
+    pub width_in_lpxs: f32,
+    pub ascender_in_lpxs: f32,
+    pub descender_in_lpxs: f32,
+    pub glyphs: Vec<PreparedTextGlyph>,
 }
 
 impl DrawText {
@@ -263,6 +284,41 @@ impl DrawText {
             &[(origin_in_lpxs, font_size_in_lpxs, rasterized_glyph)],
             color,
         );
+    }
+
+    pub fn prepare_single_line_run(&self, cx: &mut Cx2d, text: &str) -> Option<PreparedTextRun> {
+        let laidout = self.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+        let row = laidout.rows.first()?;
+        if row.glyphs.is_empty() {
+            return None;
+        }
+
+        let dpx_factor = cx.current_dpi_factor() as f32;
+        let mut glyphs = Vec::with_capacity(row.glyphs.len());
+        for glyph in &row.glyphs {
+            let dpx_per_em = glyph.font_size_in_lpxs * dpx_factor;
+            let Some(rasterized) = glyph.rasterize(dpx_per_em) else {
+                continue;
+            };
+
+            glyphs.push(PreparedTextGlyph {
+                pen_x_in_lpxs: glyph.origin_in_lpxs.x * self.font_scale,
+                offset_x_in_lpxs: glyph.offset_in_lpxs() * self.font_scale,
+                advance_in_lpxs: glyph.advance_in_lpxs() * self.font_scale,
+                font_size_in_lpxs: glyph.font_size_in_lpxs,
+                rasterized,
+            });
+        }
+        if glyphs.is_empty() {
+            return None;
+        }
+
+        Some(PreparedTextRun {
+            width_in_lpxs: row.width_in_lpxs * self.font_scale,
+            ascender_in_lpxs: row.ascender_in_lpxs * self.font_scale,
+            descender_in_lpxs: row.descender_in_lpxs * self.font_scale,
+            glyphs,
+        })
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
