@@ -25,7 +25,9 @@ pub use crate::{
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
     overlay::Overlay,
     shader::{
+        draw_glyph::DrawGlyph,
         draw_quad::DrawColor, draw_quad::DrawQuad, draw_text::DrawText, draw_text::TextStyle,
+        draw_svg_glyph::DrawSvgGlyph,
         draw_vector::DrawVector,
     },
     /*
@@ -44,9 +46,11 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::sdf::script_mod(vm);
     crate::geometry::script_mod(vm);
     crate::shader::draw_quad::script_mod(vm);
+    crate::shader::draw_glyph::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
     crate::shader::draw_vector::script_mod(vm);
     crate::shader::draw_svg::script_mod(vm);
+    crate::shader::draw_svg_glyph::script_mod(vm);
     NIL
 }
 /*

@@ -5,7 +5,7 @@ use crate::{
     animator::{Animator, AnimatorImpl, Animate, AnimatorAction},
 };
 
-use crate::makepad_draw::DrawSvg;
+use crate::makepad_draw::DrawSvgGlyph;
 
 script_mod!{
     use mod.prelude.widgets_internal.*
@@ -265,7 +265,7 @@ pub struct Tab {
     #[rust] is_dragging: bool,
     
     #[live] draw_bg: DrawQuad,
-    #[live] draw_icon: DrawSvg,
+    #[live] draw_icon: DrawSvgGlyph,
     #[live] draw_text: DrawText,
     #[live] icon_walk: Walk,
     
