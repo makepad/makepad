@@ -190,6 +190,7 @@ pub enum Apply {
     Reload,
     Animate,
     Eval,
+    Render(),
     Default(usize),
 }
 
@@ -227,7 +228,14 @@ impl Apply {
             _ => false,
         }
     }
-
+    
+    pub fn is_render(&self) -> bool {
+        match self {
+            Self::Render{..} => true,
+            _ => false,
+        }
+    }
+    
     pub fn is_animate(&self) -> bool {
         match self {
             Self::Animate => true,

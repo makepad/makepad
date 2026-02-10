@@ -321,9 +321,9 @@ pub struct MapView {
     #[rust]
     local_source_missing_logged: bool,
     #[rust]
-    local_to_ui: ToUIReceiver<LocalSourceMessage>,
+    tile_worker_rx: ToUIReceiver<TileWorkerMessage>,
     #[rust]
-    local_job_in_progress: bool,
+    tile_thread_pool: Option<TagThreadPool<TileKey>>,
     #[rust]
     local_requested_tiles: HashSet<TileKey>,
     #[rust]
@@ -338,6 +338,33 @@ pub struct MapView {
     compiled_style_dark: CompiledMapTheme,
     #[rust]
     path_glyphs: Vec<PathGlyphInstance>,
+    // Scratch buffers reused across frames to avoid per-frame allocations
+    #[rust]
+    scratch_draw_tiles: Vec<TileKey>,
+    #[rust]
+    scratch_draw_seen: HashSet<TileKey>,
+    #[rust]
+    scratch_descendant_tiles: Vec<TileKey>,
+    #[rust]
+    scratch_candidates: Vec<LabelCandidate>,
+    #[rust]
+    scratch_accepted_centers: HashMap<String, Vec<Vec2d>>,
+    #[rust]
+    scratch_accepted_bounds: Vec<Rect>,
+    #[rust]
+    scratch_accepted_plans: Vec<(f64, usize, usize)>,
+    #[rust]
+    scratch_screen_path: Vec<Vec2d>,
+    #[rust]
+    scratch_cumulative: Vec<f64>,
+    #[rust]
+    scratch_smooth_a: Vec<Vec2d>,
+    #[rust]
+    scratch_smooth_b: Vec<Vec2d>,
+    #[rust]
+    prev_status_label_perf: LabelPerfStats,
+    #[rust]
+    prev_status_counters: (usize, usize, usize, usize, usize, usize),
 }
 
 impl ScriptHook for MapView {
@@ -388,7 +415,7 @@ impl ScriptHook for MapView {
 
 impl Widget for MapView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.handle_local_source_messages(cx);
+        self.handle_tile_worker_messages(cx);
         self.widget_match_event(cx, event, scope);
 
         if let Event::KeyDown(ke) = event {
@@ -446,8 +473,11 @@ impl Widget for MapView {
             y: (rect.pos.y + rect.size.y * 0.5 - center_world.y) as f32,
         };
 
-        let mut draw_tiles = self.draw_tile_keys_with_fallback();
-        draw_tiles.sort_unstable_by_key(|key| (key.z, key.y, key.x));
+        self.fill_draw_tile_keys();
+        self.scratch_draw_tiles
+            .sort_unstable_by_key(|key| (key.z, key.y, key.x));
+        // Take draw_tiles out so we can pass &[TileKey] while mutating self for labels
+        let draw_tiles = std::mem::take(&mut self.scratch_draw_tiles);
 
         // Fill pass
         for key in &draw_tiles {
@@ -496,6 +526,9 @@ impl Widget for MapView {
         } else {
             self.label_perf = LabelPerfStats::default();
         }
+
+        // Put draw_tiles back into scratch buffer (preserves allocation)
+        self.scratch_draw_tiles = draw_tiles;
 
         self.update_status_text();
         // self.draw_text.draw_abs(cx, dvec2(rect.pos.x + 10.0, rect.pos.y + 16.0), &self.status);
@@ -546,17 +579,32 @@ impl WidgetMatchEvent for MapView {
             return;
         };
 
-        match self.build_tile_buffers(tile_key, &body) {
-            Ok(buffers) => {
-                store_tile_data_cache_on_disk(tile_key, &body);
-                self.insert_ready_tile(cx, tile_key, buffers);
+        // Offload heavy JSON parsing + tessellation to the thread pool
+        self.ensure_tile_thread_pool(cx);
+        let pool = self.tile_thread_pool.as_ref().unwrap();
+        let sender = self.tile_worker_rx.sender();
+        let style_epoch = self.style_epoch;
+        let theme_style = self.active_style().clone();
+
+        pool.execute_rev(tile_key, move |_tag| {
+            match build_tile_buffers_from_body(tile_key, &body, &theme_style) {
+                Ok(buffers) => {
+                    store_tile_data_cache_on_disk(tile_key, &body);
+                    let _ = sender.send(TileWorkerMessage::NetworkTileParsed {
+                        style_epoch,
+                        tile_key,
+                        buffers,
+                    });
+                }
+                Err(err) => {
+                    let _ = sender.send(TileWorkerMessage::NetworkTileParseFailed {
+                        style_epoch,
+                        tile_key,
+                        error: err,
+                    });
+                }
             }
-            Err(err) => {
-                self.mark_tile_failed(tile_key, &format!("endpoint {} parse: {}", endpoint, err));
-            }
-        }
-        self.update_status_text();
-        self.redraw(cx);
+        });
     }
 
     fn handle_http_request_error(
@@ -627,7 +675,6 @@ impl MapView {
         self.tiles.clear();
         self.request_to_tile.clear();
         self.local_requested_tiles.clear();
-        self.local_job_in_progress = false;
     }
 
     fn apply_theme_palette(&mut self) {
@@ -678,15 +725,11 @@ impl MapView {
         );
     }
 
-    fn build_tile_buffers(&self, tile_key: TileKey, body: &str) -> Result<TileBuffers, String> {
-        build_tile_buffers_from_body(tile_key, body, self.active_style())
-    }
-
-    fn handle_local_source_messages(&mut self, cx: &mut Cx) {
+    fn handle_tile_worker_messages(&mut self, cx: &mut Cx) {
         let mut redraw = false;
-        while let Ok(msg) = self.local_to_ui.try_recv() {
+        while let Ok(msg) = self.tile_worker_rx.try_recv() {
             match msg {
-                LocalSourceMessage::Generated {
+                TileWorkerMessage::LocalBatchLoaded {
                     style_epoch,
                     requested,
                     loaded,
@@ -697,11 +740,9 @@ impl MapView {
                         }
                         continue;
                     }
-                    self.local_job_in_progress = false;
                     for key in &requested {
                         self.local_requested_tiles.remove(key);
                     }
-                    if !requested.is_empty() {}
 
                     let mut loaded_keys = HashSet::with_capacity(loaded.len());
                     let mut empty_feature_tiles = Vec::<TileKey>::new();
@@ -726,7 +767,7 @@ impl MapView {
                     }
                     redraw = true;
                 }
-                LocalSourceMessage::Failed {
+                TileWorkerMessage::LocalBatchFailed {
                     style_epoch,
                     requested,
                     error,
@@ -737,12 +778,33 @@ impl MapView {
                         }
                         continue;
                     }
-                    self.local_job_in_progress = false;
                     log!("MapView: local mbtiles load failed: {}", error);
                     for key in requested {
                         self.local_requested_tiles.remove(&key);
                         self.tiles.remove(&key);
                     }
+                    redraw = true;
+                }
+                TileWorkerMessage::NetworkTileParsed {
+                    style_epoch,
+                    tile_key,
+                    buffers,
+                } => {
+                    if style_epoch != self.style_epoch {
+                        continue;
+                    }
+                    self.insert_ready_tile(cx, tile_key, buffers);
+                    redraw = true;
+                }
+                TileWorkerMessage::NetworkTileParseFailed {
+                    style_epoch,
+                    tile_key,
+                    error,
+                } => {
+                    if style_epoch != self.style_epoch {
+                        continue;
+                    }
+                    self.mark_tile_failed(tile_key, &format!("parse: {}", error));
                     redraw = true;
                 }
             }
@@ -753,8 +815,8 @@ impl MapView {
         }
     }
 
-    fn request_visible_tiles_from_local_source(&mut self, cx: &mut Cx) {
-        if !self.use_local_mbtiles || self.local_job_in_progress {
+    fn request_visible_tiles_from_local_source(&mut self, _cx: &mut Cx) {
+        if !self.use_local_mbtiles {
             return;
         }
 
@@ -796,15 +858,16 @@ impl MapView {
             );
         }
 
-        self.local_job_in_progress = true;
-        let sender = self.local_to_ui.sender();
+        let pool = self.tile_thread_pool.as_ref().unwrap();
+        let sender = self.tile_worker_rx.sender();
         let requested = missing.clone();
         let mbtiles_path = LOCAL_MBTILES_PATH.to_string();
         let cache_dir = TILE_CACHE_DIR.to_string();
         let style_epoch = self.style_epoch;
         let theme_style = self.active_style().clone();
+        let batch_tag = missing[0];
 
-        cx.spawn_thread(move || {
+        pool.execute_rev(batch_tag, move |_tag| {
             let result = load_local_tile_batch(
                 Path::new(&mbtiles_path),
                 Path::new(&cache_dir),
@@ -813,14 +876,14 @@ impl MapView {
             );
             match result {
                 Ok(loaded) => {
-                    let _ = sender.send(LocalSourceMessage::Generated {
+                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
                         style_epoch,
                         requested,
                         loaded,
                     });
                 }
                 Err(error) => {
-                    let _ = sender.send(LocalSourceMessage::Failed {
+                    let _ = sender.send(TileWorkerMessage::LocalBatchFailed {
                         style_epoch,
                         requested,
                         error,
@@ -893,11 +956,19 @@ impl MapView {
         self.redraw(cx);
     }
 
+    fn ensure_tile_thread_pool(&mut self, cx: &mut Cx) {
+        if self.tile_thread_pool.is_none() {
+            let num_threads = cx.cpu_cores().max(3) - 2;
+            self.tile_thread_pool = Some(TagThreadPool::new(cx, num_threads));
+        }
+    }
+
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
         self.visible_tiles = self.visible_tile_keys(rect);
         let target_zoom = self.request_zoom_level();
 
+        self.ensure_tile_thread_pool(cx);
         self.request_visible_tiles_from_local_source(cx);
 
         let mut visible_set = HashSet::with_capacity(self.visible_tiles.len());
@@ -1011,30 +1082,32 @@ impl MapView {
         out
     }
 
-    fn draw_tile_keys_with_fallback(&self) -> Vec<TileKey> {
-        let mut out = Vec::with_capacity(self.visible_tiles.len());
-        let mut seen = HashSet::with_capacity(self.visible_tiles.len() * 2);
+    fn fill_draw_tile_keys(&mut self) {
+        self.scratch_draw_tiles.clear();
+        self.scratch_draw_seen.clear();
 
-        for key in &self.visible_tiles {
-            if self.tile_is_ready(*key) {
-                if seen.insert(*key) {
-                    out.push(*key);
+        for i in 0..self.visible_tiles.len() {
+            let key = self.visible_tiles[i];
+            if self.tile_is_ready(key) {
+                if self.scratch_draw_seen.insert(key) {
+                    self.scratch_draw_tiles.push(key);
                 }
                 continue;
             }
-            if let Some(draw_key) = self.find_ready_ancestor(*key) {
-                if seen.insert(draw_key) {
-                    out.push(draw_key);
+            if let Some(draw_key) = self.find_ready_ancestor(key) {
+                if self.scratch_draw_seen.insert(draw_key) {
+                    self.scratch_draw_tiles.push(draw_key);
                 }
                 continue;
             }
-            for draw_key in self.find_ready_descendants(*key) {
-                if seen.insert(draw_key) {
-                    out.push(draw_key);
+            self.fill_ready_descendants(key);
+            for j in 0..self.scratch_descendant_tiles.len() {
+                let draw_key = self.scratch_descendant_tiles[j];
+                if self.scratch_draw_seen.insert(draw_key) {
+                    self.scratch_draw_tiles.push(draw_key);
                 }
             }
         }
-        out
     }
 
     fn tile_is_ready(&self, key: TileKey) -> bool {
@@ -1067,17 +1140,16 @@ impl MapView {
         None
     }
 
-    fn find_ready_descendants(&self, key: TileKey) -> Vec<TileKey> {
-        let mut out = Vec::new();
+    fn fill_ready_descendants(&mut self, key: TileKey) {
+        self.scratch_descendant_tiles.clear();
         for (candidate, entry) in &self.tiles {
             if !matches!(entry.state, TileLoadState::Ready { .. }) {
                 continue;
             }
             if is_descendant_tile(*candidate, key) {
-                out.push(*candidate);
+                self.scratch_descendant_tiles.push(*candidate);
             }
         }
-        out
     }
 
     fn request_tile(
@@ -1090,22 +1162,40 @@ impl MapView {
         if attempts == 0 && !self.use_local_mbtiles {
             let cache_path = tile_data_cache_path_for(tile_key);
             if let Ok(cached_body) = fs::read_to_string(&cache_path) {
-                match self.build_tile_buffers(tile_key, &cached_body) {
-                    Ok(buffers) => {
-                        self.insert_ready_tile(cx, tile_key, buffers);
-                        return false;
+                // Offload heavy JSON parsing + tessellation to the thread pool
+                self.ensure_tile_thread_pool(cx);
+                let pool = self.tile_thread_pool.as_ref().unwrap();
+                let sender = self.tile_worker_rx.sender();
+                let style_epoch = self.style_epoch;
+                let theme_style = self.active_style().clone();
+                self.tiles.insert(
+                    tile_key,
+                    TileEntry {
+                        state: TileLoadState::LoadingLocal,
+                        last_used: self.frame_counter,
+                        attempts: 0,
+                    },
+                );
+                pool.execute_rev(tile_key, move |_tag| {
+                    match build_tile_buffers_from_body(tile_key, &cached_body, &theme_style) {
+                        Ok(buffers) => {
+                            let _ = sender.send(TileWorkerMessage::NetworkTileParsed {
+                                style_epoch,
+                                tile_key,
+                                buffers,
+                            });
+                        }
+                        Err(_err) => {
+                            let _ = fs::remove_file(&cache_path);
+                            let _ = sender.send(TileWorkerMessage::NetworkTileParseFailed {
+                                style_epoch,
+                                tile_key,
+                                error: String::new(),
+                            });
+                        }
                     }
-                    Err(err) => {
-                        log!(
-                            "MapView: cache parse failed for tile z{} x{} y{}: {}",
-                            tile_key.z,
-                            tile_key.x,
-                            tile_key.y,
-                            err
-                        );
-                        let _ = fs::remove_file(&cache_path);
-                    }
-                }
+                });
+                return false;
             }
         }
 
@@ -1150,36 +1240,41 @@ impl MapView {
         rect: Rect,
     ) {
         let mut label_perf = LabelPerfStats::default();
-        let mut candidates =
-            self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
-        if candidates.is_empty() {
+        self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
+        if self.scratch_candidates.is_empty() {
             self.label_perf = label_perf;
             return;
         }
-        candidates.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+        self.scratch_candidates
+            .sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
         let candidate_budget = label_candidate_budget(view_zoom);
-        if candidates.len() > candidate_budget {
-            candidates.truncate(candidate_budget);
+        if self.scratch_candidates.len() > candidate_budget {
+            self.scratch_candidates.truncate(candidate_budget);
         }
-        label_perf.candidates_kept = candidates.len();
+        label_perf.candidates_kept = self.scratch_candidates.len();
         label_perf.shape_budget = label_shape_attempt_budget(view_zoom);
 
         self.path_glyphs.clear();
-        let mut accepted_centers = HashMap::<String, Vec<Vec2d>>::new();
-        let mut accepted_bounds = Vec::<Rect>::new();
-        // (score, glyph_start, glyph_end) — indices into self.path_glyphs
-        let mut accepted_plans: Vec<(f64, usize, usize)> = Vec::new();
+        // Clear but retain allocations from previous frames
+        for v in self.scratch_accepted_centers.values_mut() {
+            v.clear();
+        }
+        self.scratch_accepted_bounds.clear();
+        self.scratch_accepted_plans.clear();
 
-        for (candidate_index, candidate) in candidates.into_iter().enumerate() {
-            let repeat_key = candidate.name_key.clone();
-            let close_repeat = accepted_centers.get(&repeat_key).is_some_and(|centers| {
-                let r2 = candidate.repeat_distance * candidate.repeat_distance;
-                centers.iter().any(|c| {
-                    let dx = c.x - candidate.center.x;
-                    let dy = c.y - candidate.center.y;
-                    dx * dx + dy * dy < r2
-                })
-            });
+        for candidate_index in 0..self.scratch_candidates.len() {
+            let candidate = &self.scratch_candidates[candidate_index];
+            let close_repeat = self
+                .scratch_accepted_centers
+                .get(&candidate.name_key)
+                .is_some_and(|centers| {
+                    let r2 = candidate.repeat_distance * candidate.repeat_distance;
+                    centers.iter().any(|c| {
+                        let dx = c.x - candidate.center.x;
+                        let dy = c.y - candidate.center.y;
+                        dx * dx + dy * dy < r2
+                    })
+                });
             if close_repeat {
                 label_perf.rejected_repeat += 1;
                 continue;
@@ -1198,18 +1293,22 @@ impl MapView {
                 break;
             }
             label_perf.shaped_attempts += 1;
-            let Some(placement) = self.build_label_placement(cx, &candidate) else {
+            // Build placement needs mutable self for draw_label + path_glyphs,
+            // but only reads scratch_candidates[candidate_index] immutably.
+            // Safe because build_label_placement doesn't touch scratch_candidates.
+            let candidate_ptr = &self.scratch_candidates[candidate_index] as *const LabelCandidate;
+            let candidate_ref = unsafe { &*candidate_ptr };
+            let Some(placement) = self.build_label_placement(cx, candidate_ref) else {
                 label_perf.rejected_plan_none += 1;
                 continue;
             };
             label_perf.shaped_ok += 1;
             if rect_outside_rect(placement.bounds, rect, LABEL_VIEW_MARGIN) {
-                // Discard glyphs that were appended
                 self.path_glyphs.truncate(placement.glyph_start);
                 label_perf.rejected_outside += 1;
                 continue;
             }
-            if accepted_bounds.iter().any(|placed| {
+            if self.scratch_accepted_bounds.iter().any(|placed| {
                 rects_overlap_with_padding(*placed, placement.bounds, LABEL_COLLISION_PADDING)
             }) {
                 self.path_glyphs.truncate(placement.glyph_start);
@@ -1217,20 +1316,30 @@ impl MapView {
                 continue;
             }
 
-            accepted_centers
-                .entry(repeat_key)
-                .or_default()
-                .push(placement.center);
-            accepted_bounds.push(placement.bounds);
+            let candidate = &self.scratch_candidates[candidate_index];
+            let name_key = &candidate.name_key;
+            if let Some(centers) = self.scratch_accepted_centers.get_mut(name_key) {
+                centers.push(placement.center);
+            } else {
+                let key = name_key.clone();
+                self.scratch_accepted_centers
+                    .entry(key)
+                    .or_default()
+                    .push(placement.center);
+            }
+            self.scratch_accepted_bounds.push(placement.bounds);
             let glyph_count = placement.glyph_end - placement.glyph_start;
             label_perf.drawn_labels += 1;
             label_perf.drawn_glyphs += glyph_count;
             let score = candidate.score + candidate.source_rank as f64 * 2.0;
-            accepted_plans.push((score, placement.glyph_start, placement.glyph_end));
+            self.scratch_accepted_plans
+                .push((score, placement.glyph_start, placement.glyph_end));
         }
 
-        accepted_plans.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        for &(_, start, end) in &accepted_plans {
+        self.scratch_accepted_plans
+            .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        for i in 0..self.scratch_accepted_plans.len() {
+            let (_, start, end) = self.scratch_accepted_plans[i];
             self.draw_label
                 .draw_path_glyphs(cx, &self.path_glyphs[start..end]);
         }
@@ -1238,14 +1347,23 @@ impl MapView {
     }
 
     fn collect_label_candidates(
-        &self,
+        &mut self,
         draw_tiles: &[TileKey],
         view_zoom: f64,
         map_offset: Vec2f,
         rect: Rect,
         label_perf: &mut LabelPerfStats,
-    ) -> Vec<LabelCandidate> {
-        let mut out = Vec::<LabelCandidate>::new();
+    ) {
+        // Reuse scratch_candidates: clear but retain per-element heap allocations
+        // (String, Vec<Vec2d>) from previous frames so they don't re-allocate.
+        for c in self.scratch_candidates.iter_mut() {
+            c.text.clear();
+            c.name_key.clear();
+            c.road_kind.clear();
+            c.screen_path.clear();
+        }
+        let mut write_idx = 0usize;
+
         for key in draw_tiles {
             label_perf.draw_tiles += 1;
             let Some(entry) = self.tiles.get(key) else {
@@ -1272,20 +1390,33 @@ impl MapView {
                     continue;
                 }
 
-                let screen_path = build_screen_polyline(&label.path_points, scale, map_offset);
-                if screen_path.len() < 2
-                    || polyline_outside_rect(&screen_path, rect, LABEL_VIEW_MARGIN)
+                // Build screen_path into scratch buffer, then move it into candidate
+                self.scratch_screen_path.clear();
+                build_screen_polyline_into(
+                    &label.path_points,
+                    scale,
+                    map_offset,
+                    &mut self.scratch_screen_path,
+                );
+                if self.scratch_screen_path.len() < 2
+                    || polyline_outside_rect(&self.scratch_screen_path, rect, LABEL_VIEW_MARGIN)
                 {
                     continue;
                 }
-                let cumulative = polyline_cumulative_lengths(&screen_path);
-                let path_length = *cumulative.last().unwrap_or(&0.0);
+                self.scratch_cumulative.clear();
+                polyline_cumulative_lengths_into(
+                    &self.scratch_screen_path,
+                    &mut self.scratch_cumulative,
+                );
+                let path_length = *self.scratch_cumulative.last().unwrap_or(&0.0);
                 if path_length < LABEL_MIN_PATH_PIXELS {
                     continue;
                 }
-                let Some(center) =
-                    sample_polyline_point_at_distance(&screen_path, &cumulative, path_length * 0.5)
-                else {
+                let Some(center) = sample_polyline_point_at_distance(
+                    &self.scratch_screen_path,
+                    &self.scratch_cumulative,
+                    path_length * 0.5,
+                ) else {
                     continue;
                 };
                 if point_outside_rect(center, rect, LABEL_VIEW_MARGIN) {
@@ -1307,22 +1438,38 @@ impl MapView {
                     + (220.0 - zoom_delta * 65.0)
                     + path_length.min(640.0) * 0.35;
 
-                out.push(LabelCandidate {
-                    text: label.text.clone(),
-                    name_key,
-                    road_kind: label.road_kind.clone(),
-                    source_rank,
-                    score,
-                    path_length,
-                    center,
-                    repeat_distance,
-                    font_scale,
-                    screen_path,
-                });
+                // Reuse existing candidate slot or push a new one
+                if write_idx < self.scratch_candidates.len() {
+                    let c = &mut self.scratch_candidates[write_idx];
+                    c.text.push_str(&label.text);
+                    c.name_key.push_str(&name_key);
+                    c.road_kind.push_str(&label.road_kind);
+                    c.source_rank = source_rank;
+                    c.score = score;
+                    c.path_length = path_length;
+                    c.center = center;
+                    c.repeat_distance = repeat_distance;
+                    c.font_scale = font_scale;
+                    c.screen_path.extend_from_slice(&self.scratch_screen_path);
+                } else {
+                    self.scratch_candidates.push(LabelCandidate {
+                        text: label.text.clone(),
+                        name_key,
+                        road_kind: label.road_kind.clone(),
+                        source_rank,
+                        score,
+                        path_length,
+                        center,
+                        repeat_distance,
+                        font_scale,
+                        screen_path: self.scratch_screen_path.clone(),
+                    });
+                }
+                write_idx += 1;
                 label_perf.candidates += 1;
             }
         }
-        out
+        self.scratch_candidates.truncate(write_idx);
     }
 
     fn build_label_placement(
@@ -1333,8 +1480,24 @@ impl MapView {
         if candidate.screen_path.len() < 2 {
             return None;
         }
-        let screen_path = smooth_label_curve(&candidate.screen_path);
-        if screen_path.len() < 2 {
+
+        // Smooth the candidate's screen_path into scratch_smooth_a,
+        // using scratch_smooth_b and scratch_cumulative as temp buffers.
+        let mut smooth_a = std::mem::take(&mut self.scratch_smooth_a);
+        let mut smooth_b = std::mem::take(&mut self.scratch_smooth_b);
+        let mut cum = std::mem::take(&mut self.scratch_cumulative);
+
+        smooth_label_curve_into(
+            &candidate.screen_path,
+            &mut smooth_a,
+            &mut smooth_b,
+            &mut cum,
+        );
+
+        if smooth_a.len() < 2 {
+            self.scratch_smooth_a = smooth_a;
+            self.scratch_smooth_b = smooth_b;
+            self.scratch_cumulative = cum;
             return None;
         }
 
@@ -1342,24 +1505,46 @@ impl MapView {
         let run = self
             .draw_label
             .draw_super
-            .prepare_single_line_run(cx, candidate.text.as_str())?;
-        if run.glyphs.is_empty() {
-            return None;
-        }
+            .prepare_single_line_run(cx, candidate.text.as_str());
+        let run = match run {
+            Some(r) if !r.glyphs.is_empty() => r,
+            _ => {
+                self.scratch_smooth_a = smooth_a;
+                self.scratch_smooth_b = smooth_b;
+                self.scratch_cumulative = cum;
+                return None;
+            }
+        };
 
-        let cumulative = polyline_cumulative_lengths(&screen_path);
+        // Build cumulative lengths for the smoothed path
+        cum.clear();
+        polyline_cumulative_lengths_into(&smooth_a, &mut cum);
+
         let text_width = run.width_in_lpxs;
-        let start_distance =
-            choose_label_start_distance(&screen_path, &cumulative, text_width as f64)?;
+        let start_distance = choose_label_start_distance(&smooth_a, &cum, text_width as f64);
+        let start_distance = match start_distance {
+            Some(d) => d,
+            None => {
+                self.scratch_smooth_a = smooth_a;
+                self.scratch_smooth_b = smooth_b;
+                self.scratch_cumulative = cum;
+                return None;
+            }
+        };
 
         let mid_distance = start_distance + text_width as f64 * 0.5;
         let probe_delta = (text_width as f64 * 0.25).clamp(12.0, 42.0);
-        let mid_tangent_angle = sample_polyline_tangent_angle_raw(
-            &screen_path,
-            &cumulative,
-            mid_distance,
-            probe_delta,
-        )?;
+        let mid_tangent_angle =
+            sample_polyline_tangent_angle_raw(&smooth_a, &cum, mid_distance, probe_delta);
+        let mid_tangent_angle = match mid_tangent_angle {
+            Some(a) => a,
+            None => {
+                self.scratch_smooth_a = smooth_a;
+                self.scratch_smooth_b = smooth_b;
+                self.scratch_cumulative = cum;
+                return None;
+            }
+        };
         let reverse = choose_label_reverse(mid_tangent_angle);
         let label_angle_bias = if reverse { std::f32::consts::PI } else { 0.0 };
 
@@ -1367,10 +1552,10 @@ impl MapView {
             * 0.5
             * LABEL_BASELINE_SHIFT_FACTOR as f32;
 
-        self.draw_label.place_text_along_path(
+        let result = self.draw_label.place_text_along_path(
             &run,
-            &screen_path,
-            &cumulative,
+            &smooth_a,
+            &cum,
             start_distance,
             reverse,
             baseline_shift,
@@ -1379,7 +1564,12 @@ impl MapView {
             LABEL_GLYPH_ANGLE_BLEND,
             candidate.center,
             &mut self.path_glyphs,
-        )
+        );
+
+        self.scratch_smooth_a = smooth_a;
+        self.scratch_smooth_b = smooth_b;
+        self.scratch_cumulative = cum;
+        result
     }
 
     fn update_status_text(&mut self) {
@@ -1411,7 +1601,18 @@ impl MapView {
             }
         }
 
+        let counters = (ready, loading, failed, retrying, exhausted, features);
         let lp = self.label_perf;
+        // Skip format! if nothing changed since the last call
+        if counters == self.prev_status_counters
+            && lp == self.prev_status_label_perf
+            && !self.status.is_empty()
+        {
+            return;
+        }
+        self.prev_status_counters = counters;
+        self.prev_status_label_perf = lp;
+
         self.status = format!(
             "Amsterdam [{}|{}] z{:.2} (req:{})  ready:{}  loading:{}  failed:{}(retry:{} stuck:{})  features:{}  labels(tile:{} scan:{} cand:{}/{} shape:{}/{}(b:{}) draw:{} glyphs:{} rej:r{} ps{} p{} o{} c{} b{})",
             self.source_mode_label(), self.theme_label(), self.view_zoom(), self.request_zoom_level(),
