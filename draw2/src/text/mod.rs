@@ -12,6 +12,7 @@ pub mod image;
 pub mod intern;
 pub mod layouter;
 pub mod loader;
+pub mod msdfer;
 pub mod num;
 pub mod rasterizer;
 pub mod sdfer;

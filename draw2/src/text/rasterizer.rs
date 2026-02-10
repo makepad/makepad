@@ -1,27 +1,64 @@
 use super::{
     font::{Font, GlyphId},
-    font_atlas::{ColorAtlas, GlyphImage, GlyphImageKey, GrayscaleAtlas},
+    font_atlas::{ColorAtlas, GlyphImage, GlyphImageKey, GlyphImageKind, GrayscaleAtlas, MsdfAtlas},
     geom::{Point, Rect, Size},
-    image::{Image},
+    glyph_outline::{Command, GlyphOutline},
+    image::{Bgra, Image, R},
+    msdfer,
+    msdfer::Msdfer,
     sdfer,
     sdfer::Sdfer,
 };
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicU64, Ordering},
+};
 //use std::{fs::File, io::BufWriter, path::Path, slice};
 
+static GLYPH_GEN_CUMULATIVE_US: AtomicU64 = AtomicU64::new(0);
+static GLYPH_GEN_CUMULATIVE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub struct Rasterizer {
     sdfer: Sdfer,
-    grayscale_atlas: GrayscaleAtlas,
-    color_atlas: ColorAtlas,
+    msdfer: Msdfer,
+    msdf_resolution: MsdfResolutionSettings,
+    msdf_complexity: MsdfComplexitySettings,
+    outline_rasterization_mode: OutlineRasterizationMode,
+    atlas: ColorAtlas,
+    outline_msdf_ready: HashSet<GlyphImageKey>,
+    outline_msdf_pending: HashSet<GlyphImageKey>,
+    outline_msdf_failed: HashSet<GlyphImageKey>,
+    queued_msdf_jobs: Vec<QueuedMsdfJob>,
+    atlas_epoch: u64,
 }
 
 impl Rasterizer {
     pub fn new(settings: Settings) -> Self {
+        let atlas_size = Size::new(
+            settings
+                .grayscale_atlas_size
+                .width
+                .max(settings.color_atlas_size.width)
+                .max(settings.msdf_atlas_size.width),
+            settings
+                .grayscale_atlas_size
+                .height
+                .max(settings.color_atlas_size.height)
+                .max(settings.msdf_atlas_size.height),
+        );
         Self {
             sdfer: Sdfer::new(settings.sdfer),
-            grayscale_atlas: GrayscaleAtlas::new(settings.grayscale_atlas_size),
-            color_atlas: ColorAtlas::new(settings.color_atlas_size),
+            msdfer: Msdfer::new(settings.msdfer),
+            msdf_resolution: settings.msdf_resolution,
+            msdf_complexity: settings.msdf_complexity,
+            outline_rasterization_mode: settings.outline_rasterization_mode,
+            atlas: ColorAtlas::new(atlas_size),
+            outline_msdf_ready: HashSet::new(),
+            outline_msdf_pending: HashSet::new(),
+            outline_msdf_failed: HashSet::new(),
+            queued_msdf_jobs: Vec::new(),
+            atlas_epoch: 0,
         }
     }
 
@@ -29,20 +66,137 @@ impl Rasterizer {
         &self.sdfer
     }
 
+    pub fn msdfer(&self) -> &Msdfer {
+        &self.msdfer
+    }
+
+    pub fn msdf_resolution(&self) -> MsdfResolutionSettings {
+        self.msdf_resolution
+    }
+
+    pub fn msdf_complexity(&self) -> MsdfComplexitySettings {
+        self.msdf_complexity
+    }
+
+    pub fn outline_rasterization_mode(&self) -> OutlineRasterizationMode {
+        self.outline_rasterization_mode
+    }
+
+    pub fn set_outline_rasterization_mode(&mut self, mode: OutlineRasterizationMode) {
+        self.outline_rasterization_mode = mode;
+    }
+
+    pub fn on_atlas_reset(&mut self) {
+        self.outline_msdf_ready.clear();
+        self.outline_msdf_pending.clear();
+        self.outline_msdf_failed.clear();
+        self.queued_msdf_jobs.clear();
+        self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
+    }
+
+    pub fn take_queued_msdf_jobs(&mut self) -> Vec<QueuedMsdfJob> {
+        std::mem::take(&mut self.queued_msdf_jobs)
+    }
+
+    pub fn apply_completed_msdf_job(&mut self, job: CompletedMsdfJob) {
+        if job.epoch != self.atlas_epoch {
+            return;
+        }
+        if !self.outline_msdf_pending.remove(&job.key) {
+            return;
+        }
+        let Some(rect) = self.atlas.get_cached_glyph_image_rect(&job.key) else {
+            return;
+        };
+        if job.pixels.len() != job.key.size.width.saturating_mul(job.key.size.height) {
+            return;
+        }
+        if !self.is_valid_msdf_upgrade(rect, &job.pixels) {
+            println!(
+                "glyph-gen reject mode=msdf-async reason=validation font={:?} glyph={} size={}x{}",
+                job.key.font_id,
+                job.key.glyph_id,
+                job.key.size.width,
+                job.key.size.height
+            );
+            self.outline_msdf_failed.insert(job.key);
+            return;
+        }
+
+        {
+            let mut dst = self.atlas.get_cached_glyph_image_mut(rect);
+            for y in 0..job.key.size.height {
+                for x in 0..job.key.size.width {
+                    dst[Point::new(x, y)] = job.pixels[y * job.key.size.width + x];
+                }
+            }
+        }
+        self.outline_msdf_ready.insert(job.key);
+    }
+
+    fn is_valid_msdf_upgrade(&self, rect: Rect<usize>, msdf_pixels: &[Bgra]) -> bool {
+        let sdf_threshold = 1.0 - self.sdfer.settings().cutoff;
+        let padding = self.sdfer.settings().padding;
+        let width = rect.size.width;
+        let height = rect.size.height;
+        if width <= padding * 2 || height <= padding * 2 {
+            return true;
+        }
+
+        let atlas = self.atlas.image();
+        let mut mismatch = 0usize;
+        let mut checked = 0usize;
+        let sx = 8usize;
+        let sy = 8usize;
+        for gy in 0..sy {
+            let y = padding + gy * (height - padding * 2 - 1) / (sy - 1);
+            for gx in 0..sx {
+                let x = padding + gx * (width - padding * 2 - 1) / (sx - 1);
+                let local_index = y * width + x;
+                let old = atlas[rect.origin + Size::new(x, y)];
+                let old_sdf = old.r() as f32 / 255.0;
+                let new_msdf = msdf_median(msdf_pixels[local_index]);
+                if (old_sdf - sdf_threshold).abs() < 0.03 || (new_msdf - sdf_threshold).abs() < 0.03
+                {
+                    continue;
+                }
+                checked += 1;
+                let old_inside = old_sdf > sdf_threshold;
+                let new_inside = new_msdf > sdf_threshold;
+                if old_inside != new_inside {
+                    mismatch += 1;
+                }
+            }
+        }
+
+        if checked == 0 {
+            return true;
+        }
+        mismatch * 100 <= checked * 35
+    }
+
     pub fn grayscale_atlas(&self) -> &GrayscaleAtlas {
-        &self.grayscale_atlas
+        &self.atlas
     }
 
     pub fn color_atlas(&self) -> &ColorAtlas {
-        &self.color_atlas
+        &self.atlas
+    }
+
+    pub fn msdf_atlas(&self) -> &MsdfAtlas {
+        &self.atlas
     }
 
     pub fn grayscale_atlas_mut(&mut self) -> &mut GrayscaleAtlas {
-        &mut self.grayscale_atlas
+        &mut self.atlas
     }
 
     pub fn color_atlas_mut(&mut self) -> &mut ColorAtlas {
-        &mut self.color_atlas
+        &mut self.atlas
+    }
+
+    pub fn msdf_atlas_mut(&mut self) -> &mut MsdfAtlas {
+        &mut self.atlas
     }
 
     pub fn rasterize_glyph(
@@ -81,45 +235,165 @@ impl Rasterizer {
         glyph_id: GlyphId,
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
-        let dpxs_per_em = if dpxs_per_em < 32.0 { 32.0 } else { 64.0 };
-        let dpxs_per_em = dpxs_per_em * 2.0;
+        match self.outline_rasterization_mode {
+            OutlineRasterizationMode::Sdf => {
+                self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em)
+            }
+            OutlineRasterizationMode::Msdf => {
+                self.rasterize_glyph_outline_msdf(font, glyph_id, dpxs_per_em)
+            }
+        }
+    }
+
+    fn rasterize_glyph_outline_sdf(
+        &mut self,
+        font: &Font,
+        glyph_id: GlyphId,
+        mut dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
+        debug_assert_eq!(self.sdfer.settings().padding, self.msdfer.settings().padding);
+        dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
         let mut outline = None;
         let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
+        let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
         let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
         let atlas_image_padding = self.sdfer.settings().padding;
-        let atlas_image_bounds =
-            match self
-                .grayscale_atlas
-                .get_or_allocate_glyph_image(GlyphImageKey {
-                    font_id: font.id(),
+        let key = GlyphImageKey {
+            font_id: font.id(),
+            glyph_id,
+            size: atlas_image_size + Size::from(atlas_image_padding) * 2,
+            kind: GlyphImageKind::Outline,
+        };
+        let atlas_image_bounds = match self.atlas.get_or_allocate_glyph_image(key.clone())? {
+            GlyphImage::Cached(rect) => rect,
+            GlyphImage::Allocated(mut slot) => {
+                let start = std::time::Instant::now();
+                println!(
+                    "glyph-gen start mode=sdf font={:?} glyph={} dpxs_per_em={:.2}",
+                    font.id(),
                     glyph_id,
-                    size: atlas_image_size + Size::from(self.sdfer.settings().padding) * 2,
-                })? {
-                GlyphImage::Cached(rect) => rect,
-                GlyphImage::Allocated(mut sdf) => {
-                    let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
-                    let mut coverage = Image::new(atlas_image_size);
-                    outline.rasterize(
-                        dpxs_per_em,
-                        &mut coverage.subimage_mut(atlas_image_size.into()),
-                    );
-                    // lets plunk this thing to disk
-                    /*Self::save_to_png(&coverage, "./test.png");*/
-                    
-                    self.sdfer
-                        .coverage_to_sdf(&coverage.subimage(atlas_image_size.into()), &mut sdf);
-                    sdf.bounds()
+                    dpxs_per_em
+                );
+                let mut coverage = Image::new(atlas_image_size);
+                outline.rasterize(
+                    dpxs_per_em,
+                    &mut coverage.subimage_mut(atlas_image_size.into()),
+                );
+                let sdf_image_size = atlas_image_size + Size::from(atlas_image_padding) * 2;
+                let mut sdf_image = Image::<R>::new(sdf_image_size);
+                self.sdfer.coverage_to_sdf(
+                    &coverage.subimage(atlas_image_size.into()),
+                    &mut sdf_image.subimage_mut(Rect::from(sdf_image_size)),
+                );
+                for y in 0..sdf_image_size.height {
+                    for x in 0..sdf_image_size.width {
+                        let v = sdf_image[Point::new(x, y)].r();
+                        slot[Point::new(x, y)] = Bgra::new(v, v, v, v);
+                    }
                 }
-            };
+                self.outline_msdf_ready.remove(&key);
+                self.outline_msdf_failed.remove(&key);
+                let elapsed_us = start.elapsed().as_micros() as u64;
+                let cumulative_us = GLYPH_GEN_CUMULATIVE_US
+                    .fetch_add(elapsed_us, Ordering::Relaxed)
+                    .saturating_add(elapsed_us);
+                let cumulative_count = GLYPH_GEN_CUMULATIVE_COUNT
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                println!(
+                        "glyph-gen end mode=sdf font={:?} glyph={} elapsed_us={} cumulative_us={} cumulative_count={}",
+                        font.id(),
+                        glyph_id,
+                        elapsed_us,
+                        cumulative_us,
+                        cumulative_count
+                    );
+                slot.bounds()
+            }
+        };
 
         return Some(RasterizedGlyph {
             atlas_kind: AtlasKind::Grayscale,
-            atlas_size: self.grayscale_atlas().size(),
+            atlas_size: self.atlas.size(),
             atlas_image_bounds,
             atlas_image_padding,
             origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
             dpxs_per_em,
         });
+    }
+
+    fn rasterize_glyph_outline_msdf(
+        &mut self,
+        font: &Font,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
+        let mut outline = None;
+        let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
+        let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
+        let complexity = estimate_outline_complexity(&outline);
+        if !is_msdf_complexity_acceptable(self.msdf_complexity, complexity) {
+            println!(
+                "glyph-gen route mode=msdf->sdf reason=complexity font={:?} glyph={} outline_commands={} estimated_segments={} max_commands={} max_segments={}",
+                font.id(),
+                glyph_id,
+                complexity.outline_commands,
+                complexity.estimated_segments,
+                self.msdf_complexity.max_outline_commands,
+                self.msdf_complexity.max_estimated_segments
+            );
+            return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
+        }
+        let resolution_choice = choose_msdf_resolution(self.msdf_resolution, &outline, dpxs_per_em);
+        let dpxs_per_em = resolution_choice.selected_dpxs_per_em;
+        let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
+        let atlas_image_padding = self.msdfer.settings().padding;
+        let key = GlyphImageKey {
+            font_id: font.id(),
+            glyph_id,
+            size: atlas_image_size + Size::from(atlas_image_padding) * 2,
+            kind: GlyphImageKind::Outline,
+        };
+        if self.outline_msdf_failed.contains(&key) {
+            return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
+        }
+        if self.outline_msdf_ready.contains(&key) {
+            if let Some(atlas_image_bounds) = self.atlas.get_cached_glyph_image_rect(&key) {
+                return Some(RasterizedGlyph {
+                    atlas_kind: AtlasKind::Msdf,
+                    atlas_size: self.atlas.size(),
+                    atlas_image_bounds,
+                    atlas_image_padding,
+                    origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
+                    dpxs_per_em,
+                });
+            }
+            self.outline_msdf_ready.remove(&key);
+        }
+
+        let sdf_glyph = self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em)?;
+        if !self.outline_msdf_ready.contains(&key) && self.outline_msdf_pending.insert(key.clone())
+        {
+            println!(
+                "glyph-gen queue mode=msdf font={:?} glyph={} requested_dpxs_per_em={:.2} base_dpxs_per_em={:.2} selected_dpxs_per_em={:.2} required_dpxs_per_em={:.2} min_feature_ems={:.6}",
+                font.id(),
+                glyph_id,
+                resolution_choice.requested_dpxs_per_em,
+                resolution_choice.base_dpxs_per_em,
+                dpxs_per_em,
+                resolution_choice.required_dpxs_per_em,
+                resolution_choice
+                    .min_feature_ems
+                    .unwrap_or(self.msdf_resolution.min_feature_floor_ems)
+            );
+            self.queued_msdf_jobs.push(QueuedMsdfJob {
+                key,
+                outline,
+                dpxs_per_em,
+                epoch: self.atlas_epoch,
+            });
+        }
+        Some(sdf_glyph)
     }
 
     fn rasterize_glyph_raster_image(
@@ -131,25 +405,45 @@ impl Rasterizer {
         const PADDING: usize = 2;
 
         let raster_image = font.glyph_raster_image(glyph_id, dpxs_per_em)?;
-        let atlas_image_bounds =
-            match self
-                .color_atlas
-                .get_or_allocate_glyph_image(GlyphImageKey {
-                    font_id: font.id(),
+        let atlas_image_bounds = match self.atlas.get_or_allocate_glyph_image(GlyphImageKey {
+            font_id: font.id(),
+            glyph_id,
+            size: raster_image.decode_size() + Size::from(2 * PADDING),
+            kind: GlyphImageKind::Color,
+        })? {
+            GlyphImage::Cached(rect) => rect,
+            GlyphImage::Allocated(mut image) => {
+                let start = std::time::Instant::now();
+                println!(
+                    "glyph-gen start mode=color font={:?} glyph={} dpxs_per_em={:.2}",
+                    font.id(),
                     glyph_id,
-                    size: raster_image.decode_size() + Size::from(2 * PADDING),
-                })? {
-                GlyphImage::Cached(rect) => rect,
-                GlyphImage::Allocated(mut image) => {
-                    let size = image.size();
-                    image = image.subimage_mut(Rect::from(size).unpad(PADDING));
-                    raster_image.decode(&mut image);
-                    image.bounds()
-                }
-            };
+                    dpxs_per_em
+                );
+                let size = image.size();
+                image = image.subimage_mut(Rect::from(size).unpad(PADDING));
+                raster_image.decode(&mut image);
+                let elapsed_us = start.elapsed().as_micros() as u64;
+                let cumulative_us = GLYPH_GEN_CUMULATIVE_US
+                    .fetch_add(elapsed_us, Ordering::Relaxed)
+                    .saturating_add(elapsed_us);
+                let cumulative_count = GLYPH_GEN_CUMULATIVE_COUNT
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                println!(
+                        "glyph-gen end mode=color font={:?} glyph={} elapsed_us={} cumulative_us={} cumulative_count={}",
+                        font.id(),
+                        glyph_id,
+                        elapsed_us,
+                        cumulative_us,
+                        cumulative_count
+                    );
+                image.bounds()
+            }
+        };
         return Some(RasterizedGlyph {
             atlas_kind: AtlasKind::Color,
-            atlas_size: self.color_atlas.size(),
+            atlas_size: self.atlas.size(),
             atlas_image_bounds,
             atlas_image_padding: PADDING,
             origin_in_dpxs: raster_image.origin_in_dpxs(),
@@ -161,8 +455,44 @@ impl Rasterizer {
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     pub sdfer: sdfer::Settings,
+    pub msdfer: msdfer::Settings,
+    pub msdf_resolution: MsdfResolutionSettings,
+    pub msdf_complexity: MsdfComplexitySettings,
+    pub outline_rasterization_mode: OutlineRasterizationMode,
     pub grayscale_atlas_size: Size<usize>,
     pub color_atlas_size: Size<usize>,
+    pub msdf_atlas_size: Size<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct QueuedMsdfJob {
+    pub key: GlyphImageKey,
+    pub outline: GlyphOutline,
+    pub dpxs_per_em: f32,
+    pub epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompletedMsdfJob {
+    pub key: GlyphImageKey,
+    pub pixels: Vec<Bgra>,
+    pub epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MsdfResolutionSettings {
+    pub min_dpxs_per_em: f32,
+    pub base_dpxs_per_em: f32,
+    pub max_dpxs_per_em: f32,
+    pub target_feature_texels: f32,
+    pub dpx_quantum: f32,
+    pub min_feature_floor_ems: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MsdfComplexitySettings {
+    pub max_outline_commands: usize,
+    pub max_estimated_segments: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -179,6 +509,13 @@ pub struct RasterizedGlyph {
 pub enum AtlasKind {
     Grayscale,
     Color,
+    Msdf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum OutlineRasterizationMode {
+    Sdf,
+    Msdf,
 }
 
 fn glyph_outline_image_size(size_in_ems: Size<f32>, dpxs_per_em: f32) -> Size<usize> {
@@ -186,6 +523,203 @@ fn glyph_outline_image_size(size_in_ems: Size<f32>, dpxs_per_em: f32) -> Size<us
     Size::new(
         size_in_dpxs.width.ceil() as usize,
         size_in_dpxs.height.ceil() as usize,
+    )
+}
+
+fn msdf_median(pixel: Bgra) -> f32 {
+    let r = pixel.r() as f32 / 255.0;
+    let g = pixel.g() as f32 / 255.0;
+    let b = pixel.b() as f32 / 255.0;
+    (r + g + b) - r.min(g).min(b) - r.max(g).max(b)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OutlineComplexity {
+    outline_commands: usize,
+    estimated_segments: usize,
+}
+
+fn estimate_outline_complexity(outline: &GlyphOutline) -> OutlineComplexity {
+    const QUAD_COMPLEXITY_SEGMENTS: usize = 8;
+    const CUBIC_COMPLEXITY_SEGMENTS: usize = 12;
+
+    let mut estimated_segments = 0usize;
+    for command in outline.commands().iter().copied() {
+        match command {
+            Command::MoveTo(_) => {}
+            Command::LineTo(_) => estimated_segments = estimated_segments.saturating_add(1),
+            Command::QuadTo(_, _) => {
+                estimated_segments = estimated_segments.saturating_add(QUAD_COMPLEXITY_SEGMENTS);
+            }
+            Command::CurveTo(_, _, _) => {
+                estimated_segments = estimated_segments.saturating_add(CUBIC_COMPLEXITY_SEGMENTS);
+            }
+            Command::Close => estimated_segments = estimated_segments.saturating_add(1),
+        }
+    }
+
+    OutlineComplexity {
+        outline_commands: outline.commands().len(),
+        estimated_segments,
+    }
+}
+
+fn is_msdf_complexity_acceptable(
+    settings: MsdfComplexitySettings,
+    complexity: OutlineComplexity,
+) -> bool {
+    complexity.outline_commands <= settings.max_outline_commands
+        && complexity.estimated_segments <= settings.max_estimated_segments
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MsdfResolutionChoice {
+    requested_dpxs_per_em: f32,
+    base_dpxs_per_em: f32,
+    selected_dpxs_per_em: f32,
+    required_dpxs_per_em: f32,
+    min_feature_ems: Option<f32>,
+}
+
+fn choose_msdf_resolution(
+    settings: MsdfResolutionSettings,
+    outline: &GlyphOutline,
+    requested_dpxs_per_em: f32,
+) -> MsdfResolutionChoice {
+    let min_dpxs = settings.min_dpxs_per_em.max(1.0);
+    let base_dpxs = settings.base_dpxs_per_em.max(min_dpxs);
+    let max_dpxs = settings.max_dpxs_per_em.max(base_dpxs);
+    let base = if requested_dpxs_per_em < min_dpxs {
+        min_dpxs
+    } else {
+        base_dpxs
+    };
+
+    let min_feature = estimate_outline_min_feature_ems(outline);
+    let effective_min_feature = min_feature
+        .unwrap_or(settings.min_feature_floor_ems)
+        .max(settings.min_feature_floor_ems);
+    let required = (settings.target_feature_texels.max(0.5) / effective_min_feature).max(base);
+
+    let mut selected = required.min(max_dpxs);
+    selected = quantize_up(selected, settings.dpx_quantum.max(0.0));
+    selected = selected.clamp(base, max_dpxs);
+
+    MsdfResolutionChoice {
+        requested_dpxs_per_em,
+        base_dpxs_per_em: base,
+        selected_dpxs_per_em: selected,
+        required_dpxs_per_em: required,
+        min_feature_ems: min_feature,
+    }
+}
+
+fn estimate_outline_min_feature_ems(outline: &GlyphOutline) -> Option<f32> {
+    const QUAD_STEPS: usize = 8;
+    const CUBIC_STEPS: usize = 12;
+    const EPS: f32 = 0.000_000_1;
+
+    let transform = outline.rasterize_transform(1.0);
+    let mut min_feature = f32::INFINITY;
+    let mut first = None;
+    let mut last = None;
+
+    for command in outline.commands().iter().copied() {
+        match command {
+            Command::MoveTo(p) => {
+                let p = p.apply_transform(transform);
+                first = Some(p);
+                last = Some(p);
+            }
+            Command::LineTo(p1) => {
+                if let Some(p0) = last {
+                    let p1 = p1.apply_transform(transform);
+                    update_min_feature(&mut min_feature, p0, p1, EPS);
+                    last = Some(p1);
+                }
+            }
+            Command::QuadTo(p1, p2) => {
+                if let Some(p0) = last {
+                    let p1 = p1.apply_transform(transform);
+                    let p2 = p2.apply_transform(transform);
+                    let mut prev = p0;
+                    for step in 1..=QUAD_STEPS {
+                        let t = step as f32 / QUAD_STEPS as f32;
+                        let next = quadratic_point(p0, p1, p2, t);
+                        update_min_feature(&mut min_feature, prev, next, EPS);
+                        prev = next;
+                    }
+                    last = Some(p2);
+                }
+            }
+            Command::CurveTo(p1, p2, p3) => {
+                if let Some(p0) = last {
+                    let p1 = p1.apply_transform(transform);
+                    let p2 = p2.apply_transform(transform);
+                    let p3 = p3.apply_transform(transform);
+                    let mut prev = p0;
+                    for step in 1..=CUBIC_STEPS {
+                        let t = step as f32 / CUBIC_STEPS as f32;
+                        let next = cubic_point(p0, p1, p2, p3, t);
+                        update_min_feature(&mut min_feature, prev, next, EPS);
+                        prev = next;
+                    }
+                    last = Some(p3);
+                }
+            }
+            Command::Close => {
+                if let (Some(p0), Some(p1)) = (last, first) {
+                    update_min_feature(&mut min_feature, p0, p1, EPS);
+                }
+                last = first;
+            }
+        }
+    }
+
+    if min_feature.is_finite() {
+        Some(min_feature)
+    } else {
+        None
+    }
+}
+
+fn update_min_feature(min_feature: &mut f32, p0: Point<f32>, p1: Point<f32>, eps: f32) {
+    let dx = p1.x - p0.x;
+    let dy = p1.y - p0.y;
+    let d = (dx * dx + dy * dy).sqrt();
+    if d > eps && d < *min_feature {
+        *min_feature = d;
+    }
+}
+
+fn quantize_up(value: f32, quantum: f32) -> f32 {
+    if quantum <= 0.0 {
+        return value;
+    }
+    (value / quantum).ceil() * quantum
+}
+
+fn quadratic_point(p0: Point<f32>, p1: Point<f32>, p2: Point<f32>, t: f32) -> Point<f32> {
+    let omt = 1.0 - t;
+    Point::new(
+        omt * omt * p0.x + 2.0 * omt * t * p1.x + t * t * p2.x,
+        omt * omt * p0.y + 2.0 * omt * t * p1.y + t * t * p2.y,
+    )
+}
+
+fn cubic_point(
+    p0: Point<f32>,
+    p1: Point<f32>,
+    p2: Point<f32>,
+    p3: Point<f32>,
+    t: f32,
+) -> Point<f32> {
+    let omt = 1.0 - t;
+    let omt2 = omt * omt;
+    let t2 = t * t;
+    Point::new(
+        omt2 * omt * p0.x + 3.0 * omt2 * t * p1.x + 3.0 * omt * t2 * p2.x + t2 * t * p3.x,
+        omt2 * omt * p0.y + 3.0 * omt2 * t * p1.y + 3.0 * omt * t2 * p2.y + t2 * t * p3.y,
     )
 }
 
