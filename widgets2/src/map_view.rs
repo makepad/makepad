@@ -22,7 +22,7 @@ const MAX_PENDING_REQUESTS: usize = 2;
 const MAX_TILE_RETRIES: u8 = 6;
 const RETRY_BASE_FRAMES: u64 = 30;
 const RETRY_MAX_FRAMES: u64 = 300;
-const TILE_CACHE_DIR: &str = "local/tilecache_v2";
+const TILE_CACHE_DIR: &str = "local/tilecache_v4";
 const TILE_QUERY_PAD: f64 = 0.05;
 const LOCAL_MBTILES_PATH: &str = "local/noord-holland-shortbread-1.0.mbtiles";
 const LOCAL_MBTILES_MIN_ZOOM: u32 = 0;
@@ -31,9 +31,28 @@ const MAX_LOCAL_TILE_BATCH: usize = 10;
 const LABEL_COLLISION_PADDING: f64 = 4.0;
 const LABEL_VIEW_MARGIN: f64 = 72.0;
 const LABEL_MIN_PATH_PIXELS: f64 = 24.0;
+const LABEL_MAX_CANDIDATES_ZOOMED_OUT: usize = 520;
+const LABEL_MAX_CANDIDATES_MID_ZOOM: usize = 700;
+const LABEL_MAX_CANDIDATES_DEFAULT: usize = 1200;
+const LABEL_MAX_SHAPE_ATTEMPTS_ZOOMED_OUT: usize = 520;
+const LABEL_MAX_SHAPE_ATTEMPTS_MID_ZOOM: usize = 700;
+const LABEL_MAX_SHAPE_ATTEMPTS_DEFAULT: usize = 1200;
+const LABEL_GLYPH_ANGLE_BLEND: f32 = 0.35;
+const LABEL_MAX_GLYPH_TURN_RADIANS: f32 = 0.70;
+const LABEL_CURVE_RESAMPLE_SPACING: f64 = 6.0;
+const LABEL_CURVE_MAX_SAMPLES: usize = 192;
+const LABEL_CURVE_SMOOTH_PASSES: usize = 2;
+const LABEL_BASELINE_SHIFT_FACTOR: f64 = 0.0;
+const LABEL_LAYOUT_SCAN_STEP: f64 = 12.0;
+const LABEL_LAYOUT_MAX_CURVATURE: f32 = 1.0;
+const LABEL_VERTICAL_AXIS_EPSILON: f32 = 0.22;
+const MAX_TILE_LABELS: usize = 512;
+const POINT_LABEL_HALF_SPAN_PIXELS: f32 = 96.0;
 const ROAD_CLIP_PADDING: f32 = 8.0;
 const ROAD_SMOOTH_FACTOR: f32 = 0.0;
-const ROAD_CENTER_OVERLAY_WIDTH_SCALE: f32 = 0.84;
+const ROAD_CENTER_OVERLAY_WIDTH_SCALE: f32 = 1.2;
+const ROAD_CENTER_OVERLAY_CASING_SCALE: f32 = 0.80;
+const ROAD_CENTER_OVERLAY_CASING_EPSILON: f32 = 0.02;
 const ROAD_CENTER_OVERLAY_MIN_WIDTH: f32 = 0.45;
 const EARCUT_MAX_RINGS: usize = 500;
 const POLYGON_AREA_EPSILON: f64 = 1e-2;
@@ -458,6 +477,7 @@ struct LabelCandidate {
     road_kind: String,
     source_rank: u8,
     score: f64,
+    path_length: f64,
     center: Vec2d,
     repeat_distance: f64,
     font_scale: f32,
@@ -479,6 +499,27 @@ struct LabelDrawPlan {
     center: Vec2d,
     bounds: Rect,
     glyphs: Vec<LabelGlyphInstance>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LabelPerfStats {
+    draw_tiles: usize,
+    tiles_with_labels: usize,
+    labels_in_tiles: usize,
+    labels_scanned: usize,
+    candidates: usize,
+    candidates_kept: usize,
+    shape_budget: usize,
+    shaped_attempts: usize,
+    shaped_ok: usize,
+    rejected_repeat: usize,
+    rejected_plan_none: usize,
+    rejected_pre_short: usize,
+    rejected_outside: usize,
+    rejected_collision: usize,
+    rejected_budget: usize,
+    drawn_labels: usize,
+    drawn_glyphs: usize,
 }
 
 #[derive(Debug)]
@@ -566,6 +607,8 @@ pub struct MapView {
     frame_counter: u64,
     #[rust]
     status: String,
+    #[rust]
+    label_perf: LabelPerfStats,
     #[rust]
     local_source_missing_logged: bool,
     #[rust]
@@ -736,7 +779,10 @@ impl Widget for MapView {
 
         if view_zoom >= 13.0 {
             self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
+        } else {
+            self.label_perf = LabelPerfStats::default();
         }
+        self.update_status_text();
 
         self.draw_text.draw_abs(
             cx,
@@ -878,13 +924,13 @@ impl MapView {
     }
 
     fn apply_theme_palette(&mut self) {
-        let (background, label, status_text) = {
+        let (background, label) = {
             let style = self.active_style();
-            (style.background, style.label, style.status_text)
+            (style.background, style.label)
         };
         self.draw_bg.color = background;
         self.draw_label.draw_super.color = label;
-        self.draw_text.color = status_text;
+        self.draw_text.color = vec4(0.0, 0.0, 0.0, 1.0);
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
@@ -1464,18 +1510,51 @@ impl MapView {
         map_offset: Vec2f,
         rect: Rect,
     ) {
-        let mut candidates = self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect);
+        let mut label_perf = LabelPerfStats::default();
+        let mut candidates =
+            self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
         if candidates.is_empty() {
+            self.label_perf = label_perf;
+            if self.frame_counter % 30 == 0 {
+                let lp = self.label_perf;
+                log!(
+                    "MapView labels z{:.2}: draw_tiles={} tiles_with_labels={} labels_in_tiles={} scanned={} candidates={}/{} shaped={}/{}(budget:{}) drawn={} glyphs={} rejects[r:{} ps:{} p:{} o:{} c:{} b:{}]",
+                    view_zoom,
+                    lp.draw_tiles,
+                    lp.tiles_with_labels,
+                    lp.labels_in_tiles,
+                    lp.labels_scanned,
+                    lp.candidates_kept,
+                    lp.candidates,
+                    lp.shaped_ok,
+                    lp.shaped_attempts,
+                    lp.shape_budget,
+                    lp.drawn_labels,
+                    lp.drawn_glyphs,
+                    lp.rejected_repeat,
+                    lp.rejected_pre_short,
+                    lp.rejected_plan_none,
+                    lp.rejected_outside,
+                    lp.rejected_collision,
+                    lp.rejected_budget,
+                );
+            }
             return;
         }
         candidates.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+        let candidate_budget = label_candidate_budget(view_zoom);
+        if candidates.len() > candidate_budget {
+            candidates.truncate(candidate_budget);
+        }
+        label_perf.candidates_kept = candidates.len();
+        label_perf.shape_budget = label_shape_attempt_budget(view_zoom);
 
         let mut accepted_centers = HashMap::<String, Vec<Vec2d>>::new();
         let mut accepted_bounds = Vec::<Rect>::new();
         let mut plans = Vec::<LabelDrawPlan>::new();
 
-        for candidate in candidates {
-            let repeat_key = format!("{}|{}", candidate.name_key, candidate.road_kind);
+        for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+            let repeat_key = candidate.name_key.clone();
             let close_repeat = accepted_centers.get(&repeat_key).is_some_and(|centers| {
                 let r2 = candidate.repeat_distance * candidate.repeat_distance;
                 centers.iter().any(|center| {
@@ -1485,18 +1564,35 @@ impl MapView {
                 })
             });
             if close_repeat {
+                label_perf.rejected_repeat += 1;
                 continue;
             }
 
+            let estimated_width = estimate_label_width_pixels(&candidate.text, candidate.font_scale);
+            if candidate.path_length < estimated_width + 4.0 {
+                label_perf.rejected_pre_short += 1;
+                continue;
+            }
+
+            if label_perf.shaped_attempts >= label_perf.shape_budget {
+                label_perf.rejected_budget +=
+                    label_perf.candidates_kept.saturating_sub(candidate_index);
+                break;
+            }
+            label_perf.shaped_attempts += 1;
             let Some(plan) = self.build_label_draw_plan(cx, &candidate) else {
+                label_perf.rejected_plan_none += 1;
                 continue;
             };
+            label_perf.shaped_ok += 1;
             if rect_outside_rect(plan.bounds, rect, LABEL_VIEW_MARGIN) {
+                label_perf.rejected_outside += 1;
                 continue;
             }
             if accepted_bounds.iter().any(|placed| {
                 rects_overlap_with_padding(*placed, plan.bounds, LABEL_COLLISION_PADDING)
             }) {
+                label_perf.rejected_collision += 1;
                 continue;
             }
 
@@ -1505,12 +1601,40 @@ impl MapView {
                 .or_default()
                 .push(plan.center);
             accepted_bounds.push(plan.bounds);
+            label_perf.drawn_labels += 1;
+            label_perf.drawn_glyphs += plan.glyphs.len();
             plans.push(plan);
         }
 
         plans.sort_unstable_by(|a, b| a.score.total_cmp(&b.score));
         for plan in &plans {
             self.draw_label_plan(cx, plan);
+        }
+
+        self.label_perf = label_perf;
+        if self.frame_counter % 30 == 0 {
+            let lp = self.label_perf;
+            log!(
+                "MapView labels z{:.2}: draw_tiles={} tiles_with_labels={} labels_in_tiles={} scanned={} candidates={}/{} shaped={}/{}(budget:{}) drawn={} glyphs={} rejects[r:{} ps:{} p:{} o:{} c:{} b:{}]",
+                view_zoom,
+                lp.draw_tiles,
+                lp.tiles_with_labels,
+                lp.labels_in_tiles,
+                lp.labels_scanned,
+                lp.candidates_kept,
+                lp.candidates,
+                lp.shaped_ok,
+                lp.shaped_attempts,
+                lp.shape_budget,
+                lp.drawn_labels,
+                lp.drawn_glyphs,
+                lp.rejected_repeat,
+                lp.rejected_pre_short,
+                lp.rejected_plan_none,
+                lp.rejected_outside,
+                lp.rejected_collision,
+                lp.rejected_budget,
+            );
         }
     }
 
@@ -1520,28 +1644,28 @@ impl MapView {
         view_zoom: f64,
         map_offset: Vec2f,
         rect: Rect,
+        label_perf: &mut LabelPerfStats,
     ) -> Vec<LabelCandidate> {
         let mut out = Vec::<LabelCandidate>::new();
 
         for key in draw_tiles {
-            let (labels, scale) = {
-                let Some(entry) = self.tiles.get(key) else {
-                    continue;
-                };
-                let TileLoadState::Ready { labels, .. } = &entry.state else {
-                    continue;
-                };
-                if labels.is_empty() {
-                    continue;
-                }
-                (
-                    labels.clone(),
-                    2.0_f64.powf(view_zoom - key.z as f64) as f32,
-                )
+            label_perf.draw_tiles += 1;
+            let Some(entry) = self.tiles.get(key) else {
+                continue;
             };
+            let TileLoadState::Ready { labels, .. } = &entry.state else {
+                continue;
+            };
+            if labels.is_empty() {
+                continue;
+            }
+            label_perf.tiles_with_labels += 1;
+            label_perf.labels_in_tiles += labels.len();
+            let scale = 2.0_f64.powf(view_zoom - key.z as f64) as f32;
 
             let zoom_delta = (view_zoom - key.z as f64).abs();
             for label in labels {
+                label_perf.labels_scanned += 1;
                 let Some(source_rank) = label_source_rank(&label.source_layer) else {
                     continue;
                 };
@@ -1566,6 +1690,9 @@ impl MapView {
                 else {
                     continue;
                 };
+                if point_outside_rect(center, rect, LABEL_VIEW_MARGIN) {
+                    continue;
+                }
 
                 let repeat_distance = repeat_distance_for_label(label.priority, source_rank);
                 let mut font_scale = (scale.powf(0.28) * 0.78).clamp(0.52, 1.05);
@@ -1581,16 +1708,18 @@ impl MapView {
                     + path_length.min(640.0) * 0.35;
 
                 out.push(LabelCandidate {
-                    text: label.text,
+                    text: label.text.clone(),
                     name_key,
-                    road_kind: label.road_kind,
+                    road_kind: label.road_kind.clone(),
                     source_rank,
                     score,
+                    path_length,
                     center,
                     repeat_distance,
                     font_scale,
                     screen_path,
                 });
+                label_perf.candidates += 1;
             }
         }
 
@@ -1605,6 +1734,10 @@ impl MapView {
         if candidate.screen_path.len() < 2 {
             return None;
         }
+        let screen_path = smooth_label_curve(&candidate.screen_path);
+        if screen_path.len() < 2 {
+            return None;
+        }
 
         self.draw_label.draw_super.font_scale = candidate.font_scale;
         let run = self
@@ -1615,25 +1748,25 @@ impl MapView {
             return None;
         }
 
-        let cumulative = polyline_cumulative_lengths(&candidate.screen_path);
+        let cumulative = polyline_cumulative_lengths(&screen_path);
         let total_length = *cumulative.last()?;
         let text_width = run.width_in_lpxs;
         if total_length < text_width as f64 + 4.0 {
             return None;
         }
 
-        let baseline_shift = (run.ascender_in_lpxs + run.descender_in_lpxs) * 0.5;
-        let start_distance = (total_length - text_width as f64) * 0.5;
+        let baseline_shift =
+            (run.ascender_in_lpxs + run.descender_in_lpxs) * 0.5 * LABEL_BASELINE_SHIFT_FACTOR as f32;
+        let start_distance = choose_label_start_distance(&screen_path, &cumulative, text_width as f64)?;
         let probe_delta = (text_width as f64 * 0.25).clamp(12.0, 42.0);
         let mid_distance = start_distance + text_width as f64 * 0.5;
-        let reverse = sample_polyline_tangent_angle_raw(
-            &candidate.screen_path,
+        let mid_tangent_angle = sample_polyline_tangent_angle_raw(
+            &screen_path,
             &cumulative,
             mid_distance,
             probe_delta,
-        )
-        .map(|angle| angle.cos() < 0.0)
-        .unwrap_or(false);
+        )?;
+        let reverse = choose_label_reverse(mid_tangent_angle);
 
         let label_half_height =
             ((run.ascender_in_lpxs - run.descender_in_lpxs).abs() as f64 * 0.5).max(3.0);
@@ -1649,42 +1782,61 @@ impl MapView {
                 continue;
             }
 
-            let glyph_center_distance =
-                start_distance + (glyph.pen_x_in_lpxs + glyph.advance_in_lpxs * 0.5) as f64;
-            let path_center_distance = if reverse {
-                total_length - glyph_center_distance
+            let pen_distance = start_distance + glyph.pen_x_in_lpxs as f64;
+            let advance_half = glyph.advance_in_lpxs as f64 * 0.5;
+            let path_pen_distance = if reverse {
+                total_length - pen_distance
             } else {
-                glyph_center_distance
+                pen_distance
+            };
+            let path_center_distance = if reverse {
+                path_pen_distance - advance_half
+            } else {
+                path_pen_distance + advance_half
+            };
+
+            let Some(pen_point) = sample_polyline_point_at_distance(
+                &screen_path,
+                &cumulative,
+                path_pen_distance,
+            ) else {
+                continue;
             };
 
             let Some(center_point) = sample_polyline_point_at_distance(
-                &candidate.screen_path,
+                &screen_path,
                 &cumulative,
                 path_center_distance,
             ) else {
                 continue;
             };
 
-            let angle_sample_delta = (glyph.advance_in_lpxs as f64 * 1.25).clamp(6.0, 24.0);
-            let Some(raw_angle) = sample_polyline_tangent_angle_raw(
-                &candidate.screen_path,
+            let angle_sample_delta = (glyph.advance_in_lpxs as f64 * 1.45).clamp(10.0, 30.0);
+            let Some(mut raw_angle) = sample_polyline_tangent_angle_raw(
+                &screen_path,
                 &cumulative,
                 path_center_distance,
                 angle_sample_delta,
             ) else {
                 continue;
             };
-            let mut angle = upright_angle(raw_angle);
+            if reverse {
+                raw_angle = wrap_angle_pi(raw_angle + std::f32::consts::PI);
+            }
+            let mut angle = stable_upright_angle(prev_angle, raw_angle);
             if let Some(prev) = prev_angle {
-                angle = smooth_continuous_angle(prev, angle, 0.65);
+                angle = smooth_continuous_angle(prev, angle, LABEL_GLYPH_ANGLE_BLEND);
+                let turn = wrap_angle_pi(angle - prev).abs();
+                if turn > LABEL_MAX_GLYPH_TURN_RADIANS {
+                    return None;
+                }
             }
             prev_angle = Some(angle);
 
             let tangent = dvec2((angle as f64).cos(), (angle as f64).sin());
             let normal = dvec2(-tangent.y, tangent.x);
+            let baseline_pen_origin = pen_point + normal * baseline_shift as f64;
             let baseline_center = center_point + normal * baseline_shift as f64;
-            let baseline_pen_origin =
-                baseline_center - tangent * (glyph.advance_in_lpxs as f64 * 0.5);
             let glyph_origin = baseline_pen_origin + tangent * glyph.offset_x_in_lpxs as f64;
 
             let half_width = (glyph.advance_in_lpxs.abs() as f64 * 0.62).max(2.0);
@@ -1699,8 +1851,8 @@ impl MapView {
                     glyph_origin.y as f32,
                 ),
                 rotation_origin: crate::makepad_draw::text::geom::Point::new(
-                    baseline_center.x as f32,
-                    baseline_center.y as f32,
+                    baseline_pen_origin.x as f32,
+                    baseline_pen_origin.y as f32,
                 ),
                 font_size_in_lpxs: glyph.font_size_in_lpxs,
                 rasterized: glyph.rasterized,
@@ -1771,8 +1923,9 @@ impl MapView {
             }
         }
 
+        let lp = self.label_perf;
         self.status = format!(
-            "Amsterdam [{}|{}] z{:.2} (req:{})  ready:{}  loading:{}  failed:{}(retry:{} stuck:{})  features:{}",
+            "Amsterdam [{}|{}] z{:.2} (req:{})  ready:{}  loading:{}  failed:{}(retry:{} stuck:{})  features:{}  labels(tile:{} scan:{} cand:{}/{} shape:{}/{}(b:{}) draw:{} glyphs:{} rej:r{} ps{} p{} o{} c{} b{})",
             self.source_mode_label(),
             self.theme_label(),
             self.view_zoom(),
@@ -1782,7 +1935,22 @@ impl MapView {
             failed,
             retrying,
             exhausted,
-            features
+            features,
+            lp.labels_in_tiles,
+            lp.labels_scanned,
+            lp.candidates_kept,
+            lp.candidates,
+            lp.shaped_ok,
+            lp.shaped_attempts,
+            lp.shape_budget,
+            lp.drawn_labels,
+            lp.drawn_glyphs,
+            lp.rejected_repeat,
+            lp.rejected_pre_short,
+            lp.rejected_plan_none,
+            lp.rejected_outside,
+            lp.rejected_collision,
+            lp.rejected_budget,
         );
     }
 
@@ -1923,6 +2091,161 @@ fn polyline_cumulative_lengths(points: &[Vec2d]) -> Vec<f64> {
     out
 }
 
+fn resample_polyline_evenly(
+    points: &[Vec2d],
+    cumulative: &[f64],
+    spacing: f64,
+    max_samples: usize,
+) -> Vec<Vec2d> {
+    let total = *cumulative.last().unwrap_or(&0.0);
+    if points.len() < 2 || total <= 1e-6 {
+        return points.to_vec();
+    }
+
+    let spacing = spacing.max(1.0);
+    let mut sample_count = (total / spacing).ceil() as usize + 1;
+    sample_count = sample_count.clamp(2, max_samples.max(2));
+
+    let mut out = Vec::<Vec2d>::with_capacity(sample_count);
+    for i in 0..sample_count {
+        let t = if sample_count <= 1 {
+            0.0
+        } else {
+            i as f64 / (sample_count - 1) as f64
+        };
+        let d = total * t;
+        if let Some(point) = sample_polyline_point_at_distance(points, cumulative, d) {
+            let push_point = match out.last() {
+                None => true,
+                Some(last) => {
+                    let dx = point.x - last.x;
+                    let dy = point.y - last.y;
+                    dx * dx + dy * dy > 1e-3
+                }
+            };
+            if push_point {
+                out.push(point);
+            }
+        }
+    }
+    if out.len() < 2 {
+        points.to_vec()
+    } else {
+        out
+    }
+}
+
+fn smooth_polyline_once(points: &[Vec2d]) -> Vec<Vec2d> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut out = Vec::<Vec2d>::with_capacity(points.len());
+    out.push(points[0]);
+    for i in 1..points.len() - 1 {
+        let prev = points[i - 1];
+        let cur = points[i];
+        let next = points[i + 1];
+        out.push(dvec2(
+            (prev.x + 2.0 * cur.x + next.x) * 0.25,
+            (prev.y + 2.0 * cur.y + next.y) * 0.25,
+        ));
+    }
+    out.push(points[points.len() - 1]);
+    out
+}
+
+fn smooth_label_curve(points: &[Vec2d]) -> Vec<Vec2d> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let cumulative = polyline_cumulative_lengths(points);
+    let total = *cumulative.last().unwrap_or(&0.0);
+    if total < 12.0 {
+        return points.to_vec();
+    }
+
+    let mut out = resample_polyline_evenly(
+        points,
+        &cumulative,
+        LABEL_CURVE_RESAMPLE_SPACING,
+        LABEL_CURVE_MAX_SAMPLES,
+    );
+    for _ in 0..LABEL_CURVE_SMOOTH_PASSES {
+        out = smooth_polyline_once(&out);
+    }
+    out
+}
+
+fn choose_label_start_distance(
+    points: &[Vec2d],
+    cumulative: &[f64],
+    text_width: f64,
+) -> Option<f64> {
+    let total = *cumulative.last()?;
+    if total < text_width + 4.0 {
+        return None;
+    }
+    let max_start = (total - text_width).max(0.0);
+    if max_start <= 1e-6 {
+        return Some(0.0);
+    }
+
+    let scan_step = LABEL_LAYOUT_SCAN_STEP.clamp(4.0, 48.0);
+    let angle_delta = (text_width * 0.20).clamp(8.0, 28.0);
+    let mut best_score = f32::INFINITY;
+    let mut best_start: Option<f64> = None;
+    let mut start = 0.0_f64;
+
+    while start <= max_start + 1e-3 {
+        let q1 = start + text_width * 0.25;
+        let mid = start + text_width * 0.5;
+        let q3 = start + text_width * 0.75;
+        let Some(a1_raw) = sample_polyline_tangent_angle_raw(points, cumulative, q1, angle_delta) else {
+            start += scan_step;
+            continue;
+        };
+        let Some(a2_raw) = sample_polyline_tangent_angle_raw(points, cumulative, mid, angle_delta) else {
+            start += scan_step;
+            continue;
+        };
+        let Some(a3_raw) = sample_polyline_tangent_angle_raw(points, cumulative, q3, angle_delta) else {
+            start += scan_step;
+            continue;
+        };
+
+        let a2 = a2_raw;
+        let a1 = nearest_equivalent_angle(a2, a1_raw);
+        let a3 = nearest_equivalent_angle(a2, a3_raw);
+        let curvature = wrap_angle_pi(a1 - a2).abs() + wrap_angle_pi(a3 - a2).abs();
+        let mid_bias = ((mid - total * 0.5).abs() / total) as f32 * 0.10;
+        let score = curvature + mid_bias;
+        if score < best_score {
+            best_score = score;
+            best_start = Some(start.min(max_start));
+        }
+
+        start += scan_step;
+    }
+
+    let best_start = best_start?;
+    if best_score > LABEL_LAYOUT_MAX_CURVATURE {
+        return None;
+    }
+    Some(best_start)
+}
+
+fn choose_label_reverse(mid_angle: f32) -> bool {
+    let cos = mid_angle.cos();
+    let sin = mid_angle.sin();
+    if cos.abs() > LABEL_VERTICAL_AXIS_EPSILON {
+        cos < 0.0
+    } else {
+        // Near vertical, keep text direction deterministic and avoid random flips.
+        // Screen-space y grows downward, so prefer upward-directed labels.
+        sin > 0.0
+    }
+}
+
 fn wrap_angle_pi(mut angle: f32) -> f32 {
     while angle > std::f32::consts::PI {
         angle -= std::f32::consts::TAU;
@@ -1933,12 +2256,38 @@ fn wrap_angle_pi(mut angle: f32) -> f32 {
     angle
 }
 
-fn upright_angle(raw_angle: f32) -> f32 {
-    let mut angle = wrap_angle_pi(raw_angle);
-    if angle.cos() < 0.0 {
-        angle = wrap_angle_pi(angle + std::f32::consts::PI);
+fn nearest_equivalent_angle(reference: f32, angle: f32) -> f32 {
+    let mut out = angle;
+    while out - reference > std::f32::consts::PI {
+        out -= std::f32::consts::TAU;
     }
-    angle
+    while out - reference < -std::f32::consts::PI {
+        out += std::f32::consts::TAU;
+    }
+    out
+}
+
+fn stable_upright_angle(previous: Option<f32>, raw_angle: f32) -> f32 {
+    let a = wrap_angle_pi(raw_angle);
+    let b = wrap_angle_pi(raw_angle + std::f32::consts::PI);
+    match previous {
+        Some(prev) => {
+            let a_adj = nearest_equivalent_angle(prev, a);
+            let b_adj = nearest_equivalent_angle(prev, b);
+            if (a_adj - prev).abs() <= (b_adj - prev).abs() {
+                a_adj
+            } else {
+                b_adj
+            }
+        }
+        None => {
+            if a.cos() >= 0.0 {
+                a
+            } else {
+                b
+            }
+        }
+    }
 }
 
 fn smooth_continuous_angle(previous: f32, current: f32, blend: f32) -> f32 {
@@ -1974,6 +2323,7 @@ fn label_source_rank(layer: &str) -> Option<u8> {
     }
     Some(match layer {
         "street_labels" | "street_labels_points" => 7,
+        "streets_polygons_labels" => 6,
         "transportation_name" => 6,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"
         | "public_transport" => 2,
@@ -1988,6 +2338,43 @@ fn repeat_distance_for_label(priority: u8, source_rank: u8) -> f64 {
         _ => 120.0,
     };
     base + (source_rank as f64 - 4.0) * 10.0
+}
+
+fn label_candidate_budget(view_zoom: f64) -> usize {
+    if view_zoom < 14.25 {
+        LABEL_MAX_CANDIDATES_ZOOMED_OUT
+    } else if view_zoom < 15.0 {
+        LABEL_MAX_CANDIDATES_MID_ZOOM
+    } else {
+        LABEL_MAX_CANDIDATES_DEFAULT
+    }
+}
+
+fn label_shape_attempt_budget(view_zoom: f64) -> usize {
+    if view_zoom < 14.25 {
+        LABEL_MAX_SHAPE_ATTEMPTS_ZOOMED_OUT
+    } else if view_zoom < 15.0 {
+        LABEL_MAX_SHAPE_ATTEMPTS_MID_ZOOM
+    } else {
+        LABEL_MAX_SHAPE_ATTEMPTS_DEFAULT
+    }
+}
+
+fn estimate_label_width_pixels(text: &str, font_scale: f32) -> f64 {
+    let mut units = 0.0_f64;
+    for ch in text.chars() {
+        units += if ch.is_whitespace() {
+            0.45
+        } else if ch.is_ascii_uppercase() {
+            1.08
+        } else if ch.is_ascii_digit() {
+            0.86
+        } else {
+            0.92
+        };
+    }
+    // Coarse prefilter only; keep conservative to avoid dropping valid labels.
+    (units * 8.0 * font_scale as f64 + 6.0).max(12.0)
 }
 
 fn rects_overlap_with_padding(a: Rect, b: Rect, padding: f64) -> bool {
@@ -2007,6 +2394,13 @@ fn rect_outside_rect(a: Rect, b: Rect, margin: f64) -> bool {
         || a.pos.y + a.size.y < b.pos.y - margin
         || a.pos.x > b.pos.x + b.size.x + margin
         || a.pos.y > b.pos.y + b.size.y + margin
+}
+
+fn point_outside_rect(point: Vec2d, rect: Rect, margin: f64) -> bool {
+    point.x < rect.pos.x - margin
+        || point.y < rect.pos.y - margin
+        || point.x > rect.pos.x + rect.size.x + margin
+        || point.y > rect.pos.y + rect.size.y + margin
 }
 
 fn select_label_text(tags: &HashMap<String, String>) -> Option<String> {
@@ -2080,6 +2474,28 @@ fn sample_polyline_tangent_angle_raw(
     Some(dy.atan2(dx) as f32)
 }
 
+fn road_label_priority(road_kind: &str) -> u8 {
+    match road_kind {
+        "motorway" | "trunk" | "primary" => 1,
+        "secondary" | "tertiary" => 2,
+        _ => 3,
+    }
+}
+
+fn is_road_point_label_layer(layer: &str) -> bool {
+    matches!(
+        layer,
+        "street_labels" | "street_labels_points" | "streets_polygons_labels" | "transportation_name"
+    )
+}
+
+fn point_label_path(point: (f32, f32)) -> Vec<(f32, f32)> {
+    vec![
+        (point.0 - POINT_LABEL_HALF_SPAN_PIXELS, point.1),
+        (point.0 + POINT_LABEL_HALF_SPAN_PIXELS, point.1),
+    ]
+}
+
 fn extract_way_label(tags: &HashMap<String, String>, points: &[(f32, f32)]) -> Option<TileLabel> {
     if points.len() < 2 {
         return None;
@@ -2100,11 +2516,7 @@ fn extract_way_label(tags: &HashMap<String, String>, points: &[(f32, f32)]) -> O
         .get("highway")
         .cloned()
         .unwrap_or_else(|| "residential".to_string());
-    let priority = match road_kind.as_str() {
-        "motorway" | "trunk" | "primary" => 1,
-        "secondary" | "tertiary" => 2,
-        _ => 3,
-    };
+    let priority = road_label_priority(&road_kind);
 
     let path_points = simplify_label_path(points);
     if path_points.len() < 2 {
@@ -2117,6 +2529,97 @@ fn extract_way_label(tags: &HashMap<String, String>, points: &[(f32, f32)]) -> O
         road_kind,
         path_points,
     })
+}
+
+fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) -> Option<TileLabel> {
+    if !tags.contains_key("highway") {
+        return None;
+    }
+    let source_layer = tags.get("layer").cloned().unwrap_or_default();
+    if !is_road_point_label_layer(&source_layer) {
+        return None;
+    }
+    if is_road_polygon_layer(&source_layer) {
+        return None;
+    }
+    if label_source_rank(&source_layer).is_none() {
+        return None;
+    }
+    let name = select_label_text(tags)?;
+    let road_kind = tags
+        .get("highway")
+        .cloned()
+        .unwrap_or_else(|| "residential".to_string());
+    let priority = road_label_priority(&road_kind);
+
+    Some(TileLabel {
+        text: name,
+        priority,
+        source_layer,
+        road_kind,
+        path_points: point_label_path(point),
+    })
+}
+
+fn polyline_length_f32(points: &[(f32, f32)]) -> f32 {
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let mut length = 0.0_f32;
+    for pair in points.windows(2) {
+        let dx = pair[1].0 - pair[0].0;
+        let dy = pair[1].1 - pair[0].1;
+        length += (dx * dx + dy * dy).sqrt();
+    }
+    length
+}
+
+fn compact_tile_labels(labels: &mut Vec<TileLabel>) {
+    let mut by_street = HashMap::<(String, String), (f32, TileLabel)>::new();
+    for label in labels.drain(..) {
+        if label.path_points.len() < 2 {
+            continue;
+        }
+        let name_key = normalize_label_key(&label.text);
+        if name_key.len() < 2 {
+            continue;
+        }
+        let key = (name_key, label.road_kind.clone());
+        let length = polyline_length_f32(&label.path_points);
+        let replace = match by_street.get(&key) {
+            None => true,
+            Some((best_len, best_label)) => {
+                if length > *best_len + 1.0 {
+                    true
+                } else if (length - *best_len).abs() <= 1.0 {
+                    let rank = label_source_rank(&label.source_layer).unwrap_or(0);
+                    let best_rank = label_source_rank(&best_label.source_layer).unwrap_or(0);
+                    rank > best_rank
+                } else {
+                    false
+                }
+            }
+        };
+        if replace {
+            by_street.insert(key, (length, label));
+        }
+    }
+
+    let mut compacted = by_street.into_values().collect::<Vec<_>>();
+    compacted.sort_unstable_by(|a, b| {
+        let a_label = &a.1;
+        let b_label = &b.1;
+        let a_rank = label_source_rank(&a_label.source_layer).unwrap_or(0);
+        let b_rank = label_source_rank(&b_label.source_layer).unwrap_or(0);
+        a_label
+            .priority
+            .cmp(&b_label.priority)
+            .then_with(|| b_rank.cmp(&a_rank))
+            .then_with(|| b.0.total_cmp(&a.0))
+            .then_with(|| a_label.text.cmp(&b_label.text))
+    });
+
+    labels.extend(compacted.into_iter().take(MAX_TILE_LABELS).map(|(_, label)| label));
 }
 
 #[derive(Clone, Debug)]
@@ -2372,6 +2875,48 @@ fn append_stroke_pass(
     *stroke_zbias += VECTOR_ZBIAS_STEP;
 }
 
+fn append_stroke_fill_overlay_pass(
+    path: &mut VectorPath,
+    points: &[(f32, f32)],
+    tess: &mut Tessellator,
+    tess_verts: &mut Vec<VVertex>,
+    tess_indices: &mut Vec<u32>,
+    stroke_vertices: &mut Vec<f32>,
+    stroke_indices: &mut Vec<u32>,
+    pass: StrokePassStyle,
+    line_cap: LineCap,
+    stroke_zbias: &mut f32,
+) {
+    let stroke_points = expand_polyline_endpoints(points, pass.width);
+    emit_path(path, &stroke_points, false);
+    let stroke_mult = tessellate_path_stroke(
+        path,
+        tess,
+        tess_verts,
+        tess_indices,
+        pass.width,
+        line_cap,
+        LineJoin::Round,
+        4.0,
+        1.0,
+    );
+    append_tessellated_geometry(
+        tess_verts,
+        tess_indices,
+        stroke_vertices,
+        stroke_indices,
+        VectorRenderParams {
+            color: hex_to_premul_rgba(pass.color, 1.0),
+            // Draw overlay as anti-aliased center geometry.
+            stroke_mult,
+            shape_id: 0.0,
+            params: [0.0; 6],
+            zbias: *stroke_zbias,
+        },
+    );
+    *stroke_zbias += VECTOR_ZBIAS_STEP;
+}
+
 fn expand_polyline_endpoints(points: &[(f32, f32)], _stroke_width: f32) -> Vec<(f32, f32)> {
     points.to_vec()
 }
@@ -2525,12 +3070,21 @@ fn build_tile_buffers_from_body(
 
     let mut nodes = HashMap::<i64, (f64, f64)>::new();
     let mut ways = Vec::<WayData>::new();
+    let mut labels = Vec::<TileLabel>::new();
 
     for element in parsed.elements {
         match element.kind.as_str() {
             "node" => {
                 if let (Some(lat), Some(lon)) = (element.lat, element.lon) {
                     nodes.insert(element.id, (lon, lat));
+                    if let Some(tags) = element.tags {
+                        let world = lon_lat_to_world(lon, lat, tile_key.z);
+                        if let Some(label) =
+                            extract_point_label(&tags, (world.x as f32, world.y as f32))
+                        {
+                            labels.push(label);
+                        }
+                    }
                 }
             }
             "way" => {
@@ -2560,7 +3114,6 @@ fn build_tile_buffers_from_body(
     let mut fill_zbias = 0.0_f32;
     let mut stroke_zbias = 0.0_f32;
     let mut feature_count = 0usize;
-    let mut labels = Vec::<TileLabel>::new();
 
     let mut prepared = Vec::<PreparedWay>::with_capacity(ways.len());
     for (way_index, way) in ways.iter().enumerate() {
@@ -2664,9 +3217,7 @@ fn build_tile_buffers_from_body(
             labels.push(label);
         }
         if let Some(style) = stroke_style_for_tags(theme, &way.tags, tile_key.z) {
-            let center_overlay = way.tags.contains_key("highway")
-                && style.center.shape_id == 0.0
-                && style.center.width > ROAD_CENTER_OVERLAY_MIN_WIDTH;
+            let center_overlay = way.tags.contains_key("highway");
             stroke_jobs.push(StrokeDrawJob {
                 sort_rank: style.sort_rank,
                 style,
@@ -2699,29 +3250,21 @@ fn build_tile_buffers_from_body(
 
     merged_stroke_jobs.sort_unstable_by_key(|job| job.sort_rank);
     let clip_bounds = tile_clip_bounds(tile_key, ROAD_CLIP_PADDING);
+    let mut merged_stroke_parts = Vec::<(StrokeStyle, bool, Vec<Vec<(f32, f32)>>)>::new();
     for job in merged_stroke_jobs {
         let parts = build_polyline_parts(&job.points, clip_bounds, false, ROAD_SMOOTH_FACTOR);
+        merged_stroke_parts.push((job.style, job.center_overlay, parts));
+    }
+
+    // Pass 1: draw all casings first.
+    for (style, _center_overlay, parts) in &merged_stroke_parts {
+        let Some(casing) = style.casing else {
+            continue;
+        };
         for part in parts {
             if part.len() < 2 {
                 continue;
             }
-
-            if let Some(casing) = job.style.casing {
-                append_stroke_pass(
-                    &mut path,
-                    &part,
-                    &mut tess,
-                    &mut tess_verts,
-                    &mut tess_indices,
-                    &mut stroke_vertices,
-                    &mut stroke_indices,
-                    casing,
-                    LineCap::Butt,
-                    &mut stroke_zbias,
-                );
-                feature_count += 1;
-            }
-
             append_stroke_pass(
                 &mut path,
                 &part,
@@ -2730,18 +3273,30 @@ fn build_tile_buffers_from_body(
                 &mut tess_indices,
                 &mut stroke_vertices,
                 &mut stroke_indices,
-                job.style.center,
+                casing,
                 LineCap::Butt,
                 &mut stroke_zbias,
             );
             feature_count += 1;
+        }
+    }
 
-            if job.center_overlay {
-                let overlay_width = (job.style.center.width * ROAD_CENTER_OVERLAY_WIDTH_SCALE)
-                    .max(ROAD_CENTER_OVERLAY_MIN_WIDTH)
-                    .min(job.style.center.width - 0.05);
+    // Pass 2: draw all centers/overlays above all casings.
+    for (style, center_overlay, parts) in &merged_stroke_parts {
+        for part in parts {
+            if part.len() < 2 {
+                continue;
+            }
+            if *center_overlay {
+                let overlay_width = if let Some(casing) = style.casing {
+                    let casing_limit = (casing.width - ROAD_CENTER_OVERLAY_CASING_EPSILON).max(0.0);
+                    (casing.width * ROAD_CENTER_OVERLAY_CASING_SCALE).min(casing_limit)
+                } else {
+                    style.center.width * ROAD_CENTER_OVERLAY_WIDTH_SCALE
+                }
+                .max(ROAD_CENTER_OVERLAY_MIN_WIDTH);
                 if overlay_width > 0.0 {
-                    append_stroke_pass(
+                    append_stroke_fill_overlay_pass(
                         &mut path,
                         &part,
                         &mut tess,
@@ -2750,22 +3305,37 @@ fn build_tile_buffers_from_body(
                         &mut stroke_vertices,
                         &mut stroke_indices,
                         StrokePassStyle {
+                            color: style.center.color,
                             width: overlay_width,
-                            ..job.style.center
+                            ..style.center
                         },
-                        LineCap::Round,
+                        // Road overlays are split at junction nodes; round caps create
+                        // visible blobs there, so use square caps to avoid bulges while
+                        // still slightly overlapping segment ends.
+                        LineCap::Square,
                         &mut stroke_zbias,
                     );
                     feature_count += 1;
                 }
+            } else {
+                append_stroke_pass(
+                    &mut path,
+                    &part,
+                    &mut tess,
+                    &mut tess_verts,
+                    &mut tess_indices,
+                    &mut stroke_vertices,
+                    &mut stroke_indices,
+                    style.center,
+                    LineCap::Butt,
+                    &mut stroke_zbias,
+                );
+                feature_count += 1;
             }
         }
     }
 
-    labels.sort_unstable_by_key(|label| label.priority);
-    if labels.len() > 96 {
-        labels.truncate(96);
-    }
+    compact_tile_labels(&mut labels);
 
     Ok(TileBuffers {
         fill_indices,
@@ -2943,6 +3513,7 @@ impl MvtValue {
 #[derive(Debug)]
 struct MvtTileJsonBuilder {
     nodes: Vec<(i64, f64, f64)>,
+    tagged_nodes: Vec<(i64, f64, f64, HashMap<String, String>)>,
     ways: Vec<(i64, Vec<i64>, HashMap<String, String>)>,
     next_node_id: i64,
     next_way_id: i64,
@@ -2953,6 +3524,7 @@ impl Default for MvtTileJsonBuilder {
     fn default() -> Self {
         Self {
             nodes: Vec::new(),
+            tagged_nodes: Vec::new(),
             ways: Vec::new(),
             next_node_id: 1,
             next_way_id: 1,
@@ -3014,8 +3586,23 @@ impl MvtTileJsonBuilder {
         self.ways.push((way_id, node_ids, tags));
     }
 
+    fn add_point(
+        &mut self,
+        tile_key: TileKey,
+        extent: u32,
+        point: (i32, i32),
+        tags: HashMap<String, String>,
+    ) {
+        let node_id = self.next_node_id;
+        self.next_node_id += 1;
+        let (lon, lat) = local_tile_to_lon_lat(tile_key, extent, point.0, point.1);
+        self.tagged_nodes.push((node_id, lon, lat, tags));
+    }
+
     fn to_json(&self) -> String {
-        let mut out = String::with_capacity(32 + self.nodes.len() * 64 + self.ways.len() * 192);
+        let mut out = String::with_capacity(
+            32 + self.nodes.len() * 64 + self.tagged_nodes.len() * 192 + self.ways.len() * 192,
+        );
         out.push_str("{\"elements\":[");
         let mut first = true;
 
@@ -3031,6 +3618,31 @@ impl MvtTileJsonBuilder {
             out.push_str(",\"lon\":");
             out.push_str(&format!("{:.8}", lon));
             out.push('}');
+        }
+
+        for (id, lon, lat, tags) in &self.tagged_nodes {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push_str("{\"type\":\"node\",\"id\":");
+            out.push_str(&id.to_string());
+            out.push_str(",\"lat\":");
+            out.push_str(&format!("{:.8}", lat));
+            out.push_str(",\"lon\":");
+            out.push_str(&format!("{:.8}", lon));
+            out.push_str(",\"tags\":{");
+            let mut tag_first = true;
+            for (key, value) in tags {
+                if !tag_first {
+                    out.push(',');
+                }
+                tag_first = false;
+                append_json_string(&mut out, key);
+                out.push(':');
+                append_json_string(&mut out, value);
+            }
+            out.push_str("}}");
         }
 
         for (id, node_ids, tags) in &self.ways {
@@ -3383,7 +3995,7 @@ fn parse_mvt_feature(
         }
     }
 
-    if matches!(geom_type, MvtGeomType::Unknown | MvtGeomType::Point) {
+    if geom_type == MvtGeomType::Unknown {
         return Ok(());
     }
 
@@ -3401,6 +4013,20 @@ fn parse_mvt_feature(
     }
     normalize_mvt_tags(layer_name, geom_type, &mut tags);
 
+    let paths = decode_mvt_geometry(&geometry_cmds, geom_type)?;
+    if geom_type == MvtGeomType::Point {
+        if !should_emit_mvt_point_label_feature(&tags) {
+            return Ok(());
+        }
+        for path in paths {
+            let Some(point) = path.first().copied() else {
+                continue;
+            };
+            builder.add_point(tile_key, extent, point, tags.clone());
+        }
+        return Ok(());
+    }
+
     let polygon_feature_key = if geom_type == MvtGeomType::Polygon {
         let raw_id = feature_id.unwrap_or_else(|| builder.alloc_feature_id());
         Some(format!("{}:{}", layer_name, raw_id))
@@ -3408,7 +4034,6 @@ fn parse_mvt_feature(
         None
     };
 
-    let paths = decode_mvt_geometry(&geometry_cmds, geom_type)?;
     for (ring_index, mut path) in paths.into_iter().enumerate() {
         if path.len() < 2 {
             continue;
@@ -3512,6 +4137,19 @@ fn normalize_mvt_tags(
         }
         _ => {}
     }
+}
+
+fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
+    let Some(layer) = tags.get("layer") else {
+        return false;
+    };
+    if !is_road_point_label_layer(layer) {
+        return false;
+    }
+    if !tags.contains_key("highway") {
+        return false;
+    }
+    select_label_text(tags).is_some()
 }
 
 fn normalize_highway_kind(kind: &str) -> String {
