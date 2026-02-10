@@ -218,7 +218,7 @@ script_mod! {
 
 // ---- Shared page data ----
 
-struct CachedPage {
+pub struct CachedPage {
     ops: Vec<PdfOp>,
     page: PdfPage,
 }
