@@ -1,7 +1,0 @@
-[package]
-name = "makepad-example-filltest"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-makepad-widgets2 = { path = "../../widgets2", version = "2.0.0" }
