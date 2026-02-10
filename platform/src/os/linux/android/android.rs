@@ -508,6 +508,7 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, true);
                     }
                 }
+                self.call_event_handler(&Event::ClearAtlasses);
                 self.redraw_all();
                 self.reinitialise_media();
                 self.call_event_handler(&Event::Resume);
@@ -990,7 +991,10 @@ impl Cx {
                         start, end 
                     }));
                     unsafe {
-                        if let Some(display) = &mut self.os.display { 
+                        if let Some(display) = &mut self.os.display {
+                            // Ensure GPU finishes rendering before swapping buffers
+                            // This prevents swapping before render-to-texture operations complete
+                            (display.libgl.glFlush)();
                             (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
                         }
                     }
