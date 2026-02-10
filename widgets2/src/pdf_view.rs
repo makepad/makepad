@@ -118,6 +118,28 @@ impl PageTextTracker {
     fn get_text_for_range(&self, start: usize, end: usize) -> String {
         self.text.get(start..end).unwrap_or("").to_string()
     }
+
+    /// Get cursor rect (thin vertical line) at the given byte index.
+    fn cursor_rect(&self, index: usize) -> Option<Rect> {
+        for seg in &self.segments {
+            let seg_end = seg.char_offset + seg.text.len();
+            if index >= seg.char_offset && index <= seg_end {
+                let local_byte = index - seg.char_offset;
+                let total_bytes = seg.text.len();
+                let frac = if total_bytes > 0 {
+                    local_byte as f64 / total_bytes as f64
+                } else {
+                    0.0
+                };
+                let x = seg.rect.pos.x + seg.rect.size.x * frac;
+                return Some(Rect {
+                    pos: dvec2(x - 1.0, seg.rect.pos.y),
+                    size: dvec2(2.0, seg.rect.size.y),
+                });
+            }
+        }
+        None
+    }
 }
 
 fn point_to_rect_distance(point: DVec2, rect: Rect) -> f64 {
@@ -150,7 +172,16 @@ script_mod! {
             color: #fff
         }
         draw_selection +: {
-            color: #x3399FF66
+            color: uniform(#x3399FF66)
+            pixel: fn() {
+                return vec4(self.color.rgb * self.color.a, self.color.a)
+            }
+        }
+        draw_cursor +: {
+            color: uniform(#000)
+            pixel: fn() {
+                return vec4(self.color.rgb * self.color.a, self.color.a)
+            }
         }
         draw_text +: {
             text_style: theme.font_regular
@@ -254,6 +285,8 @@ pub struct PdfPageView {
     #[live]
     draw_selection: DrawQuad,
     #[live]
+    draw_cursor: DrawQuad,
+    #[live]
     draw_vector: DrawVector,
     #[live]
     draw_text: DrawText,
@@ -289,22 +322,12 @@ impl WidgetNode for PdfPageView {
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
 
     fn selection_text_len(&self) -> usize {
-        let len = self.text_tracker.total_len();
-        log!("PdfPageView::selection_text_len => {}", len);
-        len
+        self.text_tracker.total_len()
     }
     fn selection_point_to_char_index(&self, _cx: &Cx, abs: DVec2) -> Option<usize> {
-        let idx = self.text_tracker.point_to_index(abs);
-        log!(
-            "PdfPageView::selection_point_to_char_index({:?}) => {:?}, segments={}",
-            abs,
-            idx,
-            self.text_tracker.segments.len()
-        );
-        idx
+        self.text_tracker.point_to_index(abs)
     }
     fn selection_set(&mut self, anchor: usize, cursor: usize) {
-        log!("PdfPageView::selection_set({}, {})", anchor, cursor);
         self.selection_anchor = anchor;
         self.selection_cursor = cursor;
     }
@@ -325,6 +348,10 @@ impl WidgetNode for PdfPageView {
 }
 
 impl Widget for PdfPageView {
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -935,10 +962,20 @@ impl PdfPageView {
         let start = self.selection_anchor.min(self.selection_cursor);
         let end = self.selection_anchor.max(self.selection_cursor);
         if start == end {
+            // Draw cursor caret at the anchor position
+            if self.selection_anchor > 0 || self.selection_cursor > 0 {
+                if let Some(rect) = self.text_tracker.cursor_rect(self.selection_cursor) {
+                    self.draw_cursor.draw_abs(cx, rect);
+                }
+            }
             return;
         }
         for rect in self.text_tracker.selection_rects(start, end) {
             self.draw_selection.draw_abs(cx, rect);
+        }
+        // Draw cursor at the cursor end of the selection
+        if let Some(rect) = self.text_tracker.cursor_rect(self.selection_cursor) {
+            self.draw_cursor.draw_abs(cx, rect);
         }
     }
 }
