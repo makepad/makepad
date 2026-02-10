@@ -74,9 +74,7 @@ pub mod tab_close_button;
 pub mod html;
 pub mod markdown;
 
-pub mod map_leaflet;
-pub mod map_style;
-pub mod map_view;
+pub mod map;
 pub mod math_view;
 pub mod pdf_view;
 pub mod splash;
@@ -205,7 +203,7 @@ pub use crate::html::*;
 
 pub use crate::markdown::*;
 
-pub use crate::map_view::*;
+pub use crate::map::*;
 
 pub use crate::math_view::*;
 
@@ -324,8 +322,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::svg::script_mod(vm);
     crate::vector::script_mod(vm);
     crate::chart::script_mod(vm);
-    crate::map_style::script_mod(vm);
-    crate::map_view::script_mod(vm);
+    crate::map::style::script_mod(vm);
+    crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
     // make the prelude.widgetst with all our components

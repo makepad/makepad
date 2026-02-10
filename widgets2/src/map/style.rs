@@ -1,3 +1,4 @@
+use super::geometry::{is_road_polygon_layer, tag_is, tag_is_truthy};
 use crate::makepad_draw::*;
 use std::collections::HashMap;
 
@@ -276,24 +277,7 @@ impl MapThemeStyle {
 
         for rule in &self.road_rules {
             let kind = rule.kind.trim().to_ascii_lowercase();
-            let template = StrokeTemplate {
-                sort_rank: clamp_u32_to_i16(rule.sort_rank),
-                casing: if rule.casing_width > 0.0 {
-                    Some(StrokePassStyle {
-                        color: vec4_to_rgb_hex(rule.casing_color),
-                        width: rule.casing_width,
-                        shape_id: rule.casing_shape_id,
-                    })
-                } else {
-                    None
-                },
-                center: StrokePassStyle {
-                    color: vec4_to_rgb_hex(rule.center_color),
-                    width: rule.center_width,
-                    shape_id: rule.center_shape_id,
-                },
-            };
-
+            let template = stroke_template_from_road_rule(rule);
             if is_default_key(kind.as_str()) {
                 compiled.road_default = Some(template);
             } else {
@@ -303,24 +287,7 @@ impl MapThemeStyle {
 
         for rule in &self.waterway_rules {
             let kind = rule.kind.trim().to_ascii_lowercase();
-            let template = StrokeTemplate {
-                sort_rank: clamp_u32_to_i16(rule.sort_rank),
-                casing: if rule.casing_width > 0.0 {
-                    Some(StrokePassStyle {
-                        color: vec4_to_rgb_hex(rule.casing_color),
-                        width: rule.casing_width,
-                        shape_id: rule.casing_shape_id,
-                    })
-                } else {
-                    None
-                },
-                center: StrokePassStyle {
-                    color: vec4_to_rgb_hex(rule.center_color),
-                    width: rule.center_width,
-                    shape_id: rule.center_shape_id,
-                },
-            };
-
+            let template = stroke_template_from_waterway_rule(rule);
             if is_default_key(kind.as_str()) {
                 compiled.waterway_default = Some(template);
             } else {
@@ -329,26 +296,70 @@ impl MapThemeStyle {
         }
 
         if let Some(rule) = &self.railway_rule {
-            compiled.railway_rule = Some(StrokeTemplate {
-                sort_rank: clamp_u32_to_i16(rule.sort_rank),
-                casing: if rule.casing_width > 0.0 {
-                    Some(StrokePassStyle {
-                        color: vec4_to_rgb_hex(rule.casing_color),
-                        width: rule.casing_width,
-                        shape_id: rule.casing_shape_id,
-                    })
-                } else {
-                    None
-                },
-                center: StrokePassStyle {
-                    color: vec4_to_rgb_hex(rule.center_color),
-                    width: rule.center_width,
-                    shape_id: rule.center_shape_id,
-                },
-            });
+            compiled.railway_rule = Some(stroke_template_from_rail_rule(rule));
         }
 
         compiled
+    }
+}
+
+fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
+    StrokeTemplate {
+        sort_rank: clamp_u32_to_i16(rule.sort_rank),
+        casing: if rule.casing_width > 0.0 {
+            Some(StrokePassStyle {
+                color: vec4_to_rgb_hex(rule.casing_color),
+                width: rule.casing_width,
+                shape_id: rule.casing_shape_id,
+            })
+        } else {
+            None
+        },
+        center: StrokePassStyle {
+            color: vec4_to_rgb_hex(rule.center_color),
+            width: rule.center_width,
+            shape_id: rule.center_shape_id,
+        },
+    }
+}
+
+fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate {
+    StrokeTemplate {
+        sort_rank: clamp_u32_to_i16(rule.sort_rank),
+        casing: if rule.casing_width > 0.0 {
+            Some(StrokePassStyle {
+                color: vec4_to_rgb_hex(rule.casing_color),
+                width: rule.casing_width,
+                shape_id: rule.casing_shape_id,
+            })
+        } else {
+            None
+        },
+        center: StrokePassStyle {
+            color: vec4_to_rgb_hex(rule.center_color),
+            width: rule.center_width,
+            shape_id: rule.center_shape_id,
+        },
+    }
+}
+
+fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
+    StrokeTemplate {
+        sort_rank: clamp_u32_to_i16(rule.sort_rank),
+        casing: if rule.casing_width > 0.0 {
+            Some(StrokePassStyle {
+                color: vec4_to_rgb_hex(rule.casing_color),
+                width: rule.casing_width,
+                shape_id: rule.casing_shape_id,
+            })
+        } else {
+            None
+        },
+        center: StrokePassStyle {
+            color: vec4_to_rgb_hex(rule.center_color),
+            width: rule.center_width,
+            shape_id: rule.center_shape_id,
+        },
     }
 }
 
@@ -364,21 +375,6 @@ fn vec4_to_rgb_hex(color: Vec4f) -> u32 {
     color.to_u32() >> 8
 }
 
-fn is_road_polygon_layer(layer: &str) -> bool {
-    matches!(layer, "street_polygons" | "streets_polygons_labels")
-}
-
-fn tag_is(tags: &HashMap<String, String>, key: &str, value: &str) -> bool {
-    tags.get(key).is_some_and(|v| v == value)
-}
-
-fn tag_is_truthy(tags: &HashMap<String, String>, key: &str) -> bool {
-    let Some(value) = tags.get(key) else {
-        return false;
-    };
-    !matches!(value.as_str(), "" | "0" | "false" | "False" | "no")
-}
-
 pub fn fill_color_for_tags(
     theme: &CompiledMapTheme,
     tags: &HashMap<String, String>,
@@ -391,11 +387,9 @@ pub fn fill_color_for_tags(
     if tags.contains_key("building") {
         return theme.building_fill;
     }
-
     if tag_is(tags, "natural", "water") || tag_is(tags, "waterway", "riverbank") {
         return theme.water_fill;
     }
-
     if let Some(landuse) = tags.get("landuse") {
         let key = landuse.trim().to_ascii_lowercase();
         if let Some(color) = theme.landuse_fills.get(&key) {
@@ -403,7 +397,6 @@ pub fn fill_color_for_tags(
         }
         return theme.landuse_default;
     }
-
     if let Some(leisure) = tags.get("leisure") {
         let key = leisure.trim().to_ascii_lowercase();
         if let Some(color) = theme.leisure_fills.get(&key) {
@@ -411,14 +404,12 @@ pub fn fill_color_for_tags(
         }
         return theme.leisure_default;
     }
-
     None
 }
 
 fn scaled_style(template: StrokeTemplate, rank_bias: i16, width_scale: f32) -> StrokeStyle {
     let rank = (template.sort_rank as i32 + rank_bias as i32)
         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-
     StrokeStyle {
         sort_rank: rank,
         casing: template.casing.map(|casing| StrokePassStyle {
@@ -469,7 +460,6 @@ pub fn stroke_style_for_tags(
         width_scale *= 0.84;
         rank_bias -= 10;
     }
-
     if tag_is_truthy(tags, "tunnel") {
         rank_bias -= 22;
     }
@@ -477,7 +467,6 @@ pub fn stroke_style_for_tags(
     if let Some(highway) = tags.get("highway") {
         let key = highway.trim().to_ascii_lowercase();
         let template = theme.road_rules.get(&key).copied().or(theme.road_default)?;
-
         let mut style = scaled_style(template, rank_bias, width_scale);
         if tag_is_truthy(tags, "tunnel") {
             style.center.shape_id = 11.0;
@@ -495,7 +484,6 @@ pub fn stroke_style_for_tags(
             .get(&key)
             .copied()
             .or(theme.waterway_default)?;
-
         return Some(scaled_style(template, rank_bias, width_scale));
     }
 
