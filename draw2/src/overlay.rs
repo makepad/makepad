@@ -3,7 +3,7 @@ use {
         rc::Rc,
         cell::{RefCell},
     },*/
-    crate::{cx_2d::Cx2d, makepad_platform::*, makepad_script::*},
+    crate::{cx_2d::Cx2d, makepad_platform::*},
 };
 
 #[derive(Debug, Script, ScriptHook)]
