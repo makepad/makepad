@@ -90,7 +90,16 @@ script_mod! {
         }
 
         sdf: fn(scale, p, color) {
-            let s = self.grayscale_texture.sample(p).x;
+            let sampled = self.grayscale_texture.sample(p);
+            let s = if self.atlas_plane < 0.5 {
+                sampled.r
+            } else if self.atlas_plane < 1.5 {
+                sampled.g
+            } else if self.atlas_plane < 2.5 {
+                sampled.b
+            } else {
+                sampled.a
+            };
             // Convert sampled SDF to coverage (0..1). scale is source texels per screen pixel.
             let safe_scale = max(scale, 0.0001);
             let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
@@ -109,7 +118,8 @@ script_mod! {
 
         msdf: fn(scale, p, color) {
             let s = self.msdf_texture.sample(p);
-            let dist = max(min(s.r, s.g), min(max(s.r, s.g), s.b));
+            // Use alpha as the coverage source to keep parity with SDF while RGB stores MSDF.
+            let dist = s.a;
             let safe_scale = max(scale, 0.0001);
             let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
             var a = clamp(
@@ -198,6 +208,8 @@ pub struct DrawText {
     pub glyph_depth: f32,
     #[live]
     pub texture_index: f32,
+    #[live]
+    pub atlas_plane: f32,
     #[live]
     pub char_index: f32,
     #[live(vec4(1., 1., 1., 1.))]
@@ -705,6 +717,7 @@ impl DrawText {
             ) / 255.0;
         }
         self.texture_index = texture_index;
+        self.atlas_plane = glyph.atlas_plane as f32;
         self.t_min = vec2(t_min.x, t_min.y);
         self.t_max = vec2(t_max.x, t_max.y);
         let slice = self.draw_vars.as_slice();
