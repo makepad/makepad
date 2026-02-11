@@ -209,8 +209,6 @@ pub struct DrawText {
     #[live]
     pub texture_index: f32,
     #[live]
-    pub atlas_plane: f32,
-    #[live]
     pub char_index: f32,
     #[live(vec4(1., 1., 1., 1.))]
     pub color: Vec4f,
@@ -222,6 +220,10 @@ pub struct DrawText {
     pub t_min: Vec2f,
     #[live]
     pub t_max: Vec2f,
+    #[live]
+    pub atlas_plane: f32,
+    #[live]
+    pub pad1:f32
 }
 
 #[derive(Clone, Debug)]
