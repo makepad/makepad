@@ -128,7 +128,10 @@ script_mod! {
                 1.0,
             );
             let bias = (0.5 - luma) * self.sdf_luma_bias;
-            a = clamp(a - bias, 0.0, 1.0);
+            // Avoid lifting near-zero background alpha into visible gray quads on light text.
+            if a > self.sdf_luma_bias * 0.5 {
+                a = clamp(a - bias, 0.0, 1.0);
+            }
             return a
         }
 
@@ -410,24 +413,6 @@ impl DrawText {
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
         let row_height = cx.turtle().next_row_offset();
-
-        // lets draw a debug rect
-        /*
-        if text_str.starts_with("markdownedited"){
-            let mut area = Area::Empty;
-            cx.add_aligned_rect_area(
-                &mut area,
-                makepad_platform::rect(
-                    origin_in_lpxs.x as f64,
-                    origin_in_lpxs.y as f64,
-                    100.0 as f64,
-                    row_height as f64,
-                ),
-            );
-            cx.cx
-            .debug
-            .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
-        }*/
 
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
