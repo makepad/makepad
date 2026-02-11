@@ -35,6 +35,10 @@ impl<T> FontAtlas<T> {
         self.needs_reset
     }
 
+    pub fn request_reset(&mut self) {
+        self.needs_reset = true;
+    }
+
     pub fn size(&self) -> Size<usize> {
         self.image.size()
     }
@@ -287,7 +291,8 @@ pub struct GlyphImageKey {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GlyphImageKind {
-    Outline,
+    OutlineSdf,
+    OutlineMsdf,
     Color,
 }
 

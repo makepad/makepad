@@ -7,6 +7,7 @@ pub use makepad_platform::log;
 pub use makepad_platform::makepad_script;
 
 pub use makepad_html;
+#[cfg(feature = "pdf")]
 pub use makepad_pdf_parse;
 
 pub use makepad_zune_jpeg;
@@ -74,8 +75,10 @@ pub mod tab_close_button;
 pub mod html;
 pub mod markdown;
 
+#[cfg(feature = "maps")]
 pub mod map;
 pub mod math_view;
+#[cfg(feature = "pdf")]
 pub mod pdf_view;
 pub mod splash;
 pub mod svg;
@@ -203,12 +206,14 @@ pub use crate::html::*;
 
 pub use crate::markdown::*;
 
+#[cfg(feature = "maps")]
 pub use crate::map::*;
 
 pub use crate::math_view::*;
 
 pub use crate::splash::*;
 
+#[cfg(feature = "pdf")]
 pub use crate::pdf_view::*;
 pub use crate::svg::*;
 pub use crate::vector::*;
@@ -318,11 +323,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::markdown::script_mod(vm);
 
     crate::splash::script_mod(vm);
+    #[cfg(feature = "pdf")]
     crate::pdf_view::script_mod(vm);
     crate::svg::script_mod(vm);
     crate::vector::script_mod(vm);
     crate::chart::script_mod(vm);
+    #[cfg(feature = "maps")]
     crate::map::style::script_mod(vm);
+    #[cfg(feature = "maps")]
     crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
