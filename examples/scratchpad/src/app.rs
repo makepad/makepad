@@ -62,16 +62,15 @@ script_mod! {
                         View{
                             width: Fill height: Fit flow: Right spacing: 8
                             align: Align{y: 0.5}
-                            let query=""
                             search_input := TextInput{
                                 width: Fill height: Fit
                                 empty_text: "Search the web..."
-                                on_change: |text| query = text
+                                on_enter: || ui.search_button.on_click()
                             }
                             search_button := Button{
                                 text: "Search"
                                 on_click: ||{
-                                    do_search(query)    
+                                    do_search(ui.search_input.text())
                                 }
                             }
                         }
@@ -88,7 +87,7 @@ script_mod! {
                     Hr{}
 
                     // Results area
-                    ScrollYView{
+                    results := ScrollYView{
                         width: Fill height: Fill
                         padding: 16 flow: Down spacing: 10
                         render: ||{
@@ -107,7 +106,7 @@ script_mod! {
     // ---- Logic ----
     // These use script features (var, fn) that run in the script VM.
     // They will work once the script engine supports them fully.
-
+    
     fn do_search(query){
         let req = net.HttpRequest{
             url: "https://html.duckduckgo.com/html/?q=" + query
@@ -126,7 +125,8 @@ script_mod! {
                         snippet: if i < snippets.len() snippets[i].text else ""
                     })
                 }
-                render()
+                
+                @.results.render()
             }
         }
     }
