@@ -1,7 +1,7 @@
 use super::{
     font::{Font, GlyphId},
     font_atlas::{
-        ColorAtlas, GlyphImage, GlyphImageKey, GlyphImageKind, GrayscaleAtlas, MsdfAtlas,
+        ColorAtlas, GlyphImageKey, GlyphImageKind, GrayscaleAtlas, MsdfAtlas,
     },
     geom::{Point, Rect, Size},
     glyph_outline::{Command, GlyphOutline},
@@ -11,7 +11,7 @@ use super::{
     sdfer,
     sdfer::Sdfer,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 //use std::{fs::File, io::BufWriter, path::Path, slice};
 
 #[derive(Debug)]
@@ -22,6 +22,8 @@ pub struct Rasterizer {
     msdf_complexity: MsdfComplexitySettings,
     outline_rasterization_mode: OutlineRasterizationMode,
     atlas: ColorAtlas,
+    allocator: MultiPlaneAllocator,
+    cached_slots: HashMap<GlyphImageKey, AtlasSlot>,
     outline_msdf_ready: HashSet<GlyphImageKey>,
     outline_msdf_pending: HashSet<GlyphImageKey>,
     outline_msdf_failed: HashSet<GlyphImageKey>,
@@ -50,6 +52,8 @@ impl Rasterizer {
             msdf_complexity: settings.msdf_complexity,
             outline_rasterization_mode: settings.outline_rasterization_mode,
             atlas: ColorAtlas::new(atlas_size),
+            allocator: MultiPlaneAllocator::new(atlas_size),
+            cached_slots: HashMap::new(),
             outline_msdf_ready: HashSet::new(),
             outline_msdf_pending: HashSet::new(),
             outline_msdf_failed: HashSet::new(),
@@ -83,6 +87,8 @@ impl Rasterizer {
     }
 
     pub fn on_atlas_reset(&mut self) {
+        self.allocator.reset(self.atlas.size());
+        self.cached_slots.clear();
         self.outline_msdf_ready.clear();
         self.outline_msdf_pending.clear();
         self.outline_msdf_failed.clear();
@@ -101,67 +107,27 @@ impl Rasterizer {
         if !self.outline_msdf_pending.remove(&job.key) {
             return;
         }
-        let Some(rect) = self.atlas.get_cached_glyph_image_rect(&job.key) else {
+        let Some(slot) = self.cached_slots.get(&job.key).copied() else {
             return;
         };
         if job.pixels.len() != job.key.size.width.saturating_mul(job.key.size.height) {
-            return;
-        }
-        if !self.is_valid_msdf_upgrade(rect, &job.pixels) {
             self.outline_msdf_failed.insert(job.key);
             return;
         }
 
         {
-            let mut dst = self.atlas.get_cached_glyph_image_mut(rect);
+            let mut dst = self.atlas.get_cached_glyph_image_mut(slot.rect);
             for y in 0..job.key.size.height {
                 for x in 0..job.key.size.width {
-                    dst[Point::new(x, y)] = job.pixels[y * job.key.size.width + x];
+                    let point = Point::new(x, y);
+                    let old = dst[point];
+                    let msdf = job.pixels[y * job.key.size.width + x];
+                    // Keep alpha as seeded SDF coverage for stable visual parity while RGB carries MSDF.
+                    dst[point] = Bgra::new(msdf.b(), msdf.g(), msdf.r(), old.a());
                 }
             }
         }
         self.outline_msdf_ready.insert(job.key);
-    }
-
-    fn is_valid_msdf_upgrade(&self, rect: Rect<usize>, msdf_pixels: &[Bgra]) -> bool {
-        let sdf_threshold = 1.0 - self.sdfer.settings().cutoff;
-        let padding = self.sdfer.settings().padding;
-        let width = rect.size.width;
-        let height = rect.size.height;
-        if width <= padding * 2 || height <= padding * 2 {
-            return true;
-        }
-
-        let atlas = self.atlas.image();
-        let mut mismatch = 0usize;
-        let mut checked = 0usize;
-        let sx = 8usize;
-        let sy = 8usize;
-        for gy in 0..sy {
-            let y = padding + gy * (height - padding * 2 - 1) / (sy - 1);
-            for gx in 0..sx {
-                let x = padding + gx * (width - padding * 2 - 1) / (sx - 1);
-                let local_index = y * width + x;
-                let old = atlas[rect.origin + Size::new(x, y)];
-                let old_sdf = old.r() as f32 / 255.0;
-                let new_msdf = msdf_median(msdf_pixels[local_index]);
-                if (old_sdf - sdf_threshold).abs() < 0.03 || (new_msdf - sdf_threshold).abs() < 0.03
-                {
-                    continue;
-                }
-                checked += 1;
-                let old_inside = old_sdf > sdf_threshold;
-                let new_inside = new_msdf > sdf_threshold;
-                if old_inside != new_inside {
-                    mismatch += 1;
-                }
-            }
-        }
-
-        if checked == 0 {
-            return true;
-        }
-        mismatch * 100 <= checked * 35
     }
 
     pub fn grayscale_atlas(&self) -> &GrayscaleAtlas {
@@ -186,6 +152,66 @@ impl Rasterizer {
 
     pub fn msdf_atlas_mut(&mut self) -> &mut MsdfAtlas {
         &mut self.atlas
+    }
+
+    fn get_cached_slot(&self, key: &GlyphImageKey) -> Option<AtlasSlot> {
+        self.cached_slots.get(key).copied()
+    }
+
+    fn allocate_sdf_slot(&mut self, key: GlyphImageKey) -> Option<(AtlasSlot, bool)> {
+        if let Some(slot) = self.get_cached_slot(&key) {
+            return Some((slot, false));
+        }
+        let Some(slot) = self.allocator.allocate_sdf_slot(key.size) else {
+            self.atlas.request_reset();
+            return None;
+        };
+        self.cached_slots.insert(key, slot);
+        Some((slot, true))
+    }
+
+    fn allocate_shared_slot(&mut self, key: GlyphImageKey) -> Option<(AtlasSlot, bool)> {
+        if let Some(slot) = self.get_cached_slot(&key) {
+            return Some((slot, false));
+        }
+        let Some(rect) = self.allocator.allocate_shared_slot(key.size) else {
+            self.atlas.request_reset();
+            return None;
+        };
+        let slot = AtlasSlot {
+            rect,
+            plane: AtlasPlane::R,
+        };
+        self.cached_slots.insert(key, slot);
+        Some((slot, true))
+    }
+
+    fn seed_msdf_slot_from_sdf(&mut self, dst_slot: AtlasSlot, sdf_glyph: RasterizedGlyph) {
+        if sdf_glyph.atlas_kind != AtlasKind::Grayscale {
+            return;
+        }
+        let src_rect = sdf_glyph.atlas_image_bounds;
+        if src_rect.size != dst_slot.rect.size {
+            return;
+        }
+        let src_plane = AtlasPlane::from_index(sdf_glyph.atlas_plane as usize);
+        let mut src_values = Vec::with_capacity(src_rect.size.width * src_rect.size.height);
+        {
+            let atlas = self.atlas.image();
+            for y in 0..src_rect.size.height {
+                for x in 0..src_rect.size.width {
+                    let src = atlas[src_rect.origin + Size::new(x, y)];
+                    src_values.push(src_plane.get(src));
+                }
+            }
+        }
+        let mut dst = self.atlas.get_cached_glyph_image_mut(dst_slot.rect);
+        for y in 0..dst_slot.rect.size.height {
+            for x in 0..dst_slot.rect.size.width {
+                let v = src_values[y * dst_slot.rect.size.width + x];
+                dst[Point::new(x, y)] = Bgra::new(v, v, v, v);
+            }
+        }
     }
 
     pub fn rasterize_glyph(
@@ -254,11 +280,14 @@ impl Rasterizer {
             font_id: font.id(),
             glyph_id,
             size: atlas_image_size + Size::from(atlas_image_padding) * 2,
-            kind: GlyphImageKind::Outline,
+            kind: GlyphImageKind::OutlineSdf,
         };
-        let atlas_image_bounds = match self.atlas.get_or_allocate_glyph_image(key.clone())? {
-            GlyphImage::Cached(rect) => rect,
-            GlyphImage::Allocated(mut slot) => {
+        let (slot, allocated) = self.allocate_sdf_slot(key.clone())?;
+        let atlas_image_bounds = if !allocated {
+            slot.rect
+        } else {
+            let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
+            {
                 let mut coverage = Image::new(atlas_image_size);
                 outline.rasterize(
                     dpxs_per_em,
@@ -273,13 +302,13 @@ impl Rasterizer {
                 for y in 0..sdf_image_size.height {
                     for x in 0..sdf_image_size.width {
                         let v = sdf_image[Point::new(x, y)].r();
-                        slot[Point::new(x, y)] = Bgra::new(v, v, v, v);
+                        let point = Point::new(x, y);
+                        let old = image[point];
+                        image[point] = slot.plane.set(old, v);
                     }
                 }
-                self.outline_msdf_ready.remove(&key);
-                self.outline_msdf_failed.remove(&key);
-                slot.bounds()
             }
+            slot.rect
         };
 
         return Some(RasterizedGlyph {
@@ -287,6 +316,7 @@ impl Rasterizer {
             atlas_size: self.atlas.size(),
             atlas_image_bounds,
             atlas_image_padding,
+            atlas_plane: slot.plane.index(),
             origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
             dpxs_per_em,
         });
@@ -298,6 +328,10 @@ impl Rasterizer {
         glyph_id: GlyphId,
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
+        // Always keep small text on SDF, even if an MSDF slot already exists.
+        if dpxs_per_em <= self.msdf_resolution.min_request_dpxs_per_em {
+            return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
+        }
         let mut outline = None;
         let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
         let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
@@ -305,25 +339,26 @@ impl Rasterizer {
         if !is_msdf_complexity_acceptable(self.msdf_complexity, complexity) {
             return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
         }
-        let dpxs_per_em = choose_msdf_resolution(self.msdf_resolution, &outline, dpxs_per_em);
+        let dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
         let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
         let atlas_image_padding = self.msdfer.settings().padding;
         let key = GlyphImageKey {
             font_id: font.id(),
             glyph_id,
             size: atlas_image_size + Size::from(atlas_image_padding) * 2,
-            kind: GlyphImageKind::Outline,
+            kind: GlyphImageKind::OutlineMsdf,
         };
         if self.outline_msdf_failed.contains(&key) {
             return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
         }
         if self.outline_msdf_ready.contains(&key) {
-            if let Some(atlas_image_bounds) = self.atlas.get_cached_glyph_image_rect(&key) {
+            if let Some(slot) = self.get_cached_slot(&key) {
                 return Some(RasterizedGlyph {
                     atlas_kind: AtlasKind::Msdf,
                     atlas_size: self.atlas.size(),
-                    atlas_image_bounds,
+                    atlas_image_bounds: slot.rect,
                     atlas_image_padding,
+                    atlas_plane: AtlasPlane::R.index(),
                     origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
                     dpxs_per_em,
                 });
@@ -332,8 +367,17 @@ impl Rasterizer {
         }
 
         let sdf_glyph = self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em)?;
-        if !self.outline_msdf_ready.contains(&key) && self.outline_msdf_pending.insert(key.clone())
-        {
+        if self.outline_msdf_ready.contains(&key) || self.outline_msdf_pending.contains(&key) {
+            return Some(sdf_glyph);
+        }
+        let (slot, allocated) = match self.allocate_shared_slot(key.clone()) {
+            Some(slot) => slot,
+            None => return Some(sdf_glyph),
+        };
+        if allocated {
+            self.seed_msdf_slot_from_sdf(slot, sdf_glyph);
+        }
+        if self.outline_msdf_pending.insert(key.clone()) {
             self.queued_msdf_jobs.push(QueuedMsdfJob {
                 key,
                 outline,
@@ -353,28 +397,389 @@ impl Rasterizer {
         const PADDING: usize = 2;
 
         let raster_image = font.glyph_raster_image(glyph_id, dpxs_per_em)?;
-        let atlas_image_bounds = match self.atlas.get_or_allocate_glyph_image(GlyphImageKey {
+        let key = GlyphImageKey {
             font_id: font.id(),
             glyph_id,
             size: raster_image.decode_size() + Size::from(2 * PADDING),
             kind: GlyphImageKind::Color,
-        })? {
-            GlyphImage::Cached(rect) => rect,
-            GlyphImage::Allocated(mut image) => {
+        };
+        let (slot, allocated) = self.allocate_shared_slot(key)?;
+        let atlas_image_bounds = if !allocated {
+            slot.rect
+        } else {
+            let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
+            {
                 let size = image.size();
                 image = image.subimage_mut(Rect::from(size).unpad(PADDING));
                 raster_image.decode(&mut image);
-                image.bounds()
             }
+            slot.rect
         };
         return Some(RasterizedGlyph {
             atlas_kind: AtlasKind::Color,
             atlas_size: self.atlas.size(),
             atlas_image_bounds,
             atlas_image_padding: PADDING,
+            atlas_plane: AtlasPlane::R.index(),
             origin_in_dpxs: raster_image.origin_in_dpxs(),
             dpxs_per_em: raster_image.dpxs_per_em(),
         });
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AtlasSlot {
+    rect: Rect<usize>,
+    plane: AtlasPlane,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AtlasPlane {
+    R,
+    G,
+    B,
+    A,
+}
+
+impl AtlasPlane {
+    fn from_index(index: usize) -> Self {
+        match index & 3 {
+            0 => Self::R,
+            1 => Self::G,
+            2 => Self::B,
+            _ => Self::A,
+        }
+    }
+
+    fn index(self) -> u8 {
+        match self {
+            Self::R => 0,
+            Self::G => 1,
+            Self::B => 2,
+            Self::A => 3,
+        }
+    }
+
+    fn set(self, pixel: Bgra, value: u8) -> Bgra {
+        match self {
+            Self::R => Bgra::new(pixel.b(), pixel.g(), value, pixel.a()),
+            Self::G => Bgra::new(pixel.b(), value, pixel.r(), pixel.a()),
+            Self::B => Bgra::new(value, pixel.g(), pixel.r(), pixel.a()),
+            Self::A => Bgra::new(pixel.b(), pixel.g(), pixel.r(), value),
+        }
+    }
+
+    fn get(self, pixel: Bgra) -> u8 {
+        match self {
+            Self::R => pixel.r(),
+            Self::G => pixel.g(),
+            Self::B => pixel.b(),
+            Self::A => pixel.a(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MultiPlaneAllocator {
+    planes: [RectPacker; 4],
+    plane_used_area: [usize; 4],
+    round_robin_cursor: usize,
+}
+
+impl MultiPlaneAllocator {
+    fn new(size: Size<usize>) -> Self {
+        Self {
+            planes: std::array::from_fn(|_| RectPacker::new(size)),
+            plane_used_area: [0; 4],
+            round_robin_cursor: 0,
+        }
+    }
+
+    fn reset(&mut self, size: Size<usize>) {
+        self.planes = std::array::from_fn(|_| RectPacker::new(size));
+        self.plane_used_area = [0; 4];
+        self.round_robin_cursor = 0;
+    }
+
+    fn allocate_sdf_slot(&mut self, size: Size<usize>) -> Option<AtlasSlot> {
+        let mut best_plane = None;
+        let mut best_rank = (usize::MAX, usize::MAX, usize::MAX, usize::MAX, usize::MAX);
+        for offset in 0..4 {
+            let plane = (self.round_robin_cursor + offset) & 3;
+            let Some(score) = self.planes[plane].peek_best_fit(size) else {
+                continue;
+            };
+            // Keep single-channel occupancy balanced while still using best-fit packing.
+            let rank = (
+                self.plane_used_area[plane],
+                offset,
+                score.short,
+                score.long,
+                score.area,
+            );
+            if rank < best_rank {
+                best_rank = rank;
+                best_plane = Some(plane);
+            }
+        }
+        let plane = best_plane?;
+        let rect = self.planes[plane].allocate(size)?;
+        let area = size.width.saturating_mul(size.height);
+        self.plane_used_area[plane] = self.plane_used_area[plane].saturating_add(area);
+        self.round_robin_cursor = (plane + 1) & 3;
+        Some(AtlasSlot {
+            rect,
+            plane: AtlasPlane::from_index(plane),
+        })
+    }
+
+    fn allocate_shared_slot(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let mut candidates = self.planes[0].free_rects().to_vec();
+        for plane in 1..4 {
+            let mut next = Vec::new();
+            for a in candidates.iter().copied() {
+                for b in self.planes[plane].free_rects().iter().copied() {
+                    let Some(common) = rect_intersection(a, b) else {
+                        continue;
+                    };
+                    if common.size.width >= size.width && common.size.height >= size.height {
+                        next.push(common);
+                    }
+                }
+            }
+            prune_contained_rects(&mut next);
+            if next.is_empty() {
+                return None;
+            }
+            candidates = next;
+        }
+
+        let origin = choose_best_fit_origin(&candidates, size)?;
+        let placed = Rect::new(origin, size);
+        for plane in &mut self.planes {
+            if !plane.reserve(placed) {
+                return None;
+            }
+        }
+        let area = size.width.saturating_mul(size.height);
+        for used in &mut self.plane_used_area {
+            *used = used.saturating_add(area);
+        }
+        Some(placed)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PlacementScore {
+    origin: Point<usize>,
+    short: usize,
+    long: usize,
+    area: usize,
+}
+
+#[derive(Clone, Debug)]
+struct RectPacker {
+    size: Size<usize>,
+    free_rects: Vec<Rect<usize>>,
+}
+
+impl RectPacker {
+    fn new(size: Size<usize>) -> Self {
+        Self {
+            size,
+            free_rects: vec![Rect::from(size)],
+        }
+    }
+
+    fn free_rects(&self) -> &[Rect<usize>] {
+        &self.free_rects
+    }
+
+    fn peek_best_fit(&self, size: Size<usize>) -> Option<PlacementScore> {
+        let mut best: Option<PlacementScore> = None;
+        let mut best_rank = (usize::MAX, usize::MAX, usize::MAX);
+        for free in self.free_rects.iter().copied() {
+            if size.width > free.size.width || size.height > free.size.height {
+                continue;
+            }
+            let leftover_w = free.size.width - size.width;
+            let leftover_h = free.size.height - size.height;
+            let short = leftover_w.min(leftover_h);
+            let long = leftover_w.max(leftover_h);
+            let area = free.size.width * free.size.height - size.width * size.height;
+            let rank = (short, long, area);
+            if rank < best_rank {
+                best_rank = rank;
+                best = Some(PlacementScore {
+                    origin: free.origin,
+                    short,
+                    long,
+                    area,
+                });
+            }
+        }
+        best
+    }
+
+    fn allocate(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
+        let score = self.peek_best_fit(size)?;
+        let rect = Rect::new(score.origin, size);
+        if self.reserve(rect) {
+            Some(rect)
+        } else {
+            None
+        }
+    }
+
+    fn reserve(&mut self, used: Rect<usize>) -> bool {
+        if used.size.width == 0 || used.size.height == 0 {
+            return false;
+        }
+        if !Rect::from(self.size).contains_rect(used) {
+            return false;
+        }
+        if !self
+            .free_rects
+            .iter()
+            .copied()
+            .any(|free| free.contains_rect(used))
+        {
+            return false;
+        }
+        let mut next_free_rects = Vec::with_capacity(self.free_rects.len().saturating_mul(2));
+        for free in self.free_rects.drain(..) {
+            if !rects_intersect(free, used) {
+                next_free_rects.push(free);
+                continue;
+            }
+            split_free_rect(free, used, &mut next_free_rects);
+        }
+        self.free_rects = next_free_rects;
+        prune_contained_rects(&mut self.free_rects);
+        true
+    }
+}
+
+fn choose_best_fit_origin(rects: &[Rect<usize>], size: Size<usize>) -> Option<Point<usize>> {
+    let mut best_origin = None;
+    let mut best_rank = (usize::MAX, usize::MAX, usize::MAX);
+    for rect in rects.iter().copied() {
+        if size.width > rect.size.width || size.height > rect.size.height {
+            continue;
+        }
+        let leftover_w = rect.size.width - size.width;
+        let leftover_h = rect.size.height - size.height;
+        let short = leftover_w.min(leftover_h);
+        let long = leftover_w.max(leftover_h);
+        let area = rect.size.width * rect.size.height - size.width * size.height;
+        let rank = (short, long, area);
+        if rank < best_rank {
+            best_rank = rank;
+            best_origin = Some(rect.origin);
+        }
+    }
+    best_origin
+}
+
+fn prune_contained_rects(rects: &mut Vec<Rect<usize>>) {
+    let mut i = 0;
+    while i < rects.len() {
+        let mut remove_i = false;
+        let mut j = i + 1;
+        while j < rects.len() {
+            if rects[i].contains_rect(rects[j]) {
+                rects.swap_remove(j);
+                continue;
+            }
+            if rects[j].contains_rect(rects[i]) {
+                remove_i = true;
+                break;
+            }
+            j += 1;
+        }
+        if remove_i {
+            rects.swap_remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn rect_intersection(a: Rect<usize>, b: Rect<usize>) -> Option<Rect<usize>> {
+    let min_x = a.origin.x.max(b.origin.x);
+    let min_y = a.origin.y.max(b.origin.y);
+    let a_max = a.max();
+    let b_max = b.max();
+    let max_x = a_max.x.min(b_max.x);
+    let max_y = a_max.y.min(b_max.y);
+    if max_x <= min_x || max_y <= min_y {
+        return None;
+    }
+    Some(Rect::new(
+        Point::new(min_x, min_y),
+        Size::new(max_x - min_x, max_y - min_y),
+    ))
+}
+
+fn rects_intersect(a: Rect<usize>, b: Rect<usize>) -> bool {
+    let a_max = a.max();
+    let b_max = b.max();
+    a.origin.x < b_max.x && a_max.x > b.origin.x && a.origin.y < b_max.y && a_max.y > b.origin.y
+}
+
+fn split_free_rect(free: Rect<usize>, used: Rect<usize>, out: &mut Vec<Rect<usize>>) {
+    let free_max = free.max();
+    let used_max = used.max();
+
+    if used.origin.x < free_max.x && used_max.x > free.origin.x {
+        if used.origin.y > free.origin.y {
+            push_non_empty_rect(
+                out,
+                Rect::new(
+                    free.origin,
+                    Size::new(free.size.width, used.origin.y - free.origin.y),
+                ),
+            );
+        }
+        if used_max.y < free_max.y {
+            push_non_empty_rect(
+                out,
+                Rect::new(
+                    Point::new(free.origin.x, used_max.y),
+                    Size::new(free.size.width, free_max.y - used_max.y),
+                ),
+            );
+        }
+    }
+
+    if used.origin.y < free_max.y && used_max.y > free.origin.y {
+        if used.origin.x > free.origin.x {
+            push_non_empty_rect(
+                out,
+                Rect::new(
+                    free.origin,
+                    Size::new(used.origin.x - free.origin.x, free.size.height),
+                ),
+            );
+        }
+        if used_max.x < free_max.x {
+            push_non_empty_rect(
+                out,
+                Rect::new(
+                    Point::new(used_max.x, free.origin.y),
+                    Size::new(free_max.x - used_max.x, free.size.height),
+                ),
+            );
+        }
+    }
+}
+
+fn push_non_empty_rect(out: &mut Vec<Rect<usize>>, rect: Rect<usize>) {
+    if rect.size.width != 0 && rect.size.height != 0 {
+        out.push(rect);
     }
 }
 
@@ -407,6 +812,7 @@ pub struct CompletedMsdfJob {
 
 #[derive(Clone, Copy, Debug)]
 pub struct MsdfResolutionSettings {
+    pub min_request_dpxs_per_em: f32,
     pub min_dpxs_per_em: f32,
     pub base_dpxs_per_em: f32,
     pub max_dpxs_per_em: f32,
@@ -427,11 +833,12 @@ pub struct RasterizedGlyph {
     pub atlas_size: Size<usize>,
     pub atlas_image_bounds: Rect<usize>,
     pub atlas_image_padding: usize,
+    pub atlas_plane: u8,
     pub origin_in_dpxs: Point<f32>,
     pub dpxs_per_em: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtlasKind {
     Grayscale,
     Color,
@@ -450,13 +857,6 @@ fn glyph_outline_image_size(size_in_ems: Size<f32>, dpxs_per_em: f32) -> Size<us
         size_in_dpxs.width.ceil() as usize,
         size_in_dpxs.height.ceil() as usize,
     )
-}
-
-fn msdf_median(pixel: Bgra) -> f32 {
-    let r = pixel.r() as f32 / 255.0;
-    let g = pixel.g() as f32 / 255.0;
-    let b = pixel.b() as f32 / 255.0;
-    (r + g + b) - r.min(g).min(b) - r.max(g).max(b)
 }
 
 #[derive(Clone, Copy, Debug)]

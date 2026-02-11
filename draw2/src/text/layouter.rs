@@ -118,6 +118,7 @@ impl Default for Settings {
                         corner_angle_threshold: 3.0,
                     },
                     msdf_resolution: rasterizer::MsdfResolutionSettings {
+                        min_request_dpxs_per_em: 20.0,
                         min_dpxs_per_em: 32.0,
                         base_dpxs_per_em: 64.0,
                         max_dpxs_per_em: 128.0,

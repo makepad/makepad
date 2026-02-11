@@ -24,6 +24,7 @@ impl HeapLiveIdPath {
     pub fn push(&mut self, id: LiveId) {
         self.data.push(id);
     }
+    
     pub fn pop(&mut self) {
         self.data.pop();
     }
@@ -183,14 +184,13 @@ impl<'a, 'b> Scope<'a, 'b> {
 // Apply - Source of apply operation
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub enum Apply {
     #[default]
     New,
     Reload,
     Animate,
     Eval,
-    Render(),
     Default(usize),
 }
 
@@ -225,13 +225,6 @@ impl Apply {
     pub fn is_reload(&self) -> bool {
         match self {
             Self::Reload => true,
-            _ => false,
-        }
-    }
-    
-    pub fn is_render(&self) -> bool {
-        match self {
-            Self::Render{..} => true,
             _ => false,
         }
     }

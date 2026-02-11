@@ -12,8 +12,8 @@ metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
 [dependencies]
 makepad-draw2 = { path = "../draw2", version = "2.0.0" }
 makepad-derive-widget2 = {path = "./derive_widget", version="2.0.0"}
-makepad-mbtile-reader = { path = "../libs/mbtile_reader", version = "1.0.0" }
-flate2 = { path = "../libs/flate2-1.1.9", default-features = false, features = ["rust_backend"] }
+makepad-mbtile-reader = { path = "../libs/mbtile_reader", version = "1.0.0", optional = true }
+flate2 = { path = "../libs/flate2-1.1.9", default-features = false, features = ["rust_backend"], optional = true }
 
 makepad-zune-jpeg = { version = "0.5.12", path = "../libs/zune-jpeg" }
 makepad-zune-png = { version = "0.5.1", path = "../libs/zune-png" }
@@ -21,13 +21,16 @@ makepad-html = { path = "../libs/html", version = "1.0.0" }
 unicode-segmentation = { version = "1.12.0", path = "../libs/unicode-segmentation-1.12.0" }
 pulldown-cmark = { version = "0.12.2", path = "../libs/pulldown-cmark-0.12.2", default-features = false, features = ["simd"] }
 makepad-latex-math = { path = "../libs/latex_math", version = "0.1.0" }
-makepad-pdf-parse = { path = "../libs/pdf_parse", version = "1.0.0" }
+makepad-pdf-parse = { path = "../libs/pdf_parse", version = "1.0.0", optional = true }
 ttf-parser = { path = "../libs/ttf-parser-0.24.1" }
 
 serde = { version = "1.0", optional = true, features = ["derive"] }
 
 [features]
 default = []
+
+maps = ["dep:makepad-mbtile-reader", "dep:flate2"]
+pdf = ["dep:makepad-pdf-parse"]
 
 ## Enables certain public-facing types to derive serde serialization traits.
 serde = ["dep:serde", "makepad-draw2/serde", "makepad-derive-widget2/serde"]
