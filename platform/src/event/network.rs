@@ -1,5 +1,5 @@
-use crate::makepad_live_id::*;
 use crate::makepad_micro_serde::*;
+use crate::makepad_script::*;
 use std::collections::BTreeMap;
 use std::str;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -12,15 +12,19 @@ pub struct NetworkResponseItem {
 
 pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Script, ScriptHook)]
 pub struct HttpError {
+    #[live]
     pub message: String,
+    #[live]
     pub metadata_id: LiveId,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Script, ScriptHook)]
 pub struct HttpProgress {
+    #[live]
     pub loaded: u64,
+    #[live]
     pub total: u64,
 }
 
@@ -74,14 +78,21 @@ pub struct HttpRequest {
 }
 */
 
-#[derive(PartialEq, Debug, Default)]
+#[derive(PartialEq, Debug, Script, ScriptHook, Default)]
 pub struct HttpRequest {
+    #[live]
     pub metadata_id: LiveId,
+    #[live]
     pub url: String,
+    #[live]
     pub method: HttpMethod,
+    #[live]
     pub headers: BTreeMap<String, Vec<String>>,
+    #[live]
     pub ignore_ssl_cert: bool,
+    #[live]
     pub is_streaming: bool,
+    #[live]
     pub body: Option<Vec<u8>>,
 }
 
@@ -178,11 +189,15 @@ impl HttpRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Script, ScriptHook)]
 pub struct HttpResponse {
+    #[live]
     pub metadata_id: LiveId,
+    #[live]
     pub status_code: u16,
+    #[live]
     pub headers: BTreeMap<String, Vec<String>>,
+    #[live]
     pub body: Option<Vec<u8>>,
 }
 
@@ -248,9 +263,10 @@ impl HttpResponse {
     }
 }
 
-#[derive(PartialEq, Debug, Default)]
+#[derive(PartialEq, Debug, Script, ScriptHook, Default)]
 pub enum HttpMethod {
     #[default]
+    #[pick]
     GET,
     HEAD,
     POST,

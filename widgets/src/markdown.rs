@@ -3,116 +3,103 @@ use crate::{
     widget::*, WidgetMatchEvent,
 };
 
-use pulldown_cmark::{Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
-    use crate::link_label::LinkLabelBase;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub MarkdownLinkBase = {{MarkdownLink}}<LinkLabelBase> {
-        /*link = {
-            draw_text:{
-                // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
-                color: #1a0dab
-            }
-        }*/
-    }
+    mod.widgets.MarkdownLinkBase = #(MarkdownLink::register_widget(vm))
 
-    pub MarkdownBase = {{Markdown}} {
-        // ok so we can use one drawtext
-        // change to italic, change bold (SDF), strikethrough
-    }
+    mod.widgets.MarkdownBase = #(Markdown::register_widget(vm))
 
-    pub MarkdownLink = <MarkdownLinkBase> {
-        width: Fit, height: Fit,
-        align: {x: 0., y: 0.}
+    mod.widgets.MarkdownLink = set_type_default() do mod.widgets.MarkdownLinkBase{
+        width: Fit height: Fit
+        align: Align{x: 0. y: 0.}
 
-        label_walk: { width: Fit, height: Fit }
+        label_walk: Walk{width: Fit height: Fit}
 
-        draw_icon: {
-            instance hover: 0.0
-            instance pressed: 0.0
+        draw_icon +: {
+            hover: instance(0.0)
+            pressed: instance(0.0)
 
-            fn get_color(self) -> vec4 {
+            get_color: fn() {
                 return mix(
                     mix(
-                        THEME_COLOR_LABEL_INNER,
-                        THEME_COLOR_LABEL_INNER_HOVER,
+                        theme.color_label_inner,
+                        theme.color_label_inner_hover,
                         self.hover
                     ),
-                    THEME_COLOR_LABEL_INNER_DOWN,
+                    theme.color_label_inner_down,
                     self.pressed
                 )
             }
         }
 
-        animator: {
-            hover = {
-                default: off,
-                off = {
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_text: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {pressed: 0.0 hover: 0.0}
+                        draw_icon: {pressed: 0.0 hover: 0.0}
+                        draw_text: {pressed: 0.0 hover: 0.0}
                     }
                 }
 
-                on = {
+                on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {pressed: 0.0 hover: snap(1.0)}
+                        draw_icon: {pressed: 0.0 hover: snap(1.0)}
+                        draw_text: {pressed: 0.0 hover: snap(1.0)}
                     }
                 }
 
-                pressed = {
+                pressed: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {pressed: snap(1.0) hover: 1.0}
+                        draw_icon: {pressed: snap(1.0) hover: 1.0}
+                        draw_text: {pressed: snap(1.0) hover: 1.0}
                     }
                 }
             }
         }
 
-        draw_bg: {
-            instance pressed: 0.0
-            instance hover: 0.0
+        draw_bg +: {
+            pressed: instance(0.0)
+            hover: instance(0.0)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let offset_y = 1.0
-                sdf.move_to(0., self.rect_size.y - offset_y);
-                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                sdf.move_to(0. self.rect_size.y-offset_y)
+                sdf.line_to(self.rect_size.x self.rect_size.y-offset_y)
                 return sdf.stroke(mix(
-                    THEME_COLOR_LABEL_INNER,
-                    THEME_COLOR_LABEL_INNER_DOWN,
+                    theme.color_label_inner,
+                    theme.color_label_inner_down,
                     self.pressed
-                ), mix(0.0, 0.8, self.hover));
+                ), mix(0.0, 0.8, self.hover))
             }
         }
 
-        draw_text: {
-            instance pressed: 0.0
-            instance hover: 0.0
+        draw_text +: {
+            pressed: instance(0.0)
+            hover: instance(0.0)
 
-            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER),
-            uniform color_pressed: (THEME_COLOR_LABEL_INNER_DOWN),
+            color_hover: uniform(theme.color_label_inner_hover)
+            color_pressed: uniform(theme.color_label_inner_down)
 
-            wrap: Word
-            color: (THEME_COLOR_LABEL_INNER),
-            text_style: <THEME_FONT_REGULAR>{
-                font_size: (THEME_FONT_SIZE_P)
+            color: theme.color_label_inner
+            text_style: theme.font_regular{
+                font_size: theme.font_size_p
             }
-            fn get_color(self) -> vec4 {
+            get_color: fn() {
                 return mix(
                     mix(
                         self.color,
@@ -126,173 +113,124 @@ live_design! {
         }
     }
 
-    pub Markdown = <MarkdownBase> {
-        width:Fill, height:Fit,
-        flow: Right { wrap: true },
-        padding: <THEME_MSPACE_1> {}
+    mod.widgets.Markdown = set_type_default() do mod.widgets.MarkdownBase{
+        width: Fill height: Fit
+        flow: Flow.Right{wrap: true}
+        padding: theme.mspace_1
 
-        font_size: (THEME_FONT_SIZE_P),
-        font_color: (THEME_COLOR_LABEL_INNER),
+        font_size: theme.font_size_p
+        font_color: theme.color_label_inner
 
-        paragraph_spacing: 16,
-        pre_code_spacing: 8,
-        inline_code_padding: <THEME_MSPACE_1> {},
-        inline_code_margin: <THEME_MSPACE_1> {},
-        heading_base_scale: 1.8,
+        paragraph_spacing: 16
+        pre_code_spacing: 8
+        inline_code_padding: theme.mspace_1
+        inline_code_margin: theme.mspace_1
+        heading_base_scale: 1.8
 
-        draw_normal: {
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_INNER)
+        draw_text +: {
+            color: theme.color_label_inner
         }
 
-        draw_italic: {
-            text_style: <THEME_FONT_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_INNER)
+        text_style_normal: theme.font_regular{
+            font_size: theme.font_size_p
         }
 
-        draw_bold: {
-            text_style: <THEME_FONT_BOLD> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_INNER)
+        text_style_italic: theme.font_italic{
+            font_size: theme.font_size_p
         }
 
-        draw_bold_italic: {
-            text_style: <THEME_FONT_BOLD_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_INNER)
+        text_style_bold: theme.font_bold{
+            font_size: theme.font_size_p
         }
 
-        draw_fixed: {
-            temp_y_shift: 0.25
-            text_style: <THEME_FONT_CODE> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_INNER)
+        text_style_bold_italic: theme.font_bold_italic{
+            font_size: theme.font_size_p
         }
 
-        code_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3), bottom:10 }
-        }
-        code_walk: { width: Fill, height: Fit }
-
-        quote_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
-        }
-        quote_walk: { width: Fill, height: Fit, }
-
-        list_item_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_1> {}
-        }
-        list_item_walk: {
-            height: Fit, width: Fill,
+        text_style_fixed: theme.font_code{
+            font_size: theme.font_size_p
         }
 
-        sep_walk: {
-            width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_1> {}
+        code_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: 10}
+        }
+        code_walk: Walk{width: Fill height: Fit}
+
+        quote_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
+        }
+        quote_walk: Walk{width: Fill height: Fit}
+
+        list_item_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: theme.mspace_1
+        }
+        list_item_walk: Walk{
+            height: Fit width: Fill
         }
 
-        draw_block: {
-            line_color: (THEME_COLOR_LABEL_INNER)
-            sep_color: (THEME_COLOR_SHADOW)
-            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_LABEL_INNER)
-            code_color: (THEME_COLOR_BG_HIGHLIGHT)
+        sep_walk: Walk{
+            width: Fill height: 4.
+            margin: theme.mspace_v_1
+        }
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+        draw_block +: {
+            line_color: theme.color_label_inner
+            sep_color: theme.color_shadow
+            quote_bg_color: theme.color_bg_highlight
+            quote_fg_color: theme.color_label_inner
+            code_color: theme.color_bg_highlight
+            selection_color: theme.color_selection_focus
+            space_1: uniform(theme.space_1)
+            space_2: uniform(theme.space_2)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 match self.block_type {
-                    FlowBlockType::Quote => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
+                    FlowBlockType.Quote => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
                         sdf.fill(self.quote_bg_color)
-                        sdf.box(
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            self.rect_size.y - THEME_SPACE_2,
-                            1.5
-                        );
+                        sdf.box(self.space_1 self.space_1 self.space_1 self.rect_size.y-self.space_2 1.5)
                         sdf.fill(self.quote_fg_color)
-                        return sdf.result;
+                        return sdf.result
                     }
-                    FlowBlockType::Sep => {
-                        sdf.box(
-                            0.,
-                            1.,
-                            self.rect_size.x-1,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.sep_color);
-                        return sdf.result;
+                    FlowBlockType.Sep => {
+                        sdf.box(0. 1. self.rect_size.x-1. self.rect_size.y-2. 2.)
+                        sdf.fill(self.sep_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Code => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
+                    FlowBlockType.Code => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
-                    FlowBlockType::InlineCode => {
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x,
-                            self.rect_size.y - 2.,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
+                    FlowBlockType.InlineCode => {
+                        sdf.box(1. 1. self.rect_size.x-2. self.rect_size.y-2. 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Underline => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y-2,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
+                    FlowBlockType.Underline => {
+                        sdf.box(0. self.rect_size.y-2. self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Strikethrough => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y * 0.45,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
+                    FlowBlockType.Strikethrough => {
+                        sdf.box(0. self.rect_size.y * 0.45 self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
+                    }
+                    FlowBlockType.Selection => {
+                        return vec4(self.selection_color.rgb * self.selection_color.a, self.selection_color.a)
                     }
                 }
                 return #f00
             }
         }
 
-        link = <MarkdownLink> {}
+        link := mod.widgets.MarkdownLink{}
     }
-
 }
 
 /// The state of a list at a given nesting level.
@@ -303,10 +241,10 @@ struct ListState {
     start_number: Option<u64>,
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct Markdown {
     #[deref]
-    text_flow: TextFlow,
+    pub text_flow: TextFlow,
     #[live]
     body: ArcStringMut,
     #[live]
@@ -319,6 +257,10 @@ pub struct Markdown {
     in_code_block: bool,
     #[rust]
     code_block_string: String,
+    #[rust]
+    in_splash_block: bool,
+    #[rust]
+    splash_block_string: String,
     #[live(false)]
     use_math_widget: bool,
     #[rust]
@@ -328,15 +270,21 @@ pub struct Markdown {
 }
 
 impl Widget for Markdown {
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.auto_id = 0;
+
         self.begin(cx, walk);
         self.process_markdown_doc(cx);
         self.end(cx);
+
         DrawStep::done()
     }
 
@@ -368,7 +316,7 @@ impl Markdown {
             match event {
                 MdEvent::Start(Tag::Heading { level, .. }) => {
                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
                     let heading_base = self.heading_base_scale;
@@ -386,11 +334,11 @@ impl Markdown {
                 MdEvent::End(TagEnd::Heading(_level)) => {
                     tf.bold.pop();
                     tf.font_sizes.pop();
-                    cx.turtle_new_line();
+                    tf.new_line_collapsed(cx);
                 }
                 MdEvent::Start(Tag::Paragraph) => {
                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
                 }
@@ -399,7 +347,7 @@ impl Markdown {
                 }
                 MdEvent::Start(Tag::BlockQuote(_)) => {
                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
                     tf.begin_quote(cx);
@@ -418,7 +366,7 @@ impl Markdown {
                 }
                 MdEvent::Start(Tag::Item) => {
                     if !is_first_block {
-                        cx.turtle_new_line();
+                        tf.new_line_collapsed(cx);
                     }
                     is_first_block = false;
                     let marker = if let Some(state) = list_stack.last_mut() {
@@ -475,44 +423,60 @@ impl Markdown {
                     tf.draw_text(cx, &dest_url);
                     tf.draw_text(cx, "]");
                 }
-                MdEvent::Start(Tag::CodeBlock(_kind)) => {
+                MdEvent::Start(Tag::CodeBlock(kind)) => {
                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.pre_code_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.pre_code_spacing);
                     }
                     is_first_block = false;
-                    if self.use_code_block_widget {
+                    // Check if this is a runsplash block
+                    let is_runsplash = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.as_ref() == "runsplash");
+                    if is_runsplash {
+                        self.in_splash_block = true;
+                        self.splash_block_string.clear();
+                    } else if self.use_code_block_widget {
                         self.in_code_block = true;
                         self.code_block_string.clear();
-
-                        // TODO: Handle language info if available for syntax highlighting
-                        // if let CodeBlockKind::Fenced(lang) = kind {
-                        // }
                     } else {
                         const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
                         tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
                         tf.combine_spaces.push(false);
                         tf.fixed.push();
-
-                        // This adjustment is necesary to do not add too much spacing
-                        // between lines inside the code block.
-                        // tf.top_drop.push(0.2);
-
                         tf.begin_code(cx);
                     }
                 }
                 MdEvent::End(TagEnd::CodeBlock) => {
-                    if self.in_code_block {
+                    if self.in_splash_block {
+                        self.in_splash_block = false;
+                        let entry_id = tf.new_counted_id();
+                        let sbs = &self.splash_block_string;
+
+                        // Draw the splash block using the $splash_block template
+                        tf.item_with(cx, entry_id, id!(splash_block), |cx, item, _tf| {
+                            //let tree = item.widget_tree();
+                            //cx.with_vm(|vm| {
+                            //    log!("$splash_block widget tree:\n{}", tree.display(vm.heap()));
+                            //});
+                            item.widget(cx, ids!(splash_view)).set_text(cx, sbs);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else if self.in_code_block {
                         self.in_code_block = false;
                         let entry_id = tf.new_counted_id();
                         let cbs = &self.code_block_string;
 
-                        tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf| {
-                            item.widget(ids!(code_view)).set_text(cx, cbs);
+                        // Draw the code block and capture the CodeView widget ref
+                        let mut code_view_ref = WidgetRef::empty();
+                        tf.item_with(cx, entry_id, id!(code_block), |cx, item, _tf| {
+                            item.widget(cx, ids!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
+                            code_view_ref = item.widget(cx, ids!(code_view));
                         });
+
+                        // Register the code view widget for cross-child selection
+                        // (its area will be queried at event time, not draw time)
+                        tf.push_widget_text_for_selection(code_view_ref, &self.code_block_string);
                     } else {
                         tf.font_sizes.pop();
-                        //tf.top_drop.pop();
                         tf.fixed.pop();
                         tf.combine_spaces.pop();
                         tf.end_code(cx);
@@ -552,7 +516,7 @@ impl Markdown {
                 // Display math ($$...$$)
                 MdEvent::DisplayMath(text) => {
                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
 
@@ -572,39 +536,39 @@ impl Markdown {
                     }
                 }
                 MdEvent::Text(text) => {
-                    if self.in_code_block {
+                    if self.in_splash_block {
+                        self.splash_block_string.push_str(&text);
+                    } else if self.in_code_block {
                         self.code_block_string.push_str(&text);
                     } else {
                         tf.draw_text(cx, &text.trim_end_matches("\n"));
                     }
                 }
                 MdEvent::SoftBreak => {
-                    if self.in_code_block {
+                    if self.in_splash_block {
+                        self.splash_block_string.push('\n');
+                    } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
-                        // Soft break should typically render as a space or wrap, not a full newline.
-                        // TextFlow handles wrapping, so we might not need to do anything specific here,
-                        // or perhaps just ensure a space if the rendering context needs it.
-                        // For now, let's treat it like a space.
                         tf.draw_text(cx, " ");
                     }
                 }
                 MdEvent::HardBreak => {
-                    if self.in_code_block {
+                    if self.in_splash_block {
+                        self.splash_block_string.push('\n');
+                    } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
-                        // Internal break within a block, do not add spacing
-                        cx.turtle_new_line();
+                        tf.new_line_collapsed(cx);
                     }
                 }
                 MdEvent::Rule => {
                     if !is_first_block {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
                     tf.sep(cx);
-                    // Add spacing after the separator rule as well
-                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                 }
                 MdEvent::TaskListMarker(_) => {
                     // TODO: Implement task list markers
@@ -633,7 +597,7 @@ impl Markdown {
                 MdEvent::End(TagEnd::TableCell) => {
                     // TODO: Implement table cell support
                 }
-                _ => {} // Unimplemented or unneceary events
+                _ => {} // Unimplemented or unnecessary events
             }
         }
     }
@@ -646,9 +610,46 @@ impl MarkdownRef {
         };
         inner.set_text(cx, v)
     }
+
+    /// Start streaming text animation with fade-in effect.
+    pub fn start_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.start_streaming_animation();
+        }
+    }
+
+    /// Reset and start streaming animation (for reused widgets).
+    pub fn reset_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.reset_streaming_animation();
+        }
+    }
+
+    /// Stop streaming animation (fade will complete naturally).
+    pub fn stop_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.stop_streaming_animation();
+        }
+    }
+
+    /// Check if streaming animation is completely done.
+    pub fn is_streaming_animation_done(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.text_flow.is_streaming_animation_done()
+        } else {
+            true
+        }
+    }
+
+    /// Reset all streaming animations (text fade).
+    pub fn reset_all_streaming_animations(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.reset_all_streaming_animations();
+        }
+    }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 struct MarkdownLink {
     #[deref]
     link: LinkLabel,
@@ -657,11 +658,10 @@ struct MarkdownLink {
 }
 
 impl WidgetMatchEvent for MarkdownLink {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         if self.link.clicked(actions) {
             cx.widget_action(
                 self.widget_uid(),
-                &scope.path,
                 MarkdownAction::LinkNavigated(self.href.clone()),
             );
         }
@@ -696,8 +696,9 @@ impl MarkdownLinkRef {
     }
 }
 
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum MarkdownAction {
+    #[default]
     None,
     LinkNavigated(String),
 }

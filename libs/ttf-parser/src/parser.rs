@@ -238,10 +238,10 @@ impl TryNumFrom<f32> for i32 {
 
         // We can't represent `MIN-1` exactly, but there's no fractional part
         // at this magnitude, so we can just use a `MIN` inclusive boundary.
-        const MIN: f32 = core::i32::MIN as f32;
+        const MIN: f32 = i32::MIN as f32;
         // We can't represent `MAX` exactly, but it will round up to exactly
         // `MAX+1` (a power of two) when we cast it.
-        const MAX_P1: f32 = core::i32::MAX as f32;
+        const MAX_P1: f32 = i32::MAX as f32;
         if v >= MIN && v < MAX_P1 {
             Some(v as i32)
         } else {
@@ -372,7 +372,7 @@ impl<'a, T: FromData> LazyArray16<'a, T> {
 
 impl<'a, T: FromData + core::fmt::Debug + Copy> core::fmt::Debug for LazyArray16<'a, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.debug_list().entries(self.into_iter()).finish()
+        f.debug_list().entries(*self).finish()
     }
 }
 
@@ -522,7 +522,7 @@ impl<'a, T: FromData> LazyArray32<'a, T> {
 
 impl<'a, T: FromData + core::fmt::Debug + Copy> core::fmt::Debug for LazyArray32<'a, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.debug_list().entries(self.into_iter()).finish()
+        f.debug_list().entries(*self).finish()
     }
 }
 
@@ -622,7 +622,7 @@ impl<'a, T: FromSlice<'a>> LazyOffsetArray16<'a, T> {
 
 impl<'a, T: FromSlice<'a> + core::fmt::Debug + Copy> core::fmt::Debug for LazyOffsetArray16<'a, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.debug_list().entries(self.into_iter()).finish()
+        f.debug_list().entries(*self).finish()
     }
 }
 
@@ -764,6 +764,11 @@ impl<'a> Stream<'a> {
     /// Reads N bytes from the stream.
     #[inline]
     pub fn read_bytes(&mut self, len: usize) -> Option<&'a [u8]> {
+        // An integer overflow here on 32bit systems is almost guarantee to be caused
+        // by an incorrect parsing logic from the caller side.
+        // Simply using `checked_add` here would silently swallow errors, which is not what we want.
+        debug_assert!(self.offset as u64 + len as u64 <= u32::MAX as u64);
+
         let v = self.data.get(self.offset..self.offset + len)?;
         self.advance(len);
         Some(v)

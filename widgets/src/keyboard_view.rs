@@ -1,12 +1,19 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, view::*, widget::*};
+use crate::{
+    makepad_derive_widget::*, makepad_draw::event::Ease, makepad_draw::*, view::*, widget::*,
+};
 
-live_design! {
-    link widgets;
-    pub KeyboardViewBase = {{KeyboardView}} {}
-    pub KeyboardView = <KeyboardViewBase>{}
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.View
+
+    mod.widgets.KeyboardViewBase = #(KeyboardView::register_widget(vm))
+    mod.widgets.KeyboardView = set_type_default() do mod.widgets.KeyboardViewBase{
+        width: Fill height: Fill
+        keyboard_min_shift: 30.
+    }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct KeyboardView {
     #[deref]
     view: View,

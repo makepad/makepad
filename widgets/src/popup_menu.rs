@@ -1,223 +1,184 @@
-use crate::makepad_draw::*;
+use crate::{
+    animator::{Animator, AnimatorAction, AnimatorImpl},
+    makepad_derive_widget::*,
+    makepad_draw::*,
+};
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub PopupMenuItemBase = {{PopupMenuItem}} {}
-    pub PopupMenuBase = {{PopupMenu}} {}
+    mod.widgets.PopupMenuItemBase = #(PopupMenuItem::script_component(vm))
+    mod.widgets.PopupMenuBase = #(PopupMenu::script_component(vm))
 
-    pub PopupMenuItem = <PopupMenuItemBase> {
-        width: Fill, height: Fit,
-        align: { y: 0.5 }
-        padding: <THEME_MSPACE_1> { left: 15. }
+    mod.widgets.PopupMenuItem = set_type_default() do mod.widgets.PopupMenuItemBase{
+        width: Fill
+        height: Fit
+        align: Align{y: 0.5}
+        padding: theme.mspace_1{left: 15.}
 
-        draw_text: {
-            instance active: 0.0
-            instance hover: 0.0
-            instance disabled: 0.0
+        draw_text +: {
+            active: instance(0.0)
+            hover: instance(0.0)
+            disabled: instance(0.0)
 
-            uniform color: (THEME_COLOR_LABEL_INNER)
-            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
-            uniform color_active: (THEME_COLOR_LABEL_INNER_ACTIVE)
-            uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+            color: theme.color_label_inner
+            color_hover: uniform(theme.color_label_inner_hover)
+            color_active: uniform(theme.color_label_inner_active)
+            color_disabled: uniform(theme.color_label_inner_disabled)
 
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P),
+            text_style: theme.font_regular{
+                font_size: theme.font_size_p
             }
 
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        mix(
-                            self.color,
-                            self.color_active,
-                            self.active
-                        ),
-                        self.color_hover,
-                        self.hover
-                    ),
-                    self.color_disabled,
-                    self.disabled
-                )
+            get_color: fn() {
+                return self.color
+                    .mix(self.color_active, self.active)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_disabled, self.disabled)
             }
         }
 
-        draw_bg: {
-            instance active: 0.0
-            instance hover: 0.0
-            instance disabled: 0.0
+        draw_bg +: {
+            active: instance(0.0)
+            hover: instance(0.0)
+            disabled: instance(0.0)
 
-            uniform gradient_border_horizontal: 0.0
-            uniform gradient_fill_horizontal: 0.0
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            uniform color_dither: 1.0
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
+            color_dither: uniform(1.0)
+            border_size: uniform(theme.beveling)
+            border_radius: uniform(theme.corner_radius)
 
-            uniform color: (THEME_COLOR_U_HIDDEN)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
-            uniform color_disabled: (THEME_COLOR_OUTSET_DISABLED)
+            color: uniform(theme.color_u_hidden)
+            color_hover: uniform(theme.color_outset_hover)
+            color_active: uniform(theme.color_outset_active)
+            color_disabled: uniform(theme.color_outset_disabled)
 
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
-            uniform color_2_active: (THEME_COLOR_OUTSET_2_ACTIVE)
-            uniform color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_2_hover: uniform(theme.color_outset_2_hover)
+            color_2_active: uniform(theme.color_outset_2_active)
+            color_2_disabled: uniform(theme.color_outset_2_disabled)
 
-            uniform border_color: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_active: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_disabled: (THEME_COLOR_U_HIDDEN)
+            border_color: uniform(theme.color_u_hidden)
+            border_color_hover: uniform(theme.color_u_hidden)
+            border_color_active: uniform(theme.color_u_hidden)
+            border_color_disabled: uniform(theme.color_u_hidden)
 
-            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color_2_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_2_disabled: (THEME_COLOR_U_HIDDEN)
+            border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            border_color_2_hover: uniform(theme.color_u_hidden)
+            border_color_2_active: uniform(theme.color_u_hidden)
+            border_color_2_disabled: uniform(theme.color_u_hidden)
 
-            uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_MARK_ACTIVE)
-            uniform mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
+            mark_color: uniform(theme.color_u_hidden)
+            mark_color_active: uniform(theme.color_mark_active)
+            mark_color_disabled: uniform(theme.color_mark_disabled)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let color_2 = self.color;
-                let color_2_hover = self.color_hover;
-                let color_2_active = self.color_active;
-                let color_2_disabled = self.color_disabled;
-
-                let border_color_2 = self.border_color;
-                let border_color_2_hover = self.border_color_hover;
-                let border_color_2_active = self.border_color_active;
-                let border_color_2_disabled = self.border_color_disabled;
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
-                    color_2_hover = self.color_2_hover
-                    color_2_active = self.color_2_active;
-                    color_2_disabled = self.color_2_disabled;
-                }
-
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2;
-                    border_color_2_hover = self.border_color_2_hover;
-                    border_color_2_active = self.border_color_2_active;
-                    border_color_2_disabled = self.border_color_2_disabled;
-                }
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
                 let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
                 )
 
-                let gradient_border = vec2(
-                    self.pos.x + dither,
-                    self.pos.y + dither
-                )
-
-                let gradient_border_dir = gradient_border.y;
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = gradient_border.x;
-                }
-
                 let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.x - self.border_size * 2.
                     self.rect_size.y - self.border_size * 2.
-                );
+                )
 
                 let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.x / sz_inner_px.x
                     self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                let gradient_fill_dir = gradient_fill.y;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = gradient_fill.x;
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
+                    self.border_radius
+                )
+
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_active = self.color_active
+                let mut color_fill_disabled = self.color_disabled
+
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_fill = vec2(
+                        self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
+                        self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                    )
+                    let dir = if self.gradient_fill_horizontal > 0.5 gradient_fill.x else gradient_fill.y
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_active = mix(self.color_active, self.color_2_active, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
                 }
 
-                // Background
-                sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
-                    self.border_radius
-                );
+                let mut color_stroke = self.border_color
+                let mut color_stroke_hover = self.border_color_hover
+                let mut color_stroke_active = self.border_color_active
+                let mut color_stroke_disabled = self.border_color_disabled
 
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(self.color, color_2, gradient_fill_dir),
-                                mix(self.color_active, color_2_active, gradient_fill_dir),
-                                self.active
-                            ),
-                            mix(self.color_hover, color_2_hover, gradient_fill_dir),
-                            self.hover
-                        ),
-                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
-                        self.disabled
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_border = vec2(
+                        self.pos.x + dither
+                        self.pos.y + dither
                     )
-                );
+                    let dir = if self.gradient_border_horizontal > 0.5 gradient_border.x else gradient_border.y
+                    color_stroke = mix(self.border_color, self.border_color_2, dir)
+                    color_stroke_hover = mix(self.border_color_hover, self.border_color_2_hover, dir)
+                    color_stroke_active = mix(self.border_color_active, self.border_color_2_active, dir)
+                    color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
+                }
 
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(self.border_color, border_color_2, gradient_border_dir),
-                                mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
-                                self.hover
-                            ),
-                            mix(self.border_color_active, border_color_2_active, gradient_border_dir),
-                            self.active
-                        ),
-                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir),
-                        self.disabled
-                    ), self.border_size
-                );
+                let fill = color_fill
+                    .mix(color_fill_active, self.active)
+                    .mix(color_fill_hover, self.hover)
+                    .mix(color_fill_disabled, self.disabled)
+
+                let stroke = color_stroke
+                    .mix(color_stroke_active, self.active)
+                    .mix(color_stroke_hover, self.hover)
+                    .mix(color_stroke_disabled, self.disabled)
+
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
 
                 // Mark
-                let sz = 3.;
-                let dx = 2.0;
-                let c = vec2(8.0, 0.5 * self.rect_size.y);
-                sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
-                sdf.line_to(c.x, c.y + sz);
-                sdf.line_to(c.x + sz, c.y - sz);
+                let sz = 3.
+                let dx = 2.0
+                let c = vec2(8.0, 0.5 * self.rect_size.y)
+                sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx)
+                sdf.line_to(c.x, c.y + sz)
+                sdf.line_to(c.x + sz, c.y - sz)
 
                 sdf.stroke(
-                    mix(
-                        mix(
-                            self.mark_color,
-                            self.mark_color_active,
-                            self.active
-                        ),
-                        self.mark_color_disabled,
-                        self.disabled
-                    ), 1.);
+                    self.mark_color
+                        .mix(self.mark_color_active, self.active)
+                        .mix(self.mark_color_disabled, self.disabled)
+                    1.)
 
-                return sdf.result;
+                return sdf.result
             }
         }
 
-        animator: {
-            disabled = {
-                default: off,
-                off = {
+        animator: Animator{
+            disabled: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
                         draw_bg: {disabled: 0.0}
                         draw_text: {disabled: 0.0}
                     }
                 }
-                on = {
+                on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {disabled: 1.0}
@@ -225,17 +186,17 @@ live_design! {
                     }
                 }
             }
-            hover = {
-                default: off
-                off = {
+            hover: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Snap}
                     apply: {
                         draw_bg: {hover: 0.0}
                         draw_text: {hover: 0.0}
                     }
                 }
-                on = {
-                    cursor: Hand
+                on: AnimatorState{
+                    cursor: MouseCursor.Hand
                     from: {all: Snap}
                     apply: {
                         draw_bg: {hover: 1.0}
@@ -244,20 +205,20 @@ live_design! {
                 }
             }
 
-            active = {
-                default: off
-                off = {
+            active: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Snap}
                     apply: {
-                        draw_bg: {active: 0.0,}
-                        draw_text: {active: 0.0,}
+                        draw_bg: {active: 0.0}
+                        draw_text: {active: 0.0}
                     }
                 }
-                on = {
+                on: AnimatorState{
                     from: {all: Snap}
                     apply: {
-                        draw_bg: {active: 1.0,}
-                        draw_text: {active: 1.0,}
+                        draw_bg: {active: 1.0}
+                        draw_text: {active: 1.0}
                     }
                 }
             }
@@ -265,158 +226,140 @@ live_design! {
         indent_width: 10.0
     }
 
-    PopupMenuItemGradientX = <PopupMenuItem> {
-        draw_bg: {
+    mod.widgets.PopupMenuItemGradientX = mod.widgets.PopupMenuItem{
+        draw_bg +: {
             gradient_border_horizontal: 0.0
             gradient_fill_horizontal: 1.0
 
-            color: (THEME_COLOR_U_HIDDEN)
-            color_hover: (THEME_COLOR_OUTSET_1_HOVER)
-            color_active: (THEME_COLOR_OUTSET_1_ACTIVE)
-            color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
+            color: theme.color_u_hidden
+            color_hover: theme.color_outset_1_hover
+            color_active: theme.color_outset_1_active
+            color_disabled: theme.color_outset_1_disabled
 
-            color_2: (THEME_COLOR_U_HIDDEN)
-            color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
-            color_2_active: (THEME_COLOR_OUTSET_2_ACTIVE)
-            color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
+            color_2: theme.color_u_hidden
+            color_2_hover: theme.color_outset_2_hover
+            color_2_active: theme.color_outset_2_active
+            color_2_disabled: theme.color_outset_2_disabled
         }
     }
 
-    PopupMenuItemGradientY = <PopupMenuItemGradientX> {
-        draw_bg: {
+    mod.widgets.PopupMenuItemGradientY = mod.widgets.PopupMenuItemGradientX{
+        draw_bg +: {
             gradient_border_horizontal: 0.0
             gradient_fill_horizontal: 0.0
         }
     }
 
-    pub PopupMenuFlat = <PopupMenuBase> {
-        width: 150., height: Fit,
-        flow: Down,
-        padding: <THEME_MSPACE_1> {}
+    mod.widgets.PopupMenuFlat = set_type_default() do mod.widgets.PopupMenuBase{
+        width: 150.
+        height: Fit
+        flow: Flow.Down
+        padding: theme.mspace_1
 
-        menu_item: <PopupMenuItem> {}
+        menu_item: mod.widgets.PopupMenuItem{}
 
-        draw_bg: {
-            uniform border_size: (THEME_BEVELING)
-            uniform gradient_border_horizontal: 0.0
-            uniform gradient_fill_horizontal: 0.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
+        draw_bg +: {
+            border_size: uniform(theme.beveling)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
+            border_radius: uniform(theme.corner_radius)
 
-            uniform color: (THEME_COLOR_FG_APP)
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color: (THEME_COLOR_BEVEL)
-            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_dither: 1.0
+            color: uniform(theme.color_fg_app)
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            border_color: uniform(theme.color_bevel)
+            border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_dither: uniform(1.0)
 
-            uniform gradient_fill_dir: 0.0
-            uniform gradient_border_dir: 0.0
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let color_2 = self.color;
-                let border_color_2 = self.border_color;
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
-                }
-
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2;
-                }
+                let color_2 = if self.color_2.x > -0.5 self.color_2 else self.color
+                let border_color_2 = if self.border_color_2.x > -0.5 self.border_color_2 else self.border_color
 
                 let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
                 )
 
                 let gradient_border = vec2(
-                    self.pos.x + dither,
+                    self.pos.x + dither
                     self.pos.y + dither
                 )
 
-                let gradient_border_dir = gradient_border.y;
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = gradient_border.x;
-                }
+                let gradient_border_dir = if self.gradient_border_horizontal > 0.5 gradient_border.x else gradient_border.y
 
                 let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.x - self.border_size * 2.
                     self.rect_size.y - self.border_size * 2.
-                );
+                )
 
                 let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.x / sz_inner_px.x
                     self.rect_size.y / sz_inner_px.y
-                );
+                )
 
                 let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
+                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
                     self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                let gradient_fill_dir = gradient_fill.y;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = gradient_fill.x;
-                }
+                let gradient_fill_dir = if self.gradient_fill_horizontal > 0.5 gradient_fill.x else gradient_fill.y
 
                 sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
                     self.border_radius
                 )
 
-                sdf.fill_keep(mix(self.color, color_2, gradient_fill_dir));
+                sdf.fill_keep(mix(self.color, color_2, gradient_fill_dir))
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(
-                            self.border_color,
-                            border_color_2,
-                            gradient_border_dir
-                        ), self.border_size
-                    );
+                        mix(self.border_color, border_color_2, gradient_border_dir)
+                        self.border_size
+                    )
                 }
 
-                return sdf.result;
+                return sdf.result
             }
         }
     }
 
-    pub PopupMenu = <PopupMenuFlat> {
-        menu_item: <PopupMenuItem> {}
-        draw_bg: {
-            border_color: (THEME_COLOR_BEVEL_OUTSET_1)
-            border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
+    mod.widgets.PopupMenu = mod.widgets.PopupMenuFlat{
+        menu_item: mod.widgets.PopupMenuItem{}
+        draw_bg +: {
+            border_color: theme.color_bevel_outset_1
+            border_color_2: theme.color_bevel_outset_2
         }
     }
 
-    pub PopupMenuGradientY = <PopupMenu> {
-        menu_item: <PopupMenuItemGradientY> {}
+    mod.widgets.PopupMenuGradientY = mod.widgets.PopupMenu{
+        menu_item: mod.widgets.PopupMenuItemGradientY{}
 
-        draw_bg: {
-            color: (THEME_COLOR_FG_APP)
-            color_2: (THEME_COLOR_FG_APP * 1.2)
+        draw_bg +: {
+            color: theme.color_fg_app
+            color_2: theme.color_fg_app * 1.2
         }
     }
 
-    pub PopupMenuGradientX = <PopupMenuGradientY> {
-        menu_item: <PopupMenuItemGradientY> {}
+    mod.widgets.PopupMenuGradientX = mod.widgets.PopupMenuGradientY{
+        menu_item: mod.widgets.PopupMenuItemGradientY{}
 
-        draw_bg: {
+        draw_bg +: {
             gradient_border_horizontal: 0.0
             gradient_fill_horizontal: 1.0
         }
     }
-
-
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook, Animator)]
 pub struct PopupMenuItem {
+    #[source]
+    source: ScriptObjectRef,
+
     #[live]
     draw_bg: DrawQuad,
     #[live]
@@ -424,7 +367,7 @@ pub struct PopupMenuItem {
 
     #[layout]
     layout: Layout,
-    #[animator]
+    #[apply_default]
     animator: Animator,
     #[walk]
     walk: Walk,
@@ -442,12 +385,15 @@ pub struct PopupMenuItem {
     active: f32,
 }
 
-#[derive(Live, LiveRegister)]
+#[derive(Script)]
 pub struct PopupMenu {
+    #[source]
+    source: ScriptObjectRef,
+
     #[live]
     draw_list: DrawList2d,
     #[live]
-    menu_item: Option<LivePtr>,
+    menu_item: ScriptValue,
 
     #[live]
     draw_bg: DrawQuad,
@@ -468,14 +414,21 @@ pub struct PopupMenu {
     count: usize,
 }
 
-impl LiveHook for PopupMenu {
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, live_id!(list_node).as_field()) {
+impl ScriptHook for PopupMenu {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        // Apply menu_item template to existing items
+        if !self.menu_item.is_nil() {
             for (_, node) in self.menu_items.iter_mut() {
-                node.apply(cx, apply, index, nodes);
+                node.script_apply(vm, apply, scope, self.menu_item);
             }
         }
-        self.draw_list.redraw(cx);
+        self.draw_list.redraw(vm.cx_mut());
     }
 }
 
@@ -486,10 +439,11 @@ pub enum PopupMenuItemAction {
     None,
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Default)]
 pub enum PopupMenuAction {
     WasSweeped(PopupMenuItemId),
     WasSelected(PopupMenuItemId),
+    #[default]
     None,
 }
 
@@ -533,13 +487,7 @@ impl PopupMenuItem {
             }
             Hit::FingerUp(se) if se.is_primary_hit() => {
                 if !se.is_sweep {
-                    //if se.was_tap() { // ok this only goes for the first time
-                    //    dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
-                    //    println!("MIGHTBESELECTED");
-                    // }
-                    //else {
                     dispatch_action(cx, PopupMenuItemAction::WasSelected);
-                    //}
                 } else {
                     self.animator_play(cx, ids!(hover.off));
                     self.animator_play(cx, ids!(active.off));
@@ -561,24 +509,14 @@ impl PopupMenu {
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
 
-        // ok so. this thing needs a complete position reset
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.count = 0;
     }
 
     pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d) {
-        // ok so.
-        /*
-        let menu_rect1 = cx.turtle().padded_rect_used();
-        let pass_rect = Rect {pos: dvec2(0.0, 0.0), size: cx.current_pass_size()};
-        let menu_rect2 = pass_rect.add_margin(-dvec2(10.0, 10.0)).contain(menu_rect1);
-        */
-        //cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
-        //let menu_rect1 = cx.turtle().padded_rect_used();
         self.draw_bg.end(cx);
 
         cx.end_pass_sized_turtle_with_shift(shift_area, shift);
-        //cx.debug.rect_r(self.draw_bg.area().get_rect(cx));
         self.draw_list.end(cx);
         self.menu_items.retain_visible();
         if let Some(init_select_item) = self.init_select_item.take() {
@@ -594,9 +532,9 @@ impl PopupMenu {
         self.count += 1;
 
         let menu_item = self.menu_item;
-        let menu_item = self
-            .menu_items
-            .get_or_insert(cx, item_id, |cx| PopupMenuItem::new_from_ptr(cx, menu_item));
+        let menu_item = self.menu_items.get_or_insert(cx, item_id, |cx| {
+            cx.with_vm(|vm| PopupMenuItem::script_from_value(vm, menu_item))
+        });
         menu_item.draw_item(cx, label);
     }
 

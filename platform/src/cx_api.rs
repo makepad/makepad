@@ -1,5 +1,4 @@
 use crate::file_dialogs::FileDialog;
-use crate::ime::TextInputConfig;
 
 use {
     crate::{
@@ -7,23 +6,21 @@ use {
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType, XrCapabilities},
         draw_list::DrawListId,
+        draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
         event::xr::XrAnchor,
-        event::{
-            keyboard::CharOffset, DragItem, HttpRequest, NextFrame, Timer, Trigger, VideoSource,
-        },
+        event::{DragItem, HttpRequest, NextFrame, Timer, Trigger, VideoSource},
         gpu_info::GpuInfo,
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
-        makepad_live_compiler::LiveId,
+        makepad_live_id::*,
         makepad_math::{Rect, Vec2d},
-        pass::{CxPassParent, CxPassRect, PassId},
+        makepad_script::value::ScriptHandle,
         texture::Texture,
         window::WindowId,
     },
     std::{
         any::{Any, TypeId},
-        ops::Range,
         rc::Rc,
     },
 };
@@ -84,16 +81,8 @@ pub enum CxOsOp {
     SetTopmost(WindowId, bool),
     ShowInDock(bool),
 
-    ShowTextIME(Area, Vec2d, TextInputConfig),
+    ShowTextIME(Area, Vec2d),
     HideTextIME,
-    /// Synchronize IME with current text state
-    /// Used when widget changes text programmatically (clear, paste, undo)
-    /// Platform converts to native format (Android: updateSelection, iOS: update positions)
-    SyncImeState {
-        text: String,
-        selection: Range<CharOffset>,
-        composition: Option<Range<CharOffset>>,
-    },
     SetCursor(MouseCursor),
     StartTimer {
         timer_id: u64,
@@ -181,7 +170,6 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
             Self::HideTextIME => write!(f, "HideTextIME"),
-            Self::SyncImeState { .. } => write!(f, "SyncImeState"),
             Self::SetCursor(..) => write!(f, "SetCursor"),
             Self::StartTimer { .. } => write!(f, "StartTimer"),
             Self::StopTimer(..) => write!(f, "StopTimer"),
@@ -261,6 +249,12 @@ impl Cx {
         }
         Err(format!("Dependency not loaded {}", path))
     }
+
+    /// Get loaded resource data by ScriptHandle
+    pub fn get_resource(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
+        self.script_data.resources.get_data(handle)
+    }
+
     pub fn null_texture(&self) -> Texture {
         self.null_texture.clone()
     }
@@ -330,53 +324,20 @@ impl Cx {
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
-        self.show_text_ime_with_config(area, pos, TextInputConfig::default());
-    }
-
-    pub fn show_text_ime_with_config(&mut self, area: Area, pos: Vec2d, config: TextInputConfig) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
-            self.platform_ops
-                .push(CxOsOp::ShowTextIME(area, pos, config));
+            self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
         }
     }
 
     pub fn hide_text_ime(&mut self) {
-        self.keyboard.set_text_ime_dismissed();
+        self.keyboard.reset_text_ime_dismissed();
         self.platform_ops.push(CxOsOp::HideTextIME);
-    }
-
-    /// Synchronize IME with current text state
-    /// Call this when widget changes text programmatically (clear, paste, undo)
-    /// Platform will update native IME state accordingly
-    pub fn sync_ime_state(
-        &mut self,
-        text: String,
-        selection: Range<CharOffset>,
-        composition: Option<Range<CharOffset>>,
-    ) {
-        self.platform_ops.push(CxOsOp::SyncImeState {
-            text,
-            selection,
-            composition,
-        });
     }
 
     pub fn text_ime_was_dismissed(&mut self) {
         self.keyboard.set_text_ime_dismissed();
         self.platform_ops.push(CxOsOp::HideTextIME);
-    }
-
-    /// Returns true if the text IME was just dismissed (keyboard closed).
-    /// Used to prevent unwanted focus changes when keyboard closes.
-    pub fn keyboard_text_ime_dismissed(&self) -> bool {
-        self.keyboard.text_ime_dismissed
-    }
-
-    /// Clears the text IME dismissed flag.
-    /// Should be called after handling the dismissed state.
-    pub fn clear_keyboard_text_ime_dismissed(&mut self) {
-        self.keyboard.reset_text_ime_dismissed();
     }
 
     /// Shows the native clipboard actions menu (Copy/Paste/Cut/Select All).
@@ -514,18 +475,18 @@ impl Cx {
 
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {
         if let Some(draw_list_id) = area.draw_list_id() {
-            let pass_id = self.draw_lists[draw_list_id].pass_id.unwrap();
-            return self.get_delegated_dpi_factor(pass_id);
+            let draw_pass_id = self.draw_lists[draw_list_id].draw_pass_id.unwrap();
+            return self.get_delegated_dpi_factor(draw_pass_id);
         }
         return 1.0;
     }
 
-    pub fn get_pass_window_id(&self, pass_id: PassId) -> Option<WindowId> {
-        let mut pass_id_walk = pass_id;
+    pub fn get_pass_window_id(&self, draw_pass_id: DrawPassId) -> Option<WindowId> {
+        let mut pass_id_walk = draw_pass_id;
         for _ in 0..25 {
             match self.passes[pass_id_walk].parent {
-                CxPassParent::Window(window_id) => return Some(window_id),
-                CxPassParent::Pass(next_pass_id) => {
+                CxDrawPassParent::Window(window_id) => return Some(window_id),
+                CxDrawPassParent::DrawPass(next_pass_id) => {
                     pass_id_walk = next_pass_id;
                 }
                 _ => {
@@ -536,17 +497,17 @@ impl Cx {
         None
     }
 
-    pub fn get_delegated_dpi_factor(&mut self, pass_id: PassId) -> f64 {
-        let mut pass_id_walk = pass_id;
+    pub fn get_delegated_dpi_factor(&mut self, draw_pass_id: DrawPassId) -> f64 {
+        let mut pass_id_walk = draw_pass_id;
         for _ in 0..25 {
             match self.passes[pass_id_walk].parent {
-                CxPassParent::Window(window_id) => {
+                CxDrawPassParent::Window(window_id) => {
                     if !self.windows[window_id].is_created {
                         return 1.0;
                     }
                     return self.windows[window_id].window_geom.dpi_factor;
                 }
-                CxPassParent::Pass(next_pass_id) => {
+                CxDrawPassParent::DrawPass(next_pass_id) => {
                     pass_id_walk = next_pass_id;
                 }
                 _ => {
@@ -557,14 +518,14 @@ impl Cx {
         1.0
     }
 
-    pub fn redraw_pass_and_parent_passes(&mut self, pass_id: PassId) {
-        let mut walk_pass_id = pass_id;
+    pub fn redraw_pass_and_parent_passes(&mut self, draw_pass_id: DrawPassId) {
+        let mut walk_pass_id = draw_pass_id;
         loop {
             if let Some(main_list_id) = self.passes[walk_pass_id].main_draw_list_id {
                 self.redraw_list_and_children(main_list_id);
             }
             match self.passes[walk_pass_id].parent.clone() {
-                CxPassParent::Pass(next_pass_id) => {
+                CxDrawPassParent::DrawPass(next_pass_id) => {
                     walk_pass_id = next_pass_id;
                 }
                 _ => {
@@ -574,30 +535,30 @@ impl Cx {
         }
     }
 
-    pub fn get_pass_rect(&self, pass_id: PassId, dpi: f64) -> Option<Rect> {
-        match self.passes[pass_id].pass_rect {
-            Some(CxPassRect::Area(area)) => {
+    pub fn get_pass_rect(&self, draw_pass_id: DrawPassId, dpi: f64) -> Option<Rect> {
+        match self.passes[draw_pass_id].pass_rect {
+            Some(CxDrawPassRect::Area(area)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: (rect.pos * dpi).floor() / dpi,
                     size: (rect.size * dpi).ceil() / dpi,
                 })
             }
-            Some(CxPassRect::AreaOrigin(area, origin)) => {
+            Some(CxDrawPassRect::AreaOrigin(area, origin)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: origin,
                     size: (rect.size * dpi).ceil() / dpi,
                 })
             }
-            /*Some(CxPassRect::ScaledArea(area, scale)) => {
+            /*Some(CxDrawPassRect::ScaledArea(area, scale)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: (rect.pos * dpi).floor() / dpi,
                     size: scale * (rect.size * dpi).ceil() / dpi,
                 })
             }*/
-            Some(CxPassRect::Size(size)) => Some(Rect {
+            Some(CxDrawPassRect::Size(size)) => Some(Rect {
                 pos: Vec2d::default(),
                 size: (size * dpi).ceil() / dpi,
             }),
@@ -605,36 +566,38 @@ impl Cx {
         }
     }
 
-    pub fn get_pass_name(&self, pass_id: PassId) -> &str {
-        &self.passes[pass_id].debug_name
+    pub fn get_pass_name(&self, draw_pass_id: DrawPassId) -> &str {
+        &self.passes[draw_pass_id].debug_name
     }
 
-    pub fn repaint_pass(&mut self, pass_id: PassId) {
-        let cxpass = &mut self.passes[pass_id];
+    pub fn repaint_pass(&mut self, draw_pass_id: DrawPassId) {
+        let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
     }
 
-    pub fn repaint_pass_and_child_passes(&mut self, pass_id: PassId) {
-        let cxpass = &mut self.passes[pass_id];
+    pub fn repaint_pass_and_child_passes(&mut self, draw_pass_id: DrawPassId) {
+        let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
         for sub_pass_id in self.passes.id_iter() {
-            if let CxPassParent::Pass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
-                if dep_pass_id == pass_id {
+            if let CxDrawPassParent::DrawPass(dep_pass_id) = self.passes[sub_pass_id].parent.clone()
+            {
+                if dep_pass_id == draw_pass_id {
                     self.repaint_pass_and_child_passes(sub_pass_id);
                 }
             }
         }
     }
 
-    pub fn redraw_pass_and_child_passes(&mut self, pass_id: PassId) {
-        let cxpass = &self.passes[pass_id];
+    pub fn redraw_pass_and_child_passes(&mut self, draw_pass_id: DrawPassId) {
+        let cxpass = &self.passes[draw_pass_id];
         if let Some(main_list_id) = cxpass.main_draw_list_id {
             self.redraw_list_and_children(main_list_id);
         }
         // lets redraw all subpasses as well
         for sub_pass_id in self.passes.id_iter() {
-            if let CxPassParent::Pass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
-                if dep_pass_id == pass_id {
+            if let CxDrawPassParent::DrawPass(dep_pass_id) = self.passes[sub_pass_id].parent.clone()
+            {
+                if dep_pass_id == draw_pass_id {
                     self.redraw_pass_and_child_passes(sub_pass_id);
                 }
             }
@@ -886,7 +849,7 @@ impl Cx {
 
 #[macro_export]
 macro_rules! register_component_factory {
-    ( $ cx: ident, $ registry: ident, $ ty: ty, $ factory: ident) => {
+    ( $ cx: expr, $ registry: ident, $ ty: ty, $ factory: ident) => {
         let module_id = LiveModuleId::from_str(&module_path!()).unwrap();
         if let Some((reg, _)) = $cx
             .live_registry

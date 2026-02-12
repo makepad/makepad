@@ -3,21 +3,20 @@ use {
         action::ActionsBuf,
         action::{ActionSend, ACTION_SENDER_GLOBAL},
         area::Area,
+        component::ComponentRegistries,
         cx_api::CxOsOp,
         debug::Debug,
         display_context::DisplayContext,
         draw_list::CxDrawListPool,
         draw_matrix::CxDrawMatrixPool,
+        draw_pass::CxDrawPassPool,
         draw_shader::CxDrawShaders,
         event::{CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger},
-        geometry::{CxGeometryPool, Geometry, GeometryFingerprint},
-        //script::script::CxScriptData,
+        geometry::CxGeometryPool,
         gpu_info::GpuInfo,
-        makepad_live_compiler::{LiveFileChange, LiveRegistry},
-        makepad_shader_compiler::ShaderRegistry,
         os::CxOs,
-        pass::CxPassPool,
         performance_stats::PerformanceStats,
+        script::script::CxScriptData,
         studio::StudioScreenshotRequest,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         web_socket::WebSocket,
@@ -27,12 +26,12 @@ use {
         executor,
         executor::{Executor, Spawner},
     },
+    makepad_script::{ScriptVm, ScriptVmBase},
     std::{
         any::{Any, TypeId},
         cell::RefCell,
         collections::{HashMap, HashSet},
         rc::Rc,
-        rc::Weak,
     },
 };
 
@@ -40,6 +39,12 @@ use {
 //pub use makepad_shader_compiler::makepad_math::*;
 
 pub struct Cx {
+    pub script_vm: Option<Box<ScriptVmBase>>,
+    pub script_data: CxScriptData,
+    pub package_root: Option<String>,
+
+    pub debug_trace_active: bool,
+
     pub(crate) os_type: OsType,
     pub in_makepad_studio: bool,
     pub demo_time_repaint: bool,
@@ -48,12 +53,11 @@ pub struct Cx {
     pub(crate) cpu_cores: usize,
     pub null_texture: Texture,
     pub windows: CxWindowPool,
-    pub passes: CxPassPool,
+    pub passes: CxDrawPassPool,
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     pub(crate) geometries: CxGeometryPool,
-    pub(crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry>>,
 
     pub draw_shaders: CxDrawShaders,
 
@@ -82,21 +86,19 @@ pub struct Cx {
     pub(crate) dependencies: HashMap<String, CxDependency>,
 
     pub(crate) triggers: HashMap<Area, Vec<Trigger>>,
-
-    pub live_registry: Rc<RefCell<LiveRegistry>>,
-
-    pub(crate) live_file_change_receiver: std::sync::mpsc::Receiver<Vec<LiveFileChange>>,
-    pub(crate) live_file_change_sender: std::sync::mpsc::Sender<Vec<LiveFileChange>>,
-
+    /*
+    pub (crate) live_file_change_receiver: std::sync::mpsc::Receiver<Vec<LiveFileChange>>,
+    pub (crate) live_file_change_sender: std::sync::mpsc::Sender<Vec<LiveFileChange >>,
+    */
     pub(crate) action_receiver: std::sync::mpsc::Receiver<ActionSend>,
-
-    pub shader_registry: ShaderRegistry,
 
     pub os: CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
     pub(crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
 
     pub(crate) globals: Vec<(TypeId, Box<dyn Any>)>,
+
+    pub components: ComponentRegistries,
 
     pub(crate) self_ref: Option<Rc<RefCell<Cx>>>,
     pub(crate) in_draw_event: bool,
@@ -114,6 +116,7 @@ pub struct Cx {
     pub(crate) studio_http: String,
 
     pub performance_stats: PerformanceStats,
+    #[allow(unused)]
     pub(crate) screenshot_requests: Vec<StudioScreenshotRequest>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
@@ -123,6 +126,8 @@ pub struct Cx {
     /// This is primarily used when adaptive views change their active variant,
     /// as the widget hierarchy changes require parent views to rebuild their widget queries.
     pub widget_query_invalidation_event: Option<u64>,
+
+    pub widget_tree_ptr: *mut (),
 }
 
 #[derive(Clone)]
@@ -255,13 +260,22 @@ impl Cx {
         });
 
         let (executor, spawner) = executor::new_executor_and_spawner();
-        let (live_file_change_sender, live_file_change_receiver) = std::sync::mpsc::channel();
+        //let (live_file_change_sender, live_file_change_receiver) = std::sync::mpsc::channel();
         let (action_sender, action_receiver) = std::sync::mpsc::channel();
         if let Ok(mut sender) = ACTION_SENDER_GLOBAL.lock() {
             *sender = Some(action_sender);
         }
 
+        let mut vm = ScriptVm {
+            host: &mut 0,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+
+        //todo!();
+        crate::script::script_mod(&mut vm);
+
         Self {
+            package_root: None,
             demo_time_repaint: false,
             null_texture,
             cpu_cores: 8,
@@ -277,7 +291,6 @@ impl Cx {
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
-            geometries_refs: Default::default(),
 
             draw_shaders: Default::default(),
 
@@ -307,13 +320,7 @@ impl Cx {
 
             triggers: Default::default(),
 
-            live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
-
-            live_file_change_receiver,
-            live_file_change_sender,
             action_receiver,
-
-            shader_registry: ShaderRegistry::new(true),
 
             os: CxOs::default(),
 
@@ -321,7 +328,11 @@ impl Cx {
 
             debug: Default::default(),
 
+            debug_trace_active: false,
+
             globals: Default::default(),
+
+            components: ComponentRegistries::new(),
 
             executor: Some(executor),
             spawner,
@@ -332,6 +343,10 @@ impl Cx {
             display_context: Default::default(),
 
             widget_query_invalidation_event: None,
+            widget_tree_ptr: std::ptr::null_mut(),
+
+            script_vm: Some(vm.bx),
+            script_data: Default::default(),
         }
     }
 }

@@ -136,7 +136,7 @@ impl LookupFlags {
     #[inline] pub fn ignore_marks(self) -> bool { self.0 & 0x0008 != 0 }
     #[inline] pub fn ignore_flags(self) -> bool { self.0 & 0x000E != 0 }
     #[inline] pub fn use_mark_filtering_set(self) -> bool { self.0 & 0x0010 != 0 }
-    #[inline] pub fn mark_attachment_type(self) -> u8 { (self.0 & 0xFF00) as u8 }
+    #[inline] pub fn mark_attachment_type(self) -> u8 { ((self.0 & 0xFF00) >> 8) as u8 }
 }
 
 impl FromData for LookupFlags {

@@ -3,12 +3,12 @@ use {
     crate::{
         cx::{Cx, OsType},
         draw_list::DrawListId,
+        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
         event::{Event, TextureHandleReadyEvent},
         makepad_live_id::*,
         makepad_math::{Vec2d, Vec4f},
         makepad_shader_compiler::generate_glsl,
-        pass::{PassClearColor, PassClearDepth, PassId},
         texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated},
     },
     gl_sys::LibGl,
@@ -23,7 +23,7 @@ use {
 impl Cx {
     pub(crate) fn render_view(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
@@ -47,7 +47,7 @@ impl Cx {
                 .kind
                 .sub_list()
             {
-                self.render_view(pass_id, sub_list_id, zbias, zbias_step);
+                self.render_view(draw_pass_id, sub_list_id, zbias, zbias_step);
             } else {
                 let gl = self.os.gl();
 
@@ -70,7 +70,7 @@ impl Cx {
                 }
                 let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
 
-                let shader_variant = self.passes[pass_id].os.shader_variant;
+                let shader_variant = self.passes[draw_pass_id].os.shader_variant;
 
                 if shp.gl_shader[shader_variant].is_none() {
                     shp.gl_shader[shader_variant] = Some(GlShader::new(
@@ -129,11 +129,11 @@ impl Cx {
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                     #[cfg(use_gles_3)]
-                    if draw_call.user_uniforms.len() != 0 {
+                    if draw_call.draw_call_uniforms.len() != 0 {
                         draw_item
                             .os
-                            .user_uniforms
-                            .update_uniform_buffer(gl, &mut draw_call.user_uniforms);
+                            .draw_call_uniforms
+                            .update_uniform_buffer(gl, &mut draw_call.draw_call_uniforms);
                     }
                 }
 
@@ -222,17 +222,17 @@ impl Cx {
                     {
                         shgl.uniforms
                             .pass_uniforms_binding
-                            .bind_buffer(gl, &self.passes[pass_id].os.pass_uniforms);
+                            .bind_buffer(gl, &self.passes[draw_pass_id].os.pass_uniforms);
                         shgl.uniforms
                             .draw_list_uniforms_binding
                             .bind_buffer(gl, &draw_list.os.draw_list_uniforms);
                         shgl.uniforms
                             .draw_call_uniforms_binding
                             .bind_buffer(gl, &draw_item.os.draw_call_uniforms);
-                        if draw_call.user_uniforms.len() != 0 {
+                        if draw_call.draw_call_uniforms.len() != 0 {
                             shgl.uniforms
                                 .user_uniforms_binding
-                                .bind_buffer(gl, &draw_item.os.user_uniforms);
+                                .bind_buffer(gl, &draw_item.os.draw_call_uniforms);
                         }
                         shgl.uniforms
                             .live_uniforms_binding
@@ -240,7 +240,7 @@ impl Cx {
                     }
                     #[cfg(not(use_gles_3))]
                     {
-                        let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
+                        let pass_uniforms = self.passes[draw_pass_id].pass_uniforms.as_slice();
                         let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                         let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
                         GlShader::set_uniform_array(
@@ -260,8 +260,8 @@ impl Cx {
                         );
                         GlShader::set_uniform_array(
                             gl,
-                            &shgl.uniforms.user_uniforms,
-                            &draw_call.user_uniforms,
+                            &shgl.uniforms.draw_call_uniforms,
+                            &draw_call.draw_call_uniforms,
                         );
                     }
 
@@ -356,10 +356,10 @@ impl Cx {
         }
     }
 
-    pub fn setup_render_pass(&mut self, pass_id: PassId) -> Option<(Vec2d, f64)> {
-        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
-        let pass = &mut self.passes[pass_id];
+    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId) -> Option<(Vec2d, f64)> {
+        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+        let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+        let pass = &mut self.passes[draw_pass_id];
         pass.paint_dirty = false;
 
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
@@ -379,12 +379,12 @@ impl Cx {
 
     pub fn draw_pass_to_texture(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         override_pass_texture: Option<&Texture>,
     ) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        let (pass_size, dpi_factor) = if let Some(pz) = self.setup_render_pass(pass_id) {
+        let (pass_size, dpi_factor) = if let Some(pz) = self.setup_render_pass(draw_pass_id) {
             pz
         } else {
             return;
@@ -395,11 +395,11 @@ impl Cx {
         let mut clear_flags = 0;
         let gl = self.os.gl();
         // make a framebuffer
-        if self.passes[pass_id].os.gl_framebuffer.is_none() {
+        if self.passes[draw_pass_id].os.gl_framebuffer.is_none() {
             unsafe {
                 let mut gl_framebuffer = std::mem::MaybeUninit::uninit();
                 (gl.glGenFramebuffers)(1, gl_framebuffer.as_mut_ptr());
-                self.passes[pass_id].os.gl_framebuffer = Some(gl_framebuffer.assume_init());
+                self.passes[draw_pass_id].os.gl_framebuffer = Some(gl_framebuffer.assume_init());
             }
         }
 
@@ -407,23 +407,23 @@ impl Cx {
         unsafe {
             (gl.glBindFramebuffer)(
                 gl_sys::FRAMEBUFFER,
-                self.passes[pass_id].os.gl_framebuffer.unwrap(),
+                self.passes[draw_pass_id].os.gl_framebuffer.unwrap(),
             );
         }
 
         let color_textures_from_fb_texture = override_pass_texture.map(|texture| {
-            [crate::pass::CxPassColorTexture {
-                clear_color: PassClearColor::ClearWith(self.passes[pass_id].clear_color),
+            [crate::draw_pass::CxDrawPassColorTexture {
+                clear_color: DrawPassClearColor::ClearWith(self.passes[draw_pass_id].clear_color),
                 texture: texture.clone(),
             }]
         });
         let color_textures = color_textures_from_fb_texture
             .as_ref()
-            .map_or(&self.passes[pass_id].color_textures[..], |xs| &xs[..]);
+            .map_or(&self.passes[draw_pass_id].color_textures[..], |xs| &xs[..]);
 
         for (index, color_texture) in color_textures.iter().enumerate() {
             match color_texture.clear_color {
-                PassClearColor::InitWith(_clear_color) => {
+                DrawPassClearColor::InitWith(_clear_color) => {
                     let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                     let size = dpi_factor * pass_size;
                     cxtexture.update_render_target(gl, size.x as usize, size.y as usize);
@@ -432,7 +432,7 @@ impl Cx {
                         clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                     }
                 }
-                PassClearColor::ClearWith(_clear_color) => {
+                DrawPassClearColor::ClearWith(_clear_color) => {
                     let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                     let size = dpi_factor * pass_size;
                     cxtexture.update_render_target(gl, size.x as usize, size.y as usize);
@@ -457,9 +457,9 @@ impl Cx {
         }
 
         // attach/clear depth buffers, if any
-        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
-            match self.passes[pass_id].clear_depth {
-                PassClearDepth::InitWith(_clear_depth) => {
+        if let Some(depth_texture) = &self.passes[draw_pass_id].depth_texture {
+            match self.passes[draw_pass_id].clear_depth {
+                DrawPassClearDepth::InitWith(_clear_depth) => {
                     let cxtexture = &mut self.textures[depth_texture.texture_id()];
                     let size = dpi_factor * pass_size;
                     cxtexture.update_depth_stencil(gl, size.x as usize, size.y as usize);
@@ -468,7 +468,7 @@ impl Cx {
                         clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
                     }
                 }
-                PassClearDepth::ClearWith(_clear_depth) => {
+                DrawPassClearDepth::ClearWith(_clear_depth) => {
                     let cxtexture = &mut self.textures[depth_texture.texture_id()];
                     let size = dpi_factor * pass_size;
                     cxtexture.update_depth_stencil(gl, size.x as usize, size.y as usize);
@@ -478,7 +478,7 @@ impl Cx {
             }
         } else {
             /* unsafe { // BUGFIX. we have to create a depthbuffer for rtt without depthbuffer use otherwise it fails if there is another pass with depth
-                if self.passes[pass_id].os.gl_bugfix_depthbuffer.is_none() {
+                if self.passes[draw_pass_id].os.gl_bugfix_depthbuffer.is_none() {
                     let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
                     (gl.glGenRenderbuffers)(1, gl_renderbuf.as_mut_ptr());
                     let gl_renderbuffer = gl_renderbuf.assume_init();
@@ -490,12 +490,12 @@ impl Cx {
                         (pass_size.y * dpi_factor) as i32
                     );
                     (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, 0);
-                    self.passes[pass_id].os.gl_bugfix_depthbuffer = Some(gl_renderbuffer);
+                    self.passes[draw_pass_id].os.gl_bugfix_depthbuffer = Some(gl_renderbuffer);
                 }
                 clear_depth = 1.0;
                 clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
                 (gl.glDisable)(gl_sys::DEPTH_TEST);
-                (gl.glFramebufferRenderbuffer)(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT, gl_sys::RENDERBUFFER, self.passes[pass_id].os.gl_bugfix_depthbuffer.unwrap());
+                (gl.glFramebufferRenderbuffer)(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT, gl_sys::RENDERBUFFER, self.passes[draw_pass_id].os.gl_bugfix_depthbuffer.unwrap());
             }*/
         }
 
@@ -536,9 +536,9 @@ impl Cx {
         Self::set_default_depth_and_blend_mode(self.os.gl());
 
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
 
-        self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step);
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
 
         unsafe {
             (self.os.gl().glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
@@ -625,7 +625,7 @@ pub struct GlShaderUniforms {
     pub pass_uniforms: OpenglUniform,
     pub draw_list_uniforms: OpenglUniform,
     pub draw_call_uniforms: OpenglUniform,
-    pub user_uniforms: OpenglUniform,
+    pub draw_call_uniforms: OpenglUniform,
     pub live_uniforms: OpenglUniform,
     pub const_table_uniform: OpenglUniform,
 }
@@ -636,7 +636,7 @@ impl GlShaderUniforms {
             pass_uniforms: GlShader::opengl_get_uniform(gl, program, "pass_table"),
             draw_list_uniforms: GlShader::opengl_get_uniform(gl, program, "draw_list_table"),
             draw_call_uniforms: GlShader::opengl_get_uniform(gl, program, "draw_call_table"),
-            user_uniforms: GlShader::opengl_get_uniform(gl, program, "user_table"),
+            draw_call_uniforms: GlShader::opengl_get_uniform(gl, program, "user_table"),
             live_uniforms: GlShader::opengl_get_uniform(gl, program, "live_table"),
             const_table_uniform: GlShader::opengl_get_uniform(gl, program, "const_table"),
         }
@@ -1389,7 +1389,7 @@ impl CxOsDrawCallVao {
 #[derive(Default, Clone)]
 pub struct CxOsDrawCall {
     pub draw_call_uniforms: OpenglBuffer,
-    pub user_uniforms: OpenglBuffer,
+    pub draw_call_uniforms: OpenglBuffer,
     pub inst_vb: OpenglBuffer,
     pub vao: Option<CxOsDrawCallVao>,
 }

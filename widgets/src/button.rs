@@ -1,359 +1,252 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    makepad_script::ScriptFnRef,
+    widget::*,
+    widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
+};
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use link::shaders::*;
+use crate::makepad_draw::DrawSvg;
 
-    pub ButtonBase = {{Button}} {}
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub ButtonFlat = <ButtonBase> {
+    mod.widgets.ButtonBase = #(Button::register_widget(vm))
+
+    mod.widgets.ButtonFlat = set_type_default() do mod.widgets.ButtonBase{
         text: "Button"
-        width: Fit, height: Fit,
-        spacing: (THEME_SPACE_2),
-        align: {x: 0.5, y: 0.5},
-        padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
-        margin: <THEME_MSPACE_V_1> {}
-        label_walk: { width: Fit, height: Fit },
+        width: Fit
+        height: Fit
+        spacing: theme.space_2
+        align: Center
+        padding: theme.mspace_1{left: theme.space_2, right: theme.space_2}
+        margin: theme.mspace_v_1
+        label_walk: Walk{width: Fit, height: Fit}
 
-        draw_text: {
-            instance hover: 0.0,
-            instance down: 0.0,
-            instance focus: 0.0,
-            instance disabled: 0.0
+        draw_text +: {
+            hover: instance(0.0)
+            down: instance(0.0)
+            focus: instance(0.0)
+            disabled: instance(0.0)
 
-            color: (THEME_COLOR_LABEL_INNER)
-            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
-            uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)
-            uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
-            uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+            color: theme.color_label_inner
+            color_hover: uniform(theme.color_label_inner_hover)
+            color_down: uniform(theme.color_label_inner_down)
+            color_focus: uniform(theme.color_label_inner_focus)
+            color_disabled: uniform(theme.color_label_inner_disabled)
 
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
+            text_style: theme.font_regular{
+                font_size: theme.font_size_p
             }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        mix(
-                            mix(self.color, self.color_focus, self.focus),
-                            self.color_hover,
-                            self.hover
-                        ),
-                        self.color_down,
-                        self.down
-                    ),
-                    self.color_disabled,
-                    self.disabled
-                )
+            get_color: fn() {
+                return self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                    .mix(self.color_disabled, self.disabled)
             }
         }
 
-        icon_walk: {
-            width: (THEME_DATA_ICON_WIDTH), height: Fit,
-        }
+        icon_walk: Walk{width: Fit, height: Fit}
 
-        draw_icon: {
-            instance hover: 0.0
-            instance down: 0.0
-            instance focus: 0.0
-            instance disabled: 0.0
+        draw_bg +: {
+            hover: instance(0.0)
+            focus: instance(0.0)
+            down: instance(0.0)
+            disabled: instance(0.0)
 
-            uniform color_dither: 1.0
+            border_size: uniform(theme.beveling)
+            border_radius: uniform(theme.corner_radius)
 
-            uniform gradient_fill_horizontal: 0.
-            uniform color: (THEME_COLOR_LABEL_OUTER)
-            uniform color_hover: (THEME_COLOR_LABEL_OUTER_HOVER)
-            uniform color_down: (THEME_COLOR_LABEL_OUTER_DOWN)
-            uniform color_focus: (THEME_COLOR_LABEL_OUTER_FOCUS)
-            uniform color_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
+            color_dither: uniform(1.0)
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_2_hover: (THEME_COLOR_LABEL_OUTER_HOVER)
-            uniform color_2_down: (THEME_COLOR_LABEL_OUTER_DOWN)
-            uniform color_2_focus: (THEME_COLOR_LABEL_OUTER_FOCUS)
-            uniform color_2_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
+            color: uniform(theme.color_outset)
+            color_hover: uniform(theme.color_outset_hover)
+            color_down: uniform(theme.color_outset_down)
+            color_focus: uniform(theme.color_outset_focus)
+            color_disabled: uniform(theme.color_outset_disabled)
 
-            fn get_color(self) -> vec4 {
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_2_hover: uniform(theme.color_outset_2_hover)
+            color_2_down: uniform(theme.color_outset_2_down)
+            color_2_focus: uniform(theme.color_outset_2_focus)
+            color_2_disabled: uniform(theme.color_outset_2_disabled)
 
-                let color_2 = self.color;
-                let color_2_hover = self.color_hover;
-                let color_2_down = self.color_down;
-                let color_2_focus = self.color_focus;
-                let color_2_disabled = self.color_disabled;
+            border_color: uniform(theme.color_bevel)
+            border_color_hover: uniform(theme.color_bevel_hover)
+            border_color_down: uniform(theme.color_bevel_down)
+            border_color_focus: uniform(theme.color_bevel_focus)
+            border_color_disabled: uniform(theme.color_bevel_disabled)
 
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
-                    color_2_hover = self.color_2_hover;
-                    color_2_down = self.color_2_down;
-                    color_2_focus = self.color_2_focus;
-                    color_2_disabled = self.color_2_disabled;
-                }
+            border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            border_color_2_hover: uniform(theme.color_bevel_outset_2_hover)
+            border_color_2_down: uniform(theme.color_bevel_outset_2_down)
+            border_color_2_focus: uniform(theme.color_bevel_outset_2_focus)
+            border_color_2_disabled: uniform(theme.color_bevel_outset_2_disabled)
 
-                let gradient_fill_dir = self.pos.y + dither;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither;
-                }
-
-                return mix(
-                    mix(
-                        mix(
-                            mix(
-                                mix(self.color, color_2, gradient_fill_dir),
-                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
-                                self.focus
-                            ),
-                            mix(self.color_hover, color_2_hover, gradient_fill_dir),
-                            self.hover
-                        ),
-                        mix(self.color_down, color_2_down, gradient_fill_dir),
-                        self.down
-                    ),
-                    mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
-                    self.disabled
-                )
-            }
-        }
-
-        draw_bg: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance enabled: 1.0
-            instance disabled: 1.0
-
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
-
-            uniform color_dither: 1.0
-            uniform gradient_border_horizontal: 0.0;
-            uniform gradient_fill_horizontal: 0.0;
-
-            uniform color: (THEME_COLOR_OUTSET)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_down: (THEME_COLOR_OUTSET_DOWN)
-            uniform color_focus: (THEME_COLOR_OUTSET_FOCUS)
-            uniform color_disabled: (THEME_COLOR_OUTSET_DISABLED)
-
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
-            uniform color_2_down: (THEME_COLOR_OUTSET_2_DOWN)
-            uniform color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
-            uniform color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
-
-            uniform border_color: (THEME_COLOR_BEVEL)
-            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
-            uniform border_color_down: (THEME_COLOR_BEVEL_DOWN)
-            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
-            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
-
-            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let color_2 = self.color;
-                let color_2_hover = self.color_hover;
-                let color_2_down = self.color_down;
-                let color_2_focus = self.color_focus;
-                let color_2_disabled = self.color_disabled;
-
-                let border_color_2 = self.border_color;
-                let border_color_2_hover = self.border_color_hover;
-                let border_color_2_down = self.border_color_down;
-                let border_color_2_focus = self.border_color_focus;
-                let border_color_2_disabled = self.border_color_disabled;
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
-                    color_2_hover = self.color_2_hover
-                    color_2_down = self.color_2_down;
-                    color_2_focus = self.color_2_focus;
-                    color_2_disabled = self.color_2_disabled;
-                }
-
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2;
-                    border_color_2_hover = self.border_color_2_hover;
-                    border_color_2_down = self.border_color_2_down;
-                    border_color_2_focus = self.border_color_2_focus;
-                    border_color_2_disabled = self.border_color_2_disabled;
-                }
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
                 let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
                 )
 
-                let gradient_border = vec2(
-                    self.pos.x + dither,
-                    self.pos.y + dither
-                )
-
-                let gradient_border_dir = gradient_border.y;
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = gradient_border.x;
-                }
-
                 let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.x - self.border_size * 2.
                     self.rect_size.y - self.border_size * 2.
-                );
+                )
 
                 let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.x / sz_inner_px.x
                     self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                let gradient_fill_dir = gradient_fill.y;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = gradient_fill.x;
-                }
-
                 sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
                     self.border_radius
                 )
 
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color, color_2, gradient_fill_dir),
-                                    mix(self.color_focus, color_2_focus, gradient_fill_dir),
-                                    self.focus
-                                ),
-                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
-                                self.hover
-                            ),
-                            mix(self.color_down, color_2_down, gradient_fill_dir),
-                            self.down
-                        ),
-                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
-                        self.disabled
-                    )
-                )
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_down = self.color_down
+                let mut color_fill_focus = self.color_focus
+                let mut color_fill_disabled = self.color_disabled
 
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.border_color, border_color_2, gradient_border_dir),
-                                    mix(self.border_color_focus, border_color_2_focus, gradient_border_dir),
-                                    self.focus
-                                ),
-                                mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
-                                self.hover
-                            ),
-                            mix(self.border_color_down, border_color_2_down, gradient_border_dir),
-                            self.down
-                            ),
-                            mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir),
-                            self.disabled
-                        ), self.border_size
-                )
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_fill = vec2(
+                        self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
+                        self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                    )
+                    let dir = if self.gradient_fill_horizontal > 0.5 gradient_fill.x else gradient_fill.y
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
+                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                }
+
+                let mut color_stroke = self.border_color
+                let mut color_stroke_hover = self.border_color_hover
+                let mut color_stroke_down = self.border_color_down
+                let mut color_stroke_focus = self.border_color_focus
+                let mut color_stroke_disabled = self.border_color_disabled
+
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_border = vec2(
+                        self.pos.x + dither
+                        self.pos.y + dither
+                    )
+                    let dir = if self.gradient_border_horizontal > 0.5 gradient_border.x else gradient_border.y
+                    color_stroke = mix(self.border_color, self.border_color_2, dir)
+                    color_stroke_hover = mix(self.border_color_hover, self.border_color_2_hover, dir)
+                    color_stroke_down = mix(self.border_color_down, self.border_color_2_down, dir)
+                    color_stroke_focus = mix(self.border_color_focus, self.border_color_2_focus, dir)
+                    color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
+                }
+
+                let fill = color_fill
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover, self.hover)
+                    .mix(color_fill_down, self.down)
+                    .mix(color_fill_disabled, self.disabled)
+
+                let stroke = color_stroke
+                    .mix(color_stroke_focus, self.focus)
+                    .mix(color_stroke_hover, self.hover)
+                    .mix(color_stroke_down, self.down)
+                    .mix(color_stroke_disabled, self.disabled)
+
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
                 return sdf.result
             }
         }
 
-        animator: {
-            disabled = {
-                default: off,
-                off = {
+        animator: Animator{
+            disabled: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
                         draw_bg: {disabled: 0.0}
                         draw_text: {disabled: 0.0}
-                        draw_icon: {disabled: 0.0}
                     }
                 }
-                on = {
+                on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {disabled: 1.0}
                         draw_text: {disabled: 1.0}
-                        draw_icon: {disabled: 1.0}
                     }
                 }
             }
-            time = {
-                default: off,
-                off = {
+            time: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
-                        //draw_bg: {anim_time: 0.0}
                     }
                 }
-                on = {
-                    from: {all: Loop {duration: 1.0, end:1000000000.0}}
+                on: AnimatorState{
+                    from: {all: Loop {duration: 1.0, end: 1000000000.0}}
                     apply: {
-                        draw_bg: {anim_time: [{time: 0.0, value: 0.0},{time:1.0, value:1.0}]}
+                        draw_bg: {anim_time: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
                     }
                 }
             }
-            hover = {
-                default: off,
-                off = {
+            hover: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {down: 0.0, hover: 0.0}
-                        draw_icon: {down: 0.0, hover: 0.0}
                         draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
 
-                on = {
+                on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
                         down: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {down: 0.0, hover: snap(1.0)}
+                        draw_text: {down: 0.0, hover: snap(1.0)}
                     }
                 }
 
-                down = {
+                down: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {down: snap(1.0), hover: 1.0}
+                        draw_text: {down: snap(1.0), hover: 1.0}
                     }
                 }
             }
-            focus = {
-                default: off
-                off = {
+            focus: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {focus: 0.0}
-                        draw_icon: {focus: 0.0}
                         draw_text: {focus: 0.0}
                     }
                 }
-                on = {
-                    cursor: Arrow,
+                on: AnimatorState{
+                    cursor: MouseCursor.Arrow
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_bg: {focus: 1.0}
-                        draw_icon: {focus: 1.0}
                         draw_text: {focus: 1.0}
                     }
                 }
@@ -361,82 +254,78 @@ live_design! {
         }
     }
 
-    pub ButtonFlatter = <ButtonFlat> {
-        draw_bg: {
-            color: (THEME_COLOR_U_HIDDEN)
-            color_hover: (THEME_COLOR_U_HIDDEN)
-            color_down: (THEME_COLOR_U_HIDDEN)
-            color_disabled: (THEME_COLOR_OUTSET_DISABLED)
+    mod.widgets.ButtonFlatter = mod.widgets.ButtonFlat{
+        draw_bg +: {
+            color: theme.color_u_hidden
+            color_hover: theme.color_u_hidden
+            color_down: theme.color_u_hidden
+            color_disabled: theme.color_outset_disabled
 
-            border_color: (THEME_COLOR_U_HIDDEN)
-            border_color_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_down: (THEME_COLOR_U_HIDDEN)
-            border_color_focus: (THEME_COLOR_U_HIDDEN)
-            border_color_disabled: (THEME_COLOR_U_HIDDEN)
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_down: theme.color_u_hidden
+            border_color_focus: theme.color_u_hidden
+            border_color_disabled: theme.color_u_hidden
         }
     }
 
-    pub Button = <ButtonFlat> {
-        draw_bg: {
-            border_color: (THEME_COLOR_BEVEL_OUTSET_1)
-            border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-            border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-            border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+    mod.widgets.Button = mod.widgets.ButtonFlat{
+        draw_bg +: {
+            border_color: theme.color_bevel_outset_1
+            border_color_hover: theme.color_bevel_outset_1_hover
+            border_color_down: theme.color_bevel_outset_1_down
+            border_color_focus: theme.color_bevel_outset_1_focus
+            border_color_disabled: theme.color_bevel_outset_1_disabled
 
-            border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
-            border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
-            border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
-            border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
-        }
-
-    }
-
-    pub ButtonGradientX = <Button> {
-        draw_bg: {
-            uniform color: (THEME_COLOR_OUTSET_1)
-            uniform color_hover: (THEME_COLOR_OUTSET_1_HOVER)
-            uniform color_down: (THEME_COLOR_OUTSET_1_DOWN)
-            uniform color_focus: (THEME_COLOR_OUTSET_1_FOCUS)
-            uniform color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
-
-            uniform color_2: (THEME_COLOR_OUTSET_2)
+            border_color_2: theme.color_bevel_outset_2
+            border_color_2_hover: theme.color_bevel_outset_2_hover
+            border_color_2_down: theme.color_bevel_outset_2_down
+            border_color_2_focus: theme.color_bevel_outset_2_focus
+            border_color_2_disabled: theme.color_bevel_outset_2_disabled
         }
     }
 
-    pub ButtonGradientY = <ButtonGradientX> {
-       draw_bg: {
-            gradient_fill_horizontal: 1.0
-       }
+    mod.widgets.ButtonGradientX = mod.widgets.Button{
+        draw_bg +: {
+            color: theme.color_outset_1
+            color_hover: theme.color_outset_1_hover
+            color_down: theme.color_outset_1_down
+            color_focus: theme.color_outset_1_focus
+            color_disabled: theme.color_outset_1_disabled
+
+            color_2: theme.color_outset_2
+        }
     }
 
-    pub ButtonIcon = <Button> {
+    mod.widgets.ButtonGradientY = mod.widgets.ButtonGradientX{
+        draw_bg.gradient_fill_horizontal: 1.0
+    }
+
+    mod.widgets.ButtonIcon = mod.widgets.Button{
         spacing: 0.
         text: ""
     }
 
-    pub ButtonGradientXIcon = <ButtonGradientX> {
+    mod.widgets.ButtonGradientXIcon = mod.widgets.ButtonGradientX{
         spacing: 0.
         text: ""
     }
 
-    pub ButtonGradientYIcon = <ButtonGradientY> {
+    mod.widgets.ButtonGradientYIcon = mod.widgets.ButtonGradientY{
         spacing: 0.
         text: ""
     }
 
-    pub ButtonFlatIcon = <ButtonFlat> {
+    mod.widgets.ButtonFlatIcon = mod.widgets.ButtonFlat{
         spacing: 0.
         text: ""
     }
 
-    pub ButtonFlatterIcon = <ButtonFlatter> {
-        draw_bg: { color_focus: (THEME_COLOR_U_HIDDEN)}
+    mod.widgets.ButtonFlatterIcon = mod.widgets.ButtonFlatter{
+        draw_bg.color_focus: theme.color_u_hidden
         spacing: 0.
         text: ""
     }
-
 }
 
 /// Actions emitted by a button widget, including the key modifiers
@@ -449,8 +338,9 @@ live_design! {
 /// 3. Then, either one of the following, but not both:
 ///    * `ButtonAction::Clicked` when the mouse/finger is lifted up while over the button area.
 ///    * `ButtonAction::Released` when the mouse/finger is lifted up while *not* over the button area.
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum ButtonAction {
+    #[default]
     None,
     /// The button was pressed (a "down" event).
     Pressed(KeyModifiers),
@@ -464,9 +354,13 @@ pub enum ButtonAction {
 }
 
 /// A clickable button widget that emits actions when pressed, and when either released or clicked.
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Button {
-    #[animator]
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[apply_default]
     animator: Animator,
 
     #[redraw]
@@ -475,7 +369,7 @@ pub struct Button {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_icon: DrawIcon,
+    draw_icon: DrawSvg,
     #[live]
     icon_walk: Walk,
     #[live]
@@ -524,12 +418,31 @@ pub struct Button {
     #[live]
     pub text: ArcStringMut,
 
+    #[live]
+    on_click: ScriptFnRef,
+
     #[action_data]
     #[rust]
     action_data: WidgetActionData,
 }
 
 impl Widget for Button {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(on_click) {
+            let uid = self.widget_uid();
+            vm.with_cx_mut(|cx| {
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+            });
+            return ScriptAsyncResult::Return(TRUE);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,
@@ -544,19 +457,16 @@ impl Widget for Button {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
 
         match event.hit_designer(cx, self.draw_bg.area()) {
-            HitDesigner::DesignerPick(_e) => cx.widget_action_with_data(
-                &self.action_data,
-                uid,
-                &scope.path,
-                WidgetDesignAction::PickedBody,
-            ),
+            HitDesigner::DesignerPick(_e) => {
+                cx.widget_action_with_data(&self.action_data, uid, WidgetDesignAction::PickedBody)
+            }
             _ => (),
         }
 
@@ -578,7 +488,6 @@ impl Widget for Button {
                 cx.widget_action_with_data(
                     &self.action_data,
                     uid,
-                    &scope.path,
                     ButtonAction::Pressed(fe.modifiers),
                 );
                 self.animator_play(cx, ids!(hover.down));
@@ -596,12 +505,7 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerLongPress(_lp) if self.enabled && self.enable_long_press => {
-                cx.widget_action_with_data(
-                    &self.action_data,
-                    uid,
-                    &scope.path,
-                    ButtonAction::LongPressed,
-                );
+                cx.widget_action_with_data(&self.action_data, uid, ButtonAction::LongPressed);
             }
             Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
                 let was_clicked = fe.is_over
@@ -614,8 +518,14 @@ impl Widget for Button {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        &scope.path,
                         ButtonAction::Clicked(fe.modifiers),
+                    );
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[],
                     );
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, ids!(hover.off));
@@ -628,7 +538,6 @@ impl Widget for Button {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        &scope.path,
                         ButtonAction::Released(fe.modifiers),
                     );
                     self.animator_play(cx, ids!(hover.off));
@@ -648,7 +557,7 @@ impl Widget for Button {
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
         self.draw_bg.end(cx);
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
     }
 
@@ -690,10 +599,11 @@ impl Button {
     /// Note that this does not mean the button has been released yet.
     /// See [`ButtonAction`] for more details.
     pub fn long_pressed(&self, actions: &Actions) -> bool {
-        matches!(
-            actions.find_widget_action(self.widget_uid()).cast_ref(),
-            ButtonAction::LongPressed,
-        )
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            matches!(item.cast(), ButtonAction::LongPressed)
+        } else {
+            false
+        }
     }
 
     /// Returns `true` if this button was released, which is *not* considered to be clicked.
@@ -707,22 +617,24 @@ impl Button {
     ///
     /// See [`ButtonAction`] for more details.
     pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
-            Some(*m)
-        } else {
-            None
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ButtonAction::Clicked(m) = item.cast() {
+                return Some(m);
+            }
         }
+        None
     }
 
     /// Returns `Some` (with active keyboard modifiers) if this button was pressed down.
     ///
     /// See [`ButtonAction`] for more details.
     pub fn pressed_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
-            Some(*m)
-        } else {
-            None
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ButtonAction::Pressed(m) = item.cast() {
+                return Some(m);
+            }
         }
+        None
     }
 
     /// Returns `Some` (with active keyboard modifiers) if this button was released,
@@ -730,12 +642,12 @@ impl Button {
     ///
     /// See [`ButtonAction`] for more details.
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast_ref()
-        {
-            Some(*m)
-        } else {
-            None
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ButtonAction::Released(m) = item.cast() {
+                return Some(m);
+            }
         }
+        None
     }
 }
 

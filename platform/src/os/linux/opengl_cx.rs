@@ -3,7 +3,7 @@ use std::ffi::{c_void, CString};
 use crate::{
     egl_sys::{self, LibEgl},
     gl_sys::{self, LibGl},
-    Cx, PassClearColor, PassClearDepth, PassId,
+    Cx, DrawPassClearColor, DrawPassClearDepth, DrawPassId,
 };
 
 pub struct OpenglCx {
@@ -137,16 +137,16 @@ impl OpenglCx {
 impl Cx {
     pub fn draw_pass_to_window(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         egl_surface: egl_sys::EGLSurface,
         pix_width: f64,
         pix_height: f64,
     ) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        self.setup_render_pass(pass_id);
+        self.setup_render_pass(draw_pass_id);
 
-        self.passes[pass_id].paint_dirty = false;
+        self.passes[draw_pass_id].paint_dirty = false;
 
         let gl = self.os.gl();
         unsafe {
@@ -160,20 +160,20 @@ impl Cx {
             (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
 
-        let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            self.passes[pass_id].clear_color
+        let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
+            self.passes[draw_pass_id].clear_color
         } else {
-            match self.passes[pass_id].color_textures[0].clear_color {
-                PassClearColor::InitWith(color) => color,
-                PassClearColor::ClearWith(color) => color,
+            match self.passes[draw_pass_id].color_textures[0].clear_color {
+                DrawPassClearColor::InitWith(color) => color,
+                DrawPassClearColor::ClearWith(color) => color,
             }
         };
-        let clear_depth = match self.passes[pass_id].clear_depth {
-            PassClearDepth::InitWith(depth) => depth,
-            PassClearDepth::ClearWith(depth) => depth,
+        let clear_depth = match self.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) => depth,
+            DrawPassClearDepth::ClearWith(depth) => depth,
         };
 
-        if !self.passes[pass_id].dont_clear {
+        if !self.passes[draw_pass_id].dont_clear {
             unsafe {
                 (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
                 (gl.glClearDepthf)(clear_depth as f32);
@@ -184,9 +184,9 @@ impl Cx {
         Cx::set_default_depth_and_blend_mode(self.os.gl());
 
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
 
-        self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step);
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
 
         unsafe {
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();

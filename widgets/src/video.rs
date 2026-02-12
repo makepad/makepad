@@ -2,76 +2,78 @@ use crate::{
     image_cache::ImageCacheImpl, makepad_derive_widget::*, makepad_draw::*,
     makepad_platform::event::video_playback::*, widget::*,
 };
+//use std::sync::Arc;
 
-live_design! {
-    link widgets;
-    use link::shaders::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
 
-    pub VideoBase = {{Video}} {}
-    pub Video = <VideoBase> {
-        width: 100, height: 100
+    mod.widgets.VideoBase = #(Video::register_widget(vm))
 
-        draw_bg: {
-            shape: Solid,
+    mod.widgets.Video = set_type_default() do mod.widgets.VideoBase{
+        width: 100
+        height: 100
+
+        draw_bg +: {
+            shape: Solid
             fill: Image
             texture video_texture: textureOES
             texture thumbnail_texture: texture2d
             uniform show_thumbnail: 0.0
 
-            instance opacity: 1.0
-            instance image_scale: vec2(1.0, 1.0)
-            instance image_pan: vec2(0.5, 0.5)
+            opacity: instance(1.0)
+            image_scale: instance(vec2(1.0, 1.0))
+            image_pan: instance(vec2(0.5, 0.5))
 
-            uniform source_size: vec2(1.0, 1.0)
-            uniform target_size: vec2(-1.0, -1.0)
+            source_size: uniform(vec2(1.0, 1.0))
+            target_size: uniform(vec2(-1.0, -1.0))
 
-            fn get_color_scale_pan(self) -> vec4 {
+            get_color_scale_pan: fn() {
                 // Early return for default scaling and panning,
                 // used when walk size is not specified or non-fixed.
                 if self.target_size.x <= 0.0 && self.target_size.y <= 0.0 {
                     if self.show_thumbnail > 0.0 {
-                        return sample2d(self.thumbnail_texture, self.pos).xyzw;
+                        return self.thumbnail_texture.sample(self.pos).xyzw
                     } else {
-                        return sample2dOES(self.video_texture, self.pos);
+                        return self.video_texture.sampleOES(self.pos)
                     }
                 }
 
-                let scale = self.image_scale;
-                let pan = self.image_pan;
-                let source_aspect_ratio = self.source_size.x / self.source_size.y;
-                let target_aspect_ratio = self.target_size.x / self.target_size.y;
+                let mut scale = self.image_scale
+                let pan = self.image_pan
+                let source_aspect_ratio = self.source_size.x / self.source_size.y
+                let target_aspect_ratio = self.target_size.x / self.target_size.y
 
                 // Adjust scale based on aspect ratio difference
-                if (source_aspect_ratio != target_aspect_ratio) {
-                    if (source_aspect_ratio > target_aspect_ratio) {
-                        scale.x = target_aspect_ratio / source_aspect_ratio;
-                        scale.y = 1.0;
+                if source_aspect_ratio != target_aspect_ratio {
+                    if source_aspect_ratio > target_aspect_ratio {
+                        scale.x = target_aspect_ratio / source_aspect_ratio
+                        scale.y = 1.0
                     } else {
-                        scale.x = 1.0;
-                        scale.y = source_aspect_ratio / target_aspect_ratio;
+                        scale.x = 1.0
+                        scale.y = source_aspect_ratio / target_aspect_ratio
                     }
                 }
 
                 // Calculate the range for panning
-                let pan_range_x = max(0.0, (1.0 - scale.x));
-                let pan_range_y = max(0.0, (1.0 - scale.y));
+                let pan_range_x = max(0.0, 1.0 - scale.x)
+                let pan_range_y = max(0.0, 1.0 - scale.y)
 
                 // Adjust the user pan values to be within the pan range
-                let adjusted_pan_x = pan_range_x * pan.x;
-                let adjusted_pan_y = pan_range_y * pan.y;
-                let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y);
-                let adjusted_pos = (self.pos * scale) + adjusted_pan;
+                let adjusted_pan_x = pan_range_x * pan.x
+                let adjusted_pan_y = pan_range_y * pan.y
+                let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y)
+                let adjusted_pos = self.pos * scale + adjusted_pan
 
                 if self.show_thumbnail > 0.5 {
-                    return sample2d(self.thumbnail_texture, adjusted_pos).xyzw;
+                    return self.thumbnail_texture.sample(adjusted_pos).xyzw
                 } else {
-                    return sample2dOES(self.video_texture, adjusted_pos);
+                    return self.video_texture.sampleOES(adjusted_pos)
                 }
             }
 
-            fn pixel(self) -> vec4 {
-                let color = self.get_color_scale_pan();
-                return Pal::premul(vec4(color.xyz, color.w * self.opacity));
+            pixel: fn() {
+                let color = self.get_color_scale_pan()
+                return Pal.premul(vec4(color.xyz, color.w * self.opacity))
             }
         }
     }
@@ -104,8 +106,13 @@ live_design! {
 ///  - Option to restart playback manually when not looping.
 ///  - Hotswap video source, `set_source(VideoDataSource)` only works if video is in Unprepared state.
 
-#[derive(Live, Widget)]
+#[derive(Script, Widget)]
 pub struct Video {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source_ref: ScriptObjectRef,
+
     // Drawing
     #[redraw]
     #[live]
@@ -126,7 +133,7 @@ pub struct Video {
     video_texture_handle: Option<u32>,
     /// Requires [`show_thumbnail_before_playback`] to be `true`.
     #[live]
-    thumbnail_source: Option<LiveDependency>,
+    thumbnail_source: Option<ScriptHandleRef>,
     #[rust]
     thumbnail_texture: Option<Texture>,
 
@@ -163,6 +170,26 @@ pub struct Video {
 
     #[rust]
     id: LiveId,
+}
+
+impl ScriptHook for Video {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.with_cx_mut(|cx| {
+            self.init_video_texture(cx);
+        });
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        vm.with_cx_mut(|cx| {
+            self.apply_thumbnail_settings(cx);
+        });
+    }
 }
 
 impl VideoRef {
@@ -325,54 +352,9 @@ enum AudioState {
     Muted,
 }
 
-impl LiveHook for Video {
-    #[allow(unused)]
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.id = LiveId::unique();
-
-        #[cfg(target_os = "android")]
-        {
-            if self.video_texture.is_none() {
-                let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
-                self.video_texture = Some(new_texture);
-            }
-            let texture = self.video_texture.as_mut().unwrap();
-            self.draw_bg.draw_vars.set_texture(0, &texture);
-        }
-
-        #[cfg(not(target_os = "android"))]
-        error!("Video Widget is currently only supported on Android.");
-
-        match cx.os_type() {
-            OsType::Android(params) => {
-                if params.is_emulator {
-                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
-                }
-            }
-            _ => {}
-        }
-
-        self.should_prepare_playback = self.autoplay;
-    }
-
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        self.lazy_create_image_cache(cx);
-        self.thumbnail_texture = Some(Texture::new(cx));
-
-        let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
-        let target_h = self.walk.height.to_fixed().unwrap_or(0.0);
-        self.draw_bg
-            .set_uniform(cx, ids!(target_size), &[target_w as f32, target_h as f32]);
-
-        if self.show_thumbnail_before_playback {
-            self.load_thumbnail_image(cx);
-            self.draw_bg.set_uniform(cx, ids!(show_thumbnail), &[1.0]);
-        }
-    }
-}
-
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum VideoAction {
+    #[default]
     None,
     PlaybackPrepared,
     PlaybackBegan,
@@ -380,7 +362,10 @@ pub enum VideoAction {
     PlaybackCompleted,
     PlayerReset,
     // The video view was secondary clicked (right-clicked) or long-pressed.
-    SecondaryClicked { abs: Vec2d, modifiers: KeyModifiers },
+    SecondaryClicked {
+        abs: Vec2d,
+        modifiers: KeyModifiers,
+    },
 }
 
 impl Widget for Video {
@@ -408,7 +393,7 @@ impl Widget for Video {
                     if self.playback_state == PlaybackState::Prepared {
                         self.playback_state = PlaybackState::Playing;
                         cx.widget_action(uid, &scope.path, VideoAction::PlaybackBegan);
-                        self.draw_bg.set_uniform(cx, ids!(show_thumbnail), &[0.0]);
+                        self.draw_bg.set_uniform(cx, id!(show_thumbnail), &[0.0]);
                     }
                     if self.should_dispatch_texture_updates {
                         cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
@@ -430,9 +415,11 @@ impl Widget for Video {
                 }
             }
             Event::TextureHandleReady(event) => {
-                if event.texture_id == self.video_texture.clone().unwrap().texture_id() {
-                    self.video_texture_handle = Some(event.handle);
-                    self.maybe_prepare_playback(cx);
+                if let Some(video_texture) = &self.video_texture {
+                    if event.texture_id == video_texture.texture_id() {
+                        self.video_texture_handle = Some(event.handle);
+                        self.maybe_prepare_playback(cx);
+                    }
                 }
             }
             _ => (),
@@ -455,6 +442,49 @@ impl ImageCacheImpl for Video {
 }
 
 impl Video {
+    fn init_video_texture(&mut self, cx: &mut Cx) {
+        self.id = LiveId::unique();
+
+        #[cfg(target_os = "android")]
+        {
+            if self.video_texture.is_none() {
+                let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
+                self.video_texture = Some(new_texture);
+            }
+            let texture = self.video_texture.as_mut().unwrap();
+            self.draw_bg.draw_vars.set_texture(0, &texture);
+        }
+
+        #[cfg(not(target_os = "android"))]
+        error!("Video Widget is currently only supported on Android.");
+
+        match cx.os_type() {
+            OsType::Android(params) => {
+                if params.is_emulator {
+                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
+                }
+            }
+            _ => {}
+        }
+
+        self.should_prepare_playback = self.autoplay;
+    }
+
+    fn apply_thumbnail_settings(&mut self, cx: &mut Cx) {
+        self.lazy_create_image_cache(cx);
+        self.thumbnail_texture = Some(Texture::new(cx));
+
+        let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
+        let target_h = self.walk.height.to_fixed().unwrap_or(0.0);
+        self.draw_bg
+            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
+
+        if self.show_thumbnail_before_playback {
+            self.load_thumbnail_image(cx);
+            self.draw_bg.set_uniform(cx, id!(show_thumbnail), &[1.0]);
+        }
+    }
+
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
             if self.video_texture_handle.is_none() {
@@ -463,17 +493,21 @@ impl Video {
             }
 
             let source = match &self.source {
-                VideoDataSource::Dependency { path } => match cx.get_dependency(path.as_str()) {
-                    Ok(data) => VideoSource::InMemory(data),
-                    Err(e) => {
-                        error!(
-                            "Attempted to prepare playback: resource not found {} {}",
-                            path.as_str(),
-                            e
-                        );
+                VideoDataSource::Dependency { res } => {
+                    if let Some(handle_ref) = res {
+                        let handle = handle_ref.as_handle();
+                        match cx.get_resource(handle) {
+                            Some(data) => VideoSource::InMemory(data),
+                            None => {
+                                error!("Attempted to prepare playback: resource not found");
+                                return;
+                            }
+                        }
+                    } else {
+                        error!("Attempted to prepare playback: no resource handle provided");
                         return;
                     }
-                },
+                }
                 VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
                 VideoDataSource::Filesystem { path } => VideoSource::Filesystem(path.to_string()),
             };
@@ -499,7 +533,7 @@ impl Video {
 
         self.draw_bg.set_uniform(
             cx,
-            ids!(source_size),
+            id!(source_size),
             &[self.video_width as f32, self.video_height as f32],
         );
 
@@ -642,11 +676,17 @@ impl Video {
     }
 
     fn load_thumbnail_image(&mut self, cx: &mut Cx) {
-        if let Some(path) = self.thumbnail_source.clone() {
-            let path_str = path.as_str();
-
-            if path_str.len() > 0 {
-                let _ = self.load_image_dep_by_path(cx, path_str, 0);
+        if let Some(ref handle_ref) = self.thumbnail_source {
+            let handle = handle_ref.as_handle();
+            if let Some(data) = cx.get_resource(handle) {
+                // Try to load as PNG first, then JPG
+                if self.load_png_from_data(cx, &data, 0).is_ok() {
+                    return;
+                }
+                if self.load_jpg_from_data(cx, &data, 0).is_ok() {
+                    return;
+                }
+                error!("Failed to load thumbnail image: unsupported format");
             }
         }
     }
@@ -654,17 +694,16 @@ impl Video {
 
 /// The source of the video data.
 ///
-/// [`Dependency`]: The path to a LiveDependency (an asset loaded with `dep("crate://..)`).
+/// [`Dependency`]: A resource handle (loaded with `crate_resource("self:path/to/video.mp4")`).
 ///
 /// [`Network`]: The URL of a video file, it can be any regular HTTP download or HLS, DASH, RTMP, RTSP.
 ///
 /// [`Filesystem`]: The path to a video file on the local filesystem. This requires runtime-approved permissions for reading storage.
-#[derive(Clone, Debug, Live, LiveHook)]
-#[live_ignore]
+#[derive(Clone, Debug, Script, ScriptHook)]
 pub enum VideoDataSource {
-    #[live {path: LiveDependency::default()}]
-    Dependency { path: LiveDependency },
-    #[pick {url: "".to_string()}]
+    #[pick {res: None}]
+    Dependency { res: Option<ScriptHandleRef> },
+    #[live {url: "".to_string()}]
     Network { url: String },
     #[live {path: "".to_string()}]
     Filesystem { path: String },

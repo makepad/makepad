@@ -1,7 +1,12 @@
-// Audio stream is strictly a utility class to combine multiple input streams
+// Audio stream with smart buffering:
+// - Normally outputs with minimal latency (no forced minimum buffer)
+// - On underrun: buffers back up to min_buf before resuming
+// - On overflow (max_buf reached): drops to min_buf to resync
+// - Adaptive max_buf: temporarily increases during network bursts
 
 use {
     crate::audio::*,
+    std::collections::VecDeque,
     std::sync::mpsc::{channel, Receiver, SendError, Sender},
     std::sync::{Arc, Mutex},
 };
@@ -27,7 +32,29 @@ unsafe impl Send for AudioStreamReceiver {}
 pub struct AudioRoute {
     id: u64,
     start_offset: usize,
-    buffers: Vec<AudioBuffer>,
+    buffers: VecDeque<AudioBuffer>,
+    // After an underrun, we enter "buffering" mode and wait for min_buf before resuming
+    is_buffering: bool,
+    // Adaptive max_buf tracking
+    min_buf_multiplier: usize,
+    max_buf_multiplier: usize, // Current multiplier (1 = normal, 2 = doubled, etc)
+    stable_chunks: usize,      // Consecutive stable chunks (no underrun/overflow)
+}
+
+impl AudioRoute {
+    fn new(id: u64, buf: AudioBuffer) -> Self {
+        let mut buffers = VecDeque::new();
+        buffers.push_back(buf);
+        Self {
+            id,
+            buffers,
+            start_offset: 0,
+            is_buffering: true,
+            min_buf_multiplier: 1,
+            max_buf_multiplier: 1,
+            stable_chunks: 0,
+        }
+    }
 }
 
 impl AudioStreamSender {
@@ -70,21 +97,24 @@ impl AudioStreamReceiver {
         iself
             .routes
             .get(route_num)
-            .and_then(|route| route.buffers.first())
+            .and_then(|route| route.buffers.front())
             .map(|buf| buf.channel_count())
     }
 
     pub fn try_recv_stream(&mut self) {
         let mut iself = self.0.lock().unwrap();
-        while let Ok((route_id, buf)) = iself.stream_recv.try_recv() {
-            if let Some(route) = iself.routes.iter_mut().find(|v| v.id == route_id) {
-                route.buffers.push(buf);
+        let mut count = 0;
+        // Limit to 20 packets per call to avoid stalling the audio thread during network bursts
+        while count < 20 {
+            if let Ok((route_id, buf)) = iself.stream_recv.try_recv() {
+                if let Some(route) = iself.routes.iter_mut().find(|v| v.id == route_id) {
+                    route.buffers.push_back(buf);
+                } else {
+                    iself.routes.push(AudioRoute::new(route_id, buf));
+                }
+                count += 1;
             } else {
-                iself.routes.push(AudioRoute {
-                    id: route_id,
-                    buffers: vec![buf],
-                    start_offset: 0,
-                });
+                break;
             }
         }
     }
@@ -94,20 +124,21 @@ impl AudioStreamReceiver {
             let mut iself = self.0.lock().unwrap();
             if let Ok((route_id, buf)) = iself.stream_recv.recv() {
                 if let Some(route) = iself.routes.iter_mut().find(|v| v.id == route_id) {
-                    route.buffers.push(buf);
+                    route.buffers.push_back(buf);
                 } else {
-                    iself.routes.push(AudioRoute {
-                        id: route_id,
-                        buffers: vec![buf],
-                        start_offset: 0,
-                    });
+                    iself.routes.push(AudioRoute::new(route_id, buf));
                 }
             }
         }
         self.try_recv_stream();
     }
 
-    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer) -> usize {
+    pub fn read_buffer(
+        &mut self,
+        underrun_ok: bool,
+        route_num: usize,
+        output: &mut AudioBuffer,
+    ) -> usize {
         let mut iself = self.0.lock().unwrap();
         let min_buf = iself.min_buf;
         let max_buf = iself.max_buf;
@@ -117,38 +148,83 @@ impl AudioStreamReceiver {
             return 0;
         };
 
-        // ok if we dont have enough data in our stack for output, just output nothing
+        // Calculate total available frames
         let mut total = 0;
         for buf in route.buffers.iter() {
             total += buf.frame_count();
         }
+        let available = total.saturating_sub(route.start_offset);
+        let chunk_size = output.frame_count();
 
-        // check if we have enough buffer
-        if total - route.start_offset < output.frame_count() * min_buf {
+        // Effective max_buf with adaptive multiplier
+        let effective_max_buf = max_buf * route.max_buf_multiplier;
+
+        // If we're in buffering mode, wait until we have min_buf worth of data
+        if route.is_buffering {
+            if available < chunk_size * min_buf * route.min_buf_multiplier {
+                // Still buffering, not ready yet
+                return 0;
+            }
+            // We have enough, exit buffering mode
+            route.is_buffering = false;
+        }
+
+        // Check if we have enough for even one chunk
+        if available < chunk_size {
+            if !underrun_ok {
+                if route.stable_chunks <= 500 && route.min_buf_multiplier < 16 {
+                    route.min_buf_multiplier = (route.min_buf_multiplier * 2).min(16);
+                    // Cap at 4x
+                }
+            }
+            // UNDERRUN: Enter buffering mode
+            route.is_buffering = true;
+            route.stable_chunks = 0; // Reset stability counter
             return 0;
         }
 
-        // what if we have too much buffer.. we should take the 'end' of the buffers
-        while total - route.buffers.first().unwrap().frame_count() > output.frame_count() * max_buf
-        {
-            let buf = route.buffers.remove(0);
-            total -= buf.frame_count();
-            route.start_offset = 0;
+        // Check for overflow - if we have too much, drop to min_buf to resync
+        if available > chunk_size * effective_max_buf {
+            // Track flush frequency for adaptive max_buf
+            if route.stable_chunks <= 500 && route.max_buf_multiplier < 16 {
+                route.max_buf_multiplier = (route.max_buf_multiplier * 2).min(16);
+            // Cap at 4x
+            } else {
+                let target = chunk_size * min_buf * route.max_buf_multiplier;
+                while !route.buffers.is_empty() && total - route.start_offset > target {
+                    let buf = route.buffers.pop_front().unwrap();
+                    total -= buf.frame_count();
+                    route.start_offset = 0;
+                }
+            }
+            route.stable_chunks = 0;
+        } else {
+            // Normal operation - count stable chunks
+            route.stable_chunks += 1;
+
+            // After 100 stable chunks, try reducing max_buf_multiplier
+            if route.stable_chunks > 500 && route.max_buf_multiplier > 1 {
+                route.max_buf_multiplier = (route.max_buf_multiplier / 2).max(1);
+            }
+            if route.stable_chunks > 500 && route.min_buf_multiplier > 1 {
+                route.min_buf_multiplier = (route.min_buf_multiplier / 2).max(1);
+            }
         }
 
-        // ok so we need to eat from the start of the buffer vec until output is filled
+        // Read frames from buffers into output
         let mut frames_read = 0;
         let out_channel_count = output.channel_count();
         let out_frame_count = output.frame_count();
-        while let Some(input) = route.buffers.first() {
-            // ok so. we can copy buffer from start_offset
+
+        while let Some(input) = route.buffers.front() {
             let mut start_offset = None;
             let start_frames_read = frames_read;
+
             for chan in 0..out_channel_count {
                 frames_read = start_frames_read;
                 let inp = input.channel(chan.min(input.channel_count() - 1));
                 let out = output.channel_mut(chan);
-                // alright so we write into the output buffer
+
                 for i in route.start_offset..inp.len() {
                     if frames_read >= out_frame_count {
                         start_offset = Some(i);
@@ -158,14 +234,13 @@ impl AudioStreamReceiver {
                     frames_read += 1;
                 }
             }
-            // only consumed a part of the buffer
+
             if let Some(start_offset) = start_offset {
                 route.start_offset = start_offset;
                 break;
             } else {
-                // consumed entire buffer
                 route.start_offset = 0;
-                route.buffers.remove(0);
+                route.buffers.pop_front();
             }
         }
 

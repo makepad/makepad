@@ -21,6 +21,7 @@ use {
                 get_event_key_modifier, get_event_keycode, keycode_to_menu_key, nsstring_to_string,
                 str_to_nsstring,
             },
+            audio_tap::define_sc_stream_output_delegate,
             audio_unit::define_key_value_observing_delegate,
             av_capture::define_av_video_callback_delegate,
             cx_native::EventFlow,
@@ -55,6 +56,7 @@ pub struct AppleClasses {
     pub web_socket_delegate: *const Class,
     pub url_session_delegate: *const Class,
     pub url_session_data_delegate: *const Class,
+    pub sc_stream_output_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
     pub const_empty_string: RcObjcId,
 }
@@ -72,6 +74,7 @@ impl AppleClasses {
             url_session_data_delegate: define_url_session_data_delegate(),
             video_callback_delegate: define_av_video_callback_delegate(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
+            sc_stream_output_delegate: define_sc_stream_output_delegate(),
             const_attributes_for_marked_text: unsafe {
                 msg_send![
                     class!(NSArray),

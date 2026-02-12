@@ -1,20 +1,25 @@
 use crate::*;
 use makepad_script::*;
 
-pub mod net;
-pub mod vm;
+pub mod draw;
+pub mod event;
 pub mod fs;
+pub mod net;
+pub mod res;
 pub mod run;
-pub mod std;
 pub mod script;
-pub mod timer;
+pub mod std;
 pub mod task;
+pub mod timer;
+pub mod vm;
 
-pub fn define_script_modules(vm:&mut ScriptVm){
-    crate::script::net::define_net_module(vm);
-    crate::script::fs::define_fs_module(vm);
-    crate::script::run::define_run_module(vm);
-    crate::script::timer::extend_std_module_with_timer(vm);
-    crate::script::task::extend_std_module_with_task(vm);
-    crate::script::std::extend_std_module_with_println(vm);
+pub fn script_mod(vm: &mut ScriptVm) {
+    crate::script::net::script_mod(vm);
+    crate::script::fs::script_mod(vm);
+    crate::script::run::script_mod(vm);
+    crate::script::timer::script_mod(vm);
+    crate::script::task::script_mod(vm);
+    crate::script::res::script_mod(vm);
+    crate::script::draw::script_mod(vm);
+    crate::script::event::script_mod(vm);
 }

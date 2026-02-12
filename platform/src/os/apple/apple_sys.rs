@@ -76,7 +76,6 @@ extern "C" {
     pub static UIKeyboardWillChangeFrameNotification: ObjcId;
     pub static UIKeyboardAnimationDurationUserInfoKey: ObjcId;
     pub static UIKeyboardAnimationCurveUserInfoKey: ObjcId;
-    pub static UITextInputCurrentInputModeDidChangeNotification: ObjcId;
 }
 
 #[cfg(any(target_os = "ios", target_os = "tvos"))]
@@ -1334,91 +1333,70 @@ extern "C" {
 
 }
 
-// C Audio Unit API for VoiceProcessingIO on macOS
-
-pub type AURenderCallback = unsafe extern "C" fn(
-    inRefCon: *mut c_void,
-    ioActionFlags: *mut u32,
-    inTimeStamp: *const AudioTimeStamp,
-    inBusNumber: u32,
-    inNumberFrames: u32,
-    ioData: *mut AudioBufferList,
-) -> OSStatus;
-
-#[repr(C)]
-pub struct AURenderCallbackStruct {
-    pub inputProc: AURenderCallback,
-    pub inputProcRefCon: *mut c_void,
+// ScreenCaptureKit framework (macOS 12.3+) for audio loopback capture
+#[cfg(target_os = "macos")]
+#[link(name = "ScreenCaptureKit", kind = "framework")]
+extern "C" {
+    pub static SCShareableContent: ObjcId;
+    pub static SCContentFilter: ObjcId;
+    pub static SCStreamConfiguration: ObjcId;
+    pub static SCStream: ObjcId;
 }
 
-// Audio Unit property IDs
-pub const kAudioOutputUnitProperty_EnableIO: u32 = 2003;
-pub const kAudioOutputUnitProperty_SetInputCallback: u32 = 2005;
-pub const kAudioUnitProperty_StreamFormat: u32 = 8;
-pub const kAudioUnitProperty_ShouldAllocateBuffer: u32 = 23;
-
-// VoiceProcessingIO specific properties
-pub const kAUVoiceIOProperty_VoiceProcessingEnableAGC: u32 = 2100;
-pub const kAUVoiceIOProperty_BypassVoiceProcessing: u32 = 2101;
-
-// Render callback property (for output)
-pub const kAudioUnitProperty_SetRenderCallback: u32 = 23;
-
-// Audio Unit scopes
-pub const kAudioUnitScope_Global: u32 = 0;
-pub const kAudioUnitScope_Input: u32 = 1;
-pub const kAudioUnitScope_Output: u32 = 2;
-
-// Audio Unit elements (buses) for VPIO
-pub const kInputBus: u32 = 1; // Microphone input
-pub const kOutputBus: u32 = 0; // Speaker output
-
-#[link(name = "AudioToolbox", kind = "framework")]
+#[link(name = "GameController", kind = "framework")]
 extern "C" {
-    pub fn AudioComponentFindNext(
-        inComponent: CAudioComponent,
-        inDesc: *const AudioComponentDescription,
-    ) -> CAudioComponent;
+    pub static GCController: ObjcId;
+    pub static GCExtendedGamepad: ObjcId;
+}
 
-    pub fn AudioComponentInstanceNew(
-        inComponent: CAudioComponent,
-        outInstance: *mut CAudioUnit,
-    ) -> OSStatus;
+// Game Controller Framework (GCController)
 
-    pub fn AudioComponentInstanceDispose(inInstance: CAudioUnit) -> OSStatus;
+#[link(name = "GameController", kind = "framework")]
+extern "C" {
+    /// Notification name for when a controller connects
+    pub static GCControllerDidConnectNotification: ObjcId;
+    /// Notification name for when a controller disconnects  
+    pub static GCControllerDidDisconnectNotification: ObjcId;
+    /// Notification name for when a controller becomes the current controller
+    pub static GCControllerDidBecomeCurrentNotification: ObjcId;
+    /// Notification name for when a controller stops being the current controller
+    pub static GCControllerDidStopBeingCurrentNotification: ObjcId;
+}
 
-    pub fn AudioUnitInitialize(inUnit: CAudioUnit) -> OSStatus;
+// IOSurface framework for cross-process texture sharing
+#[cfg(target_os = "macos")]
+pub type IOSurfaceRef = *mut c_void;
+#[cfg(target_os = "macos")]
+pub type IOSurfaceID = u32;
+#[cfg(target_os = "macos")]
+pub type mach_port_t = u32;
 
-    pub fn AudioUnitUninitialize(inUnit: CAudioUnit) -> OSStatus;
+#[cfg(target_os = "macos")]
+pub const MACH_PORT_NULL: mach_port_t = 0;
 
-    pub fn AudioOutputUnitStart(ci: CAudioUnit) -> OSStatus;
+#[cfg(target_os = "macos")]
+#[link(name = "IOSurface", kind = "framework")]
+extern "C" {
+    pub fn IOSurfaceCreate(properties: ObjcId) -> IOSurfaceRef;
+    pub fn IOSurfaceGetID(surface: IOSurfaceRef) -> IOSurfaceID;
+    pub fn IOSurfaceLookup(surface_id: IOSurfaceID) -> IOSurfaceRef;
+    pub fn IOSurfaceCreateMachPort(surface: IOSurfaceRef) -> mach_port_t;
+    pub fn IOSurfaceLookupFromMachPort(port: mach_port_t) -> IOSurfaceRef;
+    pub fn IOSurfaceGetWidth(surface: IOSurfaceRef) -> usize;
+    pub fn IOSurfaceGetHeight(surface: IOSurfaceRef) -> usize;
+    pub fn IOSurfaceIncrementUseCount(surface: IOSurfaceRef);
+    pub fn IOSurfaceDecrementUseCount(surface: IOSurfaceRef);
+}
 
-    pub fn AudioOutputUnitStop(ci: CAudioUnit) -> OSStatus;
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    pub fn CFRelease(cf: *const c_void);
+}
 
-    pub fn AudioUnitSetProperty(
-        inUnit: CAudioUnit,
-        inID: u32,
-        inScope: u32,
-        inElement: u32,
-        inData: *const c_void,
-        inDataSize: u32,
-    ) -> OSStatus;
-
-    pub fn AudioUnitGetProperty(
-        inUnit: CAudioUnit,
-        inID: u32,
-        inScope: u32,
-        inElement: u32,
-        outData: *mut c_void,
-        ioDataSize: *mut u32,
-    ) -> OSStatus;
-
-    pub fn AudioUnitRender(
-        inUnit: CAudioUnit,
-        ioActionFlags: *mut u32,
-        inTimeStamp: *const AudioTimeStamp,
-        inOutputBusNumber: u32,
-        inNumberFrames: u32,
-        ioData: *mut AudioBufferList,
-    ) -> OSStatus;
+#[cfg(target_os = "macos")]
+#[link(name = "System")]
+extern "C" {
+    pub fn mach_port_deallocate(task: mach_port_t, name: mach_port_t) -> i32;
+    pub fn mach_task_self() -> mach_port_t;
 }

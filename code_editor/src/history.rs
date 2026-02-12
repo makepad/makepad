@@ -12,10 +12,10 @@ pub struct History {
     redo_stack: Stack,
 }
 
-#[derive(Clone,Copy)]
-pub enum NewGroup{
+#[derive(Clone, Copy)]
+pub enum NewGroup {
     Yes,
-    No
+    No,
 }
 
 impl History {

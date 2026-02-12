@@ -72,8 +72,6 @@ impl<'a> Subtable2<'a> {
     pub fn glyph_index(&self, code_point: u32) -> Option<GlyphId> {
         // This subtable supports code points only in a u16 range.
         let code_point = u16::try_from(code_point).ok()?;
-
-        let code_point = code_point;
         let high_byte = code_point >> 8;
         let low_byte = code_point & 0x00FF;
 

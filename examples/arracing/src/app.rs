@@ -1,17 +1,16 @@
-use makepad_draw2::*;
+use makepad_widgets::*;
 
 app_main!(App);
 script_mod! {
-    use mod.std.*;
+    use mod.prelude.widgets.*
     #(App::script_api(vm)){
     }
 }
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_draw2::script_mod(vm);
-        let r = App::from_script_mod(vm, script_mod);
-        r
+        crate::makepad_widgets::script_mod(vm);
+        App::from_script_mod(vm, script_mod)
     }
 }
 
@@ -24,7 +23,7 @@ pub struct App {
     #[new]
     depth_texture: Texture,
     #[rust]
-    smooth_throttle: f32,
+    _smooth_throttle: f32,
     #[new]
     main_draw_list: DrawList2d,
 }

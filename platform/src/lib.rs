@@ -6,33 +6,27 @@ pub mod os;
 pub mod log;
 
 #[macro_use]
-mod live_prims;
-
-#[macro_use]
 mod cx;
+mod arc_string_mut;
 mod cx_api;
-mod ime;
 
 pub mod action;
-
-pub mod live_atomic;
-pub mod live_cx;
-pub mod live_traits;
+pub mod game_input;
 
 pub mod audio;
 pub mod midi;
-pub mod scope;
+pub mod script;
 pub mod thread;
 pub mod video;
-//pub mod script;
 
 mod draw_list;
 mod draw_matrix;
+mod draw_pass;
 mod draw_shader;
 mod draw_vars;
 
-mod animator;
 mod area;
+pub mod component;
 mod component_list;
 mod component_map;
 mod cursor;
@@ -42,7 +36,6 @@ mod geometry;
 mod gpu_info;
 mod id_pool;
 mod macos_menu;
-mod pass;
 mod performance_stats;
 pub mod permission;
 pub mod studio;
@@ -75,20 +68,27 @@ pub use ::windows;
 
 pub use makepad_futures;
 
+// Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
+pub use makepad_script::trap;
+
 pub use {
     crate::{
         action::{
             Action, ActionCast, ActionCastRef, ActionDefaultRef, ActionTrait, Actions, ActionsBuf,
         },
-        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Ease, Play},
         area::{Area, InstanceArea, RectArea},
         audio::*,
+        component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,
-        draw_vars::{shader_enum, DrawVars},
+        draw_pass::{
+            CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,
+            DrawPassId, ScriptDrawPass,
+        },
+        draw_vars::DrawVars,
         event::{
             DesignerPickEvent,
             DigitDevice,
@@ -107,6 +107,7 @@ pub use {
             FingerMoveEvent,
             FingerScrollEvent,
             FingerUpEvent,
+            GameInputState,
             Hit,
             HitDesigner,
             HitOptions,
@@ -116,11 +117,11 @@ pub use {
             HttpProgress,
             HttpRequest,
             HttpResponse,
+            Inset,
             KeyCode,
             KeyEvent,
             KeyFocusEvent,
             KeyModifiers,
-            Margin,
             MouseButton,
             MouseDownEvent,
             MouseMoveEvent,
@@ -149,25 +150,14 @@ pub use {
             XrState,
             XrUpdateEvent,
         },
-        geometry::{
-            Geometry, GeometryField, GeometryFields, GeometryFingerprint, GeometryId, GeometryRef,
-        },
+        game_input::*,
+        geometry::{Geometry, GeometryId},
         gpu_info::GpuPerformance,
-        ime::{
-            AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
-            TextInputConfig,
-        },
-        live_prims::{ArcStringMut, LiveDependency},
-        live_traits::{
-            Apply, ApplyFrom, LiveApply, LiveApplyReset, LiveApplyValue, LiveBody, LiveHook,
-            LiveHookDeref, LiveNew, LiveRead, LiveRegister, ToLiveValue,
-        },
         macos_menu::MacosMenu,
         media_api::CxMediaApi,
         midi::*,
         os::*,
-        pass::{CxPassParent, CxPassRect, Pass, PassClearColor, PassClearDepth, PassId},
-        scope::*,
+        script::vm::*,
         texture::{
             Texture, TextureAnimation, TextureFormat, TextureId, TextureSize, TextureUpdated,
         },
@@ -175,39 +165,26 @@ pub use {
         ui_runner::*,
         video::*,
         web_socket::{WebSocket, WebSocketMessage},
-        window::{CxWindowPool, WindowHandle, WindowId},
+        window::{CxWindowPool, ScriptWindowHandle, WindowHandle, WindowId},
     },
     app_main::*,
+    arc_string_mut::ArcStringMut,
     component_list::ComponentList,
     component_map::ComponentMap,
-    //makepad_script::vm::*,
-    //makepad_script::traits::*,
-    //makepad_script::script,
-    log::*,
     //makepad_image_formats::image,
-    makepad_derive_live::*,
-
-    makepad_error_log,
+    log::*,
     makepad_http,
-    //makepad_script::vm,
-    makepad_live_compiler::{
-        live_error_origin, vec4_ext::*, InlineString, LiveBinding, LiveComponentInfo,
-        LiveComponentRegistry, LiveErrorOrigin, LiveFieldKind, LiveFileId, LiveId, LiveIdAsProp,
-        LiveIdMap, LiveIdPath, LiveModuleId, LiveNode, LiveNodeOrigin, LiveNodeSlice,
-        LiveNodeSliceApi, LiveNodeSliceToCbor, LiveNodeVec, LiveNodeVecApi, LiveNodeVecFromCbor,
-        LiveProp, LivePropType, LivePtr, LiveRef, LiveRegistry, LiveType, LiveTypeField,
-        LiveTypeInfo, LiveValue,
-    },
-    makepad_live_id::*,
+    makepad_math::makepad_micro_serde,
     makepad_math::*,
-    makepad_shader_compiler,
-    makepad_shader_compiler::makepad_derive_live,
-    makepad_shader_compiler::makepad_live_compiler,
-    makepad_shader_compiler::makepad_live_id,
-    makepad_shader_compiler::makepad_live_tokenizer,
-    makepad_shader_compiler::makepad_math,
-    makepad_shader_compiler::makepad_micro_serde,
-    makepad_shader_compiler::{DrawShaderPtr, ShaderEnum, ShaderRegistry, ShaderTy},
+    makepad_script,
+    makepad_script::{
+        apply::*, handle::*, heap::*, makepad_error_log, makepad_live_id, makepad_live_id::*,
+        makepad_math, makepad_script_derive, makepad_script_derive::*, native::*, object::*,
+        script_args, script_args_def, script_array_index, script_has_proto, script_is_fn,
+        script_value, script_value_bool, script_value_f64, set_script_value,
+        set_script_value_to_api, set_script_value_to_pod, string::*, traits::*, trap::*, value::*,
+        vm::*,
+    },
     smallvec,
     smallvec::SmallVec,
 };

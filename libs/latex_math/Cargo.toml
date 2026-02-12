@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ttf-parser = { path = "../ttf-parser-0.24.1" }
+ttf-parser = { path = "../ttf-parser" }
 
 [dev-dependencies]

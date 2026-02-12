@@ -1,136 +1,72 @@
-use crate::{makepad_derive_live::*, makepad_platform::*};
+use crate::makepad_platform::*;
 
-live_design! {
-    pub GeometryQuad2D = {{GeometryQuad2D}} {
-    }
-
-    pub GeometryCube3D = {{GeometryCube3D}} {
-    }
+#[derive(Clone, Script, ScriptHook)]
+pub struct QuadVertex {
+    #[live]
+    pub pos: Vec2f,
 }
 
-impl LiveHook for GeometryQuad2D {
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        let mut fp = GeometryFingerprint::new(LiveType::of::<Self>());
-        fp.push(self.x1);
-        fp.push(self.y1);
-        fp.push(self.x2);
-        fp.push(self.y2);
-        // lets get the fingerprint
-        self.geometry_ref = Some(cx.get_geometry_ref(fp));
-        GeometryGen::from_quad_2d(self.x1, self.y1, self.x2, self.y2)
-            .to_geometry(cx, &self.geometry_ref.as_ref().unwrap().0);
-    }
+#[derive(Clone, Script, ScriptHook)]
+pub struct VectorVertex {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    #[live]
+    pub u: f32,
+    #[live]
+    pub v: f32,
+    #[live]
+    pub color_r: f32,
+    #[live]
+    pub color_g: f32,
+    #[live]
+    pub color_b: f32,
+    #[live]
+    pub color_a: f32,
+    #[live]
+    pub stroke_mult: f32,
+    #[live]
+    pub stroke_dist: f32,
+    #[live]
+    pub shape_id: f32,
+    // dual-purpose params: shadow (stroke_mult == -1) or gradient (param0 > 0)
+    #[live]
+    pub param0: f32,
+    #[live]
+    pub param1: f32,
+    #[live]
+    pub param2: f32,
+    #[live]
+    pub param3: f32,
+    #[live]
+    pub param4: f32,
+    #[live]
+    pub param5: f32,
+    // max distance from this vertex to any other vertex it shares a triangle with
+    #[live]
+    pub clip_radius: f32,
+    // per-shape z-bias for painter's algorithm ordering
+    #[live]
+    pub zbias: f32,
 }
 
-impl GeometryFields for GeometryQuad2D {
-    fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
-        fields.push(GeometryField {
-            id: live_id!(geom_pos),
-            ty: ShaderTy::Vec2f,
-        });
-    }
-
-    fn get_geometry_id(&self) -> Option<GeometryId> {
-        // ok so what about doing a Rc<Geometry> based on input and class type
-        if let Some(gr) = &self.geometry_ref {
-            Some(gr.0.geometry_id())
-        } else {
-            None
-        }
-    }
-
-    fn live_type_check(&self) -> LiveType {
-        LiveType::of::<Self>()
-    }
-}
-
-#[derive(Live, LiveRegister)]
-pub struct GeometryQuad2D {
-    #[rust]
-    pub geometry_ref: Option<GeometryRef>,
-    #[live(0.0)]
-    pub x1: f32,
-    #[live(0.0)]
-    pub y1: f32,
-    #[live(1.0)]
-    pub x2: f32,
-    #[live(1.0)]
-    pub y2: f32,
-}
-
-impl LiveHook for GeometryCube3D {
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        let mut fp = GeometryFingerprint::new(LiveType::of::<Self>());
-        fp.push(self.width);
-        fp.push(self.height);
-        fp.push(self.depth);
-        fp.push(self.width_segments as f32);
-        fp.push(self.height_segments as f32);
-        fp.push(self.depth_segments as f32);
-        // lets get the fingerprint
-        self.geometry_ref = Some(cx.get_geometry_ref(fp));
-        GeometryGen::from_cube_3d(
-            self.width,
-            self.height,
-            self.depth,
-            self.width_segments,
-            self.height_segments,
-            self.depth_segments,
-        )
-        .to_geometry(cx, &self.geometry_ref.as_ref().unwrap().0);
-    }
-}
-
-impl GeometryFields for GeometryCube3D {
-    fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
-        fields.push(GeometryField {
-            id: live_id!(geom_pos),
-            ty: ShaderTy::Vec3f,
-        });
-        fields.push(GeometryField {
-            id: live_id!(geom_id),
-            ty: ShaderTy::Float,
-        });
-        fields.push(GeometryField {
-            id: live_id!(geom_normal),
-            ty: ShaderTy::Vec3f,
-        });
-        fields.push(GeometryField {
-            id: live_id!(geom_uv),
-            ty: ShaderTy::Vec2f,
-        });
-    }
-
-    fn get_geometry_id(&self) -> Option<GeometryId> {
-        // ok so what about doing a Rc<Geometry> based on input and class type
-        if let Some(gr) = &self.geometry_ref {
-            Some(gr.0.geometry_id())
-        } else {
-            None
-        }
-    }
-
-    fn live_type_check(&self) -> LiveType {
-        LiveType::of::<Self>()
-    }
-}
-
-#[derive(Live, LiveRegister)]
-pub struct GeometryCube3D {
-    #[rust]
-    pub geometry_ref: Option<GeometryRef>,
-    #[live(1.0)]
-    width: f32,
-    #[live(1.0)]
-    height: f32,
-    #[live(1.0)]
-    depth: f32,
-    #[live(1usize)]
-    width_segments: usize,
-    #[live(1usize)]
-    height_segments: usize,
-    #[live(1usize)]
-    depth_segments: usize,
+pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+    let geom = vm.new_module(id!(geom));
+    // lets make a Quad geometry here
+    set_script_value_to_pod!(vm, geom.QuadVertex);
+    // now lets also build a quad vertexbuffer
+    let gen = GeometryGen::from_quad_2d(0., 0., 1., 1.)
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.QuadGeom = gen);
+    // Vector geometry: vertex type + placeholder geom (overridden at draw time)
+    set_script_value_to_pod!(vm, geom.VectorVertex);
+    let vgen = GeometryGen::from_triangle_2d()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.VectorGeom = vgen);
+    NIL
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -147,8 +83,32 @@ pub enum GeometryAxis {
 }
 
 impl GeometryGen {
-    pub fn to_geometry(self, cx: &mut Cx, geometry: &Geometry) {
+    pub fn update_geometry(self, cx: &mut Cx, geometry: &Geometry) {
         geometry.update(cx, self.indices, self.vertices);
+    }
+
+    pub fn into_geometry(self, cx: &mut Cx) -> Geometry {
+        let g = Geometry::new(cx);
+        g.update(cx, self.indices, self.vertices);
+        g
+    }
+
+    /// Placeholder single-triangle geometry for vector drawing (overridden at draw time)
+    pub fn from_triangle_2d() -> GeometryGen {
+        let mut g = Self::default();
+        // 3 vertices with full VectorVertex stride (23 floats each)
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[
+                0.0, 0.0, 0.5, 1.0, // x, y, u, v
+                1.0, 1.0, 1.0, 1.0, // color r,g,b,a
+                1e6, 0.0, 0.0, // stroke_mult, stroke_dist, shape_id
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // param0-5
+                0.0, // clip_radius
+                0.0, // zbias
+            ]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
     }
 
     pub fn from_quad_2d(x1: f32, y1: f32, x2: f32, y2: f32) -> GeometryGen {

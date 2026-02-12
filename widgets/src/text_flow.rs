@@ -1,229 +1,194 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::makepad_draw::text::{
+    geom::Point as TextPoint,
+    layouter::LaidoutText,
+    selection::{Cursor, Selection},
+};
+use crate::{
+    animator::*, makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+};
+use std::rc::Rc;
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
-    use crate::button::Button;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub DrawFlowBlock = {{DrawFlowBlock}} {}
-    pub TextFlowBase = {{TextFlow}} {
-        // ok so we can use one drawtext
-        // change to italic, change bold (SDF), strikethrough
-        font_size: 8,
-        // font_color: (THEME_COLOR_TEXT),
-        flow: Right { wrap: true },
+    let FlowBlockType = set_type_default() do #(FlowBlockType::script_api(vm))
+
+    mod.widgets.DrawFlowBlock = set_type_default() do #(DrawFlowBlock::script_shader(vm)){
+        ..mod.draw.DrawQuad
+
+        block_type: instance(FlowBlockType.Quote)
+        line_color: #fff
+        sep_color: #888
+        code_color: #333
+        quote_bg_color: #222
+        quote_fg_color: #aaa
+        selection_color: #FF5C3966
+
+        space_1: uniform(4.0)
+        space_2: uniform(8.0)
     }
 
-    pub TextFlowLinkBase = {{TextFlowLink}} {
-        link = {
-            draw_text = {
-                // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
-                color: #1a0dab
-            }
-        }
+    mod.widgets.FlowBlockType = FlowBlockType
+
+    mod.widgets.TextFlowBase = #(TextFlow::register_widget(vm)){
+        font_size: 8
+        flow: Flow.Right{wrap: true}
     }
 
-    pub TextFlowLink = <TextFlowLinkBase> {
-        color: #xa,
-        color_hover: #xf,
-        color_down: #x3,
+    mod.widgets.TextFlowLinkBase = #(TextFlowLink::register_widget(vm)){}
 
-        margin:{right:5}
+    mod.widgets.TextFlowLink = set_type_default() do mod.widgets.TextFlowLinkBase{
+        color: #xa
+        color_hover: #xf
+        color_down: #x3
+        margin: Inset{right: 5}
 
-        animator: {
-            hover = {
-                default: off,
-                off = {
-                    redraw: true,
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    redraw: true
                     from: {all: Forward {duration: 0.01}}
                     apply: {
-                        hovered: 0.0,
-                        down: 0.0,
+                        hovered: 0.0
+                        down: 0.0
                     }
                 }
 
-                on = {
-                    redraw: true,
+                on: AnimatorState{
+                    redraw: true
                     from: {
                         all: Forward {duration: 0.1}
                         down: Forward {duration: 0.01}
                     }
                     apply: {
-                        hovered: [{time: 0.0, value: 1.0}],
-                        down: [{time: 0.0, value: 1.0}],
+                        hovered: snap(1.0)
+                        down: snap(1.0)
                     }
                 }
 
-                down = {
-                    redraw: true,
+                down: AnimatorState{
+                    redraw: true
                     from: {all: Forward {duration: 0.01}}
                     apply: {
-                        hovered: [{time: 0.0, value: 1.0}],
-                        down: [{time: 0.0, value: 1.0}],
+                        hovered: snap(1.0)
+                        down: snap(1.0)
                     }
                 }
             }
         }
     }
 
-    pub TextFlow = <TextFlowBase> {
-        width: Fill, height: Fit,
-        flow: Right { wrap: true },
-        width:Fill,
-        height:Fit,
+    mod.widgets.TextFlow = set_type_default() do mod.widgets.TextFlowBase{
+        width: Fill height: Fit
+        flow: Flow.Right{wrap: true}
         padding: 0
 
-        font_size: (THEME_FONT_SIZE_P),
-        font_color: (THEME_COLOR_TEXT),
+        font_size: theme.font_size_p
+        font_color: theme.color_text
 
-        draw_normal: {
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT)
+        draw_text +: {
+            color: theme.color_text
+            extend_area: true
         }
 
-        draw_italic: {
-            text_style: <THEME_FONT_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT)
+        text_style_normal: theme.font_regular{
+            font_size: theme.font_size_p
         }
 
-        draw_bold: {
-            text_style: <THEME_FONT_BOLD> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT)
+        text_style_italic: theme.font_italic{
+            font_size: theme.font_size_p
         }
 
-        draw_bold_italic: {
-            text_style: <THEME_FONT_BOLD_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT)
+        text_style_bold: theme.font_bold{
+            font_size: theme.font_size_p
         }
 
-        draw_fixed: {
-            text_style: <THEME_FONT_CODE> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT)
+        text_style_bold_italic: theme.font_bold_italic{
+            font_size: theme.font_size_p
         }
 
-        code_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
-        }
-        code_walk: { width: Fill, height: Fit }
-
-        quote_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
-        }
-        quote_walk: { width: Fill, height: Fit, }
-
-        list_item_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_1> {}
-        }
-        list_item_walk: {
-            height: Fit, width: Fill,
+        text_style_fixed: theme.font_code{
+            font_size: theme.font_size_p
         }
 
-        inline_code_padding: <THEME_MSPACE_1> {},
-        inline_code_margin: <THEME_MSPACE_1> {},
+        code_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
+        }
+        code_walk: Walk{width: Fill, height: Fit}
 
-        sep_walk: {
-            width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_1> {}
+        quote_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
+        }
+        quote_walk: Walk{width: Fill, height: Fit}
+
+        list_item_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: theme.mspace_1
+        }
+        list_item_walk: Walk{
+            height: Fit width: Fill
         }
 
-        link = <TextFlowLink> {}
+        inline_code_padding: theme.mspace_1
+        inline_code_margin: theme.mspace_1
 
-        draw_block:{
-            line_color: (THEME_COLOR_TEXT)
-            sep_color: (THEME_COLOR_SHADOW)
-            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_TEXT)
-            code_color: (THEME_COLOR_BG_HIGHLIGHT)
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+        sep_walk: Walk{
+            width: Fill height: 4.
+            margin: theme.mspace_v_1
+        }
+
+        link := mod.widgets.TextFlowLink{}
+
+        draw_block +: {
+            line_color: theme.color_text
+            sep_color: theme.color_shadow
+            quote_bg_color: theme.color_bg_highlight
+            quote_fg_color: theme.color_text
+            code_color: theme.color_bg_highlight
+            selection_color: theme.color_selection_focus
+            space_1: uniform(theme.space_1)
+            space_2: uniform(theme.space_2)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 match self.block_type {
-                    FlowBlockType::Quote => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
+                    FlowBlockType.Quote => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
                         sdf.fill(self.quote_bg_color)
-                        sdf.box(
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            self.rect_size.y - THEME_SPACE_2,
-                            1.5
-                        );
-                        sdf.fill(self.quote_fg_color);
-                        return sdf.result;
+                        sdf.box(self.space_1 self.space_1 self.space_1 self.rect_size.y-self.space_2 1.5)
+                        sdf.fill(self.quote_fg_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Sep => {
-                        sdf.box(
-                            0.,
-                            1.,
-                            self.rect_size.x-1,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.sep_color);
-                        return sdf.result;
+                    FlowBlockType.Sep => {
+                        sdf.box(0. 1. self.rect_size.x-1. self.rect_size.y-2. 2.)
+                        sdf.fill(self.sep_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Code => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
+                    FlowBlockType.Code => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
-                    FlowBlockType::InlineCode => {
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
+                    FlowBlockType.InlineCode => {
+                        sdf.box(1. 1. self.rect_size.x-2. self.rect_size.y-2. 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Underline => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y-2,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
+                    FlowBlockType.Underline => {
+                        sdf.box(0. self.rect_size.y-2. self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Strikethrough => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y * 0.45,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
+                    FlowBlockType.Strikethrough => {
+                        sdf.box(0. self.rect_size.y * 0.45 self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
+                    }
+                    FlowBlockType.Selection => {
+                        return vec4(self.selection_color.rgb * self.selection_color.a, self.selection_color.a)
                     }
                 }
                 return #f00
@@ -232,20 +197,20 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_ignore]
+#[derive(Script, ScriptHook)]
 #[repr(u32)]
 pub enum FlowBlockType {
     #[pick]
-    Quote = shader_enum(1),
-    Sep = shader_enum(2),
-    Code = shader_enum(3),
-    InlineCode = shader_enum(4),
-    Underline = shader_enum(5),
-    Strikethrough = shader_enum(6),
+    Quote = 1,
+    Sep = 2,
+    Code = 3,
+    InlineCode = 4,
+    Underline = 5,
+    Strikethrough = 6,
+    Selection = 7,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawFlowBlock {
     #[deref]
@@ -260,6 +225,8 @@ pub struct DrawFlowBlock {
     pub quote_bg_color: Vec4f,
     #[live]
     pub quote_fg_color: Vec4f,
+    #[live]
+    pub selection_color: Vec4f,
     #[live]
     pub block_type: FlowBlockType,
 }
@@ -283,19 +250,324 @@ impl StackCounter {
     }
 }
 
+/// A segment in the TextFlow selection stream
+pub enum SelectionSegment {
+    /// Text segment with layout info for selection
+    Text {
+        /// The laid out text (cached, Rc'd)
+        laidout_text: Rc<LaidoutText>,
+        /// Origin in screen coordinates
+        origin: DVec2,
+        /// Font scale used when drawing
+        font_scale: f32,
+        /// Start index in accumulated text buffer
+        text_start: usize,
+    },
+    /// Non-text gap (widget, image, icon, etc)
+    Gap {
+        /// Bounding rect in screen coordinates
+        rect: Rect,
+        /// Start index in accumulated text buffer
+        text_start: usize,
+    },
+    /// A child widget whose text content participates in selection (e.g. CodeView).
+    /// The widget draws its own selection highlights; TextFlow skips it in draw_selection.
+    WidgetText {
+        /// The widget's draw area (queried at event time for its rect)
+        area: Area,
+        /// Start index in accumulated text buffer
+        text_start: usize,
+        /// Length of the widget's text in the accumulated buffer
+        text_len: usize,
+    },
+}
+
+/// Tracks all segments during drawing for selection support
+#[derive(Default)]
+pub struct SelectionTracker {
+    /// All segments in draw order
+    pub segments: Vec<SelectionSegment>,
+    /// Accumulated text content (for copy operations)
+    pub text: String,
+}
+
+impl SelectionTracker {
+    pub fn clear(&mut self) {
+        self.segments.clear();
+        self.text.clear();
+    }
+
+    pub fn push_text(
+        &mut self,
+        laidout_text: Rc<LaidoutText>,
+        origin: DVec2,
+        font_scale: f32,
+        text: &str,
+    ) {
+        let text_start = self.text.len();
+        self.text.push_str(text);
+        self.segments.push(SelectionSegment::Text {
+            laidout_text,
+            origin,
+            font_scale,
+            text_start,
+        });
+    }
+
+    pub fn push_gap(&mut self, rect: Rect) {
+        let text_start = self.text.len();
+        // Use object replacement character for gaps
+        self.text.push('\u{FFFC}');
+        self.segments
+            .push(SelectionSegment::Gap { rect, text_start });
+    }
+
+    /// Push a child widget's text content as a selectable segment.
+    /// The text is stored in the accumulated buffer so it participates in
+    /// copy and char-index mapping. The widget draws its own selection highlights.
+    pub fn push_widget_text(&mut self, area: Area, text: &str) {
+        let text_start = self.text.len();
+        let text_len = text.len();
+        self.text.push_str(text);
+        self.segments.push(SelectionSegment::WidgetText {
+            area,
+            text_start,
+            text_len,
+        });
+    }
+
+    pub fn push_newline(&mut self) {
+        self.text.push('\n');
+    }
+
+    pub fn total_len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Find character index from screen point.
+    /// `cx` is needed to query widget areas for WidgetText segments.
+    pub fn point_to_index(&self, cx: &Cx, point: DVec2) -> Option<usize> {
+        for segment in &self.segments {
+            match segment {
+                SelectionSegment::Text {
+                    laidout_text,
+                    origin,
+                    font_scale,
+                    text_start,
+                } => {
+                    // Convert point to layout-local coords
+                    let local_point = TextPoint::new(
+                        ((point.x - origin.x) / *font_scale as f64) as f32,
+                        ((point.y - origin.y) / *font_scale as f64) as f32,
+                    );
+
+                    // Check if point is within text bounds
+                    let size = laidout_text.size_in_lpxs;
+                    if local_point.x >= 0.0
+                        && local_point.x <= size.width
+                        && local_point.y >= 0.0
+                        && local_point.y <= size.height
+                    {
+                        let cursor = laidout_text.point_in_lpxs_to_cursor(local_point);
+                        return Some(text_start + cursor.index);
+                    }
+                }
+                SelectionSegment::Gap { rect, text_start } => {
+                    if rect.contains(point) {
+                        return Some(*text_start);
+                    }
+                }
+                SelectionSegment::WidgetText {
+                    area,
+                    text_start,
+                    text_len,
+                } => {
+                    if area.is_valid(cx) {
+                        let rect = area.rect(cx);
+                        if rect.size.y > 0.0 && rect.contains(point) {
+                            // Linear interpolation based on y position
+                            let local_y = (point.y - rect.pos.y).max(0.0);
+                            let fraction = (local_y / rect.size.y).min(1.0);
+                            return Some(text_start + (fraction * *text_len as f64) as usize);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find nearest segment if point outside all
+        self.nearest_index(cx, point)
+    }
+
+    /// Find the nearest character index when point is outside all segments
+    fn nearest_index(&self, cx: &Cx, point: DVec2) -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+
+        for segment in &self.segments {
+            match segment {
+                SelectionSegment::Text {
+                    laidout_text,
+                    origin,
+                    font_scale,
+                    text_start,
+                } => {
+                    // Check distance to this text segment's bounding box
+                    let size = laidout_text.size_in_lpxs;
+                    let rect = Rect {
+                        pos: *origin,
+                        size: dvec2(
+                            (size.width * font_scale) as f64,
+                            (size.height * font_scale) as f64,
+                        ),
+                    };
+                    let dist = Self::point_to_rect_distance(point, rect);
+
+                    if best.map_or(true, |(_, d)| dist < d) {
+                        // Find cursor position within this segment
+                        let local_point = TextPoint::new(
+                            ((point.x - origin.x) / *font_scale as f64) as f32,
+                            ((point.y - origin.y) / *font_scale as f64) as f32,
+                        );
+                        let cursor = laidout_text.point_in_lpxs_to_cursor(local_point);
+                        best = Some((text_start + cursor.index, dist));
+                    }
+                }
+                SelectionSegment::Gap { rect, text_start } => {
+                    let dist = Self::point_to_rect_distance(point, *rect);
+                    if best.map_or(true, |(_, d)| dist < d) {
+                        best = Some((*text_start, dist));
+                    }
+                }
+                SelectionSegment::WidgetText {
+                    area,
+                    text_start,
+                    text_len,
+                } => {
+                    if area.is_valid(cx) {
+                        let rect = area.rect(cx);
+                        let dist = Self::point_to_rect_distance(point, rect);
+                        if best.map_or(true, |(_, d)| dist < d) {
+                            // Linear interpolation based on y position
+                            let local_y = (point.y - rect.pos.y).max(0.0);
+                            let fraction = if rect.size.y > 0.0 {
+                                (local_y / rect.size.y).min(1.0)
+                            } else {
+                                0.0
+                            };
+                            best =
+                                Some((text_start + (fraction * *text_len as f64) as usize, dist));
+                        }
+                    }
+                }
+            }
+        }
+
+        best.map(|(idx, _)| idx)
+    }
+
+    fn point_to_rect_distance(point: DVec2, rect: Rect) -> f64 {
+        let dx = if point.x < rect.pos.x {
+            rect.pos.x - point.x
+        } else if point.x > rect.pos.x + rect.size.x {
+            point.x - (rect.pos.x + rect.size.x)
+        } else {
+            0.0
+        };
+        let dy = if point.y < rect.pos.y {
+            rect.pos.y - point.y
+        } else if point.y > rect.pos.y + rect.size.y {
+            point.y - (rect.pos.y + rect.size.y)
+        } else {
+            0.0
+        };
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// Get all selection rects for the given character range
+    pub fn selection_rects(&self, start: usize, end: usize) -> Vec<Rect> {
+        let mut rects = Vec::new();
+
+        for segment in &self.segments {
+            match segment {
+                SelectionSegment::Text {
+                    laidout_text,
+                    origin,
+                    font_scale,
+                    text_start,
+                } => {
+                    let seg_end = text_start + laidout_text.text.len();
+
+                    // Check overlap
+                    if end <= *text_start || start >= seg_end {
+                        continue;
+                    }
+
+                    // Clamp selection to segment bounds
+                    let sel_start = start.saturating_sub(*text_start);
+                    let sel_end = (end - text_start).min(laidout_text.text.len());
+
+                    let selection = Selection {
+                        anchor: Cursor {
+                            index: sel_start,
+                            prefer_next_row: false,
+                        },
+                        cursor: Cursor {
+                            index: sel_end,
+                            prefer_next_row: false,
+                        },
+                    };
+
+                    // Add a small padding to selection rects so descenders aren't cut off
+                    let padding = 2.0;
+                    for sel_rect in laidout_text.selection_rects(selection) {
+                        rects.push(Rect {
+                            pos: *origin
+                                + dvec2(
+                                    (sel_rect.rect_in_lpxs.origin.x * font_scale) as f64,
+                                    (sel_rect.rect_in_lpxs.origin.y * font_scale) as f64 - padding,
+                                ),
+                            size: dvec2(
+                                (sel_rect.rect_in_lpxs.size.width * font_scale) as f64,
+                                (sel_rect.rect_in_lpxs.size.height * font_scale) as f64
+                                    + padding * 2.0,
+                            ),
+                        });
+                    }
+                }
+                SelectionSegment::Gap { rect, text_start } => {
+                    // If gap is in selection range, include its rect
+                    let seg_end = text_start + 1; // Gap is 1 char
+                    if start < seg_end && end > *text_start {
+                        rects.push(*rect);
+                    }
+                }
+                SelectionSegment::WidgetText { .. } => {
+                    // Widget draws its own selection highlights - skip here
+                }
+            }
+        }
+
+        rects
+    }
+}
+
 // this widget has a retained and an immediate mode api
-#[derive(Live, Widget)]
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct TextFlow {
+    #[uid]
+    uid: WidgetUid,
     #[live]
-    pub draw_normal: DrawText,
+    pub draw_text: DrawText,
     #[live]
-    pub draw_italic: DrawText,
+    pub text_style_normal: TextStyle,
     #[live]
-    pub draw_bold: DrawText,
+    pub text_style_italic: TextStyle,
     #[live]
-    pub draw_bold_italic: DrawText,
+    pub text_style_bold: TextStyle,
     #[live]
-    pub draw_fixed: DrawText,
+    pub text_style_bold_italic: TextStyle,
+    #[live]
+    pub text_style_fixed: TextStyle,
     #[live]
     pub draw_block: DrawFlowBlock,
 
@@ -314,8 +586,6 @@ pub struct TextFlow {
     pub font_sizes: SmallVec<[f32; 8]>,
     #[rust]
     pub font_colors: SmallVec<[Vec4f; 8]>,
-    // #[rust] pub font: SmallVec<[Font;2]>,
-    //#[rust] pub top_drop: SmallVec<[f64;4]>,
     #[rust]
     pub combine_spaces: SmallVec<[bool; 4]>,
     #[rust]
@@ -359,15 +629,14 @@ pub struct TextFlow {
     #[live]
     list_item_walk: Walk,
     #[live]
-    pub inline_code_padding: Padding,
+    pub inline_code_padding: Inset,
     #[live]
-    pub inline_code_margin: Margin,
-    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})]
-    pub heading_margin: Margin,
-    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})]
-    pub paragraph_margin: Margin,
+    pub inline_code_margin: Inset,
+    #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})]
+    pub heading_margin: Inset,
+    #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})]
+    pub paragraph_margin: Inset,
 
-    #[redraw]
     #[rust]
     area: Area,
     #[rust]
@@ -375,40 +644,100 @@ pub struct TextFlow {
     #[rust(Some(Default::default()))]
     items: Option<ComponentMap<LiveId, (WidgetRef, LiveId)>>,
     #[rust]
-    templates: ComponentMap<LiveId, LivePtr>,
+    templates: ComponentMap<LiveId, ScriptObjectRef>,
+
+    /// Enable text selection
+    #[live(false)]
+    pub selectable: bool,
+
+    /// Selection anchor (start) character index
+    #[rust]
+    selection_anchor: usize,
+
+    /// Selection cursor (end) character index
+    #[rust]
+    selection_cursor: usize,
+
+    /// Selection tracker (only populated when selectable)
+    #[rust]
+    selection_tracker: SelectionTracker,
+
+    /// Child widgets participating in selection, with their text ranges.
+    /// Kept separate from the tracker so it only holds Areas, not WidgetRefs.
+    #[rust]
+    widget_text_entries: Vec<(WidgetRef, usize, usize)>,
+
+    /// Whether currently dragging to select
+    #[rust]
+    is_selecting: bool,
+
+    // Streaming text animation fields
+    #[rust]
+    next_frame: NextFrame,
+    /// Whether streaming animation is active
+    #[rust]
+    pub streaming_animation: bool,
+    /// Animated char count for fade effect (lags behind actual)
+    #[rust]
+    animated_chars: f32,
+    /// Actual drawn char count
+    #[rust]
+    actual_chars: f32,
+    /// Last frame time for dt calculation
+    #[rust]
+    last_rate_time: f64,
+    /// Number of chars over which to fade (default 50)
+    #[live(50.0)]
+    pub fade_chars: f32,
+    /// Minimum animation speed in chars per second
+    #[live(100.0)]
+    pub min_fade_speed: f32,
 }
 
-impl LiveHook for TextFlow {
-    // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(
+impl TextFlow {
+    fn apply_template(
         &mut self,
-        cx: &mut Cx,
-        apply: &mut Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> usize {
-        let id = nodes[index].id;
-        match apply.from {
-            ApplyFrom::NewFromDoc { file_id } | ApplyFrom::UpdateFromDoc { file_id, .. } => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
-                    let live_ptr = cx
-                        .live_registry
-                        .borrow()
-                        .file_id_index_to_live_ptr(file_id, index);
-                    self.templates.insert(id, live_ptr);
-                    // lets apply this thing over all our childnodes with that template
-                    for (node, templ_id) in self.items.as_mut().unwrap().values_mut() {
-                        if *templ_id == id {
-                            node.apply(cx, apply, index, nodes);
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        id: LiveId,
+        template_obj: ScriptObject,
+    ) {
+        // Root the template object
+        let template_ref = vm.bx.heap.new_object_ref(template_obj);
+        self.templates.insert(id, template_ref);
+        // Apply to existing items with matching template
+        let template_value: ScriptValue = template_obj.into();
+        for (node, templ_id) in self.items.as_mut().unwrap().values_mut() {
+            if *templ_id == id {
+                node.script_apply(vm, apply, scope, template_value);
+            }
+        }
+    }
+}
+
+impl ScriptHook for TextFlow {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if let Some(id) = kv.key.as_id() {
+                            if let Some(template_obj) = kv.value.as_object() {
+                                self.apply_template(vm, apply, scope, id, template_obj);
+                            }
                         }
                     }
-                } else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                }
+                });
             }
-            _ => (),
         }
-        nodes.skip_node(index)
     }
 }
 
@@ -447,14 +776,64 @@ impl RectAreasTracker {
 }
 
 #[derive(Clone)]
-enum DrawState {
+pub enum DrawState {
     Begin,
     Drawing,
 }
 
+impl WidgetNode for TextFlow {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn area(&self) -> Area {
+        self.area.area()
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+    }
+
+    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
+        if let Some(items) = self.items.as_ref() {
+            for (_id, (widget, _template)) in items.iter() {
+                widget.find_widgets_from_point(cx, point, found);
+            }
+        }
+    }
+
+    fn selection_text_len(&self) -> usize {
+        self.text_len()
+    }
+    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
+        self.selection_tracker.point_to_index(cx, abs)
+    }
+    fn selection_set(&mut self, anchor: usize, cursor: usize) {
+        self.set_selection(anchor, cursor)
+    }
+    fn selection_clear(&mut self) {
+        self.clear_selection()
+    }
+    fn selection_select_all(&mut self) {
+        self.select_all()
+    }
+    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
+        self.get_text_for_range(start, end)
+    }
+    fn selection_get_full_text(&self) -> String {
+        self.get_full_text()
+    }
+}
+
 impl Widget for TextFlow {
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        //self.draw_text.draw_walk(cx, walk.with_add_padding(self.padding), self.align, self.text.as_ref());
         if self.draw_state.begin(cx, DrawState::Begin) {
             self.begin(cx, walk);
             return DrawStep::make_step();
@@ -465,37 +844,152 @@ impl Widget for TextFlow {
         }
         DrawStep::done()
     }
-    /*
-    fn text(&self)->String{
-        "".into()
-        //self.text.as_ref().to_string()
-    }
-
-    fn set_text(&mut self, _v:&str){
-        //self.text.as_mut_empty().push_str(v);
-    }*/
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Handle child item events first
         for (id, (entry, _)) in self.items.as_mut().unwrap().iter_mut() {
-            scope.with_id(*id, |scope| {
+            cx.with_node(entry.widget_uid(), *id, entry.clone(), |cx| {
                 entry.handle_event(cx, event, scope);
             });
+        }
+
+        // Handle streaming animation NextFrame
+        if let Some(ev) = self.next_frame.is_event(event) {
+            let time = ev.time;
+            // Calculate time delta
+            let dt = if self.last_rate_time > 0.0 {
+                (time - self.last_rate_time).max(0.001)
+            } else {
+                1.0 / 60.0
+            };
+            self.last_rate_time = time;
+
+            // Target depends on streaming state:
+            // - While streaming: chase actual_chars (so new text fades in)
+            // - After streaming: go to actual_chars + fade_chars (complete the fade)
+            let target = if self.streaming_animation {
+                self.actual_chars
+            } else {
+                self.actual_chars + self.fade_chars
+            };
+
+            // Calculate how far behind we are
+            let distance = target - self.animated_chars;
+
+            if distance > 0.0 {
+                // Speed scales with distance - further behind = faster catch up
+                // Use a proportional approach: catch up ~20% of distance per frame at 60fps
+                // Plus a minimum speed to ensure we always make progress
+                let catch_up_factor = 0.15; // Fraction of distance to cover per frame (at 60fps baseline)
+                let frame_factor = (dt * 60.0) as f32; // Scale for actual frame rate
+                let proportional_speed = distance * catch_up_factor * frame_factor;
+                let min_speed = self.min_fade_speed * dt as f32;
+                let speed = proportional_speed.max(min_speed);
+
+                self.animated_chars += speed;
+                // Don't overshoot
+                if self.animated_chars > target {
+                    self.animated_chars = target;
+                }
+                // Update shader directly and request redraw for the area
+                self.draw_text.set_total_chars(cx, self.animated_chars);
+                self.draw_text.draw_vars.area.redraw(cx);
+            }
+
+            // Keep animation alive if streaming or not done fading
+            let done = !self.streaming_animation
+                && self.animated_chars >= self.actual_chars + self.fade_chars;
+            if !done {
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+
+        // Handle selection events when selectable (standalone mode only)
+        // When inside a selectable PortalList, PortalList handles events directly
+        if !self.selectable {
+            return;
+        }
+
+        match event.hits(cx, self.area) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Text);
+            }
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                cx.set_key_focus(self.area);
+                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
+                    self.selection_anchor = idx;
+                    self.selection_cursor = idx;
+                    self.is_selecting = true;
+                    self.redraw(cx);
+                }
+            }
+            Hit::FingerMove(fe) if self.is_selecting => {
+                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
+                    if self.selection_cursor != idx {
+                        self.selection_cursor = idx;
+                        // Propagate selection to child widgets (e.g., CodeView)
+                        self.propagate_selection_to_children();
+                        self.redraw(cx);
+                    }
+                }
+            }
+            Hit::FingerUp(_) => {
+                self.is_selecting = false;
+            }
+            Hit::KeyFocusLost(_) => {
+                self.clear_selection();
+                self.redraw(cx);
+            }
+            Hit::TextCopy(event) => {
+                let text = self.selected_text();
+                if !text.is_empty() {
+                    *event.response.borrow_mut() = Some(text);
+                }
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyA,
+                modifiers,
+                ..
+            }) if modifiers.is_primary() => {
+                self.select_all();
+                self.redraw(cx);
+            }
+            _ => {}
         }
     }
 }
 
 impl TextFlow {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // lets begin a turtle
-        // well know if we have a known width to wrap
-        // if we dont we just dont wrap
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
         self.draw_block.append_to_draw_call(cx);
         self.clear_stacks();
+        if self.selectable {
+            self.selection_tracker.clear();
+            self.widget_text_entries.clear();
+        }
+        // Always reset char_index so it doesn't accumulate across redraws.
+        // Without this, char_index grows unboundedly and eventually exceeds
+        // the shader default total_chars (1 000 000), causing get_color to
+        // compute alpha=0 for every glyph — making text invisible.
+        self.draw_text.reset_char_index();
     }
 
-    fn clear_stacks(&mut self) {
+    /// Check if animation is completely idle (not streaming and fade complete)
+    pub fn is_animation_idle(&self) -> bool {
+        // Animation was never started — both counters still at their initial zero
+        // values and streaming flag is off.  Without this early-out a fresh
+        // TextFlow would be treated as "mid-animation" because 0.0 < 0.0 + fade_chars,
+        // causing set_total_chars(0.0) which overrides the shader default (1 000 000)
+        // and makes all text invisible.
+        if !self.streaming_animation && self.animated_chars == 0.0 && self.actual_chars == 0.0 {
+            return true;
+        }
+        !self.streaming_animation && self.animated_chars >= self.actual_chars + self.fade_chars
+    }
+
+    pub fn clear_stacks(&mut self) {
         self.item_counter = 0;
         self.areas_tracker.clear_stack();
         self.bold.clear();
@@ -504,11 +998,9 @@ impl TextFlow {
         self.underline.clear();
         self.strikethrough.clear();
         self.inline_code.clear();
-        //self.font.clear();
         self.font_sizes.clear();
         self.font_colors.clear();
         self.area_stack.clear();
-        //self.top_drop.clear();
         self.combine_spaces.clear();
         self.ignore_newlines.clear();
         self.first_thing_on_a_line = true;
@@ -524,13 +1016,187 @@ impl TextFlow {
     }
 
     pub fn end(&mut self, cx: &mut Cx2d) {
-        // lets end the turtle with how far we walked
+        // Draw selection highlight before finishing the turtle
+        self.draw_selection(cx);
+
         cx.end_turtle_with_area(&mut self.area);
         self.items.as_mut().unwrap().retain_visible();
+
+        // Update streaming animation state after drawing (also while fading out)
+        let is_idle = self.is_animation_idle();
+        if self.streaming_animation || !is_idle {
+            self.actual_chars = self.draw_text.char_index;
+            self.draw_text.set_total_chars(cx, self.animated_chars);
+            self.next_frame = cx.new_next_frame();
+        }
+    }
+
+    /// Start streaming text animation with fade-in effect on new characters.
+    /// Call this before drawing when streaming new content.
+    pub fn start_streaming_animation(&mut self) {
+        self.streaming_animation = true;
+    }
+
+    /// Reset streaming animation state (for reused widgets).
+    /// Call this when starting to stream new content.
+    pub fn reset_streaming_animation(&mut self) {
+        self.streaming_animation = true;
+        self.animated_chars = 0.0;
+        self.actual_chars = 0.0;
+        self.last_rate_time = 0.0;
+    }
+
+    /// Stop streaming animation. The fade will complete naturally.
+    pub fn stop_streaming_animation(&mut self) {
+        self.streaming_animation = false;
+    }
+
+    /// Check if streaming animation is still running (including fade-out)
+    pub fn is_streaming_animation_done(&self) -> bool {
+        self.is_animation_idle()
+    }
+
+    /// Reset all streaming animations (text fade).
+    pub fn reset_all_streaming_animations(&mut self) {
+        self.reset_streaming_animation();
+    }
+
+    /// Draw selection highlight rectangles
+    fn draw_selection(&mut self, cx: &mut Cx2d) {
+        if !self.selectable {
+            return;
+        }
+
+        let start = self.selection_anchor.min(self.selection_cursor);
+        let end = self.selection_anchor.max(self.selection_cursor);
+
+        if start == end {
+            return;
+        }
+
+        self.draw_block.block_type = FlowBlockType::Selection;
+
+        for rect in self.selection_tracker.selection_rects(start, end) {
+            self.draw_block.draw_abs(cx, rect);
+        }
+    }
+
+    /// Get the currently selected text
+    pub fn selected_text(&self) -> String {
+        if !self.selectable {
+            return String::new();
+        }
+        let start = self.selection_anchor.min(self.selection_cursor);
+        let end = self.selection_anchor.max(self.selection_cursor);
+        if start == end {
+            return String::new();
+        }
+        // Filter out object replacement characters from gaps
+        self.selection_tracker
+            .text
+            .get(start..end)
+            .unwrap_or("")
+            .chars()
+            .filter(|c| *c != '\u{FFFC}')
+            .collect()
+    }
+
+    /// Select all text in this TextFlow
+    pub fn select_all(&mut self) {
+        if self.selectable {
+            self.selection_anchor = 0;
+            self.selection_cursor = self.selection_tracker.total_len();
+            for (widget, _, _) in &self.widget_text_entries {
+                widget.selection_select_all();
+            }
+        }
+    }
+
+    /// Clear selection
+    pub fn clear_selection(&mut self) {
+        self.selection_anchor = 0;
+        self.selection_cursor = 0;
+        self.is_selecting = false;
+        for (widget, _, _) in &self.widget_text_entries {
+            widget.selection_clear();
+        }
+    }
+
+    /// Check if there is a selection
+    pub fn has_selection(&self) -> bool {
+        self.selectable && self.selection_anchor != self.selection_cursor
+    }
+
+    /// Set selection range (for external control, e.g., cross-TextFlow selection).
+    /// Propagates sub-ranges to child WidgetText widgets so they draw their own selection.
+    pub fn set_selection(&mut self, anchor: usize, cursor: usize) {
+        if self.selectable {
+            self.selection_anchor = anchor;
+            self.selection_cursor = cursor;
+            self.propagate_selection_to_children();
+        }
+    }
+
+    /// Propagate the current selection range to child widgets (e.g., CodeView).
+    /// Called both from external `set_selection` and internal mouse selection handling.
+    fn propagate_selection_to_children(&self) {
+        let start = self.selection_anchor.min(self.selection_cursor);
+        let end = self.selection_anchor.max(self.selection_cursor);
+
+        for (widget, text_start, text_len) in &self.widget_text_entries {
+            let seg_end = text_start + text_len;
+            if start < seg_end && end > *text_start {
+                let sub_start = start.saturating_sub(*text_start);
+                let sub_end = (end - text_start).min(*text_len);
+                widget.selection_set(sub_start, sub_end);
+            } else {
+                widget.selection_clear();
+            }
+        }
+    }
+
+    /// Get the full text content (for cross-boundary copy)
+    pub fn get_full_text(&self) -> String {
+        // Filter out object replacement characters from gaps
+        self.selection_tracker
+            .text
+            .chars()
+            .filter(|c| *c != '\u{FFFC}')
+            .collect()
+    }
+
+    /// Get text for a specific character range (for cross-boundary copy)
+    pub fn get_text_for_range(&self, start: usize, end: usize) -> String {
+        self.selection_tracker
+            .text
+            .get(start..end)
+            .unwrap_or("")
+            .chars()
+            .filter(|c| *c != '\u{FFFC}')
+            .collect()
+    }
+
+    /// Get the total text length
+    pub fn text_len(&self) -> usize {
+        self.selection_tracker.total_len()
+    }
+
+    /// Register a child widget's text content in the selection tracker.
+    /// Call after drawing a child widget whose text should participate
+    /// in cross-child selection (e.g. CodeView code blocks).
+    /// The widget's Area is stored in the tracker for hit testing;
+    /// the WidgetRef is stored separately for selection propagation.
+    pub fn push_widget_text_for_selection(&mut self, widget: WidgetRef, text: &str) {
+        if self.selectable {
+            let text_start = self.selection_tracker.text.len();
+            let text_len = text.len();
+            self.selection_tracker.push_widget_text(widget.area(), text);
+            self.widget_text_entries
+                .push((widget, text_start, text_len));
+        }
     }
 
     pub fn begin_code(&mut self, cx: &mut Cx2d) {
-        // alright we are going to push a block with a layout and a walk
         self.draw_block.block_type = FlowBlockType::Code;
         self.draw_block.begin(cx, self.code_walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
@@ -538,25 +1204,21 @@ impl TextFlow {
     }
 
     pub fn end_code(&mut self, cx: &mut Cx2d) {
-        // check if we need to use a widget
         self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
         self.draw_block.end(cx);
+        if self.selectable {
+            self.selection_tracker.push_newline();
+        }
     }
 
     pub fn begin_list_item(&mut self, cx: &mut Cx2d, dot: &str, pad: f64) {
-        // alright we are going to push a block with a layout and a walk
-        let fs = self.font_sizes.last().unwrap_or(&self.font_size);
-        self.draw_normal.text_style.font_size = *fs as _;
-        let fc = self.font_colors.last().unwrap_or(&self.font_color);
-        self.draw_normal.color = *fc;
-
-        // Use the provided padding to reserve space for the marker
-        let font_based_padding = self.draw_normal.text_style.font_size as f64 * pad;
+        let fs = *self.font_sizes.last().unwrap_or(&self.font_size);
+        let font_based_padding = fs as f64 * pad;
 
         cx.begin_turtle(
             self.list_item_walk,
             Layout {
-                padding: Padding {
+                padding: Inset {
                     left: self.list_item_layout.padding.left + font_based_padding,
                     ..self.list_item_layout.padding
                 },
@@ -564,15 +1226,11 @@ impl TextFlow {
             },
         );
 
-        // Move turtle back to draw the marker
         cx.turtle_mut()
             .move_right_down(dvec2(-font_based_padding, 0.0));
 
-        // Draw the marker and space using the turtle system
         self.draw_text(cx, dot);
         self.draw_text(cx, " ");
-
-        // The turtle is now positioned after the marker+space, content will flow naturally
 
         self.area_stack.push(self.draw_block.draw_vars.area);
     }
@@ -580,18 +1238,25 @@ impl TextFlow {
     pub fn end_list_item(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
         self.first_thing_on_a_line = true;
+        if self.selectable {
+            self.selection_tracker.push_newline();
+        }
     }
 
     pub fn new_line_collapsed(&mut self, cx: &mut Cx2d) {
-        // if all we emitted is a single whitespace
         cx.turtle_new_line();
         self.first_thing_on_a_line = true;
+        if self.selectable {
+            self.selection_tracker.push_newline();
+        }
     }
 
     pub fn new_line_collapsed_with_spacing(&mut self, cx: &mut Cx2d, spacing: f64) {
-        // if all we emitted is a single whitespace
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
+        if self.selectable {
+            self.selection_tracker.push_newline();
+        }
     }
 
     pub fn sep(&mut self, cx: &mut Cx2d) {
@@ -600,7 +1265,6 @@ impl TextFlow {
     }
 
     pub fn begin_quote(&mut self, cx: &mut Cx2d) {
-        // alright we are going to push a block with a layout and a walk
         self.draw_block.block_type = FlowBlockType::Quote;
         self.draw_block
             .begin(cx, self.quote_walk, self.quote_layout);
@@ -610,24 +1274,34 @@ impl TextFlow {
     pub fn end_quote(&mut self, cx: &mut Cx2d) {
         self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
         self.draw_block.end(cx);
-    }
-    /*
-    pub fn counted_item(&mut self, cx: &mut Cx, template: LiveId) -> Option<WidgetRef> {
-        self.item_counter += 1;
-        if let Some(ptr) = self.templates.get(&template) {
-            let entry = self.items.as_mut().unwrap().get_or_insert(cx, (LiveId(self.item_counter), template), | cx | {
-                WidgetRef::new_from_ptr(cx, Some(*ptr))
-            });
-            return Some(entry.clone())
+        if self.selectable {
+            self.selection_tracker.push_newline();
         }
-        None
-    }*/
+    }
 
     pub fn draw_item_counted(&mut self, cx: &mut Cx2d, template: LiveId) -> LiveId {
         let entry_id = self.new_counted_id();
+        let start_pos = if self.selectable {
+            Some(cx.turtle().pos())
+        } else {
+            None
+        };
+
         self.item_with(cx, entry_id, template, |cx, item, tf| {
             item.draw_all(cx, &mut Scope::with_data(tf));
         });
+
+        // Track gap for selection when selectable
+        if let Some(start) = start_pos {
+            let end_pos = cx.turtle().pos();
+            let row_height = cx.turtle().row_height().max(10.0); // Ensure minimum height
+            let rect = Rect {
+                pos: start,
+                size: dvec2((end_pos.x - start.x).max(1.0), row_height),
+            };
+            self.selection_tracker.push_gap(rect);
+        }
+
         entry_id
     }
 
@@ -644,10 +1318,29 @@ impl TextFlow {
 
     pub fn draw_item_counted_ref(&mut self, cx: &mut Cx2d, template: LiveId) -> WidgetRef {
         let entry_id = self.new_counted_id();
-        self.item_with(cx, entry_id, template, |cx, item, tf| {
+        let start_pos = if self.selectable {
+            Some(cx.turtle().pos())
+        } else {
+            None
+        };
+
+        let result = self.item_with(cx, entry_id, template, |cx, item, tf| {
             item.draw_all(cx, &mut Scope::with_data(tf));
             item.clone()
-        })
+        });
+
+        // Track gap for selection when selectable
+        if let Some(start) = start_pos {
+            let end_pos = cx.turtle().pos();
+            let row_height = cx.turtle().row_height().max(10.0);
+            let rect = Rect {
+                pos: start,
+                size: dvec2((end_pos.x - start.x).max(1.0), row_height),
+            };
+            self.selection_tracker.push_gap(rect);
+        }
+
+        result
     }
 
     pub fn draw_item_ref(
@@ -673,10 +1366,18 @@ impl TextFlow {
         F: FnOnce(&mut Cx2d, &WidgetRef, &mut TextFlow) -> R,
     {
         let mut items = self.items.take().unwrap();
-        let r = if let Some(ptr) = self.templates.get(&template) {
+        let r = if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = items.get_or_insert(cx, entry_id, |cx| {
-                (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
+                let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                (widget, template)
             });
+            // If the template changed (e.g. streaming markdown switched code block type),
+            // recreate the widget from the new template.
+            if entry.1 != template {
+                let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                *entry = (widget, template);
+            }
             f(cx, &entry.0, self)
         } else {
             R::default()
@@ -686,14 +1387,20 @@ impl TextFlow {
     }
 
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> WidgetRef {
-        if let Some(ptr) = self.templates.get(&template) {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = self
                 .items
                 .as_mut()
                 .unwrap()
                 .get_or_insert(cx, entry_id, |cx| {
-                    (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
+                    let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                    (widget, template)
                 });
+            if entry.1 != template {
+                let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                *entry = (widget, template);
+            }
             return entry.0.clone();
         }
         WidgetRef::empty()
@@ -701,14 +1408,20 @@ impl TextFlow {
 
     pub fn item_counted(&mut self, cx: &mut Cx, template: LiveId) -> WidgetRef {
         let entry_id = self.new_counted_id();
-        if let Some(ptr) = self.templates.get(&template) {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = self
                 .items
                 .as_mut()
                 .unwrap()
                 .get_or_insert(cx, entry_id, |cx| {
-                    (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
+                    let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                    (widget, template)
                 });
+            if entry.1 != template {
+                let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                *entry = (widget, template);
+            }
             return entry.0.clone();
         }
         WidgetRef::empty()
@@ -733,16 +1446,17 @@ impl TextFlow {
         entry_id: LiveId,
         template: LiveId,
     ) -> Option<WidgetRef> {
-        if let Some(ptr) = self.templates.get(&template) {
+        if let Some(template_ref) = self.templates.get(&template) {
+            let template_value: ScriptValue = template_ref.as_object().into();
             let entry = self
                 .items
                 .as_mut()
                 .unwrap()
                 .get_or_insert(cx, entry_id, |cx| {
-                    (
-                        WidgetRef::new_from_ptr_with_scope(cx, Some(*ptr), scope),
-                        template,
-                    )
+                    let widget = cx.with_vm(|vm| {
+                        WidgetRef::script_from_value_scoped(vm, scope, template_value)
+                    });
+                    (widget, template)
                 });
             return Some(entry.0.clone());
         }
@@ -760,28 +1474,57 @@ impl TextFlow {
                 text.trim_end_matches("\n")
             };
 
-            let dt = if self.fixed.value() > 0 {
-                &mut self.draw_fixed
+            // Select the appropriate text style based on bold/italic/fixed state
+            let text_style = if self.fixed.value() > 0 {
+                self.text_style_fixed.clone()
             } else if self.bold.value() > 0 {
                 if self.italic.value() > 0 {
-                    &mut self.draw_bold_italic
+                    self.text_style_bold_italic.clone()
                 } else {
-                    &mut self.draw_bold
+                    self.text_style_bold.clone()
                 }
             } else if self.italic.value() > 0 {
-                &mut self.draw_italic
+                self.text_style_italic.clone()
             } else {
-                &mut self.draw_normal
+                self.text_style_normal.clone()
             };
+
+            // Apply the text style to the single draw_text instance
+            self.draw_text.text_style = text_style;
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
-            //dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
-            dt.text_style.font_size = *font_size as _;
-            dt.color = *font_color;
-            //dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
-            //dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
-            //if let Some(font) = self.font
-            // the turtle is at pos X so we walk it.
+            self.draw_text.text_style.font_size = *font_size as _;
+            self.draw_text.color = *font_color;
+
+            let dt = &mut self.draw_text;
+
+            // Capture LaidoutText for selection when selectable
+            if self.selectable {
+                let turtle_pos = cx.turtle().pos();
+                let turtle_rect = cx.turtle().inner_rect();
+                let origin = dvec2(turtle_rect.pos.x, turtle_pos.y);
+                let first_row_indent = (turtle_pos.x - turtle_rect.pos.x) as f32;
+                let row_height = cx.turtle().next_row_offset() as f32;
+                let max_width = if !turtle_rect.size.x.is_nan() {
+                    Some(turtle_rect.size.x as f32)
+                } else {
+                    None
+                };
+                let wrap = cx.turtle().layout().flow == Flow::right_wrap();
+
+                let laidout_text = dt.layout(
+                    cx,
+                    first_row_indent,
+                    row_height,
+                    max_width,
+                    wrap,
+                    Align::default(),
+                    text,
+                );
+
+                self.selection_tracker
+                    .push_text(laidout_text, origin, dt.font_scale, text);
+            }
 
             let areas_tracker = &mut self.areas_tracker;
             if self.inline_code.value() > 0 {
@@ -848,33 +1591,42 @@ impl TextFlow {
     }
 }
 
-#[derive(Debug, Clone, DefaultNone)]
-pub enum TextFlowLinkAction {
-    Clicked { key_modifiers: KeyModifiers },
+/// Actions emitted by TextFlow for cross-boundary selection in PortalList
+#[derive(Debug, Clone, Default)]
+pub enum TextFlowAction {
+    #[default]
     None,
 }
 
-#[derive(Live, Widget)]
-struct TextFlowLink {
-    #[animator]
+#[derive(Debug, Clone, Default)]
+pub enum TextFlowLinkAction {
+    Clicked {
+        key_modifiers: KeyModifiers,
+    },
+    #[default]
+    None,
+}
+
+#[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister, Animator)]
+pub struct TextFlowLink {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[apply_default]
     animator: Animator,
 
-    // TODO: this is unusued; just here to invalidly satisfy the area provider.
-    //       I'm not sure how to implement `fn area()` given that it has multiple area rects.
-    #[redraw]
-    #[area]
+    #[rust]
     area: Area,
 
-    // TODO: remove these if they're unneeded
-    //#[walk] walk: Walk,
     #[live(true)]
     click_on_down: bool,
     #[rust]
-    drawn_areas: SmallVec<[Area; 2]>,
+    pub drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)]
     grab_key_focus: bool,
     #[live]
-    margin: Margin,
+    margin: Inset,
     #[live]
     hovered: f32,
     #[live]
@@ -893,12 +1645,49 @@ struct TextFlowLink {
     #[live]
     pub text: ArcStringMut,
 
-    #[action_data]
     #[rust]
     action_data: WidgetActionData,
 }
 
-impl LiveHook for TextFlowLink {}
+impl WidgetNode for TextFlowLink {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        Walk::default()
+    }
+
+    fn area(&self) -> Area {
+        self.area.area()
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+    }
+
+    fn set_action_data(&mut self, data: std::sync::Arc<dyn ActionTrait>) {
+        self.action_data.set_box(data)
+    }
+
+    fn action_data(&self) -> Option<std::sync::Arc<dyn ActionTrait>> {
+        self.action_data.clone_data()
+    }
+
+    fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
+        // Check main area
+        let area = self.area();
+        if area.is_valid(cx) && area.rect(cx).contains(point) {
+            return true;
+        }
+        // Links span multiple text rects via drawn_areas
+        for area in self.drawn_areas.iter() {
+            if area.is_valid(cx) && area.rect(cx).contains(point) {
+                return true;
+            }
+        }
+        false
+    }
+}
 
 impl Widget for TextFlowLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -921,7 +1710,6 @@ impl Widget for TextFlowLink {
                         cx.widget_action_with_data(
                             &self.action_data,
                             self.widget_uid(),
-                            &scope.path,
                             TextFlowLinkAction::Clicked {
                                 key_modifiers: fe.modifiers,
                             },
@@ -941,7 +1729,6 @@ impl Widget for TextFlowLink {
                             cx.widget_action_with_data(
                                 &self.action_data,
                                 self.widget_uid(),
-                                &scope.path,
                                 TextFlowLinkAction::Clicked {
                                     key_modifiers: fe.modifiers,
                                 },
@@ -1019,23 +1806,3 @@ impl Widget for TextFlowLink {
         self.redraw(cx);
     }
 }
-/*
-#[derive(Clone)]
-pub struct HtmlId(pub HtmlString);
-impl HtmlId{
-    pub fn new(rc:&Rc<String>, start:usize, end:usize)->Self{
-        Self(HtmlString(rc.clone(), start, end))
-    }
-    pub fn as_id(&self)->LiveId{
-        LiveId::from_str(&self.0.0[self.0.1..self.0.2])
-    }
-}
-
-impl fmt::Debug for HtmlId{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0.as_str())
-    }
-}
-*/
-
-// HTML Dom tree-flat vector

@@ -10,4 +10,4 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "Ywx5y_Q1A52NaelyQCiYcZ6m0Po="
 
 [dependencies]
-makepad-draw2 = { path = "../../draw2", version = "2.0.0" }
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }

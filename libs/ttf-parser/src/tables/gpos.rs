@@ -889,7 +889,7 @@ pub struct AnchorMatrix<'a> {
     pub rows: u16,
     /// Number of columns in the matrix.
     pub cols: u16,
-    matrix: LazyArray32<'a, Offset16>,
+    matrix: LazyArray32<'a, Option<Offset16>>,
 }
 
 impl<'a> AnchorMatrix<'a> {
@@ -909,7 +909,7 @@ impl<'a> AnchorMatrix<'a> {
     /// Returns an [`Anchor`] at position.
     pub fn get(&self, row: u16, col: u16) -> Option<Anchor<'_>> {
         let idx = u32::from(row) * u32::from(self.cols) + u32::from(col);
-        let offset = self.matrix.get(idx)?.to_usize();
+        let offset = self.matrix.get(idx)??.to_usize();
         Anchor::parse(self.data.get(offset..)?)
     }
 }

@@ -5,10 +5,10 @@ helicopter-headset experience, silent disco, and so on.
 This example shows using networking and audio IO
 */
 
-use makepad_draw2::makepad_platform::{
+use makepad_widgets::makepad_platform::{
     audio::AudioBuffer, audio_stream::AudioStreamSender, makepad_micro_serde::*,
 };
-use makepad_draw2::*;
+use makepad_widgets::*;
 use std::collections::HashMap;
 use std::net::UdpSocket;
 use std::time::Duration;
@@ -144,14 +144,14 @@ fn apply_fade_out(buf: &mut [f32], fade_samples: usize) {
 app_main!(App);
 
 script_mod! {
-    use mod.std.*;
+    use mod.prelude.widgets.*
     #(App::script_api(vm)){
     }
 }
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_draw2::script_mod(vm);
+        crate::makepad_widgets::script_mod(vm);
         App::from_script_mod(vm, script_mod)
     }
 }
@@ -216,7 +216,7 @@ impl MatchEvent for App {
         }
 
         // Select input device based on --device= argument or use default
-        let inputs = if let Some(ref device_name) = args.device {
+        let _inputs = if let Some(ref device_name) = args.device {
             let matched = devices.match_inputs(&[device_name.as_str()]);
             if matched.is_empty() {
                 println!(
@@ -268,7 +268,7 @@ impl App {
         // and allows arbitrary chunksized reads. Little utility struct.
         // platform2's create_pair takes (min_buf, max_buf) at creation time
         let (mic_send, mut mic_recv) = AudioStreamSender::create_pair(0, 8);
-        let (mix_send, mut mix_recv) = AudioStreamSender::create_pair(3, 8);
+        let (_mix_send, mut mix_recv) = AudioStreamSender::create_pair(3, 8);
 
         // the UDP broadcast socket
         let write_audio = UdpSocket::bind("0.0.0.0:41531").unwrap();
@@ -387,7 +387,7 @@ impl App {
 
                     // create an audiobuffer from the data
                     // Received data keeps its original channel count (mono or stereo)
-                    let (client_uid, sequence, buffer) = match packet {
+                    let (client_uid, sequence, _buffer) = match packet {
                         TeamTalkWire::Audio {
                             client_uid,
                             sequence,

@@ -7,13 +7,13 @@ use {
     crate::{
         cx::{Cx, LinuxWindowParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        draw_pass::CxDrawPassParent,
         event::*,
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::dvec2,
         os::cx_native::EventFlow,
         os::cx_stdin::PollTimers,
-        pass::CxPassParent,
         permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
     },
@@ -229,6 +229,7 @@ impl X11Cx {
                 if e.timer_id == 0 {
                     if SignalToUI::check_and_clear_ui_signal() {
                         cx.handle_media_signals();
+                        cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
                     }
                     cx.handle_action_receiver();
@@ -259,15 +260,15 @@ impl X11Cx {
             cx.compute_pass_repaint_order(&mut passes_todo);
             cx.repaint_id += 1;
         }
-        for pass_id in &passes_todo {
+        for draw_pass_id in &passes_todo {
             let parent = {
                 let mut cx = self.cx.borrow_mut();
-                cx.passes[*pass_id].set_time(get_xlib_app_global().time_now() as f32);
-                cx.passes[*pass_id].parent.clone()
+                cx.passes[*draw_pass_id].set_time(get_xlib_app_global().time_now() as f32);
+                cx.passes[*draw_pass_id].parent.clone()
             };
             match parent {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     if let Some(window) =
                         opengl_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
@@ -281,17 +282,17 @@ impl X11Cx {
                         let pix_height =
                             window.window_geom.inner_size.y * window.window_geom.dpi_factor;
                         let mut cx = self.cx.borrow_mut();
-                        cx.draw_pass_to_window(*pass_id, egl_surface, pix_width, pix_height);
+                        cx.draw_pass_to_window(*draw_pass_id, egl_surface, pix_width, pix_height);
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     let mut cx = self.cx.borrow_mut();
-                    cx.draw_pass_to_texture(*pass_id, None);
+                    cx.draw_pass_to_texture(*draw_pass_id, None);
                 }
-                CxPassParent::None => {
+                CxDrawPassParent::None => {
                     let mut cx = self.cx.borrow_mut();
-                    cx.draw_pass_to_texture(*pass_id, None);
+                    cx.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
         }
@@ -375,10 +376,6 @@ impl X11Cx {
                     }
                 }
                 CxOsOp::ShowClipboardActions { .. } => {}
-                CxOsOp::HideClipboardActions => {}
-                CxOsOp::SyncImeState { .. } => {
-                    // Linux X11 IME handled by input method framework
-                }
                 CxOsOp::CopyToClipboard(content) => {
                     if let Some(window) = opengl_windows.get(0) {
                         unsafe {
@@ -403,7 +400,7 @@ impl X11Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     xlib_app.stop_timer(timer_id);
                 }
-                CxOsOp::ShowTextIME(area, pos, _config) => {
+                CxOsOp::ShowTextIME(area, pos) => {
                     let pos = area.clipped_rect(&cx).pos + pos;
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_spot(pos);

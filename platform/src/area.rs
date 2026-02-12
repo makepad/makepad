@@ -1,6 +1,11 @@
 use crate::{
-    cx::Cx, draw_list::DrawListId, makepad_error_log::*, makepad_live_compiler::LiveId,
-    makepad_math::*, makepad_shader_compiler::ShaderTy,
+    cx::Cx,
+    //makepad_live_id::{
+    //LiveId,
+    //},
+    draw_list::DrawListId,
+    makepad_error_log::*,
+    makepad_math::*,
 };
 
 #[derive(Clone, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
@@ -39,13 +44,13 @@ impl Default for Area {
     }
 }
 
-pub struct DrawReadRef<'a> {
+pub struct _DrawReadRef<'a> {
     pub repeat: usize,
     pub stride: usize,
     pub buffer: &'a [f32],
 }
 
-pub struct DrawWriteRef<'a> {
+pub struct _DrawWriteRef<'a> {
     pub repeat: usize,
     pub stride: usize,
     pub buffer: &'a mut [f32],
@@ -105,6 +110,40 @@ impl Area {
         };
     }
 
+    /// Extends this area to include another area if they're in the same draw call.
+    /// If self is stale (redraw_id doesn't match Cx), returns new_area.
+    /// If self is current, extends to cover both ranges.
+    pub fn extend_with(self, _cx: &Cx, new_area: Area) -> Area {
+        // If self is empty, just use the new one
+        if let Area::Empty = self {
+            return new_area;
+        }
+
+        // Check if old area is stale by comparing against Cx's redraw_id
+        if let Area::Instance(old_inst) = self {
+            if let Area::Instance(new_inst) = new_area {
+                if new_inst.redraw_id != old_inst.redraw_id
+                    || old_inst.draw_list_id != new_inst.draw_list_id
+                    || old_inst.draw_item_id != new_inst.draw_item_id
+                {
+                    return new_area;
+                }
+
+                // Extend: keep old offset, expand count to cover both ranges
+                return Area::Instance(InstanceArea {
+                    draw_list_id: old_inst.draw_list_id,
+                    draw_item_id: old_inst.draw_item_id,
+                    instance_offset: old_inst.instance_offset,
+                    instance_count: old_inst.instance_count + new_inst.instance_count,
+                    redraw_id: new_inst.redraw_id,
+                });
+            }
+        }
+
+        // Different draw calls, just use the new one
+        new_area
+    }
+
     pub fn is_valid(&self, cx: &Cx) -> bool {
         return match self {
             Area::Instance(inst) => {
@@ -152,17 +191,7 @@ impl Area {
                     error!("No instances but everything else valid?");
                     return Rect::default();
                 }
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!(
-                        "Generation invalid get_rect {} {:?} {} {}",
-                        draw_list.debug_id,
-                        inst,
-                        cx.draw_shaders.generation,
-                        draw_call.draw_shader.draw_shader_generation
-                    );
-                    return Rect::default();
-                }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
@@ -243,7 +272,6 @@ impl Area {
         return match self {
             Area::Instance(inst) => {
                 if inst.instance_count == 0 {
-                    //panic!();
                     error!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return Rect::default();
                 }
@@ -258,17 +286,7 @@ impl Area {
                     error!("No instances but everything else valid?");
                     return Rect::default();
                 }
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!(
-                        "Generation invalid get_rect {} {:?} {} {}",
-                        draw_list.debug_id,
-                        inst,
-                        cx.draw_shaders.generation,
-                        draw_call.draw_shader.draw_shader_generation
-                    );
-                    return Rect::default();
-                }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
@@ -311,18 +329,7 @@ impl Area {
                 }
                 let draw_item = &draw_list.draw_items[inst.draw_item_id];
                 let draw_call = draw_item.draw_call().unwrap();
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!(
-                        "Generation invalid abs_to_rel {} {:?} {} {}",
-                        draw_list.debug_id,
-                        inst,
-                        cx.draw_shaders.generation,
-                        draw_call.draw_shader.draw_shader_generation
-                    );
-                    return abs;
-                }
-
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     let buf = draw_item.instances.as_ref().unwrap();
@@ -358,10 +365,7 @@ impl Area {
                 let draw_item = &mut cxview.draw_items[inst.draw_item_id];
                 //log!("{:?}", draw_item.kind.sub_list().is_some());
                 let draw_call = draw_item.kind.draw_call().unwrap();
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    return;
-                }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id]; // ok now we have to patch x/y/w/h into it
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index]; // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_mut().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     buf[inst.instance_offset + rect_pos + 0] = rect.pos.x as f32;
@@ -380,13 +384,8 @@ impl Area {
             _ => (),
         }
     }
-
-    pub fn get_read_ref<'a>(
-        &self,
-        cx: &'a Cx,
-        id: LiveId,
-        ty: ShaderTy,
-    ) -> Option<DrawReadRef<'a>> {
+    /*
+    pub fn get_read_ref<'a>(&self, cx: &'a Cx, id: LiveId, ty: ShaderTy) -> Option<DrawReadRef<'a >> {
         match self {
             Area::Instance(inst) => {
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
@@ -400,47 +399,32 @@ impl Area {
                     return None;
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if let Some(input) = sh
-                    .mapping
-                    .user_uniforms
-                    .inputs
-                    .iter()
-                    .find(|input| input.id == id)
-                {
+                if let Some(input) = sh.mapping.draw_call_uniforms.inputs.iter().find( | input | input.id == id) {
                     if input.ty != ty {
-                        panic!(
-                            "get_read_ref wrong uniform type, expected {:?} got: {:?}!",
-                            input.ty, ty
-                        );
+                        panic!("get_read_ref wrong uniform type, expected {:?} got: {:?}!", input.ty, ty);
                     }
-                    return Some(DrawReadRef {
-                        repeat: 1,
-                        stride: 0,
-                        buffer: &draw_call.user_uniforms[input.offset..],
-                    });
+                    return Some(
+                        DrawReadRef {
+                            repeat: 1,
+                            stride: 0,
+                            buffer: &draw_call.draw_call_uniforms[input.offset..]
+                        }
+                    )
                 }
-                if let Some(input) = sh
-                    .mapping
-                    .instances
-                    .inputs
-                    .iter()
-                    .find(|input| input.id == id)
-                {
+                if let Some(input) = sh.mapping.instances.inputs.iter().find( | input | input.id == id) {
                     if input.ty != ty {
-                        panic!(
-                            "get_read_ref wrong instance type, expected {:?} got: {:?}!",
-                            input.ty, ty
-                        );
+                        panic!("get_read_ref wrong instance type, expected {:?} got: {:?}!", input.ty, ty);
                     }
                     if inst.instance_count == 0 {
-                        return None;
+                        return None
                     }
-                    return Some(DrawReadRef {
-                        repeat: inst.instance_count,
-                        stride: sh.mapping.instances.total_slots,
-                        buffer: &draw_item.instances.as_ref().unwrap()
-                            [(inst.instance_offset + input.offset)..],
-                    });
+                    return Some(
+                        DrawReadRef {
+                            repeat: inst.instance_count,
+                            stride: sh.mapping.instances.total_slots,
+                            buffer: &draw_item.instances.as_ref().unwrap()[(inst.instance_offset + input.offset)..],
+                        }
+                    )
                 }
                 panic!("get_read_ref property not found! {}", id);
             }
@@ -449,13 +433,7 @@ impl Area {
         None
     }
 
-    pub fn get_write_ref<'a>(
-        &self,
-        cx: &'a mut Cx,
-        id: LiveId,
-        ty: ShaderTy,
-        name: &str,
-    ) -> Option<DrawWriteRef<'a>> {
+    pub fn get_write_ref<'a>(&self, cx: &'a mut Cx, id: LiveId, ty: ShaderTy, name: &str) -> Option<DrawWriteRef<'a >> {
         match self {
             Area::Instance(inst) => {
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -469,59 +447,44 @@ impl Area {
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
 
-                if let Some(input) = sh
-                    .mapping
-                    .user_uniforms
-                    .inputs
-                    .iter()
-                    .find(|input| input.id == id)
-                {
+                if let Some(input) = sh.mapping.draw_call_uniforms.inputs.iter().find( | input | input.id == id) {
                     if input.ty != ty {
-                        panic!(
-                            "get_write_ref {} wrong uniform type, expected {:?} got: {:?}!",
-                            name, input.ty, ty
-                        );
+                        panic!("get_write_ref {} wrong uniform type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
 
-                    cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     draw_call.uniforms_dirty = true;
 
-                    return Some(DrawWriteRef {
-                        repeat: 1,
-                        stride: 0,
-                        buffer: &mut draw_call.user_uniforms[input.offset..],
-                    });
+                    return Some(
+                        DrawWriteRef {
+                            repeat: 1,
+                            stride: 0,
+                            buffer: &mut draw_call.draw_call_uniforms[input.offset..]
+                        }
+                    )
                 }
-                if let Some(input) = sh
-                    .mapping
-                    .instances
-                    .inputs
-                    .iter()
-                    .find(|input| input.id == id)
-                {
+                if let Some(input) = sh.mapping.instances.inputs.iter().find( | input | input.id == id) {
                     if input.ty != ty {
-                        panic!(
-                            "get_write_ref {} wrong instance type, expected {:?} got: {:?}!",
-                            name, input.ty, ty
-                        );
+                        panic!("get_write_ref {} wrong instance type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
 
-                    cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     draw_call.instance_dirty = true;
                     if inst.instance_count == 0 {
-                        return None;
+                        return None
                     }
-                    return Some(DrawWriteRef {
-                        repeat: inst.instance_count,
-                        stride: sh.mapping.instances.total_slots,
-                        buffer: &mut draw_item.instances.as_mut().unwrap()
-                            [(inst.instance_offset + input.offset)..],
-                    });
+                    return Some(
+                        DrawWriteRef {
+                            repeat: inst.instance_count,
+                            stride: sh.mapping.instances.total_slots,
+                            buffer: &mut draw_item.instances.as_mut().unwrap()[(inst.instance_offset + input.offset)..]
+                        }
+                    )
                 }
                 panic!("get_write_ref {} property not found!", name);
             }
             _ => (),
         }
         None
-    }
+    }*/
 }

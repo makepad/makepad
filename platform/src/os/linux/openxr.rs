@@ -2,6 +2,7 @@ use makepad_jni_sys as jni_sys;
 use {
     crate::{
         cx::{Cx, OsType},
+        draw_pass::{CxDrawPassParent, DrawPassId},
         draw_shader::CxDrawShaderMapping,
         event::Event,
         makepad_math::Mat4f,
@@ -10,7 +11,6 @@ use {
             android::android::CxAndroidDisplay, android::android_jni::*, gl_sys, gl_sys::LibGl,
             opengl::GlShader, openxr_anchor::*, openxr_input::*, openxr_sys::*,
         },
-        pass::{CxPassParent, PassId},
     },
     std::ptr,
     std::sync::mpsc,
@@ -114,14 +114,18 @@ impl Cx {
         }
     }
 
-    pub(crate) fn openxr_draw_pass_to_multiview(&mut self, pass_id: PassId, frame: &CxOpenXrFrame) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+    pub(crate) fn openxr_draw_pass_to_multiview(
+        &mut self,
+        draw_pass_id: DrawPassId,
+        frame: &CxOpenXrFrame,
+    ) {
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
         let session = &self.os.openxr.session.as_ref().unwrap();
         let gl = &self.os.display.as_ref().unwrap().libgl;
 
         // alright lets set up the pass matrices
-        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-        let pass = &mut self.passes[pass_id];
+        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+        let pass = &mut self.passes[draw_pass_id];
 
         pass.set_dpi_factor(dpi_factor);
         pass.paint_dirty = true;
@@ -176,8 +180,8 @@ impl Cx {
         //let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
 
         let mut zbias = 0.0;
-        let zbias_step = -0.1; //self.passes[pass_id].zbias_step;
-        self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step);
+        let zbias_step = -0.1; //self.passes[draw_pass_id].zbias_step;
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
 
         let gl = &self.os.display.as_ref().unwrap().libgl;
         unsafe {
@@ -197,20 +201,20 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {
-                    self.openxr_draw_pass_to_multiview(*pass_id, frame);
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {
+                    self.openxr_draw_pass_to_multiview(*draw_pass_id, frame);
                 }
-                CxPassParent::Window(_) => {
+                CxDrawPassParent::Window(_) => {
                     // this cant exist..
                 }
-                CxPassParent::Pass(_) => {
-                    self.draw_pass_to_texture(*pass_id, None);
+                CxDrawPassParent::DrawPass(_) => {
+                    self.draw_pass_to_texture(*draw_pass_id, None);
                 }
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, None);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
         }

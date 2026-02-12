@@ -1,5 +1,4 @@
 use crate::cx::Cx;
-use crate::generate_any_trait_api;
 use crate::thread::SignalToUI;
 use std::any::TypeId;
 use std::fmt;
@@ -25,7 +24,27 @@ impl<T: 'static + Debug + ?Sized> ActionTrait for T {
     }
 }
 
-generate_any_trait_api!(ActionTrait);
+impl dyn ActionTrait {
+    pub fn is<T: ActionTrait + 'static>(&self) -> bool {
+        let t = TypeId::of::<T>();
+        let concrete = self.ref_cast_type_id();
+        t == concrete
+    }
+    pub fn downcast_ref<T: ActionTrait + 'static>(&self) -> Option<&T> {
+        if self.is::<T>() {
+            Some(unsafe { &*(self as *const dyn ActionTrait as *const T) })
+        } else {
+            None
+        }
+    }
+    pub fn downcast_mut<T: ActionTrait + 'static>(&mut self) -> Option<&mut T> {
+        if self.is::<T>() {
+            Some(unsafe { &mut *(self as *const dyn ActionTrait as *mut T) })
+        } else {
+            None
+        }
+    }
+}
 
 impl Debug for dyn ActionTrait {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

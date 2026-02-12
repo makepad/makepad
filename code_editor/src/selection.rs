@@ -378,7 +378,7 @@ impl Cursor {
             preferred_column_index: None,
         }
     }
-    
+
     pub fn move_to_file_start(self) -> Self {
         Self {
             position: Position {
@@ -529,7 +529,6 @@ impl Cursor {
             preferred_column_index: Some(column_index),
         }
     }
-
 
     pub fn apply_edit(self, edit: &Edit) -> Self {
         Self {
