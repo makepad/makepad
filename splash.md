@@ -127,7 +127,8 @@ RoundedView{ height: Fit width: Fill flow: Down spacing: 8
 }
 ```
 
-**The ONLY exception** is inside a fixed-height parent:
+**Exceptions:**
+1. Inside a fixed-height parent, `height: Fill` is OK:
 ```
 View{ height: 300  // Fixed parent
     View{ height: Fill  // OK here - fills the 300px
@@ -135,6 +136,7 @@ View{ height: 300  // Fixed parent
     }
 }
 ```
+2. **MapView** — has no intrinsic height, so `height: Fit` also gives 0px. Use a **fixed pixel height**: `MapView{width: Fill height: 500}`
 
 **TEMPLATE: Copy this pattern for every container:**
 ```
@@ -2361,12 +2363,75 @@ MathView{text: "\\alpha + \\beta" font_size: 24.0}
 
 The `MapView{}` widget renders interactive geographic maps with OpenStreetMap data. It supports panning, zooming, street labels, and light/dark themes.
 
+### ⛔ CRITICAL: MapView Uses Custom GPU Drawing — Batching Rules Apply ⛔
+
+MapView renders map tiles using custom GPU geometry (`DrawMapVector`) and a full-rect background (`DrawColor`). Because of Makepad's draw batching, the map's draw calls can merge with sibling widgets' draw calls, causing the **map to render on top of other UI elements** (headers, labels, buttons) even though they appear earlier in the widget tree.
+
+**You MUST wrap MapView in a container with `new_batch: true`** whenever MapView has sibling widgets (headers, toolbars, labels, etc.) in the same parent:
+
+```
+// CORRECT — new_batch on parent prevents map from drawing over header
+RoundedView{
+    width: Fill height: Fit
+    flow: Down spacing: 0
+    new_batch: true
+    draw_bg.color: #1a1a2e
+    draw_bg.border_radius: 12.0
+
+    RoundedView{
+        width: Fill height: Fit
+        padding: 12
+        new_batch: true
+        draw_bg.color: #16213e
+        draw_bg.border_radius: 12.0
+        Label{text: "Map Explorer" draw_text.color: #xeee draw_text.text_style.font_size: 13}
+    }
+
+    MapView{
+        width: Fill height: 500
+        dark_theme: true
+    }
+}
+```
+
+```
+// WRONG — map draws over the header label because parent lacks new_batch
+RoundedView{
+    flow: Down
+    RoundedView{
+        Label{text: "Header" draw_text.color: #fff}
+    }
+    MapView{width: Fill height: 500}
+}
+```
+
+### ⛔⛔⛔ CRITICAL: MapView MUST Use a Fixed Pixel Height ⛔⛔⛔
+
+MapView has NO intrinsic content size. It cannot size itself. You MUST give it a **fixed pixel height**:
+
+```
+// CORRECT — always use a fixed pixel height
+MapView{width: Fill height: 500}
+
+// WRONG — height: Fill in a Fit parent = 0px = invisible map
+MapView{width: Fill height: Fill}
+
+// WRONG — MapView has no intrinsic height, Fit = 0px = invisible map
+MapView{width: Fill height: Fit}
+```
+
+**Why not `height: Fill`?** Your output renders inside a `height: Fit` container. `Fill` inside `Fit` = circular dependency = **0 height = invisible**. This is the #1 MapView mistake.
+
+**Why not `height: Fit`?** MapView renders tiles on a canvas — it has no content to measure, so `Fit` = 0 height = invisible.
+
+**Always use a fixed height like `height: 400`, `height: 500`, or `height: 600`.**
+
 ### Basic Usage
 
 ```
 MapView{
     width: Fill
-    height: Fill
+    height: 500
 }
 ```
 
@@ -2385,7 +2450,9 @@ This creates a map centered on Amsterdam at zoom level 14 with the default light
 | `use_network` | bool | false | Enable online Overpass API |
 | `use_local_mbtiles` | bool | true | Enable local .mbtiles tiles |
 | `width` | Size | Fill | Widget width |
-| `height` | Size | Fill | Widget height |
+| `height` | Size | — | **Must be a fixed pixel value** (e.g. `500`). Never `Fit` or `Fill`. |
+
+**Source mode rules:** You can only use ONE source at a time. If both `use_network` and `use_local_mbtiles` are `true`, the widget silently forces offline-only mode. If both are `false`, it silently forces offline mode. To use network, set `use_network: true` AND `use_local_mbtiles: false`.
 
 ### Interactions
 
@@ -2397,47 +2464,75 @@ This creates a map centered on Amsterdam at zoom level 14 with the default light
 
 ```
 // Default map (Amsterdam, light theme, offline tiles)
-MapView{width: Fill height: Fill}
+MapView{width: Fill height: 500}
 
-// Custom center and zoom (e.g. New York)
+// Custom center and zoom (e.g. New York — requires network)
 MapView{
-    width: Fill height: Fill
+    width: Fill height: 500
     center_lon: -73.9857
     center_lat: 40.7484
     zoom: 15.0
+    use_network: true
+    use_local_mbtiles: false
 }
 
 // Dark theme
 MapView{
-    width: Fill height: Fill
+    width: Fill height: 500
     dark_theme: true
 }
 
-// In a split layout with sidebar
+// Map with header bar (note new_batch on both parent and header)
+RoundedView{
+    width: Fill height: Fit
+    flow: Down spacing: 0
+    new_batch: true
+    draw_bg.color: #1a1a2e
+    draw_bg.border_radius: 12.0
+
+    RoundedView{
+        width: Fill height: Fit
+        padding: Inset{top: 12 bottom: 12 left: 16 right: 16}
+        flow: Right
+        align: Align{y: 0.5}
+        new_batch: true
+        draw_bg.color: #16213e
+        draw_bg.border_radius: 12.0
+        Label{text: "Map Explorer" draw_text.color: #xeee draw_text.text_style.font_size: 13}
+        Filler{}
+        Label{text: "scroll to zoom | drag to pan | T = theme" draw_text.color: #556 draw_text.text_style.font_size: 9}
+    }
+
+    MapView{
+        width: Fill height: 500
+        dark_theme: true
+    }
+}
+
+// Sidebar + map using Splitter
 Splitter{
     axis: SplitterAxis.Horizontal
     align: SplitterAlign.FromA(300.0)
-    a := sidebar
-    b := map_area
+    a := SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #222
+        flow: Down padding: 15 spacing: 10
+        new_batch: true
+        Label{text: "Map Controls" draw_text.color: #fff draw_text.text_style.font_size: 14}
+        Label{text: "Drag to pan, scroll to zoom" draw_text.color: #888 draw_text.text_style.font_size: 10}
+        Label{text: "Press T to toggle theme" draw_text.color: #888 draw_text.text_style.font_size: 10}
+    }
+    b := MapView{width: Fill height: Fill}
 }
-sidebar := SolidView{
-    width: Fill height: Fill
-    draw_bg.color: #222
-    flow: Down padding: 15 spacing: 10
-    Label{text: "Map Controls" draw_text.color: #fff draw_text.text_style.font_size: 14}
-    Label{text: "Drag to pan, scroll to zoom" draw_text.color: #888 draw_text.text_style.font_size: 10}
-    Label{text: "Press T to toggle theme" draw_text.color: #888 draw_text.text_style.font_size: 10}
-}
-map_area := MapView{width: Fill height: Fill}
 ```
 
 ### Data Sources
 
 **Offline mode** (default): Loads tiles from a local `.mbtiles` file at `local/noord-holland-shortbread-1.0.mbtiles`. Covers the Noord Holland region (Amsterdam area). Zoom range 0–14.
 
-**Online mode** (`use_network: true`): Queries the Overpass API for OpenStreetMap data. Covers any location worldwide but requires internet and may be slower.
+**Online mode** (`use_network: true, use_local_mbtiles: false`): Queries the Overpass API for OpenStreetMap data. Covers any location worldwide but requires internet and may be slower.
 
-If both are enabled, offline mode takes priority.
+**⚠️ Only one source at a time.** Setting both `use_network: true` and `use_local_mbtiles: true` silently disables network. For non-Amsterdam locations, you MUST set `use_network: true` AND `use_local_mbtiles: false`.
 
 ### Theme Styling
 
@@ -2455,7 +2550,10 @@ MapView includes built-in light and dark themes with colors for:
 
 - MapView defaults to offline mode with pre-bundled Amsterdam region tiles
 - Street labels appear at zoom level 13 and above
-- The status bar in the bottom-left shows tile loading progress and feature counts
-- MapView fills its container by default (`width: Fill`, `height: Fill`)
-- For online mode, set `use_network: true` and optionally `use_local_mbtiles: false`
-- For locations outside the Amsterdam region in offline mode, set `use_network: true` to fetch tiles from the Overpass API
+- **Always use a fixed pixel height** (e.g. `height: 500`) — both `height: Fit` and `height: Fill` produce 0px (invisible) in the splash rendering context
+- **Never use `height: Fit`** — MapView has no intrinsic height; it collapses to 0
+- **Never use `height: Fill`** — the splash output renders inside a `Fit` parent, so `Fill` inside `Fit` = 0 height
+- **Always set `new_batch: true`** on any parent container that has MapView alongside other widgets (Labels, buttons, etc.) — otherwise the map's GPU draws will render on top of sibling UI
+- For online mode, set `use_network: true` AND `use_local_mbtiles: false`
+- For locations outside Amsterdam in offline mode, nothing will render — you must enable network mode
+- The `zoom` value is clamped to `[min_zoom, max_zoom]` automatically
