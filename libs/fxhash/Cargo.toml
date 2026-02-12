@@ -30,6 +30,3 @@ path = "lib.rs"
 [dependencies.byteorder]
 version = "1.5.0"
 path = "../byteorder"
-
-[dev-dependencies.fnv]
-version = "1.0.5"

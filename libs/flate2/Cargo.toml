@@ -143,14 +143,3 @@ features = [
 ]
 optional = true
 default-features = false
-
-[dev-dependencies.futures]
-version = "0.3"
-default-features = false
-
-[dev-dependencies.quickcheck]
-version = "1.0"
-default-features = false
-
-[dev-dependencies.rand]
-version = "0.9"
