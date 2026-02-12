@@ -700,6 +700,21 @@ impl ScriptHeap {
                     }) {
                         return value;
                     }
+                } else if key.is_string_like() {
+                    // string key on string_keys object: resolve via intern to canonical ScriptValue
+                    if let Some(Some(value)) = self.string_with(key, |heap, s| {
+                        if let Some(idx) = heap.check_intern_string(s) {
+                            if idx != key {
+                                object.map_get(&idx)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }) {
+                        return value;
+                    }
                 }
             } else if key.is_string_like() {
                 let id = if let Some(s) = key.as_string() {
@@ -972,6 +987,45 @@ impl ScriptHeap {
     pub fn map_len(&self, ptr: ScriptObject) -> usize {
         let object = &self.objects[ptr];
         object.map_len()
+    }
+
+    /// Total number of iterable entries: vec entries + map entries.
+    /// Used by `for k, v in obj` to iterate all entries.
+    pub fn iter_len(&self, ptr: ScriptObject) -> usize {
+        let object = &self.objects[ptr];
+        object.vec.len() + object.map_len()
+    }
+
+    /// Get key-value at an iteration index spanning both vec and map.
+    /// Indices 0..vec_len come from vec, indices vec_len..vec_len+map_len come from map.
+    pub fn iter_key_value(
+        &self,
+        ptr: ScriptObject,
+        index: usize,
+        trap: ScriptTrap,
+    ) -> ScriptVecValue {
+        let object = &self.objects[ptr];
+        let vec_len = object.vec.len();
+        if index < vec_len {
+            return object.vec[index];
+        }
+        let map_index = index - vec_len;
+        if let Some((key, map_val)) = object.map.iter().nth(map_index) {
+            return ScriptVecValue {
+                key: *key,
+                value: map_val.value,
+            };
+        }
+        ScriptVecValue {
+            key: NIL,
+            value: script_err_out_of_bounds!(
+                trap,
+                "iter index {} out of bounds (vec_len={}, map_len={})",
+                index,
+                vec_len,
+                object.map_len()
+            ),
+        }
     }
 
     pub fn vec_ref(&self, ptr: ScriptObject) -> &[ScriptVecValue] {

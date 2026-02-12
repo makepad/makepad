@@ -208,7 +208,13 @@ impl<'a> ScriptVm<'a> {
 
     pub(crate) fn handle_assign_index(&mut self) {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let index = self.bx.threads.cur().pop_stack_value();
+        let index = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        // Escaped ids (@x) from variables need to be unescaped for use as property keys
+        let index = if index.is_escaped_id() {
+            ScriptValue::from_id(index.as_id().unwrap())
+        } else {
+            index
+        };
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         if let Some(obj) = object.as_object() {
             let value =
@@ -217,10 +223,12 @@ impl<'a> ScriptVm<'a> {
                     .set_value(obj, index, value, self.bx.threads.cur().trap.pass());
             self.bx.threads.cur().push_stack_unchecked(value);
         } else if let Some(arr) = object.as_array() {
-            let value =
-                self.bx
-                    .heap
-                    .array_index(arr, index.as_index(), self.bx.threads.cur().trap.pass());
+            self.bx.heap.set_array_index(
+                arr,
+                index.as_index(),
+                value,
+                self.bx.threads.cur().trap.pass(),
+            );
             self.bx.threads.cur().push_stack_unchecked(value);
         } else {
             let value = script_err_wrong_value!(

@@ -414,9 +414,13 @@ where
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let obj = vm.bx.heap.new_object();
+        let mut has_string_keys = false;
         vm.map_mut_with(obj, |vm, obj_map| {
             for (key, value) in self.iter() {
                 let key = key.script_to_value(vm);
+                if key.is_string_like() {
+                    has_string_keys = true;
+                }
                 let value = value.script_to_value(vm);
                 obj_map.insert(
                     key,
@@ -427,6 +431,9 @@ where
                 );
             }
         });
+        if has_string_keys {
+            vm.bx.heap.set_string_keys(obj);
+        }
         obj.into()
     }
 }
@@ -507,9 +514,13 @@ where
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let obj = vm.bx.heap.new_object();
+        let mut has_string_keys = false;
         vm.map_mut_with(obj, |vm, obj_map| {
             for (key, value) in self.iter() {
                 let key = key.script_to_value(vm);
+                if key.is_string_like() {
+                    has_string_keys = true;
+                }
                 let value = value.script_to_value(vm);
                 obj_map.insert(
                     key,
@@ -520,6 +531,9 @@ where
                 );
             }
         });
+        if has_string_keys {
+            vm.bx.heap.set_string_keys(obj);
+        }
         obj.into()
     }
 }

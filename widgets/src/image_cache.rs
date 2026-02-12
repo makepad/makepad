@@ -278,6 +278,17 @@ impl ImageCache {
     }
 }
 
+/// Detect image format from magic bytes
+fn detect_image_format(data: &[u8]) -> Option<&'static str> {
+    if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        Some("png")
+    } else if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
+        Some("jpg")
+    } else {
+        None
+    }
+}
+
 /// The possible errors that can occur when loading or creating an image texture.
 #[derive(Debug)]
 pub enum ImageError {
@@ -357,27 +368,38 @@ pub trait ImageCacheImpl {
     }
 
     fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), ImageError> {
-        if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
-            let cursor = ZCursor::new(data);
-            let mut decoder = JpegDecoder::new(cursor);
-            decoder.decode_headers().map_err(ImageError::JpgDecode)?;
-            let image_info = decoder.info().ok_or_else(|| {
-                ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
-                    "Failed to get JPG image info after decoding headers",
-                ))
-            })?;
-            return Ok((image_info.width as usize, image_info.height as usize));
+        let ext = image_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase());
+        let format = match ext.as_deref() {
+            Some("jpg") | Some("jpeg") => "jpg",
+            Some("png") => "png",
+            _ => detect_image_format(data).ok_or(ImageError::UnsupportedFormat)?,
+        };
+        match format {
+            "jpg" => {
+                let cursor = ZCursor::new(data);
+                let mut decoder = JpegDecoder::new(cursor);
+                decoder.decode_headers().map_err(ImageError::JpgDecode)?;
+                let image_info = decoder.info().ok_or_else(|| {
+                    ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
+                        "Failed to get JPG image info after decoding headers",
+                    ))
+                })?;
+                Ok((image_info.width as usize, image_info.height as usize))
+            }
+            "png" => {
+                let cursor = ZCursor::new(data);
+                let mut decoder = PngDecoder::new(cursor);
+                decoder.decode_headers()?;
+                let (width, height) = decoder.dimensions().ok_or(ImageError::PngDecode(
+                    PngDecodeErrors::GenericStatic("Failed to get PNG image dimensions"),
+                ))?;
+                Ok((width, height))
+            }
+            _ => Err(ImageError::UnsupportedFormat),
         }
-        if image_path.extension().map(|s| s == "png").unwrap_or(false) {
-            let cursor = ZCursor::new(data);
-            let mut decoder = PngDecoder::new(cursor);
-            decoder.decode_headers()?;
-            let (width, height) = decoder.dimensions().ok_or(ImageError::PngDecode(
-                PngDecodeErrors::GenericStatic("Failed to get PNG image dimensions"),
-            ))?;
-            return Ok((width, height));
-        }
-        Err(ImageError::UnsupportedFormat)
     }
 
     fn image_size_by_path(image_path: &Path) -> Result<(usize, usize), ImageError> {
@@ -449,43 +471,23 @@ pub trait ImageCacheImpl {
                 .as_mut()
                 .unwrap()
                 .execute_rev(image_path.into(), move |image_path| {
-                    if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
-                        match ImageBuffer::from_jpg(&*data) {
-                            Ok(data) => {
-                                Cx::post_action(AsyncImageLoad {
-                                    image_path,
-                                    result: RefCell::new(Some(Ok(data))),
-                                });
-                            }
-                            Err(err) => {
-                                Cx::post_action(AsyncImageLoad {
-                                    image_path,
-                                    result: RefCell::new(Some(Err(err))),
-                                });
-                            }
-                        }
-                        return;
-                    }
-                    if image_path.extension().map(|s| s == "png").unwrap_or(false) {
-                        match ImageBuffer::from_png(&*data) {
-                            Ok(data) => {
-                                Cx::post_action(AsyncImageLoad {
-                                    image_path,
-                                    result: RefCell::new(Some(Ok(data))),
-                                });
-                            }
-                            Err(err) => {
-                                Cx::post_action(AsyncImageLoad {
-                                    image_path,
-                                    result: RefCell::new(Some(Err(err))),
-                                });
-                            }
-                        }
-                        return;
-                    }
+                    let ext = image_path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_lowercase());
+                    let format = match ext.as_deref() {
+                        Some("jpg") | Some("jpeg") => Some("jpg"),
+                        Some("png") => Some("png"),
+                        _ => detect_image_format(&data),
+                    };
+                    let result = match format {
+                        Some("jpg") => ImageBuffer::from_jpg(&*data),
+                        Some("png") => ImageBuffer::from_png(&*data),
+                        _ => Err(ImageError::UnsupportedFormat),
+                    };
                     Cx::post_action(AsyncImageLoad {
                         image_path,
-                        result: RefCell::new(Some(Err(ImageError::UnsupportedFormat))),
+                        result: RefCell::new(Some(result)),
                     });
                 });
             Ok(AsyncLoadResult::Loading(w, h))
@@ -526,43 +528,23 @@ pub trait ImageCacheImpl {
                         let mut data = Vec::new();
                         match f.read_to_end(&mut data) {
                             Ok(_len) => {
-                                if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
-                                    match ImageBuffer::from_jpg(&*data) {
-                                        Ok(data) => {
-                                            Cx::post_action(AsyncImageLoad {
-                                                image_path,
-                                                result: RefCell::new(Some(Ok(data))),
-                                            });
-                                        }
-                                        Err(err) => {
-                                            Cx::post_action(AsyncImageLoad {
-                                                image_path,
-                                                result: RefCell::new(Some(Err(err))),
-                                            });
-                                        }
-                                    }
-                                    return;
-                                }
-                                if image_path.extension().map(|s| s == "png").unwrap_or(false) {
-                                    match ImageBuffer::from_png(&*data) {
-                                        Ok(data) => {
-                                            Cx::post_action(AsyncImageLoad {
-                                                image_path,
-                                                result: RefCell::new(Some(Ok(data))),
-                                            });
-                                        }
-                                        Err(err) => {
-                                            Cx::post_action(AsyncImageLoad {
-                                                image_path,
-                                                result: RefCell::new(Some(Err(err))),
-                                            });
-                                        }
-                                    }
-                                    return;
-                                }
+                                let ext = image_path
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| s.to_lowercase());
+                                let format = match ext.as_deref() {
+                                    Some("jpg") | Some("jpeg") => Some("jpg"),
+                                    Some("png") => Some("png"),
+                                    _ => detect_image_format(&data),
+                                };
+                                let result = match format {
+                                    Some("jpg") => ImageBuffer::from_jpg(&*data),
+                                    Some("png") => ImageBuffer::from_png(&*data),
+                                    _ => Err(ImageError::UnsupportedFormat),
+                                };
                                 Cx::post_action(AsyncImageLoad {
                                     image_path,
-                                    result: RefCell::new(Some(Err(ImageError::UnsupportedFormat))),
+                                    result: RefCell::new(Some(result)),
                                 });
                             }
                             Err(_err) => {
@@ -592,43 +574,43 @@ pub trait ImageCacheImpl {
         id: usize,
         image_path: &Path,
     ) -> Result<(), ImageError> {
-        if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
-            match ImageBuffer::from_jpg(&*data) {
-                Ok(data) => {
-                    let texture = data.into_new_texture(cx);
-                    cx.get_global::<ImageCache>()
-                        .map
-                        .insert(image_path.into(), ImageCacheEntry::Loaded(texture.clone()));
-                    self.set_texture(Some(texture), id);
-                    return Ok(());
-                }
-                Err(err) => {
-                    error!("load_image_file_by_path_and_data: Cannot load jpeg image from path: {:?} {}", image_path, err);
-                    return Err(err);
-                }
+        let ext = image_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase());
+        let format = match ext.as_deref() {
+            Some("jpg") | Some("jpeg") => Some("jpg"),
+            Some("png") => Some("png"),
+            _ => detect_image_format(data),
+        };
+        let result = match format {
+            Some("jpg") => ImageBuffer::from_jpg(data),
+            Some("png") => ImageBuffer::from_png(data),
+            _ => {
+                error!(
+                    "load_image_file_by_path_and_data: Image format not supported {:?}",
+                    image_path
+                );
+                return Err(ImageError::UnsupportedFormat);
+            }
+        };
+        match result {
+            Ok(data) => {
+                let texture = data.into_new_texture(cx);
+                cx.get_global::<ImageCache>()
+                    .map
+                    .insert(image_path.into(), ImageCacheEntry::Loaded(texture.clone()));
+                self.set_texture(Some(texture), id);
+                Ok(())
+            }
+            Err(err) => {
+                error!(
+                    "load_image_file_by_path_and_data: Cannot load image from path: {:?} {}",
+                    image_path, err
+                );
+                Err(err)
             }
         }
-        if image_path.extension().map(|s| s == "png").unwrap_or(false) {
-            match ImageBuffer::from_png(&*data) {
-                Ok(data) => {
-                    let texture = data.into_new_texture(cx);
-                    cx.get_global::<ImageCache>()
-                        .map
-                        .insert(image_path.into(), ImageCacheEntry::Loaded(texture.clone()));
-                    self.set_texture(Some(texture), id);
-                    return Ok(());
-                }
-                Err(err) => {
-                    error!("load_image_file_by_path_and_data: Cannot load png image from path: {:?} {}", image_path, err);
-                    return Err(err);
-                }
-            }
-        }
-        error!(
-            "load_image_file_by_path_and_data: Image format not supported {:?}",
-            image_path
-        );
-        Err(ImageError::UnsupportedFormat)
     }
 
     fn load_image_file_by_path(
