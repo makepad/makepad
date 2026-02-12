@@ -40,6 +40,14 @@ impl ScriptHeap {
     }
 
     pub fn new_with_proto(&mut self, proto: ScriptValue) -> ScriptObject {
+        self.new_with_proto_impl(proto, true)
+    }
+
+    pub fn new_with_proto_no_vec(&mut self, proto: ScriptValue) -> ScriptObject {
+        self.new_with_proto_impl(proto, false)
+    }
+
+    fn new_with_proto_impl(&mut self, proto: ScriptValue, copy_vec_from_auto_proto: bool) -> ScriptObject {
         let (proto_fwd, proto_ptr) = if let Some(ptr) = proto.as_object() {
             // Use checked access via ScriptObject
             let object = &mut self.objects[ptr];
@@ -67,7 +75,7 @@ impl ScriptHeap {
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
             // only copy vec if we are 'auto' otherwise we proto inherit normally
-            if proto_object.tag.is_auto() {
+            if copy_vec_from_auto_proto && proto_object.tag.is_auto() {
                 object.vec.extend_from_slice(&proto_object.vec);
             }
             obj
@@ -77,7 +85,7 @@ impl ScriptHeap {
             object.tag.set_alloced();
             object.tag.set_proto_fwd(proto_fwd);
             let proto_object = &self.objects[proto_ptr];
-            if proto_object.tag.is_auto() {
+            if copy_vec_from_auto_proto && proto_object.tag.is_auto() {
                 object.vec.extend_from_slice(&proto_object.vec);
             }
             let (_, generation) = self.objects.push(object);
