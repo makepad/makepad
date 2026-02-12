@@ -156,6 +156,18 @@ impl WidgetNode for CachedWidget {
         }
     }
 
+    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
+        if let Some(widget) = &self.widget {
+            if self.template_id == path[0] {
+                if path.len() > 1 {
+                    widget.find_widgets(&path[1..], results);
+                } else {
+                    results.push(widget.clone());
+                }
+            }
+        }
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         if let Some(widget) = &self.widget {
             widget.redraw(cx);

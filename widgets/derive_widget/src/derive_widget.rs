@@ -118,6 +118,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn area(&self)->Area{ self.")
                 .ident(wrap_field)
                 .add(".area()}");
+            tb.add("   fn find_widgets(&self, path:&[LiveId], results:&mut WidgetSet){");
+            tb.add("       self.")
+                .ident(wrap_field)
+                .add(".find_widgets(path, results)");
+            tb.add("   }");
             tb.add("   fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
             tb.add("       self.")
                 .ident(wrap_field)
@@ -201,6 +206,13 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 );
             }
             if !find_fields.is_empty() {
+                tb.add("    fn find_widgets(&self, path:&[LiveId], results:&mut WidgetSet){");
+                for find_field in &find_fields {
+                    tb.add("    self.")
+                        .ident(find_field)
+                        .add(".find_widgets(path, results);");
+                }
+                tb.add("    }");
                 tb.add("    fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
                 for find_field in &find_fields {
                     tb.add("    self.")
@@ -257,6 +269,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 }
                 tb.add("        String::new() }");
             } else if let Some(deref_field) = &deref_field {
+                tb.add("   fn find_widgets(&self, path:&[LiveId], results:&mut WidgetSet){");
+                tb.add("       self.")
+                    .ident(deref_field)
+                    .add(".find_widgets(path, results)");
+                tb.add("   }");
                 tb.add("   fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
                 tb.add("       self.")
                     .ident(deref_field)

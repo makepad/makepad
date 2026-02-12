@@ -41,6 +41,10 @@ pub trait WidgetNode: ScriptApply {
     fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign> {
         return None;
     }
+    /// Recursively find widgets by path, walking the actual children structure.
+    /// This is a fallback for when the widget tree hasn't been built yet
+    /// (e.g. freshly created list items that haven't been drawn).
+    fn find_widgets(&self, _path: &[LiveId], _results: &mut WidgetSet) {}
     /// Find all widgets whose area contains the given point. Calls the closure for each found widget.
     fn find_widgets_from_point(&self, _cx: &Cx, _point: DVec2, _found: &mut dyn FnMut(&WidgetRef)) {
     }
@@ -123,7 +127,14 @@ pub trait Widget: WidgetNode {
     }
 
     fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
-        cx.widget_tree().find_within(self.widget_uid(), path)
+        let result = cx.widget_tree().find_within(self.widget_uid(), path);
+        if !result.is_empty() {
+            return result;
+        }
+        // Fallback: widget not in tree yet, walk the children structure directly
+        let mut results = WidgetSet::default();
+        self.find_widgets(path, &mut results);
+        results.into_first()
     }
 
     fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
@@ -474,7 +485,10 @@ impl WidgetRef {
             return false;
         };
 
-        vm.cx().components.get::<WidgetRegistry>().can_script_new(type_id)
+        vm.cx()
+            .components
+            .get::<WidgetRegistry>()
+            .can_script_new(type_id)
     }
 
     pub fn into_option(self) -> Option<WidgetRef> {
@@ -620,6 +634,12 @@ impl WidgetRef {
             }
         }
     */
+    pub fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.find_widgets(path, results)
+        }
+    }
+
     pub fn find_widgets_from_point(
         &self,
         cx: &Cx,
@@ -709,7 +729,14 @@ impl WidgetRef {
     }
 
     pub fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
-        cx.widget_tree().find_within(self.widget_uid(), path)
+        let result = cx.widget_tree().find_within(self.widget_uid(), path);
+        if !result.is_empty() {
+            return result;
+        }
+        // Fallback: widget not in tree yet, walk the children structure directly
+        let mut results = WidgetSet::default();
+        self.find_widgets(path, &mut results);
+        results.into_first()
     }
 
     pub fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {

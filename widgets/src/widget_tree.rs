@@ -84,9 +84,9 @@ impl WidgetTree {
     pub fn find_within(&self, root_uid: WidgetUid, path: &[LiveId]) -> WidgetRef {
         let (start, end) = match self.uid_map.get(&root_uid) {
             Some(&idx) => (idx as usize, self.subtree_end[idx as usize] as usize),
-            // Root widget may not be in the tree (e.g. Root registers children but not itself).
-            // Fall back to searching the entire tree.
-            None => (0, self.names.len()),
+            // Widget not in tree yet - return empty, let the caller's
+            // find_widgets fallback handle it.
+            None => return WidgetRef::empty(),
         };
         let target = match path.last() {
             Some(&id) => id,
@@ -108,7 +108,7 @@ impl WidgetTree {
         let mut results = Vec::new();
         let (start, end) = match self.uid_map.get(&root_uid) {
             Some(&idx) => (idx as usize, self.subtree_end[idx as usize] as usize),
-            None => (0, self.names.len()),
+            None => return results,
         };
         let target = match path.last() {
             Some(&id) => id,
