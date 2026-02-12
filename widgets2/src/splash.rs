@@ -51,8 +51,7 @@ impl Splash {
         cx.with_vm(|vm| {
             let value = vm.eval_with_append_source(script_mod, &code, NIL.into());
             if !value.is_err() && !value.is_nil() {
-                self.view
-                    .script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
+                self.view = View::script_from_value(vm, value);
             }
         });
     }
