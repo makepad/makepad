@@ -54,6 +54,9 @@ specialization = []
 union = []
 write = []
 
+[lints.rust.unexpected_cfgs]
+level = "allow"
+
 [lib]
 name = "smallvec"
 path = "src/lib.rs"
