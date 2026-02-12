@@ -65,6 +65,10 @@ impl Font {
         self.id
     }
 
+    pub fn data(&self) -> &Rc<Vec<u8>> {
+        self.face.data()
+    }
+
     pub(super) fn ttf_parser_face(&self) -> &ttf_parser::Face<'_> {
         self.face.as_ttf_parser_face()
     }

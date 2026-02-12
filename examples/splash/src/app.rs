@@ -1,6 +1,6 @@
-use makepad_widgets2::animator::Animate;
-use makepad_widgets2::file_tree::FileTree;
-use makepad_widgets2::*;
+use makepad_widgets::animator::Animate;
+use makepad_widgets::file_tree::FileTree;
+use makepad_widgets::*;
 use std::path::Path;
 
 app_main!(App);
@@ -1535,7 +1535,7 @@ script_mod! {
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets2::script_mod(vm);
+        crate::makepad_widgets::script_mod(vm);
         App::from_script_mod(vm, self::script_mod)
     }
 }

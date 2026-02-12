@@ -391,7 +391,7 @@ impl MacosApp {
                                     MacosApp::do_callback(MacosEvent::TextInput(TextInputEvent {
                                         input: string,
                                         was_paste: true,
-                                        ..Default::default()
+                                        replace_last: false,
                                     }));
                                 }
                             }

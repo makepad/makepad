@@ -6,7 +6,7 @@
 use crate::agent::*;
 use crate::types::*;
 use makepad_micro_serde::*;
-use makepad_widgets2::*;
+use makepad_widgets::*;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};

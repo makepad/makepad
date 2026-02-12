@@ -1,4 +1,4 @@
-use crate::{area::Area, cx::Cx, event::Event, Margin, Vec2d};
+use crate::{area::Area, cx::Cx, event::Event, Inset, Vec2d};
 
 #[derive(Clone, Debug)]
 pub struct DesignerPickEvent {
@@ -15,7 +15,7 @@ impl Event {
         match self {
             Event::DesignerPick(e) => {
                 let rect = area.clipped_rect(&cx);
-                if Margin::rect_contains_with_margin(e.abs, &rect, &None) {
+                if Inset::rect_contains_with_inset(e.abs, &rect, &None) {
                     return HitDesigner::DesignerPick(e.clone());
                 }
             }

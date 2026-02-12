@@ -1,6 +1,6 @@
 use makepad_ai::*;
-use makepad_widgets2::makepad_platform::makepad_micro_serde::*;
-use makepad_widgets2::*;
+use makepad_widgets::makepad_platform::makepad_micro_serde::*;
+use makepad_widgets::*;
 
 app_main!(App);
 
@@ -493,8 +493,8 @@ pub struct App {
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets2::script_mod(vm);
-        crate::makepad_code_editor2::script_mod(vm);
+        crate::makepad_widgets::script_mod(vm);
+        crate::makepad_code_editor::script_mod(vm);
 
         let mut available_backends = vec![];
         if ClaudeAcpAgent::is_available() {

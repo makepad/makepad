@@ -10,10 +10,10 @@ use {
     },
     crate::{
         cx::Cx,
+        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::*,
         makepad_math::Vec2d,
         opengl_cx::OpenglCx,
-        pass::{PassClearColor, PassClearDepth, PassId},
         texture::{CxTexture, Texture},
         window::WindowId,
         x11::linux_x11::X11Cx,

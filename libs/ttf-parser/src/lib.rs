@@ -43,10 +43,17 @@ Font parsing starts with a [`Face`].
 #![allow(clippy::collapsible_else_if)]
 #![allow(clippy::field_reassign_with_default)]
 #![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::bool_assert_comparison)]
 
 #[cfg(feature = "std")]
 #[macro_use]
 extern crate std;
+
+#[cfg(not(any(feature = "std", feature = "no-std-float")))]
+compile_error!("You have to activate either the `std` or the `no-std-float` feature.");
+
+#[cfg(not(feature = "std"))]
+use core_maths::CoreFloat;
 
 #[cfg(feature = "apple-layout")]
 mod aat;
@@ -74,7 +81,7 @@ pub use tables::CFFError;
 #[cfg(feature = "apple-layout")]
 pub use tables::{ankr, feat, kerx, morx, trak};
 #[cfg(feature = "variable-fonts")]
-pub use tables::{avar, cff2, fvar, gvar, hvar, mvar};
+pub use tables::{avar, cff2, fvar, gvar, hvar, mvar, vvar};
 pub use tables::{cbdt, cblc, cff1 as cff, vhea};
 pub use tables::{
     cmap, colr, cpal, glyf, head, hhea, hmtx, kern, loca, maxp, name, os2, post, sbix, svg, vorg,
@@ -368,19 +375,19 @@ impl RectF {
     #[inline]
     fn new() -> Self {
         RectF {
-            x_min: core::f32::MAX,
-            y_min: core::f32::MAX,
-            x_max: core::f32::MIN,
-            y_max: core::f32::MIN,
+            x_min: f32::MAX,
+            y_min: f32::MAX,
+            x_max: f32::MIN,
+            y_max: f32::MIN,
         }
     }
 
     #[inline]
     fn is_default(&self) -> bool {
-        self.x_min == core::f32::MAX
-            && self.y_min == core::f32::MAX
-            && self.x_max == core::f32::MIN
-            && self.y_max == core::f32::MIN
+        self.x_min == f32::MAX
+            && self.y_min == f32::MAX
+            && self.x_max == f32::MIN
+            && self.y_max == f32::MIN
     }
 
     #[inline]
@@ -430,6 +437,30 @@ impl Transform {
     #[inline]
     pub fn new_translate(tx: f32, ty: f32) -> Self {
         Transform::new(1.0, 0.0, 0.0, 1.0, tx, ty)
+    }
+
+    /// Creates a new rotation transform.
+    #[inline]
+    pub fn new_rotate(angle: f32) -> Self {
+        let cc = (angle * core::f32::consts::PI).cos();
+        let ss = (angle * core::f32::consts::PI).sin();
+
+        Transform::new(cc, ss, -ss, cc, 0.0, 0.0)
+    }
+
+    /// Creates a new skew transform.
+    #[inline]
+    pub fn new_skew(skew_x: f32, skew_y: f32) -> Self {
+        let x = (skew_x * core::f32::consts::PI).tan();
+        let y = (skew_y * core::f32::consts::PI).tan();
+
+        Transform::new(1.0, y, -x, 1.0, 0.0, 0.0)
+    }
+
+    /// Creates a new scale transform.
+    #[inline]
+    pub fn new_scale(sx: f32, sy: f32) -> Self {
+        Transform::new(sx, 0.0, 0.0, sy, 0.0, 0.0)
     }
 
     /// Combines two transforms with each other.
@@ -488,6 +519,30 @@ impl core::fmt::Debug for Transform {
             self.a, self.b, self.c, self.d, self.e, self.f
         )
     }
+}
+
+/// A float point.
+#[derive(Clone, Copy, Debug)]
+pub struct PointF {
+    /// The X-axis coordinate.
+    pub x: f32,
+    /// The Y-axis coordinate.
+    pub y: f32,
+}
+
+/// Phantom points.
+///
+/// Available only for variable fonts with the `gvar` table.
+#[derive(Clone, Copy, Debug)]
+pub struct PhantomPoints {
+    /// Left side bearing point.
+    pub left: PointF,
+    /// Right side bearing point.
+    pub right: PointF,
+    /// Top side bearing point.
+    pub top: PointF,
+    /// Bottom side bearing point.
+    pub bottom: PointF,
 }
 
 /// A RGBA color in the sRGB color space.
@@ -991,7 +1046,7 @@ pub struct FaceTables<'a> {
     #[cfg(feature = "variable-fonts")]
     pub mvar: Option<mvar::Table<'a>>,
     #[cfg(feature = "variable-fonts")]
-    pub vvar: Option<hvar::Table<'a>>,
+    pub vvar: Option<vvar::Table<'a>>,
 }
 
 /// A font face.
@@ -1298,7 +1353,7 @@ impl<'a> Face<'a> {
             #[cfg(feature = "variable-fonts")]
             mvar: raw_tables.mvar.and_then(mvar::Table::parse),
             #[cfg(feature = "variable-fonts")]
-            vvar: raw_tables.vvar.and_then(hvar::Table::parse),
+            vvar: raw_tables.vvar.and_then(vvar::Table::parse),
         })
     }
 
@@ -1862,6 +1917,9 @@ impl<'a> Face<'a> {
                         // We can't use `round()` in `no_std`, so this is the next best thing.
                         advance += offset + 0.5;
                     }
+                } else if let Some(points) = self.glyph_phantom_points(glyph_id) {
+                    // We can't use `round()` in `no_std`, so this is the next best thing.
+                    advance += points.right.x + 0.5
                 }
             }
 
@@ -1890,6 +1948,9 @@ impl<'a> Face<'a> {
                         // We can't use `round()` in `no_std`, so this is the next best thing.
                         advance += offset + 0.5;
                     }
+                } else if let Some(points) = self.glyph_phantom_points(glyph_id) {
+                    // We can't use `round()` in `no_std`, so this is the next best thing.
+                    advance += points.bottom.y + 0.5
                 }
             }
 
@@ -1914,7 +1975,7 @@ impl<'a> Face<'a> {
             if self.is_variable() {
                 // Ignore variation offset when `hvar` is not set.
                 if let Some(hvar) = self.tables.hvar {
-                    if let Some(offset) = hvar.side_bearing_offset(glyph_id, self.coords()) {
+                    if let Some(offset) = hvar.left_side_bearing_offset(glyph_id, self.coords()) {
                         // We can't use `round()` in `no_std`, so this is the next best thing.
                         bearing += offset + 0.5;
                     }
@@ -1942,7 +2003,7 @@ impl<'a> Face<'a> {
             if self.is_variable() {
                 // Ignore variation offset when `vvar` is not set.
                 if let Some(vvar) = self.tables.vvar {
-                    if let Some(offset) = vvar.side_bearing_offset(glyph_id, self.coords()) {
+                    if let Some(offset) = vvar.top_side_bearing_offset(glyph_id, self.coords()) {
                         // We can't use `round()` in `no_std`, so this is the next best thing.
                         bearing += offset + 0.5;
                     }
@@ -1960,8 +2021,30 @@ impl<'a> Face<'a> {
 
     /// Returns glyph's vertical origin according to
     /// [Vertical Origin Table](https://docs.microsoft.com/en-us/typography/opentype/spec/vorg).
+    ///
+    /// This method is affected by variation axes.
     pub fn glyph_y_origin(&self, glyph_id: GlyphId) -> Option<i16> {
-        self.tables.vorg.map(|vorg| vorg.glyph_y_origin(glyph_id))
+        #[cfg(feature = "variable-fonts")]
+        {
+            let mut origin = self.tables.vorg.map(|vorg| vorg.glyph_y_origin(glyph_id))? as f32;
+
+            if self.is_variable() {
+                // Ignore variation offset when `vvar` is not set.
+                if let Some(vvar) = self.tables.vvar {
+                    if let Some(offset) = vvar.vertical_origin_offset(glyph_id, self.coords()) {
+                        // We can't use `round()` in `no_std`, so this is the next best thing.
+                        origin += offset + 0.5;
+                    }
+                }
+            }
+
+            i16::try_num_from(origin)
+        }
+
+        #[cfg(not(feature = "variable-fonts"))]
+        {
+            self.tables.vorg.map(|vorg| vorg.glyph_y_origin(glyph_id))
+        }
     }
 
     /// Returns glyph's name.
@@ -2266,6 +2349,16 @@ impl<'a> Face<'a> {
     #[inline]
     pub fn has_non_default_variation_coordinates(&self) -> bool {
         self.coordinates.as_slice().iter().any(|c| c.0 != 0)
+    }
+
+    /// Parses glyph's phantom points.
+    ///
+    /// Available only for variable fonts with the `gvar` table.
+    #[cfg(feature = "variable-fonts")]
+    pub fn glyph_phantom_points(&self, glyph_id: GlyphId) -> Option<PhantomPoints> {
+        let glyf = self.tables.glyf?;
+        let gvar = self.tables.gvar?;
+        gvar.phantom_points(glyf, self.coords(), glyph_id)
     }
 
     #[cfg(feature = "variable-fonts")]

@@ -2,18 +2,22 @@ use {
     crate::{
         cx::Cx,
         cx_api::CxOsOp,
-        event::{Event, WindowGeom},
+        draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
+        event::{Event, TextClipboardEvent, WindowGeom},
         makepad_live_id::*,
         makepad_math::*,
         makepad_micro_serde::*,
         os::cx_stdin::{aux_chan, HostToStdin, PollTimer, PresentableDraw, StdinToHost, Swapchain},
-        pass::{CxPassColorTexture, CxPassParent, PassClearColor},
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         window::CxWindowPool,
         CxOsApi,
     },
-    std::io::{self, prelude::*, BufReader},
+    std::{
+        cell::RefCell,
+        io::{self, prelude::*, BufReader},
+        rc::Rc,
+    },
 };
 
 #[derive(Default)]
@@ -30,11 +34,11 @@ impl Cx {
         self.repaint_id += 1;
 
         let time_now = self.os.stdin_timers.time_now();
-        for &pass_id in &passes_todo {
-            self.passes[pass_id].set_time(time_now as f32);
-            match self.passes[pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+        for &draw_pass_id in &passes_todo {
+            self.passes[draw_pass_id].set_time(time_now as f32);
+            match self.passes[draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
                     let window = &mut windows[window_id.id()];
                     if let Some(swapchain) = &window.swapchain {
@@ -43,15 +47,15 @@ impl Cx {
                             (window.present_index + 1) % swapchain.presentable_images.len();
 
                         // render to swapchain
-                        self.draw_pass_to_texture(pass_id, Some(&current_image.image));
+                        self.draw_pass_to_texture(draw_pass_id, Some(&current_image.image));
 
                         // wait for GPU to finish rendering
                         unsafe {
                             (self.os.gl().glFinish)();
                         }
 
-                        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-                        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+                        let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
                         let presentable_draw = PresentableDraw {
                             window_id: window_id.id(),
                             target_id: current_image.id,
@@ -67,12 +71,12 @@ impl Cx {
                         );
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(pass_id, None);
+                    self.draw_pass_to_texture(draw_pass_id, None);
                 }
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(pass_id, None);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(draw_pass_id, None);
                 }
             }
         }
@@ -126,7 +130,31 @@ impl Cx {
                     self.call_event_handler(&Event::KeyUp(e));
                 }
                 HostToStdin::TextInput(e) => {
-                    self.call_event_handler(&Event::TextInput(e.into()));
+                    self.call_event_handler(&Event::TextInput(e));
+                }
+                HostToStdin::TextCopy => {
+                    let response = Rc::new(RefCell::new(None));
+                    self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
+                        response: response.clone(),
+                    }));
+                    let text = response.borrow().clone();
+                    if let Some(text) = text {
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
+                        let _ = io::stdout().flush();
+                    }
+                }
+                HostToStdin::TextCut => {
+                    let response = Rc::new(RefCell::new(None));
+                    self.call_event_handler(&Event::TextCut(TextClipboardEvent {
+                        response: response.clone(),
+                    }));
+                    let text = response.borrow().clone();
+                    if let Some(text) = text {
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
+                        let _ = io::stdout().flush();
+                    }
                 }
                 HostToStdin::MouseDown(e) => {
                     self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
@@ -218,9 +246,9 @@ impl Cx {
                     let window = &mut self.windows[CxWindowPool::from_usize(window_id)];
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     if let Some(swapchain) = &stdin_window.swapchain {
-                        pass.color_textures = vec![CxPassColorTexture {
-                            clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                            //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        pass.color_textures = vec![CxDrawPassColorTexture {
+                            clear_color: DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
+                            //clear_color: DrawPassClearColor::ClearWith(pass.clear_color),
                             texture: swapchain.presentable_images[stdin_window.present_index]
                                 .image
                                 .clone(),
@@ -236,6 +264,7 @@ impl Cx {
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
+                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if SignalToUI::check_and_clear_action_signal() {
@@ -244,6 +273,7 @@ impl Cx {
 
                     let events = self.os.stdin_timers.get_dispatch();
                     for event in events {
+                        self.handle_script_timer(&event);
                         self.call_event_handler(&Event::Timer(event));
                     }
 
@@ -310,6 +340,11 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.stdin_timers.timers.remove(&timer_id);
                 }
+                CxOsOp::CopyToClipboard(content) => {
+                    let _ = io::stdout()
+                        .write_all(StdinToHost::SetClipboard(content).to_json().as_bytes());
+                    let _ = io::stdout().flush();
+                }
                 _ => (), /*
                          CxOsOp::CloseWindow(_window_id) => {},
                          CxOsOp::MinimizeWindow(_window_id) => {},
@@ -320,7 +355,7 @@ impl Cx {
                          CxOsOp::SetTopmost(_window_id, _is_topmost) => {}
                          CxOsOp::XrStartPresenting(_) => {},
                          CxOsOp::XrStopPresenting(_) => {},
-                         CxOsOp::ShowTextIME(_area, _pos, _config) => {},
+                         CxOsOp::ShowTextIME(_area, _pos) => {},
                          CxOsOp::HideTextIME => {},
                          CxOsOp::SetCursor(_cursor) => {},
                          CxOsOp::StartTimer {timer_id, interval, repeats} => {},

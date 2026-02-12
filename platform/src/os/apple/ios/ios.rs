@@ -2,7 +2,8 @@ use {
     crate::{
         cx::{Cx, IosParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        event::{keyboard::CharOffset, Event, KeyEvent, NetworkResponseChannel, TextInputEvent},
+        draw_pass::CxDrawPassParent,
+        event::{Event, NetworkResponseChannel},
         makepad_live_id::*,
         makepad_objc_sys::objc_block,
         os::{
@@ -10,7 +11,7 @@ use {
                 apple_sys::*,
                 apple_util::*,
                 ios::{
-                    ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
+                    ios_app::{init_ios_app_global, with_ios_app, IosApp},
                     ios_event::IosEvent,
                 },
                 url_session::AppleHttpRequests,
@@ -20,7 +21,6 @@ use {
             cx_native::EventFlow,
             metal::{DrawPassMode, MetalCx},
         },
-        pass::CxPassParent,
         permission::PermissionResult,
         thread::SignalToUI,
         window::CxWindowPool,
@@ -91,19 +91,19 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(with_ios_app(|app| app.time_now() as f32));
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(_window_id) => {
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(with_ios_app(|app| app.time_now() as f32));
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(_window_id) => {
                     let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
                 }
-                CxPassParent::Pass(_) => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::DrawPass(_) => {
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
-                CxPassParent::None => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::None => {
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }
@@ -116,6 +116,7 @@ impl Cx {
             out.push(item);
         }
         if out.len() > 0 {
+            self.handle_script_network_events(&out);
             self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
@@ -127,6 +128,8 @@ impl Cx {
     }
 
     fn ios_event_callback(&mut self, event: IosEvent, metal_cx: &mut MetalCx) -> EventFlow {
+        self.handle_platform_ops(metal_cx);
+
         // send a mouse up when dragging starts
 
         let mut paint_dirty = false;
@@ -138,65 +141,10 @@ impl Cx {
                     if let Some(vk) = vk {
                         self.call_event_handler(&Event::VirtualKeyboard(vk));
                     }
-                    // IMPORTANT: Process ALL queued iOS text events atomically BEFORE handle_platform_ops
-                    // This ensures that if iOS sends multiple events (e.g., replaceRange + insertText
-                    // for autocorrect + space), they're all processed together before SyncImeState
-                    // can interfere. This fixes the "missing space after autocorrect" issue.
-
-                    // Drain the entire event queue at once (atomic batch)
-                    let queued_events = with_ios_app(|app| {
-                        std::mem::replace(&mut app.queued_text_events, Vec::new())
-                    });
-
-                    // Process all queued events in order
-                    let time = with_ios_app(|app| app.time_now());
-                    for event in queued_events {
-                        match event {
-                            ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
-                                self.call_event_handler(&Event::TextInput(TextInputEvent {
-                                    input,
-                                    was_paste: false,
-                                    replace_last,
-                                    ..Default::default()
-                                }));
-                            }
-                            ios_app::IosTextInputEvent::RangeReplace(
-                                start,
-                                end,
-                                replacement_text,
-                            ) => {
-                                // iOS uses character offsets (already in correct format)
-                                self.call_event_handler(&Event::TextInput(TextInputEvent {
-                                    input: replacement_text,
-                                    replace_last: false, // Using replace_range instead
-                                    was_paste: false,
-                                    composition: None, // TODO: Get from UITextInput markedTextRange
-                                    full_state_sync: None, // iOS uses incremental updates
-                                    replace_range: Some((CharOffset(start), CharOffset(end))),
-                                }));
-                            }
-                            ios_app::IosTextInputEvent::KeyEvent(key_code) => {
-                                self.call_event_handler(&Event::KeyDown(KeyEvent {
-                                    key_code,
-                                    is_repeat: false,
-                                    modifiers: Default::default(),
-                                    time,
-                                }));
-                                self.call_event_handler(&Event::KeyUp(KeyEvent {
-                                    key_code,
-                                    is_repeat: false,
-                                    modifiers: Default::default(),
-                                    time,
-                                }));
-                            }
-                        }
-                    }
-                    // NOW handle platform ops (including SyncImeState) after iOS text events are processed
-                    self.handle_platform_ops(metal_cx);
-
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
+                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if SignalToUI::check_and_clear_action_signal() {
@@ -216,11 +164,6 @@ impl Cx {
             _ => (),
         }
 
-        // Handle platform ops for non-timer events
-        if !matches!(event, IosEvent::Timer(_)) {
-            self.handle_platform_ops(metal_cx);
-        }
-
         //self.process_desktop_pre_event(&mut event);
         match event {
             IosEvent::VirtualKeyboard(vk) => {
@@ -228,6 +171,8 @@ impl Cx {
             }
             IosEvent::Init => {
                 with_ios_app(|app| app.start_timer(0, 0.008, true));
+                // Start gamepad monitoring
+                crate::os::apple::apple_gamepad::start_gamepad_monitoring();
                 self.start_studio_websocket_delayed();
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
@@ -292,6 +237,7 @@ impl Cx {
             }
             IosEvent::Scroll(e) => self.call_event_handler(&Event::Scroll(e.into())),
             IosEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
+            IosEvent::TextRangeReplace(e) => self.call_event_handler(&Event::TextRangeReplace(e)),
 
             IosEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
@@ -305,12 +251,14 @@ impl Cx {
             IosEvent::TextCut(e) => self.call_event_handler(&Event::TextCut(e)),
             IosEvent::Timer(e) => {
                 if e.timer_id != 0 {
+                    self.handle_script_timer(&e);
                     self.call_event_handler(&Event::Timer(e))
                 }
             }
             IosEvent::PermissionResult(result) => {
                 self.call_event_handler(&Event::PermissionResult(result))
             }
+            IosEvent::GamepadConnected(e) => self.call_event_handler(&Event::GamepadConnected(e)),
         }
 
         if self.any_passes_dirty()
@@ -333,21 +281,11 @@ impl Cx {
                     window.window_geom = with_ios_app(|app| app.last_window_geom.clone());
                     window.is_created = true;
                 }
-                CxOsOp::ShowTextIME(_area, pos, config) => {
-                    IosApp::set_ime_position(pos);
-                    IosApp::configure_keyboard(&config);
+                CxOsOp::ShowTextIME(_area, _pos) => {
                     IosApp::show_keyboard();
                 }
                 CxOsOp::HideTextIME => {
                     IosApp::hide_keyboard();
-                }
-                CxOsOp::SyncImeState {
-                    text,
-                    selection,
-                    composition: _,
-                } => {
-                    // Pass CharOffset directly, conversion happens in set_ime_text
-                    IosApp::set_ime_text(text, selection.end);
                 }
                 CxOsOp::StartTimer {
                     timer_id,
@@ -384,15 +322,8 @@ impl Cx {
                 CxOsOp::CancelHttpRequest { request_id } => {
                     self.os.http_requests.cancel_http_request(request_id);
                 }
-                CxOsOp::ShowClipboardActions {
-                    has_selection,
-                    rect,
-                    keyboard_shift,
-                } => {
-                    IosApp::show_clipboard_actions(has_selection, rect, keyboard_shift);
-                }
-                CxOsOp::HideClipboardActions => {
-                    IosApp::hide_clipboard_actions();
+                CxOsOp::ShowClipboardActions { has_selection, .. } => {
+                    with_ios_app(|app| app.show_clipboard_actions(has_selection));
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     with_ios_app(|app| app.copy_to_clipboard(&content));

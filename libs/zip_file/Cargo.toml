@@ -1,0 +1,12 @@
+[package]
+name = "makepad-zip-file"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Simple zip file reader"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+miniz_oxide = { version = "0.8.5", path = "../miniz_oxide", default-features = false, features = ["with-alloc"] }

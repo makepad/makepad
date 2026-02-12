@@ -39,6 +39,7 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
         let mut wrap_field = None;
         let mut visible_field = None;
         let mut action_data_field = None;
+        let mut uid_field = None;
         let mut find_fields = Vec::new();
         let mut redraw_fields = Vec::new();
         for field in &mut fields {
@@ -66,6 +67,9 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             if field.attrs.iter().any(|v| v.name == "action_data") {
                 action_data_field = Some(field.name.clone());
             }
+            if field.attrs.iter().any(|v| v.name == "uid") {
+                uid_field = Some(field.name.clone());
+            }
         }
         tb.add("impl").stream(generic.clone());
         tb.add("WidgetNode for")
@@ -73,6 +77,20 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             .stream(generic)
             .stream(where_clause)
             .add("{");
+        if let Some(uid_field) = &uid_field {
+            tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
+                .ident(uid_field)
+                .add("}");
+        } else if let Some(wrap_field) = &wrap_field {
+            tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
+                .ident(wrap_field)
+                .add(".widget_uid()}");
+        } else if let Some(deref_field) = &deref_field {
+            tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
+                .ident(deref_field)
+                .add(".widget_uid()}");
+        }
+
         if designable {
             tb.add("    fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign>{return Some(self)}");
         }
@@ -100,12 +118,29 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn area(&self)->Area{ self.")
                 .ident(wrap_field)
                 .add(".area()}");
-            tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(wrap_field).add(".find_widgets(path, cached, results)}");
-            tb.add("   fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
+            tb.add("   fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
             tb.add("       self.")
                 .ident(wrap_field)
-                .add(".uid_to_widget(uid)");
+                .add(".find_widgets_from_point(cx, point, found)");
             tb.add("   }");
+            // Selection API delegation through wrap field
+            tb.add("    fn selection_text_len(&self) -> usize { self.")
+                .ident(wrap_field)
+                .add(".selection_text_len() }");
+            tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> { self.").ident(wrap_field).add(".selection_point_to_char_index(cx, abs) }");
+            tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.")
+                .ident(wrap_field)
+                .add(".selection_set(anchor, cursor) }");
+            tb.add("    fn selection_clear(&mut self) { self.")
+                .ident(wrap_field)
+                .add(".selection_clear() }");
+            tb.add("    fn selection_select_all(&mut self) { self.")
+                .ident(wrap_field)
+                .add(".selection_select_all() }");
+            tb.add("    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String { self.").ident(wrap_field).add(".selection_get_text_for_range(start, end) }");
+            tb.add("    fn selection_get_full_text(&self) -> String { self.")
+                .ident(wrap_field)
+                .add(".selection_get_full_text() }");
         } else {
             if let Some(visible_field) = &visible_field {
                 tb.add("    fn visible(&self)->bool{ self.")
@@ -166,34 +201,85 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 );
             }
             if !find_fields.is_empty() {
-                tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){");
+                tb.add("    fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
                 for find_field in &find_fields {
                     tb.add("    self.")
                         .ident(find_field)
-                        .add(".find_widgets(path, cached, results);");
+                        .add(".find_widgets_from_point(cx, point, found);");
                 }
                 tb.add("    }");
-                tb.add("    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
+                // Selection API delegation through find fields (first non-default wins)
+                tb.add("    fn selection_text_len(&self) -> usize {");
                 for find_field in &find_fields {
-                    tb.add("    let x = self.")
+                    tb.add("        { let v = self.")
                         .ident(find_field)
-                        .add(".uid_to_widget(uid);");
-                    tb.add("    if !x.is_empty(){return x;}");
+                        .add(".selection_text_len(); if v > 0 { return v; } }");
                 }
-                tb.add("        WidgetRef::empty()");
+                tb.add("        0 }");
+                tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {");
+                for find_field in &find_fields {
+                    tb.add("        if let Some(v) = self.")
+                        .ident(find_field)
+                        .add(".selection_point_to_char_index(cx, abs) { return Some(v); }");
+                }
+                tb.add("        None }");
+                tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) {");
+                for find_field in &find_fields {
+                    tb.add("        self.")
+                        .ident(find_field)
+                        .add(".selection_set(anchor, cursor);");
+                }
                 tb.add("    }");
+                tb.add("    fn selection_clear(&mut self) {");
+                for find_field in &find_fields {
+                    tb.add("        self.")
+                        .ident(find_field)
+                        .add(".selection_clear();");
+                }
+                tb.add("    }");
+                tb.add("    fn selection_select_all(&mut self) {");
+                for find_field in &find_fields {
+                    tb.add("        self.")
+                        .ident(find_field)
+                        .add(".selection_select_all();");
+                }
+                tb.add("    }");
+                tb.add("    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {");
+                for find_field in &find_fields {
+                    tb.add("        { let v = self.").ident(find_field).add(".selection_get_text_for_range(start, end); if !v.is_empty() { return v; } }");
+                }
+                tb.add("        String::new() }");
+                tb.add("    fn selection_get_full_text(&self) -> String {");
+                for find_field in &find_fields {
+                    tb.add("        { let v = self.")
+                        .ident(find_field)
+                        .add(".selection_get_full_text(); if !v.is_empty() { return v; } }");
+                }
+                tb.add("        String::new() }");
             } else if let Some(deref_field) = &deref_field {
-                tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(deref_field).add(".find_widgets(path, cached, results)}");
-                tb.add("   fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
+                tb.add("   fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
                 tb.add("       self.")
                     .ident(deref_field)
-                    .add(".uid_to_widget(uid)");
+                    .add(".find_widgets_from_point(cx, point, found)");
                 tb.add("   }");
-            } else {
-                tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){}");
-                tb.add("    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
-                tb.add("       WidgetRef::empty()");
-                tb.add("   }");
+                // Selection API delegation through deref field
+                tb.add("    fn selection_text_len(&self) -> usize { self.")
+                    .ident(deref_field)
+                    .add(".selection_text_len() }");
+                tb.add("    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> { self.").ident(deref_field).add(".selection_point_to_char_index(cx, abs) }");
+                tb.add("    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.")
+                    .ident(deref_field)
+                    .add(".selection_set(anchor, cursor) }");
+                tb.add("    fn selection_clear(&mut self) { self.")
+                    .ident(deref_field)
+                    .add(".selection_clear() }");
+                tb.add("    fn selection_select_all(&mut self) { self.")
+                    .ident(deref_field)
+                    .add(".selection_select_all() }");
+                tb.add("    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String { self.").ident(deref_field).add(".selection_get_text_for_range(start, end) }");
+                tb.add("    fn selection_get_full_text(&self) -> String { self.")
+                    .ident(deref_field)
+                    .add(".selection_get_full_text() }");
             }
         }
         tb.add("}");
@@ -213,16 +299,16 @@ pub fn derive_widget_register_impl(input: TokenStream) -> TokenStream {
             let _types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
             tb.add("impl").stream(generic.clone());
-            tb.add("LiveRegister for")
+            tb.add("WidgetRegister for")
                 .ident(&struct_name)
                 .stream(generic.clone())
                 .stream(where_clause.clone())
                 .add("{");
-            //tb.add("    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}");
-            tb.add("    fn live_register(cx: &mut Cx) {");
-            tb.add("        register_widget!(cx, ")
+            tb.add("    fn register_widget(vm: &mut ScriptVm)->ScriptValue{");
+            tb.add("        register_widget!(vm.cx_mut(), ")
                 .ident(&struct_name)
                 .add(");");
+            tb.add("        Self::script_component(vm)");
             tb.add("    }");
             tb.add("}");
             return tb.end();
@@ -364,7 +450,6 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
 
             //let frame_ext = format!("{}ViewRefExt", clean_name);
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
-            let actions_ext = format!("{}WidgetActionsExt", clean_name);
             let widget_ext = format!("{}WidgetExt", clean_name);
             let get_fn = snake_name.to_string();
             let as_fn = format!("as_{}", snake_name);
@@ -372,20 +457,12 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("pub trait").ident(&widget_ref_ext).add("{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&self, path: &[LiveId]) -> ")
+                .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
                 .ident(&ref_name)
                 .add(";");
             tb.add("    fn ")
                 .ident(&as_fn)
                 .add("(&self) -> ")
-                .ident(&ref_name)
-                .add(";");
-            tb.add("}");
-
-            tb.add("pub trait").ident(&actions_ext).add("{");
-            tb.add("    fn ")
-                .ident(&get_fn)
-                .add("(&self, path: &[LiveId]) -> ")
                 .ident(&ref_name)
                 .add(";");
             tb.add("}");
@@ -395,12 +472,12 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
                 .add(" for WidgetRef{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&self, path: &[LiveId]) -> ")
+                .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
                 .ident(&ref_name)
                 .add("{");
             tb.add("        ")
                 .ident(&ref_name)
-                .add("(self.widget(path))");
+                .add("(self.widget(cx, path))");
             tb.add("    }");
             tb.add("    fn ")
                 .ident(&as_fn)
@@ -408,18 +485,6 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
                 .ident(&ref_name)
                 .add("{");
             tb.add("        ").ident(&ref_name).add("(self.clone())");
-            tb.add("    }");
-            tb.add("}");
-
-            tb.add("impl ").ident(&actions_ext).add(" for Actions{");
-            tb.add("    fn ")
-                .ident(&get_fn)
-                .add("(&self, path: &[LiveId]) -> ")
-                .ident(&ref_name)
-                .add("{");
-            tb.add("        ")
-                .ident(&ref_name)
-                .add("(self.widget(path))");
             tb.add("    }");
             tb.add("}");
 
@@ -439,7 +504,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("pub trait").ident(&widget_ext).add("{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&self, path: &[LiveId]) -> ")
+                .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
                 .ident(&ref_name)
                 .add(";");
             tb.add("}");
@@ -449,12 +514,12 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
                 .add(" for T where T: Widget{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&self, path: &[LiveId]) -> ")
+                .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
                 .ident(&ref_name)
                 .add("{");
             tb.add("        ")
                 .ident(&ref_name)
-                .add("(self.widget(path))");
+                .add("(self.widget(cx, path))");
             tb.add("    }");
             tb.add("}");
 
@@ -510,7 +575,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("pub trait").ident(&set_ext).add("{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&self, paths: &[&[LiveId]]) -> ")
+                .add("(&self, cx: &Cx, paths: &[&[LiveId]]) -> ")
                 .ident(&set_name)
                 .add(";");
             tb.add("    fn ")
@@ -539,12 +604,12 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("impl ").ident(&set_ext).add(" for WidgetSet{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&self, paths: &[&[LiveId]]) -> ")
+                .add("(&self, cx: &Cx, paths: &[&[LiveId]]) -> ")
                 .ident(&set_name)
                 .add("{");
             tb.add("        ")
                 .ident(&set_name)
-                .add("(self.widgets(paths))");
+                .add("(self.widgets(cx, paths))");
             tb.add("    }");
             tb.add("    fn ")
                 .ident(&as_fn)
@@ -558,7 +623,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("pub trait").ident(&ref_ext).add("{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&self, paths: &[&[LiveId]]) -> ")
+                .add("(&self, cx: &Cx, paths: &[&[LiveId]]) -> ")
                 .ident(&set_name)
                 .add(";");
             tb.add("}");
@@ -566,19 +631,19 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("impl ").ident(&ref_ext).add(" for WidgetRef{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&self, paths: &[&[LiveId]]) -> ")
+                .add("(&self, cx: &Cx, paths: &[&[LiveId]]) -> ")
                 .ident(&set_name)
                 .add("{");
             tb.add("        ")
                 .ident(&set_name)
-                .add("(self.widgets(paths))");
+                .add("(self.widgets(cx, paths))");
             tb.add("    }");
             tb.add("}");
 
             tb.add("pub trait").ident(&widget_ext).add("{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&mut self, paths: &[&[LiveId]]) -> ")
+                .add("(&self, cx: &Cx, paths: &[&[LiveId]]) -> ")
                 .ident(&set_name)
                 .add(";");
             tb.add("}");
@@ -588,12 +653,12 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
                 .add(" for T where T: Widget{");
             tb.add("    fn ")
                 .ident(&get_fn)
-                .add("(&mut self, paths: &[&[LiveId]]) -> ")
+                .add("(&self, cx: &Cx, paths: &[&[LiveId]]) -> ")
                 .ident(&set_name)
                 .add("{");
             tb.add("        ")
                 .ident(&set_name)
-                .add("(self.widgets(paths))");
+                .add("(self.widgets(cx, paths))");
             tb.add("    }");
             tb.add("}");
 

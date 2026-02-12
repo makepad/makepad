@@ -17,4 +17,4 @@ std = ["simd-adler32/std"]
 default = ["zlib", "gzip", "std"]
 
 [dependencies]
-simd-adler32 = { version = "0.3.8", path = "../simd-adler32-0.3.8", optional = true, default-features = false }
+simd-adler32 = { version = "0.3.8", path = "../simd-adler32", optional = true, default-features = false }

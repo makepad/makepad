@@ -3,6 +3,7 @@ use {
     crate::{
         cx::Cx,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        draw_pass::CxDrawPassParent,
         event::{
             Event, HttpError, HttpProgress, HttpResponse, MouseDownEvent, MouseMoveEvent,
             MouseUpEvent, NetworkResponse, NetworkResponseItem, ScrollEvent, TextClipboardEvent,
@@ -10,7 +11,6 @@ use {
         },
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
-        pass::CxPassParent,
         permission::{Permission, PermissionResult, PermissionStatus},
         thread::SignalToUI,
         window::CxWindowPool,
@@ -166,6 +166,7 @@ impl Cx {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
                     if tw.flags & 1 != 0 {
                         self.handle_media_signals();
+                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if tw.flags & 2 != 0 {
@@ -179,6 +180,7 @@ impl Cx {
                         timer_id: tw.timer_id as u64,
                         time: None,
                     };
+                    self.handle_script_timer(&e);
                     self.call_event_handler(&Event::Timer(e));
                 }
 
@@ -375,6 +377,7 @@ impl Cx {
         }
 
         if network_responses.len() != 0 {
+            self.handle_script_network_events(&network_responses);
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
 
@@ -403,20 +406,20 @@ impl Cx {
 
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(time as f32);
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(_) => {
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(time as f32);
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(_) => {
                     //et dpi_factor = self.os.window_geom.dpi_factor;
-                    self.draw_pass_to_canvas(*pass_id);
+                    self.draw_pass_to_canvas(*draw_pass_id);
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id);
+                    self.draw_pass_to_texture(*draw_pass_id);
                 }
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(*draw_pass_id);
                 }
             }
         }
@@ -466,7 +469,7 @@ impl Cx {
                 CxOsOp::XrStopPresenting => {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 }
-                CxOsOp::ShowTextIME(area, pos, _config) => {
+                CxOsOp::ShowTextIME(area, pos) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     self.os
                         .from_wasm(FromWasmShowTextIME { x: pos.x, y: pos.y });

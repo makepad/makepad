@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use makepad_miniz::zip_file::*;
+use makepad_zip_file::*;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, Write},

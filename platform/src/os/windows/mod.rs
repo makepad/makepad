@@ -19,6 +19,7 @@ pub mod winrt_midi;
 pub mod d3d11;
 mod web_socket;
 pub mod windows;
+pub mod windows_game_input;
 pub mod windows_stdin;
 
 pub(crate) use crate::os::windows::d3d11::*;

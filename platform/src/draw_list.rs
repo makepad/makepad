@@ -1,14 +1,16 @@
 use crate::{
     cx::Cx,
-    draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShader},
-    draw_vars::{DrawVars, DRAW_CALL_TEXTURE_SLOTS, DRAW_CALL_USER_UNIFORMS},
+    draw_pass::DrawPassId,
+    draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderId},
+    draw_vars::{DrawVars, DRAW_CALL_DYN_UNIFORMS, DRAW_CALL_TEXTURE_SLOTS},
     geometry::GeometryId,
     id_pool::*,
     makepad_error_log::*,
-    makepad_live_compiler::LiveId,
+    makepad_live_id::LiveId,
     makepad_math::*,
+    makepad_script::*,
     os::{CxOsDrawCall, CxOsDrawList},
-    pass::PassId,
+    script::vm::*,
     texture::Texture,
 };
 
@@ -18,6 +20,14 @@ pub struct DrawList(PoolId);
 impl DrawList {
     pub fn new(cx: &mut Cx) -> Self {
         cx.draw_lists.alloc()
+    }
+}
+
+impl ScriptHook for DrawList {}
+impl ScriptApply for DrawList {}
+impl ScriptNew for DrawList {
+    fn script_new(vm: &mut ScriptVm) -> Self {
+        Self::new(vm.cx_mut())
     }
 }
 
@@ -82,17 +92,21 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Script, ScriptHook)]
 #[repr(C)]
-pub struct CxDrawCallUniforms {
-    pub draw_zbias: f32,
+pub struct DrawCallUniforms {
+    #[live]
+    pub zbias: f32,
+    #[live]
     pub pad1: f32,
+    #[live]
     pub pad2: f32,
+    #[live]
     pub pad3: f32,
 }
 
-impl CxDrawCallUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<CxDrawCallUniforms>()] {
+impl DrawCallUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>()] {
         unsafe { std::mem::transmute(self) }
     }
     /*
@@ -101,7 +115,7 @@ impl CxDrawCallUniforms {
     }*/
 
     pub fn set_zbias(&mut self, zbias: f32) {
-        self.draw_zbias = zbias;
+        self.zbias = zbias;
     }
     /*
     pub fn set_clip(&mut self, clip: (Vec2f, Vec2f)) {
@@ -176,12 +190,12 @@ impl CxDrawKind {
 }
 
 pub struct CxDrawCall {
-    pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
+    pub draw_shader_id: DrawShaderId, // if shader_id changed, delete gl vao
     pub options: CxDrawShaderOptions,
     pub total_instance_slots: usize,
-    pub draw_call_uniforms: CxDrawCallUniforms, // draw uniforms
+    pub draw_call_uniforms: DrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
-    pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
+    pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS], // user uniforms
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
@@ -192,10 +206,10 @@ impl CxDrawCall {
         CxDrawCall {
             geometry_id: draw_vars.geometry_id,
             options: draw_vars.options.clone(),
-            draw_shader: draw_vars.draw_shader.unwrap(),
+            draw_shader_id: draw_vars.draw_shader_id.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
-            draw_call_uniforms: CxDrawCallUniforms::default(),
-            user_uniforms: draw_vars.user_uniforms,
+            draw_call_uniforms: DrawCallUniforms::default(),
+            dyn_uniforms: draw_vars.dyn_uniforms,
             texture_slots: draw_vars.texture_slots.clone(),
             instance_dirty: true,
             uniforms_dirty: true,
@@ -203,17 +217,22 @@ impl CxDrawCall {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Script, ScriptHook)]
 #[repr(C)]
-pub struct CxDrawListUniforms {
+pub struct DrawListUniforms {
+    #[live]
     pub view_transform: Mat4f,
+    #[live]
     pub view_clip: Vec4f,
+    #[live]
     pub view_shift: Vec2f,
+    #[live]
     pub pad1: f32,
+    #[live]
     pub pad2: f32,
 }
 
-impl Default for CxDrawListUniforms {
+impl Default for DrawListUniforms {
     fn default() -> Self {
         Self {
             view_transform: Mat4f::identity(),
@@ -225,8 +244,8 @@ impl Default for CxDrawListUniforms {
     }
 }
 
-impl CxDrawListUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<CxDrawListUniforms>()] {
+impl DrawListUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
         unsafe { std::mem::transmute(self) }
     }
 }
@@ -282,20 +301,22 @@ impl CxDrawItems {
 #[derive(Default)]
 pub struct CxDrawList {
     pub debug_id: LiveId,
+    pub debug_dump: bool,
+    pub debug_dump_count: u32,
 
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
 
     pub redraw_id: u64,
-    pub pass_id: Option<PassId>,
+    pub draw_pass_id: Option<DrawPassId>,
 
     pub draw_items: CxDrawItems,
 
-    pub draw_list_uniforms: CxDrawListUniforms,
+    pub draw_list_uniforms: DrawListUniforms,
     pub draw_list_has_clip: bool,
 
     pub os: CxOsDrawList,
     pub rect_areas: Vec<CxRectArea>,
-    pub find_appendable_draw_shader_id: Vec<u64>,
+    pub find_appendable_draw_shader_check: Vec<u64>,
 }
 
 pub struct CxRectArea {
@@ -304,48 +325,28 @@ pub struct CxRectArea {
 }
 
 impl CxDrawList {
-    /*
-    pub fn intersect_clip(&mut self, clip: (Vec2f, Vec2f)) -> (Vec2f, Vec2f) {
-        if !self.unclipped {
-            let min_x = self.rect.pos.x - self.parent_scroll.x;
-            let min_y = self.rect.pos.y - self.parent_scroll.y;
-            let max_x = self.rect.pos.x + self.rect.size.x - self.parent_scroll.x;
-            let max_y = self.rect.pos.y + self.rect.size.y - self.parent_scroll.y;
-
-            let ret = (Vec2f {
-                x: min_x.max(clip.0.x),
-                y: min_y.max(clip.0.y)
-            }, Vec2f {
-                x: max_x.min(clip.1.x),
-                y: max_y.min(clip.1.y)
-            });
-            self.clip_points = ret;
-            ret
-        }
-        else {
-            self.clip_points = clip;
-            clip
-        }
-    }*/
-
     pub fn find_appendable_drawcall(
         &mut self,
         sh: &CxDrawShader,
         draw_vars: &DrawVars,
     ) -> Option<usize> {
         // find our drawcall to append to the current layer
-        if draw_vars.draw_shader.is_none() {
+        if draw_vars.draw_shader_id.is_none() {
             return None;
         }
-        let draw_shader_id = draw_vars.draw_shader.as_ref().unwrap().false_compare_id();
+        let draw_shader_check = draw_vars
+            .draw_shader_id
+            .as_ref()
+            .unwrap()
+            .false_compare_check();
 
         //let mut found = 0;
         for i in (0..self.draw_items.len()).rev() {
-            if self.find_appendable_draw_shader_id[i] == draw_shader_id {
+            if self.find_appendable_draw_shader_check[i] == draw_shader_check {
                 let draw_item = &mut self.draw_items[i];
                 if let Some(draw_call) = &draw_item.draw_call() {
                     // TODO! figure out why this can happen
-                    if draw_call.draw_shader != draw_vars.draw_shader.unwrap() {
+                    if draw_call.draw_shader_id != draw_vars.draw_shader_id.unwrap() {
                         continue;
                     }
                     // lets compare uniforms and textures..
@@ -354,8 +355,8 @@ impl CxDrawList {
                             continue;
                         }
                         let mut diff = false;
-                        for i in 0..sh.mapping.user_uniforms.total_slots {
-                            if draw_call.user_uniforms[i] != draw_vars.user_uniforms[i] {
+                        for i in 0..sh.mapping.dyn_uniforms.total_slots {
+                            if draw_call.dyn_uniforms[i] != draw_vars.dyn_uniforms[i] {
                                 diff = true;
                                 break;
                             }
@@ -401,11 +402,11 @@ impl CxDrawList {
         sh: &CxDrawShader,
         draw_vars: &DrawVars,
     ) -> &mut CxDrawItem {
-        if let Some(ds) = &draw_vars.draw_shader {
-            self.find_appendable_draw_shader_id
-                .push(ds.false_compare_id());
+        if let Some(ds) = &draw_vars.draw_shader_id {
+            self.find_appendable_draw_shader_check
+                .push(ds.false_compare_check());
         } else {
-            self.find_appendable_draw_shader_id.push(0);
+            self.find_appendable_draw_shader_check.push(0);
         }
         self.draw_items.push_item(
             redraw_id,
@@ -417,14 +418,14 @@ impl CxDrawList {
         self.redraw_id = redraw_id;
         self.draw_items.clear();
         self.rect_areas.clear();
-        self.find_appendable_draw_shader_id.clear();
+        self.find_appendable_draw_shader_check.clear();
     }
 
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
         // see if we need to add a new one
         self.draw_items
             .push_item(redraw_id, CxDrawKind::SubList(sub_list_id));
-        self.find_appendable_draw_shader_id.push(0);
+        self.find_appendable_draw_shader_check.push(0);
     }
 
     pub fn store_sub_list_last(&mut self, redraw_id: u64, sub_list_id: DrawListId) {

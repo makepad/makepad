@@ -23,13 +23,12 @@ use {
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         cx_stdin::{PollTimer, PollTimers},
+        draw_pass::CxDrawPassParent,
+        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
-            keyboard::{CharOffset, FullTextState},
             Event,
             HttpError,
             HttpResponse,
-            ImeAction,
-            ImeActionEvent,
             KeyCode,
             KeyEvent,
             KeyModifiers,
@@ -55,8 +54,6 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         os::cx_native::EventFlow,
-        pass::CxPassParent,
-        pass::{PassClearColor, PassClearDepth, PassId},
         studio::{AppToStudio, GPUSample},
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
@@ -118,30 +115,6 @@ impl Cx {
                 }
                 Ok(message) => {
                     self.handle_message(message);
-                    // ================================================================
-                    // IME ECHO PREVENTION - IMMEDIATE PLATFORM OPS PROCESSING
-                    // ================================================================
-                    // Process queued platform ops immediately after handling messages.
-                    // This is critical for IME shadow buffer synchronization.
-                    //
-                    // Without immediate processing, the sequence would be:
-                    //   1. Java InputConnection sends text to Rust (ImeTextStateChanged)
-                    //   2. Rust widget updates state and queues SyncImeState
-                    //   3. ... wait until next frame ...
-                    //   4. Gboard queries Java's stale buffer (before SyncImeState runs)
-                    //   5. Autocorrect/prediction breaks due to stale data
-                    //
-                    // With immediate processing:
-                    //   1. Java InputConnection sends text to Rust
-                    //   2. Rust widget updates and queues SyncImeState
-                    //   3. handle_platform_ops() runs SyncImeState immediately
-                    //   4. Java buffer updated before Gboard's next query
-                    //
-                    // There's three layers of echo preventions, see also:
-                    //   - MakepadInputConnection.java
-                    //   - text_input.rs: update_ime_context() and ime_update_frame
-                    // ================================================================
-                    self.handle_platform_ops();
                 }
                 Err(e) => {
                     crate::error!("Error receiving message: {:?}", e);
@@ -284,9 +257,6 @@ impl Cx {
                         input: character.to_string(),
                         replace_last: false,
                         was_paste: false,
-                        composition: None,
-                        full_state_sync: None,
-                        replace_range: None,
                     });
                     self.call_event_handler(&e);
                 }
@@ -326,9 +296,6 @@ impl Cx {
                                     input: content,
                                     replace_last: false,
                                     was_paste: true,
-                                    composition: None,
-                                    full_state_sync: None,
-                                    replace_range: None,
                                 });
                                 self.call_event_handler(&e);
                             }
@@ -417,6 +384,7 @@ impl Cx {
                         Some(body),
                     )),
                 }];
+                self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
                 self.call_event_handler(&e);
             }
@@ -433,6 +401,7 @@ impl Cx {
                         metadata_id: LiveId(metadata_id),
                     }),
                 }];
+                self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
                 self.call_event_handler(&e);
             }
@@ -635,54 +604,7 @@ impl Cx {
                     input: content,
                     replace_last: false,
                     was_paste: true,
-                    composition: None,
-                    full_state_sync: None,
-                    replace_range: None,
                 });
-                self.call_event_handler(&e);
-            }
-            // IME unified text state notification (Java→Rust)
-            // Java's InputConnection is now the source of truth for IME operations
-            FromJavaMessage::ImeTextStateChanged {
-                full_text,
-                selection_start,
-                selection_end,
-                composing_start,
-                composing_end,
-            } => {
-                // Convert UTF-16 indices from Java to character offsets
-                let sel_start = CharOffset::from_utf16_index(&full_text, selection_start as usize);
-                let sel_end = CharOffset::from_utf16_index(&full_text, selection_end as usize);
-
-                // Convert composing region from Java's -1 convention to Option<Range>
-                let composition = if composing_start >= 0 && composing_end >= 0 {
-                    let comp_start =
-                        CharOffset::from_utf16_index(&full_text, composing_start as usize);
-                    let comp_end = CharOffset::from_utf16_index(&full_text, composing_end as usize);
-                    Some(comp_start..comp_end)
-                } else {
-                    None
-                };
-
-                // Android uses full state sync - Java InputConnection is authoritative
-                let e = Event::TextInput(TextInputEvent {
-                    input: String::new(), // Not used for full state sync
-                    replace_last: false,
-                    was_paste: false,
-                    composition: None, // Composition info is in full_state_sync
-                    full_state_sync: Some(FullTextState {
-                        text: full_text,
-                        selection: sel_start..sel_end,
-                        composition,
-                    }),
-                    replace_range: None, // Android uses full state sync, not incremental replacements
-                });
-                self.call_event_handler(&e);
-            }
-            // IME editor action (Done, Go, Search, etc.) for single-line inputs
-            FromJavaMessage::ImeEditorAction { action_code } => {
-                let action = ImeAction::from_android_action_code(action_code);
-                let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
             FromJavaMessage::Init(_) => {}
@@ -719,12 +641,14 @@ impl Cx {
         // Timers
         let events = self.os.timers.get_dispatch();
         for event in events {
+            self.handle_script_timer(&event);
             self.call_event_handler(&Event::Timer(event));
         }
 
         // Signals
         if SignalToUI::check_and_clear_ui_signal() {
             self.handle_media_signals();
+            self.handle_script_signals();
             self.call_event_handler(&Event::Signal);
         }
         if SignalToUI::check_and_clear_action_signal() {
@@ -985,13 +909,13 @@ impl Cx {
         }
     }
 
-    pub fn draw_pass_to_fullscreen(&mut self, pass_id: PassId) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+    pub fn draw_pass_to_fullscreen(&mut self, draw_pass_id: DrawPassId) {
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        self.setup_render_pass(pass_id);
+        self.setup_render_pass(draw_pass_id);
 
         // keep repainting in a loop
-        self.passes[pass_id].paint_dirty = false;
+        self.passes[draw_pass_id].paint_dirty = false;
         //let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
 
         let gl = self.os.gl();
@@ -1004,20 +928,20 @@ impl Cx {
             );
         }
 
-        let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            self.passes[pass_id].clear_color
+        let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
+            self.passes[draw_pass_id].clear_color
         } else {
-            match self.passes[pass_id].color_textures[0].clear_color {
-                PassClearColor::InitWith(color) => color,
-                PassClearColor::ClearWith(color) => color,
+            match self.passes[draw_pass_id].color_textures[0].clear_color {
+                DrawPassClearColor::InitWith(color) => color,
+                DrawPassClearColor::ClearWith(color) => color,
             }
         };
-        let clear_depth = match self.passes[pass_id].clear_depth {
-            PassClearDepth::InitWith(depth) => depth,
-            PassClearDepth::ClearWith(depth) => depth,
+        let clear_depth = match self.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) => depth,
+            DrawPassClearDepth::ClearWith(depth) => depth,
         };
 
-        if !self.passes[pass_id].dont_clear {
+        if !self.passes[draw_pass_id].dont_clear {
             unsafe {
                 //(gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
                 (gl.glClearDepthf)(clear_depth as f32);
@@ -1028,9 +952,9 @@ impl Cx {
         Self::set_default_depth_and_blend_mode(gl);
 
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
 
-        self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step);
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
 
         //to_java.swap_buffers();
         //unsafe {
@@ -1043,16 +967,16 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {
                     // cant happen
                 }
-                CxPassParent::Window(_) => {
+                CxDrawPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
                     let start = self.seconds_since_app_start();
-                    self.draw_pass_to_fullscreen(*pass_id);
+                    self.draw_pass_to_fullscreen(*draw_pass_id);
                     let end = self.seconds_since_app_start();
                     Cx::send_studio_message(AppToStudio::GPUSample(GPUSample { start, end }));
                     unsafe {
@@ -1064,12 +988,12 @@ impl Cx {
                         }
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, None);
+                    self.draw_pass_to_texture(*draw_pass_id, None);
                 }
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, None);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
         }
@@ -1116,10 +1040,9 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
                 }
-                CxOsOp::ShowTextIME(_area, _pos, config) => {
+                CxOsOp::ShowTextIME(_area, _pos) => {
                     //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
                     unsafe {
-                        android_jni::to_java_configure_keyboard(&config);
                         android_jni::to_java_show_keyboard(true);
                     }
                 }
@@ -1127,31 +1050,6 @@ impl Cx {
                     //self.os.keyboard_visible = false;
                     unsafe {
                         android_jni::to_java_show_keyboard(false);
-                    }
-                }
-                CxOsOp::SyncImeState {
-                    text,
-                    selection,
-                    composition: _,
-                } => {
-                    // ECHO PREVENTION: Sync Rust's authoritative text state to Java.
-                    // This is called from text_input.rs update_ime_context() when:
-                    //   1. Widget text/selection changed programmatically (not from IME)
-                    //   2. State comparison shows actual change from last sent state
-                    //
-                    // The Java side (updateImeTextState) will check wasRecentlySentToRust()
-                    // to avoid applying stale echoes. Only genuine programmatic changes
-                    // (like clearing text via a button) will actually update Java's buffer.
-
-                    // Convert CharOffset to UTF-16 indices for Java
-                    let sel_start_utf16 = selection.start.to_utf16_index(&text) as i32;
-                    let sel_end_utf16 = selection.end.to_utf16_index(&text) as i32;
-                    unsafe {
-                        android_jni::to_java_update_ime_text_state(
-                            &text,
-                            sel_start_utf16,
-                            sel_end_utf16,
-                        );
                     }
                 }
                 CxOsOp::CopyToClipboard(content) => unsafe {

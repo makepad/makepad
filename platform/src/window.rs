@@ -1,14 +1,14 @@
 use crate::{
     cx::Cx,
     cx_api::CxOsOp,
+    draw_pass::{CxDrawPassParent, DrawPass, DrawPassId},
     event::WindowGeom,
     id_pool::*,
-    live_traits::*,
     makepad_error_log::*,
-    makepad_live_compiler::*,
-    makepad_live_id::*,
     makepad_math::*,
-    pass::{CxPassParent, Pass, PassId},
+    //makepad_live_id::*,
+    makepad_script::*,
+    script::vm::*,
 };
 
 pub struct WindowHandle(PoolId);
@@ -120,9 +120,25 @@ impl std::ops::IndexMut<WindowId> for CxWindowPool {
     }
 }
 
-impl LiveHook for WindowHandle {}
-impl LiveNew for WindowHandle {
-    fn new(cx: &mut Cx) -> Self {
+impl ScriptHook for WindowHandle {}
+impl ScriptNew for WindowHandle {
+    fn script_new(vm: &mut ScriptVm) -> Self {
+        Self::new(vm.cx_mut())
+    }
+}
+impl ScriptApply for WindowHandle {
+    fn script_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+    }
+}
+
+impl WindowHandle {
+    pub fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
@@ -133,83 +149,66 @@ impl LiveNew for WindowHandle {
             .push(CxOsOp::CreateWindow(window.window_id()));
         window
     }
+}
 
-    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: LiveType::of::<Self>(),
-            fields: Vec::new(),
-            live_ignore: true,
-            type_name: id_lut!(Window),
-        }
+#[derive(Script)]
+pub struct ScriptWindowHandle {
+    #[rust(WindowHandle::new(vm.cx_mut()))]
+    pub handle: WindowHandle,
+    #[live]
+    pub title: String,
+    #[live]
+    pub inner_size: Option<Vec2d>,
+    #[live]
+    pub position: Option<Vec2d>,
+    #[live]
+    pub kind_id: usize,
+    #[live]
+    pub dpi_override: Option<f64>,
+    #[live]
+    pub topmost: bool,
+}
+
+impl std::ops::Deref for ScriptWindowHandle {
+    type Target = WindowHandle;
+    fn deref(&self) -> &Self::Target {
+        &self.handle
     }
 }
 
-impl LiveApply for WindowHandle {
-    //fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
-    fn apply(
+impl ScriptHook for ScriptWindowHandle {
+    fn on_after_apply(
         &mut self,
-        cx: &mut Cx,
-        apply: &mut Apply,
-        start_index: usize,
-        nodes: &[LiveNode],
-    ) -> usize {
-        if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(
-                live_error_origin!(),
-                start_index,
-                nodes,
-                live_id!(View),
-            );
-            return nodes.skip_node(start_index);
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        let cx = vm.host.cx_mut();
+        let window_id = self.handle.window_id();
+        if !self.title.is_empty() {
+            cx.windows[window_id].create_title = self.title.clone();
         }
-
-        let mut index = start_index + 1;
-        loop {
-            if nodes[index].value.is_close() {
-                index += 1;
-                break;
-            }
-            match nodes[index].id {
-                live_id!(inner_size) => {
-                    let v: Vec2f = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    cx.windows[self.window_id()].create_inner_size = Some(v.into());
-                }
-                live_id!(title) => {
-                    let v = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    cx.windows[self.window_id()].create_title = v;
-                }
-                live_id!(kind_id) => {
-                    let v = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    cx.windows[self.window_id()].kind_id = v;
-                }
-                live_id!(position) => {
-                    let v: Vec2f = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    cx.windows[self.window_id()].create_position = Some(v.into());
-                }
-                live_id!(dpi_override) => {
-                    let v: f64 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    //log!("DPI OVERRIDE {}", v);
-                    cx.windows[self.window_id()].dpi_override = Some(v);
-                }
-                live_id!(topmost) => {
-                    let v: bool = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    self.set_topmost(cx, v);
-                }
-                _ => {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                    index = nodes.skip_node(index);
-                }
-            }
+        if self.inner_size.is_some() {
+            cx.windows[window_id].create_inner_size = self.inner_size;
         }
-        return index;
+        if self.position.is_some() {
+            cx.windows[window_id].create_position = self.position;
+        }
+        cx.windows[window_id].kind_id = self.kind_id;
+        if self.dpi_override.is_some() {
+            cx.windows[window_id].dpi_override = self.dpi_override;
+        }
+        if self.topmost {
+            self.handle.set_topmost(cx, self.topmost);
+        }
     }
 }
 
 impl WindowHandle {
-    pub fn set_pass(&self, cx: &mut Cx, pass: &Pass) {
-        cx.windows[self.window_id()].main_pass_id = Some(pass.pass_id());
-        cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
+    pub fn set_pass(&self, cx: &mut Cx, pass: &DrawPass) {
+        cx.windows[self.window_id()].main_pass_id = Some(pass.draw_pass_id());
+        cx.passes[pass.draw_pass_id()].parent = CxDrawPassParent::Window(self.window_id());
     }
     pub fn configure_window(
         &mut self,
@@ -300,7 +299,7 @@ pub struct CxWindow {
     pub os_dpi_factor: Option<f64>,
     pub is_created: bool,
     pub window_geom: WindowGeom,
-    pub main_pass_id: Option<PassId>,
+    pub main_pass_id: Option<DrawPassId>,
     pub is_fullscreen: bool,
 }
 

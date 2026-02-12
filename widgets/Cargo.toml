@@ -1,34 +1,36 @@
 [package]
 name = "makepad-widgets"
-version = "1.0.0"
+version = "2.0.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
-description = "Makepad widgets"
+description = "Makepad widgets2"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
 
 [dependencies]
-makepad-draw = { path = "../draw", version = "1.0.0" }
-makepad-derive-widget = {path = "./derive_widget", version="1.0.0"}
+makepad-draw = { path = "../draw", version = "2.0.0" }
+makepad-derive-widget = {path = "./derive_widget", version="2.0.0"}
+makepad-mbtile-reader = { path = "../libs/mbtile_reader", version = "1.0.0", optional = true }
+flate2 = { path = "../libs/flate2", default-features = false, features = ["rust_backend"], optional = true }
 
-makepad-zune-jpeg ={ version = "0.5.12",  path = "../libs/zune-jpeg" }
-makepad-zune-png ={ version = "0.5.1", path = "../libs/zune-png"  }
-
-makepad-html ={ path = "../libs/html", version = "1.0.0" }
-unicode-segmentation = "1.11.0"
-pulldown-cmark = { version = "0.12.2", default-features = false, features = ["simd"] }
-
-makepad-fonts-emoji = {path = "./fonts/emoji", version = "1.0.0"}
-makepad-fonts-chinese-regular = {path = "./fonts/chinese_regular", version = "1.0.1"}
-makepad-fonts-chinese-regular-2 = {path = "./fonts/chinese_regular_2", version = "1.0.1"}
-makepad-fonts-chinese-bold = {path = "./fonts/chinese_bold", version = "1.0.1"}
-makepad-fonts-chinese-bold-2 = {path = "./fonts/chinese_bold_2", version = "1.0.1"}
+makepad-zune-jpeg = { version = "0.5.12", path = "../libs/zune-jpeg" }
+makepad-zune-png = { version = "0.5.1", path = "../libs/zune-png" }
+makepad-html = { path = "../libs/html", version = "1.0.0" }
+unicode-segmentation = { version = "1.12.0", path = "../libs/unicode-segmentation" }
+pulldown-cmark = { version = "0.12.2", path = "../libs/pulldown-cmark", default-features = false, features = ["simd"] }
+makepad-latex-math = { path = "../libs/latex_math", version = "0.1.0" }
+makepad-pdf-parse = { path = "../libs/pdf_parse", version = "1.0.0", optional = true }
+ttf-parser = { path = "../libs/ttf-parser" }
 
 serde = { version = "1.0", optional = true, features = ["derive"] }
 
 [features]
 default = []
+
+maps = ["dep:makepad-mbtile-reader", "dep:flate2"]
+pdf = ["dep:makepad-pdf-parse"]
+
 ## Enables certain public-facing types to derive serde serialization traits.
 serde = ["dep:serde", "makepad-draw/serde", "makepad-derive-widget/serde"]

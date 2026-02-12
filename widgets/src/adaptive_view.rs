@@ -1,18 +1,22 @@
 use std::collections::HashMap;
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent, WindowAction};
+use crate::{
+    makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+    WidgetMatchEvent, WindowAction,
+};
 
-live_design! {
-    link widgets;
-    use link::widgets::*;
-    use link::theme::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub AdaptiveViewBase = {{AdaptiveView}} {}
-    pub AdaptiveView = <AdaptiveViewBase> {
-        width: Fill, height: Fill
+    mod.widgets.AdaptiveViewBase = #(AdaptiveView::register_widget(vm))
 
-        Mobile = <View> {}
-        Desktop = <View> {}
+    mod.widgets.AdaptiveView = set_type_default() do mod.widgets.AdaptiveViewBase{
+        width: Fill
+        height: Fill
+
+        Mobile := mod.widgets.ViewBase{}
+        Desktop := mod.widgets.ViewBase{}
     }
 }
 
@@ -60,8 +64,13 @@ live_design! {
 /// device layouts (Currently `Desktop` and `Mobile`). You can override this through the `set_variant_selector` method.
 ///
 /// Check out [VariantSelector] for more information on how to define custom selectors, and what information is available to them.
-#[derive(Live, LiveRegisterWidget, WidgetRef)]
+#[derive(Script, WidgetRegister, WidgetRef)]
 pub struct AdaptiveView {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+
     #[rust]
     area: Area,
 
@@ -81,7 +90,7 @@ pub struct AdaptiveView {
 
     /// A map of templates that are used to create the active widget.
     #[rust]
-    templates: ComponentMap<LiveId, LivePtr>,
+    templates: ComponentMap<LiveId, ScriptObjectRef>,
 
     /// The active widget that is currently being displayed.
     #[rust]
@@ -113,6 +122,9 @@ pub struct WidgetVariant {
 }
 
 impl WidgetNode for AdaptiveView {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, cx: &mut Cx) -> Walk {
         if let Some(active_widget) = self.active_widget.as_ref() {
             active_widget.widget_ref.walk(cx)
@@ -129,80 +141,76 @@ impl WidgetNode for AdaptiveView {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some(active_widget) = self.active_widget.as_ref() {
-            active_widget.widget_ref.find_widgets(path, cached, results);
-        }
-    }
-
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        if let Some(active_widget) = self.active_widget.as_ref() {
-            active_widget.widget_ref.uid_to_widget(uid)
-        } else {
-            WidgetRef::empty()
-        }
-    }
 }
 
-impl LiveHook for AdaptiveView {
-    fn before_apply(
+impl ScriptHook for AdaptiveView {
+    fn on_before_apply(
         &mut self,
-        _cx: &mut Cx,
-        apply: &mut Apply,
-        _index: usize,
-        _nodes: &[LiveNode],
+        _vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
     ) {
-        if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
+        if apply.is_reload() {
             self.templates.clear();
         }
     }
 
-    fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        // Handle vec_key children from the object's vec
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if kv.key.as_id().is_some() {
+                            if let Some(id) = kv.key.as_id() {
+                                if let Some(template_obj) = kv.value.as_object() {
+                                    self.templates
+                                        .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                }
+
+                                if id != id!(Desktop) && id != id!(Mobile) {
+                                    self.has_custom_templates = true;
+                                }
+
+                                if let Some(widget_variant) = self.active_widget.as_mut() {
+                                    if widget_variant.template_id == id {
+                                        widget_variant
+                                            .widget_ref
+                                            .script_apply(vm, apply, scope, kv.value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
         // Do not override the current selector if we are updating from the doc
-        if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
+        if apply.is_reload() {
             return;
         };
 
         // If there are no custom templates, create a default widget with the default variant Desktop
         // This is needed so that methods that run before drawing (find_widgets, walk) have something to work with
         if !self.has_custom_templates {
-            let template = self.templates.get(&live_id!(Desktop)).unwrap();
-            let widget_ref = WidgetRef::new_from_ptr(cx, Some(*template));
+            let template_ref = self.templates.get(&id!(Desktop)).unwrap();
+            let template_value: ScriptValue = template_ref.as_object().into();
+            let widget_ref = WidgetRef::script_from_value_scoped(vm, scope, template_value);
             self.active_widget = Some(WidgetVariant {
                 template_id: live_id!(Desktop),
-                widget_ref: widget_ref.clone(),
+                widget_ref,
             });
         }
         self.set_default_variant_selector();
-    }
-
-    fn apply_value_instance(
-        &mut self,
-        cx: &mut Cx,
-        apply: &mut Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> usize {
-        if nodes[index].is_instance_prop() {
-            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index) {
-                let id = nodes[index].id;
-                self.templates.insert(id, live_ptr);
-
-                if id != live_id!(Desktop) && id != live_id!(Mobile) {
-                    self.has_custom_templates = true;
-                }
-
-                if let Some(widget_variant) = self.active_widget.as_mut() {
-                    if widget_variant.template_id == id {
-                        widget_variant.widget_ref.apply(cx, apply, index, nodes);
-                    }
-                }
-            }
-        } else {
-            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-        }
-        nodes.skip_node(index)
     }
 }
 
@@ -210,7 +218,14 @@ impl Widget for AdaptiveView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.widget_match_event(cx, event, scope);
         if let Some(active_widget) = self.active_widget.as_mut() {
-            active_widget.widget_ref.handle_event(cx, event, scope);
+            cx.with_node(
+                active_widget.widget_ref.widget_uid(),
+                active_widget.template_id,
+                active_widget.widget_ref.clone(),
+                |cx| {
+                    active_widget.widget_ref.handle_event(cx, event, scope);
+                },
+            );
         }
     }
 
@@ -225,7 +240,12 @@ impl Widget for AdaptiveView {
         }
 
         if let Some(active_widget) = self.active_widget.as_mut() {
-            active_widget.widget_ref.draw_walk(cx, scope, walk)?;
+            cx.with_node(
+                active_widget.widget_ref.widget_uid(),
+                active_widget.template_id,
+                active_widget.widget_ref.clone(),
+                |cx| active_widget.widget_ref.draw_walk(cx, scope, walk),
+            )?;
         }
 
         DrawStep::done()
@@ -277,8 +297,9 @@ impl AdaptiveView {
         cx.widget_query_invalidation_event = Some(cx.event_id());
 
         // Otherwise create a new widget from the template
-        let template = self.templates.get(&template_id).unwrap();
-        let widget_ref = WidgetRef::new_from_ptr(cx, Some(*template));
+        let template_ref = self.templates.get(&template_id).unwrap();
+        let template_value: ScriptValue = template_ref.as_object().into();
+        let widget_ref = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
 
         // Update this widget's walk to match the walk of the active widget,
         // this ensures that the new widget is not affected by `Fill` or `Fit` constraints from this parent.

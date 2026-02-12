@@ -1,5 +1,5 @@
+use crate::makepad_platform::*;
 use crate::{Cx2d, CxDraw};
-use makepad_platform::*;
 
 pub trait MatchEvent {
     fn handle_startup(&mut self, _cx: &mut Cx) {}

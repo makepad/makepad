@@ -1,54 +1,61 @@
-use crate::{image::Image, image_cache::*, makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    animator::{Animator, AnimatorAction, AnimatorImpl},
+    image::Image,
+    image_cache::*,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
+};
 use std::path::Path;
 
-live_design! {
-    link widgets;
-    use link::widgets::*;
-    use link::shaders::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub ImageBlendBase = {{ImageBlend}} {}
+    mod.widgets.ImageBlendBase = #(ImageBlend::register_widget(vm))
 
-    pub ImageBlend = <ImageBlendBase> {
-        image_a: <Image>{
-            fit: Smallest
-            width: Fill,
+    mod.widgets.ImageBlend = set_type_default() do mod.widgets.ImageBlendBase{
+        image_a: Image{
+            fit: ImageFit.Smallest
+            width: Fill
             height: Fill
-        },
-        image_b: <Image>{
-            fit: Smallest
-            width: Fill,
+        }
+        image_b: Image{
+            fit: ImageFit.Smallest
+            width: Fill
             height: Fill
-        },
-        width: Fill,
-        height: Fill,
+        }
+        width: Fill
+        height: Fill
         flow: Overlay
-        align: {x: 0.5, y: 0.5}
-        animator: {
-            blend = {
-                default: zero,
-                zero = {
-                    from: {all: Forward {duration: 0.525}}
+        align: Align{x: 0.5, y: 0.5}
+        animator: Animator{
+            blend: {
+                default: @zero
+                zero: AnimatorState{
+                    from: {all: Forward{duration: 0.525}}
                     apply: {
-                        image_b:{draw_bg:{opacity: 0.0}}
+                        image_b: {draw_bg: {opacity: 0.0}}
                     }
                 }
-                one = {
-                    from: {
-                        all: Forward {duration: 0.525}
-                    }
+                one: AnimatorState{
+                    from: {all: Forward{duration: 0.525}}
                     apply: {
-                        image_b:{draw_bg:{opacity: 1.0}}
+                        image_b: {draw_bg: {opacity: 1.0}}
                     }
                 }
             }
         }
     }
-
 }
 
-#[derive(Live, Widget, LiveHook)]
+#[derive(Script, ScriptHook, Widget, Animator)]
 pub struct ImageBlend {
-    #[animator]
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[apply_default]
     animator: Animator,
     #[walk]
     walk: Walk,
@@ -82,7 +89,7 @@ impl ImageCacheImpl for ImageBlend {
 
 impl Widget for ImageBlend {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_walk(cx, walk)
+        self.draw_walk_blend(cx, walk)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -96,7 +103,7 @@ impl Widget for ImageBlend {
 }
 
 impl ImageBlend {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
+    pub fn draw_walk_blend(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         self.image_a.draw_all_unscoped(cx);
         self.image_b.draw_all_unscoped(cx);
@@ -121,12 +128,14 @@ impl ImageBlendRef {
             inner.flip_animate(cx);
         }
     }
+
     pub fn set_texture(&self, cx: &mut Cx, texture: Option<Texture>) {
         if let Some(mut inner) = self.borrow_mut() {
             let slot = inner.flip_animate(cx);
             inner.set_texture(texture, slot);
         }
     }
+
     /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {

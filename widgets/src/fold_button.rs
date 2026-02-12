@@ -1,81 +1,86 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
+};
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use link::shaders::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub FoldButtonBase = {{FoldButton}} {}
+    mod.widgets.FoldButtonBase = #(FoldButton::register_widget(vm))
 
-    pub FoldButton = <FoldButtonBase> {
-        height: 20, width: 15,
-        margin: { left: 0. }
+    mod.widgets.FoldButton = set_type_default() do mod.widgets.FoldButtonBase{
+        height: 20
+        width: 15
+        margin: Inset{left: 0.}
 
-        draw_bg: {
-            instance active: 0.0
-            instance hover: 0.0
+        draw_bg +: {
+            active: instance(1.0)  // Default to open state (matches animator default: @on)
+            hover: instance(0.0)
 
-            uniform color: (THEME_COLOR_LABEL_INNER)
-            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
-            uniform color_active: (THEME_COLOR_LABEL_INNER_ACTIVE)
+            color: uniform(theme.color_label_inner)
+            color_hover: uniform(theme.color_label_inner_hover)
+            color_active: uniform(theme.color_label_inner_active)
 
-            uniform fade: 1.0
+            fade: uniform(1.0)
 
-            fn pixel(self) -> vec4 {
-                let sz = 2.5;
-                let c = vec2(5.0, self.rect_size.y * 0.4);
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(vec4(0.));
+            pixel: fn() {
+                let sz = 2.5
+                let c = vec2(5.0, self.rect_size.y * 0.4)
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.clear(vec4(0.))
 
                 // we have 3 points, and need to rotate around its center
-                sdf.rotate(self.active * 0.5 * PI + 0.5 * PI, c.x, c.y);
-                sdf.move_to(c.x - sz, c.y + sz);
-                sdf.line_to(c.x, c.y - sz);
-                sdf.line_to(c.x + sz, c.y + sz);
-                sdf.close_path();
+                sdf.rotate(self.active * 0.5 * PI + 0.5 * PI, c.x, c.y)
+                sdf.move_to(c.x - sz, c.y + sz)
+                sdf.line_to(c.x, c.y - sz)
+                sdf.line_to(c.x + sz, c.y + sz)
+                sdf.close_path()
                 sdf.fill(
                     mix(
-                        mix(self.color, self.color_hover, self.hover),
-                        mix(self.color_active, self.color_hover, self.hover),
+                        mix(self.color, self.color_hover, self.hover)
+                        mix(self.color_active, self.color_hover, self.hover)
                         self.active
                     )
-                );
-                return sdf.result * self.fade;
+                )
+                return sdf.result * self.fade
             }
         }
 
-        animator: {
-            hover = {
-                default: off
-                off = {
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.1}}
                     apply: {draw_bg: {hover: 0.0}}
                 }
 
-                on = {
+                on: AnimatorState{
                     from: {all: Snap}
                     apply: {draw_bg: {hover: 1.0}}
                 }
             }
 
-            active = {
-                default: on
-                off = {
+            active: {
+                default: @on
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
                         active: 0.0
-                        draw_bg: {active: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                        draw_bg: {active: 0.0}
                     }
                 }
-                on = {
+                on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
                         active: 1.0
-                        draw_bg: {active: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+                        draw_bg: {active: 1.0}
                     }
                 }
             }
@@ -83,18 +88,31 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Clone, Debug, Default)]
+pub enum FoldButtonAction {
+    #[default]
+    None,
+    Opening,
+    Closing,
+    Animating(f64),
+}
+
+#[derive(Script, ScriptHook, Widget, Animator)]
 pub struct FoldButton {
-    #[animator]
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[apply_default]
     animator: Animator,
 
     #[redraw]
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    abs_size: Vec2d,
+    abs_size: DVec2,
     #[live]
-    abs_offset: Vec2d,
+    abs_offset: DVec2,
     #[walk]
     walk: Walk,
     #[live]
@@ -104,29 +122,24 @@ pub struct FoldButton {
     action_data: WidgetActionData,
 }
 
-#[derive(Clone, Debug, DefaultNone)]
-pub enum FoldButtonAction {
-    None,
-    Opening,
-    Closing,
-    Animating(f64),
-}
-
 impl FoldButton {
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
         self.animator_toggle(cx, is_open, animate, ids!(active.on), ids!(active.off))
+    }
+
+    pub fn is_open(&self, cx: &Cx) -> bool {
+        self.animator_in_state(cx, ids!(active.on))
     }
 
     pub fn draw_walk_fold_button(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.draw_walk(cx, walk);
     }
 
-    pub fn area(&mut self) -> Area {
+    pub fn area(&self) -> Area {
         self.draw_bg.area()
     }
 
-    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2d, fade: f64) {
-        self.draw_bg.apply_over(cx, live! {fade: (fade)});
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2) {
         self.draw_bg.draw_abs(
             cx,
             Rect {
@@ -165,32 +178,28 @@ impl FoldButton {
 }
 
 impl Widget for FoldButton {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         let res = self.animator_handle_event(cx, event);
-        if res.is_animating() {
-            if self.animator.is_track_animating(cx, ids!(active)) {
-                let mut value = [0.0];
-                self.draw_bg.get_instance(cx, ids!(active), &mut value);
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    FoldButtonAction::Animating(value[0] as f64),
-                )
-            }
-            if res.must_redraw() {
-                self.draw_bg.redraw(cx);
-            }
-        };
+        if res.must_redraw() {
+            // Use self.active which is updated by the animator's script_apply
+            // (draw_bg.get_instance returns the OLD value from the previous draw)
+            cx.widget_action_with_data(
+                &self.action_data,
+                uid,
+                FoldButtonAction::Animating(self.active),
+            );
+            self.draw_bg.redraw(cx);
+        }
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 if self.animator_in_state(cx, ids!(active.on)) {
                     self.animator_play(cx, ids!(active.off));
-                    cx.widget_action(uid, &scope.path, FoldButtonAction::Closing)
+                    cx.widget_action_with_data(&self.action_data, uid, FoldButtonAction::Closing)
                 } else {
                     self.animator_play(cx, ids!(active.on));
-                    cx.widget_action(uid, &scope.path, FoldButtonAction::Opening)
+                    cx.widget_action_with_data(&self.action_data, uid, FoldButtonAction::Opening)
                 }
                 self.animator_play(cx, ids!(hover.on));
             }
@@ -256,5 +265,15 @@ impl FoldButtonRef {
         } else {
             1.0
         }
+    }
+
+    pub fn set_is_open(&self, cx: &mut Cx, is_open: bool, animate: Animate) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_is_open(cx, is_open, animate);
+        }
+    }
+
+    pub fn is_open(&self, cx: &Cx) -> bool {
+        self.borrow().map_or(true, |inner| inner.is_open(cx))
     }
 }

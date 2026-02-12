@@ -1,19 +1,19 @@
 use crate::{
     cx::Cx,
     draw_list::DrawListId,
+    draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
     draw_vars::DRAW_CALL_TEXTURE_SLOTS,
     makepad_math::*,
     makepad_shader_compiler::generate_glsl,
     makepad_wasm_bridge::*,
     os::web::from_wasm::*,
-    pass::{PassClearColor, PassClearDepth, PassId},
     texture::TextureFormat,
 };
 
 impl Cx {
     pub fn render_view(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
@@ -28,7 +28,7 @@ impl Cx {
             if let Some(sub_list_id) =
                 self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
             {
-                self.render_view(pass_id, sub_list_id, zbias, zbias_step);
+                self.render_view(draw_pass_id, sub_list_id, zbias, zbias_step);
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
@@ -173,7 +173,7 @@ impl Cx {
                     });
                 }
 
-                let pass_uniforms = &self.passes[pass_id].pass_uniforms;
+                let pass_uniforms = &self.passes[draw_pass_id].pass_uniforms;
 
                 let mut textures = [None; DRAW_CALL_TEXTURE_SLOTS];
                 for (index, texture_slot) in draw_call.texture_slots.iter().enumerate() {
@@ -188,7 +188,7 @@ impl Cx {
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
-                    user_uniforms: WasmPtrF32::new(draw_call.user_uniforms.as_slice()),
+                    dyn_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
                     live_uniforms: WasmPtrF32::new(&sh.mapping.live_uniforms_buf),
                     const_table: WasmPtrF32::new(&sh.mapping.const_table.table),
                     textures,
@@ -203,30 +203,30 @@ impl Cx {
         }*/
     }
 
-    pub fn setup_render_pass(&mut self, pass_id: PassId) -> Vec2d {
-        self.passes[pass_id].paint_dirty = false;
-        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
-        self.passes[pass_id].set_dpi_factor(dpi_factor);
-        self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId) -> Vec2d {
+        self.passes[draw_pass_id].paint_dirty = false;
+        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+        let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
+        self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
         pass_rect.size
     }
 
-    pub fn draw_pass_to_canvas(&mut self, pass_id: PassId) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+    pub fn draw_pass_to_canvas(&mut self, draw_pass_id: DrawPassId) {
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
         // get the color and depth
-        let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            self.passes[pass_id].clear_color
+        let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
+            self.passes[draw_pass_id].clear_color
         } else {
-            match self.passes[pass_id].color_textures[0].clear_color {
-                PassClearColor::InitWith(color) => color,
-                PassClearColor::ClearWith(color) => color,
+            match self.passes[draw_pass_id].color_textures[0].clear_color {
+                DrawPassClearColor::InitWith(color) => color,
+                DrawPassClearColor::ClearWith(color) => color,
             }
         };
-        let clear_depth = match self.passes[pass_id].clear_depth {
-            PassClearDepth::InitWith(depth) => depth,
-            PassClearDepth::ClearWith(depth) => depth,
+        let clear_depth = match self.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) => depth,
+            DrawPassClearDepth::ClearWith(depth) => depth,
         };
 
         self.os.from_wasm(FromWasmBeginRenderCanvas {
@@ -234,24 +234,24 @@ impl Cx {
             clear_depth,
         });
 
-        self.setup_render_pass(pass_id);
+        self.setup_render_pass(draw_pass_id);
 
         self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
 
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
 
-        self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step);
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
     }
 
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+    pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        let pass_size = self.setup_render_pass(pass_id);
-        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+        let pass_size = self.setup_render_pass(draw_pass_id);
+        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         /*
         self.platform.from_wasm(FromWasmBeginRenderTargets {
-            pass_id,
+            draw_pass_id,
             width: (pass_size.x * dpi_factor) as usize,
             height: (pass_size.y * dpi_factor) as usize
         });*/
@@ -259,19 +259,19 @@ impl Cx {
         let mut color_targets = [WColorTarget::default()];
         let mut depth_target = WDepthTarget::default();
 
-        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+        for (index, color_texture) in self.passes[draw_pass_id].color_textures.iter().enumerate() {
             let size = pass_size * dpi_factor;
             self.textures[color_texture.texture.texture_id()]
                 .alloc_render(size.x as usize, size.y as usize);
             match color_texture.clear_color {
-                PassClearColor::InitWith(clear_color) => {
+                DrawPassClearColor::InitWith(clear_color) => {
                     color_targets[index] = WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: true,
                         clear_color: clear_color.into(),
                     };
                 }
-                PassClearColor::ClearWith(clear_color) => {
+                DrawPassClearColor::ClearWith(clear_color) => {
                     color_targets[index] = WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: false,
@@ -282,18 +282,18 @@ impl Cx {
         }
 
         // attach/clear depth buffers, if any
-        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
+        if let Some(depth_texture) = &self.passes[draw_pass_id].depth_texture {
             let size = pass_size * dpi_factor;
             self.textures[depth_texture.texture_id()].alloc_depth(size.x as usize, size.y as usize);
-            match self.passes[pass_id].clear_depth {
-                PassClearDepth::InitWith(clear_depth) => {
+            match self.passes[draw_pass_id].clear_depth {
+                DrawPassClearDepth::InitWith(clear_depth) => {
                     depth_target = WDepthTarget {
                         texture_id: depth_texture.texture_id().0,
                         init_only: true,
                         clear_depth,
                     };
                 }
-                PassClearDepth::ClearWith(clear_depth) => {
+                DrawPassClearDepth::ClearWith(clear_depth) => {
                     depth_target = WDepthTarget {
                         texture_id: depth_texture.texture_id().0,
                         init_only: false,
@@ -304,7 +304,7 @@ impl Cx {
         }
 
         self.os.from_wasm(FromWasmBeginRenderTexture {
-            pass_id: pass_id.0,
+            draw_pass_id: draw_pass_id.0,
             width: (pass_size.x * dpi_factor) as usize,
             height: (pass_size.y * dpi_factor) as usize,
             color_targets,
@@ -314,9 +314,9 @@ impl Cx {
         // set the default depth and blendmode
         self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
 
-        self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step);
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
     }
 
     pub fn webgl_compile_shaders(&mut self) {

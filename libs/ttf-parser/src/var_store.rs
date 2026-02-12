@@ -60,7 +60,7 @@ impl<'a> ItemVariationStore<'a> {
         })
     }
 
-    pub fn region_indices(&self, index: u16) -> Option<LazyArray16<'_,u16>> {
+    pub fn region_indices(&self, index: u16) -> Option<LazyArray16<'_, u16>> {
         // Offsets in bytes from the start of the item variation store
         // to each item variation data subtable.
         let offset = self.data_offsets.get(index)?;
@@ -96,7 +96,7 @@ impl<'a> ItemVariationStore<'a> {
         // if the LONG_WORDS flag is not set, or 2 x that amount if the flag is set.
         let mut delta_set_len = word_delta_count + region_index_count;
         if has_long_words {
-            delta_set_len = delta_set_len * 2;
+            delta_set_len *= 2;
         }
 
         s.advance(usize::from(inner_index).checked_mul(usize::from(delta_set_len))?);

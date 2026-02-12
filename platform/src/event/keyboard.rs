@@ -1,10 +1,12 @@
 use {
     crate::{
-        area::Area, cx::Cx, event::finger::KeyModifiers, live_traits::*, makepad_derive_live::*,
-        makepad_live_compiler::*, makepad_micro_serde::*,
+        area::Area,
+        //cx::Cx,
+        event::finger::KeyModifiers,
+        makepad_micro_serde::*,
+        makepad_script::*,
     },
     std::cell::RefCell,
-    std::ops::Range,
     std::rc::Rc,
 };
 
@@ -63,13 +65,12 @@ impl CxKeyboard {
             self.next_key_focus = new_area
         }
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn all_keys_up(&mut self) -> Vec<KeyEvent> {
+    /*
+    pub (crate) fn all_keys_up(&mut self) -> Vec<KeyEvent> {
         let mut keys_down = Vec::new();
         std::mem::swap(&mut keys_down, &mut self.keys_down);
         keys_down
-    }
+    }*/
 
     pub(crate) fn cycle_key_focus_changed(&mut self) -> Option<(Area, Area)> {
         if self.next_key_focus != self.key_focus {
@@ -82,20 +83,25 @@ impl CxKeyboard {
 
     #[allow(dead_code)]
     pub fn is_key_down(&mut self, key_code: KeyCode) -> bool {
-        self.keys_down.iter().any(|k| k.key_code == key_code)
+        if let Some(_) = self.keys_down.iter().position(|k| k.key_code == key_code) {
+            return true;
+        }
+        return false;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn process_key_down(&mut self, key_event: KeyEvent) {
-        if self
+        if let Some(_) = self
             .keys_down
             .iter()
-            .any(|k| k.key_code == key_event.key_code)
+            .position(|k| k.key_code == key_event.key_code)
         {
             return;
         }
         self.keys_down.push(key_event);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn process_key_up(&mut self, key_event: KeyEvent) {
         if let Some(pos) = self
             .keys_down
@@ -121,96 +127,11 @@ pub struct KeyFocusEvent {
     pub focus: Area,
 }
 
-/// Character offset (Unicode scalar values)
-/// Platform-independent index type for text positions
-/// One character = one Unicode scalar (one emoji = one character)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, SerBin, DeBin, SerJson, DeJson)]
-pub struct CharOffset(pub usize);
-
-impl CharOffset {
-    /// Convert to byte index in UTF-8 string
-    pub fn to_byte_index(self, text: &str) -> usize {
-        text.char_indices()
-            .nth(self.0)
-            .map(|(byte_idx, _)| byte_idx)
-            .unwrap_or(text.len())
-    }
-
-    /// Convert from UTF-16 index (Android/Java)
-    /// UTF-16 uses 1 unit for BMP chars, 2 units for emoji/supplementary
-    pub fn from_utf16_index(text: &str, utf16_idx: usize) -> Self {
-        let mut utf16_count = 0;
-        for (char_idx, c) in text.chars().enumerate() {
-            if utf16_count >= utf16_idx {
-                return CharOffset(char_idx);
-            }
-            utf16_count += c.len_utf16();
-        }
-        CharOffset(text.chars().count())
-    }
-
-    /// Convert to UTF-16 index (for Android/Java)
-    pub fn to_utf16_index(self, text: &str) -> usize {
-        text.chars().take(self.0).map(|c| c.len_utf16()).sum()
-    }
-
-    /// Convert Range<CharOffset> to Range<usize> (byte indices)
-    pub fn range_to_bytes(range: &Range<CharOffset>, text: &str) -> Range<usize> {
-        range.start.to_byte_index(text)..range.end.to_byte_index(text)
-    }
-}
-
-/// Full text state from platform IME (Android InputConnection)
-/// Used when platform is authoritative source of text state
-/// Not serializable - only used for in-process events
-#[derive(Clone, Debug, PartialEq)]
-pub struct FullTextState {
-    /// Full text content
-    pub text: String,
-    /// Selection range in character offsets
-    pub selection: Range<CharOffset>,
-    /// Composition range in character offsets (within text)
-    /// None = no active composition
-    pub composition: Option<Range<CharOffset>>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct TextInputEvent {
-    /// Text to insert or replace
     pub input: String,
-    /// If true, replaces the previous composition/input
-    /// Used for IME composition updates
     pub replace_last: bool,
-    /// True if this input came from paste operation
     pub was_paste: bool,
-    /// Composition range in character offsets (within input string)
-    /// Some(range) = text is being composed (show underline)
-    /// None = text is committed (no composition active)
-    /// Not serializable - only used for in-process events
-    pub composition: Option<Range<usize>>,
-    /// Full text state synchronization (Android only)
-    /// When Some, this is authoritative full state from platform
-    /// Widget should replace entire text buffer and selection
-    /// Not serializable - only used for in-process events
-    pub full_state_sync: Option<FullTextState>,
-    /// Range to replace in existing text (iOS autocorrect/paste)
-    /// When Some, replace text[start..end] with input
-    /// Character offsets in the widget's current text
-    /// Not serializable - only used for in-process events
-    pub replace_range: Option<(CharOffset, CharOffset)>,
-}
-
-impl Default for TextInputEvent {
-    fn default() -> Self {
-        Self {
-            input: String::new(),
-            replace_last: false,
-            was_paste: false,
-            composition: None,
-            full_state_sync: None,
-            replace_range: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -218,49 +139,15 @@ pub struct TextClipboardEvent {
     pub response: Rc<RefCell<Option<String>>>,
 }
 
-/// IME editor action type (from mobile soft keyboard action buttons)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImeAction {
-    /// Default action (not specified)
-    Unspecified,
-    None,
-    /// "Go" button - typically for URL bars
-    Go,
-    /// "Search" button - typically for search fields
-    Search,
-    /// "Send" button - typically for messaging
-    Send,
-    /// "Next" button - move to next field
-    Next,
-    /// "Done" button - finish input
-    Done,
-    /// "Previous" button - move to previous field
-    Previous,
-}
-
-impl ImeAction {
-    /// Convert from Android EditorInfo action codes
-    pub fn from_android_action_code(code: i32) -> Self {
-        match code {
-            0 => ImeAction::Unspecified,
-            1 => ImeAction::None,
-            2 => ImeAction::Go,
-            3 => ImeAction::Search,
-            4 => ImeAction::Send,
-            5 => ImeAction::Next,
-            6 => ImeAction::Done,
-            7 => ImeAction::Previous,
-            _ => ImeAction::Unspecified,
-        }
-    }
-}
-
-/// Event for IME editor action (Done, Go, Search, etc.)
-/// Triggered when user presses the action button on the soft keyboard
+/// Event for replacing a specific range of text
 #[derive(Clone, Debug)]
-pub struct ImeActionEvent {
-    /// The action that was triggered
-    pub action: ImeAction,
+pub struct TextRangeReplaceEvent {
+    /// Start index (in characters, not bytes) of range to replace
+    pub start: usize,
+    /// End index (in characters, not bytes) of range to replace
+    pub end: usize,
+    /// Text to insert at the range
+    pub text: String,
 }
 
 impl Default for KeyCode {
@@ -270,7 +157,9 @@ impl Default for KeyCode {
 }
 
 // lowest common denominator keymap between desktop and web
-#[derive(Live, LiveHook, Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, Eq, PartialEq)]
+// Note: Using manual SerJson/DeJson impl with integer encoding to reduce code bloat
+// (derive-based string matching generates ~9500 lines of LLVM IR for 80 variants)
+#[derive(Script, ScriptHook, Clone, Copy, Debug, SerBin, DeBin, Eq, PartialEq)]
 pub enum KeyCode {
     #[pick]
     Escape,
@@ -743,5 +632,133 @@ impl KeyCode {
             KeyCode::Numpad9 => Some('9'),
             _ => None,
         }
+    }
+}
+
+// Const array for efficient index-to-variant conversion (all 102 variants in order)
+const KEYCODE_VARIANTS: [KeyCode; 102] = [
+    KeyCode::Escape,
+    KeyCode::Back,
+    KeyCode::Backtick,
+    KeyCode::Key0,
+    KeyCode::Key1,
+    KeyCode::Key2,
+    KeyCode::Key3,
+    KeyCode::Key4,
+    KeyCode::Key5,
+    KeyCode::Key6,
+    KeyCode::Key7,
+    KeyCode::Key8,
+    KeyCode::Key9,
+    KeyCode::Minus,
+    KeyCode::Equals,
+    KeyCode::Backspace,
+    KeyCode::Tab,
+    KeyCode::KeyQ,
+    KeyCode::KeyW,
+    KeyCode::KeyE,
+    KeyCode::KeyR,
+    KeyCode::KeyT,
+    KeyCode::KeyY,
+    KeyCode::KeyU,
+    KeyCode::KeyI,
+    KeyCode::KeyO,
+    KeyCode::KeyP,
+    KeyCode::LBracket,
+    KeyCode::RBracket,
+    KeyCode::ReturnKey,
+    KeyCode::KeyA,
+    KeyCode::KeyS,
+    KeyCode::KeyD,
+    KeyCode::KeyF,
+    KeyCode::KeyG,
+    KeyCode::KeyH,
+    KeyCode::KeyJ,
+    KeyCode::KeyK,
+    KeyCode::KeyL,
+    KeyCode::Semicolon,
+    KeyCode::Quote,
+    KeyCode::Backslash,
+    KeyCode::KeyZ,
+    KeyCode::KeyX,
+    KeyCode::KeyC,
+    KeyCode::KeyV,
+    KeyCode::KeyB,
+    KeyCode::KeyN,
+    KeyCode::KeyM,
+    KeyCode::Comma,
+    KeyCode::Period,
+    KeyCode::Slash,
+    KeyCode::Control,
+    KeyCode::Alt,
+    KeyCode::Shift,
+    KeyCode::Logo,
+    KeyCode::Space,
+    KeyCode::Capslock,
+    KeyCode::F1,
+    KeyCode::F2,
+    KeyCode::F3,
+    KeyCode::F4,
+    KeyCode::F5,
+    KeyCode::F6,
+    KeyCode::F7,
+    KeyCode::F8,
+    KeyCode::F9,
+    KeyCode::F10,
+    KeyCode::F11,
+    KeyCode::F12,
+    KeyCode::PrintScreen,
+    KeyCode::ScrollLock,
+    KeyCode::Pause,
+    KeyCode::Insert,
+    KeyCode::Delete,
+    KeyCode::Home,
+    KeyCode::End,
+    KeyCode::PageUp,
+    KeyCode::PageDown,
+    KeyCode::Numpad0,
+    KeyCode::Numpad1,
+    KeyCode::Numpad2,
+    KeyCode::Numpad3,
+    KeyCode::Numpad4,
+    KeyCode::Numpad5,
+    KeyCode::Numpad6,
+    KeyCode::Numpad7,
+    KeyCode::Numpad8,
+    KeyCode::Numpad9,
+    KeyCode::NumpadEquals,
+    KeyCode::NumpadSubtract,
+    KeyCode::NumpadAdd,
+    KeyCode::NumpadDecimal,
+    KeyCode::NumpadMultiply,
+    KeyCode::NumpadDivide,
+    KeyCode::Numlock,
+    KeyCode::NumpadEnter,
+    KeyCode::ArrowUp,
+    KeyCode::ArrowDown,
+    KeyCode::ArrowLeft,
+    KeyCode::ArrowRight,
+    KeyCode::Unknown,
+];
+
+// Manual SerJson/DeJson implementations using integer encoding
+// This reduces LLVM IR from ~9500 lines (string matching) to ~100 lines (integer parsing + array lookup)
+impl SerJson for KeyCode {
+    fn ser_json(&self, _d: usize, s: &mut SerJsonState) {
+        let idx = KEYCODE_VARIANTS
+            .iter()
+            .position(|k| k == self)
+            .unwrap_or(101);
+        s.out.push_str(&idx.to_string());
+    }
+}
+
+impl DeJson for KeyCode {
+    fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> Result<Self, DeJsonErr> {
+        let val = u64::de_json(s, i)? as usize;
+        Ok(KEYCODE_VARIANTS
+            .get(val)
+            .copied()
+            .unwrap_or(KeyCode::Unknown))
     }
 }

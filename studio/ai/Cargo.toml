@@ -10,7 +10,7 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = ""
 
 [dependencies]
-makepad-widgets2 = { path = "../../widgets2", version = "2.0.0" }
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }
 

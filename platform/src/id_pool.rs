@@ -38,9 +38,15 @@ pub struct PoolId {
     pub free: IdPoolFree,
 }
 
+impl PoolId {
+    pub fn free(&mut self) {
+        self.free.0.borrow_mut().push(self.id)
+    }
+}
+
 impl Drop for PoolId {
     fn drop(&mut self) {
-        self.free.0.borrow_mut().push(self.id)
+        self.free()
     }
 }
 

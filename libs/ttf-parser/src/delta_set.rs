@@ -36,7 +36,7 @@ impl<'a> DeltaSetIndexMap<'a> {
         let entry_size = ((entry_format >> 4) & 3) + 1;
         let inner_index_bit_count = u32::from((entry_format & 0xF) + 1);
 
-        s.advance(usize::try_from(entry_size).ok()? * usize::try_from(index).ok()?);
+        s.advance(usize::from(entry_size) * usize::try_from(index).ok()?);
 
         let mut n = 0u32;
         for b in s.read_bytes(usize::from(entry_size))? {

@@ -117,7 +117,7 @@ impl<'a> FeatureNames<'a> {
 
 impl<'a> core::fmt::Debug for FeatureNames<'a> {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.debug_list().entries(self.into_iter()).finish()
+        f.debug_list().entries(*self).finish()
     }
 }
 

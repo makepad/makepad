@@ -1,86 +1,144 @@
 use crate::{
-    debug_view::DebugView, desktop_button::*, makepad_derive_widget::*, makepad_draw::*,
-    nav_control::NavControl, performance_view::PerformanceView, view::*, widget::*,
+    desktop_button::DesktopButtonWidgetExt, makepad_derive_widget::*, makepad_draw::*,
+    nav_control::NavControl, view::*, widget::*,
 };
 
-live_design! {
-    link widgets;
-    use link::widgets::*;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.View
+    use mod.widgets.SolidView
+    use mod.widgets.Label
+    use mod.widgets.DesktopButton
+    use mod.widgets.DesktopButtonType
+    use mod.widgets.KeyboardView
+    use mod.widgets.WindowMenu
+    use mod.widgets.NavControl
+    use mod.widgets.MenuItem
+    use mod.draw.KeyCode
 
-    pub WindowBase = {{Window}} {demo:false}
-    pub Window = <WindowBase> {
-        pass: { clear_color: (THEME_COLOR_BG_APP) }
+    mod.widgets.WindowBase = #(Window::register_widget(vm))
+    mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
+        demo: false
+        pass +: { clear_color: theme.color_bg_app }
         flow: Down
-        nav_control: <NavControl> {}
-        caption_bar = <SolidView> {
-            visible: false,
+        nav_control: NavControl {}
+        caption_bar := SolidView {
+            visible: false
 
             flow: Right
 
-            draw_bg: {color: (THEME_COLOR_APP_CAPTION_BAR)}
-            height: 27,
-            caption_label = <View> {
-                width: Fill, height: Fill,
-                align: {x: 0.5, y: 0.5},
-                label = <Label> {text: "Makepad", margin: {left: 100}}
+            draw_bg.color: theme.color_app_caption_bar
+            height: 27
+            caption_label := View {
+                width: Fill height: Fill
+                align: Center
+                label := Label {text: "Makepad" margin: Inset{left: 100}}
             }
-            windows_buttons = <View> {
-                visible: false,
-                width: Fit, height: Fit,
-                min = <DesktopButton> {draw_bg: {button_type: WindowsMin}}
-                max = <DesktopButton> {draw_bg: {button_type: WindowsMax}}
-                close = <DesktopButton> {draw_bg: {button_type: WindowsClose}}
+            windows_buttons := View {
+                visible: false
+                width: Fit height: Fit
+                min := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMin width: 46 height: 29}
+                max := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMax width: 46 height: 29}
+                close := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsClose width: 46 height: 29}
             }
-            web_fullscreen = <View> {
-                visible: false,
-                width: Fit, height: Fit,
-                fullscreen = <DesktopButton> {draw_bg: {button_type: Fullscreen}}
+            web_fullscreen := View {
+                visible: false
+                width: Fit height: Fit
+                fullscreen := DesktopButton {draw_bg.button_type: DesktopButtonType.Fullscreen width: 50 height: 36}
             }
-            web_xr = <View> {
-                visible: false,
-                width: Fit, height: Fit,
-                xr_on = <DesktopButton> {draw_bg: {button_type: XRMode}}
-            }
-        }
-
-        window_menu = <WindowMenu> {
-            main = Main{items:[app]}
-            app = Sub { name:"Makepad", items:[quit] }
-            quit = Item {
-                name:"Quit",
-                shift: false,
-                key: KeyQ,
-                enabled: true
+            web_xr := View {
+                visible: false
+                width: Fit height: Fit
+                xr_on := DesktopButton {draw_bg.button_type: DesktopButtonType.XRMode width: 50 height: 36}
             }
         }
-        body = <KeyboardView> {
-            width: Fill, height: Fill,
-            keyboard_min_shift: 30,
+        window_menu := WindowMenu {
+            main := MenuItem.Main{items:[@app_menu, @file_menu, @edit_menu, @selection_menu, @view_menu, @window_menu, @help_menu]}
+
+            // App menu
+            app_menu := MenuItem.Sub { name:"Makepad" items:[@about, @line1, @settings, @line2, @quit] }
+            about := MenuItem.Item { name:"About Makepad" key: KeyCode.Escape enabled: true }
+            line1 := MenuItem.Line {}
+            settings := MenuItem.Item { name:"Settings..." key: KeyCode.Comma enabled: true }
+            line2 := MenuItem.Line {}
+            quit := MenuItem.Item { name:"Quit Makepad" key: KeyCode.KeyQ enabled: true }
+
+            // File menu
+            file_menu := MenuItem.Sub { name:"File" items:[@new_file, @new_window, @line3, @open, @line4, @save, @save_as, @line5, @close_editor, @close_window] }
+            new_file := MenuItem.Item { name:"New File" key: KeyCode.KeyN enabled: true }
+            new_window := MenuItem.Item { name:"New Window" shift: true key: KeyCode.KeyN enabled: true }
+            line3 := MenuItem.Line {}
+            open := MenuItem.Item { name:"Open..." key: KeyCode.KeyO enabled: true }
+            line4 := MenuItem.Line {}
+            save := MenuItem.Item { name:"Save" key: KeyCode.KeyS enabled: true }
+            save_as := MenuItem.Item { name:"Save As..." shift: true key: KeyCode.KeyS enabled: true }
+            line5 := MenuItem.Line {}
+            close_editor := MenuItem.Item { name:"Close Editor" key: KeyCode.KeyW enabled: true }
+            close_window := MenuItem.Item { name:"Close Window" shift: true key: KeyCode.KeyW enabled: true }
+
+            // Edit menu
+            edit_menu := MenuItem.Sub { name:"Edit" items:[@undo, @redo, @line6, @cut, @copy, @paste, @line7, @find, @replace, @line8, @find_in_files, @replace_in_files] }
+            undo := MenuItem.Item { name:"Undo" key: KeyCode.KeyZ enabled: true }
+            redo := MenuItem.Item { name:"Redo" shift: true key: KeyCode.KeyZ enabled: true }
+            line6 := MenuItem.Line {}
+            cut := MenuItem.Item { name:"Cut" key: KeyCode.KeyX enabled: true }
+            copy := MenuItem.Item { name:"Copy" key: KeyCode.KeyC enabled: true }
+            paste := MenuItem.Item { name:"Paste" key: KeyCode.KeyV enabled: true }
+            line7 := MenuItem.Line {}
+            find := MenuItem.Item { name:"Find" key: KeyCode.KeyF enabled: true }
+            replace := MenuItem.Item { name:"Replace" key: KeyCode.KeyH enabled: true }
+            line8 := MenuItem.Line {}
+            find_in_files := MenuItem.Item { name:"Find in Files" shift: true key: KeyCode.KeyF enabled: true }
+            replace_in_files := MenuItem.Item { name:"Replace in Files" shift: true key: KeyCode.KeyH enabled: true }
+
+            // Selection menu
+            selection_menu := MenuItem.Sub { name:"Selection" items:[@select_all] }
+            select_all := MenuItem.Item { name:"Select All" key: KeyCode.KeyA enabled: true }
+
+            // View menu
+            view_menu := MenuItem.Sub { name:"View" items:[@zoom_in, @zoom_out, @line9, @fullscreen] }
+            zoom_in := MenuItem.Item { name:"Zoom In" key: KeyCode.Equals enabled: true }
+            zoom_out := MenuItem.Item { name:"Zoom Out" key: KeyCode.Minus enabled: true }
+            line9 := MenuItem.Line {}
+            fullscreen := MenuItem.Item { name:"Enter Full Screen" key: KeyCode.ReturnKey enabled: true }
+
+            // Window menu
+            window_menu := MenuItem.Sub { name:"Window" items:[@minimize, @zoom, @line10, @all_to_front] }
+            minimize := MenuItem.Item { name:"Minimize" key: KeyCode.KeyM enabled: true }
+            zoom := MenuItem.Item { name:"Zoom" key: KeyCode.Escape enabled: true }
+            line10 := MenuItem.Line {}
+            all_to_front := MenuItem.Item { name:"Bring All to Front" key: KeyCode.Escape enabled: true }
+
+            // Help menu
+            help_menu := MenuItem.Sub { name:"Help" items:[@help_about] }
+            help_about := MenuItem.Item { name:"Makepad Help" key: KeyCode.Escape enabled: true }
+        }
+        body := KeyboardView {
+            width: Fill height: Fill
+            keyboard_min_shift: 30
         }
 
-        cursor: Default
-        mouse_cursor_size: vec2(20, 20),
-        draw_cursor: {
-            uniform border_size: 1.5
-            uniform color: (THEME_COLOR_CURSOR)
-            uniform border_color: (THEME_COLOR_CURSOR_BORDER)
+        cursor: MouseCursor.Default
+        mouse_cursor_size: vec2(20 20)
+        draw_cursor +: {
+            border_size: uniform(1.5)
+            color: uniform(theme.color_cursor)
+            border_color: uniform(theme.color_cursor_border)
 
-            fn get_color(self) -> vec4 {
+            get_color: fn() {
                 return self.color
             }
 
-            fn get_border_color(self) -> vec4 {
+            get_border_color: fn() {
                 return self.border_color
             }
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.move_to(1.0, 1.0);
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.move_to(1.0, 1.0)
                 sdf.line_to(self.rect_size.x - 1.0, self.rect_size.y * 0.5)
                 sdf.line_to(self.rect_size.x * 0.5, self.rect_size.y - 1.0)
-                sdf.close_path();
+                sdf.close_path()
                 sdf.fill_keep(self.get_color())
                 if self.border_size > 0.0 {
                     sdf.stroke(self.get_border_color(), self.border_size)
@@ -88,15 +146,17 @@ live_design! {
                 return sdf.result
             }
         }
-        window: {
-            inner_size: vec2(1024, 768)
+        window +: {
+            inner_size: vec2(1024 768)
         }
     }
 
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct Window {
+    #[uid]
+    uid: WidgetUid,
     //#[rust] caption_size: Vec2d,
     #[live]
     last_mouse_pos: Vec2d,
@@ -110,25 +170,23 @@ pub struct Window {
     cursor_draw_list: DrawList2d,
     #[live]
     draw_cursor: DrawQuad,
-    #[live]
-    debug_view: DebugView,
-    #[live]
-    performance_view: PerformanceView,
+    //#[live] debug_view: DebugView,
+    //#[live] performance_view: PerformanceView,
     #[live]
     nav_control: NavControl,
     #[live]
-    window: WindowHandle,
+    window: ScriptWindowHandle,
     #[live]
     stdin_size: DrawColor,
     #[rust]
     last_known_area: Area,
-    #[rust(Overlay::new(cx))]
+    #[new]
     overlay: Overlay,
-    #[rust(DrawList2d::new(cx))]
+    #[new]
     main_draw_list: DrawList2d,
     #[live]
-    pass: Pass,
-    #[rust(Texture::new(cx))]
+    pass: ScriptDrawPass,
+    #[new]
     depth_texture: Texture,
     #[live]
     hide_caption_on_fullscreen: bool,
@@ -138,19 +196,12 @@ pub struct Window {
     xr_view_matrix: Mat4f,
     #[deref]
     view: View,
-    // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
-    /*#[rust(Menu::main(vec![
-        Menu::sub("App", vec![
-            //Menu::item("Quit App", Cx::command_quit()),
-        ]),
-    ]))]*/
-    //#[live] _default_menu: Menu,
-
-    //#[rust] last_menu: Option<Menu>,
 
     // testing
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
+    #[rust]
+    initialized: bool,
 }
 
 #[derive(Clone)]
@@ -158,9 +209,23 @@ enum DrawState {
     Drawing,
 }
 
-impl LiveHook for Window {
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.window.set_pass(cx, &self.pass);
+#[derive(Clone, Debug, Default)]
+pub enum WindowAction {
+    EventForOtherWindow,
+    WindowClosed,
+    WindowGeomChange(WindowGeomChangeEvent),
+    #[default]
+    None,
+}
+
+impl Window {
+    fn ensure_initialized(&mut self, cx: &mut Cx) {
+        if self.initialized {
+            return;
+        }
+        self.initialized = true;
+
+        self.window.handle.set_pass(cx, &self.pass.handle);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
         self.depth_texture = Texture::new_with_format(
             cx,
@@ -169,40 +234,34 @@ impl LiveHook for Window {
                 initial: true,
             },
         );
-        self.pass
-            .set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
+        self.pass.handle.set_depth_texture(
+            cx,
+            &self.depth_texture,
+            DrawPassClearDepth::ClearWith(1.0),
+        );
+
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
             // lets show a VR button
-            self.view(ids!(web_xr)).set_visible(cx, true);
+            self.view(cx, ids!(web_xr)).set_visible(cx, true);
             log!("VR IS SUPPORTED");
         }
-    }
 
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        // OS-specific caption bar setup
         if self.demo {
             self.demo_next_frame = cx.new_next_frame();
         }
         match cx.os_type() {
             OsType::Windows => {
                 if !cx.in_makepad_studio() {
-                    self.view(ids!(caption_bar)).set_visible(cx, true);
-                    self.view(ids!(windows_buttons)).set_visible(cx, true);
+                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
                 }
             }
             OsType::Macos => {
-                //self.view(ids!(caption_bar)).set_visible(true);
-                //self.view(ids!(windows_buttons)).set_visible(true);
-                //self.view(ids!(caption_bar)).set_visible(true);
-                //self.view(ids!(windows_buttons)).set_visible(true);
-                /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                    self.apply_over(cx, live!{
-                        caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
-                    });
-                }*/
-
-                //draw_bg: {color: (THEME_COLOR_BG_APP)}
-                // self.frame.get_view(ids!(caption_bar)).set_visible(false);
+                if !cx.in_makepad_studio() {
+                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                }
             }
             OsType::LinuxWindow(_) | OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
@@ -213,23 +272,15 @@ impl LiveHook for Window {
             _ => (),
         }
     }
-}
 
-#[derive(Clone, Debug, DefaultNone)]
-pub enum WindowAction {
-    EventForOtherWindow,
-    WindowClosed,
-    WindowGeomChange(WindowGeomChangeEvent),
-    None,
-}
-
-impl Window {
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
+        self.ensure_initialized(cx);
+
         if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
             return Redrawing::no();
         }
 
-        cx.begin_pass(&self.pass, None);
+        cx.begin_pass(&self.pass.handle, None);
 
         self.main_draw_list.begin_always(cx);
 
@@ -243,7 +294,7 @@ impl Window {
 
     pub fn end(&mut self, cx: &mut Cx2d) {
         //while self.frame.draw_widget_continue(cx).is_not_done() {}
-        self.debug_view.draw(cx);
+        //self.debug_view.draw(cx);
 
         // lets draw our cursor
         if let OsType::LinuxDirect = cx.os_type() {
@@ -270,7 +321,7 @@ impl Window {
         // if we are running in stdin mode, write a tracking pixel with the pass size
         if cx.in_makepad_studio() {
             let df = cx.current_dpi_factor();
-            let size = self.pass.size(cx).unwrap() * df;
+            let size = self.pass.handle.size(cx).unwrap() * df;
             self.stdin_size.color = encode_size(size.x);
             self.stdin_size.draw_abs(
                 cx,
@@ -289,23 +340,23 @@ impl Window {
             );
         }
 
-        if self.show_performance_view {
-            self.performance_view.draw_all(cx, &mut Scope::empty());
-        }
+        //if self.show_performance_view {
+        //    self.performance_view.draw_all(cx, &mut Scope::empty());
+        //}
 
         cx.end_pass_sized_turtle();
 
         self.main_draw_list.end(cx);
-        cx.end_pass(&self.pass);
+        cx.end_pass(&self.pass.handle);
     }
     pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
-        self.window.resize(cx, size);
+        self.window.handle.resize(cx, size);
     }
     pub fn reposition(&self, cx: &mut Cx, size: Vec2d) {
-        self.window.reposition(cx, size);
+        self.window.handle.reposition(cx, size);
     }
     pub fn set_fullscreen(&mut self, cx: &mut Cx) {
-        self.window.fullscreen(cx);
+        self.window.handle.fullscreen(cx);
     }
     pub fn configure_window(
         &mut self,
@@ -316,6 +367,7 @@ impl Window {
         title: String,
     ) {
         self.window
+            .handle
             .configure_window(cx, inner_size, position, is_fullscreen, title);
     }
 }
@@ -323,7 +375,7 @@ impl Window {
 impl WindowRef {
     pub fn get_inner_size(&self, cx: &Cx) -> Vec2d {
         if let Some(inner) = self.borrow() {
-            inner.window.get_inner_size(cx)
+            inner.window.handle.get_inner_size(cx)
         } else {
             dvec2(0.0, 0.0)
         }
@@ -331,14 +383,14 @@ impl WindowRef {
 
     pub fn get_position(&self, cx: &Cx) -> Vec2d {
         if let Some(inner) = self.borrow() {
-            inner.window.get_position(cx)
+            inner.window.handle.get_position(cx)
         } else {
             dvec2(0.0, 0.0)
         }
     }
     pub fn is_fullscreen(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.window.is_fullscreen(cx)
+            inner.window.handle.is_fullscreen(cx)
         } else {
             false
         }
@@ -395,10 +447,10 @@ impl Widget for Window {
 
         let uid = self.widget_uid();
 
-        self.debug_view.handle_event(cx, event);
-        if self.show_performance_view {
-            self.performance_view.handle_widget(cx, event);
-        }
+        //self.debug_view.handle_event(cx, event);
+        //if self.show_performance_view {
+        //    self.performance_view.handle_widget(cx, event);
+        //}
 
         self.nav_control
             .handle_event(cx, event, self.main_draw_list.draw_list_id());
@@ -407,13 +459,13 @@ impl Widget for Window {
             if self.demo {
                 self.demo_next_frame = cx.new_next_frame();
             }
-            cx.repaint_pass_and_child_passes(self.pass.pass_id());
+            cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
         }
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
                 if ev.window_id == self.window.window_id() {
-                    cx.widget_action(uid, &scope.path, WindowAction::WindowClosed)
+                    cx.widget_action(uid, WindowAction::WindowClosed)
                 }
                 true
             }
@@ -421,11 +473,11 @@ impl Widget for Window {
                 if ev.window_id == self.window.window_id() {
                     match cx.os_type() {
                         OsType::Windows | OsType::Macos => {
-                            if self.hide_caption_on_fullscreen {
+                            if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
                                 if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
-                                    self.view(ids!(caption_bar)).set_visible(cx, false);
+                                    self.view(cx, ids!(caption_bar)).set_visible(cx, false);
                                 } else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
-                                    self.view(ids!(caption_bar)).set_visible(cx, true);
+                                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
                                 };
                             }
                         }
@@ -436,14 +488,14 @@ impl Widget for Window {
                     cx.display_context.screen_size = ev.new_geom.inner_size;
                     cx.display_context.updated_on_event_id = cx.event_id();
 
-                    cx.widget_action(uid, &scope.path, WindowAction::WindowGeomChange(ev.clone()));
+                    cx.widget_action(uid, WindowAction::WindowGeomChange(ev.clone()));
                     return;
                 }
                 true
             }
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
-                    if self.view(ids!(caption_bar)).visible() {
+                    if self.view(cx, ids!(caption_bar)).visible() {
                         let size = self.window.get_inner_size(cx);
 
                         if dq.abs.y < 25. {
@@ -483,7 +535,7 @@ impl Widget for Window {
         };
 
         if is_for_other_window {
-            cx.widget_action(uid, &scope.path, WindowAction::EventForOtherWindow);
+            cx.widget_action(uid, WindowAction::EventForOtherWindow);
             return;
         } else {
             // lets store our inverse matrix
@@ -502,35 +554,38 @@ impl Widget for Window {
 
         if let Event::Actions(actions) = event {
             if self
-                .desktop_button(ids!(windows_buttons.min))
+                .desktop_button(cx, ids!(windows_buttons.min))
                 .clicked(&actions)
             {
-                self.window.minimize(cx);
+                self.window.handle.minimize(cx);
             }
             if self
-                .desktop_button(ids!(windows_buttons.max))
+                .desktop_button(cx, ids!(windows_buttons.max))
                 .clicked(&actions)
             {
-                if self.window.is_fullscreen(cx) {
-                    self.window.restore(cx);
+                if self.window.handle.is_fullscreen(cx) {
+                    self.window.handle.restore(cx);
                 } else {
-                    self.window.maximize(cx);
+                    self.window.handle.maximize(cx);
                 }
             }
             if self
-                .desktop_button(ids!(windows_buttons.close))
+                .desktop_button(cx, ids!(windows_buttons.close))
                 .clicked(&actions)
             {
-                self.window.close(cx);
+                self.window.handle.close(cx);
             }
-            if self.desktop_button(ids!(web_xr.xr_on)).clicked(&actions) {
+            if self
+                .desktop_button(cx, ids!(web_xr.xr_on))
+                .clicked(&actions)
+            {
                 cx.xr_start_presenting();
             }
         }
 
-        if let Event::ClearAtlasses = event {
-            CxDraw::reset_icon_atlas(cx);
-        }
+        //if let Event::ClearAtlasses = event {
+        //    CxDraw::reset_icon_atlas(cx);
+        //}
 
         if let Event::MouseMove(ev) = event {
             if let OsType::LinuxDirect = cx.os_type() {
@@ -577,7 +632,7 @@ impl Widget for Window {
 
         self.view.draw_walk_all(cx, scope, Walk::default());
 
-        self.debug_view.draw(cx);
+        //self.debug_view.draw(cx);
 
         self.main_draw_list
             .set_view_transform(cx, &self.xr_view_matrix);

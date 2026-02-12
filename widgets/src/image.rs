@@ -1,62 +1,49 @@
-use crate::{image_cache::*, makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    animator::{Animator, AnimatorAction, AnimatorImpl},
+    image_cache::*,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-live_design! {
-    link widgets;
-    use link::shaders::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
 
-    DrawImage= {{DrawImage}} {
-        texture image: texture2d
+    mod.widgets.ImageFit = #(ImageFit::script_api(vm))
+
+    set_type_default() do #(DrawImage::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        image_texture: texture_2d(float)
         opacity: 1.0
         image_scale: vec2(1.0, 1.0)
         image_pan: vec2(0.0, 0.0)
+        async_load: 0.0
 
-        fn get_color_scale_pan(self, scale: vec2, pan: vec2) -> vec4 {
-            return sample2d(self.image, self.pos * scale + pan).xyzw;
+        get_color_scale_pan: fn(scale: vec2, pan: vec2) {
+            return self.image_texture.sample(self.pos * scale + pan)
         }
 
-        fn get_color(self) -> vec4 {
+        get_color: fn() {
             return self.get_color_scale_pan(self.image_scale, self.image_pan)
         }
 
-        fn pixel(self) -> vec4 {
-            let color = mix(self.get_color(), #3, self.async_load);
-            return Pal::premul(vec4(color.xyz, color.w * self.opacity))
+        pixel: fn() {
+            let color = mix(self.get_color(), #3, self.async_load)
+            return Pal.premul(vec4(color.xyz, color.w * self.opacity))
         }
-
     }
 
-    pub ImageBase = {{Image}} {}
+    mod.widgets.ImageBase = #(Image::register_widget(vm))
 
-    pub Image = <ImageBase> {
-        animator: {
-            async_load = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_bg: {async_load: 0.0}
-                    }
-                }
-                on = {
-                    from: {
-                        all: Forward {duration: 0.1}
-                    }
-                    apply: {
-                        draw_bg: {async_load: 1.0}
-                    }
-                }
-            }
-        }
-
+    mod.widgets.Image = set_type_default() do mod.widgets.ImageBase{
         width: 100
         height: 100
     }
-
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawImage {
     #[deref]
@@ -71,12 +58,11 @@ pub struct DrawImage {
     async_load: f32,
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[live_ignore]
+#[derive(Copy, Clone, Debug, Default, Script, ScriptHook)]
 pub enum ImageAnimation {
     Stop,
     Once,
-    #[pick]
+    #[default]
     Loop,
     Bounce,
     #[live(0.0)]
@@ -91,19 +77,23 @@ pub enum ImageAnimation {
     BounceFps(f64),
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Image {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
-    #[animator]
+    #[apply_default]
     animator: Animator,
     #[redraw]
     #[live]
     pub draw_bg: DrawImage,
     #[live]
-    min_width: i64,
+    min_width: u64,
     #[live]
-    min_height: i64,
+    min_height: u64,
     #[live(1.0)]
     width_scale: f64,
     #[live(ImageAnimation::BounceFps(25.0))]
@@ -119,8 +109,6 @@ pub struct Image {
     next_frame: NextFrame,
     #[live]
     fit: ImageFit,
-    #[live]
-    source: LiveDependency,
     #[rust]
     async_image_path: Option<PathBuf>,
     #[rust]
@@ -136,23 +124,6 @@ impl ImageCacheImpl for Image {
 
     fn set_texture(&mut self, texture: Option<Texture>, _id: usize) {
         self.texture = texture;
-    }
-}
-
-impl LiveHook for Image {
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        match apply.from{
-            ApplyFrom::NewFromDoc{..}|// newed from DSL,
-            ApplyFrom:: UpdateFromDoc{..}|
-            ApplyFrom::Over{..}=>{
-                self.lazy_create_image_cache(cx);
-                let source = self.source.clone();
-                if source.as_str().len()>0 {
-                    let _ = self.load_image_dep_by_path(cx, source.as_str(), 0);
-                }
-            }
-            _=>()
-        }
     }
 }
 
@@ -274,7 +245,7 @@ impl Widget for Image {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_walk(cx, walk)
+        self.draw_walk_image(cx, walk)
     }
 }
 
@@ -293,7 +264,7 @@ impl Image {
         self.texture.is_some()
     }
 
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
+    pub fn draw_walk_image(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
         }
@@ -304,7 +275,6 @@ impl Image {
 
         let (width, height) = if let Some((w, h)) = &self.async_image_size {
             // still loading
-
             (*w as f64, *h as f64)
         } else if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
@@ -370,6 +340,7 @@ impl Image {
         cx: &mut Cx,
         image_path: &Path,
     ) -> Result<(), ImageError> {
+        self.lazy_create_image_cache(cx);
         if let Ok(result) = self.load_image_file_by_path_async_impl(cx, image_path, 0) {
             match result {
                 AsyncLoadResult::Loading(w, h) => {
@@ -382,16 +353,17 @@ impl Image {
                     self.redraw(cx);
                 }
             }
-            // lets set the w-h
         }
         Ok(())
     }
+
     pub fn load_image_from_data_async(
         &mut self,
         cx: &mut Cx,
         image_path: &Path,
         data: Arc<Vec<u8>>,
     ) -> Result<(), ImageError> {
+        self.lazy_create_image_cache(cx);
         if let Ok(result) = self.load_image_from_data_async_impl(cx, image_path, data, 0) {
             match result {
                 AsyncLoadResult::Loading(w, h) => {
@@ -404,7 +376,6 @@ impl Image {
                     self.redraw(cx);
                 }
             }
-            // lets set the w-h
         }
         Ok(())
     }
@@ -419,6 +390,7 @@ impl ImageRef {
     /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
             inner.load_image_dep_by_path(cx, image_path, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
@@ -432,6 +404,7 @@ impl ImageRef {
         image_path: &Path,
     ) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
             inner.load_image_file_by_path(cx, image_path, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
@@ -466,7 +439,8 @@ impl ImageRef {
     /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
     pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.load_jpg_from_data(cx, data, 0)
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_jpg_from_data(&mut *inner, cx, data, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
@@ -475,7 +449,8 @@ impl ImageRef {
     /// Loads a PNG into this `ImageRef` by decoding the given encoded PNG `data`.
     pub fn load_png_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.load_png_from_data(cx, data, 0)
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_png_from_data(&mut *inner, cx, data, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
@@ -490,7 +465,7 @@ impl ImageRef {
         }
     }
 
-    pub fn set_uniform(&self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
+    pub fn set_uniform(&self, cx: &Cx, uniform: LiveId, value: &[f32]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.set_uniform(cx, uniform, value);
         }

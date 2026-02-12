@@ -212,7 +212,7 @@ pub struct AiResponse {
 
 ```rust
 use crate::types::*;
-use makepad_widgets2::*;
+use makepad_widgets::*;
 
 /// Identifies an in-flight request
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -879,7 +879,7 @@ makepad-ai = { path = "../../studio/ai" }
 ### Basic App Structure
 
 ```rust
-use makepad_widgets2::*;
+use makepad_widgets::*;
 use makepad_ai::*;
 
 app_main!(App);
@@ -942,7 +942,7 @@ pub struct App {
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets2::script_mod(vm);
+        crate::makepad_widgets::script_mod(vm);
 
         let mut ai_manager = AiManager::new();
 

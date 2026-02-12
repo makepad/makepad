@@ -1,3 +1,3 @@
-pub use makepad_code_editor2;
-pub use makepad_widgets2;
+pub use makepad_code_editor;
+pub use makepad_widgets;
 pub mod app;
