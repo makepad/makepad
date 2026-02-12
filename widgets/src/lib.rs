@@ -242,6 +242,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_mod! {
             mod.prelude.widgets_internal = {
                 ..mod.res,
+                ..mod.helper,
                 ..mod.animator,
                 ..mod.animator.Play,
                 ..mod.animator.Ease,
@@ -347,6 +348,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_mod! {
             mod.prelude.widgets = {
                 ..mod.res,
+                ..mod.helper,
                 ..mod.std,
                 ..mod.pod,
                 ..mod.math,

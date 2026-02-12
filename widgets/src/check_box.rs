@@ -2,7 +2,9 @@ use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_script::ScriptFnRef,
     widget::*,
+    widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
 };
 
 use crate::makepad_draw::DrawSvg;
@@ -399,6 +401,9 @@ pub struct CheckBox {
     pub active: Option<bool>,
 
     #[live]
+    on_click: ScriptFnRef,
+
+    #[live]
     bind: String,
     #[action_data]
     #[rust]
@@ -472,6 +477,19 @@ impl Widget for CheckBox {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(checked) {
+            let is_active = vm.with_cx(|cx| self.animator_in_state(cx, ids!(active.on)));
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(is_active));
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -495,13 +513,14 @@ impl Widget for CheckBox {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.set_key_focus(cx);
-                if self.animator_in_state(cx, ids!(active.on)) {
+                let new_active = if self.animator_in_state(cx, ids!(active.on)) {
                     self.animator_play(cx, ids!(active.off));
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
                         CheckBoxAction::Change(false),
                     );
+                    false
                 } else {
                     self.animator_play(cx, ids!(active.on));
                     cx.widget_action_with_data(
@@ -509,7 +528,15 @@ impl Widget for CheckBox {
                         uid,
                         CheckBoxAction::Change(true),
                     );
-                }
+                    true
+                };
+                cx.widget_to_script_call(
+                    uid,
+                    NIL,
+                    self.source.clone(),
+                    self.on_click.clone(),
+                    &[ScriptValue::from_bool(new_active)],
+                );
             }
             Hit::FingerUp(_fe) => {}
             Hit::FingerMove(_fe) => {}

@@ -1134,6 +1134,39 @@ pub fn main() {
         assert(destruct_w == 5 && destruct_y == 6 && destruct_z == 7)
 
         // ============================================================
+        // FOR-LOOP CLOSURE CAPTURE TESTS
+        // Each iteration should capture its own copy of the loop variable
+        // ============================================================
+
+        // Closure capturing loop index from for-in-range
+        let fns = []
+        for i in 0..3 {
+            fns.push(|| i)
+        }
+        assert(fns[0]() == 0)
+        assert(fns[1]() == 1)
+        assert(fns[2]() == 2)
+
+        // Closure capturing loop index from for-in-array
+        let fns2 = []
+        let arr = [10, 20, 30]
+        for i, v in arr {
+            fns2.push(|| [i, v])
+        }
+        assert(fns2[0]() == [0, 10])
+        assert(fns2[1]() == [1, 20])
+        assert(fns2[2]() == [2, 30])
+
+        // Closure capturing loop variable with mutation after capture
+        let fns3 = []
+        for i in 0..3 {
+            fns3.push(|x| i + x)
+        }
+        assert(fns3[0](100) == 100)
+        assert(fns3[1](100) == 101)
+        assert(fns3[2](100) == 102)
+
+        // ============================================================
         // SHADER COMPILER TESTS
         // Comprehensive test of all shader compiler features
         // ============================================================

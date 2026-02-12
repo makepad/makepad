@@ -4,6 +4,96 @@ Splash is Makepad's UI scripting language. No commas between properties. No semi
 
 **Do NOT use `Root{}` or `Window{}`** — those are host-level wrappers handled externally. Your output is the content inside a body/splash widget.
 
+## Splash supports INTERACTIVE SCRIPTING — use it!
+
+Splash supports full interactive scripting. When a user asks for anything interactive, working, or functional — use these features. Here is the exact syntax that works:
+
+**Variables:** `let x = 0` and `let items = []` (always `let`, never `var`)
+
+**Objects:** `{text: "hello", done: false}` (no quotes on keys)
+
+**Array methods:** `items.push(obj)`, `items.remove(index)`, `items.retain(|x| condition)`, `items.len()`
+
+**Functions:** `fn name(args) { body }` (always `fn`, never `function`)
+
+**Callbacks use `||` closure syntax:**
+- `on_click: || do_something()` — button/checkbox click
+- `on_click: |checked| toggle(i, checked)` — checkbox click receives bool
+- `on_return: || do_something()` — TextInput enter key
+- `on_render: ||{ ... }` — view re-render (for dynamic lists)
+
+**`on_click` works on:** `Button`, `ButtonFlat`, `ButtonFlatter`, `CheckBox`
+
+**Widget methods use `ui.` prefix:**
+- `ui.my_input.text()` — get TextInput text
+- `ui.my_input.set_text("")` — set TextInput text
+- `ui.my_list.render()` — trigger re-render of a view
+- `ui.my_button.on_click()` — programmatically click a button
+
+**Dynamic lists use `on_render` + `for`:**
+```
+list := ScrollYView{width: Fill height: Fill flow: Down spacing: 4 new_batch: true
+    on_render: ||{
+        for i, item in items {
+            View{width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                Label{width: Fill text: item.text draw_text.color: #xddd}
+                ButtonFlatter{text: "x" on_click: || delete_item(i)}
+            }
+        }
+    }
+}
+```
+
+**After mutating state, call `.render()` to update the list:**
+```
+fn add_item(text) {
+    items.push({text: text, done: false})
+    ui.list.render()
+}
+```
+
+**Comparison:** `text != ""` (works), `items.len() == 0` (works)
+
+### Complete working interactive todo (copy this pattern exactly):
+```
+let items = []
+items.push({text: "First task", done: false})
+items.push({text: "Second task", done: false})
+
+fn add_item(text) {
+    items.push({text: text, done: false})
+    ui.item_list.render()
+}
+fn delete_item(index) {
+    items.remove(index)
+    ui.item_list.render()
+}
+
+View{width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+    todo_input := TextInput{width: Fill height: Fit empty_text: "Add a task..."
+        on_return: || ui.add_btn.on_click()
+    }
+    add_btn := Button{text: "Add"
+        on_click: ||{
+            let text = ui.todo_input.text()
+            if text != "" { add_item(text) ui.todo_input.set_text("") }
+        }
+    }
+}
+
+item_list := ScrollYView{width: Fill height: Fill flow: Down spacing: 4 new_batch: true
+    on_render: ||{
+        for i, item in items {
+            View{width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                CheckBox{text: "" active: item.done on_click: |checked| items[i].done = checked}
+                Label{width: Fill text: item.text draw_text.color: #xddd}
+                ButtonFlatter{text: "x" on_click: || delete_item(i)}
+            }
+        }
+    }
+}
+```
+
 ---
 
 ## NAMING CHILDREN: Use `:=` for dynamic/list properties
@@ -17,7 +107,212 @@ If you write `label:` (colon) instead of `label :=` (colon-equals), the child is
 
 **Use `:=` for any child you want to reference or override later:** `check :=`, `label :=`, `tag :=`, `title :=`, `body :=`, `icon :=`, `content :=`, etc.
 
-## COPY-PASTE REFERENCE: Todo list
+## COPY-PASTE REFERENCE: Interactive todo app (with TextInput, add, delete, check)
+
+**When the user asks for a "todo list", "todo app", "task list", or anything involving adding/removing items, ALWAYS use this interactive version.** This is a fully working app with a TextInput to type new items, a Button to add them, CheckBoxes to mark done, and delete buttons to remove them. The user can type, press Enter or click "+", and the list updates live. Do NOT use the static mockup below unless the user explicitly asks for a non-interactive visual-only mockup.
+
+This is the full pattern for a working interactive todo list with add, check, delete, and clear. It demonstrates all the key interactive patterns: state arrays, `on_render` for dynamic lists, `on_click`/`on_return` callbacks, `for` loops with closures that capture the loop index, and `ScrollYView` with `new_batch: true`.
+
+### Key concepts
+
+- **State**: Use `let` to declare arrays and variables at script scope. These persist across renders.
+- **`on_render`**: A callback on a `ScrollYView` (or any View) that runs each time the view needs to draw. Inside it, emit widgets dynamically with `for` loops. Call `.render()` on the view to trigger a re-render when state changes.
+- **`on_click`**: A callback on `Button`, `ButtonFlat`, `ButtonFlatter`, or `CheckBox`. For CheckBox it receives a `checked` boolean arg. **Only works on button/checkbox widgets, NOT on View or RoundedView.**
+- **`on_return`**: A callback on `TextInput` that fires when the user presses Enter.
+- **Closures capture loop index**: In `for i, todo in todos { ... on_click: || delete_todo(i) }`, the closure captures `i` by value at the time the item is created.
+- **`new_batch: true`**: Required on the ScrollYView container so that each todo item's background draws correctly relative to its text.
+- **Named children through containers**: When a named child (`:=`) is nested inside another named container, use dot-path to reach it: `tag.tag_label.text: todo.tag`.
+
+### Pitfalls to avoid
+
+- **`on_click` only works on Button/ButtonFlat/ButtonFlatter/CheckBox** — NOT on View or RoundedView. If you need a clickable area, use `ButtonFlatter{text: ""}`.
+- **`MouseCursor.Hand`** is NOT available in the `widgets` prelude as `MouseCursor.Hand`. The `MouseCursor` enum variants are spread directly into scope, so use `cursor: Hand` (without `MouseCursor.` prefix).
+- **Don't put an `id` on todo items** — just use the loop index `i` from `for i, todo in todos`. The index is captured by closures.
+- **Call `.render()` after any state mutation** that should update the list (push, remove, retain). Toggle doesn't need it because the CheckBox widget handles its own visual state.
+
+```
+use mod.prelude.widgets.*
+
+// ---- Vector Icons (optional, for polish) ----
+
+let IconClipboard = Vector{width: 40 height: 40 viewbox: vec4(0 0 24 24)
+    Path{d: "M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" fill: false stroke: #x334 stroke_width: 1.2 stroke_linecap: "round" stroke_linejoin: "round"}
+    Path{d: "M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v0a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1z" fill: false stroke: #x334 stroke_width: 1.2 stroke_linecap: "round" stroke_linejoin: "round"}
+    Path{d: "M9 12h6M9 16h4" fill: false stroke: #x334 stroke_width: 1.2 stroke_linecap: "round"}
+}
+
+// ---- Templates ----
+
+let TodoItem = RoundedView{
+    width: Fill height: Fit
+    padding: Inset{top: 12 bottom: 12 left: 16 right: 16}
+    flow: Right spacing: 14
+    align: Align{y: 0.5}
+    draw_bg.color: #x1f1f35
+    draw_bg.border_radius: 10.0
+
+    check := CheckBox{text: ""}
+    label := Label{
+        width: Fill
+        text: "task"
+        draw_text.color: #xccccdd
+        draw_text.text_style.font_size: 12.5
+    }
+    tag := RoundedView{
+        width: Fit height: Fit
+        padding: Inset{top: 3 bottom: 3 left: 8 right: 8}
+        draw_bg.color: #x33335a
+        draw_bg.border_radius: 4.0
+        tag_label := Label{
+            text: ""
+            draw_text.color: #x7a7acc
+            draw_text.text_style.font_size: 9
+            draw_text.text_style: theme.font_bold{}
+        }
+    }
+    delete := ButtonFlatter{
+        text: "x"
+        width: 28 height: 28
+        draw_text +: {
+            color: #x556
+            text_style: {font_size: 12}
+        }
+    }
+}
+
+let EmptyState = View{
+    width: Fill height: 260
+    align: Center
+    flow: Down spacing: 12
+    IconClipboard{}
+    Label{text: "No tasks yet" draw_text.color: #x445 draw_text.text_style.font_size: 15}
+    Label{text: "Add one below to get started" draw_text.color: #x334 draw_text.text_style.font_size: 11}
+}
+
+// ---- State ----
+let todos = []
+
+todos.push({text: "Build the todo app", tag: "dev", done: true})
+todos.push({text: "Style everything nicely", tag: "design", done: false})
+todos.push({text: "Buy groceries", tag: "personal", done: false})
+
+// ---- Logic (functions that mutate state and re-render) ----
+
+fn add_todo(text, tag){
+    todos.push({text: text, tag: tag, done: false})
+    ui.todo_list.render()
+}
+
+fn toggle_todo(index, checked){
+    todos[index].done = checked
+    // No render() needed — CheckBox handles its own visual state
+}
+
+fn delete_todo(index){
+    todos.remove(index)
+    ui.todo_list.render()
+}
+
+// ---- UI ----
+
+ScrollYView{
+    width: Fill height: Fill
+    flow: Down spacing: 0
+
+    // Header
+    SolidView{
+        width: Fill height: Fit
+        padding: Inset{top: 32 bottom: 24 left: 28 right: 28}
+        flow: Down spacing: 4
+        draw_bg.color: #x12122a
+        Label{text: "Todo" draw_text.color: #xfff draw_text.text_style: theme.font_bold{font_size: 22}}
+        Label{text: "Stay organized, get things done." draw_text.color: #x446 draw_text.text_style.font_size: 11}
+    }
+
+    // Add bar
+    SolidView{
+        width: Fill height: Fit
+        padding: Inset{top: 14 bottom: 14 left: 28 right: 28}
+        draw_bg.color: #x161630
+        View{
+            width: Fill height: Fit
+            flow: Right spacing: 10
+            align: Align{y: 0.5}
+            todo_input := TextInput{
+                width: Fill height: Fit
+                empty_text: "What needs to be done?"
+                on_return: || ui.add_button.on_click()
+            }
+            add_button := Button{
+                text: "+"
+                width: 40 height: 34
+                draw_bg +: {
+                    color: uniform(#x4a4aee)
+                    color_hover: uniform(#x5b5bff)
+                    color_down: uniform(#x3939cc)
+                    border_radius: 8.0
+                }
+                draw_text +: { color: #xfff text_style: {font_size: 16} }
+                on_click: ||{
+                    let text = ui.todo_input.text()
+                    if text != "" {
+                        add_todo(text, "")
+                        ui.todo_input.set_text("")
+                    }
+                }
+            }
+        }
+    }
+
+    // Divider
+    SolidView{width: Fill height: 1 draw_bg.color: #x222244}
+
+    // Dynamic todo list
+    todo_list := ScrollYView{
+        width: Fill height: Fill
+        padding: Inset{top: 14 bottom: 14 left: 20 right: 20}
+        flow: Down spacing: 8
+        new_batch: true
+        on_render: ||{
+            if todos.len() == 0
+                EmptyState{}
+            else for i, todo in todos {
+                TodoItem{
+                    label.text: todo.text
+                    tag.tag_label.text: todo.tag
+                    check.active: todo.done
+                    check.on_click: |checked| toggle_todo(i, checked)
+                    delete.on_click: || delete_todo(i)
+                }
+            }
+        }
+        EmptyState{}
+    }
+
+    // Footer
+    SolidView{
+        width: Fill height: Fit
+        padding: Inset{top: 12 bottom: 16 left: 28 right: 28}
+        draw_bg.color: #x12122a
+        flow: Right
+        align: Align{y: 0.5}
+        Label{text: "" draw_text.color: #x446 draw_text.text_style.font_size: 10}
+        Filler{}
+        clear_done := ButtonFlatter{
+            text: "Clear completed"
+            draw_text +: { color: #x5a5aee }
+            on_click: ||{
+                todos.retain(|todo| !todo.done)
+                ui.todo_list.render()
+            }
+        }
+    }
+}
+```
+
+## COPY-PASTE REFERENCE: Static todo mockup (visual only, NO interaction)
+
+**Only use this if the user explicitly asks for a non-interactive visual mockup.** For any real todo app, use the interactive version above.
 
 ```
 let TodoItem = View{
@@ -32,11 +327,11 @@ let TodoItem = View{
 }
 
 RoundedView{
-    width: 380 height: Fit
+    width: Fill height: Fit
     flow: Down spacing: 4
     padding: 16
     new_batch: true
-    draw_bg.color: #1e1e2e
+    draw_bg.color: #x1e1e2e
     draw_bg.border_radius: 10.0
     Label{text: "My Tasks" draw_text.color: #fff draw_text.text_style.font_size: 14}
     Hr{}
@@ -79,6 +374,8 @@ View{
 - Use CSS-like property names (no `border-radius`, use `draw_bg.border_radius`)
 
 If you're unsure whether a property exists, **don't use it**. Stick to the exact syntax shown in the examples.
+
+**However, Splash DOES support interactive scripting:** `let` state variables, `fn` functions, `on_click`/`on_return`/`on_render` callbacks, `for` loops inside `on_render`, array methods (`.push()`, `.remove()`, `.retain()`, `.len()`), and widget methods (`ui.id.text()`, `ui.id.set_text()`, `ui.id.render()`). See the "Interactive Scripting" section. **When a user asks for something interactive, working, or functional, use these features — do NOT just output static layouts.**
 
 ---
 
@@ -315,6 +612,203 @@ let Item = View{
     }
 }
 Item{texts.label.text: "new text"}           // full path through named containers
+```
+
+## Interactive Scripting (state, callbacks, dynamic lists)
+
+Splash is NOT just a static layout language — it supports **full interactive scripting** with state, functions, callbacks, and dynamic rendering. When a user asks for something "interactive", "working", "functional", or "real", use these features.
+
+### State variables
+
+Use `let` at script scope to declare persistent state. Arrays and objects persist across renders:
+```
+let items = []
+let count = 0
+items.push({text: "First item", done: false})
+items.push({text: "Second item", done: false})
+count = items.len()
+```
+
+### Array methods
+
+```
+items.push({key: "value"})     // append to end
+items.remove(index)            // remove by index
+items.retain(|item| !item.done)  // keep only items matching predicate
+items.len()                    // get length
+```
+
+### Functions
+
+Define functions with `fn`. They can read and mutate state variables from the enclosing scope:
+```
+fn add_item(text) {
+    items.push({text: text, done: false})
+    ui.my_list.render()          // trigger re-render of the list view
+}
+
+fn delete_item(index) {
+    items.remove(index)
+    ui.my_list.render()
+}
+
+fn toggle_item(index, checked) {
+    items[index].done = checked
+    // No render() needed for CheckBox — it handles its own visual state
+}
+```
+
+### Event callbacks
+
+These are properties you set on widgets to handle user interaction:
+
+| Callback | Widget types | Args | Description |
+|----------|-------------|------|-------------|
+| `on_click` | `Button`, `ButtonFlat`, `ButtonFlatter`, `CheckBox` | `\|checked\|` for CheckBox, none for buttons | Fires on click/tap |
+| `on_return` | `TextInput` | none | Fires when user presses Enter |
+| `on_render` | Any View (`View`, `ScrollYView`, `SolidView`, etc.) | none | Fires each time the view draws |
+
+**`on_click` only works on Button/ButtonFlat/ButtonFlatter/CheckBox.** It does NOT work on View, RoundedView, SolidView, etc. If you need a clickable area, use `ButtonFlatter{text: ""}`.
+
+```
+my_button := Button{
+    text: "Click me"
+    on_click: || do_something()
+}
+
+my_input := TextInput{
+    width: Fill height: Fit
+    empty_text: "Type here..."
+    on_return: || ui.my_button.on_click()   // trigger another widget's click
+}
+
+check := CheckBox{
+    text: ""
+    on_click: |checked| toggle_item(i, checked)  // receives bool
+}
+```
+
+### Widget methods (callable from script)
+
+```
+ui.widget_id.text()            // get text content (TextInput)
+ui.widget_id.set_text("")      // set text content (TextInput)
+ui.widget_id.render()          // trigger re-render (any View)
+ui.widget_id.on_click()        // programmatically fire a click (Button)
+```
+
+### Dynamic rendering with `on_render`
+
+`on_render` is the key to dynamic lists. It runs each time a view needs to draw. Inside it, emit widgets with `for` loops. The loop body creates widget instances dynamically:
+
+```
+my_list := ScrollYView{
+    width: Fill height: Fill
+    flow: Down spacing: 8
+    new_batch: true               // REQUIRED for correct draw ordering
+    on_render: ||{
+        if items.len() == 0
+            Label{text: "No items yet" draw_text.color: #x556}
+        else for i, item in items {
+            View{
+                width: Fill height: Fit
+                flow: Right spacing: 10
+                align: Align{y: 0.5}
+                check := CheckBox{
+                    text: ""
+                    active: item.done
+                    on_click: |checked| toggle_item(i, checked)
+                }
+                label := Label{
+                    width: Fill
+                    text: item.text
+                    draw_text.color: #xddd
+                }
+                delete := ButtonFlatter{
+                    text: "x"
+                    on_click: || delete_item(i)
+                }
+            }
+        }
+    }
+}
+```
+
+**Key points:**
+- Closures in `for i, item in items` capture `i` by value — each item gets its own index
+- Call `ui.my_list.render()` after mutating state (push, remove, retain) to re-draw the list
+- `new_batch: true` on the container is required so backgrounds draw correctly behind text
+- `on_render` replaces the view's content each time — don't put static children alongside it (except as fallback default content)
+
+### Putting it all together (minimal interactive list pattern)
+
+```
+use mod.prelude.widgets.*
+
+let items = []
+items.push({text: "First task", done: false})
+items.push({text: "Second task", done: false})
+
+fn add_item(text) {
+    items.push({text: text, done: false})
+    ui.item_list.render()
+}
+
+fn delete_item(index) {
+    items.remove(index)
+    ui.item_list.render()
+}
+
+fn toggle_item(index, checked) {
+    items[index].done = checked
+}
+
+View{
+    width: Fill height: Fit
+    flow: Down spacing: 8
+    padding: 16
+
+    // Input row
+    View{
+        width: Fill height: Fit
+        flow: Right spacing: 8
+        align: Align{y: 0.5}
+        todo_input := TextInput{
+            width: Fill height: Fit
+            empty_text: "Add a task..."
+            on_return: || ui.add_btn.on_click()
+        }
+        add_btn := Button{
+            text: "Add"
+            on_click: ||{
+                let text = ui.todo_input.text()
+                if text != "" {
+                    add_item(text)
+                    ui.todo_input.set_text("")
+                }
+            }
+        }
+    }
+
+    // Dynamic list
+    item_list := ScrollYView{
+        width: Fill height: Fill
+        flow: Down spacing: 4
+        new_batch: true
+        on_render: ||{
+            for i, item in items {
+                View{
+                    width: Fill height: Fit
+                    flow: Right spacing: 8
+                    align: Align{y: 0.5}
+                    CheckBox{text: "" active: item.done on_click: |checked| toggle_item(i, checked)}
+                    Label{width: Fill text: item.text draw_text.color: #xddd}
+                    ButtonFlatter{text: "x" on_click: || delete_item(i)}
+                }
+            }
+        }
+    }
+}
 ```
 
 ## Syntax Fundamentals

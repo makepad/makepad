@@ -47,7 +47,11 @@ impl ScriptHeap {
         self.new_with_proto_impl(proto, false)
     }
 
-    fn new_with_proto_impl(&mut self, proto: ScriptValue, copy_vec_from_auto_proto: bool) -> ScriptObject {
+    fn new_with_proto_impl(
+        &mut self,
+        proto: ScriptValue,
+        copy_vec_from_auto_proto: bool,
+    ) -> ScriptObject {
         let (proto_fwd, proto_ptr) = if let Some(ptr) = proto.as_object() {
             // Use checked access via ScriptObject
             let object = &mut self.objects[ptr];
@@ -958,6 +962,11 @@ impl ScriptHeap {
     pub fn vec_len(&self, ptr: ScriptObject) -> usize {
         let object = &self.objects[ptr];
         object.vec.len()
+    }
+
+    pub fn map_delete(&mut self, ptr: ScriptObject, key: &ScriptValue) -> Option<ScriptValue> {
+        let object = &mut self.objects[ptr];
+        object.map_delete(key)
     }
 
     pub fn map_len(&self, ptr: ScriptObject) -> usize {

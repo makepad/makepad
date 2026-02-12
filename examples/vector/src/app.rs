@@ -15,7 +15,7 @@ script_mod! {
         height: Fill
     }
 
-    load_all_resources() do #(App::script_component(vm)){
+    startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
                 window.inner_size: vec2(1200, 800)
@@ -63,7 +63,8 @@ impl AppMain for App {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct SvgDemo {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[redraw]

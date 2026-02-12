@@ -73,8 +73,12 @@ script_mod! {
             }
         }
         delete := ButtonFlatter{
-            text: ""
+            text: "x"
             width: 28 height: 28
+            draw_text +: {
+                color: #x556
+                text_style +: {font_size: 12}
+            }
         }
     }
 

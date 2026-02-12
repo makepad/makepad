@@ -171,10 +171,7 @@ script_mod! {
         }
     }
 
-    mod.gc.set_static(mod)
-    mod.gc.run()
-
-    load_all_resources() do #(App::script_component(vm)){
+    startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
                 window.inner_size: vec2(900, 700)
