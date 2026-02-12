@@ -49,14 +49,6 @@ repository = "https://github.com/servo/unicode-bidi"
 name = "unicode_bidi"
 path = "src/lib.rs"
 
-[dependencies.flame]
-version = "0.2"
-optional = true
-
-[dependencies.flamer]
-version = "0.4"
-optional = true
-
 [dependencies.serde]
 version = ">=0.8, <2.0"
 features = ["derive"]
@@ -74,10 +66,6 @@ bench_it = []
 default = [
     "std",
     "hardcoded-data",
-]
-flame_it = [
-    "flame",
-    "flamer",
 ]
 hardcoded-data = []
 std = []
