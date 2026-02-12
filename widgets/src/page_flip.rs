@@ -126,6 +126,19 @@ impl WidgetNode for PageFlip {
         self.area
     }
 
+    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
+        if let Some(page) = self.pages.get(&path[0]) {
+            if path.len() > 1 {
+                page.find_widgets(&path[1..], results);
+            } else {
+                results.push(page.clone());
+            }
+        }
+        for page in self.pages.values() {
+            page.find_widgets(path, results);
+        }
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx)
     }
