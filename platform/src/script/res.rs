@@ -1,3 +1,4 @@
+use crate::event::network::HttpRequest;
 use crate::script::vm::*;
 use crate::*;
 use makepad_script::id;
@@ -10,6 +11,7 @@ use std::rc::Rc;
 #[derive(Clone, Debug)]
 pub enum CxScriptResourceData {
     NotLoaded,
+    Loading,
     Loaded(Rc<Vec<u8>>),
     Error(String),
 }
@@ -21,9 +23,16 @@ pub struct CxScriptResource {
     pub handle: ScriptHandle,
 }
 
+/// Tracks an in-flight HTTP request that will populate a resource
+pub struct CxScriptHttpResource {
+    pub request_id: LiveId,
+    pub handle: ScriptHandle,
+}
+
 #[derive(Default)]
 pub struct CxScriptResources {
     pub resources: Rc<RefCell<Vec<CxScriptResource>>>,
+    pub http_resources: Vec<CxScriptHttpResource>,
 }
 
 impl CxScriptResources {
@@ -38,7 +47,52 @@ impl CxScriptResources {
         None
     }
 
-    /// Load all resources that haven't been loaded yet
+    /// Store HTTP response data into a resource by request_id.
+    /// Returns true if a matching resource was found and updated.
+    pub fn handle_http_response(&mut self, request_id: LiveId, data: Vec<u8>) -> bool {
+        if let Some(idx) = self
+            .http_resources
+            .iter()
+            .position(|r| r.request_id == request_id)
+        {
+            let handle = self.http_resources[idx].handle;
+            self.http_resources.remove(idx);
+            let mut resources = self.resources.borrow_mut();
+            if let Some(res) = resources.iter_mut().find(|r| r.handle == handle) {
+                res.data = CxScriptResourceData::Loaded(Rc::new(data));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Store HTTP error into a resource by request_id.
+    /// Returns true if a matching resource was found and updated.
+    pub fn handle_http_error(&mut self, request_id: LiveId, error: String) -> bool {
+        if let Some(idx) = self
+            .http_resources
+            .iter()
+            .position(|r| r.request_id == request_id)
+        {
+            let handle = self.http_resources[idx].handle;
+            self.http_resources.remove(idx);
+            let mut resources = self.resources.borrow_mut();
+            if let Some(res) = resources.iter_mut().find(|r| r.handle == handle) {
+                res.data = CxScriptResourceData::Error(error);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a request_id belongs to an http_resource
+    pub fn is_http_resource(&self, request_id: LiveId) -> bool {
+        self.http_resources
+            .iter()
+            .any(|r| r.request_id == request_id)
+    }
+
+    /// Load all resources that haven't been loaded yet (skips Loading/HTTP resources)
     pub fn load_all_resources(&self) {
         let mut resources = self.resources.borrow_mut();
         for res in resources.iter_mut() {
@@ -263,6 +317,52 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         return handle.into();
                     }
                 }
+            }
+
+            script_err_type_mismatch!(vm.trap(), "invalid res arg type")
+        },
+    );
+
+    // res.http_resource("https://example.com/file.svg")
+    // Loads a resource from an HTTP URL asynchronously
+    vm.add_method(
+        res,
+        id_lut!(http_resource),
+        script_args_def!(url = NIL),
+        move |vm, args| {
+            let url = script_value!(vm, args.url);
+            if !url.is_string_like() {
+                return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
+            }
+
+            if let Some(url_string) = vm.string_with(url, |_vm, s| s.to_string()) {
+                let cx = vm.host.cx_mut();
+                let handle_gc = CxScriptResourceGc {
+                    resources: cx.script_data.resources.resources.clone(),
+                    handle: ScriptHandle::ZERO,
+                };
+                let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+
+                // Create the resource in Loading state
+                cx.script_data
+                    .resources
+                    .resources
+                    .borrow_mut()
+                    .push(CxScriptResource {
+                        abs_path: url_string.clone(),
+                        data: CxScriptResourceData::Loading,
+                        handle,
+                    });
+
+                // Fire the HTTP request
+                let request_id = LiveId::unique();
+                cx.script_data
+                    .resources
+                    .http_resources
+                    .push(CxScriptHttpResource { request_id, handle });
+                cx.http_request(request_id, HttpRequest::new(url_string, Default::default()));
+
+                return handle.into();
             }
 
             script_err_type_mismatch!(vm.trap(), "invalid res arg type")
