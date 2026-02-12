@@ -24,6 +24,7 @@ workspace.members = [
     "libs/regex",
     "libs/svg",
     "platform2/script/test",
+    "widgets2/test",
     "studio",
     "studio/ai",
     "tools/cargo_makepad",

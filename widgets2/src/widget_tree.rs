@@ -66,7 +66,7 @@ impl WidgetTree {
         idx
     }
 
-    fn close_node(&mut self, idx: u32) {
+    pub fn close_node(&mut self, idx: u32) {
         self.subtree_end[idx as usize] = self.names.len() as u32;
     }
 
@@ -74,11 +74,12 @@ impl WidgetTree {
     /// The last element of `path` is matched first (leaf name), then ancestors
     /// are verified upward.
     pub fn find_within(&self, root_uid: WidgetUid, path: &[LiveId]) -> WidgetRef {
-        let start = match self.uid_map.get(&root_uid) {
-            Some(&idx) => idx as usize,
-            None => return WidgetRef::empty(),
+        let (start, end) = match self.uid_map.get(&root_uid) {
+            Some(&idx) => (idx as usize, self.subtree_end[idx as usize] as usize),
+            // Root widget may not be in the tree (e.g. Root registers children but not itself).
+            // Fall back to searching the entire tree.
+            None => (0, self.names.len()),
         };
-        let end = self.subtree_end[start] as usize;
         let target = match path.last() {
             Some(&id) => id,
             None => return WidgetRef::empty(),
@@ -97,11 +98,10 @@ impl WidgetTree {
     /// Find all widgets matching path within the subtree of root_uid.
     pub fn find_all_within(&self, root_uid: WidgetUid, path: &[LiveId]) -> Vec<WidgetRef> {
         let mut results = Vec::new();
-        let start = match self.uid_map.get(&root_uid) {
-            Some(&idx) => idx as usize,
-            None => return results,
+        let (start, end) = match self.uid_map.get(&root_uid) {
+            Some(&idx) => (idx as usize, self.subtree_end[idx as usize] as usize),
+            None => (0, self.names.len()),
         };
-        let end = self.subtree_end[start] as usize;
         let target = match path.last() {
             Some(&id) => id,
             None => return results,
