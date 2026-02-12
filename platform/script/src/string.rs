@@ -449,7 +449,97 @@ impl ScriptStringData {
                 )
             },
         );
+
+        // str.url_decode() -> string (percent-decode a URL-encoded string)
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_STRING,
+            id!(url_decode),
+            script_args_def!(),
+            |vm, args| {
+                let sself = script_value!(vm, args.self);
+                if let Some(s) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
+                    let decoded = percent_decode(sself);
+                    heap.new_string_from_str(&decoded)
+                }) {
+                    return s.into();
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "url_decode called on non-string value"
+                )
+            },
+        );
+
+        // str.url_encode() -> string (percent-encode a string for use in URLs)
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_STRING,
+            id!(url_encode),
+            script_args_def!(),
+            |vm, args| {
+                let sself = script_value!(vm, args.self);
+                if let Some(s) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
+                    let encoded = percent_encode(sself);
+                    heap.new_string_from_str(&encoded)
+                }) {
+                    return s.into();
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "url_encode called on non-string value"
+                )
+            },
+        );
     }
+}
+
+fn percent_decode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((hi << 4 | lo) as char);
+                i += 3;
+                continue;
+            }
+        } else if bytes[i] == b'+' {
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 3);
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(b & 0xf) as usize]));
+            }
+        }
+    }
+    out
 }
 
 // ---- Regex helper functions ----

@@ -23,6 +23,12 @@ pub struct CxScriptResource {
     pub handle: ScriptHandle,
 }
 
+impl CxScriptResource {
+    pub fn is_error(&self) -> bool {
+        matches!(self.data, CxScriptResourceData::Error(_))
+    }
+}
+
 /// Tracks an in-flight HTTP request that will populate a resource
 pub struct CxScriptHttpResource {
     pub request_id: LiveId,
