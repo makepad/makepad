@@ -111,7 +111,33 @@ script_mod! {
     // ---- Logic ----
     // These use script features (var, fn) that run in the script VM.
     // They will work once the script engine supports them fully.
-
+    
+    fn http_get(url){
+        std.promise()
+        let req = net.HttpRequest{
+            url: url
+            method: net.HttpMethod.GET
+            headers: {"User-Agent": "MakepadApp/1.0"}
+        }
+        net.http_request(req) do net.HttpEvents{
+            on_response: |res| {
+                let doc = res.body.to_string().parse_html()
+                let links = doc.query("a.result__a").array()
+                let snippets = doc.query("a.result__snippet").array()
+                results.clear()
+                for i, link in links {
+                    results.push({
+                        title: link.text
+                        url: link.attr("href")
+                        snippet: if i < snippets.len() snippets[i].text else ""
+                    })
+                }
+                ui.results.render()
+            }
+        }
+                
+    }
+    
     fn do_search(query){
         let req = net.HttpRequest{
             url: "https://html.duckduckgo.com/html/?q=" + query

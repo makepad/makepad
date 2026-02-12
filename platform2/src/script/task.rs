@@ -173,14 +173,16 @@ impl Cx {
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
-    let std = vm.module(id!(std));
-    let task_type = vm.new_handle_type(id_lut!(task));
-
-    for fn_id in [id_lut!(emit), id_lut!(end)] {
-        vm.add_handle_method(task_type, fn_id, script_args_def!(), move |vm, args| {
+    fn add_send_method(
+        vm: &mut ScriptVm,
+        handle_type: ScriptHandleType,
+        fn_id: LiveId,
+        end_on_send: bool,
+    ) {
+        vm.add_handle_method(handle_type, fn_id, script_args_def!(), move |vm, args| {
             if let Some(handle) = script_value!(vm, args.self).as_handle() {
                 let cx = vm.host.cx_mut();
-                if let Some(chan) = cx
+                if let Some(task) = cx
                     .script_data
                     .tasks
                     .tasks
@@ -188,55 +190,47 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     .iter_mut()
                     .find(|v| v.handle == handle)
                 {
-                    let array_len = vm.bx.heap.array_len(chan.queue.as_array());
+                    let queue = task.queue.as_array();
+                    let array_len = vm.bx.heap.array_len(queue);
 
-                    if chan.max_depth == 0 || array_len < chan.max_depth {
-                        let vec_len = vm.bx.heap.vec_len(args.into());
-                        if vec_len == 0 {
-                            vm.bx.heap.array_push(
-                                chan.queue.as_array(),
-                                NIL,
-                                vm.bx.threads.cur().trap.pass(),
-                            );
-                        } else if vec_len == 1 {
-                            let value =
+                    if task.max_depth == 0 || array_len < task.max_depth {
+                        let value = {
+                            let vec_len = vm.bx.heap.vec_len(args.into());
+                            if vec_len == 0 {
+                                NIL
+                            } else if vec_len == 1 {
                                 vm.bx
                                     .heap
-                                    .vec_value(args, 0, vm.bx.threads.cur().trap.pass());
-                            vm.bx.heap.array_push(
-                                chan.queue.as_array(),
-                                value,
-                                vm.bx.threads.trap(),
-                            );
-                        } else {
-                            vm.bx.heap.array_push(
-                                chan.queue.as_array(),
-                                args.into(),
-                                vm.bx.threads.trap(),
-                            );
-                        }
-                        if fn_id == id!(end) {
-                            chan.ended = true;
+                                    .vec_value(args, 0, vm.bx.threads.cur().trap.pass())
+                            } else {
+                                args.into()
+                            }
+                        };
+                        vm.bx.heap.array_push(queue, value, vm.bx.threads.trap());
+                        if end_on_send {
+                            task.ended = true;
                         }
                         return ((array_len + 1) as f64).into();
-                    } else {
-                        if chan.send_pause.len() > 100 {
-                            return script_err_limit!(
-                                vm.bx.threads.trap(),
-                                "too many paused calls"
-                            );
-                        }
-                        chan.send_pause.push_front(vm.bx.threads.cur().pause());
-                        return NIL;
                     }
+
+                    if task.send_pause.len() > 100 {
+                        return script_err_limit!(vm.bx.threads.trap(), "too many paused calls");
+                    }
+                    task.send_pause.push_front(vm.bx.threads.cur().pause());
+                    return NIL;
                 }
             }
             NIL
         });
     }
-    for fn_id in [id_lut!(next), id_lut!(last)] {
-        vm.add_handle_method(task_type, fn_id, script_args_def!(), move |vm, args| {
-            // lets find the channel
+
+    fn add_recv_method(
+        vm: &mut ScriptVm,
+        handle_type: ScriptHandleType,
+        fn_id: LiveId,
+        wait_for_end: bool,
+    ) {
+        vm.add_handle_method(handle_type, fn_id, script_args_def!(), move |vm, args| {
             if let Some(handle) = script_value!(vm, args.self).as_handle() {
                 let cx = vm.host.cx_mut();
                 if let Some(task) = cx
@@ -248,7 +242,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     .find(|v| v.handle == handle)
                 {
                     if let Some(value) = vm.bx.heap.array_pop_front_option(task.queue.as_array()) {
-                        if fn_id == id!(next) || fn_id == id!(last) && task.ended {
+                        if !wait_for_end || task.ended {
                             return value;
                         }
                     }
@@ -266,32 +260,74 @@ pub fn script_mod(vm: &mut ScriptVm) {
         });
     }
 
-    vm.set_handle_getter(task_type, |vm, pself, prop| {
-        // lets find the channel
-        if prop == id!(queue) {
-            if let Some(handle) = pself.as_handle() {
-                let cx = vm.host.cx_mut();
-                if let Some(chan) = cx
-                    .script_data
-                    .tasks
-                    .tasks
-                    .borrow_mut()
-                    .iter_mut()
-                    .find(|v| v.handle == handle)
-                {
-                    return chan.queue.as_array().into();
+    fn add_queue_getter(vm: &mut ScriptVm, handle_type: ScriptHandleType) {
+        vm.set_handle_getter(handle_type, |vm, pself, prop| {
+            if prop == id!(queue) {
+                if let Some(handle) = pself.as_handle() {
+                    let cx = vm.host.cx_mut();
+                    if let Some(task) = cx
+                        .script_data
+                        .tasks
+                        .tasks
+                        .borrow_mut()
+                        .iter_mut()
+                        .find(|v| v.handle == handle)
+                    {
+                        return task.queue.as_array().into();
+                    }
                 }
             }
-        }
-        script_err_not_found!(vm.trap(), "invalid task prop")
-    });
+            script_err_not_found!(vm.trap(), "invalid task prop")
+        });
+    }
+
+    fn create_task_handle(
+        vm: &mut ScriptVm,
+        handle_type: ScriptHandleType,
+        start_task: Option<ScriptFnRef>,
+        max_depth: usize,
+    ) -> ScriptValue {
+        let cx = vm.host.cx_mut();
+        let handle_gc = CxScriptTaskGc {
+            tasks: cx.script_data.tasks.tasks.clone(),
+            handle: ScriptHandle::ZERO,
+        };
+        let handle = vm.bx.heap.new_handle(handle_type, Box::new(handle_gc));
+        let array = vm.bx.heap.new_array();
+        let queue = vm.bx.heap.new_array_ref(array);
+        cx.script_data.tasks.tasks.borrow_mut().push(CxScriptTask {
+            max_depth,
+            start_task,
+            handle,
+            ended: false,
+            recv_pause: Default::default(),
+            send_pause: Default::default(),
+            queue,
+        });
+        handle.into()
+    }
+
+    let std = vm.module(id!(std));
+    let task_type = vm.new_handle_type(id_lut!(task));
+    let promise_type = vm.new_handle_type(id_lut!(promise));
+
+    // Task API.
+    add_send_method(vm, task_type, id_lut!(emit), false);
+    add_send_method(vm, task_type, id_lut!(end), true);
+    add_recv_method(vm, task_type, id_lut!(next), false);
+    add_recv_method(vm, task_type, id_lut!(last), true);
+    add_queue_getter(vm, task_type);
+
+    // Promise API (single-result task).
+    add_send_method(vm, promise_type, id_lut!(resolve), true);
+    add_recv_method(vm, promise_type, id_lut!(await), true);
+    add_queue_getter(vm, promise_type);
 
     vm.add_method(
         std,
         id_lut!(task),
         script_args_def!(start_fn_or_depth = NIL),
         move |vm, args| {
-            // lets make a new channel
             let start_fn_or_depth = script_value!(vm, args.start_fn_or_depth);
             let (start_task, max_depth) = if vm.bx.heap.is_fn(start_fn_or_depth.into()) {
                 (
@@ -305,26 +341,24 @@ pub fn script_mod(vm: &mut ScriptVm) {
             } else {
                 (None, start_fn_or_depth.as_f64().unwrap_or(0.0) as usize)
             };
+            create_task_handle(vm, task_type, start_task, max_depth)
+        },
+    );
 
-            let cx = vm.host.cx_mut();
-            let handle_gc = CxScriptTaskGc {
-                tasks: cx.script_data.tasks.tasks.clone(),
-                handle: ScriptHandle::ZERO,
+    vm.add_method(
+        std,
+        id_lut!(promise),
+        script_args_def!(start_fn = NIL),
+        move |vm, args| {
+            let start_fn = script_value!(vm, args.start_fn);
+            let start_task = if start_fn.is_nil() {
+                None
+            } else if vm.bx.heap.is_fn(start_fn.into()) {
+                Some(vm.bx.heap.new_fn_ref(start_fn.as_object().unwrap()))
+            } else {
+                return script_err_wrong_value!(vm.trap(), "std.promise expects fn or nil");
             };
-            let handle = vm.bx.heap.new_handle(task_type, Box::new(handle_gc));
-            let array = vm.bx.heap.new_array();
-            let queue = vm.bx.heap.new_array_ref(array);
-            cx.script_data.tasks.tasks.borrow_mut().push(CxScriptTask {
-                max_depth,
-                start_task,
-                handle,
-                ended: false,
-                recv_pause: Default::default(),
-                send_pause: Default::default(),
-                queue,
-            });
-
-            handle.into()
+            create_task_handle(vm, promise_type, start_task, 1)
         },
     );
 }
