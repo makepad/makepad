@@ -157,7 +157,7 @@ pub struct DesktopButton {
 }
 
 impl Widget for DesktopButton {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -165,7 +165,7 @@ impl Widget for DesktopButton {
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(fe) => {
-                cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
+                cx.widget_action(uid, ButtonAction::Pressed(fe.modifiers));
                 self.animator_play(cx, ids!(hover.down));
             }
             Hit::FingerHoverIn(_) => {
@@ -176,18 +176,18 @@ impl Widget for DesktopButton {
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerLongPress(_) => {
-                cx.widget_action(uid, &scope.path, ButtonAction::LongPressed);
+                cx.widget_action(uid, ButtonAction::LongPressed);
             }
             Hit::FingerUp(fe) => {
                 if fe.is_over {
-                    cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                    cx.widget_action(uid, ButtonAction::Clicked(fe.modifiers));
                     if fe.device.has_hovers() {
                         self.animator_play(cx, ids!(hover.on));
                     } else {
                         self.animator_play(cx, ids!(hover.off));
                     }
                 } else {
-                    cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                    cx.widget_action(uid, ButtonAction::Released(fe.modifiers));
                     self.animator_play(cx, ids!(hover.off));
                 }
             }

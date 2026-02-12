@@ -1,4 +1,3 @@
-
 use makepad_platform::live_atomic::*;
 use makepad_widgets::*;
 
@@ -349,135 +348,135 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         let ui = self.ui.clone();
 
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_1.radio1,
             radios_demo_1.radio2,
             radios_demo_1.radio3,
             radios_demo_1.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_2.radio1,
             radios_demo_2.radio2,
             radios_demo_2.radio3,
             radios_demo_2.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_3.radio1,
             radios_demo_3.radio2,
             radios_demo_3.radio3,
             radios_demo_3.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_4.radio1,
             radios_demo_4.radio2,
             radios_demo_4.radio3,
             radios_demo_4.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_5.radio1,
             radios_demo_5.radio2,
             radios_demo_5.radio3,
             radios_demo_5.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_6.radio1,
             radios_demo_6.radio2,
             radios_demo_6.radio3,
             radios_demo_6.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_7.radio1,
             radios_demo_7.radio2,
             radios_demo_7.radio3,
             radios_demo_7.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(radios_demo_8.radio1, radios_demo_8.radio2))
+        ui.radio_button_set(cx, ids_array!(radios_demo_8.radio1, radios_demo_8.radio2))
             .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_9.radio1,
             radios_demo_9.radio2,
             radios_demo_9.radio3,
             radios_demo_9.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_10.radio1,
             radios_demo_10.radio2,
             radios_demo_10.radio3,
             radios_demo_10.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_11.radio1,
             radios_demo_11.radio2,
             radios_demo_11.radio3,
             radios_demo_11.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_12.radio1,
             radios_demo_12.radio2,
             radios_demo_12.radio3,
             radios_demo_12.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_13.radio1,
             radios_demo_13.radio2,
             radios_demo_13.radio3,
             radios_demo_13.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_14.radio1,
             radios_demo_14.radio2,
             radios_demo_14.radio3,
             radios_demo_14.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_15.radio1,
             radios_demo_15.radio2,
             radios_demo_15.radio3,
             radios_demo_15.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_16.radio1,
             radios_demo_16.radio2,
             radios_demo_16.radio3,
             radios_demo_16.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_17.radio1,
             radios_demo_17.radio2,
             radios_demo_17.radio3,
             radios_demo_17.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_18.radio1,
             radios_demo_18.radio2,
             radios_demo_18.radio3,
             radios_demo_18.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_19.radio1,
             radios_demo_19.radio2,
             radios_demo_19.radio3,
             radios_demo_19.radio4
         ))
         .selected(cx, actions);
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             radios_demo_20.radio1,
             radios_demo_20.radio2,
             radios_demo_20.radio3,
@@ -485,10 +484,10 @@ impl MatchEvent for App {
         ))
         .selected(cx, actions);
 
-        if let Some(txt) = self.ui.text_input(ids!(simpletextinput)).changed(&actions) {
+        if let Some(txt) = self.ui.text_input(cx, ids!(simpletextinput)).changed(&actions) {
             log!("TEXTBOX CHANGED {}", self.counter);
             self.counter += 1;
-            let lbl = self.ui.label(ids!(simpletextinput_outputbox));
+            let lbl = self.ui.label(cx, ids!(simpletextinput_outputbox));
             lbl.set_text(cx, &format!("{} {}", self.counter, txt));
         }
 
@@ -517,7 +516,7 @@ impl MatchEvent for App {
 
         use makepad_platform::makepad_live_tokenizer::colorhex::hex_bytes_to_u32;
 
-        if let Some(txt) = self.ui.text_input(ids!(theme_tint_color)).changed(&actions) {
+        if let Some(txt) = self.ui.text_input(cx, ids!(theme_tint_color)).changed(&actions) {
             cx.set_dsl_value(
                 live_id!(makepad_widgets),
                 live_id!(theme_desktop_dark),
@@ -527,55 +526,55 @@ impl MatchEvent for App {
             cx.reload_ui_dsl();
         }
 
-        if self.ui.button(ids!(basicbutton)).clicked(&actions) {
+        if self.ui.button(cx, ids!(basicbutton)).clicked(&actions) {
             log!("BASIC BUTTON CLICKED {}", self.counter);
             self.counter += 1;
-            let btn = self.ui.button(ids!(basicbutton));
+            let btn = self.ui.button(cx, ids!(basicbutton));
             btn.set_text(cx, &format!("Clicky clicky! {}", self.counter));
         }
 
-        if self.ui.button(ids!(blendbutton)).clicked(&actions) {
-            self.ui.image_blend(ids!(blendimage)).switch_image(cx);
+        if self.ui.button(cx, ids!(blendbutton)).clicked(&actions) {
+            self.ui.image_blend(cx, ids!(blendimage)).switch_image(cx);
         }
 
-        if self.ui.button(ids!(pageflipbutton_a)).clicked(&actions) {
+        if self.ui.button(cx, ids!(pageflipbutton_a)).clicked(&actions) {
             self.ui
-                .page_flip(ids!(page_flip))
+                .page_flip(cx, ids!(page_flip))
                 .set_active_page(cx, live_id!(page_a));
         }
 
-        if self.ui.button(ids!(pageflipbutton_b)).clicked(&actions) {
+        if self.ui.button(cx, ids!(pageflipbutton_b)).clicked(&actions) {
             self.ui
-                .page_flip(ids!(page_flip))
+                .page_flip(cx, ids!(page_flip))
                 .set_active_page(cx, live_id!(page_b));
         }
 
-        if self.ui.button(ids!(pageflipbutton_c)).clicked(&actions) {
+        if self.ui.button(cx, ids!(pageflipbutton_c)).clicked(&actions) {
             self.ui
-                .page_flip(ids!(page_flip))
+                .page_flip(cx, ids!(page_flip))
                 .set_active_page(cx, live_id!(page_c));
         }
 
-        if self.ui.button(ids!(styledbutton)).clicked(&actions) {
+        if self.ui.button(cx, ids!(styledbutton)).clicked(&actions) {
             log!("STYLED BUTTON CLICKED {}", self.counter);
             self.counter += 1;
-            let btn = self.ui.button(ids!(styledbutton));
+            let btn = self.ui.button(cx, ids!(styledbutton));
             btn.set_text(cx, &format!("Styled button clicked: {}", self.counter));
         }
 
-        if self.ui.button(ids!(find)).clicked(&actions) {}
+        if self.ui.button(cx, ids!(find)).clicked(&actions) {}
 
-        if self.ui.button(ids!(iconbutton)).clicked(&actions) {
+        if self.ui.button(cx, ids!(iconbutton)).clicked(&actions) {
             log!("ICON BUTTON CLICKED {}", self.counter);
             self.counter += 1;
-            let btn = self.ui.button(ids!(iconbutton));
+            let btn = self.ui.button(cx, ids!(iconbutton));
             btn.set_text(cx, &format!("Icon button clicked: {}", self.counter));
         }
 
-        if let Some(check) = self.ui.check_box(ids!(simplecheckbox)).changed(actions) {
+        if let Some(check) = self.ui.check_box(cx, ids!(simplecheckbox)).changed(actions) {
             log!("CHECK BUTTON CLICKED {} {}", self.counter, check);
             self.counter += 1;
-            let lbl = self.ui.label(ids!(simplecheckbox_output));
+            let lbl = self.ui.label(cx, ids!(simplecheckbox_output));
             lbl.set_text(cx, &format!("{} {}", self.counter, check));
         }
 
@@ -593,8 +592,10 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        cx.with_widget_tree(|cx| {
+            self.match_event(cx, event);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
+        });
     }
 }
 

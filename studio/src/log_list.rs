@@ -383,7 +383,7 @@ impl Widget for LogList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let log_list = self.view.portal_list(ids!(list));
+        let log_list = self.view.portal_list(cx, ids!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>().unwrap();
         if let Event::Actions(actions) = event {
@@ -413,15 +413,15 @@ impl Widget for LogList {
 impl LogListRef {
     pub fn reset_scroll(&self, cx: &mut Cx) {
         if let Some(inner) = self.borrow_mut() {
-            let log_list = inner.view.portal_list(ids!(list));
+            let log_list = inner.view.portal_list(cx, ids!(list));
             log_list.set_first_id_and_scroll(0, 0.0);
             log_list.redraw(cx);
         }
     }
 
-    pub fn is_at_end(&self) -> bool {
+    pub fn is_at_end(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.view.portal_list(ids!(list)).is_at_end()
+            inner.view.portal_list(cx, ids!(list)).is_at_end()
         } else {
             false
         }
@@ -429,7 +429,7 @@ impl LogListRef {
 
     pub fn set_tail(&self, cx: &mut Cx, tail: bool) {
         if let Some(inner) = self.borrow() {
-            let list = inner.view.portal_list(ids!(list));
+            let list = inner.view.portal_list(cx, ids!(list));
             list.set_tail_range(tail);
             if tail {
                 list.scroll_to_end(cx);
@@ -437,9 +437,9 @@ impl LogListRef {
         }
     }
 
-    pub fn scrolled(&self, actions: &Actions) -> bool {
+    pub fn scrolled(&self, cx: &Cx, actions: &Actions) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.view.portal_list(ids!(list)).scrolled(actions)
+            inner.view.portal_list(cx, ids!(list)).scrolled(actions)
         } else {
             false
         }

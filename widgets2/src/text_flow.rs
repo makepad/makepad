@@ -3,7 +3,9 @@ use crate::makepad_draw::text::{
     layouter::LaidoutText,
     selection::{Cursor, Selection},
 };
-use crate::{animator::*, makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    animator::*, makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+};
 use std::rc::Rc;
 
 script_mod! {
@@ -790,31 +792,10 @@ impl WidgetNode for TextFlow {
         self.area.redraw(cx);
     }
 
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        // Forward to all children - TextFlow items have computed IDs
-        if let Some(items) = self.items.as_ref() {
-            for (_id, (widget, _template)) in items.iter() {
-                widget.find_widgets(path, cached, results);
-            }
-        }
-    }
-
-    fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
-        WidgetRef::empty()
-    }
-
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
         if let Some(items) = self.items.as_ref() {
             for (_id, (widget, _template)) in items.iter() {
                 widget.find_widgets_from_point(cx, point, found);
-            }
-        }
-    }
-
-    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        if let Some(items) = self.items.as_ref() {
-            for (id, (widget, _template)) in items.iter() {
-                widget.widget_tree_walk_named(*id, nodes);
             }
         }
     }
@@ -862,7 +843,7 @@ impl Widget for TextFlow {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Handle child item events first
         for (id, (entry, _)) in self.items.as_mut().unwrap().iter_mut() {
-            scope.with_id(*id, |scope| {
+            cx.with_node(entry.widget_uid(), *id, entry.clone(), |cx| {
                 entry.handle_event(cx, event, scope);
             });
         }
@@ -1674,12 +1655,6 @@ impl WidgetNode for TextFlowLink {
         self.area.redraw(cx);
     }
 
-    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
-
-    fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
-        WidgetRef::empty()
-    }
-
     fn set_action_data(&mut self, data: std::sync::Arc<dyn ActionTrait>) {
         self.action_data.set_box(data)
     }
@@ -1725,7 +1700,6 @@ impl Widget for TextFlowLink {
                         cx.widget_action_with_data(
                             &self.action_data,
                             self.widget_uid(),
-                            &scope.path,
                             TextFlowLinkAction::Clicked {
                                 key_modifiers: fe.modifiers,
                             },
@@ -1745,7 +1719,6 @@ impl Widget for TextFlowLink {
                             cx.widget_action_with_data(
                                 &self.action_data,
                                 self.widget_uid(),
-                                &scope.path,
                                 TextFlowLinkAction::Clicked {
                                     key_modifiers: fe.modifiers,
                                 },

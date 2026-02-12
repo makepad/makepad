@@ -176,7 +176,7 @@ impl FoldButton {
 }
 
 impl Widget for FoldButton {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         let res = self.animator_handle_event(cx, event);
         if res.must_redraw() {
@@ -185,7 +185,6 @@ impl Widget for FoldButton {
             cx.widget_action_with_data(
                 &self.action_data,
                 uid,
-                &scope.path,
                 FoldButtonAction::Animating(self.active),
             );
             self.draw_bg.redraw(cx);
@@ -195,20 +194,10 @@ impl Widget for FoldButton {
             Hit::FingerDown(_fe) => {
                 if self.animator_in_state(cx, ids!(active.on)) {
                     self.animator_play(cx, ids!(active.off));
-                    cx.widget_action_with_data(
-                        &self.action_data,
-                        uid,
-                        &scope.path,
-                        FoldButtonAction::Closing,
-                    )
+                    cx.widget_action_with_data(&self.action_data, uid, FoldButtonAction::Closing)
                 } else {
                     self.animator_play(cx, ids!(active.on));
-                    cx.widget_action_with_data(
-                        &self.action_data,
-                        uid,
-                        &scope.path,
-                        FoldButtonAction::Opening,
-                    )
+                    cx.widget_action_with_data(&self.action_data, uid, FoldButtonAction::Opening)
                 }
                 self.animator_play(cx, ids!(hover.on));
             }

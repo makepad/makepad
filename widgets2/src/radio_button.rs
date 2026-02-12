@@ -383,7 +383,7 @@ impl Widget for RadioButton {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -415,12 +415,7 @@ impl Widget for RadioButton {
                 self.animator_play(cx, ids!(hover.on));
                 if self.animator_in_state(cx, ids!(active.off)) {
                     self.animator_play(cx, ids!(active.on));
-                    cx.widget_action_with_data(
-                        &self.action_data,
-                        uid,
-                        &scope.path,
-                        RadioButtonAction::Clicked,
-                    );
+                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
                 }
                 // Radio buttons don't toggle off when clicked again
             }
@@ -457,14 +452,13 @@ impl RadioButtonRef {
         }
     }
 
-    pub fn select(&self, cx: &mut Cx, scope: &mut Scope) {
+    pub fn select(&self, cx: &mut Cx, _scope: &mut Scope) {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.animator_in_state(cx, ids!(active.off)) {
                 inner.animator_play(cx, ids!(active.on));
                 cx.widget_action_with_data(
                     &inner.action_data,
                     inner.widget_uid(),
-                    &scope.path,
                     RadioButtonAction::Clicked,
                 );
             }

@@ -288,14 +288,24 @@ impl RunView {
 
 impl Widget for RunView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let run_view_id = scope.path.last().sub(self.window_id as u64);
+        let path = cx.widget_tree().path_to(self.widget_uid());
+        let run_view_id = path
+            .last()
+            .copied()
+            .unwrap_or(LiveId(0))
+            .sub(self.window_id as u64);
         let manager = &mut scope.data.get_mut::<AppData>().unwrap().build_manager;
         self.draw_run_view(cx, run_view_id, manager, walk);
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let run_view_id = scope.path.last().sub(self.window_id as u64);
+        let path = cx.widget_tree().path_to(self.widget_uid());
+        let run_view_id = path
+            .last()
+            .copied()
+            .unwrap_or(LiveId(0))
+            .sub(self.window_id as u64);
         let manager = &scope.data.get::<AppData>().unwrap().build_manager;
 
         self.animator_handle_event(cx, event);

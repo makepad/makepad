@@ -52,7 +52,6 @@ impl Widget for ExpandablePanel {
 
                 cx.widget_action(
                     self.widget_uid(),
-                    &scope.path,
                     ExpandablePanelAction::ScrolledAt(scrolled_at),
                 );
             }
@@ -61,7 +60,7 @@ impl Widget for ExpandablePanel {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // Apply the current panel margin before drawing
-        let panel_ref = self.view(ids!(panel));
+        let panel_ref = self.view(cx, ids!(panel));
         if let Some(mut panel) = panel_ref.borrow_mut() {
             panel.walk.margin.top = self.current_panel_margin;
         }
@@ -73,7 +72,7 @@ impl Widget for ExpandablePanel {
             touch_gesture.set_mode(ScrollMode::Swipe);
 
             // Limit the amount of dragging allowed for the panel
-            let panel_height = self.view(ids!(panel)).area().rect(cx).size.y;
+            let panel_height = self.view(cx, ids!(panel)).area().rect(cx).size.y;
             touch_gesture.set_range(0.0, panel_height - self.initial_offset);
 
             touch_gesture.reset_scrolled_at();

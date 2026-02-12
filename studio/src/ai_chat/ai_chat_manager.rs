@@ -1090,7 +1090,7 @@ impl AiChatManager {
         fs: &mut FileSystem,
     ) {
         // lets fetch all the sessions
-        let dock = ui.dock(ids!(dock));
+        let dock = ui.dock(cx, ids!(dock));
         for (tab_id, file_node_id) in &fs.tab_id_to_file_node_id {
             if *file_node_id == chat_id {
                 dock.item(*tab_id).redraw(cx);

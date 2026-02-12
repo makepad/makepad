@@ -1517,9 +1517,7 @@ impl Widget for Slider {
 
         // alright lets match our designer against the slider backgdrop
         match event.hit_designer(cx, self.draw_bg.area()) {
-            HitDesigner::DesignerPick(_e) => {
-                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
-            }
+            HitDesigner::DesignerPick(_e) => cx.widget_action(uid, WidgetDesignAction::PickedBody),
             _ => (),
         }
 
@@ -1536,11 +1534,7 @@ impl Widget for Slider {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
-                    cx.widget_action(
-                        uid,
-                        &scope.path,
-                        SliderAction::TextSlide(self.to_external()),
-                    );
+                    cx.widget_action(uid, SliderAction::TextSlide(self.to_external()));
                 }
                 TextInputAction::Escaped => {
                     self.update_text_input(cx);
@@ -1552,10 +1546,10 @@ impl Widget for Slider {
         if self.hover_actions_enabled {
             match event.hits_with_capture_overload(cx, self.label_area, true) {
                 Hit::FingerHoverIn(fh) => {
-                    cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
+                    cx.widget_action(uid, SliderAction::LabelHoverIn(fh.rect));
                 }
                 Hit::FingerHoverOut(_) => {
-                    cx.widget_action(uid, &scope.path, SliderAction::LabelHoverOut);
+                    cx.widget_action(uid, SliderAction::LabelHoverOut);
                 }
                 _ => (),
             }
@@ -1594,7 +1588,7 @@ impl Widget for Slider {
 
                 self.animator_play(cx, ids!(drag.on));
                 self.dragging = Some(self.relative_value);
-                cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
+                cx.widget_action(uid, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
@@ -1612,7 +1606,7 @@ impl Widget for Slider {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 self.dragging = None;
-                cx.widget_action(uid, &scope.path, SliderAction::EndSlide(self.to_external()));
+                cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerMove(fe) => {
@@ -1635,7 +1629,7 @@ impl Widget for Slider {
                     self.set_internal(self.to_external());
                     self.draw_bg.redraw(cx);
                     self.update_text_input(cx);
-                    cx.widget_action(uid, &scope.path, SliderAction::Slide(self.to_external()));
+                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
                 }
             }
             _ => (),

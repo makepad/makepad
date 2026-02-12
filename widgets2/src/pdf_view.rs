@@ -316,11 +316,6 @@ impl WidgetNode for PdfPageView {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
-    fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
-        WidgetRef::empty()
-    }
-    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
-
     fn selection_text_len(&self) -> usize {
         self.text_tracker.total_len()
     }

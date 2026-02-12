@@ -289,18 +289,18 @@ impl Widget for TabBar {
         };
 
         if let Some(tab_id) = self.next_active_tab_id.take() {
-            cx.widget_action(uid, &scope.path, TabBarAction::TabWasPressed(tab_id));
+            cx.widget_action(uid, TabBarAction::TabWasPressed(tab_id));
         }
         for (tab_id, (tab, _)) in self.tabs.iter_mut() {
             tab.handle_event_with(cx, event, &mut |cx, action| match action {
                 TabAction::WasPressed => {
-                    cx.widget_action(uid, &scope.path, TabBarAction::TabWasPressed(*tab_id));
+                    cx.widget_action(uid, TabBarAction::TabWasPressed(*tab_id));
                 }
                 TabAction::CloseWasPressed => {
-                    cx.widget_action(uid, &scope.path, TabBarAction::TabCloseWasPressed(*tab_id));
+                    cx.widget_action(uid, TabBarAction::TabCloseWasPressed(*tab_id));
                 }
                 TabAction::ShouldTabStartDrag => {
-                    cx.widget_action(uid, &scope.path, TabBarAction::ShouldTabStartDrag(*tab_id));
+                    cx.widget_action(uid, TabBarAction::ShouldTabStartDrag(*tab_id));
                 }
                 TabAction::ShouldTabStopDrag => {}
             });

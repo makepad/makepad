@@ -667,7 +667,6 @@ impl Widget for HtmlLink {
                     } else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
                         cx.widget_action(
                             self.widget_uid(),
-                            &scope.path,
                             HtmlLinkAction::SecondaryClicked {
                                 url: self.url.clone(),
                                 key_modifiers: fe.modifiers,
@@ -685,7 +684,6 @@ impl Widget for HtmlLink {
                 Hit::FingerLongPress(_) => {
                     cx.widget_action(
                         self.widget_uid(),
-                        &scope.path,
                         HtmlLinkAction::SecondaryClicked {
                             url: self.url.clone(),
                             key_modifiers: Default::default(),
@@ -703,7 +701,6 @@ impl Widget for HtmlLink {
                     if fu.is_over && fu.is_primary_hit() && fu.was_tap() {
                         cx.widget_action(
                             self.widget_uid(),
-                            &scope.path,
                             HtmlLinkAction::Clicked {
                                 url: self.url.clone(),
                                 key_modifiers: fu.modifiers,

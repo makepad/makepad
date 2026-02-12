@@ -538,8 +538,8 @@ impl ScriptHook for TextInput {
 }
 
 impl TextInput {
-    fn emit_change(&mut self, cx: &mut Cx, uid: WidgetUid, path: &HeapLiveIdPath) {
-        cx.widget_action(uid, path, TextInputAction::Changed(self.text.clone()));
+    fn emit_change(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        cx.widget_action(uid, TextInputAction::Changed(self.text.clone()));
         if let Some(handler) = self.on_change.as_object() {
             let text = self.text.clone();
             cx.with_vm(|vm| {
@@ -549,18 +549,8 @@ impl TextInput {
         }
     }
 
-    fn emit_return(
-        &mut self,
-        cx: &mut Cx,
-        uid: WidgetUid,
-        path: &HeapLiveIdPath,
-        mods: KeyModifiers,
-    ) {
-        cx.widget_action(
-            uid,
-            path,
-            TextInputAction::Returned(self.text.clone(), mods),
-        );
+    fn emit_return(&mut self, cx: &mut Cx, uid: WidgetUid, mods: KeyModifiers) {
+        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
         if let Some(handler) = self.on_return.as_object() {
             let text = self.text.clone();
             cx.with_vm(|vm| {
@@ -1072,7 +1062,7 @@ impl TextInput {
         self.history.force_new_edit_group();
     }
 
-    fn handle_focus_lost(&mut self, cx: &mut Cx, scope_path: &HeapLiveIdPath, uid: WidgetUid) {
+    fn handle_focus_lost(&mut self, cx: &mut Cx, uid: WidgetUid) {
         self.animator_play(cx, ids!(focus.off));
         self.animator_play(cx, ids!(blink.on));
         cx.stop_timer(self.blink_timer);
@@ -1084,7 +1074,7 @@ impl TextInput {
             }
             _ => {}
         }
-        cx.widget_action(uid, scope_path, TextInputAction::KeyFocusLost);
+        cx.widget_action(uid, TextInputAction::KeyFocusLost);
     }
 
     fn ceil_word_boundary(&self, index: usize) -> usize {
@@ -1241,7 +1231,7 @@ impl Widget for TextInput {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
             self.draw_cursor.redraw(cx);
@@ -1282,7 +1272,7 @@ impl Widget for TextInput {
                 // Update focus state in cx
                 cx.set_key_focus(Area::Empty);
                 // Handle focus loss locally
-                self.handle_focus_lost(cx, &scope.path, uid);
+                self.handle_focus_lost(cx, uid);
             }
         }
 
@@ -1297,10 +1287,10 @@ impl Widget for TextInput {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
+                cx.widget_action(uid, TextInputAction::KeyFocus);
             }
             Hit::KeyFocusLost(_) => {
-                self.handle_focus_lost(cx, &scope.path, uid);
+                self.handle_focus_lost(cx, uid);
             }
             Hit::KeyDown(
                 kev @ KeyEvent {
@@ -1318,7 +1308,7 @@ impl Widget for TextInput {
                 self.reset_blink_timer(cx);
                 let did_move = self.move_cursor_left(cx, keep_selection);
                 if !did_move {
-                    cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev));
+                    cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev));
                 }
             }
             Hit::KeyDown(
@@ -1337,7 +1327,7 @@ impl Widget for TextInput {
                 self.reset_blink_timer(cx);
                 let did_move = self.move_cursor_right(cx, keep_selection);
                 if !did_move {
-                    cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev));
+                    cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev));
                 }
             }
             Hit::KeyDown(
@@ -1356,9 +1346,7 @@ impl Widget for TextInput {
                 self.reset_blink_timer(cx);
                 match self.move_cursor_up(cx, keep_selection) {
                     Ok(true) => {}
-                    Ok(false) => {
-                        cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev))
-                    }
+                    Ok(false) => cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev)),
                     Err(_) => warning!(
                         "can't move cursor up because layout was invalidated by earlier event"
                     ),
@@ -1380,9 +1368,7 @@ impl Widget for TextInput {
                 self.reset_blink_timer(cx);
                 match self.move_cursor_down(cx, keep_selection) {
                     Ok(true) => {}
-                    Ok(false) => {
-                        cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev))
-                    }
+                    Ok(false) => cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev)),
                     Err(_) => warning!(
                         "can't move cursor down because layout was invalidated by earlier event"
                     ),
@@ -1551,14 +1537,14 @@ impl Widget for TextInput {
                 ..
             }) => {
                 cx.hide_text_ime();
-                self.emit_return(cx, uid, &scope.path, mods);
+                self.emit_return(cx, uid, mods);
             }
 
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
-                cx.widget_action(uid, &scope.path, TextInputAction::Escaped);
+                cx.widget_action(uid, TextInputAction::Escaped);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
@@ -1576,7 +1562,7 @@ impl Widget for TextInput {
                     },
                 );
                 self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid, &scope.path);
+                self.emit_change(cx, uid);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -1598,7 +1584,7 @@ impl Widget for TextInput {
                     },
                 );
                 self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid, &scope.path);
+                self.emit_change(cx, uid);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
@@ -1620,7 +1606,7 @@ impl Widget for TextInput {
                     },
                 );
                 self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid, &scope.path);
+                self.emit_change(cx, uid);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -1631,7 +1617,7 @@ impl Widget for TextInput {
                     return;
                 }
                 self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid, &scope.path);
+                self.emit_change(cx, uid);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -1642,7 +1628,7 @@ impl Widget for TextInput {
                     return;
                 }
                 self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid, &scope.path);
+                self.emit_change(cx, uid);
             }
             Hit::TextInput(TextInputEvent {
                 input,
@@ -1666,7 +1652,7 @@ impl Widget for TextInput {
                         );
                         self.composition_length = 0;
                         self.draw_bg.redraw(cx);
-                        self.emit_change(cx, uid, &scope.path);
+                        self.emit_change(cx, uid);
                     }
                     return;
                 }
@@ -1732,7 +1718,7 @@ impl Widget for TextInput {
                 }
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid, &scope.path);
+                self.emit_change(cx, uid);
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
                 // iOS autocorrect sends range replacement events
@@ -1766,7 +1752,7 @@ impl Widget for TextInput {
 
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid, &scope.path);
+                self.emit_change(cx, uid);
             }
             Hit::TextCopy(event) => {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());
@@ -1785,11 +1771,11 @@ impl Widget for TextInput {
                         },
                     );
                     self.draw_bg.redraw(cx);
-                    self.emit_change(cx, uid, &scope.path);
+                    self.emit_change(cx, uid);
                 }
             }
             Hit::KeyDown(event) => {
-                cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(event));
+                cx.widget_action(uid, TextInputAction::KeyDownUnhandled(event));
             }
             _ => {}
         }
