@@ -19,12 +19,16 @@ script_mod! {
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct StudioCodeEditor {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[live]
     pub editor: CodeEditor,
 }
 
 impl WidgetNode for StudioCodeEditor {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, cx: &mut Cx) -> Walk {
         self.editor.walk(cx)
     }
