@@ -4,6 +4,7 @@ use makepad_script::makepad_live_id::*;
 use makepad_script::makepad_math::*;
 use makepad_script::traits::*;
 use makepad_script::*;
+use std::collections::BTreeMap;
 
 pub fn main() {
     let vm = &mut ScriptVm {
@@ -126,6 +127,23 @@ pub fn main() {
                         fn gc(&mut self) {}
                     }
                     vm.bx.heap.new_handle(ht, Box::new(DummyHandle)).into()
+                },
+            );
+
+            // Returns a BTreeMap<String, Vec<String>> like HTTP headers
+            vm.add_method(
+                obj,
+                id_lut!(return_headers),
+                script_args_def!(),
+                |vm, _args| {
+                    let mut headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                    headers.insert("Content-Type".to_string(), vec!["text/html".to_string()]);
+                    headers.insert(
+                        "Set-Cookie".to_string(),
+                        vec!["session=abc123".to_string(), "lang=en".to_string()],
+                    );
+                    headers.insert("X-Custom".to_string(), vec!["hello".to_string()]);
+                    headers.script_to_value(vm)
                 },
             );
         }
@@ -368,6 +386,20 @@ pub fn main() {
         let h = s.return_handle();
         assert(h.return_three() == 3)
 
+        // BTreeMap<String, Vec<String>> test (like HTTP headers)
+        let headers = s.return_headers()
+        // Access by string key with bracket notation
+        let ct = headers["Content-Type"]
+        assert(ct[0] == "text/html")
+        let sc = headers["Set-Cookie"]
+        assert(sc[0] == "session=abc123")
+        assert(sc[1] == "lang=en")
+        let xc = headers["X-Custom"]
+        assert(xc[0] == "hello")
+        // Verify that headers work as a proper string-keyed map
+        // This should NOT crash or error
+        println(headers)
+
         // check enum
         let EnumTest = #(EnumTest::script_api(vm));
         let x = EnumTest.Bare
@@ -573,8 +605,7 @@ pub fn main() {
         //   for v in set        - value only (array, object, range)
         //   for k v in set      - key/index + value (object: key,value; array: index,value; range: index,value)
         //   for i k v in set    - index + key + value (object only, errors on array)
-        // NOTE: Object iteration only works on the "vec" part (keys using :=)
-        //       not the "map" part (keys using :). This is by design.
+        // Object iteration works on both "vec" (keys using :=) and "map" (keys using :) parts.
         fn test_for_destructuring() {
             let arr = [10, 20, 30]
             let obj = {a := 1, b := 2, c := 3}  // Use := to put in vec (iterable), not map
@@ -698,6 +729,70 @@ pub fn main() {
             assert(values6 == [0 1 2])
         }
         test_for_paren_style()
+
+        // for k v in on map-based objects (inline {"key": val} syntax)
+        fn test_for_map_objects() {
+            let map_obj = {"alpha": 1, "beta": 2, "gamma": 3}
+            let count = 0
+            let vals = []
+            for k v in map_obj {
+                count += 1
+                vals.push(v)
+            }
+            assert(count == 3)
+            assert(vals.len() == 3)
+
+            // for v in map object (value only)
+            let vals2 = []
+            for v in map_obj { vals2.push(v) }
+            assert(vals2.len() == 3)
+
+            // mixed vec + map object
+            let mixed = {a := 10, "b": 20}
+            let mixed_vals = []
+            for k v in mixed {
+                mixed_vals.push(v)
+            }
+            assert(mixed_vals.len() == 2)
+        }
+        test_for_map_objects()
+
+        // obj[variable] = val — bracket assign with variable key must resolve the variable
+        fn test_bracket_assign_variable_key() {
+            // string variable as key
+            let obj = {}
+            let key = "hello"
+            obj[key] = 42
+            assert(obj["hello"] == 42)
+
+            // variable key in a for loop over map entries
+            let target = {}
+            let src = {"a": 1, "b": 2, "c": 3}
+            for k v in src {
+                target[k] = v
+            }
+            assert(target["a"] == 1)
+            assert(target["b"] == 2)
+            assert(target["c"] == 3)
+
+            // array index assign
+            let arr = [0, 0, 0]
+            arr[1] = 99
+            assert(arr[1] == 99)
+
+            // array index assign with variable
+            let arr2 = [10, 20, 30]
+            let idx = 2
+            arr2[idx] = 777
+            assert(arr2[2] == 777)
+
+            // variable holding a LiveId key
+            let obj2 = {x := 10, y := 20}
+            let k2 = @x
+            obj2[k2] = 99
+            assert(obj2.x == 99)
+        }
+        test_bracket_assign_variable_key()
 
         // for loop return tests
 

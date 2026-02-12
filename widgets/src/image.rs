@@ -109,6 +109,11 @@ pub struct Image {
     next_frame: NextFrame,
     #[live]
     fit: ImageFit,
+    /// HTTP/file resource handle for loading image data (set via `http_resource()` or `crate_resource()`)
+    #[live]
+    src: Option<ScriptHandleRef>,
+    #[rust]
+    src_loaded: bool,
     #[rust]
     async_image_path: Option<PathBuf>,
     #[rust]
@@ -124,6 +129,51 @@ impl ImageCacheImpl for Image {
 
     fn set_texture(&mut self, texture: Option<Texture>, _id: usize) {
         self.texture = texture;
+    }
+}
+
+impl Image {
+    fn load_from_resource(&mut self, cx: &mut Cx) {
+        if self.src_loaded {
+            return;
+        }
+        let Some(ref handle_ref) = self.src else {
+            self.src_loaded = true;
+            return;
+        };
+        let handle = handle_ref.as_handle();
+        let data = if let Some(data) = cx.get_resource(handle) {
+            data
+        } else {
+            cx.script_data.resources.load_all_resources();
+            match cx.get_resource(handle) {
+                Some(data) => data,
+                None => {
+                    let resources = cx.script_data.resources.resources.borrow();
+                    if let Some(res) = resources.iter().find(|r| r.handle == handle) {
+                        if res.is_error() {
+                            drop(resources);
+                            self.src_loaded = true;
+                            return;
+                        }
+                    } else {
+                        self.src_loaded = true;
+                    }
+                    return; // Not yet loaded (HTTP pending) — retry on next draw
+                }
+            }
+        };
+        self.src_loaded = true;
+        self.lazy_create_image_cache(cx);
+        let path = {
+            let resources = cx.script_data.resources.resources.borrow();
+            resources
+                .iter()
+                .find(|r| r.handle == handle)
+                .map(|r| PathBuf::from(&r.abs_path))
+                .unwrap_or_else(|| PathBuf::from("http_resource"))
+        };
+        let _ = self.load_image_from_data_async(cx, &path, Arc::new((*data).clone()));
     }
 }
 
@@ -245,6 +295,7 @@ impl Widget for Image {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.load_from_resource(cx);
         self.draw_walk_image(cx, walk)
     }
 }

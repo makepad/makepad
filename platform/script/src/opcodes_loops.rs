@@ -127,11 +127,11 @@ impl<'a> ScriptVm<'a> {
                     return;
                 }
             } else {
-                if self.bx.heap.vec_len(obj) > 0 {
+                if self.bx.heap.iter_len(obj) > 0 {
                     let kv = self
                         .bx
                         .heap
-                        .vec_key_value(obj, 0, self.bx.threads.cur().trap.pass());
+                        .iter_key_value(obj, 0, self.bx.threads.cur().trap.pass());
                     self.begin_for_loop_inner(
                         jump, source, value_id, index_id, key_id, kv.value, 0.0, kv.key,
                     );
@@ -272,11 +272,11 @@ impl<'a> ScriptVm<'a> {
                         self.bail("source not object in end_for_loop/object");
                         return;
                     };
-                    if index >= self.bx.heap.vec_len(obj) as f64 {
+                    if index >= self.bx.heap.iter_len(obj) as f64 {
                         self.break_for_loop();
                         return;
                     }
-                    let kv = self.bx.heap.vec_key_value(
+                    let kv = self.bx.heap.iter_key_value(
                         obj,
                         index as usize,
                         self.bx.threads.cur().trap.pass(),
