@@ -70,7 +70,7 @@ impl MatchEvent for App {
                             }
                         }
                     }
-                    on_complete: || task.end(total.trim())
+                    on_complete: || task.resolve(total.trim())
                     on_error: |e| ~e
                 }
                 task
@@ -86,7 +86,7 @@ impl MatchEvent for App {
                     method: net.HttpMethod.GET
                 }
                 net.http_request(req) do net.HttpEvents{
-                    on_response: |res| task.end(res.body)
+                    on_response: |res| task.resolve(res.body)
                     on_error: |e| ~e
                 }
                 task
@@ -102,7 +102,7 @@ impl MatchEvent for App {
                     on_response: |res| {
                         let data = res.body.parse_json()
                         let image = ok{data[prompt_id].outputs[model.save].images[0]}
-                        task.end(image)
+                        task.resolve(image)
                     }
                     on_error: |e| ~e
                 }
@@ -169,7 +169,7 @@ impl MatchEvent for App {
                     body:{prompt:flow client_id:"8a327a3e4961419ea7386c542f0ea491"}.to_json()
                 }
                 net.http_request(req) do net.HttpEvents{
-                    on_response: |res| task.end(ok{res.body.parse_json().prompt_id})
+                    on_response: |res| task.resolve(ok{res.body.parse_json().prompt_id})
                 }
                 task
             }
@@ -190,7 +190,7 @@ impl MatchEvent for App {
                 }) do run.ChildEvents{
                     on_stdout: |s| {}
                     on_stderr: |s| std.println(s)
-                    on_term: || task.end()
+                    on_term: || task.resolve()
                 }
                 task
             }
@@ -259,7 +259,7 @@ impl MatchEvent for App {
 
                 let display = displays[display_iter % displays.len()]
                 display_iter += 1
-                let image_prompt = openai_completion(messages).last()
+                let image_prompt = openai_completion(messages).await()
                 /*
                 let image_prompt = {
                     visual_description:prompt.prompt,
@@ -279,7 +279,7 @@ impl MatchEvent for App {
 
                 std.println("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
 
-                let prompt_id = comfy_render(image_prompt display model).last()
+                let prompt_id = comfy_render(image_prompt display model).await()
                 // this loop needs some more features like match or a for loop with array destructuring'
                 loop{
                     let d = web_socket.next();
@@ -289,14 +289,14 @@ impl MatchEvent for App {
                     }
                 }
                 std.println("Fetching last image from comfy");
-                let image = comfy_last_image(prompt_id, model).last()
+                let image = comfy_last_image(prompt_id, model).await()
                 // fetch the image from comfy
-                let data = comfy_image_download(image).last()
+                let data = comfy_image_download(image).await()
                 let path = "/Users/admin/makepad/makepad/local/eink.png"
                 fs.write(path data)
 
                 std.println("Uploading to " + display.ip)
-                eink_upload_image(display path).last()
+                eink_upload_image(display path).await()
                 let set_prompt = image_prompt.visual_description + " - " + image_prompt.style_and_keywords
                 let set_display = display
                 std.println("DONE!")
