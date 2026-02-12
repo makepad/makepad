@@ -1511,7 +1511,8 @@ fn dispatch_shape(
 
 #[derive(Script, Widget)]
 pub struct Vector {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]

@@ -134,6 +134,14 @@ impl ScriptThread {
         self.thread_id
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.is_paused
+    }
+
+    pub fn thread_id(&self) -> ScriptThreadId {
+        self.thread_id
+    }
+
     pub fn truncate_bases(&mut self, bases: StackBases, heap: &mut ScriptHeap) {
         self.tries.truncate(bases.tries);
         self.loops.truncate(bases.loops);

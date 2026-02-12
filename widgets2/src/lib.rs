@@ -20,6 +20,7 @@ pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 pub mod theme_desktop_skeleton;
 pub mod widget;
+pub mod widget_async;
 pub mod widget_match_event;
 pub mod widget_tree;
 
@@ -195,6 +196,10 @@ pub use crate::{
         WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
         WidgetActionsApi, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister, WidgetRegistry,
         WidgetSet, WidgetSetIterator, WidgetUid,
+    },
+    widget_async::{
+        set_widget_async_trace, CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId,
+        ScriptAsyncResult,
     },
     widget_match_event::WidgetMatchEvent,
     widget_tree::CxWidgetExt,

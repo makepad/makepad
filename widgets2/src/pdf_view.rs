@@ -274,7 +274,8 @@ enum PageDrawState {
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct PdfPageView {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]
@@ -308,7 +309,9 @@ pub struct PdfPageView {
 }
 
 impl WidgetNode for PdfPageView {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }

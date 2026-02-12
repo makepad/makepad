@@ -317,7 +317,8 @@ impl ChartViewport {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChartView {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]

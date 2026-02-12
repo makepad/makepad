@@ -581,7 +581,8 @@ pub enum HtmlLinkAction {
 
 #[derive(Script, Widget, Animator)]
 pub struct HtmlLink {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]

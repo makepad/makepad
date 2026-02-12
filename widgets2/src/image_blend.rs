@@ -51,7 +51,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct ImageBlend {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]

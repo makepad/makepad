@@ -255,7 +255,8 @@ impl DrawMapVector {
 
 #[derive(Script, Widget)]
 pub struct MapView {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]
