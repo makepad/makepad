@@ -2,7 +2,12 @@ use {
     crate::makepad_draw::event::FingerLongPressEvent,
     crate::{
         animator::*, makepad_derive_widget::*, makepad_draw::*, makepad_script::ScriptFnRef,
-        scroll_bars::ScrollBars, widget::*, widget_tree::CxWidgetExt,
+        scroll_bars::ScrollBars,
+        widget::*,
+        widget_async::{
+            CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult,
+        },
+        widget_tree::CxWidgetExt,
     },
 };
 
@@ -112,7 +117,10 @@ pub struct View {
     pub debug_stream: bool,
 
     #[live]
-    render: Option<ScriptFnRef>,
+    on_render: ScriptFnRef,
+
+    #[rust]
+    script_async: ScriptAsyncCalls,
 
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
@@ -188,6 +196,10 @@ impl ScriptHook for View {
                         };
 
                         if let Some(id) = id {
+                            if !WidgetRef::value_is_newable_widget(vm, kv.value) {
+                                continue;
+                            }
+
                             if apply.is_reload() {
                                 self.live_update_order.push(id);
                             }
@@ -257,6 +269,21 @@ pub enum ViewAction {
 }
 
 impl View {
+    fn make_render_me(&self, vm: &mut ScriptVm) -> ScriptValue {
+        if self.source.is_zero() {
+            return NIL;
+        }
+
+        let source_obj = self.source.as_object();
+        let source_proto = vm.bx.heap.proto(source_obj);
+        let proto = if source_proto.as_object().is_some() {
+            source_proto
+        } else {
+            source_obj.into()
+        };
+        vm.bx.heap.new_with_proto_no_vec(proto).into()
+    }
+
     pub fn set_debug_dump(&mut self, cx: &mut Cx, debug: bool) {
         if let Some(draw_list) = &self.draw_list {
             cx.draw_lists[draw_list.id()].debug_dump = debug;
@@ -538,6 +565,9 @@ impl WidgetNode for View {
 
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
         for (_, child) in &mut self.children {
             child.redraw(cx);
         }
@@ -619,6 +649,42 @@ impl WidgetNode for View {
 }
 
 impl Widget for View {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(render) {
+            let me = self.make_render_me(vm);
+            return vm.with_cx_mut(|cx| {
+                cx.widget_to_script_async_call_fwd(
+                    self.uid,
+                    &mut self.script_async,
+                    me,
+                    self.source.clone(),
+                    self.on_render.clone(),
+                    args,
+                    id!(render),
+                )
+            });
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
+    fn script_result(&mut self, vm: &mut ScriptVm, id: ScriptAsyncId, result: ScriptValue) {
+        let Some(call) = self.script_async.take(id) else {
+            return;
+        };
+
+        if call.method() == id!(render) && !result.is_err() {
+            if let Some(me_obj) = call.me().as_object() {
+                self.script_apply(vm, &Apply::Reload, &mut Scope::empty(), me_obj.into());
+                self.redraw(vm.cx_mut());
+            }
+        }
+    }
+
     fn is_interactive(&self) -> bool {
         self.cursor.is_some() || self.animator.is_defined
     }

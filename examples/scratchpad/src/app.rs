@@ -7,7 +7,7 @@ script_mod! {
     use mod.net
 
     // ---- Templates ----
-
+    
     let ResultCard = RoundedView{
         width: Fill height: Fit
         padding: 14 flow: Down spacing: 6
@@ -16,7 +16,7 @@ script_mod! {
         draw_bg.border_size: 1.0
         draw_bg.border_color: #x3a3a3a
 
-        title := Label{text: "" draw_text.color: #x6af draw_text.text_style: theme.font_bold{font_size: 13}}
+        title := Label{text: "123" draw_text.color: #x6af draw_text.text_style: theme.font_bold{font_size: 13}}
         url := Label{text: "" draw_text.color: #x5a5 draw_text.text_style.font_size: 9}
         snippet := Label{text: "" draw_text.color: #xaaa draw_text.text_style.font_size: 11}
     }
@@ -90,21 +90,24 @@ script_mod! {
                     results := ScrollYView{
                         width: Fill height: Fill
                         padding: 16 flow: Down spacing: 10
-                        render: ||{
+                        new_batch: true
+                        on_render: ||{
                             if results.len() == 0
                                 EmptyState{}
                             else for result in results{
                                 ResultCard{
-                                    title.text: result.title
+                                   title.text: result.title
+                                   url.text : result.url
+                                   snippet.text: result.snippet
                                 }
                             }
                         }
+                        EmptyState{}
                     }
                 }
             }
         }
     }
-
     // ---- Logic ----
     // These use script features (var, fn) that run in the script VM.
     // They will work once the script engine supports them fully.
@@ -120,6 +123,7 @@ script_mod! {
                 let doc = res.body.to_string().parse_html()
                 let links = doc.query("a.result__a").array()
                 let snippets = doc.query("a.result__snippet").array()
+                results.clear()
                 for i, link in links {
                     results.push({
                         title: link.text
