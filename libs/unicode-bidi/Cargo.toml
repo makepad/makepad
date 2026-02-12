@@ -72,5 +72,8 @@ std = []
 unstable = []
 with_serde = ["serde"]
 
+[lints.rust.unexpected_cfgs]
+level = "allow"
+
 [badges.appveyor]
 repository = "servo/unicode-bidi"
