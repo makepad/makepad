@@ -609,11 +609,17 @@ fn derive_live_impl_inner(
             tb.ident(&field.name).add(":");
 
             if let Some(attr) = field.attrs.iter().find(|a| {
-                a.name == "live" || a.name == "deref" || a.name == "rust" || a.name == "calc"
+                a.name == "live"
+                    || a.name == "deref"
+                    || a.name == "rust"
+                    || a.name == "calc"
+                    || a.name == "uid"
             }) {
                 if attr.args.is_none() || attr.args.as_ref().unwrap().is_empty() {
                     if attr.name == "live" || attr.name == "deref" {
                         tb.add("LiveNew::new(cx)");
+                    } else if attr.name == "uid" {
+                        tb.add("WidgetUid::new()");
                     } else {
                         tb.add("Default::default()");
                     }

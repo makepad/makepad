@@ -46,6 +46,7 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Icon {
+    #[uid] uid: WidgetUid,
     #[redraw]
     #[live]
     draw_bg: DrawQuad,

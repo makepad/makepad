@@ -178,6 +178,7 @@ enum DrawState {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Splitter {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 

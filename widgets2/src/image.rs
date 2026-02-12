@@ -79,6 +79,7 @@ pub enum ImageAnimation {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Image {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]

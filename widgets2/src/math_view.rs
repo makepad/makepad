@@ -47,6 +47,7 @@ struct MathComponent {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct MathView {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]

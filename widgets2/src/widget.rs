@@ -9,11 +9,20 @@ use {
     std::fmt,
     std::fmt::{Debug, Error, Formatter},
     std::rc::Rc,
+    std::sync::atomic::{AtomicU64, Ordering},
     std::sync::Arc,
 };
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+static WIDGET_UID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WidgetUid(pub u64);
+
+impl WidgetUid {
+    pub fn new() -> Self {
+        Self(WIDGET_UID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 pub trait WidgetDesign: WidgetNode {}
 
@@ -25,6 +34,9 @@ pub enum WidgetDesignAction {
 }
 
 pub trait WidgetNode: ScriptApply {
+    fn widget_uid(&self) -> WidgetUid {
+        WidgetUid(0)
+    }
     fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign> {
         return None;
     }
@@ -112,10 +124,6 @@ pub trait Widget: WidgetNode {
         results
     }
 
-    fn widget_uid(&self) -> WidgetUid {
-        return WidgetUid(self as *const _ as *const () as u64);
-    }
-
     fn draw_3d(&mut self, _cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
         DrawStep::done()
     }
@@ -168,7 +176,6 @@ pub trait Widget: WidgetNode {
     fn disabled(&self, _cx: &Cx) -> bool {
         false
     }
-
 
     fn ref_cast_type_id(&self) -> TypeId
     where

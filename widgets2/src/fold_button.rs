@@ -99,6 +99,7 @@ pub enum FoldButtonAction {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct FoldButton {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]

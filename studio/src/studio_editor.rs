@@ -19,6 +19,7 @@ script_mod! {
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct StudioCodeEditor {
+    #[uid] uid: WidgetUid,
     #[live]
     pub editor: CodeEditor,
 }

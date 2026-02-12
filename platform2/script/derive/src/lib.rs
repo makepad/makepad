@@ -42,6 +42,7 @@ pub fn script_err_gen(input: TokenStream) -> TokenStream {
         walk,
         layout,
         deref,
+        uid,
     )
 )]
 

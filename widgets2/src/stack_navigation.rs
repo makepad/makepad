@@ -432,6 +432,9 @@ impl Widget for StackNavigation {
 }
 
 impl WidgetNode for StackNavigation {
+    fn widget_uid(&self) -> WidgetUid {
+        self.view.widget_uid()
+    }
     fn walk(&mut self, cx: &mut Cx) -> Walk {
         self.view.walk(cx)
     }

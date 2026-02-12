@@ -60,6 +60,7 @@ pub enum FoldHeaderAction {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct FoldHeader {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 

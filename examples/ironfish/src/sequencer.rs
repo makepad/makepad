@@ -102,6 +102,7 @@ pub struct SeqButtonId(pub LiveId);
 
 #[derive(Live, Widget)]
 pub struct Sequencer {
+    #[uid] uid: WidgetUid,
     #[redraw]
     #[rust]
     area: Area,

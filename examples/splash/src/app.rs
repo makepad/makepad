@@ -1734,6 +1734,7 @@ impl AppMain for App {
 // TestDraw widget with draw_quad and draw_text shaders
 #[derive(Script, ScriptHook, Widget)]
 pub struct TestDraw {
+    #[uid] uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[layout]
@@ -1914,6 +1915,7 @@ impl Widget for ScrollbarTestList {
 // FileTreeDemo widget demonstrating FileTree usage
 #[derive(Script, ScriptHook, Widget)]
 pub struct FileTreeDemo {
+    #[uid] uid: WidgetUid,
     #[redraw]
     #[live]
     file_tree: FileTree,
