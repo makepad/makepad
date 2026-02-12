@@ -29,6 +29,7 @@ pub struct WidgetTree {
 }
 
 struct WidgetTreeNode {
+    #[allow(unused)]
     uid: WidgetUid,
     widget: WidgetRef,
     parent: u32,
