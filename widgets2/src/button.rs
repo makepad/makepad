@@ -2,8 +2,9 @@ use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
-    makepad_script::{ScriptFnRef, ScriptRefOptionExt},
+    makepad_script::ScriptFnRef,
     widget::*,
+    widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
 };
 
 use crate::makepad_draw::DrawSvg;
@@ -355,7 +356,8 @@ pub enum ButtonAction {
 /// A clickable button widget that emits actions when pressed, and when either released or clicked.
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Button {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]
@@ -417,7 +419,7 @@ pub struct Button {
     pub text: ArcStringMut,
 
     #[live]
-    on_click: Option<ScriptFnRef>,
+    on_click: ScriptFnRef,
 
     #[action_data]
     #[rust]
@@ -425,6 +427,22 @@ pub struct Button {
 }
 
 impl Widget for Button {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(on_click) {
+            let uid = self.widget_uid();
+            vm.with_cx_mut(|cx| {
+                cx.widget_to_script_call(uid, self.source.clone(), self.on_click.clone(), &[]);
+            });
+            return ScriptAsyncResult::Return(TRUE);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,
@@ -502,11 +520,7 @@ impl Widget for Button {
                         uid,
                         ButtonAction::Clicked(fe.modifiers),
                     );
-                    if let Some(handler) = self.on_click.as_object() {
-                        cx.with_vm(|vm| {
-                            vm.call(ScriptValue::from(handler), &[]);
-                        });
-                    }
+                    cx.widget_to_script_call(uid, self.source.clone(), self.on_click.clone(), &[]);
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, ids!(hover.off));
                     } else if fe.has_hovers() {

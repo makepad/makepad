@@ -1,6 +1,7 @@
 use {
     crate::makepad_draw::{cx_2d::Cx2d, cx_3d::Cx3d, *},
     crate::widget::{WidgetRef, WidgetUid},
+    crate::widget_async::update_global_ui_handle,
     std::collections::HashMap,
 };
 
@@ -26,6 +27,7 @@ pub struct WidgetTree {
 
     // Index: uid -> node index
     uid_map: HashMap<WidgetUid, u32>,
+    root_uid: WidgetUid,
 }
 
 struct WidgetTreeNode {
@@ -42,6 +44,7 @@ impl Default for WidgetTree {
             subtree_end: Vec::new(),
             nodes: Vec::new(),
             uid_map: HashMap::new(),
+            root_uid: WidgetUid(0),
         }
     }
 }
@@ -52,6 +55,7 @@ impl WidgetTree {
         self.subtree_end.clear();
         self.nodes.clear();
         self.uid_map.clear();
+        self.root_uid = WidgetUid(0);
     }
 
     pub fn append(&mut self, uid: WidgetUid, name: LiveId, widget: WidgetRef, parent: u32) -> u32 {
@@ -64,6 +68,9 @@ impl WidgetTree {
             parent,
         });
         self.uid_map.insert(uid, idx);
+        if parent == NONE && self.root_uid == WidgetUid(0) {
+            self.root_uid = uid;
+        }
         idx
     }
 
@@ -383,6 +390,10 @@ impl WidgetTree {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
+
+    pub fn root_uid(&self) -> WidgetUid {
+        self.root_uid
+    }
 }
 
 // ============================================================================
@@ -467,8 +478,12 @@ impl CxWidgetExt for Cx {
         double.back.begin_frame();
         double.cursor_stack.clear();
         let r = f(self);
-        let double = get_double_mut(self.widget_tree_ptr);
-        std::mem::swap(&mut double.front, &mut double.back);
+        let root_uid = {
+            let double = get_double_mut(self.widget_tree_ptr);
+            std::mem::swap(&mut double.front, &mut double.back);
+            double.front.root_uid()
+        };
+        update_global_ui_handle(self, root_uid);
         r
     }
 }

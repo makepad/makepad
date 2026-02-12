@@ -359,7 +359,8 @@ pub enum PopupMenuPosition {
 
 #[derive(Script, Widget, Animator)]
 pub struct DropDown {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]

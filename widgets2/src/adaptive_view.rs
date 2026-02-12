@@ -66,7 +66,8 @@ script_mod! {
 /// Check out [VariantSelector] for more information on how to define custom selectors, and what information is available to them.
 #[derive(Script, WidgetRegister, WidgetRef)]
 pub struct AdaptiveView {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 
@@ -121,7 +122,9 @@ pub struct WidgetVariant {
 }
 
 impl WidgetNode for AdaptiveView {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, cx: &mut Cx) -> Walk {
         if let Some(active_widget) = self.active_widget.as_ref() {
             active_widget.widget_ref.walk(cx)

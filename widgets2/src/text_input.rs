@@ -13,6 +13,7 @@ use {
         },
         makepad_script::{ScriptFnRef, ScriptRefOptionExt},
         widget::*,
+        widget_async::ScriptAsyncResult,
     },
     std::rc::Rc,
     unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
@@ -462,7 +463,8 @@ script_mod! {
 
 #[derive(Script, Widget, Animator)]
 pub struct TextInput {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]
@@ -1173,6 +1175,19 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(&self.text);
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn text(&self) -> String {
         self.text.clone()
     }

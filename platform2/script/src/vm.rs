@@ -213,23 +213,7 @@ impl<'a> ScriptVm<'a> {
         f(self)
     }
 
-    pub fn call(&mut self, fnobj: ScriptValue, args: &[ScriptValue]) -> ScriptValue {
-        let scope = self.bx.heap.new_with_proto(fnobj);
-
-        self.bx.heap.clear_object_deep(scope);
-        if fnobj.is_err() {
-            return fnobj;
-        }
-
-        let trap = self.bx.threads.cur().trap.pass();
-        let err = self.bx.heap.push_all_fn_args(scope, args, trap);
-        if err.is_err() {
-            return err;
-        }
-
-        self.bx.heap.set_object_deep(scope);
-        self.bx.heap.set_object_storage_auto(scope);
-
+    fn call_with_scope(&mut self, scope: ScriptObject) -> ScriptValue {
         if let Some(fnptr) = self.bx.heap.parent_as_fn(scope) {
             match fnptr {
                 ScriptFnPtr::Native(ni) => {
@@ -270,6 +254,53 @@ impl<'a> ScriptVm<'a> {
                 self.bx.heap.proto(scope).value_type()
             );
         }
+    }
+
+    pub fn call(&mut self, fnobj: ScriptValue, args: &[ScriptValue]) -> ScriptValue {
+        let scope = self.bx.heap.new_with_proto(fnobj);
+
+        self.bx.heap.clear_object_deep(scope);
+        if fnobj.is_err() {
+            return fnobj;
+        }
+
+        let trap = self.bx.threads.cur().trap.pass();
+        let err = self.bx.heap.push_all_fn_args(scope, args, trap);
+        if err.is_err() {
+            return err;
+        }
+
+        self.bx.heap.set_object_deep(scope);
+        self.bx.heap.set_object_storage_auto(scope);
+        self.call_with_scope(scope)
+    }
+
+    pub fn call_with_args_object(
+        &mut self,
+        fnobj: ScriptValue,
+        args_obj: ScriptObject,
+    ) -> ScriptValue {
+        if fnobj.is_err() {
+            return fnobj;
+        }
+        if fnobj.as_object().is_none() {
+            return script_err_wrong_value!(
+                self.bx.threads.cur_ref().trap,
+                "call target is not a function (got {:?})",
+                fnobj.value_type()
+            );
+        }
+
+        let scope = self.bx.heap.new_with_proto(fnobj);
+        self.bx.heap.set_object_storage_vec2(scope);
+        self.bx.heap.clear_object_deep(scope);
+
+        let trap = self.bx.threads.cur().trap.pass();
+        self.bx.heap.merge_object(scope, args_obj, trap);
+
+        self.bx.heap.set_object_deep(scope);
+        self.bx.heap.set_object_storage_auto(scope);
+        self.call_with_scope(scope)
     }
 
     /// Drain and log any pending errors in the error queue.
@@ -521,6 +552,13 @@ impl<'a> ScriptVm<'a> {
             .native
             .borrow_mut()
             .new_handle_type(&mut self.bx.heap, id)
+    }
+
+    pub fn downcast_handle_gc<T: ScriptHandleGc + 'static>(
+        &self,
+        handle: ScriptHandle,
+    ) -> Option<&T> {
+        self.bx.heap.handle_ref::<T>(handle)
     }
 
     pub fn add_handle_method<F>(

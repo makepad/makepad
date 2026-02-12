@@ -213,7 +213,8 @@ pub enum LabelAction {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Label {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[redraw]
     #[live]
     draw_text: DrawText,

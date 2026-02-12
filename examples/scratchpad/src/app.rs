@@ -65,7 +65,7 @@ script_mod! {
                             search_input := TextInput{
                                 width: Fill height: Fit
                                 empty_text: "Search the web..."
-                                on_enter: || ui.search_button.on_click()
+                                on_return: || ui.search_button.on_click()
                             }
                             search_button := Button{
                                 text: "Search"

@@ -43,7 +43,8 @@ script_mod! {
 /// it should be used judiciously. Overuse of caching can lead to unexpected behavior if not managed properly.
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct CachedWidget {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]
@@ -136,7 +137,9 @@ impl ScriptHook for CachedWidget {
 }
 
 impl WidgetNode for CachedWidget {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, cx: &mut Cx) -> Walk {
         if let Some(widget) = &self.widget {
             widget.walk(cx)

@@ -10,7 +10,8 @@ script_mod! {
 
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct PageFlip {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[rust]
@@ -114,7 +115,9 @@ impl PageFlip {
 }
 
 impl WidgetNode for PageFlip {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
