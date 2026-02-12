@@ -73,7 +73,3 @@ package = "rustc-std-workspace-core"
 [dependencies.log]
 version = "0.4.20"
 optional = true
-
-[dev-dependencies.quickcheck]
-version = "1.0.3"
-default-features = false

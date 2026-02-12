@@ -48,11 +48,5 @@ repository = "https://github.com/unicode-rs/unicode-segmentation"
 name = "unicode_segmentation"
 path = "src/lib.rs"
 
-[dev-dependencies.criterion]
-version = "0.5"
-
-[dev-dependencies.quickcheck]
-version = "0.7"
-
 [features]
 no_std = []
