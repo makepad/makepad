@@ -995,7 +995,6 @@ impl MatchEvent for App {
             } else {
                 let tab_id = dock.unique_id(file_id.0);
                 self.data.file_system.request_open_file(tab_id, file_id);
-                self.data.file_system.request_open_file(tab_id, file_id);
 
                 // lets add a file tab 'somewhere'
                 let path = self.data.file_system.file_node_id_to_path(file_id).unwrap();
