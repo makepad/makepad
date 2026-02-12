@@ -124,6 +124,23 @@ pub trait Widget: WidgetNode {
         results
     }
 
+    /// Flood-fill search: find a widget by path, searching children first,
+    /// then expanding outward through parents and their subtrees.
+    fn widget_flood(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
+        cx.widget_tree().find_flood(self.widget_uid(), path)
+    }
+
+    /// Flood-fill search returning all matches, ordered by proximity.
+    fn widgets_flood(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
+        let mut results = WidgetSet::default();
+        let tree = cx.widget_tree();
+        let uid = self.widget_uid();
+        for path in paths {
+            results.0.extend(tree.find_all_flood(uid, path));
+        }
+        results
+    }
+
     fn draw_3d(&mut self, _cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
         DrawStep::done()
     }
@@ -662,6 +679,20 @@ impl WidgetRef {
 
     pub fn widget_set(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
         self.widgets(cx, paths)
+    }
+
+    pub fn widget_flood(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
+        cx.widget_tree().find_flood(self.widget_uid(), path)
+    }
+
+    pub fn widgets_flood(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
+        let mut results = WidgetSet::default();
+        let tree = cx.widget_tree();
+        let uid = self.widget_uid();
+        for path in paths {
+            results.0.extend(tree.find_all_flood(uid, path));
+        }
+        results
     }
 
     pub fn draw_walk(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {

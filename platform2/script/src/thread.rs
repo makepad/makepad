@@ -53,6 +53,9 @@ pub enum ScriptMe {
     Call {
         sself: Option<ScriptValue>,
         args: ScriptObject,
+        /// When set, this is a dynamic dispatch via the type's call function.
+        /// The method name is passed to the call handler at exec time.
+        method: Option<LiveId>,
     },
     Pod {
         pod: ScriptPod,

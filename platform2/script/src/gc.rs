@@ -408,7 +408,7 @@ impl ScriptHeap {
                         ScriptMe::Object(obj) => {
                             self.mark_vec.push(ScriptGcMark::Object(*obj));
                         }
-                        ScriptMe::Call { sself, args } => {
+                        ScriptMe::Call { sself, args, .. } => {
                             if let Some(s) = sself {
                                 self.mark_value(*s);
                             }

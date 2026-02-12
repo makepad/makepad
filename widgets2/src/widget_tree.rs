@@ -161,6 +161,224 @@ impl WidgetTree {
         path
     }
 
+    /// Flood-fill search: find a widget by path starting from `origin_uid`,
+    /// expanding outward through the tree.
+    ///
+    /// Search order:
+    /// 1. Search within the origin node's own subtree (children, grandchildren, etc.)
+    /// 2. Move to parent, search its subtree excluding the already-visited branch
+    /// 3. Continue up through ancestors until found or the entire tree is searched
+    ///
+    /// This is useful when a widget needs to find a sibling, cousin, or any
+    /// relative in the UI tree without knowing the exact structural relationship.
+    pub fn find_flood(&self, origin_uid: WidgetUid, path: &[LiveId]) -> WidgetRef {
+        let target = match path.last() {
+            Some(&id) => id,
+            None => return WidgetRef::empty(),
+        };
+
+        let origin_idx = match self.uid_map.get(&origin_uid) {
+            Some(&idx) => idx as usize,
+            None => {
+                // Origin not in tree, fall back to full tree search
+                return self.find_within_range(0, self.names.len(), target, path);
+            }
+        };
+
+        // Start with the origin's own subtree
+        let origin_end = self.subtree_end[origin_idx] as usize;
+        let result = self.find_within_range(origin_idx, origin_end, target, path);
+        if !result.is_empty() {
+            return result;
+        }
+
+        // Expand outward: walk up the parent chain
+        let mut exclude_start = origin_idx;
+        let mut exclude_end = origin_end;
+        let mut current = self.nodes[origin_idx].parent;
+
+        while current != NONE {
+            let cur = current as usize;
+            let cur_end = self.subtree_end[cur] as usize;
+
+            // Search parent's subtree, skipping the branch we already visited
+            let result = self.find_within_range_excluding(
+                cur,
+                cur_end,
+                exclude_start,
+                exclude_end,
+                target,
+                path,
+            );
+            if !result.is_empty() {
+                return result;
+            }
+
+            // Move up: the entire current subtree becomes the excluded region
+            exclude_start = cur;
+            exclude_end = cur_end;
+            current = self.nodes[cur].parent;
+        }
+
+        // Finally, search any top-level nodes outside the ancestor chain
+        self.find_within_range_excluding(
+            0,
+            self.names.len(),
+            exclude_start,
+            exclude_end,
+            target,
+            path,
+        )
+    }
+
+    /// Flood-fill search returning all matches, expanding outward from `origin_uid`.
+    ///
+    /// Same expansion order as `find_flood`, but collects every match rather
+    /// than stopping at the first one. Results are ordered by proximity: closer
+    /// nodes (in the tree) appear first.
+    pub fn find_all_flood(&self, origin_uid: WidgetUid, path: &[LiveId]) -> Vec<WidgetRef> {
+        let mut results = Vec::new();
+        let target = match path.last() {
+            Some(&id) => id,
+            None => return results,
+        };
+
+        let origin_idx = match self.uid_map.get(&origin_uid) {
+            Some(&idx) => idx as usize,
+            None => {
+                self.collect_within_range(&mut results, 0, self.names.len(), target, path);
+                return results;
+            }
+        };
+
+        // Start with the origin's own subtree
+        let origin_end = self.subtree_end[origin_idx] as usize;
+        self.collect_within_range(&mut results, origin_idx, origin_end, target, path);
+
+        // Expand outward: walk up the parent chain
+        let mut exclude_start = origin_idx;
+        let mut exclude_end = origin_end;
+        let mut current = self.nodes[origin_idx].parent;
+
+        while current != NONE {
+            let cur = current as usize;
+            let cur_end = self.subtree_end[cur] as usize;
+
+            self.collect_within_range_excluding(
+                &mut results,
+                cur,
+                cur_end,
+                exclude_start,
+                exclude_end,
+                target,
+                path,
+            );
+
+            exclude_start = cur;
+            exclude_end = cur_end;
+            current = self.nodes[cur].parent;
+        }
+
+        // Finally, search top-level nodes outside the ancestor chain
+        self.collect_within_range_excluding(
+            &mut results,
+            0,
+            self.names.len(),
+            exclude_start,
+            exclude_end,
+            target,
+            path,
+        );
+
+        results
+    }
+
+    // -- helpers for flood search --
+
+    fn find_within_range(
+        &self,
+        start: usize,
+        end: usize,
+        target: LiveId,
+        path: &[LiveId],
+    ) -> WidgetRef {
+        for i in start..end {
+            if self.names[i] == target
+                && (path.len() == 1 || self.verify_path(&path[..path.len() - 1], i))
+            {
+                return self.nodes[i].widget.clone();
+            }
+        }
+        WidgetRef::empty()
+    }
+
+    fn find_within_range_excluding(
+        &self,
+        start: usize,
+        end: usize,
+        excl_start: usize,
+        excl_end: usize,
+        target: LiveId,
+        path: &[LiveId],
+    ) -> WidgetRef {
+        let mut i = start;
+        while i < end {
+            if i == excl_start {
+                i = excl_end;
+                continue;
+            }
+            if self.names[i] == target
+                && (path.len() == 1 || self.verify_path(&path[..path.len() - 1], i))
+            {
+                return self.nodes[i].widget.clone();
+            }
+            i += 1;
+        }
+        WidgetRef::empty()
+    }
+
+    fn collect_within_range(
+        &self,
+        results: &mut Vec<WidgetRef>,
+        start: usize,
+        end: usize,
+        target: LiveId,
+        path: &[LiveId],
+    ) {
+        for i in start..end {
+            if self.names[i] == target
+                && (path.len() == 1 || self.verify_path(&path[..path.len() - 1], i))
+            {
+                results.push(self.nodes[i].widget.clone());
+            }
+        }
+    }
+
+    fn collect_within_range_excluding(
+        &self,
+        results: &mut Vec<WidgetRef>,
+        start: usize,
+        end: usize,
+        excl_start: usize,
+        excl_end: usize,
+        target: LiveId,
+        path: &[LiveId],
+    ) {
+        let mut i = start;
+        while i < end {
+            if i == excl_start {
+                i = excl_end;
+                continue;
+            }
+            if self.names[i] == target
+                && (path.len() == 1 || self.verify_path(&path[..path.len() - 1], i))
+            {
+                results.push(self.nodes[i].widget.clone());
+            }
+            i += 1;
+        }
+    }
+
     /// Check if the tree is empty (no nodes registered yet).
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()

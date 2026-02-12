@@ -30,6 +30,7 @@ impl<'a> ScriptVm<'a> {
             self.bx.threads.cur().mes.push(ScriptMe::Call {
                 args: scope,
                 sself: None,
+                method: None,
             });
         }
         self.bx.threads.cur().trap.goto_next();
@@ -42,8 +43,8 @@ impl<'a> ScriptVm<'a> {
             return false;
         };
 
-        let (args, sself) = match me {
-            ScriptMe::Call { args, sself } => (args, sself),
+        let (args, sself, method) = match me {
+            ScriptMe::Call { args, sself, method } => (args, sself, method),
             ScriptMe::Pod { pod, offset } => {
                 self.bx
                     .heap
@@ -66,6 +67,60 @@ impl<'a> ScriptVm<'a> {
         self.bx.heap.set_object_deep(args);
         self.bx.heap.set_object_storage_auto(args);
 
+        // Dynamic dispatch via call: when handle_method_call_args set
+        // method, there is no fn proto — dispatch through the type's
+        // registered call function instead.
+        if let Some(method) = method {
+            let sself = sself.unwrap_or(NIL);
+            let type_index = sself.value_type().to_redux();
+            let call_ptr: Option<*const dyn Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue> = {
+                let native = self.bx.code.native.borrow();
+                native.calls.get(type_index.to_index()).and_then(|c| {
+                    c.as_ref().map(|f| &**f as *const _)
+                })
+            };
+            if let Some(call_ptr) = call_ptr {
+                let ip = self.bx.threads.cur_ref().trap.ip;
+                // Pause thread before native call so re-entrant calls get a different thread
+                self.bx.threads.cur().is_paused = true;
+                // SAFETY: The call pointer is valid as long as native calls aren't removed during execution
+                let ret = unsafe { (*call_ptr)(self, args, method) };
+
+                // Check if call explicitly paused (via pause() which sets trap.on to Pause)
+                if matches!(
+                    self.bx.threads.cur().trap.on.get(),
+                    Some(ScriptTrapOn::Pause)
+                ) {
+                    // Re-push the me so it can be re-executed on resume
+                    self.bx.threads.cur().mes.push(ScriptMe::Call {
+                        args,
+                        sself: Some(sself),
+                        method: Some(method),
+                    });
+                    return false; // Paused: skip pop_to_me, function not complete
+                }
+
+                // Call didn't explicitly pause, unpause the thread
+                self.bx.threads.cur().is_paused = false;
+
+                self.bx.threads.cur().trap.ip = ip;
+                self.bx.threads.cur().push_stack_value(ret);
+                self.bx.heap.free_object_if_unreffed(args);
+                self.bx.threads.cur().trap.goto_next();
+                return true; // Call complete
+            }
+            // No call handler registered - fall through to error
+            let value = script_err_not_found!(
+                self.bx.threads.cur_ref().trap,
+                "no call handler for method {:?} on type {:?}",
+                method,
+                type_index
+            );
+            self.bx.threads.cur().push_stack_unchecked(value);
+            self.bx.threads.cur().trap.goto_next();
+            return true;
+        }
+
         if let Some(fnptr) = self.bx.heap.parent_as_fn(args) {
             match fnptr {
                 ScriptFnPtr::Native(ni) => {
@@ -86,7 +141,11 @@ impl<'a> ScriptVm<'a> {
                         Some(ScriptTrapOn::Pause)
                     ) {
                         // Native explicitly paused, leave is_paused = true
-                        self.bx.threads.cur().mes.push(me);
+                        self.bx.threads.cur().mes.push(ScriptMe::Call {
+                            args,
+                            sself,
+                            method: None,
+                        });
                         return false; // Paused: skip pop_to_me, function not complete
                     }
 
@@ -140,9 +199,31 @@ impl<'a> ScriptVm<'a> {
         let args = if fnobj.is_err() || fnobj == NIL {
             let method = method.as_id().unwrap_or(id!());
             let type_index = sself.value_type().to_redux();
-            let type_entry = &self.bx.code.native.borrow().type_table[type_index.to_index()];
-            if let Some(method_ptr) = type_entry.get(&method) {
-                self.bx.heap.new_with_proto((*method_ptr).into())
+            let (found_method, has_call) = {
+                let native = self.bx.code.native.borrow();
+                let type_entry = &native.type_table[type_index.to_index()];
+                let found = type_entry.get(&method).copied();
+                let has_call = native.calls.get(type_index.to_index())
+                    .map(|c| c.is_some()).unwrap_or(false);
+                (found, has_call)
+            };
+            if let Some(method_ptr) = found_method {
+                self.bx.heap.new_with_proto(method_ptr.into())
+            } else if has_call {
+                // Dynamic dispatch via call: create an empty vec2 args object.
+                // The call function will be invoked in handle_call_exec with
+                // the method name and collected arguments.
+                let args = self.bx.heap.new_with_proto(NIL);
+                self.bx.heap.set_object_storage_vec2(args);
+                self.bx.heap.clear_object_deep(args);
+
+                self.bx.threads.cur().mes.push(ScriptMe::Call {
+                    args,
+                    sself: Some(sself),
+                    method: Some(method),
+                });
+                self.bx.threads.cur().trap.goto_next();
+                return false;
             } else {
                 script_err_not_found!(
                     self.bx.threads.cur_ref().trap,
@@ -169,6 +250,7 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().mes.push(ScriptMe::Call {
             args,
             sself: Some(sself),
+            method: None,
         });
         self.bx.threads.cur().trap.goto_next();
         false

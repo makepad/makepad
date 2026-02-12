@@ -184,6 +184,11 @@ macro_rules! script_args_def{
 pub type NativeGetterFn = Box<dyn Fn(&mut ScriptVm, ScriptValue, LiveId) -> ScriptValue + 'static>;
 pub type NativeSetterFn =
     Box<dyn Fn(&mut ScriptVm, ScriptValue, LiveId, ScriptValue) -> ScriptValue + 'static>;
+/// Generic method dispatch: called with (vm, args_object, method).
+/// The args object has `self` set and all call arguments collected.
+/// Used when a type has no specific method registered but has a catch-all call handler.
+pub type NativeCallFn =
+    Box<dyn Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue + 'static>;
 pub type NativeFn = Box<dyn Fn(&mut ScriptVm, ScriptObject) -> ScriptValue + 'static>;
 
 #[derive(Default)]
@@ -193,6 +198,7 @@ pub struct ScriptNative {
     pub(crate) handle_type: LiveIdMap<LiveId, ScriptHandleType>,
     pub(crate) getters: Vec<NativeGetterFn>,
     pub(crate) setters: Vec<NativeSetterFn>,
+    pub(crate) calls: Vec<Option<NativeCallFn>>,
 }
 
 impl ScriptNative {
@@ -303,6 +309,14 @@ impl ScriptNative {
         self.setters[ty_redux.to_index()] = Box::new(f)
     }
 
+    pub fn set_type_call<F>(&mut self, ty_redux: ScriptTypeRedux, f: F)
+    where
+        F: Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue + 'static,
+    {
+        self.ensure_type_table_capacity(ty_redux);
+        self.calls[ty_redux.to_index()] = Some(Box::new(f));
+    }
+
     /// Ensures capacity for type tables - non-generic to reduce monomorphization
     #[inline(never)]
     fn ensure_type_table_capacity(&mut self, ty_redux: ScriptTypeRedux) {
@@ -329,6 +343,7 @@ impl ScriptNative {
                     )
                 })
             });
+            self.calls.resize_with(ty_redux.to_index() + 1, || None);
         }
     }
 
