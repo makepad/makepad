@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -177,28 +177,6 @@ impl WidgetNode for SlidesView {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx)
     }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        for child in self.slides.values() {
-            child.find_widgets(path, cached, results);
-        }
-    }
-
-    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        for (id, child) in self.slides.iter() {
-            child.widget_tree_walk_named(*id, nodes);
-        }
-    }
-
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        for child in self.slides.values() {
-            let x = child.uid_to_widget(uid);
-            if !x.is_empty() {
-                return x;
-            }
-        }
-        WidgetRef::empty()
-    }
 }
 
 impl Widget for SlidesView {
@@ -220,18 +198,18 @@ impl Widget for SlidesView {
         let current = self.current_slide.floor() as usize;
         if let Some(current_id) = self.draw_order.get(current) {
             if let Some(current) = self.slides.get(&current_id) {
-                scope.with_id(*current_id, |scope| {
+                cx.with_node(current.widget_uid(), *current_id, current.clone(), |cx| {
                     current.handle_event(cx, event, scope);
-                })
+                });
             }
         }
         if self.current_slide.fract() > 0.0 {
             let next = current + 1;
             if let Some(next_id) = self.draw_order.get(next) {
                 if let Some(next) = self.slides.get(&next_id) {
-                    scope.with_id(*next_id, |scope| {
+                    cx.with_node(next.widget_uid(), *next_id, next.clone(), |cx| {
                         next.handle_event(cx, event, scope);
-                    })
+                    });
                 }
             }
         }
@@ -242,11 +220,7 @@ impl Widget for SlidesView {
             }) => {
                 self.next_slide(cx);
                 let uid = self.widget_uid();
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    SlidesViewAction::Flipped(self.goal_slide as usize),
-                );
+                cx.widget_action(uid, SlidesViewAction::Flipped(self.goal_slide as usize));
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
@@ -254,11 +228,7 @@ impl Widget for SlidesView {
             }) => {
                 self.prev_slide(cx);
                 let uid = self.widget_uid();
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    SlidesViewAction::Flipped(self.goal_slide as usize),
-                );
+                cx.widget_action(uid, SlidesViewAction::Flipped(self.goal_slide as usize));
             }
             Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.area);
@@ -288,7 +258,9 @@ impl Widget for SlidesView {
             if let Some(first_id) = self.draw_order.get(first) {
                 if let Some(slide) = self.slides.get(&first_id) {
                     let walk = slide.walk(cx);
-                    scope.with_id(*first_id, |scope| slide.draw_walk(cx, scope, walk))?;
+                    cx.with_node(slide.widget_uid(), *first_id, slide.clone(), |cx| {
+                        slide.draw_walk(cx, scope, walk)
+                    })?;
                 }
             }
             cx.end_turtle();
@@ -314,7 +286,9 @@ impl Widget for SlidesView {
                 if let Some(second_id) = self.draw_order.get(second) {
                     if let Some(slide) = self.slides.get(&second_id) {
                         let walk = slide.walk(cx);
-                        scope.with_id(*second_id, |scope| slide.draw_walk(cx, scope, walk))?;
+                        cx.with_node(slide.widget_uid(), *second_id, slide.clone(), |cx| {
+                            slide.draw_walk(cx, scope, walk)
+                        })?;
                     }
                 }
             }

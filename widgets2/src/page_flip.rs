@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -124,60 +124,43 @@ impl WidgetNode for PageFlip {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx)
     }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some(page) = self.pages.get(&path[0]) {
-            if path.len() == 1 {
-                results.push(page.clone());
-            } else {
-                page.find_widgets(&path[1..], cached, results);
-            }
-        }
-        for page in self.pages.values() {
-            page.find_widgets(path, cached, results);
-        }
-    }
-
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        for page in self.pages.values() {
-            let x = page.uid_to_widget(uid);
-            if !x.is_empty() {
-                return x;
-            }
-        }
-        WidgetRef::empty()
-    }
-
-    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        for (id, page) in self.pages.iter() {
-            page.widget_tree_walk_named(*id, nodes);
-        }
-    }
 }
 
 impl Widget for PageFlip {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         if event.requires_visibility() {
-            if let Some(page) = self.pages.get_mut(&self.active_page) {
+            let active_page = self.active_page;
+            if let Some(page) = self.pages.get_mut(&active_page) {
                 let item_uid = page.widget_uid();
-                cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
+                cx.with_node(item_uid, active_page, page.clone(), |cx| {
+                    cx.group_widget_actions(uid, item_uid, |cx| {
+                        page.handle_event(cx, event, scope)
+                    });
+                });
             }
         } else {
-            for page in self.pages.values() {
+            for (page_id, page) in self.pages.iter() {
                 let item_uid = page.widget_uid();
-                cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
+                cx.with_node(item_uid, *page_id, page.clone(), |cx| {
+                    cx.group_widget_actions(uid, item_uid, |cx| {
+                        page.handle_event(cx, event, scope)
+                    });
+                });
             }
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if let Some(page) = self.page(cx, self.active_page) {
+        let active_page = self.active_page;
+        if let Some(page) = self.page(cx, active_page) {
             if self.draw_state.begin_with(cx, &(), |cx, _| page.walk(cx)) {
                 self.begin(cx, walk);
             }
             if let Some(walk) = self.draw_state.get() {
-                page.draw_walk(cx, scope, walk)?;
+                cx.with_node(page.widget_uid(), active_page, page.clone(), |cx| {
+                    page.draw_walk(cx, scope, walk)
+                })?;
             }
             self.end(cx);
         } else {

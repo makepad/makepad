@@ -98,7 +98,7 @@ impl Widget for Tooltip {
             return;
         }
 
-        let content = self.view.widget(ids!(content));
+        let content = self.view.widget(cx, ids!(content));
         content.handle_event(cx, event, scope);
 
         // Hide the tooltip if any kind of user interaction occurs (taps/clicks, drags, scrolls, etc).
@@ -147,7 +147,7 @@ impl Widget for Tooltip {
     }
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
-        self.label(ids!(tooltip_label)).set_text(cx, text);
+        self.label(cx, ids!(tooltip_label)).set_text(cx, text);
     }
 }
 

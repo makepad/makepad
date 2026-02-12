@@ -1553,7 +1553,7 @@ impl MatchEvent for App {
             Path::new("tools/open_harmony/deveco/AppScope/resources/base/media/app_icon.png");
         if let Err(e) = self
             .ui
-            .image(ids!(test_image))
+            .image(cx, ids!(test_image))
             .load_image_file_by_path(cx, image_path)
         {
             log!("Failed to load image: {:?}", e);
@@ -1561,23 +1561,23 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(ids!(button)).clicked(actions) {
+        if self.ui.button(cx, ids!(button)).clicked(actions) {
             log!("Button clicked!");
         }
-        if self.ui.button(ids!(flat_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(flat_button)).clicked(actions) {
             log!("Flat button clicked!");
         }
-        if self.ui.button(ids!(flatter_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(flatter_button)).clicked(actions) {
             log!("Flatter button clicked!");
         }
-        if self.ui.button(ids!(icon_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(icon_button)).clicked(actions) {
             log!("Icon button clicked!");
         }
 
         // Tooltip demo - show tooltips on button click
-        if self.ui.button(ids!(tooltip_btn1)).clicked(actions) {
+        if self.ui.button(cx, ids!(tooltip_btn1)).clicked(actions) {
             log!("Showing tooltip 1");
-            self.ui.tooltip(ids!(buttons_tooltip)).show_with_options(
+            self.ui.tooltip(cx, ids!(buttons_tooltip)).show_with_options(
                 cx,
                 dvec2(350.0, 280.0),
                 "This is the standard button. Click it to perform the primary action.",
@@ -1585,34 +1585,34 @@ impl MatchEvent for App {
         }
 
         // Popup notification demo
-        if self.ui.button(ids!(show_popup_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(show_popup_btn)).clicked(actions) {
             log!("Showing popup notification");
-            self.ui.popup_notification(ids!(popup_notif)).open(cx);
+            self.ui.popup_notification(cx, ids!(popup_notif)).open(cx);
         }
 
-        if let Some(value) = self.ui.check_box(ids!(checkbox)).changed(actions) {
+        if let Some(value) = self.ui.check_box(cx, ids!(checkbox)).changed(actions) {
             log!("Checkbox changed: {}", value);
         }
-        if let Some(value) = self.ui.check_box(ids!(toggle)).changed(actions) {
+        if let Some(value) = self.ui.check_box(cx, ids!(toggle)).changed(actions) {
             log!("Toggle changed: {}", value);
         }
         if let Some(index) = self
             .ui
-            .radio_button_set(ids_list!(radio1, radio2, radio3))
+            .radio_button_set(cx, ids_list!(radio1, radio2, radio3))
             .selected(cx, actions)
         {
             log!("Radio button selected: {}", index);
         }
 
         // ExpandablePanel test
-        if self.ui.button(ids!(reset_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(reset_btn)).clicked(actions) {
             log!("Resetting expandable panel");
-            self.ui.expandable_panel(ids!(expandable)).reset(cx);
+            self.ui.expandable_panel(cx, ids!(expandable)).reset(cx);
         }
 
         if let Some(offset) = self
             .ui
-            .expandable_panel(ids!(expandable))
+            .expandable_panel(cx, ids!(expandable))
             .scrolled_at(actions)
         {
             log!("ExpandablePanel scrolled to: {}", offset);
@@ -1620,112 +1620,114 @@ impl MatchEvent for App {
 
         // Modal tests
         // Open basic modal
-        if self.ui.button(ids!(open_modal_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(open_modal_btn)).clicked(actions) {
             log!("Opening basic modal");
-            self.ui.modal(ids!(test_modal)).open(cx);
+            self.ui.modal(cx, ids!(test_modal)).open(cx);
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Basic Modal Open");
         }
 
         // Close basic modal
-        if self.ui.button(ids!(close_modal_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(close_modal_btn)).clicked(actions) {
             log!("Closing basic modal via button");
-            self.ui.modal(ids!(test_modal)).close(cx);
+            self.ui.modal(cx, ids!(test_modal)).close(cx);
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Closed via button");
         }
 
         // Check if basic modal was dismissed (clicked outside or pressed Escape)
-        if self.ui.modal(ids!(test_modal)).dismissed(actions) {
+        if self.ui.modal(cx, ids!(test_modal)).dismissed(actions) {
             log!("Basic modal was dismissed");
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Dismissed (clicked outside or Escape)");
         }
 
         // Open confirmation modal
         if self
             .ui
-            .button(ids!(open_confirm_modal_btn))
+            .button(cx, ids!(open_confirm_modal_btn))
             .clicked(actions)
         {
             log!("Opening confirmation modal");
-            self.ui.modal(ids!(confirm_modal)).open(cx);
+            self.ui.modal(cx, ids!(confirm_modal)).open(cx);
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Confirmation Modal Open");
         }
 
         // Cancel confirmation
-        if self.ui.button(ids!(cancel_confirm_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(cancel_confirm_btn)).clicked(actions) {
             log!("Confirmation cancelled");
-            self.ui.modal(ids!(confirm_modal)).close(cx);
+            self.ui.modal(cx, ids!(confirm_modal)).close(cx);
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Confirmation Cancelled");
         }
 
         // Confirm action
-        if self.ui.button(ids!(confirm_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(confirm_btn)).clicked(actions) {
             log!("Action confirmed!");
-            self.ui.modal(ids!(confirm_modal)).close(cx);
+            self.ui.modal(cx, ids!(confirm_modal)).close(cx);
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Action Confirmed!");
         }
 
         // Check if confirmation modal was dismissed
-        if self.ui.modal(ids!(confirm_modal)).dismissed(actions) {
+        if self.ui.modal(cx, ids!(confirm_modal)).dismissed(actions) {
             log!("Confirmation modal was dismissed");
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Confirmation dismissed");
         }
 
         // Open non-dismissable modal
         if self
             .ui
-            .button(ids!(open_nodismiss_modal_btn))
+            .button(cx, ids!(open_nodismiss_modal_btn))
             .clicked(actions)
         {
             log!("Opening non-dismissable modal");
-            self.ui.modal(ids!(nodismiss_modal)).open(cx);
+            self.ui.modal(cx, ids!(nodismiss_modal)).open(cx);
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Non-dismissable Modal Open");
         }
 
         // Close non-dismissable modal
-        if self.ui.button(ids!(close_nodismiss_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(close_nodismiss_btn)).clicked(actions) {
             log!("Closing non-dismissable modal via button");
-            self.ui.modal(ids!(nodismiss_modal)).close(cx);
+            self.ui.modal(cx, ids!(nodismiss_modal)).close(cx);
             self.ui
-                .label(ids!(modal_status))
+                .label(cx, ids!(modal_status))
                 .set_text(cx, "Modal status: Non-dismissable closed via button");
         }
 
         // SlidePanel tests
-        if self.ui.button(ids!(slide_left_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(slide_left_btn)).clicked(actions) {
             log!("Toggling left slide panel");
-            self.ui.slide_panel(ids!(left_panel)).toggle(cx);
+            self.ui.slide_panel(cx, ids!(left_panel)).toggle(cx);
         }
-        if self.ui.button(ids!(slide_top_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(slide_top_btn)).clicked(actions) {
             log!("Toggling top slide panel");
-            self.ui.slide_panel(ids!(top_panel)).toggle(cx);
+            self.ui.slide_panel(cx, ids!(top_panel)).toggle(cx);
         }
-        if self.ui.button(ids!(slide_right_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(slide_right_btn)).clicked(actions) {
             log!("Toggling right slide panel");
-            self.ui.slide_panel(ids!(right_panel)).toggle(cx);
+            self.ui.slide_panel(cx, ids!(right_panel)).toggle(cx);
         }
     }
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        cx.with_widget_tree(|cx| {
+            self.match_event(cx, event);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
+        });
     }
 }
 
@@ -1804,8 +1806,8 @@ impl Widget for NewsListTest {
                             2 => "Medium length subtitle text here",
                             _ => "Another item in the list",
                         };
-                        item.label(ids!(title)).set_text(cx, &title);
-                        item.label(ids!(subtitle)).set_text(cx, subtitle);
+                        item.label(cx, ids!(title)).set_text(cx, &title);
+                        item.label(cx, ids!(subtitle)).set_text(cx, subtitle);
                     }
 
                     item.draw_all(cx, &mut Scope::empty());
@@ -1895,7 +1897,7 @@ impl Widget for ScrollbarTestList {
 
                     // Set the label text
                     let text = format!("Item {} - {}", item_id, height_name);
-                    item_widget.label(ids!(label)).set_text(cx, &text);
+                    item_widget.label(cx, ids!(label)).set_text(cx, &text);
 
                     item_widget.draw_all(cx, &mut Scope::empty());
                 }

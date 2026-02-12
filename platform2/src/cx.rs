@@ -126,6 +126,8 @@ pub struct Cx {
     /// This is primarily used when adaptive views change their active variant,
     /// as the widget hierarchy changes require parent views to rebuild their widget queries.
     pub widget_query_invalidation_event: Option<u64>,
+
+    pub widget_tree_ptr: *mut (),
 }
 
 #[derive(Clone)]
@@ -341,6 +343,7 @@ impl Cx {
             display_context: Default::default(),
 
             widget_query_invalidation_event: None,
+            widget_tree_ptr: std::ptr::null_mut(),
 
             script_vm: Some(vm.bx),
             script_data: Default::default(),

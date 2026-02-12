@@ -1,14 +1,14 @@
 use crate::{button::*, makepad_derive_widget::*, makepad_draw::*, view::*, widget::*};
 
-live_design!{
+live_design! {
     link widgets;
     use link::theme::*;
     use makepad_draw::shader::std::*;
-    
+
     use crate::view_ui::CachedView;
     use crate::view_ui::View;
-    use crate::button::Button; 
-    
+    use crate::button::Button;
+
     pub TogglePanelBase = {{TogglePanel}} {}
     pub TOGGLE_PANEL_CLOSE_ICON = dep("crate://self/resources/icons/close_left_panel.svg")
     pub TOGGLE_PANEL_OPEN_ICON = dep("crate://self/resources/icons/open_left_panel.svg")
@@ -16,14 +16,14 @@ live_design!{
         flow: Overlay,
         width: 300,
         height: Fill,
-        
+
         open_content = <CachedView> {
             width: Fill
             height: Fill
-            
+
             draw_bg: {
                 instance opacity: 1.0
-                    
+
                 fn pixel(self) -> vec4 {
                     return #f00;
                     let color = sample2d(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
@@ -31,7 +31,7 @@ live_design!{
                 }
             }
         }
-        
+
         persistent_content = <View> {
             height: Fit
             width: Fill
@@ -40,26 +40,26 @@ live_design!{
                 width: Fill,
                 padding: {top: 58, left: 15, right: 15}
                 spacing: 10,
-                
+
                 before = <View> {
                     height: Fit,
                     width: Fit,
                     spacing: 10,
                 }
-                
+
                 close = <Button> {
                     draw_icon: {
                         svg_file: (TOGGLE_PANEL_CLOSE_ICON),
                     }
                 }
-                
+
                 open = <Button> {
                     visible: false,
                     draw_icon: {
                         svg_file: (TOGGLE_PANEL_OPEN_ICON),
                     }
                 }
-                
+
                 after = <View> {
                     height: Fit,
                     width: Fit,
@@ -67,7 +67,7 @@ live_design!{
                 }
             }
         }
-        
+
         animator: {
             panel = {
                 default: open,
@@ -129,8 +129,8 @@ impl Widget for TogglePanel {
         };
 
         if let Event::Actions(actions) = event {
-            let open = self.button(ids!(open));
-            let close = self.button(ids!(close));
+            let open = self.button(cx, ids!(open));
+            let close = self.button(cx, ids!(close));
 
             if open.clicked(actions) {
                 open.set_visible(cx, false);

@@ -101,7 +101,7 @@ impl Widget for Modal {
         }
 
         // Forward the event to the inner `content` view.
-        let content = self.view.widget(ids!(content));
+        let content = self.view.widget(cx, ids!(content));
         content.handle_event(cx, event, scope);
 
         // Proactively consume any hit that occurred in the bg area, which prevents the hit
@@ -134,7 +134,7 @@ impl Widget for Modal {
                     _ => false,
                 };
             if should_close {
-                cx.widget_action(content.widget_uid(), &scope.path, ModalAction::Dismissed);
+                cx.widget_action(content.widget_uid(), ModalAction::Dismissed);
                 self.close(cx);
             }
         }
@@ -147,10 +147,10 @@ impl Widget for Modal {
         self.draw_bg.begin(cx, self.view.walk, self.view.layout);
 
         if self.is_open {
-            let bg_view = self.view.widget(ids!(bg_view));
+            let bg_view = self.view.widget(cx, ids!(bg_view));
             let _ = bg_view.draw_walk(cx, scope, walk.with_abs_pos(Vec2d { x: 0., y: 0. }));
 
-            let content = self.view.widget(ids!(content));
+            let content = self.view.widget(cx, ids!(content));
             let _ = content.draw_all(cx, scope);
         }
 
@@ -161,7 +161,7 @@ impl Widget for Modal {
         // After drawing the modal content, its area may have changed,
         // so we need to update that area as a scrolling-allowed area bound.
         if self.is_open {
-            let content = self.view.widget(ids!(content));
+            let content = self.view.widget(cx, ids!(content));
             cx.block_scrolling_except_within(content.area());
         }
         DrawStep::done()
@@ -172,13 +172,13 @@ impl Modal {
     pub fn open(&mut self, cx: &mut Cx) {
         self.is_open = true;
         self.draw_bg.redraw(cx);
-        let content = self.view.widget(ids!(content));
+        let content = self.view.widget(cx, ids!(content));
         cx.set_key_focus(content.area());
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
         // Inform the inner modal content that its modal is being dismissed.
-        let content = self.view.widget(ids!(content));
+        let content = self.view.widget(cx, ids!(content));
         content.handle_event(
             cx,
             &Event::Actions(vec![Box::new(ModalAction::Dismissed)]),

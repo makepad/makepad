@@ -491,15 +491,15 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.preset(cx, 0, false);
-        self.ui.piano(ids!(piano)).set_key_focus(cx);
+        self.ui.piano(cx, ids!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         let ui = self.ui.clone();
-        let piano = ui.piano(ids!(piano));
+        let piano = ui.piano(cx, ids!(piano));
 
-        ui.radio_button_set(ids_array!(oscillators.tab1, oscillators.tab2,))
+        ui.radio_button_set(cx, ids_array!(oscillators.tab1, oscillators.tab2,))
             .selected_to_visible(
                 cx,
                 &ui,
@@ -507,7 +507,7 @@ impl MatchEvent for App {
                 ids_array!(oscillators.osc1, oscillators.osc2,),
             );
 
-        ui.radio_button_set(ids_array!(filter_modes.tab1, filter_modes.tab2,))
+        ui.radio_button_set(cx, ids_array!(filter_modes.tab1, filter_modes.tab2,))
             .selected_to_visible(
                 cx,
                 &ui,
@@ -515,7 +515,7 @@ impl MatchEvent for App {
                 ids_array!(preset_pages.tab1_frame, preset_pages.tab2_frame,),
             );
 
-        ui.radio_button_set(ids_array!(
+        ui.radio_button_set(cx, ids_array!(
             mobile_modes.tab1,
             mobile_modes.tab2,
             mobile_modes.tab3,
@@ -543,29 +543,29 @@ impl MatchEvent for App {
             );
         }
 
-        if ui.button_set(ids_array!(panic)).clicked(&actions) {
+        if ui.button_set(cx, ids_array!(panic)).clicked(&actions) {
             //log!("hello world");
             cx.midi_reset();
             self.audio_graph.all_notes_off();
         }
 
-        let sequencer = ui.sequencer(ids!(sequencer));
+        let sequencer = ui.sequencer(cx, ids!(sequencer));
         // lets fetch and update the tick.
 
-        if ui.button_set(ids_array!(clear_grid)).clicked(&actions) {
+        if ui.button_set(cx, ids_array!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx);
         }
 
-        if ui.button_set(ids_array!(grid_down)).clicked(&actions) {
+        if ui.button_set(cx, ids_array!(grid_down)).clicked(&actions) {
             sequencer.grid_down(cx);
         }
 
-        if ui.button_set(ids_array!(grid_up)).clicked(&actions) {
+        if ui.button_set(cx, ids_array!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx);
         }
 
         if let Some((index, km)) = ui
-            .button_set(ids_array!(
+            .button_set(cx, ids_array!(
                 preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7, preset_8
             ))
             .which_clicked_modifiers(&actions)
@@ -592,7 +592,7 @@ impl MatchEvent for App {
     }
 
     fn handle_signal(&mut self, cx: &mut Cx) {
-        let piano = self.ui.piano_set(ids_array!(piano));
+        let piano = self.ui.piano_set(cx, ids_array!(piano));
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
             if let Some(note) = data.decode().on_note() {
@@ -644,20 +644,22 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        cx.with_widget_tree(|cx| {
+            self.match_event(cx, event);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
 
-        self.audio_graph
-            .handle_event_with(cx, event, &mut |cx, action| {
-                let display_audio = self.ui.display_audio_set(ids_array!(display_audio));
-                match action {
-                    AudioGraphAction::DisplayAudio { buffer, voice, .. } => {
-                        display_audio.process_buffer(cx, None, voice, buffer, 1.0);
-                    }
-                    AudioGraphAction::VoiceOff { voice } => {
-                        display_audio.voice_off(cx, voice);
-                    }
-                };
-            });
+            self.audio_graph
+                .handle_event_with(cx, event, &mut |cx, action| {
+                    let display_audio = self.ui.display_audio_set(cx, ids_array!(display_audio));
+                    match action {
+                        AudioGraphAction::DisplayAudio { buffer, voice, .. } => {
+                            display_audio.process_buffer(cx, None, voice, buffer, 1.0);
+                        }
+                        AudioGraphAction::VoiceOff { voice } => {
+                            display_audio.voice_off(cx, voice);
+                        }
+                    };
+                });
+        });
     }
 }

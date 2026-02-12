@@ -311,7 +311,7 @@ impl MatchEvent for App {
         self.handle_device_selection(cx, actions);
 
         // Handle passthrough toggle
-        if let Some(enabled) = self.ui.check_box(ids!(passthrough_toggle)).changed(actions) {
+        if let Some(enabled) = self.ui.check_box(cx, ids!(passthrough_toggle)).changed(actions) {
             if let Ok(mut passthrough_enabled) = self.store.passthrough_enabled.lock() {
                 *passthrough_enabled = enabled;
             }
@@ -329,14 +329,14 @@ impl MatchEvent for App {
         }
 
         // Handle volume slider
-        if let Some(volume) = self.ui.slider(ids!(volume_slider)).slided(actions) {
+        if let Some(volume) = self.ui.slider(cx, ids!(volume_slider)).slided(actions) {
             self.store.passthrough_volume.set(volume);
             self.update_volume_label(cx, volume);
         }
 
         if self
             .ui
-            .button(ids!(request_permission_button))
+            .button(cx, ids!(request_permission_button))
             .clicked(actions)
         {
             cx.request_permission(Permission::AudioInput);
@@ -392,11 +392,11 @@ impl MatchEvent for App {
                 }
             });
 
-        let mic_dropdown = self.ui.drop_down(ids!(mic_selector.device_selector));
+        let mic_dropdown = self.ui.drop_down(cx, ids!(mic_selector.device_selector));
         mic_dropdown.set_labels(cx, input_names.clone());
         mic_dropdown.set_selected_by_label(&default_input_name, cx);
 
-        let speaker_dropdown = self.ui.drop_down(ids!(speaker_selector.device_selector));
+        let speaker_dropdown = self.ui.drop_down(cx, ids!(speaker_selector.device_selector));
         speaker_dropdown.set_labels(cx, output_names.clone());
         speaker_dropdown.set_selected_by_label(&default_output_name, cx);
 
@@ -431,36 +431,38 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        cx.with_widget_tree(|cx| {
+            self.match_event(cx, event);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
 
-        if let Event::PermissionResult(pr) = event {
-            if pr.permission == Permission::AudioInput {
-                log!("Permission result: {:?}", pr);
-                match pr.status {
-                    PermissionStatus::Granted => {
-                        self.initialize(cx);
-                        self.ui
-                            .view(ids!(permission_warning))
-                            .set_visible(cx, false);
+            if let Event::PermissionResult(pr) = event {
+                if pr.permission == Permission::AudioInput {
+                    log!("Permission result: {:?}", pr);
+                    match pr.status {
+                        PermissionStatus::Granted => {
+                            self.initialize(cx);
+                            self.ui
+                                .view(cx, ids!(permission_warning))
+                                .set_visible(cx, false);
+                        }
+                        PermissionStatus::DeniedPermanent => {
+                            self.ui.label(cx, ids!(permission_warning_label)).set_text(cx, "⚠️ Microphone permission denied.\nPlease enable microphone access in the system settings.");
+                            self.ui.view(cx, ids!(permission_warning)).set_visible(cx, true);
+                            self.ui
+                                .button(cx, ids!(request_permission_button))
+                                .set_visible(cx, false);
+                        }
+                        PermissionStatus::DeniedCanRetry => {
+                            self.ui.view(cx, ids!(permission_warning)).set_visible(cx, true);
+                            self.ui
+                                .button(cx, ids!(request_permission_button))
+                                .set_visible(cx, true);
+                        }
+                        _ => {}
                     }
-                    PermissionStatus::DeniedPermanent => {
-                        self.ui.label(ids!(permission_warning_label)).set_text(cx, "⚠️ Microphone permission denied.\nPlease enable microphone access in the system settings.");
-                        self.ui.view(ids!(permission_warning)).set_visible(cx, true);
-                        self.ui
-                            .button(ids!(request_permission_button))
-                            .set_visible(cx, false);
-                    }
-                    PermissionStatus::DeniedCanRetry => {
-                        self.ui.view(ids!(permission_warning)).set_visible(cx, true);
-                        self.ui
-                            .button(ids!(request_permission_button))
-                            .set_visible(cx, true);
-                    }
-                    _ => {}
                 }
             }
-        }
+        });
     }
 }
 
@@ -477,7 +479,7 @@ impl App {
 
     fn handle_device_selection(&mut self, cx: &mut Cx, actions: &Actions) {
         // Handle speaker selection
-        let speaker_dropdown = self.ui.drop_down(ids!(speaker_selector.device_selector));
+        let speaker_dropdown = self.ui.drop_down(cx, ids!(speaker_selector.device_selector));
         if let Some(_id) = speaker_dropdown.changed(actions) {
             if let Some(device) = self.find_device_by_name(&speaker_dropdown.selected_label()) {
                 cx.use_audio_outputs(&[device.device_id]);
@@ -485,7 +487,7 @@ impl App {
         }
 
         // Handle microphone selection
-        let microphone_dropdown = self.ui.drop_down(ids!(mic_selector.device_selector));
+        let microphone_dropdown = self.ui.drop_down(cx, ids!(mic_selector.device_selector));
         if let Some(_id) = microphone_dropdown.changed(actions) {
             if let Some(device) = self.find_device_by_name(&microphone_dropdown.selected_label()) {
                 cx.use_audio_inputs(&[device.device_id]);
@@ -499,7 +501,7 @@ impl App {
 
     pub fn start_audio_test(&mut self, cx: &mut Cx) {
         self.ui
-            .label(ids!(status_label))
+            .label(cx, ids!(status_label))
             .set_text(cx, "Status: Setting up audio input...");
         self.ui.redraw(cx);
 
@@ -589,7 +591,7 @@ impl App {
 
         // Update status to show callback is registered
         self.ui
-            .label(ids!(status_label))
+            .label(cx, ids!(status_label))
             .set_text(cx, "Status: Audio callback registered, waiting for data...");
 
         self.ui.redraw(cx);
@@ -717,9 +719,9 @@ impl App {
         };
 
         self.ui
-            .label(ids!(passthrough_status))
+            .label(cx, ids!(passthrough_status))
             .set_text(cx, &status_text);
-        self.ui.label(ids!(passthrough_status)).apply_over(
+        self.ui.label(cx, ids!(passthrough_status)).apply_over(
             cx,
             live! {
                 draw_text: { color: (color) }
@@ -732,7 +734,7 @@ impl App {
     fn update_volume_label(&mut self, cx: &mut Cx, volume: f64) {
         let percentage = (volume * 100.0) as i32;
         self.ui
-            .label(ids!(volume_label))
+            .label(cx, ids!(volume_label))
             .set_text(cx, &format!("{}%", percentage));
         self.ui.redraw(cx);
     }
@@ -751,14 +753,14 @@ impl App {
         } else {
             "Status: ⚠️ Callbacks OK, but silent"
         };
-        self.ui.label(ids!(status_label)).set_text(cx, status);
+        self.ui.label(cx, ids!(status_label)).set_text(cx, status);
 
         // Update frames and peak labels
         self.ui
-            .label(ids!(frames_label))
+            .label(cx, ids!(frames_label))
             .set_text(cx, &format!("Frames: {}", frame_count));
         self.ui
-            .label(ids!(peak_label))
+            .label(cx, ids!(peak_label))
             .set_text(cx, &format!("Peak: {:.4} | Avg: {:.4}", peak, avg));
 
         // Update callback counter with frequency
@@ -767,7 +769,7 @@ impl App {
         } else {
             0
         };
-        self.ui.label(ids!(callback_label)).set_text(
+        self.ui.label(cx, ids!(callback_label)).set_text(
             cx,
             &format!("Callbacks: {} ({}Hz)", callback_count, frequency),
         );
@@ -775,7 +777,7 @@ impl App {
         // Update level bar
         let width = (peak.min(1.0) * 360.0) as f64;
         self.ui
-            .view(ids!(level_fill))
+            .view(cx, ids!(level_fill))
             .apply_over(cx, live! {width: (width)});
     }
 
@@ -788,11 +790,11 @@ impl App {
                     .map(|s| format!("{:.3}", s))
                     .collect();
                 self.ui
-                    .label(ids!(samples_label))
+                    .label(cx, ids!(samples_label))
                     .set_text(cx, &format!("Samples: [{}]", samples_str.join(", ")));
             } else {
                 self.ui
-                    .label(ids!(samples_label))
+                    .label(cx, ids!(samples_label))
                     .set_text(cx, "Samples: [no data yet]");
             }
         }

@@ -269,23 +269,21 @@ impl Widget for Label {
         self.redraw(cx);
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
 
         match event.hit_designer(cx, self.area) {
-            HitDesigner::DesignerPick(_e) => {
-                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
-            }
+            HitDesigner::DesignerPick(_e) => cx.widget_action(uid, WidgetDesignAction::PickedBody),
             _ => (),
         }
 
         if self.hover_actions_enabled {
             match event.hits_with_capture_overload(cx, self.area, true) {
                 Hit::FingerHoverIn(fh) => {
-                    cx.widget_action(uid, &scope.path, LabelAction::HoverIn(fh.rect));
+                    cx.widget_action(uid, LabelAction::HoverIn(fh.rect));
                 }
                 Hit::FingerHoverOut(_) => {
-                    cx.widget_action(uid, &scope.path, LabelAction::HoverOut);
+                    cx.widget_action(uid, LabelAction::HoverOut);
                 }
                 _ => (),
             }

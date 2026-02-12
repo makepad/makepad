@@ -456,7 +456,7 @@ impl Markdown {
                             //cx.with_vm(|vm| {
                             //    log!("$splash_block widget tree:\n{}", tree.display(vm.heap()));
                             //});
-                            item.widget(ids!(splash_view)).set_text(cx, sbs);
+                            item.widget(cx, ids!(splash_view)).set_text(cx, sbs);
                             item.draw_all_unscoped(cx);
                         });
                     } else if self.in_code_block {
@@ -467,9 +467,9 @@ impl Markdown {
                         // Draw the code block and capture the CodeView widget ref
                         let mut code_view_ref = WidgetRef::empty();
                         tf.item_with(cx, entry_id, id!(code_block), |cx, item, _tf| {
-                            item.widget(ids!(code_view)).set_text(cx, cbs);
+                            item.widget(cx, ids!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
-                            code_view_ref = item.widget(ids!(code_view));
+                            code_view_ref = item.widget(cx, ids!(code_view));
                         });
 
                         // Register the code view widget for cross-child selection
@@ -658,11 +658,10 @@ struct MarkdownLink {
 }
 
 impl WidgetMatchEvent for MarkdownLink {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         if self.link.clicked(actions) {
             cx.widget_action(
                 self.widget_uid(),
-                &scope.path,
                 MarkdownAction::LinkNavigated(self.href.clone()),
             );
         }

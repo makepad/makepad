@@ -40,7 +40,7 @@ script_mod! {
 
     // ---- UI ----
     let results = []
-    
+
     let app = load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
@@ -94,7 +94,9 @@ script_mod! {
                             if results.len() == 0
                                 EmptyState{}
                             else for result in results{
-                                // turn result into resultcard
+                                ResultCard{
+                                    title.text: result.title
+                                }
                             }
                         }
                     }
@@ -106,7 +108,7 @@ script_mod! {
     // ---- Logic ----
     // These use script features (var, fn) that run in the script VM.
     // They will work once the script engine supports them fully.
-    
+
     fn do_search(query){
         let req = net.HttpRequest{
             url: "https://html.duckduckgo.com/html/?q=" + query
@@ -125,8 +127,7 @@ script_mod! {
                         snippet: if i < snippets.len() snippets[i].text else ""
                     })
                 }
-                
-                @.results.render()
+                ui.results.render()
             }
         }
     }
@@ -155,7 +156,9 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        cx.with_widget_tree(|cx| {
+            self.match_event(cx, event);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
+        });
     }
 }

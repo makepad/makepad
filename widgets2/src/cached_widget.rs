@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -156,49 +156,33 @@ impl WidgetNode for CachedWidget {
             widget.redraw(cx);
         }
     }
-
-    // Searches for widgets within this CachedWidget based on the given path.
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        let Some(widget) = self.widget.as_ref() else {
-            return;
-        };
-        if self.template_id == path[0] {
-            if path.len() == 1 {
-                // If the child widget is the target widget, add it to the results
-                results.push(widget.clone());
-            } else {
-                // If not, continue searching in the child widget
-                widget.find_widgets(&path[1..], cached, results);
-            }
-        }
-    }
-
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        if let Some(widget) = &self.widget {
-            return widget.uid_to_widget(uid);
-        }
-        WidgetRef::empty()
-    }
-
-    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        if let Some(widget) = &self.widget {
-            widget.widget_tree_walk_named(self.template_id, nodes);
-        }
-    }
 }
 
 impl Widget for CachedWidget {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(widget) = &self.widget {
-            widget.handle_event(cx, event, scope);
+            cx.with_node(
+                widget.widget_uid(),
+                self.template_id,
+                widget.clone(),
+                |cx| {
+                    widget.handle_event(cx, event, scope);
+                },
+            );
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(widget) = &self.widget {
-            return widget.draw_walk(cx, scope, walk);
+            cx.with_node(
+                widget.widget_uid(),
+                self.template_id,
+                widget.clone(),
+                |cx| widget.draw_walk(cx, scope, walk),
+            )
+        } else {
+            DrawStep::done()
         }
-        DrawStep::done()
     }
 }
 

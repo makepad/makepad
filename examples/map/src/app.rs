@@ -40,7 +40,9 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        cx.with_widget_tree(|cx| {
+            self.match_event(cx, event);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
+        });
     }
 }

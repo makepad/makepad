@@ -69,7 +69,7 @@ pub struct App {
 impl App {
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
-            let dock = self.ui.dock(ids!(dock));
+            let dock = self.ui.dock(cx, ids!(dock));
             let tab_id = dock.unique_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
             let (tab_bar, pos) = dock.find_tab_bar_of_tab(id!(edit_first)).unwrap();
@@ -95,7 +95,7 @@ impl App {
                     // lets kill all running processes
                     self.data.build_manager.stop_all_active_builds(cx);
                     // Now we need to apply the saved state
-                    let dock = self.ui.dock(ids!(dock));
+                    let dock = self.ui.dock(cx, ids!(dock));
                     if let Some(mut dock) = dock.borrow_mut() {
                         dock.load_state(cx, state.dock_items);
 
@@ -120,7 +120,7 @@ impl App {
                             }
                         }
                     };
-                    self.ui.clear_query_cache();
+                    // query cache removed - widget tree is now centralized
                     return;
                     //self.ui.redraw(cx);
                     // cx.redraw_all();
@@ -134,8 +134,8 @@ impl App {
         }
     }
 
-    fn save_state(&self, slot: usize) {
-        let dock = self.ui.dock(ids!(dock));
+    fn save_state(&self, cx: &Cx, slot: usize) {
+        let dock = self.ui.dock(cx, ids!(dock));
         let dock_items = dock.clone_state().unwrap();
 
         // lets store the active build ids so we can fire them up again
@@ -244,13 +244,13 @@ impl MatchEvent for App {
     }
 
     fn handle_action(&mut self, cx: &mut Cx, action: &Action) {
-        let dock = self.ui.dock(ids!(dock));
-        let file_tree = self.ui.studio_file_tree(ids!(file_tree));
-        let log_list = self.ui.log_list(ids!(log_list));
-        let run_list = self.ui.view(ids!(run_list_tab));
-        let profiler = self.ui.view(ids!(profiler));
-        let search = self.ui.view(ids!(search));
-        let snapshot = self.ui.snapshot(ids!(snapshot_tab));
+        let dock = self.ui.dock(cx, ids!(dock));
+        let file_tree = self.ui.studio_file_tree(cx, ids!(file_tree));
+        let log_list = self.ui.log_list(cx, ids!(log_list));
+        let run_list = self.ui.view(cx, ids!(run_list_tab));
+        let profiler = self.ui.view(cx, ids!(profiler));
+        let search = self.ui.view(cx, ids!(search));
+        let snapshot = self.ui.snapshot(cx, ids!(snapshot_tab));
 
         match action.cast() {
             AppAction::SwapSelection(ss) => {
@@ -354,7 +354,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!(editor))
+                            .studio_code_editor(cx, ids!(editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -380,7 +380,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!(editor))
+                            .studio_code_editor(cx, ids!(editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -419,7 +419,7 @@ impl MatchEvent for App {
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         //dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(ids!(editor)).borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(cx, ids!(editor)).borrow_mut() {
                             if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do
                                 session.set_selection(
@@ -457,7 +457,7 @@ impl MatchEvent for App {
                         // ok lets scroll into view
                         if let Some(mut editor) = dock
                             .item(tab_id)
-                            .studio_code_editor(ids!(editor))
+                            .studio_code_editor(cx, ids!(editor))
                             .borrow_mut()
                         {
                             if let Some(EditSession::Code(session)) =
@@ -715,10 +715,15 @@ impl MatchEvent for App {
                 CodeEditorAction::UnhandledKeyDown(ke)
                     if ke.key_code == KeyCode::F12 && !ke.modifiers.shift =>
                 {
+                    let path = cx.widget_tree().path_to(action.widget_uid);
+                    let tab_id = path
+                        .get(path.len().wrapping_sub(2))
+                        .copied()
+                        .unwrap_or(LiveId(0));
                     if let Some(word) = self
                         .data
                         .file_system
-                        .get_word_under_cursor_for_session(action.path.from_end(1))
+                        .get_word_under_cursor_for_session(tab_id)
                     {
                         dock.select_tab(cx, id!(search));
                         let set = vec![SearchItem {
@@ -734,17 +739,24 @@ impl MatchEvent for App {
                             pre_word_boundary: true,
                             post_word_boundary: true,
                         }];
-                        search.text_input(ids!(search_input)).set_text(cx, &word);
+                        search
+                            .text_input(cx, ids!(search_input))
+                            .set_text(cx, &word);
                         self.data.file_system.search_string(cx, set);
                     }
                 }
                 CodeEditorAction::UnhandledKeyDown(ke)
                     if ke.key_code == KeyCode::F12 && ke.modifiers.shift =>
                 {
+                    let path = cx.widget_tree().path_to(action.widget_uid);
+                    let tab_id = path
+                        .get(path.len().wrapping_sub(2))
+                        .copied()
+                        .unwrap_or(LiveId(0));
                     if let Some(word) = self
                         .data
                         .file_system
-                        .get_word_under_cursor_for_session(action.path.from_end(1))
+                        .get_word_under_cursor_for_session(tab_id)
                     {
                         dock.select_tab(cx, id!(search));
                         let set = vec![SearchItem {
@@ -753,15 +765,22 @@ impl MatchEvent for App {
                             pre_word_boundary: ke.modifiers.control,
                             post_word_boundary: ke.modifiers.control,
                         }];
-                        search.text_input(ids!(search_input)).set_text(cx, &word);
+                        search
+                            .text_input(cx, ids!(search_input))
+                            .set_text(cx, &word);
                         self.data.file_system.search_string(cx, set);
                     }
                 }
                 CodeEditorAction::TextDidChange => {
                     // lets write the file
+                    let path = cx.widget_tree().path_to(action.widget_uid);
+                    let tab_id = path
+                        .get(path.len().wrapping_sub(2))
+                        .copied()
+                        .unwrap_or(LiveId(0));
                     self.data
                         .file_system
-                        .request_save_file_for_tab_id(action.path.from_end(1), false)
+                        .request_save_file_for_tab_id(tab_id, false)
                 }
                 CodeEditorAction::UnhandledKeyDown(_) => {}
                 CodeEditorAction::None => {}
@@ -868,8 +887,8 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let file_tree = self.ui.file_tree(ids!(file_tree));
-        let dock = self.ui.dock(ids!(dock));
+        let file_tree = self.ui.file_tree(cx, ids!(file_tree));
+        let dock = self.ui.dock(cx, ids!(dock));
         for action in actions {
             self.handle_action(cx, action);
         }
@@ -886,14 +905,14 @@ impl MatchEvent for App {
         }
 
         // Handle file tree filter
-        let file_tree_filter = self.ui.text_input(ids!(file_tree_filter));
-        let file_tree_view = self.ui.file_tree_view(ids!(file_tree_view));
+        let file_tree_filter = self.ui.text_input(cx, ids!(file_tree_filter));
+        let file_tree_view = self.ui.file_tree_view(cx, ids!(file_tree_view));
         if let Some(filter) = file_tree_filter.changed(&actions) {
             file_tree_view.set_filter(cx, filter, &self.data.file_system);
         }
 
         // Handle clicks on filtered files in the file tree
-        if let Some(file_id) = file_tree_view.filter_file_clicked(&actions) {
+        if let Some(file_id) = file_tree_view.filter_file_clicked(cx, &actions) {
             // If the tab is already open, focus it
             if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id) {
                 dock.select_tab(cx, tab_id);
@@ -922,29 +941,29 @@ impl MatchEvent for App {
         }
 
         // Handle Stop All button
-        if self.ui.button(ids!(stop_all)).clicked(&actions) {
+        if self.ui.button(cx, ids!(stop_all)).clicked(&actions) {
             self.data.build_manager.stop_all_active_builds(cx);
             // Redraw the run list to update the play/pause button states
-            self.ui.view(ids!(run_list)).redraw(cx);
+            self.ui.view(cx, ids!(run_list)).redraw(cx);
         }
 
         // Handle Tail checkbox for log list
-        let log_list = self.ui.log_list(ids!(log_list));
-        let tail_checkbox = self.ui.check_box(ids!(tail_checkbox));
+        let log_list = self.ui.log_list(cx, ids!(log_list));
+        let tail_checkbox = self.ui.check_box(cx, ids!(tail_checkbox));
         if let Some(tail) = tail_checkbox.changed(&actions) {
             log_list.set_tail(cx, tail);
         }
         // If user scrolled and is no longer at end, uncheck tail
-        if log_list.scrolled(&actions) && !log_list.is_at_end() {
+        if log_list.scrolled(cx, &actions) && !log_list.is_at_end(cx) {
             tail_checkbox.set_active(cx, false);
         }
 
         // Handle log filter
-        let log_filter = self.ui.text_input(ids!(log_filter));
+        let log_filter = self.ui.text_input(cx, ids!(log_filter));
         if let Some(filter) = log_filter.changed(&actions) {
             log_list.set_filter(cx, filter, &self.data.build_manager.log);
         }
-        if self.ui.button(ids!(clear_filter)).clicked(&actions) {
+        if self.ui.button(cx, ids!(clear_filter)).clicked(&actions) {
             log_filter.set_text(cx, "");
             log_list.set_filter(cx, String::new(), &self.data.build_manager.log);
         }
@@ -958,9 +977,9 @@ impl MatchEvent for App {
         .iter()
         .enumerate()
         {
-            if let Some(km) = self.ui.button(id).pressed_modifiers(actions) {
+            if let Some(km) = self.ui.button(cx, id).pressed_modifiers(actions) {
                 if km.control {
-                    self.save_state(i + 1)
+                    self.save_state(cx, i + 1)
                 } else {
                     self.load_state(cx, i + 1);
                     cx.redraw_all();
@@ -1006,20 +1025,22 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui
-            .handle_event(cx, event, &mut Scope::with_data(&mut self.data));
+        cx.with_widget_tree(|cx| {
+            self.match_event(cx, event);
+            self.ui
+                .handle_event(cx, event, &mut Scope::with_data(&mut self.data));
 
-        self.data.file_system.handle_event(cx, event, &self.ui);
-        self.data
-            .build_manager
-            .handle_event(cx, event, &mut self.data.file_system);
-        self.data
-            .ai_chat_manager
-            .handle_event(cx, event, &mut self.data.file_system);
-        if self.ui.dock(ids!(dock)).check_and_clear_need_save() {
-            self.save_state(0);
-        }
+            self.data.file_system.handle_event(cx, event, &self.ui);
+            self.data
+                .build_manager
+                .handle_event(cx, event, &mut self.data.file_system);
+            self.data
+                .ai_chat_manager
+                .handle_event(cx, event, &mut self.data.file_system);
+            if self.ui.dock(cx, ids!(dock)).check_and_clear_need_save() {
+                self.save_state(cx, 0);
+            }
+        });
     }
 }
 

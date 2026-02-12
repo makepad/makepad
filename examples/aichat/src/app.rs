@@ -369,7 +369,7 @@ impl Widget for ChatList {
                         } else {
                             &data.streaming_text
                         };
-                        let mut markdown = item_widget.markdown(ids!(selectable));
+                        let mut markdown = item_widget.markdown(cx, ids!(selectable));
                         markdown.set_text(cx, text);
                         if just_started {
                             markdown.reset_all_streaming_animations();
@@ -387,7 +387,7 @@ impl Widget for ChatList {
                             ChatRole::Assistant => id!(Assistant),
                         };
                         let item_widget = list.item(cx, item_id, template);
-                        let mut markdown = item_widget.markdown(ids!(selectable));
+                        let mut markdown = item_widget.markdown(cx, ids!(selectable));
                         markdown.set_text(cx, &msg.text);
                         if is_animating {
                             markdown.stop_streaming_animation();
@@ -606,7 +606,7 @@ impl App {
     }
 
     fn send_message(&mut self, cx: &mut Cx) {
-        let input = self.ui.text_input(ids!(input));
+        let input = self.ui.text_input(cx, ids!(input));
         let text = input.text();
         if text.trim().is_empty() {
             return;
@@ -655,10 +655,10 @@ impl App {
             text
         };
         self.current_prompt = Some(agent.send_prompt(cx, session_id, &prompt_text));
-        self.ui.view(ids!(cancel_button)).set_visible(cx, true);
+        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, true);
 
-        let chat_list = self.ui.widget(ids!(chat_list));
-        let list = chat_list.portal_list(ids!(list));
+        let chat_list = self.ui.widget(cx, ids!(chat_list));
+        let list = chat_list.portal_list(cx, ids!(list));
         list.set_tail_range(true);
         list.set_first_id_and_scroll(items_len.saturating_sub(1), 0.0);
         self.ui.redraw(cx);
@@ -679,7 +679,7 @@ impl App {
             data.is_streaming = false;
             drop(data);
 
-            self.ui.view(ids!(cancel_button)).set_visible(cx, false);
+            self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
     }
@@ -689,38 +689,47 @@ impl App {
             Some(b) => b.status_label(),
             None => "No backend selected",
         };
-        self.ui.label(ids!(status_label)).set_text(cx, status);
+        self.ui.label(cx, ids!(status_label)).set_text(cx, status);
     }
 }
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(ids!(send_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(send_button)).clicked(actions) {
             self.send_message(cx);
         }
-        if self.ui.button(ids!(cancel_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(cancel_button)).clicked(actions) {
             self.cancel_request(cx);
         }
-        if self.ui.button(ids!(clear_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(clear_button)).clicked(actions) {
             self.clear_chat(cx);
         }
-        if self.ui.text_input(ids!(input)).returned(actions).is_some() {
+        if self
+            .ui
+            .text_input(cx, ids!(input))
+            .returned(actions)
+            .is_some()
+        {
             self.send_message(cx);
         }
-        if self.ui.text_input(ids!(input)).escaped(actions) {
+        if self.ui.text_input(cx, ids!(input)).escaped(actions) {
             self.cancel_request(cx);
         }
-        if let Some(index) = self.ui.drop_down(ids!(backend_dropdown)).selected(actions) {
+        if let Some(index) = self
+            .ui
+            .drop_down(cx, ids!(backend_dropdown))
+            .selected(actions)
+        {
             if let Some(backend) = BackendType::from_index(index) {
                 self.switch_backend(cx, backend);
             }
         }
 
         // Handle message deletion
-        let chat_list = self.ui.widget(ids!(chat_list));
-        let list = chat_list.portal_list(ids!(list));
+        let chat_list = self.ui.widget(cx, ids!(chat_list));
+        let list = chat_list.portal_list(cx, ids!(list));
         for (item_id, item) in list.items_with_actions(actions) {
-            if item.button(ids!(delete_button)).pressed(actions) {
+            if item.button(cx, ids!(delete_button)).pressed(actions) {
                 let mut data = CHAT_DATA.write().unwrap();
                 if item_id < data.messages.len() {
                     data.messages.remove(item_id);
@@ -743,7 +752,7 @@ impl MatchEvent for App {
         if let Some(backend) = default_backend {
             self.switch_backend(cx, backend);
             self.ui
-                .drop_down(ids!(backend_dropdown))
+                .drop_down(cx, ids!(backend_dropdown))
                 .set_selected_item(cx, backend.to_index());
         }
         self.update_status(cx);
@@ -752,63 +761,64 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        cx.with_widget_tree(|cx| {
+            self.match_event(cx, event);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
 
-        if let Some(agent) = &mut self.agent {
-            for event in agent.handle_event(cx, event) {
-                match event {
-                    AgentEvent::SessionReady { .. } => {
-                        self.update_status(cx);
-                    }
-                    AgentEvent::SessionError { error, .. } => {
-                        self.ui
-                            .label(ids!(status_label))
-                            .set_text(cx, &format!("Error: {}", error));
-                    }
-                    AgentEvent::TextDelta { text, .. } => {
-                        let item_id = {
+            if let Some(agent) = &mut self.agent {
+                for event in agent.handle_event(cx, event) {
+                    match event {
+                        AgentEvent::SessionReady { .. } => {
+                            self.update_status(cx);
+                        }
+                        AgentEvent::SessionError { error, .. } => {
+                            self.ui
+                                .label(cx, ids!(status_label))
+                                .set_text(cx, &format!("Error: {}", error));
+                        }
+                        AgentEvent::TextDelta { text, .. } => {
+                            let item_id = {
+                                let mut data = CHAT_DATA.write().unwrap();
+                                data.streaming_text.push_str(&text);
+                                data.messages.len()
+                            };
+                            let chat_list = self.ui.widget(cx, ids!(chat_list));
+                            let list = chat_list.portal_list(cx, ids!(list));
+                            if let Some((_, item)) = list.get_item(item_id) {
+                                item.widget(cx, ids!(splash_view)).redraw(cx);
+                            }
+                            cx.redraw_all();
+                        }
+                        AgentEvent::TurnComplete { .. } => {
                             let mut data = CHAT_DATA.write().unwrap();
-                            data.streaming_text.push_str(&text);
-                            data.messages.len()
-                        };
-                        let chat_list = self.ui.widget(ids!(chat_list));
-                        let list = chat_list.portal_list(ids!(list));
-                        if let Some((_, item)) = list.get_item(item_id) {
-                            item.clear_query_cache();
-                            item.widget(ids!(splash_view)).redraw(cx);
-                        }
-                        cx.redraw_all();
-                    }
-                    AgentEvent::TurnComplete { .. } => {
-                        let mut data = CHAT_DATA.write().unwrap();
-                        let text = std::mem::take(&mut data.streaming_text);
-                        if !text.is_empty() {
-                            data.messages.push(ChatMessage {
-                                role: ChatRole::Assistant,
-                                text,
-                            });
-                        }
-                        data.is_streaming = false;
-                        data.save_to_disk();
-                        drop(data);
+                            let text = std::mem::take(&mut data.streaming_text);
+                            if !text.is_empty() {
+                                data.messages.push(ChatMessage {
+                                    role: ChatRole::Assistant,
+                                    text,
+                                });
+                            }
+                            data.is_streaming = false;
+                            data.save_to_disk();
+                            drop(data);
 
-                        self.current_prompt = None;
-                        self.ui.view(ids!(cancel_button)).set_visible(cx, false);
-                        cx.redraw_all();
+                            self.current_prompt = None;
+                            self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                            cx.redraw_all();
+                        }
+                        AgentEvent::PromptError { error, .. } => {
+                            CHAT_DATA.write().unwrap().is_streaming = false;
+                            self.current_prompt = None;
+                            self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                            self.ui
+                                .label(cx, ids!(status_label))
+                                .set_text(cx, &format!("Error: {}", error));
+                            cx.redraw_all();
+                        }
+                        AgentEvent::ToolRequest { .. } => {}
                     }
-                    AgentEvent::PromptError { error, .. } => {
-                        CHAT_DATA.write().unwrap().is_streaming = false;
-                        self.current_prompt = None;
-                        self.ui.view(ids!(cancel_button)).set_visible(cx, false);
-                        self.ui
-                            .label(ids!(status_label))
-                            .set_text(cx, &format!("Error: {}", error));
-                        cx.redraw_all();
-                    }
-                    AgentEvent::ToolRequest { .. } => {}
                 }
             }
-        }
+        });
     }
 }

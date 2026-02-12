@@ -245,7 +245,7 @@ impl Widget for FileFilterList {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        let filter_list = self.view.portal_list(ids!(list));
+        let filter_list = self.view.portal_list(cx, ids!(list));
         self.view.handle_event(cx, event, scope);
 
         if let Event::Actions(actions) = event {
@@ -256,7 +256,6 @@ impl Widget for FileFilterList {
                         if let Some(filtered_file) = self.filtered_files.get(item_id) {
                             cx.widget_action(
                                 uid,
-                                &scope.path,
                                 FileFilterListAction::FileClicked(filtered_file.file_id),
                             );
                         }
@@ -312,7 +311,7 @@ impl FileTreeViewRef {
 
             // Switch pages using PageFlip
             if inner.filter_active != was_active {
-                let page_flip = inner.view.page_flip(ids!(page_flip));
+                let page_flip = inner.view.page_flip(cx, ids!(page_flip));
                 if inner.filter_active {
                     page_flip.set_active_page(cx, id!(filter_list));
                 } else {
@@ -324,16 +323,16 @@ impl FileTreeViewRef {
         if let Some(inner) = self.borrow() {
             inner
                 .view
-                .file_filter_list(ids!(filter_list))
+                .file_filter_list(cx, ids!(filter_list))
                 .set_filter(cx, filter, file_system);
         }
     }
 
-    pub fn filter_file_clicked(&self, actions: &Actions) -> Option<LiveId> {
+    pub fn filter_file_clicked(&self, cx: &Cx, actions: &Actions) -> Option<LiveId> {
         if let Some(inner) = self.borrow() {
             return inner
                 .view
-                .file_filter_list(ids!(filter_list))
+                .file_filter_list(cx, ids!(filter_list))
                 .file_clicked(actions);
         }
         None

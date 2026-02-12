@@ -349,12 +349,6 @@ impl CodeEditor {
         self.walk
     }
 
-    pub fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
-        WidgetRef::empty()
-    }
-
-    pub fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
-
     pub fn find_widgets_from_point(
         &self,
         _cx: &Cx,

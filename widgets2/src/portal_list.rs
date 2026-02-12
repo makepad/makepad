@@ -5,6 +5,7 @@ use {
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
         widget::*,
+        widget_tree::CxWidgetExt,
     },
     std::collections::HashMap,
 };
@@ -1504,31 +1505,9 @@ impl WidgetNode for PortalList {
         self.area.redraw(cx);
     }
 
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        for item in self.items.values() {
-            let r = item.widget.uid_to_widget(uid);
-            if !r.is_empty() {
-                return r;
-            }
-        }
-        WidgetRef::empty()
-    }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        for item in self.items.values() {
-            item.widget.find_widgets(path, cached, results);
-        }
-    }
-
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
         for item in self.items.values() {
             item.widget.find_widgets_from_point(cx, point, found);
-        }
-    }
-
-    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        for item in self.items.values() {
-            item.widget.widget_tree_walk(nodes);
         }
     }
 }
@@ -1567,7 +1546,7 @@ impl Widget for PortalList {
                 self.first_scroll = 0.0;
             }
 
-            cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+            cx.widget_action(uid, PortalListAction::Scroll);
             self.was_scrolling = false;
             self.area.redraw(cx);
         }
@@ -1615,8 +1594,12 @@ impl Widget for PortalList {
                 for item_id in min_id..=max_id {
                     if let Some(item) = self.items.get_mut(&item_id) {
                         let item_uid = item.widget.widget_uid();
-                        cx.group_widget_actions(uid, item_uid, |cx| {
-                            item.widget.handle_event(cx, event, scope);
+                        let item_name = LiveId(item_id as u64);
+                        let item_widget = item.widget.clone();
+                        cx.with_node(item_uid, item_name, item_widget, |cx| {
+                            cx.group_widget_actions(uid, item_uid, |cx| {
+                                item.widget.handle_event(cx, event, scope);
+                            });
                         });
                     }
                 }
@@ -1682,12 +1665,12 @@ impl Widget for PortalList {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
                         self.delta_top_scroll(cx, delta, true, false);
-                        cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+                        cx.widget_action(uid, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
-                        cx.widget_action(uid, &scope.path, PortalListAction::SmoothScrollReached);
+                        cx.widget_action(uid, PortalListAction::SmoothScrollReached);
                     }
                 }
             }
@@ -1698,7 +1681,7 @@ impl Widget for PortalList {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
                         self.delta_top_scroll(cx, delta, false, true);
-                        cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+                        cx.widget_action(uid, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
                         self.was_scrolling = false;
@@ -1716,7 +1699,7 @@ impl Widget for PortalList {
                             self.scroll_state = ScrollState::Stopped;
                         } else {
                             *next_frame = cx.new_next_frame();
-                            cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+                            cx.widget_action(uid, PortalListAction::Scroll);
                         }
                         self.area.redraw(cx);
                     } else {
@@ -1768,7 +1751,7 @@ impl Widget for PortalList {
                             *velocity = 0.0;
                             self.scroll_state = ScrollState::Stopped;
                         }
-                        cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+                        cx.widget_action(uid, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
                         self.tail_adjustment_needed = 0.0;
@@ -1796,7 +1779,7 @@ impl Widget for PortalList {
                     // For mouse wheel: clip to top and don't transition to pulldown
                     // (pulldown/overscroll is only for touch drag/flick)
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true, false);
-                    cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+                    cx.widget_action(uid, PortalListAction::Scroll);
                     self.area.redraw(cx);
                 }
                 Hit::KeyDown(ke) => match ke.key_code {

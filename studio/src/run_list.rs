@@ -195,10 +195,10 @@ impl RunList {
                 draw_bg +: {is_even: #(is_even_f)}
             });
 
-            item.fold_button(ids!(fold))
+            item.fold_button(cx, ids!(fold))
                 .set_action_data(ActionData::FoldBinary { binary_id });
 
-            let cb = item.check_box(ids!(check));
+            let cb = item.check_box(cx, ids!(check));
             cb.set_text(name);
             cb.set_active(cx, build_manager.active.any_binary_active(&binary.name));
             cb.set_action_data(ActionData::RunMain { binary_id });
@@ -218,7 +218,7 @@ impl RunList {
                         height: #(height)
                         draw_bg +: {is_even: #(is_even_f)}
                     });
-                    let cb = item.check_box(ids!(check));
+                    let cb = item.check_box(cx, ids!(check));
                     cb.set_text(target_name);
                     cb.set_active(cx, build_manager.active.item_id_active(item_id));
 
@@ -250,9 +250,9 @@ impl RunList {
 impl WidgetMatchEvent for RunList {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
         let build_manager = &mut scope.data.get_mut::<AppData>().unwrap().build_manager;
-        let run_list = self.view.flat_list(ids!(list));
+        let run_list = self.view.flat_list(cx, ids!(list));
         for (_item_id, item) in run_list.items_with_actions(&actions) {
-            let fb = item.fold_button(ids!(fold));
+            let fb = item.fold_button(cx, ids!(fold));
             if let Some(v) = fb.animating(&actions) {
                 if let ActionData::FoldBinary { binary_id } = fb.action_data().cast_ref() {
                     build_manager.binaries[*binary_id].open = v;
@@ -260,7 +260,7 @@ impl WidgetMatchEvent for RunList {
                 }
             }
 
-            let cb = item.check_box(ids!(check));
+            let cb = item.check_box(cx, ids!(check));
             if let Some(change) = cb.changed(&actions) {
                 item.redraw(cx);
                 match cb.action_data().cast_ref() {
@@ -308,10 +308,10 @@ impl Widget for RunList {
             if ke.key_code == KeyCode::KeyD && ke.modifiers.logo {
                 log!("=== RunList animator debug dump ===");
                 let heap = &cx.script_vm.as_ref().unwrap().heap;
-                let run_list = self.view.flat_list(ids!(list));
+                let run_list = self.view.flat_list(cx, ids!(list));
                 if let Some(inner) = run_list.borrow() {
                     for (item_id, item) in inner.items.iter() {
-                        let cb = item.widget.check_box(ids!(check));
+                        let cb = item.widget.check_box(cx, ids!(check));
                         let dump = cb.debug_dump_animator(heap);
                         item_id.as_string(|s| {
                             log!("  item[{}]: {}", s.unwrap_or("?"), dump);
