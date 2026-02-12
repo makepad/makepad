@@ -67,33 +67,3 @@ optional = true
 version = "1.12"
 path = "../bytemuck"
 optional = true
-
-[dev-dependencies.arbitrary]
-version = "1.0"
-features = ["derive"]
-
-[dev-dependencies.bytemuck]
-version = "1.12.2"
-path = "../bytemuck"
-features = ["derive"]
-
-[dev-dependencies.rustversion]
-version = "1.0"
-
-[dev-dependencies.serde_json]
-version = "1.0"
-
-[dev-dependencies.serde_lib]
-version = "1.0.103"
-features = ["derive"]
-package = "serde"
-
-[dev-dependencies.serde_test]
-version = "1.0.19"
-
-[dev-dependencies.trybuild]
-version = "1.0.18"
-
-[dev-dependencies.zerocopy]
-version = "0.8"
-features = ["derive"]

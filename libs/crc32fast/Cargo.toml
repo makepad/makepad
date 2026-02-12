@@ -52,13 +52,3 @@ path = "src/lib.rs"
 [dependencies.cfg-if]
 version = "1.0"
 path = "../cfg-if"
-
-[dev-dependencies.bencher]
-version = "0.1"
-
-[dev-dependencies.quickcheck]
-version = "1.0"
-default-features = false
-
-[dev-dependencies.rand]
-version = "0.8"

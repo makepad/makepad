@@ -84,13 +84,3 @@ default-features = false
 version = "0.0.4"
 optional = true
 default-features = false
-
-[dev-dependencies.bincode1]
-version = "1.0.1"
-package = "bincode"
-
-[dev-dependencies.debugger_test]
-version = "0.1.0"
-
-[dev-dependencies.debugger_test_parser]
-version = "0.1.0"

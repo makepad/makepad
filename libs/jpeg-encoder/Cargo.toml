@@ -44,8 +44,3 @@ name = "jpeg_encoder"
 path = "src/lib.rs"
 
 [dependencies]
-
-[dev-dependencies.jpeg-decoder]
-version = "0.3"
-default-features = false
-

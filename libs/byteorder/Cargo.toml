@@ -38,13 +38,6 @@ repository = "https://github.com/BurntSushi/byteorder"
 name = "byteorder"
 bench = false
 
-[dev-dependencies.quickcheck]
-version = "0.9.2"
-default-features = false
-
-[dev-dependencies.rand]
-version = "0.7"
-
 [features]
 default = ["std"]
 i128 = []

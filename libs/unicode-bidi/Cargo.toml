@@ -69,9 +69,6 @@ path = "../smallvec"
 features = ["union"]
 optional = true
 
-[dev-dependencies.serde_test]
-version = ">=0.8, <2.0"
-
 [features]
 bench_it = []
 default = [
