@@ -49,11 +49,8 @@ Font parsing starts with a [`Face`].
 #[macro_use]
 extern crate std;
 
-#[cfg(not(any(feature = "std", feature = "no-std-float")))]
-compile_error!("You have to activate either the `std` or the `no-std-float` feature.");
-
 #[cfg(not(feature = "std"))]
-use core_maths::CoreFloat;
+compile_error!("The `std` feature is required.");
 
 #[cfg(feature = "apple-layout")]
 mod aat;
