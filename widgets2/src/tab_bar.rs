@@ -189,7 +189,8 @@ script_mod! {
 
 #[derive(Script, Widget)]
 pub struct TabBar {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 

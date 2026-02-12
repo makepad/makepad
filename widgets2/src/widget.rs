@@ -1,6 +1,7 @@
 pub use crate::register_widget;
 use {
     crate::makepad_draw::*,
+    crate::widget_async::{ScriptAsyncId, ScriptAsyncResult},
     crate::widget_tree::CxWidgetExt,
     //crate::designer_data::DesignerDataToWidget,
     std::any::TypeId,
@@ -103,6 +104,17 @@ pub trait Widget: WidgetNode {
         self.handle_event(cx, event, scope)
     }
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+    fn script_call(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        ScriptAsyncResult::MethodNotFound
+    }
+
+    fn script_result(&mut self, _vm: &mut ScriptVm, _id: ScriptAsyncId, _result: ScriptValue) {}
 
     /// Whether this widget is interactive (wants mouse/touch events like hover, click).
     /// Defaults to true. Override to return false for non-interactive widgets.
@@ -515,6 +527,24 @@ impl WidgetRef {
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.handle_event(cx, event, scope);
+        }
+    }
+
+    pub fn script_call(
+        &self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.script_call(vm, method, args);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
+    pub fn script_result(&self, vm: &mut ScriptVm, id: ScriptAsyncId, result: ScriptValue) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.script_result(vm, id, result);
         }
     }
 
@@ -1437,6 +1467,7 @@ macro_rules! register_widget {
         }
 
         let cx = $cx;
+        $crate::widget_async::ensure_widget_async_hooks_registered(cx);
         let type_id = std::any::TypeId::of::<$ty>();
         let name = $crate::LiveId::from_str_with_lut(stringify!($ty)).unwrap();
 

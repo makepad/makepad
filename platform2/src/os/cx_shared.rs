@@ -179,6 +179,13 @@ impl Cx {
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();
+        // Drain script task queues after each event dispatch cycle so
+        // widget->script calls run immediately instead of waiting for tick/timer paths.
+        self.handle_script_tasks();
+        // Script callbacks can enqueue actions/triggers; flush them in the same cycle.
+        self.inner_key_focus_change();
+        self.handle_triggers();
+        self.handle_actions();
     }
 
     // helpers

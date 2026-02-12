@@ -36,7 +36,8 @@ pub enum MenuItem {
 
 #[derive(Script, Widget)]
 pub struct WindowMenu {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[redraw]

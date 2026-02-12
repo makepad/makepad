@@ -8,7 +8,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct BareStep {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[redraw]

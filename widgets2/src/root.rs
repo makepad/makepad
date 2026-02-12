@@ -14,7 +14,8 @@ script_mod! {
 
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct Root {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[rust]
@@ -70,7 +71,9 @@ impl ScriptHook for Root {
 }
 
 impl WidgetNode for Root {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn redraw(&mut self, cx: &mut Cx) {
         for component in self.components.values_mut() {
             component.redraw(cx);

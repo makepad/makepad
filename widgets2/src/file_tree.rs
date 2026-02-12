@@ -342,7 +342,8 @@ pub struct FileTreeNode {
 
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct FileTree {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[live]
@@ -710,7 +711,9 @@ impl FileTree {
 }
 
 impl WidgetNode for FileTree {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }

@@ -15,7 +15,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Svg {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[layout]

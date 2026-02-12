@@ -155,7 +155,8 @@ impl DrawRoundCorner {
 
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet)]
 pub struct Dock {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[rust]
@@ -298,7 +299,9 @@ impl ScriptHook for Dock {
 }
 
 impl WidgetNode for Dock {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }

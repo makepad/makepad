@@ -6,6 +6,15 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+pub type CxScriptTaskOnThreadCompletedHook = fn(&mut Cx, ScriptThreadId, ScriptValue) -> bool;
+pub type CxScriptTaskPumpHook = fn(&mut Cx) -> bool;
+
+#[derive(Default, Clone)]
+pub struct CxScriptTaskHooks {
+    pub on_thread_completed: Vec<CxScriptTaskOnThreadCompletedHook>,
+    pub pump: Vec<CxScriptTaskPumpHook>,
+}
+
 #[derive(Clone)]
 pub struct CxScriptTask {
     pub start_task: Option<ScriptFnRef>,
@@ -20,6 +29,8 @@ pub struct CxScriptTask {
 #[derive(Default)]
 pub struct CxScriptTasks {
     pub tasks: Rc<RefCell<Vec<CxScriptTask>>>,
+    pub pending_resumes: VecDeque<ScriptThreadId>,
+    pub hooks: CxScriptTaskHooks,
 }
 
 // this is a UI-thread pipe
@@ -38,41 +49,123 @@ impl ScriptHandleGc for CxScriptTaskGc {
 }
 
 impl Cx {
+    pub fn add_script_task_on_thread_completed_hook(
+        &mut self,
+        hook: CxScriptTaskOnThreadCompletedHook,
+    ) {
+        if !self
+            .script_data
+            .tasks
+            .hooks
+            .on_thread_completed
+            .iter()
+            .any(|v| (*v as usize) == (hook as usize))
+        {
+            self.script_data.tasks.hooks.on_thread_completed.push(hook);
+        }
+    }
+
+    pub fn add_script_task_pump_hook(&mut self, hook: CxScriptTaskPumpHook) {
+        if !self
+            .script_data
+            .tasks
+            .hooks
+            .pump
+            .iter()
+            .any(|v| (*v as usize) == (hook as usize))
+        {
+            self.script_data.tasks.hooks.pump.push(hook);
+        }
+    }
+
+    pub fn queue_script_thread_resume(&mut self, thread_id: ScriptThreadId) {
+        self.script_data.tasks.pending_resumes.push_back(thread_id);
+    }
+
+    pub fn set_script_task_trace(&mut self, _enabled: bool) {
+    }
+
+    fn run_script_task_thread_completed_hooks(
+        &mut self,
+        thread_id: ScriptThreadId,
+        result: ScriptValue,
+    ) -> bool {
+        let hooks = self.script_data.tasks.hooks.on_thread_completed.clone();
+        let mut consumed = false;
+        for hook in hooks {
+            consumed |= hook(self, thread_id, result);
+        }
+        consumed
+    }
+
+    fn run_script_task_pump_hooks(&mut self) -> bool {
+        let hooks = self.script_data.tasks.hooks.pump.clone();
+        let mut progressed = false;
+        for hook in hooks {
+            progressed |= hook(self);
+        }
+        progressed
+    }
+
     pub(crate) fn handle_script_tasks(&mut self) {
         loop {
+            let mut progressed = false;
+
             let mut next_thread = None;
             let mut start_task = None;
-            let mut tasks = self.script_data.tasks.tasks.borrow_mut();
-            for task in tasks.iter_mut() {
-                // alright lets check each channels array len and if they are waiting
-                // ifso we call that thread
-                let queue = task.queue.as_array();
 
-                let queue_len = self.script_vm.as_ref().unwrap().heap.array_len(queue);
-                if let Some(st) = task.start_task.take() {
-                    start_task = Some((st, task.handle));
-                    break;
-                }
-                if task.recv_pause.len() > 0 && queue_len > 0 {
-                    next_thread = task.recv_pause.pop_back();
-                    break;
-                }
-                if task.send_pause.len() > 0 && queue_len < task.max_depth {
-                    next_thread = task.send_pause.pop_back();
-                    break;
+            if let Some(thread_id) = self.script_data.tasks.pending_resumes.pop_front() {
+                next_thread = Some(thread_id);
+            } else {
+                let mut tasks = self.script_data.tasks.tasks.borrow_mut();
+                for task in tasks.iter_mut() {
+                    // alright lets check each channels array len and if they are waiting
+                    // ifso we call that thread
+                    let queue = task.queue.as_array();
+
+                    let queue_len = self.script_vm.as_ref().unwrap().heap.array_len(queue);
+                    if let Some(st) = task.start_task.take() {
+                        start_task = Some((st, task.handle));
+                        break;
+                    }
+                    if task.recv_pause.len() > 0 && queue_len > 0 {
+                        next_thread = task.recv_pause.pop_back();
+                        break;
+                    }
+                    if task.send_pause.len() > 0 && queue_len < task.max_depth {
+                        next_thread = task.send_pause.pop_back();
+                        break;
+                    }
                 }
             }
-            drop(tasks);
+
             // alright execute this thread
             if let Some((start_task, handle)) = start_task.take() {
+                progressed = true;
                 self.with_vm(|vm| {
                     vm.call(start_task.into(), &[handle.into()]);
                 })
             } else if let Some(next_thread) = next_thread.take() {
-                self.with_vm_thread(next_thread, |vm| {
-                    vm.resume();
-                });
-            } else {
+                progressed = true;
+                let result = self.with_vm_thread(next_thread, |vm| vm.resume());
+
+                let is_paused = self
+                    .script_vm
+                    .as_ref()
+                    .and_then(|bx| bx.threads.get(next_thread.to_index()))
+                    .map(|thread| thread.is_paused())
+                    .unwrap_or(true);
+
+                if !is_paused {
+                    self.run_script_task_thread_completed_hooks(next_thread, result);
+                }
+            }
+
+            if self.run_script_task_pump_hooks() {
+                progressed = true;
+            }
+
+            if !progressed {
                 break;
             }
         }
@@ -128,7 +221,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         return ((array_len + 1) as f64).into();
                     } else {
                         if chan.send_pause.len() > 100 {
-                            return script_err_limit!(vm.bx.threads.trap(), "too many paused calls");
+                            return script_err_limit!(
+                                vm.bx.threads.trap(),
+                                "too many paused calls"
+                            );
                         }
                         chan.send_pause.push_front(vm.bx.threads.cur().pause());
                         return NIL;

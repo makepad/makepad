@@ -73,7 +73,8 @@ pub enum SlidesViewAction {
 
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct SlidesView {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[layout]
@@ -167,7 +168,9 @@ impl ScriptHook for SlidesView {
 }
 
 impl WidgetNode for SlidesView {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }

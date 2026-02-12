@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 makepad-widgets2 = { path = ".." }
+
+[[bin]]
+name = "widget_tree_test"
+path = "src/main.rs"
