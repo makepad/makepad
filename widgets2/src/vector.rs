@@ -1635,7 +1635,6 @@ impl Widget for Vector {
             metrics: walk.metrics,
         };
         let rect = cx.walk_turtle(walk);
-        log!("Vector draw_walk: walk.width={:?} walk.height={:?} content_size=({},{}) rect={:?} turtle_rect={:?}", walk.width, walk.height, sw, sh, rect, cx.turtle().rect());
         self.draw_svg.svg_doc = Some(std::mem::take(&mut self.doc));
         self.draw_svg.has_animations = self.has_animations;
         self.draw_svg.render_to_rect(cx, &rect, self.time as f32);
