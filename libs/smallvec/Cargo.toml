@@ -48,10 +48,7 @@ const_new = ["const_generics"]
 debugger_visualizer = []
 drain_filter = []
 drain_keep_rest = ["drain_filter"]
-impl_bincode = [
-    "bincode",
-    "unty",
-]
+
 may_dangle = []
 specialization = []
 union = []
@@ -61,26 +58,7 @@ write = []
 name = "smallvec"
 path = "src/lib.rs"
 
-[dependencies.arbitrary]
-version = "1"
-optional = true
-
-[dependencies.bincode]
-version = "2"
-optional = true
-default-features = false
-
-[dependencies.malloc_size_of]
-version = "0.1"
-optional = true
-default-features = false
-
 [dependencies.serde]
 version = "1"
-optional = true
-default-features = false
-
-[dependencies.unty]
-version = "0.0.4"
 optional = true
 default-features = false

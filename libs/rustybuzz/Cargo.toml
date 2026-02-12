@@ -77,14 +77,6 @@ default-features = false
 version = "0.5.2"
 path = "../unicode-script"
 
-[dependencies.wasmi]
-version = "0.36.0"
-optional = true
-
 [features]
 default = ["std"]
 std = ["ttf-parser/std"]
-wasm-shaper = [
-    "std",
-    "dep:wasmi",
-]
