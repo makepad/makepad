@@ -26,6 +26,7 @@ impl ScriptAsyncId {
 pub struct ScriptAsyncCall {
     id: ScriptAsyncId,
     method: LiveId,
+    me: ScriptValue,
     thread_id: Option<ScriptThreadId>,
 }
 
@@ -51,6 +52,10 @@ impl ScriptAsyncCall {
 
     pub fn method(&self) -> LiveId {
         self.method
+    }
+
+    pub fn me(&self) -> ScriptValue {
+        self.me
     }
 
     pub fn thread_id(&self) -> Option<ScriptThreadId> {
@@ -86,6 +91,7 @@ struct ScriptToWidgetReturn {
 
 struct WidgetToScriptCallRequest {
     target_uid: WidgetUid,
+    me: ScriptValue,
     source: ScriptObjectRef,
     script_fn: ScriptFnRef,
     args: ScriptValue,
@@ -176,6 +182,7 @@ trait WidgetToScriptCallExt {
         &mut self,
         target_uid: WidgetUid,
         script_async: &mut ScriptAsyncCalls,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: ScriptValue,
@@ -186,6 +193,7 @@ trait WidgetToScriptCallExt {
         &mut self,
         target_uid: WidgetUid,
         script_async: &mut ScriptAsyncCalls,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
@@ -195,6 +203,7 @@ trait WidgetToScriptCallExt {
     fn widget_to_script_call_fwd(
         &mut self,
         target_uid: WidgetUid,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: ScriptValue,
@@ -203,6 +212,7 @@ trait WidgetToScriptCallExt {
     fn widget_to_script_call(
         &mut self,
         target_uid: WidgetUid,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
@@ -278,6 +288,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         &mut self,
         target_uid: WidgetUid,
         script_async: &mut ScriptAsyncCalls,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: ScriptValue,
@@ -291,7 +302,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         let ui_handle = self.build_ui_handle_for_uid(target_uid);
         let call_args =
             self.make_call_args_object_with_context(source.as_object(), ui_handle, args);
-        let result = self.call_with_args_object(script_fn.clone().into(), call_args);
+        let result = self.call_with_args_object_with_me(script_fn.clone().into(), call_args, me);
 
         let thread = self.bx.threads.cur_ref();
         if thread.is_paused() {
@@ -299,6 +310,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
             script_async.calls.push(ScriptAsyncCall {
                 id: async_id,
                 method: from_method,
+                me,
                 thread_id: Some(thread_id),
             });
             self.cx_mut()
@@ -310,6 +322,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
             script_async.calls.push(ScriptAsyncCall {
                 id: async_id,
                 method: from_method,
+                me,
                 thread_id: None,
             });
             self.cx_mut()
@@ -328,6 +341,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         &mut self,
         target_uid: WidgetUid,
         script_async: &mut ScriptAsyncCalls,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
@@ -343,6 +357,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         self.widget_to_script_async_call_fwd(
             target_uid,
             script_async,
+            me,
             source,
             script_fn,
             args_obj.into(),
@@ -353,6 +368,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
     fn widget_to_script_call_fwd(
         &mut self,
         target_uid: WidgetUid,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: ScriptValue,
@@ -365,6 +381,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
             .widget_to_script_calls
             .push_back(WidgetToScriptCallRequest {
                 target_uid,
+                me,
                 source,
                 script_fn,
                 args,
@@ -374,6 +391,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
     fn widget_to_script_call(
         &mut self,
         target_uid: WidgetUid,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
@@ -385,7 +403,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         for value in args {
             self.bx.heap.vec_push(args_obj, NIL, *value, trap);
         }
-        self.widget_to_script_call_fwd(target_uid, source, script_fn, args_obj.into());
+        self.widget_to_script_call_fwd(target_uid, me, source, script_fn, args_obj.into());
     }
 
     fn enqueue_script_to_widget_call(
@@ -428,6 +446,7 @@ pub trait CxWidgetToScriptCallExt {
         &mut self,
         target_uid: WidgetUid,
         script_async: &mut ScriptAsyncCalls,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: ScriptValue,
@@ -438,6 +457,7 @@ pub trait CxWidgetToScriptCallExt {
         &mut self,
         target_uid: WidgetUid,
         script_async: &mut ScriptAsyncCalls,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
@@ -447,6 +467,7 @@ pub trait CxWidgetToScriptCallExt {
     fn widget_to_script_call_fwd(
         &mut self,
         target_uid: WidgetUid,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: ScriptValue,
@@ -455,6 +476,7 @@ pub trait CxWidgetToScriptCallExt {
     fn widget_to_script_call(
         &mut self,
         target_uid: WidgetUid,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
@@ -466,6 +488,7 @@ impl CxWidgetToScriptCallExt for Cx {
         &mut self,
         target_uid: WidgetUid,
         script_async: &mut ScriptAsyncCalls,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: ScriptValue,
@@ -475,6 +498,7 @@ impl CxWidgetToScriptCallExt for Cx {
             vm.widget_to_script_async_call_fwd(
                 target_uid,
                 script_async,
+                me,
                 source,
                 script_fn,
                 args,
@@ -487,6 +511,7 @@ impl CxWidgetToScriptCallExt for Cx {
         &mut self,
         target_uid: WidgetUid,
         script_async: &mut ScriptAsyncCalls,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
@@ -496,6 +521,7 @@ impl CxWidgetToScriptCallExt for Cx {
             vm.widget_to_script_async_call(
                 target_uid,
                 script_async,
+                me,
                 source,
                 script_fn,
                 args,
@@ -507,24 +533,26 @@ impl CxWidgetToScriptCallExt for Cx {
     fn widget_to_script_call_fwd(
         &mut self,
         target_uid: WidgetUid,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: ScriptValue,
     ) {
         self.with_vm(|vm| {
-            vm.widget_to_script_call_fwd(target_uid, source, script_fn, args);
+            vm.widget_to_script_call_fwd(target_uid, me, source, script_fn, args);
         });
     }
 
     fn widget_to_script_call(
         &mut self,
         target_uid: WidgetUid,
+        me: ScriptValue,
         source: ScriptObjectRef,
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
     ) {
         self.with_vm(|vm| {
-            vm.widget_to_script_call(target_uid, source, script_fn, args);
+            vm.widget_to_script_call(target_uid, me, source, script_fn, args);
         });
     }
 }
@@ -655,7 +683,11 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
                         ui_handle,
                         req.args,
                     );
-                    let _ = vm.call_with_args_object(req.script_fn.clone().into(), call_args);
+                    let _ = vm.call_with_args_object_with_me(
+                        req.script_fn.clone().into(),
+                        call_args,
+                        req.me,
+                    );
                 }
             });
             continue;

@@ -318,6 +318,10 @@ impl ComponentRegistry for WidgetRegistry {
 }
 
 impl WidgetRegistry {
+    pub fn can_script_new(&self, ty: TypeId) -> bool {
+        self.map.contains_key(&ty)
+    }
+
     pub fn script_new(&self, vm: &mut ScriptVm, ty: TypeId) -> Option<Box<dyn Widget>> {
         self.map.get(&ty).map(|(_, fac)| fac.script_new(vm))
     }
@@ -462,6 +466,17 @@ impl OptionWidgetRefExt for Option<WidgetRef> {
 }
 
 impl WidgetRef {
+    pub fn value_is_newable_widget(vm: &mut ScriptVm, value: ScriptValue) -> bool {
+        let Some(obj) = value.as_object() else {
+            return false;
+        };
+        let Some(type_id) = vm.bx.heap.object_type_id(obj) else {
+            return false;
+        };
+
+        vm.cx().components.get::<WidgetRegistry>().can_script_new(type_id)
+    }
+
     pub fn into_option(self) -> Option<WidgetRef> {
         if self.is_empty() {
             None

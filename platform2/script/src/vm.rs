@@ -213,7 +213,26 @@ impl<'a> ScriptVm<'a> {
         f(self)
     }
 
-    fn call_with_scope(&mut self, scope: ScriptObject) -> ScriptValue {
+    fn script_me_from_value(&mut self, me: ScriptValue) -> Option<ScriptMe> {
+        if me.is_nil() {
+            return None;
+        }
+        if let Some(obj) = me.as_object() {
+            return Some(ScriptMe::Object(obj));
+        }
+        if let Some(arr) = me.as_array() {
+            return Some(ScriptMe::Array(arr));
+        }
+        if let Some(pod) = me.as_pod() {
+            return Some(ScriptMe::Pod {
+                pod,
+                offset: Default::default(),
+            });
+        }
+        None
+    }
+
+    fn call_with_scope(&mut self, scope: ScriptObject, me: ScriptValue) -> ScriptValue {
         if let Some(fnptr) = self.bx.heap.parent_as_fn(scope) {
             match fnptr {
                 ScriptFnPtr::Native(ni) => {
@@ -243,6 +262,9 @@ impl<'a> ScriptVm<'a> {
                     };
                     self.bx.threads.cur().scopes.push(scope);
                     self.bx.threads.cur().calls.push(call);
+                    if let Some(me) = self.script_me_from_value(me) {
+                        self.bx.threads.cur().mes.push(me);
+                    }
                     self.bx.threads.cur().trap.ip = sip;
                     return self.run_core();
                 }
@@ -257,6 +279,15 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn call(&mut self, fnobj: ScriptValue, args: &[ScriptValue]) -> ScriptValue {
+        self.call_with_me(fnobj, args, NIL)
+    }
+
+    pub fn call_with_me(
+        &mut self,
+        fnobj: ScriptValue,
+        args: &[ScriptValue],
+        me: ScriptValue,
+    ) -> ScriptValue {
         let scope = self.bx.heap.new_with_proto(fnobj);
 
         self.bx.heap.clear_object_deep(scope);
@@ -272,13 +303,22 @@ impl<'a> ScriptVm<'a> {
 
         self.bx.heap.set_object_deep(scope);
         self.bx.heap.set_object_storage_auto(scope);
-        self.call_with_scope(scope)
+        self.call_with_scope(scope, me)
     }
 
     pub fn call_with_args_object(
         &mut self,
         fnobj: ScriptValue,
         args_obj: ScriptObject,
+    ) -> ScriptValue {
+        self.call_with_args_object_with_me(fnobj, args_obj, NIL)
+    }
+
+    pub fn call_with_args_object_with_me(
+        &mut self,
+        fnobj: ScriptValue,
+        args_obj: ScriptObject,
+        me: ScriptValue,
     ) -> ScriptValue {
         if fnobj.is_err() {
             return fnobj;
@@ -300,7 +340,7 @@ impl<'a> ScriptVm<'a> {
 
         self.bx.heap.set_object_deep(scope);
         self.bx.heap.set_object_storage_auto(scope);
-        self.call_with_scope(scope)
+        self.call_with_scope(scope, me)
     }
 
     /// Drain and log any pending errors in the error queue.

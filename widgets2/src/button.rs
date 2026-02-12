@@ -436,7 +436,7 @@ impl Widget for Button {
         if method == live_id!(on_click) {
             let uid = self.widget_uid();
             vm.with_cx_mut(|cx| {
-                cx.widget_to_script_call(uid, self.source.clone(), self.on_click.clone(), &[]);
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
             });
             return ScriptAsyncResult::Return(TRUE);
         }
@@ -520,7 +520,13 @@ impl Widget for Button {
                         uid,
                         ButtonAction::Clicked(fe.modifiers),
                     );
-                    cx.widget_to_script_call(uid, self.source.clone(), self.on_click.clone(), &[]);
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[],
+                    );
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, ids!(hover.off));
                     } else if fe.has_hovers() {
