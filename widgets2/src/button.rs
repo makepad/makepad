@@ -438,19 +438,16 @@ impl Widget for Button {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
 
         match event.hit_designer(cx, self.draw_bg.area()) {
-            HitDesigner::DesignerPick(_e) => cx.widget_action_with_data(
-                &self.action_data,
-                uid,
-                &scope.path,
-                WidgetDesignAction::PickedBody,
-            ),
+            HitDesigner::DesignerPick(_e) => {
+                cx.widget_action_with_data(&self.action_data, uid, WidgetDesignAction::PickedBody)
+            }
             _ => (),
         }
 
@@ -472,7 +469,6 @@ impl Widget for Button {
                 cx.widget_action_with_data(
                     &self.action_data,
                     uid,
-                    &scope.path,
                     ButtonAction::Pressed(fe.modifiers),
                 );
                 self.animator_play(cx, ids!(hover.down));
@@ -490,12 +486,7 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerLongPress(_lp) if self.enabled && self.enable_long_press => {
-                cx.widget_action_with_data(
-                    &self.action_data,
-                    uid,
-                    &scope.path,
-                    ButtonAction::LongPressed,
-                );
+                cx.widget_action_with_data(&self.action_data, uid, ButtonAction::LongPressed);
             }
             Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
                 let was_clicked = fe.is_over
@@ -508,7 +499,6 @@ impl Widget for Button {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        &scope.path,
                         ButtonAction::Clicked(fe.modifiers),
                     );
                     if let Some(handler) = self.on_click.as_object() {
@@ -527,7 +517,6 @@ impl Widget for Button {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        &scope.path,
                         ButtonAction::Released(fe.modifiers),
                     );
                     self.animator_play(cx, ids!(hover.off));

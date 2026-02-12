@@ -470,7 +470,7 @@ impl Widget for CheckBox {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -498,7 +498,6 @@ impl Widget for CheckBox {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        &scope.path,
                         CheckBoxAction::Change(false),
                     );
                 } else {
@@ -506,7 +505,6 @@ impl Widget for CheckBox {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        &scope.path,
                         CheckBoxAction::Change(true),
                     );
                 }

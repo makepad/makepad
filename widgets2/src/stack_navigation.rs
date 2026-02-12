@@ -1,6 +1,7 @@
 use crate::{
     animator::*, button::*, label::*, makepad_derive_widget::*, makepad_draw::*, view::*,
-    widget::*, widget_match_event::WidgetMatchEvent, window::WindowAction,
+    widget::*, widget_match_event::WidgetMatchEvent, widget_tree::CxWidgetExt,
+    window::WindowAction,
 };
 
 script_mod! {
@@ -218,7 +219,6 @@ impl StackNavigationView {
 
         cx.widget_action(
             self.widget_uid(),
-            &HeapLiveIdPath::default(),
             StackNavigationTransitionAction::HideBegin,
         );
     }
@@ -235,14 +235,10 @@ impl StackNavigationView {
         // * the "back" button on the mouse was clicked.
         if matches!(self.state, StackNavigationViewState::Active) {
             if event.back_pressed()
-                || matches!(event, Event::Actions(actions) if self.button(ids!(left_button)).clicked(&actions))
+                || matches!(event, Event::Actions(actions) if self.button(cx, ids!(left_button)).clicked(&actions))
                 || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())
             {
-                cx.widget_action(
-                    self.widget_uid(),
-                    &HeapLiveIdPath::default(),
-                    StackNavigationAction::Pop,
-                );
+                cx.widget_action(self.widget_uid(), StackNavigationAction::Pop);
             }
         }
     }
@@ -266,11 +262,7 @@ impl StackNavigationView {
                     return;
                 };
 
-                cx.widget_action(
-                    self.widget_uid(),
-                    &HeapLiveIdPath::default(),
-                    hide_end_action,
-                );
+                cx.widget_action(self.widget_uid(), hide_end_action);
 
                 self.animator_cut(cx, ids!(slide.hide));
                 self.state = StackNavigationViewState::Inactive;
@@ -284,11 +276,7 @@ impl StackNavigationView {
         {
             const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
             if self.offset < OPENING_OFFSET_THRESHOLD || !self.full_screen {
-                cx.widget_action(
-                    self.widget_uid(),
-                    &HeapLiveIdPath::default(),
-                    StackNavigationTransitionAction::ShowDone,
-                );
+                cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
                 self.state = StackNavigationViewState::Active;
             }
         }
@@ -416,13 +404,15 @@ impl Widget for StackNavigation {
         // ensuring that we don't forward it to the root view twice.
         let mut visible_views = self.get_visible_views(cx);
         if !event.requires_visibility() {
-            let root_view = self.view.widget(ids!(root_view));
-            if !visible_views.contains(&root_view) {
-                visible_views.insert(0, root_view);
+            let root_view = self.view.widget(cx, ids!(root_view));
+            if !visible_views.iter().any(|(_, w)| w == &root_view) {
+                visible_views.insert(0, (live_id!(root_view), root_view));
             }
         }
-        for widget_ref in visible_views {
-            widget_ref.handle_event(cx, event, scope);
+        for (id, widget_ref) in visible_views {
+            cx.with_node(widget_ref.widget_uid(), id, widget_ref.clone(), |cx| {
+                widget_ref.handle_event(cx, event, scope);
+            });
         }
 
         // Leaving this to the final step, so that the active stack view can handle the event first.
@@ -432,8 +422,10 @@ impl Widget for StackNavigation {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        for widget_ref in self.get_visible_views(cx.cx).iter() {
-            widget_ref.draw_walk(cx, scope, walk)?;
+        for (id, widget_ref) in self.get_visible_views(cx.cx).iter() {
+            cx.with_node(widget_ref.widget_uid(), *id, widget_ref.clone(), |cx| {
+                widget_ref.draw_walk(cx, scope, walk)
+            })?;
         }
         DrawStep::done()
     }
@@ -448,21 +440,9 @@ impl WidgetNode for StackNavigation {
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
-        for widget_ref in self.get_visible_views(cx).iter() {
+        for (_id, widget_ref) in self.get_visible_views(cx).iter() {
             widget_ref.redraw(cx);
         }
-    }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.view.find_widgets(path, cached, results);
-    }
-
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        self.view.uid_to_widget(uid)
-    }
-
-    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        self.view.widget_tree_walk(nodes)
     }
 }
 
@@ -472,13 +452,13 @@ impl WidgetMatchEvent for StackNavigation {
             if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
                 self.screen_width = ce.new_geom.inner_size.x * ce.new_geom.dpi_factor;
                 if let Some(current_entry) = self.navigation_stack.current() {
-                    let stack_view_ref = self.stack_navigation_view(&[current_entry.view_id]);
+                    let stack_view_ref = self.stack_navigation_view(cx, &[current_entry.view_id]);
                     stack_view_ref.set_offset_to_hide(self.screen_width);
                 }
             }
 
             if let Some(widget_action) = action.as_widget_action() {
-                if !self.uid_to_widget(widget_action.widget_uid).is_empty() {
+                if !cx.widget_tree().widget(widget_action.widget_uid).is_empty() {
                     match widget_action.cast() {
                         StackNavigationAction::Push(view_id) => {
                             self.push_view(view_id, cx);
@@ -510,13 +490,12 @@ impl StackNavigation {
         self.navigation_stack.remove_all(view_id);
         self.navigation_stack.push(view_id);
 
-        let stack_view_ref = self.stack_navigation_view(&[view_id]);
+        let stack_view_ref = self.stack_navigation_view(cx, &[view_id]);
         stack_view_ref.set_parent_navigation_uid(self.widget_uid());
         stack_view_ref.show(cx, self.screen_width);
 
         cx.widget_action(
             stack_view_ref.widget_uid(),
-            &HeapLiveIdPath::default(),
             StackNavigationTransitionAction::ShowBegin,
         );
 
@@ -525,7 +504,7 @@ impl StackNavigation {
 
     fn pop_view(&mut self, cx: &mut Cx) {
         if let Some(current_entry) = self.navigation_stack.current() {
-            let current_view_ref = self.stack_navigation_view(&[current_entry.view_id]);
+            let current_view_ref = self.stack_navigation_view(cx, &[current_entry.view_id]);
             current_view_ref.hide(cx);
         }
         self.redraw(cx);
@@ -533,7 +512,7 @@ impl StackNavigation {
 
     fn pop_to_root(&mut self, cx: &mut Cx) {
         if let Some(current_entry) = self.navigation_stack.current() {
-            let stack_view_ref = self.stack_navigation_view(&[current_entry.view_id]);
+            let stack_view_ref = self.stack_navigation_view(cx, &[current_entry.view_id]);
             stack_view_ref.hide(cx);
             self.navigation_stack.clear();
         }
@@ -546,31 +525,32 @@ impl StackNavigation {
     /// 1. The previous view (root_view or previous stack view), if the current view is animating and partially showing,
     /// 2. The current stack view, if it exists and is partially or fully showing,
     ///   or if there is no current stack view at all (showing root_view).
-    fn get_visible_views(&mut self, cx: &mut Cx) -> Vec<WidgetRef> {
+    fn get_visible_views(&mut self, cx: &mut Cx) -> Vec<(LiveId, WidgetRef)> {
         match self.navigation_stack.current() {
             None => {
                 // No views in stack, show root view
-                vec![self.view.widget(ids!(root_view))]
+                vec![(live_id!(root_view), self.view.widget(cx, ids!(root_view)))]
             }
             Some(current_entry) => {
-                let current_view_ref = self.stack_navigation_view(&[current_entry.view_id]);
+                let current_view_id = current_entry.view_id;
+                let current_view_ref = self.stack_navigation_view(cx, &[current_view_id]);
                 let mut views = vec![];
 
                 // If current view is showing and animating, we need to show the previous view behind it
                 if current_view_ref.is_showing(cx) && current_view_ref.is_animating() {
                     if let Some(previous_entry) = self.navigation_stack.previous() {
                         // Show the previous stack view
-                        let previous_view_ref =
-                            self.stack_navigation_view(&[previous_entry.view_id]);
-                        views.push(previous_view_ref.0.clone());
+                        let previous_view_id = previous_entry.view_id;
+                        let previous_view_ref = self.stack_navigation_view(cx, &[previous_view_id]);
+                        views.push((previous_view_id, previous_view_ref.0.clone()));
                     } else {
                         // Show the root view if there's no previous stack view
-                        views.push(self.view.widget(ids!(root_view)));
+                        views.push((live_id!(root_view), self.view.widget(cx, ids!(root_view))));
                     }
                 }
 
                 // Always add the current view
-                views.push(current_view_ref.0.clone());
+                views.push((current_view_id, current_view_ref.0.clone()));
                 views
             }
         }
@@ -654,8 +634,8 @@ impl StackNavigationRef {
     /// * `title` - The new title text
     pub fn set_title(&self, cx: &mut Cx, view_id: LiveId, title: &str) {
         if let Some(inner) = self.borrow_mut() {
-            let stack_view_ref = inner.stack_navigation_view(&[view_id]);
-            stack_view_ref.label(ids!(title)).set_text(cx, title);
+            let stack_view_ref = inner.stack_navigation_view(cx, &[view_id]);
+            stack_view_ref.label(cx, ids!(title)).set_text(cx, title);
         }
     }
 

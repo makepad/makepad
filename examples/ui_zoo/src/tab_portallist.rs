@@ -71,10 +71,10 @@ impl Widget for NewsFeed {
                         3 => format!("Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet."),
                         _ => format!("Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua."),
                     };
-                    item.label(ids!(content.text)).set_text(cx, &text);
-                    item.button(ids!(likes))
+                    item.label(cx, ids!(content.text)).set_text(cx, &text);
+                    item.button(cx, ids!(likes))
                         .set_text(cx, &format!("{}", item_id % 23));
-                    item.button(ids!(comments))
+                    item.button(cx, ids!(comments))
                         .set_text(cx, &format!("{}", item_id % 6));
                     item.draw_all(cx, &mut Scope::empty());
                 }

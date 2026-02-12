@@ -1,6 +1,7 @@
 pub use crate::register_widget;
 use {
     crate::makepad_draw::*,
+    crate::widget_tree::CxWidgetExt,
     //crate::designer_data::DesignerDataToWidget,
     std::any::TypeId,
     std::cell::RefCell,
@@ -10,13 +11,6 @@ use {
     std::rc::Rc,
     std::sync::Arc,
 };
-
-#[derive(Clone, Copy)]
-pub enum WidgetCache {
-    Yes,
-    No,
-    Clear,
-}
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WidgetUid(pub u64);
@@ -30,91 +24,10 @@ pub enum WidgetDesignAction {
     None,
 }
 
-pub enum WidgetTreeNode {
-    BeginNode {
-        widget: WidgetRef,
-        ty: TypeId,
-        name: LiveId,
-    },
-    EndNode,
-}
-
-pub struct WidgetTree {
-    pub nodes: Vec<WidgetTreeNode>,
-}
-
-impl WidgetTree {
-    pub fn display<'a>(&'a self, heap: &'a ScriptHeap) -> WidgetTreeDisplay<'a> {
-        WidgetTreeDisplay { tree: self, heap }
-    }
-}
-
-pub struct WidgetTreeDisplay<'a> {
-    tree: &'a WidgetTree,
-    heap: &'a ScriptHeap,
-}
-
-impl<'a> fmt::Display for WidgetTreeDisplay<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        let mut depth: usize = 0;
-        for node in &self.tree.nodes {
-            match node {
-                WidgetTreeNode::BeginNode { ty, name, .. } => {
-                    for _ in 0..depth {
-                        write!(f, " - ")?;
-                    }
-                    let type_name = self
-                        .heap
-                        .type_name_by_id(*ty)
-                        .and_then(|id| id.as_string(|s| s.map(|s| s.to_string())))
-                        .unwrap_or_else(|| format!("{:?}", ty));
-                    if let Some(name_str) = name.as_string(|s| s.map(|s| s.to_string())) {
-                        writeln!(f, "{}: {}", name_str, type_name)?;
-                    } else {
-                        writeln!(f, "{}", type_name)?;
-                    }
-                    depth += 1;
-                }
-                WidgetTreeNode::EndNode => {
-                    depth = depth.saturating_sub(1);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Debug for WidgetTree {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        let mut depth: usize = 0;
-        for node in &self.nodes {
-            match node {
-                WidgetTreeNode::BeginNode { ty, name, .. } => {
-                    for _ in 0..depth {
-                        write!(f, " - ")?;
-                    }
-                    if let Some(name_str) = name.as_string(|s| s.map(|s| s.to_string())) {
-                        writeln!(f, "{}: {:?}", name_str, ty)?;
-                    } else {
-                        writeln!(f, "{:?}", ty)?;
-                    }
-                    depth += 1;
-                }
-                WidgetTreeNode::EndNode => {
-                    depth = depth.saturating_sub(1);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 pub trait WidgetNode: ScriptApply {
     fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign> {
         return None;
     }
-    fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef;
-    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     /// Find all widgets whose area contains the given point. Calls the closure for each found widget.
     fn find_widgets_from_point(&self, _cx: &Cx, _point: DVec2, _found: &mut dyn FnMut(&WidgetRef)) {
     }
@@ -134,18 +47,6 @@ pub trait WidgetNode: ScriptApply {
         let area = self.area();
         area.is_valid(cx) && area.rect(cx).contains(point)
     }
-    /// Walk the widget tree depth-first, appending BeginNode/EndNode entries.
-    /// The default implementation does nothing (leaf node). Container widgets
-    /// should override this to walk their children.
-    fn widget_tree_walk(&self, _nodes: &mut Vec<WidgetTreeNode>) {}
-
-    /// Build a complete WidgetTree from this node and all its descendants.
-    fn widget_tree(&self) -> WidgetTree {
-        let mut nodes = Vec::new();
-        self.widget_tree_walk(&mut nodes);
-        WidgetTree { nodes }
-    }
-
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
@@ -197,38 +98,23 @@ pub trait Widget: WidgetNode {
         true
     }
 
-    fn widget(&self, path: &[LiveId]) -> WidgetRef {
-        let mut results = WidgetSet::default();
-        self.find_widgets(path, WidgetCache::Yes, &mut results);
-        return results.into_first();
+    fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
+        cx.widget_tree().find_within(self.widget_uid(), path)
     }
 
-    fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
+    fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
+        let tree = cx.widget_tree();
+        let uid = self.widget_uid();
         for path in paths {
-            self.find_widgets(path, WidgetCache::Yes, &mut results);
+            results.0.extend(tree.find_all_within(uid, path));
         }
         results
     }
 
-    // fn widget_uid(&self)->WidgetUid;
     fn widget_uid(&self) -> WidgetUid {
         return WidgetUid(self as *const _ as *const () as u64);
     }
-
-    /*
-    fn widget_to_data(
-        &self,
-        _cx: &mut Cx,
-        _actions: &Actions,
-        _nodes: &mut LiveNodeVec,
-        _path: &[LiveId],
-    ) -> bool {
-        false
-    }
-
-    fn data_to_widget(&mut self, _cx: &mut Cx, _nodes: &[LiveNode], _path: &[LiveId]) {}
-    */
 
     fn draw_3d(&mut self, _cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
         DrawStep::done()
@@ -283,25 +169,6 @@ pub trait Widget: WidgetNode {
         false
     }
 
-    /*fn set_text_and_redraw(&mut self, cx: &mut Cx, v: &str) {
-        self.set_text(v);
-        self.redraw(cx);
-    }*/
-    /*
-    fn create_child(
-        &mut self,
-        _cx: &mut Cx,
-        _live_ptr: LivePtr,
-        _at: CreateAt,
-        _new_id: LiveId,
-        _nodes: &[LiveNode]
-    ) -> WidgetRef {
-        WidgetRef::empty()
-    }
-
-    fn find_template(&self, _id: &[LiveId; 1]) -> Option<LivePtr> {
-        None
-    }*/
 
     fn ref_cast_type_id(&self) -> TypeId
     where
@@ -457,15 +324,13 @@ impl WidgetSet {
         WidgetRef::empty()
     }
 
-    pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
+    pub fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
+        let tree = cx.widget_tree();
         for widget in &self.0 {
-            if let Some(inner) = widget.0.borrow().as_ref() {
-                for path in paths {
-                    inner
-                        .widget
-                        .find_widgets(path, WidgetCache::Yes, &mut results);
-                }
+            let uid = widget.widget_uid();
+            for path in paths {
+                results.0.extend(tree.find_all_within(uid, path));
             }
         }
         results
@@ -574,7 +439,10 @@ impl WidgetRef {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.borrow().as_ref().is_none()
+        match self.0.try_borrow() {
+            Ok(r) => r.as_ref().is_none(),
+            Err(_) => false, // actively borrowed means not empty
+        }
     }
 
     pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
@@ -621,17 +489,8 @@ impl WidgetRef {
     }
 
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let start = cx.new_actions.len();
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.handle_event(cx, event, scope);
-        }
-        let end = cx.new_actions.len();
-        if start != end {
-            for action in &mut cx.new_actions[start..end] {
-                if let Some(action) = action.downcast_mut::<WidgetAction>() {
-                    action.widgets.push(self.clone());
-                }
-            }
         }
     }
 
@@ -692,29 +551,6 @@ impl WidgetRef {
             }
         }
     */
-    pub fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        if self.widget_uid() == uid {
-            return self.clone();
-        }
-        if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.uid_to_widget(uid);
-        }
-        WidgetRef::empty()
-    }
-
-    pub fn clear_query_cache(&self) {
-        if let Some(inner) = self.0.borrow_mut().as_ref() {
-            let mut res = WidgetSet::empty();
-            inner.widget.find_widgets(&[], WidgetCache::Clear, &mut res);
-        }
-    }
-
-    pub fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            inner.widget.find_widgets(path, cached, results)
-        }
-    }
-
     pub fn find_widgets_from_point(
         &self,
         cx: &Cx,
@@ -727,32 +563,6 @@ impl WidgetRef {
             }
             inner.widget.find_widgets_from_point(cx, point, found)
         }
-    }
-
-    /// Walk the widget tree, emitting BeginNode/EndNode with no name (LiveId(0)).
-    pub fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        self.widget_tree_walk_named(LiveId(0), nodes);
-    }
-
-    /// Walk the widget tree, emitting BeginNode/EndNode with the given name.
-    pub fn widget_tree_walk_named(&self, name: LiveId, nodes: &mut Vec<WidgetTreeNode>) {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            let ty = inner.widget.ref_cast_type_id();
-            nodes.push(WidgetTreeNode::BeginNode {
-                widget: self.clone(),
-                ty,
-                name,
-            });
-            inner.widget.widget_tree_walk(nodes);
-            nodes.push(WidgetTreeNode::EndNode);
-        }
-    }
-
-    /// Build a complete WidgetTree from this widget and all its descendants.
-    pub fn widget_tree(&self) -> WidgetTree {
-        let mut nodes = Vec::new();
-        self.widget_tree_walk(&mut nodes);
-        WidgetTree { nodes }
     }
 
     pub fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
@@ -829,26 +639,22 @@ impl WidgetRef {
         }
     }
 
-    pub fn widget(&self, path: &[LiveId]) -> WidgetRef {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.widget(path);
-        }
-        WidgetRef::empty()
+    pub fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
+        cx.widget_tree().find_within(self.widget_uid(), path)
     }
 
-    // depricate this one
-    pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.widgets(paths);
+    pub fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
+        let mut results = WidgetSet::default();
+        let tree = cx.widget_tree();
+        let uid = self.widget_uid();
+        for path in paths {
+            results.0.extend(tree.find_all_within(uid, path));
         }
-        WidgetSet::default()
+        results
     }
 
-    pub fn widget_set(&self, paths: &[&[LiveId]]) -> WidgetSet {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.widgets(paths);
-        }
-        WidgetSet::default()
+    pub fn widget_set(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
+        self.widgets(cx, paths)
     }
 
     pub fn draw_walk(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -1216,13 +1022,8 @@ pub struct WidgetAction {
     pub data: Option<Arc<dyn ActionTrait>>,
     /// The emitted action object itself, which acts as a dyn Any-like.
     pub action: Box<dyn WidgetActionTrait>,
-    /// The complete list of widgets this action bubbles up from.
-    /// You can use this to explore the UI tree of the widget that emitted the action.
-    pub widgets: SmallVec<[WidgetRef; 4]>,
     /// The UID of the widget that emitted this action.
     pub widget_uid: WidgetUid,
-    /// The path-list of the widgets this action bubbles up from (if any).
-    pub path: HeapLiveIdPath,
     /// Used by list-like widgets (e.g., PortalList) to mark a group-uid around item-actions.
     pub group: Option<WidgetActionGroup>,
 }
@@ -1234,12 +1035,11 @@ pub struct WidgetActionGroup {
 }
 
 pub trait WidgetActionCxExt {
-    fn widget_action(&mut self, uid: WidgetUid, path: &HeapLiveIdPath, t: impl WidgetActionTrait);
+    fn widget_action(&mut self, uid: WidgetUid, t: impl WidgetActionTrait);
     fn widget_action_with_data(
         &mut self,
         action_data: &WidgetActionData,
         widget_uid: WidgetUid,
-        path: &HeapLiveIdPath,
         t: impl WidgetActionTrait,
     );
     fn group_widget_actions<F, R>(&mut self, group_id: WidgetUid, item_id: WidgetUid, f: F) -> R
@@ -1248,10 +1048,6 @@ pub trait WidgetActionCxExt {
 }
 
 pub trait WidgetActionsApi {
-    fn widget(&self, path: &[LiveId]) -> WidgetRef;
-
-    fn widget_action(&self, path: &[LiveId]) -> Option<&WidgetAction>;
-
     fn find_widget_action_cast<T: WidgetActionTrait>(&self, widget_uid: WidgetUid) -> T
     where
         T: Default + Clone;
@@ -1376,41 +1172,6 @@ impl WidgetActionCast for Action {
 }
 
 impl WidgetActionsApi for Actions {
-    fn widget_action(&self, path: &[LiveId]) -> Option<&WidgetAction> {
-        for action in self {
-            if let Some(action) = action.downcast_ref::<WidgetAction>() {
-                let mut ap = action.path.data.iter().rev();
-                if path.iter().rev().all(|p| ap.find(|&ap| p == ap).is_some()) {
-                    return Some(action);
-                }
-            }
-        }
-        None
-    }
-
-    fn widget(&self, path: &[LiveId]) -> WidgetRef {
-        self.iter()
-            .find_map(|action| {
-                action.downcast_ref::<WidgetAction>().and_then(|action| {
-                    let mut ret = None;
-                    let mut ap = action.path.data.iter().rev();
-                    path.iter()
-                        .enumerate()
-                        .rev()
-                        .all(|(i, p)| {
-                            let found = ap.find(|&ap| p == ap).is_some();
-                            if found && ret.is_none() {
-                                ret = action.widgets.get(i);
-                            }
-                            found
-                        })
-                        .then_some(ret)
-                        .flatten()
-                })
-            })
-            .map_or_else(|| WidgetRef::empty(), |ret| ret.clone())
-    }
-
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction> {
         for action in self {
             if let Some(action) = action.downcast_ref::<WidgetAction>() {
@@ -1487,17 +1248,10 @@ impl WidgetActionsApi for Actions {
 }
 
 impl WidgetActionCxExt for Cx {
-    fn widget_action(
-        &mut self,
-        widget_uid: WidgetUid,
-        path: &HeapLiveIdPath,
-        t: impl WidgetActionTrait,
-    ) {
+    fn widget_action(&mut self, widget_uid: WidgetUid, t: impl WidgetActionTrait) {
         self.action(WidgetAction {
             widget_uid,
             data: None,
-            path: path.clone(),
-            widgets: Default::default(),
             action: Box::new(t),
             group: None,
         })
@@ -1507,14 +1261,11 @@ impl WidgetActionCxExt for Cx {
         &mut self,
         action_data: &WidgetActionData,
         widget_uid: WidgetUid,
-        path: &HeapLiveIdPath,
         t: impl WidgetActionTrait,
     ) {
         self.action(WidgetAction {
             widget_uid,
             data: action_data.clone_data(),
-            path: path.clone(),
-            widgets: Default::default(),
             action: Box::new(t),
             group: None,
         })
@@ -1543,14 +1294,6 @@ impl WidgetActionCxExt for Cx {
 }
 
 impl WidgetAction {
-    pub fn widget(&self) -> &WidgetRef {
-        self.widgets.first().unwrap()
-    }
-
-    pub fn widget_nth(&self, n: usize) -> &WidgetRef {
-        self.widgets.iter().nth(n).unwrap()
-    }
-
     pub fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T
     where
         T: Default + Clone,

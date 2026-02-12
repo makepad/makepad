@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -82,37 +82,6 @@ impl WidgetNode for Root {
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         Walk::default()
     }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if path.len() != 0 {
-            if let Some(component) = self.components.get(&path[0]) {
-                if path.len() == 1 {
-                    results.push(component.clone());
-                } else {
-                    component.find_widgets(&path[1..], cached, results);
-                }
-            }
-        }
-        for component in self.components.values() {
-            component.find_widgets(path, cached, results);
-        }
-    }
-
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        for component in self.components.values() {
-            let x = component.uid_to_widget(uid);
-            if !x.is_empty() {
-                return x;
-            }
-        }
-        WidgetRef::empty()
-    }
-
-    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        for (id, component) in self.components.iter() {
-            component.widget_tree_walk_named(*id, nodes);
-        }
-    }
 }
 
 impl Widget for Root {
@@ -140,14 +109,18 @@ impl Widget for Root {
             }
         }
 
-        for component in self.components.values_mut() {
-            component.handle_event(cx, event, scope);
+        for (id, component) in self.components.iter_mut() {
+            cx.with_node(component.widget_uid(), *id, component.clone(), |cx| {
+                component.handle_event(cx, event, scope);
+            });
         }
     }
 
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        for component in self.components.values() {
-            component.draw_3d_all(cx, scope);
+        for (id, component) in self.components.iter() {
+            cx.with_node(component.widget_uid(), *id, component.clone(), |cx| {
+                component.draw_3d_all(cx, scope);
+            });
         }
         DrawStep::done()
     }
@@ -156,9 +129,12 @@ impl Widget for Root {
         self.draw_state.begin(cx, DrawState::Component(0));
 
         while let Some(DrawState::Component(step)) = self.draw_state.get() {
-            if let Some(component) = self.components.values_mut().nth(step) {
+            if let Some((id, component)) = self.components.iter_mut().nth(step) {
+                let id = *id;
                 let walk = component.walk(cx);
-                component.draw_walk(cx, scope, walk)?;
+                cx.with_node(component.widget_uid(), id, component.clone(), |cx| {
+                    component.draw_walk(cx, scope, walk)
+                })?;
                 self.draw_state.set(DrawState::Component(step + 1));
             } else {
                 self.draw_state.end();

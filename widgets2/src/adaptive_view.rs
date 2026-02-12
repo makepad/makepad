@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent, WindowAction};
+use crate::{
+    makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+    WidgetMatchEvent, WindowAction,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -133,28 +136,6 @@ impl WidgetNode for AdaptiveView {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some(active_widget) = self.active_widget.as_ref() {
-            active_widget.widget_ref.find_widgets(path, cached, results);
-        }
-    }
-
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        if let Some(active_widget) = self.active_widget.as_ref() {
-            active_widget.widget_ref.uid_to_widget(uid)
-        } else {
-            WidgetRef::empty()
-        }
-    }
-
-    fn widget_tree_walk(&self, nodes: &mut Vec<WidgetTreeNode>) {
-        if let Some(active_widget) = self.active_widget.as_ref() {
-            active_widget
-                .widget_ref
-                .widget_tree_walk_named(active_widget.template_id, nodes);
-        }
-    }
 }
 
 impl ScriptHook for AdaptiveView {
@@ -232,7 +213,14 @@ impl Widget for AdaptiveView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.widget_match_event(cx, event, scope);
         if let Some(active_widget) = self.active_widget.as_mut() {
-            active_widget.widget_ref.handle_event(cx, event, scope);
+            cx.with_node(
+                active_widget.widget_ref.widget_uid(),
+                active_widget.template_id,
+                active_widget.widget_ref.clone(),
+                |cx| {
+                    active_widget.widget_ref.handle_event(cx, event, scope);
+                },
+            );
         }
     }
 
@@ -247,7 +235,12 @@ impl Widget for AdaptiveView {
         }
 
         if let Some(active_widget) = self.active_widget.as_mut() {
-            active_widget.widget_ref.draw_walk(cx, scope, walk)?;
+            cx.with_node(
+                active_widget.widget_ref.widget_uid(),
+                active_widget.template_id,
+                active_widget.widget_ref.clone(),
+                |cx| active_widget.widget_ref.draw_walk(cx, scope, walk),
+            )?;
         }
 
         DrawStep::done()

@@ -318,7 +318,6 @@ impl Widget for Splitter {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        &scope.path,
                         SplitterAction::Changed {
                             axis: self.axis,
                             align: self.align,

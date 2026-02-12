@@ -548,7 +548,7 @@ impl Widget for DropDown {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
         let uid = self.widget_uid();
 
@@ -568,7 +568,6 @@ impl Widget for DropDown {
                         cx.widget_action_with_data(
                             &self.action_data,
                             uid,
-                            &scope.path,
                             DropDownAction::Select(self.selected_item),
                         );
                         self.draw_bg.redraw(cx);
@@ -608,7 +607,6 @@ impl Widget for DropDown {
                         cx.widget_action_with_data(
                             &self.action_data,
                             uid,
-                            &scope.path,
                             DropDownAction::Select(self.selected_item),
                         );
                         self.set_closed(cx);
@@ -621,7 +619,6 @@ impl Widget for DropDown {
                         cx.widget_action_with_data(
                             &self.action_data,
                             uid,
-                            &scope.path,
                             DropDownAction::Select(self.selected_item),
                         );
                         self.set_closed(cx);

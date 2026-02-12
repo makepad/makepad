@@ -21,6 +21,7 @@ pub mod theme_desktop_light;
 pub mod theme_desktop_skeleton;
 pub mod widget;
 pub mod widget_match_event;
+pub mod widget_tree;
 
 // Modules ordered to match script_mod calls
 pub mod rubber_view;
@@ -192,10 +193,11 @@ pub use crate::{
     widget::{
         CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
         WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
-        WidgetActionsApi, WidgetCache, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister,
-        WidgetRegistry, WidgetSet, WidgetSetIterator, WidgetTree, WidgetTreeNode, WidgetUid,
+        WidgetActionsApi, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister, WidgetRegistry,
+        WidgetSet, WidgetSetIterator, WidgetUid,
     },
     widget_match_event::WidgetMatchEvent,
+    widget_tree::CxWidgetExt,
 
     window::*,
 

@@ -720,15 +720,6 @@ impl WidgetNode for FileTree {
     fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
     }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        // FileTree doesn't have widget children in the traditional sense
-        let _ = (path, cached, results);
-    }
-
-    fn uid_to_widget(&self, _uid: WidgetUid) -> WidgetRef {
-        WidgetRef::empty()
-    }
 }
 
 impl Widget for FileTree {
@@ -768,18 +759,14 @@ impl Widget for FileTree {
                     }
                     self.selected_node_id = Some(node_id);
                     if self.is_folder(node_id) {
-                        cx.widget_action(uid, &scope.path, FileTreeAction::FolderClicked(node_id));
+                        cx.widget_action(uid, FileTreeAction::FolderClicked(node_id));
                     } else {
-                        cx.widget_action(uid, &scope.path, FileTreeAction::FileClicked(node_id));
+                        cx.widget_action(uid, FileTreeAction::FileClicked(node_id));
                     }
                 }
                 FileTreeNodeAction::ShouldStartDrag => {
                     if self.dragging_node_id.is_none() {
-                        cx.widget_action(
-                            uid,
-                            &scope.path,
-                            FileTreeAction::ShouldFileStartDrag(node_id),
-                        );
+                        cx.widget_action(uid, FileTreeAction::ShouldFileStartDrag(node_id));
                     }
                 }
             }

@@ -28,19 +28,21 @@ pub struct App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::Draw(event) = event {
-            let mut cx = Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget(&mut cx).hook_widget() {
-                if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
-                    code_editor.draw(&mut cx, &mut self.state.session);
+        cx.with_widget_tree(|cx| {
+            if let Event::Draw(event) = event {
+                let mut cx = Cx2d::new(cx, event);
+                while let Some(next) = self.ui.draw_widget(&mut cx).hook_widget() {
+                    if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
+                        code_editor.draw(&mut cx, &mut self.state.session);
+                    }
                 }
+                return;
             }
-            return;
-        }
-        self.ui.handle_widget_event(cx, event);
-        if let Some(mut code_editor) = self.ui.code_editor(ids!(code_editor)).borrow_mut() {
-            code_editor.handle_event(cx, event, &mut self.state.session);
-        }
+            self.ui.handle_widget_event(cx, event);
+            if let Some(mut code_editor) = self.ui.code_editor(ids!(code_editor)).borrow_mut() {
+                code_editor.handle_event(cx, event, &mut self.state.session);
+            }
+        });
     }
 }
 

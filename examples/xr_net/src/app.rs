@@ -74,37 +74,39 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::XrUpdate(e) = event {
-            self.xr_net.send_state((*e.state).clone());
-            /*
-            use makepad_platform::makepad_micro_serde::*;
-            let data = (*e.state).serialize_bin();
-            let compr = makepad_miniz::compress_to_vec(&data,10);
-            log!("{:?} {:?}", data.len(), compr.len());
-            */
-            let lasers = self.ui.xr_lasers(ids!(xr_lasers));
-            if let Some(mut xr_hands) = self.ui.xr_hands(ids!(xr_hands)).borrow_mut() {
-                if let Some(mut xr_lasers) = lasers.borrow_mut() {
-                    while let Ok(msg) = self.xr_net.incoming_receiver.try_recv() {
-                        match msg {
-                            XrNetIncoming::Join { state, peer } => {
-                                xr_lasers.update_peer(cx, peer.to_live_id(), state.clone(), e);
-                                xr_hands.update_peer(cx, peer.to_live_id(), state, e);
-                            }
-                            XrNetIncoming::Leave { peer } => {
-                                xr_lasers.leave_peer(cx, peer.to_live_id());
-                                xr_hands.leave_peer(cx, peer.to_live_id());
-                            }
-                            XrNetIncoming::Update { state, peer } => {
-                                xr_lasers.update_peer(cx, peer.to_live_id(), state.clone(), e);
-                                xr_hands.update_peer(cx, peer.to_live_id(), state, e);
+        cx.with_widget_tree(|cx| {
+            if let Event::XrUpdate(e) = event {
+                self.xr_net.send_state((*e.state).clone());
+                /*
+                use makepad_platform::makepad_micro_serde::*;
+                let data = (*e.state).serialize_bin();
+                let compr = makepad_miniz::compress_to_vec(&data,10);
+                log!("{:?} {:?}", data.len(), compr.len());
+                */
+                let lasers = self.ui.xr_lasers(ids!(xr_lasers));
+                if let Some(mut xr_hands) = self.ui.xr_hands(ids!(xr_hands)).borrow_mut() {
+                    if let Some(mut xr_lasers) = lasers.borrow_mut() {
+                        while let Ok(msg) = self.xr_net.incoming_receiver.try_recv() {
+                            match msg {
+                                XrNetIncoming::Join { state, peer } => {
+                                    xr_lasers.update_peer(cx, peer.to_live_id(), state.clone(), e);
+                                    xr_hands.update_peer(cx, peer.to_live_id(), state, e);
+                                }
+                                XrNetIncoming::Leave { peer } => {
+                                    xr_lasers.leave_peer(cx, peer.to_live_id());
+                                    xr_hands.leave_peer(cx, peer.to_live_id());
+                                }
+                                XrNetIncoming::Update { state, peer } => {
+                                    xr_lasers.update_peer(cx, peer.to_live_id(), state.clone(), e);
+                                    xr_hands.update_peer(cx, peer.to_live_id(), state, e);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+            self.match_event(cx, event);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
+        });
     }
 }

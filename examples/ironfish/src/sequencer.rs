@@ -247,7 +247,7 @@ impl Widget for Sequencer {
         let uid = self.widget_uid();
         for button in self.buttons.values_mut() {
             if button.handle_event_changed(cx, event, self.area) {
-                cx.widget_action(uid, &scope.path, SequencerAction::Change);
+                cx.widget_action(uid, SequencerAction::Change);
             }
         }
     }
@@ -335,11 +335,7 @@ impl SequencerRef {
                 *step = 0
             }
             inner.set_steps(cx, &steps);
-            cx.widget_action(
-                inner.widget_uid(),
-                &HeapLiveIdPath::default(),
-                SequencerAction::Change,
-            );
+            cx.widget_action(inner.widget_uid(), SequencerAction::Change);
         }
     }
 
@@ -355,11 +351,7 @@ impl SequencerRef {
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            cx.widget_action(
-                inner.widget_uid(),
-                &HeapLiveIdPath::default(),
-                SequencerAction::Change,
-            );
+            cx.widget_action(inner.widget_uid(), SequencerAction::Change);
         }
     }
 
@@ -374,11 +366,7 @@ impl SequencerRef {
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            cx.widget_action(
-                inner.widget_uid(),
-                &HeapLiveIdPath::default(),
-                SequencerAction::Change,
-            );
+            cx.widget_action(inner.widget_uid(), SequencerAction::Change);
         }
     }
 }

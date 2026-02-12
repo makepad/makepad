@@ -4,6 +4,7 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
+    widget_tree::CxWidgetExt,
 };
 
 script_mod! {
@@ -103,12 +104,8 @@ impl Widget for FoldHeader {
             for action in actions {
                 if let Some(widget_action) = action.downcast_ref::<WidgetAction>() {
                     // Check if this action came from a widget within our header
-                    // uid_to_widget returns empty if the uid isn't found in the subtree
-                    if !self
-                        .header
-                        .uid_to_widget(widget_action.widget_uid)
-                        .is_empty()
-                    {
+                    // by verifying the widget exists in the widget tree under our header
+                    if !cx.widget_tree().widget(widget_action.widget_uid).is_empty() {
                         match widget_action.cast::<FoldButtonAction>() {
                             FoldButtonAction::Opening => {
                                 self.animator_play(cx, ids!(active.on));
@@ -175,7 +172,7 @@ impl FoldHeader {
         // Also toggle the fold button if it exists
         if let Some(mut fold_button) = self
             .header
-            .widget(ids!(fold_button))
+            .widget(cx, ids!(fold_button))
             .borrow_mut::<crate::fold_button::FoldButton>()
         {
             fold_button.set_is_open(cx, is_open, animate);
