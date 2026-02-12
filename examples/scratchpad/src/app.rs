@@ -7,7 +7,7 @@ script_mod! {
     use mod.net
 
     // ---- Templates ----
-    
+
     let ResultCard = RoundedView{
         width: Fill height: Fit
         padding: 14 flow: Down spacing: 6
@@ -41,7 +41,7 @@ script_mod! {
     // ---- UI ----
     let results = []
 
-    let app = load_all_resources() do #(App::script_component(vm)){
+    let app = startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
                 pass.clear_color: vec4(0.12, 0.12, 0.14, 1.0)
@@ -111,7 +111,7 @@ script_mod! {
     // ---- Logic ----
     // These use script features (var, fn) that run in the script VM.
     // They will work once the script engine supports them fully.
-    
+
     fn http_get(url){
         std.promise()
         let req = net.HttpRequest{
@@ -135,9 +135,9 @@ script_mod! {
                 ui.results.render()
             }
         }
-                
+
     }
-    
+
     fn do_search(query){
         let req = net.HttpRequest{
             url: "https://html.duckduckgo.com/html/?q=" + query

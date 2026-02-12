@@ -4,6 +4,7 @@ use makepad_script::*;
 pub mod draw;
 pub mod event;
 pub mod fs;
+pub mod helper;
 pub mod net;
 pub mod res;
 pub mod run;
@@ -22,4 +23,5 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::script::res::script_mod(vm);
     crate::script::draw::script_mod(vm);
     crate::script::event::script_mod(vm);
+    crate::script::helper::script_mod(vm);
 }

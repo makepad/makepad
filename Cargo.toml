@@ -6,6 +6,7 @@ workspace.members = [
     "examples/splash",
     "examples/charts",
     "examples/scratchpad",
+    "examples/todo",
     "examples/vector",
     "examples/comfyui",
     "examples/aichat",

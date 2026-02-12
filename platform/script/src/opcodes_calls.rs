@@ -44,7 +44,11 @@ impl<'a> ScriptVm<'a> {
         };
 
         let (args, sself, method) = match me {
-            ScriptMe::Call { args, sself, method } => (args, sself, method),
+            ScriptMe::Call {
+                args,
+                sself,
+                method,
+            } => (args, sself, method),
             ScriptMe::Pod { pod, offset } => {
                 self.bx
                     .heap
@@ -73,11 +77,14 @@ impl<'a> ScriptVm<'a> {
         if let Some(method) = method {
             let sself = sself.unwrap_or(NIL);
             let type_index = sself.value_type().to_redux();
-            let call_ptr: Option<*const dyn Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue> = {
+            let call_ptr: Option<
+                *const dyn Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue,
+            > = {
                 let native = self.bx.code.native.borrow();
-                native.calls.get(type_index.to_index()).and_then(|c| {
-                    c.as_ref().map(|f| &**f as *const _)
-                })
+                native
+                    .calls
+                    .get(type_index.to_index())
+                    .and_then(|c| c.as_ref().map(|f| &**f as *const _))
             };
             if let Some(call_ptr) = call_ptr {
                 let ip = self.bx.threads.cur_ref().trap.ip;
@@ -203,8 +210,11 @@ impl<'a> ScriptVm<'a> {
                 let native = self.bx.code.native.borrow();
                 let type_entry = &native.type_table[type_index.to_index()];
                 let found = type_entry.get(&method).copied();
-                let has_call = native.calls.get(type_index.to_index())
-                    .map(|c| c.is_some()).unwrap_or(false);
+                let has_call = native
+                    .calls
+                    .get(type_index.to_index())
+                    .map(|c| c.is_some())
+                    .unwrap_or(false);
                 (found, has_call)
             };
             if let Some(method_ptr) = found_method {

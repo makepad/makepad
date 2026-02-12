@@ -204,9 +204,6 @@ enum State {
     },
     ArrayIndex,
 
-    EmitDelete {
-        index: u32,
-    },
     EmitReturn {
         index: u32,
         code_len_before: u32,
@@ -2692,10 +2689,6 @@ impl ScriptParser {
                 self.push_code(Opcode::CONTINUE.into(), index);
                 return 0;
             }
-            State::EmitDelete { index } => {
-                self.push_code(Opcode::DELETE.into(), index);
-                return 0;
-            }
             State::EndBareSquare => {
                 self.push_code(Opcode::END_ARRAY.into(), self.index);
                 self.state.push(State::EndExpr);
@@ -3343,11 +3336,6 @@ impl ScriptParser {
                 }
                 if id == id!(continue) {
                     self.state.push(State::EmitContinue { index: self.index });
-                    return 1;
-                }
-                if id == id!(delete) {
-                    self.state.push(State::EmitDelete { index: self.index });
-                    self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
                 if id == id!(true) {

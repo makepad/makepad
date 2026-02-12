@@ -723,6 +723,26 @@ impl ScriptObjectData {
         native.add_type_method(
             heap,
             ScriptValueType::REDUX_OBJECT,
+            id!(delete),
+            script_args!(key = NIL),
+            |vm, args| {
+                if let Some(sself) = script_value!(vm, args.self).as_object() {
+                    let key = script_value!(vm, args.key);
+                    if let Some(val) = vm.bx.heap.map_delete(sself, &key) {
+                        return val;
+                    }
+                    return NIL;
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "delete called on non-object value"
+                )
+            },
+        );
+
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_OBJECT,
             id!(vec_key),
             script_args!(index = NIL),
             |vm, args| {
@@ -972,6 +992,10 @@ impl ScriptObjectData {
             };
         }
         self.map_get(key)
+    }
+
+    pub fn map_delete(&mut self, key: &ScriptValue) -> Option<ScriptValue> {
+        self.map.remove(key).map(|v| v.value)
     }
 
     pub fn map_len(&self) -> usize {

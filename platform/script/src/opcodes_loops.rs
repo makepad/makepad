@@ -41,6 +41,7 @@ impl<'a> ScriptVm<'a> {
             return;
         };
         let new_scope = self.bx.heap.new_with_proto(scope.into());
+        self.bx.heap.clear_object_deep(new_scope);
 
         self.bx.threads.cur().scopes.push(new_scope);
         self.bx
@@ -80,6 +81,7 @@ impl<'a> ScriptVm<'a> {
             return;
         };
         let new_scope = self.bx.heap.new_with_proto(scope.into());
+        self.bx.heap.clear_object_deep(new_scope);
         self.bx.threads.cur().scopes.push(new_scope);
     }
 
@@ -188,6 +190,7 @@ impl<'a> ScriptVm<'a> {
                     return;
                 };
                 let scope = self.bx.heap.new_with_proto(parent.into());
+                self.bx.heap.clear_object_deep(scope);
                 self.bx.threads.cur().scopes.push(scope);
                 self.bx
                     .heap
@@ -240,6 +243,7 @@ impl<'a> ScriptVm<'a> {
                         return;
                     };
                     let scope = self.bx.heap.new_with_proto(parent.into());
+                    self.bx.heap.clear_object_deep(scope);
                     self.bx.threads.cur().scopes.push(scope);
                     self.bx
                         .heap
@@ -303,6 +307,7 @@ impl<'a> ScriptVm<'a> {
                         return;
                     };
                     let scope = self.bx.heap.new_with_proto(parent.into());
+                    self.bx.heap.clear_object_deep(scope);
                     self.bx.threads.cur().scopes.push(scope);
                     self.bx
                         .heap
@@ -357,6 +362,7 @@ impl<'a> ScriptVm<'a> {
                     return;
                 };
                 let scope = self.bx.heap.new_with_proto(parent.into());
+                self.bx.heap.clear_object_deep(scope);
                 self.bx.threads.cur().scopes.push(scope);
 
                 self.bx

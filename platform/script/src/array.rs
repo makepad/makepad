@@ -587,6 +587,25 @@ impl ScriptArrayData {
         native.add_type_method(
             heap,
             ScriptValueType::REDUX_ARRAY,
+            id!(remove),
+            script_args!(index = NIL),
+            |vm, args| {
+                if let Some(sself) = script_value!(vm, args.self).as_array() {
+                    let index = script_value!(vm, args.index);
+                    let idx = index.as_index();
+                    let trap = vm.bx.threads.cur().trap.pass();
+                    return vm.bx.heap.array_remove(sself, idx, trap);
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "remove called on non-array value"
+                )
+            },
+        );
+
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_ARRAY,
             id!(freeze),
             &[],
             |vm, args| {
