@@ -309,6 +309,40 @@ impl Cx {
 
     pub(crate) fn handle_script_network_events(&mut self, items: &[NetworkResponseItem]) {
         for item in items {
+            // Handle http_resource responses (resource loading via HTTP)
+            if self.script_data.resources.is_http_resource(item.request_id) {
+                match &item.response {
+                    NetworkResponse::HttpResponse(res) => {
+                        if let Some(body) = res.get_body() {
+                            if res.status_code >= 200 && res.status_code < 300 {
+                                self.script_data
+                                    .resources
+                                    .handle_http_response(item.request_id, body.clone());
+                            } else {
+                                self.script_data.resources.handle_http_error(
+                                    item.request_id,
+                                    format!("HTTP error: status {}", res.status_code),
+                                );
+                            }
+                        } else {
+                            self.script_data.resources.handle_http_error(
+                                item.request_id,
+                                "HTTP error: empty response body".to_string(),
+                            );
+                        }
+                        self.redraw_all();
+                    }
+                    NetworkResponse::HttpRequestError(err) => {
+                        self.script_data.resources.handle_http_error(
+                            item.request_id,
+                            format!("HTTP request error: {}", err.message),
+                        );
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             match &item.response {
                 NetworkResponse::HttpStreamResponse(res) => {
                     if let Some(s) = self

@@ -1223,6 +1223,27 @@ script_mod! {
 
             Hr{}
 
+            Label{text: "HTTP Resource - SVG loaded from URL" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "https://makepad.nl/img/logo_makepad.svg" draw_text.color: #888 draw_text.text_style.font_size: 9}
+            Svg{
+                width: 300 height: 100
+                animating: false
+                draw_svg +: {
+                    svg: http_resource("https://makepad.nl/img/logo_makepad.svg")
+                }
+            }
+
+            Label{text: "https://makepad.nl/img/bg_header2.svg" draw_text.color: #888 draw_text.text_style.font_size: 9}
+            Svg{
+                width: Fill height: 300
+                animating: false
+                draw_svg +: {
+                    svg: http_resource("https://makepad.nl/img/bg_header2.svg")
+                }
+            }
+
+            Hr{}
+
             Label{text: "SVG Tiger" draw_text.color: #fff draw_text.text_style.font_size: 13}
             Svg{
                 width: 300 height: 300

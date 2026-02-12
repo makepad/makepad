@@ -319,9 +319,9 @@ impl DrawSvg {
         if self.svg_loaded {
             return;
         }
-        self.svg_loaded = true;
 
         let Some(ref handle_ref) = self.svg else {
+            self.svg_loaded = true;
             return;
         };
 
@@ -333,9 +333,13 @@ impl DrawSvg {
             cx.script_data.resources.load_all_resources();
             match cx.get_resource(handle) {
                 Some(data) => data,
+                // Resource not yet available (may be loading via HTTP) - don't
+                // set svg_loaded so we retry on next draw after data arrives.
                 None => return,
             }
         };
+
+        self.svg_loaded = true;
 
         let svg_str = match std::str::from_utf8(&data) {
             Ok(s) => s,
