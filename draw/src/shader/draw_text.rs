@@ -226,7 +226,7 @@ pub struct DrawText {
     #[live]
     pub atlas_plane: f32,
     #[live]
-    pub pad1:f32
+    pub pad1: f32,
 }
 
 #[derive(Clone, Debug)]

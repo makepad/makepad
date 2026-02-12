@@ -138,6 +138,12 @@ impl WidgetNode for AdaptiveView {
         self.area
     }
 
+    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
+        if let Some(active_widget) = self.active_widget.as_ref() {
+            active_widget.widget_ref.find_widgets(path, results);
+        }
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
