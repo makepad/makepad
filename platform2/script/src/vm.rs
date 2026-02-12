@@ -563,6 +563,22 @@ impl<'a> ScriptVm<'a> {
             .set_type_getter(ht.to_redux(), f)
     }
 
+    /// Register a catch-all method dispatcher for a handle type.
+    /// When a method call is made on a handle that has no specific method
+    /// registered for that name, this call function is invoked with
+    /// (vm, args_object, method). The args object has `self` set
+    /// and all call arguments collected, just like a normal native method.
+    pub fn set_handle_call<F>(&mut self, ht: ScriptHandleType, f: F)
+    where
+        F: Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue + 'static,
+    {
+        self.bx
+            .code
+            .native
+            .borrow_mut()
+            .set_type_call(ht.to_redux(), f)
+    }
+
     pub fn new_module(&mut self, id: LiveId) -> ScriptObject {
         self.bx.heap.new_module(id)
     }
