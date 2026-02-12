@@ -1515,11 +1515,10 @@ script_mod! {
         TabSlidePanel := TabSlidePanel{}
     }
 
-    mod.gc.set_static(mod)
     mod.gc.set_static(AppDock)
     mod.gc.run()
 
-    load_all_resources() do #(App::script_component(vm)){
+    startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
                 pass.clear_color: vec4(0.3 0.3 0.3 1.0)
@@ -1577,11 +1576,13 @@ impl MatchEvent for App {
         // Tooltip demo - show tooltips on button click
         if self.ui.button(cx, ids!(tooltip_btn1)).clicked(actions) {
             log!("Showing tooltip 1");
-            self.ui.tooltip(cx, ids!(buttons_tooltip)).show_with_options(
-                cx,
-                dvec2(350.0, 280.0),
-                "This is the standard button. Click it to perform the primary action.",
-            );
+            self.ui
+                .tooltip(cx, ids!(buttons_tooltip))
+                .show_with_options(
+                    cx,
+                    dvec2(350.0, 280.0),
+                    "This is the standard button. Click it to perform the primary action.",
+                );
         }
 
         // Popup notification demo
@@ -1659,7 +1660,11 @@ impl MatchEvent for App {
         }
 
         // Cancel confirmation
-        if self.ui.button(cx, ids!(cancel_confirm_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(cancel_confirm_btn))
+            .clicked(actions)
+        {
             log!("Confirmation cancelled");
             self.ui.modal(cx, ids!(confirm_modal)).close(cx);
             self.ui
@@ -1698,7 +1703,11 @@ impl MatchEvent for App {
         }
 
         // Close non-dismissable modal
-        if self.ui.button(cx, ids!(close_nodismiss_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(close_nodismiss_btn))
+            .clicked(actions)
+        {
             log!("Closing non-dismissable modal via button");
             self.ui.modal(cx, ids!(nodismiss_modal)).close(cx);
             self.ui
@@ -1734,7 +1743,8 @@ impl AppMain for App {
 // TestDraw widget with draw_quad and draw_text shaders
 #[derive(Script, ScriptHook, Widget)]
 pub struct TestDraw {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[layout]
@@ -1915,7 +1925,8 @@ impl Widget for ScrollbarTestList {
 // FileTreeDemo widget demonstrating FileTree usage
 #[derive(Script, ScriptHook, Widget)]
 pub struct FileTreeDemo {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[redraw]
     #[live]
     file_tree: FileTree,

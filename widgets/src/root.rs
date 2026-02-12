@@ -1,4 +1,7 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
+use crate::{
+    makepad_derive_widget::*, makepad_draw::*, makepad_script::ScriptFnRef, widget::*,
+    widget_async::CxWidgetToScriptCallExt, widget_tree::CxWidgetExt,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -26,6 +29,10 @@ pub struct Root {
     xr_draw_list: DrawList,
     #[live]
     xr_pass: ScriptDrawPass,
+    #[live]
+    on_startup: ScriptFnRef,
+    #[rust]
+    started: bool,
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
 }
@@ -104,6 +111,19 @@ impl WidgetNode for Root {
 
 impl Widget for Root {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::Startup = event {
+            if !self.started {
+                self.started = true;
+                let uid = self.uid;
+                cx.widget_to_script_call(
+                    uid,
+                    NIL,
+                    self.source.clone(),
+                    self.on_startup.clone(),
+                    &[],
+                );
+            }
+        }
         if let Event::Draw(e) = event {
             if cx.in_xr_mode() {
                 if !e.xr_state.is_some() {

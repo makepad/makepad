@@ -336,7 +336,30 @@ impl<'a> ScriptVm<'a> {
         self.bx.heap.clear_object_deep(scope);
 
         let trap = self.bx.threads.cur().trap.pass();
-        self.bx.heap.merge_object(scope, args_obj, trap);
+        // Map positional (unnamed) vec args to named function parameters,
+        // and merge named map args directly.
+        let vec_len = self.bx.heap.vec_len(args_obj);
+        for i in 0..vec_len {
+            let kv = self.bx.heap.vec_key_value(args_obj, i, trap);
+            if kv.key.is_nil() {
+                // Unnamed positional arg — map to named parameter via unnamed_fn_arg
+                self.bx.heap.unnamed_fn_arg(scope, kv.value, trap);
+            } else {
+                // Named arg — insert directly
+                self.bx.heap.vec_push(scope, kv.key, kv.value, trap);
+            }
+        }
+        // Copy map entries (like `self`, `ui`) from args_obj to scope
+        let map_entries: Vec<_> = self
+            .bx
+            .heap
+            .map_ref(args_obj)
+            .iter()
+            .map(|(k, v)| (*k, v.value))
+            .collect();
+        for (k, v) in map_entries {
+            self.bx.heap.force_value_in_map(scope, k, v);
+        }
 
         self.bx.heap.set_object_deep(scope);
         self.bx.heap.set_object_storage_auto(scope);

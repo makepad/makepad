@@ -144,13 +144,6 @@ impl Opcode {
     pub const BEGIN_PROTO: Self = Self(66);
     pub const PROTO_INHERIT_READ: Self = Self(67);
     pub const END_PROTO: Self = Self(68);
-    pub const PROTO_INHERIT_WRITE: Self = Self(119);
-    pub const SCOPE_INHERIT_READ: Self = Self(120);
-    pub const SCOPE_INHERIT_WRITE: Self = Self(121);
-    pub const FIELD_INHERIT_READ: Self = Self(122);
-    pub const FIELD_INHERIT_WRITE: Self = Self(123);
-    pub const INDEX_INHERIT_READ: Self = Self(124);
-    pub const INDEX_INHERIT_WRITE: Self = Self(125);
     pub const BEGIN_BARE: Self = Self(69);
     pub const END_BARE: Self = Self(70);
     pub const BEGIN_ARRAY: Self = Self(71);
@@ -176,7 +169,6 @@ impl Opcode {
     pub const FIELD_NIL: Self = Self(87);
     pub const ME_FIELD: Self = Self(88);
     pub const ARRAY_INDEX: Self = Self(89);
-    // prototypically inherit the chain for deep prototype fields
     pub const PROTO_FIELD: Self = Self(90);
     pub const POP_TO_ME: Self = Self(91);
 
@@ -188,36 +180,44 @@ impl Opcode {
     pub const LOG: Self = Self(96);
 
     pub const ME: Self = Self(97);
-    pub const DELETE: Self = Self(98);
-    pub const SCOPE: Self = Self(99);
+    pub const SCOPE: Self = Self(98);
 
-    pub const FOR_1: Self = Self(100);
-    pub const FOR_2: Self = Self(101);
-    pub const FOR_3: Self = Self(102);
-    pub const LOOP: Self = Self(103);
-    pub const BREAKIFNOT: Self = Self(104);
-    pub const FOR_END: Self = Self(105);
-    pub const BREAK: Self = Self(106);
-    pub const CONTINUE: Self = Self(107);
-    pub const RANGE: Self = Self(108);
-    pub const IS: Self = Self(109);
-    pub const RETURN_IF_ERR: Self = Self(110);
-    pub const TRY_TEST: Self = Self(111);
-    pub const TRY_ERR: Self = Self(112);
-    pub const TRY_OK: Self = Self(113);
-    pub const OK_TEST: Self = Self(114);
-    pub const OK_END: Self = Self(115);
-    pub const USE: Self = Self(116);
-    pub const VAR_TYPED: Self = Self(117);
-    pub const VAR_DYN: Self = Self(118);
-    pub const ME_SPLAT: Self = Self(126);
+    pub const FOR_1: Self = Self(99);
+    pub const FOR_2: Self = Self(100);
+    pub const FOR_3: Self = Self(101);
+    pub const LOOP: Self = Self(102);
+    pub const BREAKIFNOT: Self = Self(103);
+    pub const FOR_END: Self = Self(104);
+    pub const BREAK: Self = Self(105);
+    pub const CONTINUE: Self = Self(106);
+    pub const RANGE: Self = Self(107);
+    pub const IS: Self = Self(108);
+    pub const RETURN_IF_ERR: Self = Self(109);
+    pub const TRY_TEST: Self = Self(110);
+    pub const TRY_ERR: Self = Self(111);
+    pub const TRY_OK: Self = Self(112);
+    pub const OK_TEST: Self = Self(113);
+    pub const OK_END: Self = Self(114);
+    pub const USE: Self = Self(115);
+    pub const VAR_TYPED: Self = Self(116);
+    pub const VAR_DYN: Self = Self(117);
+
+    // Inherit opcodes
+    pub const PROTO_INHERIT_WRITE: Self = Self(118);
+    pub const SCOPE_INHERIT_READ: Self = Self(119);
+    pub const SCOPE_INHERIT_WRITE: Self = Self(120);
+    pub const FIELD_INHERIT_READ: Self = Self(121);
+    pub const FIELD_INHERIT_WRITE: Self = Self(122);
+    pub const INDEX_INHERIT_READ: Self = Self(123);
+    pub const INDEX_INHERIT_WRITE: Self = Self(124);
+    pub const ME_SPLAT: Self = Self(125);
 
     // Destructuring opcodes
-    pub const DUP: Self = Self(127);
-    pub const DROP: Self = Self(128);
-    pub const LET_DESTRUCT_ARRAY_EL: Self = Self(129); // arg = index; stack: [source, id] -> [source], binds id = source[index]
-    pub const LET_DESTRUCT_OBJECT_EL: Self = Self(130); // stack: [source, id] -> [source], binds id = source[id]
-    pub const ARRAY_INDEX_NIL: Self = Self(131); // like ARRAY_INDEX but returns nil instead of error
+    pub const DUP: Self = Self(126);
+    pub const DROP: Self = Self(127);
+    pub const LET_DESTRUCT_ARRAY_EL: Self = Self(128); // arg = index; stack: [source, id] -> [source], binds id = source[index]
+    pub const LET_DESTRUCT_OBJECT_EL: Self = Self(129); // stack: [source, id] -> [source], binds id = source[id]
+    pub const ARRAY_INDEX_NIL: Self = Self(130);
 }
 
 impl fmt::Debug for OpcodeArgs {
