@@ -403,6 +403,7 @@ impl FractalSpace {
 
 #[derive(Live, Widget)]
 pub struct Mandelbrot {
+    #[uid] uid: WidgetUid,
     // DSL accessible
     #[live]
     draw_tile: DrawTile,

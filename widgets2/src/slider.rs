@@ -1343,6 +1343,7 @@ pub struct DrawSlider {
 
 #[derive(Script, Widget, Animator)]
 pub struct Slider {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[redraw]

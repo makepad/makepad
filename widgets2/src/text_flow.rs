@@ -554,6 +554,7 @@ impl SelectionTracker {
 // this widget has a retained and an immediate mode api
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct TextFlow {
+    #[uid] uid: WidgetUid,
     #[live]
     pub draw_text: DrawText,
     #[live]
@@ -780,6 +781,7 @@ pub enum DrawState {
 }
 
 impl WidgetNode for TextFlow {
+    fn widget_uid(&self) -> WidgetUid { self.uid }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
@@ -1604,6 +1606,7 @@ pub enum TextFlowLinkAction {
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister, Animator)]
 pub struct TextFlowLink {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]
@@ -1643,6 +1646,7 @@ pub struct TextFlowLink {
 }
 
 impl WidgetNode for TextFlowLink {
+    fn widget_uid(&self) -> WidgetUid { self.uid }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         Walk::default()
     }

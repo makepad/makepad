@@ -263,6 +263,7 @@ fn derive_script_impl_inner(
                     || a.name == "deref"
                     || a.name == "rust"
                     || a.name == "source"
+                    || a.name == "uid"
             }) {
                 if attr.args.is_none() || attr.args.as_ref().unwrap().is_empty() {
                     if attr.name == "live"
@@ -271,6 +272,8 @@ fn derive_script_impl_inner(
                         || attr.name == "deref"
                     {
                         tb.add("ScriptNew::script_new_with_default(vm)");
+                    } else if attr.name == "uid" {
+                        tb.add("WidgetUid::new()");
                     } else {
                         tb.add("Default::default()");
                     }

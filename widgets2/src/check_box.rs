@@ -360,6 +360,7 @@ script_mod! {
 
 #[derive(Script, Widget, Animator)]
 pub struct CheckBox {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 

@@ -337,6 +337,7 @@ impl HeightTree {
 
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet)]
 pub struct PortalList {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 
@@ -1493,6 +1494,7 @@ impl PortalList {
 }
 
 impl WidgetNode for PortalList {
+    fn widget_uid(&self) -> WidgetUid { self.uid }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }

@@ -155,6 +155,7 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Window {
+    #[uid] uid: WidgetUid,
     //#[rust] caption_size: Vec2d,
     #[live]
     last_mouse_pos: Vec2d,

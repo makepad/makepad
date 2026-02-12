@@ -63,6 +63,7 @@ impl AppMain for App {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct SvgDemo {
+    #[uid] uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[redraw]

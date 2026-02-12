@@ -33,6 +33,7 @@ pub struct WidgetItem {
 
 #[derive(Script, Widget)]
 pub struct FlatList {
+    #[uid] uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[layout]

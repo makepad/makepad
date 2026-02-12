@@ -145,6 +145,7 @@ pub enum DesktopButtonType {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct DesktopButton {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]

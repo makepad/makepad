@@ -42,7 +42,8 @@ use crate::derive_live_registry::*;
         deref,
         designable,
         live_ignore,
-        live_debug
+        live_debug,
+        uid,
     )
 )]
 pub fn derive_live(input: TokenStream) -> TokenStream {
