@@ -365,86 +365,9 @@ impl ClaudeAcpAgent {
         Self::get_acp_paths().is_some()
     }
 
-    /// Find Claude Code ACP paths. Tries in order:
-    /// 1. `claude` command in PATH (standalone Claude Code CLI)
-    /// 2. VS Code extension installation
-    /// 3. Zed external agents installation
+    /// Find Claude Code ACP paths via Zed external agents installation
     fn get_acp_paths() -> Option<(String, String)> {
-        // Try standalone Claude Code CLI first (in PATH)
-        if let Some(path) = Self::find_claude_in_path() {
-            return Some(path);
-        }
-
-        // Try VS Code extension
-        if let Some(path) = Self::find_claude_vscode() {
-            return Some(path);
-        }
-
-        // Try Zed external agents
-        if let Some(path) = Self::find_claude_zed() {
-            return Some(path);
-        }
-
-        None
-    }
-
-    /// Check if `claude` CLI is available in PATH
-    fn find_claude_in_path() -> Option<(String, String)> {
-        // Try to find claude command
-        let output = std::process::Command::new("which")
-            .arg("claude")
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let claude_path = String::from_utf8(output.stdout).ok()?.trim().to_string();
-        if claude_path.is_empty() {
-            return None;
-        }
-
-        // Claude CLI can act as ACP server directly with --acp flag
-        // Return the claude path as both node and script (special case)
-        Some((claude_path.clone(), "--acp".to_string()))
-    }
-
-    /// Find Claude Code in VS Code extensions (macOS)
-    fn find_claude_vscode() -> Option<(String, String)> {
-        let node_path = which_node()?;
-        let home = std::env::var("HOME").ok()?;
-
-        // VS Code extensions location on macOS
-        let vscode_ext_base = format!("{}/.vscode/extensions", home);
-
-        // Look for anthropic.claude-code-* extension
-        let entries = std::fs::read_dir(&vscode_ext_base).ok()?;
-        let mut claude_extensions: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| n.starts_with("anthropic.claude-code-"))
-            .collect();
-
-        // Sort to get latest version
-        claude_extensions.sort();
-        let ext_dir = claude_extensions.pop()?;
-
-        // The ACP server script location within the extension
-        let script_path = format!("{}/{}/dist/acp-server.js", vscode_ext_base, ext_dir);
-
-        if std::path::Path::new(&script_path).exists() {
-            return Some((node_path, script_path));
-        }
-
-        // Alternative path structure
-        let script_path_alt = format!("{}/{}/out/acp-server.js", vscode_ext_base, ext_dir);
-
-        if std::path::Path::new(&script_path_alt).exists() {
-            return Some((node_path, script_path_alt));
-        }
-
-        None
+        Self::find_claude_zed()
     }
 
     /// Find Claude Code ACP in Zed external agents (macOS)
