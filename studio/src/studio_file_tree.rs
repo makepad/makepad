@@ -13,6 +13,7 @@ script_mod! {
 
 #[derive(Script, Widget)]
 pub struct StudioFileTree {
+    #[uid] uid: WidgetUid,
     #[wrap]
     #[live]
     pub file_tree: FileTree,

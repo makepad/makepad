@@ -59,6 +59,7 @@ impl ViewOptimize {
 
 #[derive(Script, Animator, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct View {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     // draw info per UI element
@@ -523,6 +524,7 @@ impl ViewSet {
 }
 
 impl WidgetNode for View {
+    fn widget_uid(&self) -> WidgetUid { self.uid }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }

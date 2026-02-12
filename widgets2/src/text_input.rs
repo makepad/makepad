@@ -462,6 +462,7 @@ script_mod! {
 
 #[derive(Script, Widget, Animator)]
 pub struct TextInput {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[apply_default]

@@ -188,6 +188,7 @@ impl Bullets {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct XrLasers {
+    #[uid] uid: WidgetUid,
     #[redraw]
     #[rust(DrawList::new(cx))]
     draw_list: DrawList,

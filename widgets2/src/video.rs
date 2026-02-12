@@ -108,6 +108,7 @@ script_mod! {
 
 #[derive(Script, Widget)]
 pub struct Video {
+    #[uid] uid: WidgetUid,
     #[source]
     source_ref: ScriptObjectRef,
 

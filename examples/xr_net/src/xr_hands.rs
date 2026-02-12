@@ -68,6 +68,7 @@ struct AlignMode {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct XrHands {
+    #[uid] uid: WidgetUid,
     #[redraw]
     #[rust(DrawList::new(cx))]
     draw_list: DrawList,

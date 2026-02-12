@@ -39,6 +39,7 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
         let mut wrap_field = None;
         let mut visible_field = None;
         let mut action_data_field = None;
+        let mut uid_field = None;
         let mut find_fields = Vec::new();
         let mut redraw_fields = Vec::new();
         for field in &mut fields {
@@ -66,6 +67,9 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             if field.attrs.iter().any(|v| v.name == "action_data") {
                 action_data_field = Some(field.name.clone());
             }
+            if field.attrs.iter().any(|v| v.name == "uid") {
+                uid_field = Some(field.name.clone());
+            }
         }
         tb.add("impl").stream(generic.clone());
         tb.add("WidgetNode for")
@@ -73,6 +77,20 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             .stream(generic)
             .stream(where_clause)
             .add("{");
+        if let Some(uid_field) = &uid_field {
+            tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
+                .ident(uid_field)
+                .add("}");
+        } else if let Some(wrap_field) = &wrap_field {
+            tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
+                .ident(wrap_field)
+                .add(".widget_uid()}");
+        } else if let Some(deref_field) = &deref_field {
+            tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
+                .ident(deref_field)
+                .add(".widget_uid()}");
+        }
+
         if designable {
             tb.add("    fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign>{return Some(self)}");
         }

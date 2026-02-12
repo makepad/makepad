@@ -58,6 +58,7 @@ script_mod! {
 
 #[derive(Script, Widget, Animator)]
 pub struct RunView {
+    #[uid] uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]

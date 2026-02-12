@@ -117,6 +117,8 @@ impl TimeRange {
 
 #[derive(Script, ScriptHook, Widget)]
 struct ProfilerEventChart {
+    #[uid]
+    uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[redraw]
