@@ -1,5 +1,8 @@
 use {
-    crate::{cx::Cx, id_pool::*, makepad_error_log::*, makepad_math::*, os::CxOsTexture},
+    crate::{
+        cx::Cx, id_pool::*, makepad_error_log::*, makepad_math::*, makepad_script::*,
+        os::CxOsTexture, script::vm::*,
+    },
     std::rc::Rc,
 };
 
@@ -629,6 +632,14 @@ impl TextureFormat {
 impl Default for TextureFormat {
     fn default() -> Self {
         TextureFormat::Unknown
+    }
+}
+
+impl ScriptHook for Texture {}
+impl ScriptApply for Texture {}
+impl ScriptNew for Texture {
+    fn script_new(vm: &mut ScriptVm) -> Self {
+        Self::new(vm.cx_mut())
     }
 }
 

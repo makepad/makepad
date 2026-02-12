@@ -1,30 +1,34 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, view::*, widget::*, WidgetMatchEvent, WindowAction,
+    animator::{Animator, AnimatorAction, AnimatorImpl},
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    view::*,
+    widget::*,
+    WidgetMatchEvent, WindowAction,
 };
 
-live_design! {
-    link widgets
-    pub SlidePanelBase = {{SlidePanel}} {}
-    pub SlidePanel = <SlidePanelBase>{
-        animator: {
-            active = {
-                default: off,
-                on = {
-                    redraw: true,
-                    from: {
-                        all: Forward {duration: 0.5}
-                    }
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
+
+    mod.widgets.SlideSide = #(SlideSide::script_api(vm))
+    mod.widgets.splat(mod.widgets.SlideSide)
+
+    mod.widgets.SlidePanelBase = #(SlidePanel::register_widget(vm))
+
+    mod.widgets.SlidePanel = set_type_default() do mod.widgets.SlidePanelBase{
+        animator: Animator{
+            active: {
+                default: @off
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.5}}
                     ease: InQuad
                     apply: {
                         active: 0.0
                     }
                 }
-
-                off = {
-                    redraw: true,
-                    from: {
-                        all: Forward {duration: 0.5}
-                    }
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.5}}
                     ease: OutQuad
                     apply: {
                         active: 1.0
@@ -35,11 +39,22 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Copy, Clone, Debug, Script, ScriptHook, Default)]
+pub enum SlideSide {
+    #[pick]
+    #[default]
+    Left,
+    Right,
+    Top,
+}
+
+#[derive(Script, ScriptHook, Widget, Animator)]
 pub struct SlidePanel {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     frame: View,
-    #[animator]
+    #[apply_default]
     animator: Animator,
     #[live]
     active: f64,
@@ -51,17 +66,17 @@ pub struct SlidePanel {
     next_frame: NextFrame,
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum SlidePanelAction {
+    #[default]
     None,
 }
 
 impl Widget for SlidePanel {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        //let uid = self.widget_uid();
         self.frame.handle_event(cx, event, scope);
         self.widget_match_event(cx, event, scope);
-        // lets handle mousedown, setfocus
+
         if self.animator_handle_event(cx, event).must_redraw() {
             self.frame.redraw(cx);
         }
@@ -75,7 +90,6 @@ impl Widget for SlidePanel {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, mut walk: Walk) -> DrawStep {
-        // we need to make this thing work with a
         let rect = cx.peek_walk_turtle(walk);
         match self.side {
             SlideSide::Top => {
@@ -106,15 +120,6 @@ impl WidgetMatchEvent for SlidePanel {
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_ignore]
-pub enum SlideSide {
-    #[pick]
-    Left,
-    Right,
-    Top,
-}
-
 impl SlidePanel {
     pub fn open(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
@@ -132,26 +137,29 @@ impl SlidePanel {
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, ids!(active.off))
+            inner.animator_play(cx, ids!(active.off));
         }
     }
+
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, ids!(active.on))
+            inner.animator_play(cx, ids!(active.on));
         }
     }
+
     pub fn toggle(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.animator_in_state(cx, ids!(active.on)) {
-                inner.animator_play(cx, ids!(active.on))
+                inner.animator_play(cx, ids!(active.off));
             } else {
-                inner.animator_play(cx, ids!(active.off))
+                inner.animator_play(cx, ids!(active.on));
             }
         }
     }
-    pub fn is_animating(&self, cx: &mut Cx) -> bool {
+
+    pub fn is_animating(&self, _cx: &mut Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator.is_track_animating(cx, ids!(active))
+            inner.animator.is_track_animating(id!(active))
         } else {
             false
         }
@@ -164,6 +172,7 @@ impl SlidePanelSet {
             item.close(cx);
         }
     }
+
     pub fn open(&self, cx: &mut Cx) {
         for item in self.iter() {
             item.open(cx);

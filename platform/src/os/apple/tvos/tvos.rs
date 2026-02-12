@@ -2,6 +2,7 @@ use {
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        draw_pass::CxDrawPassParent,
         event::{Event, NetworkResponseChannel},
         //makepad_live_id::*,
         os::{
@@ -19,7 +20,6 @@ use {
             cx_native::EventFlow,
             metal::{DrawPassMode, MetalCx},
         },
-        pass::CxPassParent,
         thread::SignalToUI,
         window::CxWindowPool,
     },
@@ -68,18 +68,18 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(_window_id) => {
+        for draw_pass_id in &passes_todo {
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(_window_id) => {
                     let mtk_view = get_tvos_app_global().mtk_view.unwrap();
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
                 }
-                CxPassParent::Pass(_) => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::DrawPass(_) => {
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
-                CxPassParent::None => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::None => {
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }
@@ -92,6 +92,7 @@ impl Cx {
             out.push(item);
         }
         if out.len() > 0 {
+            self.handle_script_network_events(&out);
             self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
@@ -107,6 +108,7 @@ impl Cx {
                 if te.timer_id == 0 {
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
+                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if SignalToUI::check_and_clear_action_signal() {
@@ -129,6 +131,8 @@ impl Cx {
         match event {
             TvosEvent::Init => {
                 get_tvos_app_global().start_timer(0, 0.008, true);
+                // Start gamepad monitoring - especially important for tvOS
+                crate::os::apple::apple_gamepad::start_gamepad_monitoring();
                 self.start_studio_websocket_delayed();
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
@@ -163,9 +167,11 @@ impl Cx {
             }
             TvosEvent::Timer(e) => {
                 if e.timer_id != 0 {
+                    self.handle_script_timer(&e);
                     self.call_event_handler(&Event::Timer(e))
                 }
             }
+            TvosEvent::GamepadConnected(e) => self.call_event_handler(&Event::GamepadConnected(e)),
         }
 
         if self.any_passes_dirty()

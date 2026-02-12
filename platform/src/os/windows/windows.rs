@@ -2,7 +2,10 @@ use {
     crate::{
         cx::*,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        draw_pass::CxDrawPassParent,
+        event::game_input::*,
         event::*,
+        game_input::*,
         makepad_live_id::*,
         makepad_math::*,
         os::{
@@ -12,11 +15,11 @@ use {
                 win32_app::*,
                 win32_event::*,
                 win32_window::Win32Window,
+                windows_game_input::WindowsGameInput,
                 windows_media::CxWindowsMedia,
             },
         },
-        pass::CxPassParent,
-        permission::{PermissionResult, PermissionStatus},
+        //permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
         window::CxWindowPool,
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
@@ -213,20 +216,24 @@ impl Cx {
             }
             Win32Event::TextCopy(e) => self.call_event_handler(&Event::TextCopy(e)),
             Win32Event::TextCut(e) => self.call_event_handler(&Event::TextCut(e)),
-            Win32Event::Timer(e) => self.call_event_handler(&Event::Timer(e)),
+            Win32Event::Timer(e) => {
+                self.handle_script_timer(&e);
+                self.call_event_handler(&Event::Timer(e))
+            }
             Win32Event::Signal => {
                 if SignalToUI::check_and_clear_ui_signal() {
                     self.handle_media_signals();
+                    self.handle_script_signals();
                     self.call_event_handler(&Event::Signal);
                 }
                 if SignalToUI::check_and_clear_action_signal() {
                     self.handle_action_receiver();
                 }
 
-                if self.handle_live_edit() {
-                    self.call_event_handler(&Event::LiveEdit);
-                    self.redraw_all();
-                }
+                //if self.handle_live_edit() {
+                //    self.call_event_handler(&Event::LiveEdit);
+                //    self.redraw_all();
+                //}
                 self.handle_networking_events();
 
                 self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
@@ -234,6 +241,8 @@ impl Cx {
                 return EventFlow::Wait;
             }
         }
+
+        self.handle_game_input_events();
 
         return EventFlow::Poll;
         /*
@@ -252,25 +261,25 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(with_win32_app(|app| app.time_now() as f32));
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(with_win32_app(|app| app.time_now() as f32));
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     if let Some(window) =
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         //let dpi_factor = window.window_geom.dpi_factor;
                         window.resize_buffers(&d3d11_cx);
-                        self.draw_pass_to_window(*pass_id, false, window, d3d11_cx);
+                        self.draw_pass_to_window(*draw_pass_id, false, window, d3d11_cx);
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx, None);
+                    self.draw_pass_to_texture(*draw_pass_id, d3d11_cx, None);
                 }
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx, None);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(*draw_pass_id, d3d11_cx, None);
                 }
             }
         }
@@ -282,8 +291,30 @@ impl Cx {
             out.push(event);
         }
         if out.len() > 0 {
+            self.handle_script_network_events(&out);
             self.call_event_handler(&Event::NetworkResponses(out))
         }
+    }
+
+    pub(crate) fn handle_game_input_events(&mut self) {
+        while let Ok(event) = self.os.game_input_events.receiver.try_recv() {
+            self.call_event_handler(&Event::GameInputConnected(event));
+        }
+
+        // Poll for new events and state updates
+        let mut events = Vec::new();
+        if let Some(game_input) = &mut self.os.windows_game_input {
+            game_input.poll(|event| {
+                events.push(event);
+            });
+        }
+
+        for event in events {
+            self.os.game_input_events.sender.send(event).unwrap();
+        }
+        // Force a repaint if any gamepad buttons are pressed?
+        // Or just let the signal loop handle it.
+        // For now, we rely on the standard event loop polling.
     }
 
     fn handle_platform_ops(
@@ -410,7 +441,7 @@ impl Cx {
 
                     //todo!("HttpRequest not implemented yet on windows, we'll get there");
                 }
-                CxOsOp::ShowTextIME(area, pos, _) => {
+                CxOsOp::ShowTextIME(area, pos) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     d3d11_windows.iter_mut().for_each(|w| {
                         w.win32_window.set_ime_spot(pos);
@@ -462,19 +493,55 @@ impl Cx {
     }
 }
 
+impl CxGameInputApi for Cx {
+    fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {
+        if let Some(game_input) = &self.os.windows_game_input {
+            if index < game_input.states.len() {
+                return Some(&game_input.states[index]);
+            }
+        }
+        None
+    }
+
+    fn game_input_states(&mut self) -> &[GameInputState] {
+        if let Some(game_input) = &self.os.windows_game_input {
+            return &game_input.states;
+        }
+        &[]
+    }
+
+    fn game_input_state_mut(&mut self, index: usize) -> Option<&mut GameInputState> {
+        if let Some(game_input) = &mut self.os.windows_game_input {
+            if index < game_input.states.len() {
+                return Some(&mut game_input.states[index]);
+            }
+        }
+        None
+    }
+
+    fn game_input_states_mut(&mut self) -> &mut [GameInputState] {
+        if let Some(game_input) = &mut self.os.windows_game_input {
+            return &mut game_input.states;
+        }
+        &mut []
+    }
+}
+
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
-            self.live_registry.borrow_mut().package_root = Some(item.to_string());
+        if let Some(_item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
+            //    self.live_registry.borrow_mut().package_root = Some(item.to_string());
         }
 
-        self.live_expand();
-        if std::env::args().find(|v| v == "--stdin-loop").is_none() {
-            self.start_disk_live_file_watcher(100);
-        }
-        self.live_scan_dependencies();
+        //self.live_expand();
+        //if std::env::args().find( | v | v == "--stdin-loop").is_none() {
+        //    self.start_disk_live_file_watcher(100);
+        //}
+        //self.live_scan_dependencies();
         self.native_load_dependencies();
+
+        self.os.windows_game_input = Some(WindowsGameInput::init());
     }
 
     fn spawn_thread<F>(&mut self, f: F)
@@ -501,5 +568,7 @@ pub struct CxOs {
     pub(crate) media: CxWindowsMedia,
     pub(crate) d3d11_device: Option<ID3D11Device>,
     pub(crate) network_response: NetworkResponseChannel,
+    pub(crate) game_input_events: GameInputEventChannel,
+    pub(crate) windows_game_input: Option<WindowsGameInput>,
     //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }

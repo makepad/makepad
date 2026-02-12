@@ -1,75 +1,88 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use link::widgets::*;
-    use makepad_draw::shader::std::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub SlidesViewBase = {{SlidesView}} {
-    }
+    mod.widgets.SlidesViewBase = #(SlidesView::register_widget(vm))
 
-    pub SlidesView = <SlidesViewBase> {
+    mod.widgets.SlidesView = set_type_default() do mod.widgets.SlidesViewBase{
         anim_speed: 0.9
     }
 
-    pub Slide = <RoundedView> {
-        width: Fill, height: Fill,
-        flow: Down, spacing: 10,
-        align: { x: 0.0, y: 0.5 }
+    mod.widgets.Slide = mod.widgets.RoundedView{
+        width: Fill
+        height: Fill
+        flow: Down
+        spacing: 10
+        align: Align{x: 0.0 y: 0.5}
         padding: 50.
-        draw_bg: {
-            color: (THEME_COLOR_INSET_1),
+        draw_bg +: {
+            color: theme.color_inset_1
             color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+            radius: theme.container_corner_radius
         }
-        title = <H1> {
-            text: "SlideTitle",
-            draw_text: {
-                color: (THEME_COLOR_TEXT)
+        title := H1{
+            text: "SlideTitle"
+            draw_text +: {
+                color: theme.color_text
             }
         }
     }
 
-    pub SlideChapter = <Slide> {
-        width: Fill, height: Fill,
-        flow: Down,
-        align: {x: 0.0, y: 0.5}
-        spacing: 10,
-        padding: 50,
-        draw_bg: {
-            color: (THEME_COLOR_MAKEPAD),
+    mod.widgets.SlideChapter = mod.widgets.Slide{
+        width: Fill
+        height: Fill
+        flow: Down
+        align: Align{x: 0.0 y: 0.5}
+        spacing: 10
+        padding: 50
+        draw_bg +: {
+            color: theme.color_makepad
             color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+            radius: theme.container_corner_radius
         }
-        title = <H1> {
-            text: "SlideTitle",
-            draw_text: {
-                color: (THEME_COLOR_TEXT)
+        title := H1{
+            text: "SlideTitle"
+            draw_text +: {
+                color: theme.color_text
             }
         }
     }
 
-    pub SlideBody = <H2> {
+    mod.widgets.SlideBody = mod.widgets.H2{
         text: "Body of the slide"
-        draw_text: {
-            color: (THEME_COLOR_TEXT)
+        draw_text +: {
+            color: theme.color_text
         }
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Clone)]
+enum DrawState {
+    DrawFirst,
+    DrawSecond,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum SlidesViewAction {
+    Flipped(usize),
+    #[default]
+    None,
+}
+
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct SlidesView {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[layout]
     layout: Layout,
     #[rust]
     area: Area,
     #[walk]
     walk: Walk,
-    #[rust]
-    children: ComponentMap<LiveId, WidgetRef>,
-    #[rust]
-    draw_order: Vec<LiveId>,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -80,9 +93,84 @@ pub struct SlidesView {
     anim_speed: f64,
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
+    #[rust]
+    templates: ComponentMap<LiveId, ScriptObjectRef>,
+    #[rust]
+    slides: ComponentMap<LiveId, WidgetRef>,
+    #[rust]
+    draw_order: Vec<LiveId>,
+}
+
+impl ScriptHook for SlidesView {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.with_cx_mut(|cx| {
+            self.next_frame(cx);
+        });
+    }
+
+    fn on_before_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if apply.is_reload() {
+            self.templates.clear();
+            self.draw_order.clear();
+        }
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        // Handle vec_key children from the object's vec (these are our slide templates)
+        // Only collect during template applies (not eval) to avoid storing temporary objects
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if kv.key.as_id().is_some() {
+                            // vec_key children are our slides
+                            if let Some(id) = kv.key.as_id() {
+                                if let Some(template_obj) = kv.value.as_object() {
+                                    self.templates
+                                        .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    self.draw_order.push(id);
+                                }
+
+                                // If we already have this slide instantiated, apply updates to it
+                                if let Some(slide) = self.slides.get_mut(&id) {
+                                    slide.script_apply(vm, apply, scope, kv.value);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        // Create all slides upfront (slides need to be available for navigation)
+        if apply.is_new() || apply.is_reload() {
+            for (slide_id, template_ref) in self.templates.iter() {
+                if !self.slides.contains_key(slide_id) {
+                    let template_value: ScriptValue = template_ref.as_object().into();
+                    let slide = WidgetRef::script_from_value_scoped(vm, scope, template_value);
+                    self.slides.insert(*slide_id, slide);
+                }
+            }
+        }
+    }
 }
 
 impl WidgetNode for SlidesView {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
@@ -94,90 +182,10 @@ impl WidgetNode for SlidesView {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx)
     }
-
-    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        for child in self.children.values() {
-            child.find_widgets(path, cached, results);
-        }
-    }
-
-    fn uid_to_widget(&self, uid: WidgetUid) -> WidgetRef {
-        for child in self.children.values() {
-            let x = child.uid_to_widget(uid);
-            if !x.is_empty() {
-                return x;
-            }
-        }
-        WidgetRef::empty()
-    }
-}
-
-#[derive(Clone)]
-enum DrawState {
-    DrawFirst,
-    DrawSecond,
-}
-
-impl LiveHook for SlidesView {
-    fn before_apply(
-        &mut self,
-        _cx: &mut Cx,
-        apply: &mut Apply,
-        _index: usize,
-        _nodes: &[LiveNode],
-    ) {
-        if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
-            //self.children.clear();
-            self.draw_order.clear();
-        }
-    }
-
-    fn apply_value_instance(
-        &mut self,
-        cx: &mut Cx,
-        apply: &mut Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> usize {
-        let id = nodes[index].id;
-        match apply.from {
-            ApplyFrom::Animate | ApplyFrom::Over => {
-                if let Some(component) = self.children.get_mut(&nodes[index].id) {
-                    component.apply(cx, apply, index, nodes)
-                } else {
-                    nodes.skip_node(index)
-                }
-            }
-            ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
-                    self.draw_order.push(id);
-                    return self
-                        .children
-                        .get_or_insert(cx, id, |cx| WidgetRef::new(cx))
-                        .apply(cx, apply, index, nodes);
-                } else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                    nodes.skip_node(index)
-                }
-            }
-            _ => nodes.skip_node(index),
-        }
-    }
-
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.next_frame(cx);
-    }
-}
-
-#[derive(Clone, Debug, DefaultNone)]
-pub enum SlidesViewAction {
-    Flipped(usize),
-    None,
 }
 
 impl Widget for SlidesView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // lets handle mousedown, setfocus
         match event {
             Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
                 self.current_slide = self.current_slide * self.anim_speed
@@ -192,23 +200,21 @@ impl Widget for SlidesView {
             _ => (),
         }
 
-        //let uid = self.widget_uid();
-        // lets grab the two slides we are seeing
         let current = self.current_slide.floor() as usize;
         if let Some(current_id) = self.draw_order.get(current) {
-            if let Some(current) = self.children.get(&current_id) {
-                scope.with_id(*current_id, |scope| {
+            if let Some(current) = self.slides.get(&current_id) {
+                cx.with_node(current.widget_uid(), *current_id, current.clone(), |cx| {
                     current.handle_event(cx, event, scope);
-                })
+                });
             }
         }
         if self.current_slide.fract() > 0.0 {
             let next = current + 1;
             if let Some(next_id) = self.draw_order.get(next) {
-                if let Some(next) = self.children.get(&next_id) {
-                    scope.with_id(*next_id, |scope| {
+                if let Some(next) = self.slides.get(&next_id) {
+                    cx.with_node(next.widget_uid(), *next_id, next.clone(), |cx| {
                         next.handle_event(cx, event, scope);
-                    })
+                    });
                 }
             }
         }
@@ -219,11 +225,7 @@ impl Widget for SlidesView {
             }) => {
                 self.next_slide(cx);
                 let uid = self.widget_uid();
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    SlidesViewAction::Flipped(self.goal_slide as usize),
-                );
+                cx.widget_action(uid, SlidesViewAction::Flipped(self.goal_slide as usize));
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
@@ -231,11 +233,7 @@ impl Widget for SlidesView {
             }) => {
                 self.prev_slide(cx);
                 let uid = self.widget_uid();
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    SlidesViewAction::Flipped(self.goal_slide as usize),
-                );
+                cx.widget_action(uid, SlidesViewAction::Flipped(self.goal_slide as usize));
             }
             Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.area);
@@ -245,8 +243,6 @@ impl Widget for SlidesView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        // alright lets draw the child slide
-        // we always maximally show 2 slides
         if self.draw_state.begin(cx, DrawState::DrawFirst) {
             cx.begin_turtle(walk, Layout::flow_overlay());
             let rect = cx.turtle().rect();
@@ -265,9 +261,11 @@ impl Widget for SlidesView {
         if let Some(DrawState::DrawFirst) = self.draw_state.get() {
             let first = self.current_slide.floor() as usize;
             if let Some(first_id) = self.draw_order.get(first) {
-                if let Some(slide) = self.children.get(&first_id) {
+                if let Some(slide) = self.slides.get(&first_id) {
                     let walk = slide.walk(cx);
-                    scope.with_id(*first_id, |scope| slide.draw_walk(cx, scope, walk))?;
+                    cx.with_node(slide.widget_uid(), *first_id, slide.clone(), |cx| {
+                        slide.draw_walk(cx, scope, walk)
+                    })?;
                 }
             }
             cx.end_turtle();
@@ -291,9 +289,11 @@ impl Widget for SlidesView {
             if self.current_slide.fract() > 0.0 {
                 let second = self.current_slide.floor() as usize + 1;
                 if let Some(second_id) = self.draw_order.get(second) {
-                    if let Some(slide) = self.children.get(&second_id) {
+                    if let Some(slide) = self.slides.get(&second_id) {
                         let walk = slide.walk(cx);
-                        scope.with_id(*second_id, |scope| slide.draw_walk(cx, scope, walk))?;
+                        cx.with_node(slide.widget_uid(), *second_id, slide.clone(), |cx| {
+                            slide.draw_walk(cx, scope, walk)
+                        })?;
                     }
                 }
             }
@@ -311,7 +311,6 @@ impl SlidesView {
 
     pub fn next_slide(&mut self, cx: &mut Cx) {
         self.goal_slide += 1.0;
-        // lets cap goal pos on the # of slides
         let max_goal_slide = (self.draw_order.len().max(1) - 1) as f64;
         if self.goal_slide > max_goal_slide {
             self.goal_slide = max_goal_slide
@@ -334,10 +333,8 @@ impl SlidesView {
 
 impl SlidesViewRef {
     pub fn flipped(&self, actions: &Actions) -> Option<usize> {
-        if let SlidesViewAction::Flipped(m) =
-            actions.find_widget_action(self.widget_uid()).cast_ref()
-        {
-            Some(*m)
+        if let SlidesViewAction::Flipped(m) = actions.find_widget_action(self.widget_uid()).cast() {
+            Some(m)
         } else {
             None
         }
@@ -357,17 +354,20 @@ impl SlidesViewRef {
             inner.next_frame(cx);
         }
     }
+
     pub fn get_slide(&self) -> usize {
         if let Some(inner) = self.borrow() {
             return inner.current_slide as usize;
         }
         0
     }
+
     pub fn next_slide(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.next_slide(cx);
         }
     }
+
     pub fn prev_slide(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.prev_slide(cx);
@@ -381,6 +381,7 @@ impl SlidesViewSet {
             item.next_slide(cx);
         }
     }
+
     pub fn prev_slide(&self, cx: &mut Cx) {
         for item in self.iter() {
             item.prev_slide(cx);

@@ -52,31 +52,35 @@ impl CodeDocument {
         );
         inner
     }
-    
+
     pub fn replace(&self, new_text: Text) {
         let mut history = self.0.history.borrow_mut();
-        
+
         // Create an edit that deletes the entire existing text.
         let text_length = history.as_text().length();
         let delete_edit = Edit {
             change: Change::Delete(Position::zero(), text_length),
             drift: Drift::Before,
         };
-        
+
         // Create an edit that inserts the new text at position zero.
         let insert_edit = Edit {
             change: Change::Insert(Position::zero(), new_text),
             drift: Drift::Before,
         };
-        
+
         // Apply the edits to history, starting a new group for undo.
         history.force_new_group(); // Start a new undo group.
-        history.push_or_extend_group(SessionId::default(), EditKind::Other, &SelectionSet::default());
+        history.push_or_extend_group(
+            SessionId::default(),
+            EditKind::Other,
+            &SelectionSet::default(),
+        );
         history.apply_edit(delete_edit.clone());
         history.apply_edit(insert_edit.clone());
-        
+
         drop(history);
-        
+
         // Now, update the document state after the edits.
         let edits = vec![delete_edit, insert_edit];
         self.update_after_edit(None, None, &edits);

@@ -1,0 +1,32 @@
+[package]
+name = "makepad-draw"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad 2d drawing API"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "4ghwd5Pq8xlLJrln_NpXXshbpeE="
+
+[dependencies]
+makepad-platform = { path = "../platform", version = "1.0.0" }
+makepad-vector = { path = "./vector", version = "1.0.0" }
+makepad-html ={ path = "../libs/html", version = "1.0.0" }
+makepad-live-id = { path = "../libs/live_id", version = "1.0.0" }
+
+rustybuzz = { version = "0.18.0", path = "../libs/rustybuzz" }
+unicode-bidi = { version = "0.3", path = "../libs/unicode-bidi" }
+ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer"}
+sdfer = { path = "../libs/sdfer", version = "0.2.1" }
+fxhash = { version = "0.2.1", path = "../libs/fxhash" }
+unicode-linebreak = { version = "0.1.5", path = "../libs/unicode-linebreak" }
+unicode-segmentation = { version = "1.12.0", path = "../libs/unicode-segmentation" }
+png = { version = "0.17.16", path = "../libs/png-0.17.16" }
+ttf-parser = { version = "0.24.1", path = "../libs/ttf-parser" }
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+default = []
+## Enables certain public-facing types to derive serde serialization traits.
+serde = ["dep:serde", "makepad-live-id/serde"]

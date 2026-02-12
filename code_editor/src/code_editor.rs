@@ -3,6 +3,7 @@ use {
         decoration::{Decoration, DecorationType},
         history::NewGroup,
         layout::{BlockElement, WrappedElement},
+        makepad_widgets::*,
         selection::Affinity,
         session::{CodeSession, SelectionMode},
         settings::Settings,
@@ -11,82 +12,84 @@ use {
         token::TokenKind,
         Line, Selection, Token,
     },
-    makepad_widgets::*,
     std::fmt::Write,
     std::{mem, slice::Iter},
 };
 
-live_design! {
-    use link::shaders::*;
-    use link::theme::*;
-    use link::widgets::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    TokenColors = {{TokenColors}} {
-        whitespace: #6E6E6E,
-        delimiter: #a,
-        delimiter_highlight: #f,
-        error_decoration: #f00,
-        warning_decoration: #0f0,
+    mod.widgets.TokenColorsBase = #(TokenColors::script_component(vm))
+    mod.widgets.TokenColors = set_type_default() do mod.widgets.TokenColorsBase {
+        whitespace: #6E6E6E
+        delimiter: #a
+        delimiter_highlight: #f
+        error_decoration: #f00
+        warning_decoration: #0f0
 
-        unknown: #C0C0C0,
-        branch_keyword: #C485BE,
-        constant: #CC917B,
-        identifier: #D4D4D4,
-        loop_keyword: #FF8C00,
-        number: #B6CEAA,
-        other_keyword: #5B9BD3,
-        punctuator: #D4D4D4,
-        string: #CC917B,
-        function: #fffcc9,
-        typename: #56C9B1,
-        comment: #638D54,
+        unknown: #C0C0C0
+        branch_keyword: #C485BE
+        constant: #CC917B
+        identifier: #D4D4D4
+        loop_keyword: #FF8C00
+        number: #B6CEAA
+        other_keyword: #5B9BD3
+        punctuator: #D4D4D4
+        string: #CC917B
+        function: #fffcc9
+        typename: #56C9B1
+        comment: #638D54
     }
 
-    DrawIndentGuide = {{DrawIndentGuide}} {
-        fn pixel(self) -> vec4 {
-            let thickness = 0.8 + self.dpi_dilate * 0.5;
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.move_to(1., -1.);
-            sdf.line_to(1., self.rect_size.y + 1.);
-            return sdf.stroke(self.color, thickness);
+    set_type_default() do #(DrawIndentGuide::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            let thickness = 0.8 + self.draw_pass.dpi_dilate * 0.5
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.move_to(1., -1.)
+            sdf.line_to(1., self.rect_size.y + 1.)
+            return sdf.stroke(self.color, thickness)
         }
     }
 
-    DrawDecoration = {{DrawDecoration}} {
-        fn pixel(self) -> vec4 {
-            let transformed_pos = vec2(self.pos.x, self.pos.y + 0.03 * sin(self.pos.x * self.rect_size.x));
-            let cx = Sdf2d::viewport(transformed_pos * self.rect_size);
-            cx.move_to(0.0, self.rect_size.y - 1.0);
-            cx.line_to(self.rect_size.x, self.rect_size.y - 1.0);
-            return cx.stroke(self.color, 0.8);
+    set_type_default() do #(DrawDecoration::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            let transformed_pos = vec2(self.pos.x, self.pos.y + 0.03 * sin(self.pos.x * self.rect_size.x))
+            let cx = Sdf2d.viewport(transformed_pos * self.rect_size)
+            cx.move_to(0.0, self.rect_size.y - 1.0)
+            cx.line_to(self.rect_size.x, self.rect_size.y - 1.0)
+            return cx.stroke(self.color, 0.8)
         }
     }
 
-    DrawSelection = {{DrawSelection}} {
-        uniform gloopiness: 8.0
-        uniform border_radius: 2.0
-        uniform focus: 1.0
-        fn vertex(self) -> vec4 {
-            let clipped: vec2 = clamp(
-                self.geom_pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos - vec2(8., 0.),
+    set_type_default() do #(DrawSelection::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        gloopiness: uniform(8.0)
+        border_radius: uniform(2.0)
+        focus: 1.0
+        vertex: fn() {
+            let clipped = clamp(
+                self.geom.pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos - vec2(8., 0.),
                 self.draw_clip.xy,
                 self.draw_clip.zw
-            );
-            self.pos = (clipped - self.rect_pos) / self.rect_size;
-            return self.camera_projection * (self.camera_view * (
-                self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
-            ));
+            )
+            self.pos = (clipped - self.rect_pos) / self.rect_size
+            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * (
+                self.draw_list.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_call.zbias, 1.)
+            ))
         }
 
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.rect_pos + self.pos * self.rect_size);
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.rect_pos + self.pos * self.rect_size)
             sdf.box(
                 self.rect_pos.x,
                 self.rect_pos.y,
                 self.rect_size.x,
                 self.rect_size.y,
                 self.border_radius
-            );
+            )
             if self.prev_w > 0.0 {
                 sdf.box(
                     self.prev_x,
@@ -94,8 +97,8 @@ live_design! {
                     self.prev_w,
                     self.rect_size.y,
                     self.border_radius
-                );
-                sdf.gloop(self.gloopiness);
+                )
+                sdf.gloop(self.gloopiness)
             }
             if self.next_w > 0.0 {
                 sdf.box(
@@ -104,34 +107,39 @@ live_design! {
                     self.next_w,
                     self.rect_size.y,
                     self.border_radius
-                );
-                sdf.gloop(self.gloopiness);
+                )
+                sdf.gloop(self.gloopiness)
             }
-            return sdf.fill(mix(THEME_COLOR_U_1 * 1.1, THEME_COLOR_U_3 * 0.8, self.focus));
+            return sdf.fill(theme.color_u_1.mix(theme.color_u_3 * 0.8, self.focus))
         }
     }
 
-    DrawCodeText = {{DrawCodeText}} { }
+    set_type_default() do #(DrawCodeText::script_shader(vm)) {
+        ..mod.draw.DrawText
+    }
 
-    pub CodeEditor = {{CodeEditor}} {
-        height: Fill, width: Fill,
-        margin: 0,
-        pad_left_top: vec2(10.0,10.0)
-        scroll_bars: <ScrollBars> {}
-        draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
-        draw_gutter: {
-            draw_depth: 1.0,
-            text_style: <THEME_FONT_CODE> {},
-            color: (THEME_COLOR_LABEL_OUTER),
+    mod.widgets.CodeEditorBase = #(CodeEditor::script_component(vm))
+
+    mod.widgets.CodeEditor = set_type_default() do mod.widgets.CodeEditorBase {
+        height: Fill
+        width: Fill
+        margin: 0
+        pad_left_top: vec2(10.0, 10.0)
+        scroll_bars: mod.widgets.ScrollBars {}
+        draw_bg +: { color: theme.color_bg_container }
+        draw_gutter +: {
+            draw_depth: 1.0
+            text_style: theme.font_code
+            color: theme.color_label_outer
         }
-        draw_text: {
-            draw_depth: 1.0,
-            text_style: <THEME_FONT_CODE> {}
-            fn get_brightness(self)->float{
+        draw_text +: {
+            draw_depth: 1.0
+            text_style: theme.font_code
+            get_brightness: fn() {
                 return 1.1
             }
 
-            fn blend_color(self, incol: vec4) -> vec4 {
+            blend_color: fn(incol: vec4) -> vec4 {
                 if self.outline < 0.5 {
                     return incol
                 }
@@ -141,78 +149,72 @@ live_design! {
                 return incol
             }
         }
-        draw_indent_guide: {
-           // draw_depth: 1.0,
-            color: (THEME_COLOR_U_2)
+        draw_indent_guide +: {
+            color: theme.color_u_2
         }
-        draw_decoration: {
-          //  draw_depth: 2.0,
+        draw_decoration +: {
         }
-        draw_selection: {
-           // draw_depth: 3.0,
+        draw_selection +: {
         }
 
-        draw_cursor: {
-          //  draw_depth: 4.0,
-            instance focus: 0.0
-            instance blink: 1.0
-            fn pixel(self) -> vec4 {
-                let color = mix(THEME_COLOR_U_HIDDEN, mix(self.color, THEME_COLOR_U_HIDDEN, self.blink),self.focus);
-                return vec4(color.rgb*color.a, color.a);
+        draw_cursor +: {
+            focus: instance(0.0)
+            blink: instance(1.0)
+            pixel: fn() {
+                let color = theme.color_u_hidden.mix(self.color.mix(theme.color_u_hidden, self.blink), self.focus)
+                return vec4(color.rgb * color.a, color.a)
             }
-            color: (THEME_COLOR_WHITE),
+            color: theme.color_white
         }
 
-
-        draw_cursor_bg: {
-            instance focus: 0.0
-            fn pixel(self) -> vec4 {
-                let color = mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_1, self.focus);
-                return vec4(color.rgb * color.a, color.a);
+        draw_cursor_bg +: {
+            focus: instance(0.0)
+            pixel: fn() {
+                let color = theme.color_u_hidden.mix(theme.color_u_1, self.focus)
+                return vec4(color.rgb * color.a, color.a)
             }
         }
 
-        animator: {
-            blink = {
-                default: off
-                off = {
-                    from: {all: Forward {duration:0.05}}
-                    apply: {
-                        draw_cursor: {blink:0.0}
-                    }
-                }
-                on = {
+        animator: Animator {
+            blink: {
+                default: @off
+                off: AnimatorState {
                     from: {all: Forward {duration: 0.05}}
                     apply: {
-                        draw_cursor: {blink:1.0}
+                        draw_cursor: {blink: 0.0}
+                    }
+                }
+                on: AnimatorState {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink: 1.0}
                     }
                 }
             }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration:0.05}}
-                    apply: {
-                        draw_cursor: {focus:0.0}
-                        draw_cursor_bg: {focus:0.0}
-                        draw_selection: {focus:0.0}
-                    }
-                }
-                on = {
+            focus: {
+                default: @off
+                off: AnimatorState {
                     from: {all: Forward {duration: 0.05}}
                     apply: {
-                        draw_cursor: {focus:1.0}
-                        draw_cursor_bg: {focus:1.0}
-                        draw_selection: {focus:1.0}
+                        draw_cursor: {focus: 0.0}
+                        draw_cursor_bg: {focus: 0.0}
+                        draw_selection: {focus: 0.0}
+                    }
+                }
+                on: AnimatorState {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {focus: 1.0}
+                        draw_cursor_bg: {focus: 1.0}
+                        draw_selection: {focus: 1.0}
                     }
                 }
             }
         }
     }
-
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 struct DrawCodeText {
     #[deref]
@@ -221,8 +223,10 @@ struct DrawCodeText {
     outline: f32,
 }
 
-#[derive(Live, LiveRegister)]
+#[derive(Script, ScriptHook, Animator)]
 pub struct CodeEditor {
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[live]
@@ -283,11 +287,17 @@ pub struct CodeEditor {
     #[live(0.5)]
     blink_speed: f64,
 
-    #[animator]
+    #[apply_default]
     animator: Animator,
 
     #[rust]
     blink_timer: Timer,
+
+    /// When true, force selection to use "focus" color even without key focus.
+    /// Used for cross-child selection where PortalList has key focus but we still
+    /// want to show focused selection colors in child editors.
+    #[rust(false)]
+    external_selection_focus: bool,
 }
 
 pub enum KeepCursorInView {
@@ -315,45 +325,6 @@ impl KeepCursorInView {
         }
     }
 }
-impl LiveHook for CodeEditor {}
-/*
-impl LiveHook for CodeEditor {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, CodeEditor)
-    }
-}
-
-impl Widget for CodeEditor {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_bars.redraw(cx);
-    }
-
-    fn handle_event(
-        &mut self,
-        _cx: &mut Cx,
-        _event: &Event,
-        _scope:&mut WidgetScope,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionWrap),
-    )->WidgetAction{
-
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
-        if self.draw_state.begin(cx, walk) {
-            return WidgetDraw::hook_above();
-        }
-        self.draw_state.end();
-        WidgetDraw::done()
-    }
-}
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct CodeEditorRef(WidgetRef);
-*/
 
 impl CodeEditor {
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -370,8 +341,20 @@ impl CodeEditor {
         self.scroll_bars.area()
     }
 
+    pub fn viewport_rect(&self) -> Rect {
+        self.viewport_rect
+    }
+
     pub fn walk(&self, _cx: &mut Cx) -> Walk {
         self.walk
+    }
+
+    pub fn find_widgets_from_point(
+        &self,
+        _cx: &Cx,
+        _point: DVec2,
+        _found: &mut dyn FnMut(&WidgetRef),
+    ) {
     }
 
     pub fn draw_empty_editor(&mut self, cx: &mut Cx2d, walk: Walk) {
@@ -669,6 +652,30 @@ impl CodeEditor {
         }
     }
 
+    /// Set external selection focus. When true, the selection will use "focus" colors
+    /// even when this editor doesn't have key focus. Used for cross-child selection
+    /// in PortalList where the list has focus but editors should still show
+    /// focused selection highlights.
+    pub fn set_external_selection_focus(&mut self, cx: &mut Cx, focus: bool) {
+        self.set_external_selection_focus_no_redraw(focus);
+        self.redraw(cx);
+    }
+
+    /// Set external selection focus without triggering a redraw.
+    /// Use this when you know a redraw will happen anyway (e.g., during draw cycle).
+    pub fn set_external_selection_focus_no_redraw(&mut self, focus: bool) {
+        self.external_selection_focus = focus;
+        if focus {
+            // Force selection to use focus color
+            self.draw_selection.focus = 1.0;
+        }
+    }
+
+    /// Check if external selection focus is active
+    pub fn external_selection_focus(&self) -> bool {
+        self.external_selection_focus
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -697,7 +704,11 @@ impl CodeEditor {
         let mut keyboard_moved_cursor = false;
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, ids!(focus.off));
+                // Don't dim selection if external_selection_focus is active
+                // (cross-child selection where PortalList has focus)
+                if !self.external_selection_focus {
+                    self.animator_play(cx, ids!(focus.off));
+                }
             }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -950,6 +961,7 @@ impl CodeEditor {
                 session.delete();
                 keyboard_moved_cursor = true;
                 self.redraw(cx);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -1325,6 +1337,11 @@ impl CodeEditor {
     }
 
     fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
+        // If external_selection_focus is active, ensure selection uses focus color
+        if self.external_selection_focus {
+            self.draw_selection.focus = 1.0;
+        }
+
         let mut active_selection = None;
         let selections = session.selections();
         let mut selections = selections.iter();
@@ -1349,7 +1366,11 @@ impl CodeEditor {
         .draw_selection_layer(cx, session)
     }
 
-    fn pick(&self, session: &CodeSession, position: Vec2d) -> ((Position, Affinity), bool) {
+    pub(crate) fn pick(
+        &self,
+        session: &CodeSession,
+        position: Vec2d,
+    ) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
 
         if position.y < 0.0 {
@@ -1389,6 +1410,7 @@ impl CodeEditor {
                     let mut byte_index = 0;
                     let mut row_index = 0;
                     let mut column_index = 0;
+                    let mut row_start_byte_index = 0; // Track where current row started
                     for element in line.wrapped_elements() {
                         match element {
                             WrappedElement::Text {
@@ -1488,9 +1510,9 @@ impl CodeEditor {
                                             (
                                                 Position {
                                                     line_index,
-                                                    byte_index,
+                                                    byte_index: row_start_byte_index,
                                                 },
-                                                Affinity::Before,
+                                                Affinity::After,
                                             ),
                                             false,
                                         )
@@ -1498,6 +1520,7 @@ impl CodeEditor {
                                 }
                                 column_index = line.wrap_indent_column_count();
                                 row_index += 1;
+                                row_start_byte_index = byte_index;
                             }
                         }
                     }
@@ -1505,6 +1528,11 @@ impl CodeEditor {
                     let start_y = origin_y + y;
                     let end_y = start_y + line.scale();
                     if (start_y..=end_y).contains(&position.y) {
+                        // Get x position where text starts on this row (after wrap indent)
+                        let (row_text_start_x, _) = line.grid_to_normalized_position(
+                            row_index,
+                            line.wrap_indent_column_count(),
+                        );
                         return if position.x < 0.0 {
                             (
                                 (
@@ -1516,7 +1544,20 @@ impl CodeEditor {
                                 ),
                                 true,
                             )
+                        } else if position.x < row_text_start_x {
+                            // Clicked before text starts on this row - go to start of row
+                            (
+                                (
+                                    Position {
+                                        line_index,
+                                        byte_index: row_start_byte_index,
+                                    },
+                                    Affinity::After,
+                                ),
+                                false,
+                            )
                         } else {
+                            // Clicked past end of text - go to end of line
                             (
                                 (
                                     Position {
@@ -1561,10 +1602,11 @@ impl CodeEditor {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, DefaultNone)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum CodeEditorAction {
     TextDidChange,
     UnhandledKeyDown(KeyEvent),
+    #[default]
     None,
 }
 
@@ -2012,7 +2054,7 @@ struct ActiveSelection {
     start_x: f64,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 struct TokenColors {
     #[live]
     unknown: Vec4f,
@@ -2050,7 +2092,7 @@ struct TokenColors {
     warning_decoration: Vec4f,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawIndentGuide {
     #[deref]
@@ -2059,7 +2101,8 @@ pub struct DrawIndentGuide {
     color: Vec4f,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
+#[repr(C)]
 struct DrawDecoration {
     #[deref]
     draw_super: DrawQuad,
@@ -2067,7 +2110,7 @@ struct DrawDecoration {
     color: Vec4f,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 struct DrawSelection {
     #[deref]
@@ -2080,6 +2123,8 @@ struct DrawSelection {
     next_x: f32,
     #[live]
     next_w: f32,
+    #[live(1.0)]
+    focus: f32,
     #[rust]
     prev_prev_rect: Option<Rect>,
     #[rust]

@@ -1,6 +1,6 @@
 use makepad_platform::*;
 mod fonts;
 
-pub fn live_design(cx: &mut Cx) {
-    fonts::live_design(cx);
+pub fn script_mod(vm:&mut ScriptVm){
+    fonts::script_mod(vm);    
 }

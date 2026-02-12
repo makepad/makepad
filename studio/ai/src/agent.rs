@@ -6,7 +6,7 @@
 
 use crate::backend::AiBackend;
 use crate::types::*;
-use makepad_widgets2::*;
+use makepad_widgets::*;
 use std::collections::HashMap;
 
 /// Unique identifier for an agent session

@@ -1,7 +1,7 @@
 use crate::backend::*;
 use crate::types::*;
 use makepad_micro_serde::*;
-use makepad_widgets2::*;
+use makepad_widgets::*;
 use std::collections::HashMap;
 
 // === Gemini API Response Types ===

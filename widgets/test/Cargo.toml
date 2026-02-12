@@ -1,0 +1,11 @@
+[package]
+name = "makepad-widgets-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets = { path = ".." }
+
+[[bin]]
+name = "widget_tree_test"
+path = "src/main.rs"

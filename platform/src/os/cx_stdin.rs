@@ -28,119 +28,23 @@ fn ref_array_to_array_of_refs<T, const N: usize>(ref_array: &[T; N]) -> [&T; N] 
 }
 
 pub const SWAPCHAIN_IMAGE_COUNT: usize = match () {
-    // HACK(eddyb) done like this so that we can override each target easily.
     _ if cfg!(target_os = "linux") => 3,
     _ if cfg!(target_os = "macos") => 1,
     _ if cfg!(target_os = "windows") => 2,
     _ => 2,
 };
 
-/// "Swapchains" group together some number (i.e. `SWAPCHAIN_IMAGE_COUNT` here)
-/// of "presentable images", to form a queue of render targets which can be
-/// "presented" (to a surface, like a display, window, etc.) independently of
-/// rendering being done onto *other* "presentable images" in the "swapchain".
-///
-/// Certain configurations of swapchains often have older/more specific names,
-/// e.g. "double buffering" for `SWAPCHAIN_IMAGE_COUNT == 2` (or "triple" etc.).
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct Swapchain<I>
-// HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
-where
-    I: Sized,
-{
-    pub window_id: usize,
-    pub alloc_width: u32,
-    pub alloc_height: u32,
-    pub presentable_images: [PresentableImage<I>; SWAPCHAIN_IMAGE_COUNT],
-}
-
-impl Swapchain<()> {
-    pub fn new(window_id: usize, alloc_width: u32, alloc_height: u32) -> Self {
-        let presentable_images = [(); SWAPCHAIN_IMAGE_COUNT].map(|()| PresentableImage {
-            id: PresentableImageId::alloc(),
-            image: (),
-        });
-        Self {
-            window_id,
-            alloc_width,
-            alloc_height,
-            presentable_images,
-        }
-    }
-}
-
-impl<I> Swapchain<I> {
-    pub fn get_image(&self, id: PresentableImageId) -> Option<&PresentableImage<I>> {
-        self.presentable_images.iter().find(|pi| pi.id == id)
-    }
-    pub fn images_as_ref(&self) -> Swapchain<&I> {
-        let Swapchain {
-            window_id,
-            alloc_width,
-            alloc_height,
-            ref presentable_images,
-        } = *self;
-        let presentable_images = ref_array_to_array_of_refs(presentable_images)
-            .map(|&PresentableImage { id, ref image }| PresentableImage { id, image });
-        Swapchain {
-            window_id,
-            alloc_width,
-            alloc_height,
-            presentable_images,
-        }
-    }
-    pub fn images_map<I2>(self, mut f: impl FnMut(PresentableImage<I>) -> I2) -> Swapchain<I2> {
-        let Swapchain {
-            window_id,
-            alloc_width,
-            alloc_height,
-            presentable_images,
-        } = self;
-        let presentable_images = presentable_images.map(|pi| PresentableImage {
-            id: pi.id,
-            image: f(pi),
-        });
-        Swapchain {
-            window_id,
-            alloc_width,
-            alloc_height,
-            presentable_images,
-        }
-    }
-}
-
-/// One of the "presentable images" of a [`SharedSwapchain`].
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct PresentableImage<I>
-// HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
-where
-    I: Sized,
-{
-    pub id: PresentableImageId,
-    pub image: I,
-}
-
-/// Cross-process-unique (on best-effort) ID of a [`SharedPresentableImage`],
-/// such that multiple processes on the same system should be able to share
-/// swapchains with each-other and (effectively) never observe collisions.
+/// Cross-process-unique ID of a presentable image.
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct PresentableImageId {
-    /// PID of the originating process (which allocated this ID).
     origin_pid: u32,
-
-    /// The atomically-acquired value of a (private) counter, during allocation,
-    /// in the originating process, which will guarantee that the same process
-    /// continuously generating new swapchains will not overlap with itself,
-    /// unless it generates billions of swapchains, mixing old and new ones.
     per_origin_counter: u32,
 }
 
 impl PresentableImageId {
     pub fn alloc() -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};
-
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-
         Self {
             origin_pid: std::process::id(),
             per_origin_counter: COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -148,14 +52,9 @@ impl PresentableImageId {
     }
 
     pub fn as_u64(self) -> u64 {
-        let Self {
-            origin_pid,
-            per_origin_counter,
-        } = self;
-        (u64::from(origin_pid) << 32) | u64::from(per_origin_counter)
+        (u64::from(self.origin_pid) << 32) | u64::from(self.per_origin_counter)
     }
 
-    // NOT public intentionally! (while not too dangerous, this could be misused)
     fn from_u64(pid_and_counter: u64) -> Self {
         Self {
             origin_pid: (pid_and_counter >> 32) as u32,
@@ -164,41 +63,217 @@ impl PresentableImageId {
     }
 }
 
-pub type SharedSwapchain = Swapchain<SharedPresentableImageOsHandle>;
+// ============================================================================
+// Host-side swapchain (holds Textures, used by studio)
+// ============================================================================
+use crate::texture::Texture;
 
-// FIXME(eddyb) move these type aliases into `os::{linux,apple,windows}`.
-
-/// [DMA-BUF](crate::os::linux::dma_buf)-backed image from `eglExportDMABUFImageMESA`.
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-pub type SharedPresentableImageOsHandle =
-    crate::os::linux::dma_buf::Image<aux_chan::AuxChannedImageFd>;
-
-// HACK(eddyb) the macOS helper XPC service (in `os/apple/metal_xpc.{m,rs}`)
-// doesn't need/want any form of "handle passing", as the `id` field contains
-// all the disambiguating information it may need (however, long-term it'd
-// probably be better to use something like `IOSurface` + mach ports).
-#[cfg(target_os = "macos")]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedPresentableImageOsHandle {
-    // HACK(eddyb) non-`()` field working around deriving limitations.
-    pub _dummy_for_macos: Option<u32>,
+#[derive(Clone, Debug)]
+pub struct HostPresentableImage {
+    pub id: PresentableImageId,
+    pub texture: Texture,
 }
 
-/// DirectX 11 `HANDLE` from `IDXGIResource::GetSharedHandle`.
-#[cfg(target_os = "windows")]
-// FIXME(eddyb) actually use a newtype of `HANDLE` with manual trait impls.
-pub type SharedPresentableImageOsHandle = u64;
+#[derive(Clone, Debug)]
+pub struct HostSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [HostPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
 
-// FIXME(eddyb) use `enum Foo {}` here ideally, when the derives are fixed.
+impl HostSwapchain {
+    pub fn new(
+        window_id: usize,
+        alloc_width: u32,
+        alloc_height: u32,
+        cx: &mut crate::cx::Cx,
+    ) -> Self {
+        use crate::texture::TextureFormat;
+        Self {
+            window_id,
+            alloc_width,
+            alloc_height,
+            presentable_images: std::array::from_fn(|_| {
+                let id = PresentableImageId::alloc();
+                HostPresentableImage {
+                    id,
+                    texture: Texture::new_with_format(
+                        cx,
+                        TextureFormat::SharedBGRAu8 {
+                            id,
+                            width: alloc_width as usize,
+                            height: alloc_height as usize,
+                            initial: true,
+                        },
+                    ),
+                }
+            }),
+        }
+    }
+
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&HostPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
+
+    pub fn regenerate_ids(&mut self) {
+        for pi in &mut self.presentable_images {
+            pi.id = PresentableImageId::alloc();
+        }
+    }
+}
+
+// ============================================================================
+// macOS: IOSurface-based swapchain (for serialization)
+// ============================================================================
+#[cfg(target_os = "macos")]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedPresentableImage {
+    pub id: PresentableImageId,
+    pub iosurface_id: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(target_os = "macos")]
+impl SharedSwapchain {
+    pub fn from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> Self {
+        Self {
+            window_id: host.window_id,
+            alloc_width: host.alloc_width,
+            alloc_height: host.alloc_height,
+            presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+                id: host.presentable_images[i].id,
+                iosurface_id: cx
+                    .share_texture_for_presentable_image(&host.presentable_images[i].texture),
+            }),
+        }
+    }
+
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
+}
+
+// ============================================================================
+// Windows: HANDLE-based swapchain
+// ============================================================================
+#[cfg(target_os = "windows")]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedPresentableImage {
+    pub id: PresentableImageId,
+    pub handle: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(target_os = "windows")]
+impl SharedSwapchain {
+    pub fn from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> Self {
+        Self {
+            window_id: host.window_id,
+            alloc_width: host.alloc_width,
+            alloc_height: host.alloc_height,
+            presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+                id: host.presentable_images[i].id,
+                handle: cx.share_texture_for_presentable_image(&host.presentable_images[i].texture),
+            }),
+        }
+    }
+
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
+}
+
+// ============================================================================
+// Linux: DMA-BUF-based swapchain
+// ============================================================================
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedPresentableImage {
+    pub id: PresentableImageId,
+    pub image: crate::os::linux::dma_buf::Image<aux_chan::AuxChannedImageFd>,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl SharedSwapchain {
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
+}
+
+// ============================================================================
+// Fallback for unsupported platforms
+// ============================================================================
 #[cfg(not(any(
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "macos",
     target_os = "windows"
 )))]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedPresentableImageOsHandle {
-    // HACK(eddyb) non-`()` field working around deriving limitations.
-    pub _dummy_for_unsupported: Option<u32>,
+pub struct SharedPresentableImage {
+    pub id: PresentableImageId,
+    pub _dummy: Option<u32>,
+}
+
+#[cfg(not(any(
+    all(target_os = "linux", not(target_env = "ohos")),
+    target_os = "macos",
+    target_os = "windows"
+)))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedSwapchain {
+    pub window_id: usize,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
+    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(not(any(
+    all(target_os = "linux", not(target_env = "ohos")),
+    target_os = "macos",
+    target_os = "windows"
+)))]
+impl SharedSwapchain {
+    pub fn new(window_id: usize, alloc_width: u32, alloc_height: u32) -> Self {
+        Self {
+            window_id,
+            alloc_width,
+            alloc_height,
+            presentable_images: [(); SWAPCHAIN_IMAGE_COUNT].map(|()| SharedPresentableImage {
+                id: PresentableImageId::alloc(),
+                _dummy: None,
+            }),
+        }
+    }
+
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
 }
 
 /// Auxiliary communication channel, besides stdin (only on Linux).
@@ -442,6 +517,15 @@ pub struct StdinMouseUp {
     pub modifiers: StdinKeyModifiers,
 }
 
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct StdinTextInput {
+    pub time: f64,
+    pub window_id: usize,
+    pub raw_button: usize,
+    pub x: f64,
+    pub y: f64,
+}
+
 impl StdinMouseUp {
     pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseUpEvent {
         MouseUpEvent {
@@ -480,26 +564,6 @@ impl StdinScroll {
     }
 }
 
-/// Simplified text input event for stdin serialization
-/// Only includes basic serializable fields
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub struct StdinTextInput {
-    pub input: String,
-    pub replace_last: bool,
-    pub was_paste: bool,
-}
-
-impl From<StdinTextInput> for TextInputEvent {
-    fn from(stdin: StdinTextInput) -> Self {
-        TextInputEvent {
-            input: stdin.input,
-            replace_last: stdin.replace_last,
-            was_paste: stdin.was_paste,
-            ..Default::default()
-        }
-    }
-}
-
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum HostToStdin {
     Swapchain(SharedSwapchain),
@@ -526,7 +590,9 @@ pub enum HostToStdin {
     MouseMove(StdinMouseMove),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
-    TextInput(StdinTextInput),
+    TextInput(TextInputEvent),
+    TextCopy,
+    TextCut,
     Scroll(StdinScroll),
     /*ReloadFile{
         file:String,
@@ -568,7 +634,9 @@ impl WindowKindId {
 pub enum StdinToHost {
     CreateWindow { window_id: usize, kind_id: usize },
     ReadyToStart,
+    RequestAnimationFrame,
     SetCursor(MouseCursor),
+    SetClipboard(String),
     // the client is done drawing, and the texture is completely updated
     DrawCompleteAndFlip(PresentableDraw),
 }

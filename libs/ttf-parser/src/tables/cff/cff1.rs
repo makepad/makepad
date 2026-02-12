@@ -452,9 +452,11 @@ fn _parse_char_string(
             }
             operator::VERTICAL_MOVE_TO => {
                 let mut i = 0;
-                if p.stack.len() == 2 && ctx.width.is_none() {
+                if p.stack.len() == 2 {
                     i += 1;
-                    ctx.width = Some(p.stack.at(0));
+                    if ctx.width.is_none() {
+                        ctx.width = Some(p.stack.at(0));
+                    }
                 }
 
                 p.parse_vertical_move_to(i)?;
@@ -582,9 +584,11 @@ fn _parse_char_string(
                 p.stack.clear();
 
                 // If the stack length is uneven, than the first value is a `width`.
-                if len.is_odd() && ctx.width.is_none() {
+                if len.is_odd() {
                     len -= 1;
-                    ctx.width = Some(p.stack.at(0));
+                    if ctx.width.is_none() {
+                        ctx.width = Some(p.stack.at(0));
+                    }
                 }
 
                 ctx.stems_len += len as u32 >> 1;
@@ -593,18 +597,22 @@ fn _parse_char_string(
             }
             operator::MOVE_TO => {
                 let mut i = 0;
-                if p.stack.len() == 3 && ctx.width.is_none() {
+                if p.stack.len() == 3 {
                     i += 1;
-                    ctx.width = Some(p.stack.at(0));
+                    if ctx.width.is_none() {
+                        ctx.width = Some(p.stack.at(0));
+                    }
                 }
 
                 p.parse_move_to(i)?;
             }
             operator::HORIZONTAL_MOVE_TO => {
                 let mut i = 0;
-                if p.stack.len() == 2 && ctx.width.is_none() {
+                if p.stack.len() == 2 {
                     i += 1;
-                    ctx.width = Some(p.stack.at(0));
+                    if ctx.width.is_none() {
+                        ctx.width = Some(p.stack.at(0));
+                    }
                 }
 
                 p.parse_horizontal_move_to(i)?;
@@ -791,7 +799,11 @@ fn parse_sid_metadata<'a>(
     Some(FontKind::SID(metadata))
 }
 
-fn parse_cid_metadata(data: &[u8], top_dict: TopDict, number_of_glyphs: u16) -> Option<FontKind<'_>> {
+fn parse_cid_metadata(
+    data: &[u8],
+    top_dict: TopDict,
+    number_of_glyphs: u16,
+) -> Option<FontKind<'_>> {
     let (charset_offset, fd_array_offset, fd_select_offset) = match (
         top_dict.charset_offset,
         top_dict.fd_array_offset,
@@ -892,7 +904,7 @@ impl<'a> Table<'a> {
             Some(charset_id::EXPERT_SUBSET) => Charset::ExpertSubset,
             Some(offset) => {
                 let mut s = Stream::new_at(data, offset)?;
-                parse_charset(number_of_glyphs.get(), &mut s)?
+                parse_charset(number_of_glyphs, &mut s)?
             }
             None => Charset::ISOAdobe, // default
         };

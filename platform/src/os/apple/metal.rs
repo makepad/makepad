@@ -2,42 +2,64 @@ use {
     crate::{
         cx::Cx,
         draw_list::DrawListId,
-        makepad_live_id::*,
+        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
+        draw_shader::{CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId},
+        draw_vars::DrawVars,
+        geometry::Geometry,
         makepad_objc_sys::objc_block,
-        makepad_shader_compiler::{generate_metal, generate_metal::MetalGeneratedShader},
+        makepad_script::shader::*,
+        makepad_script::shader_backend::*,
+        makepad_script::*,
         os::{
             apple::apple_sys::*,
             apple::apple_util::{nsstring_to_string, str_to_nsstring},
             cx_stdin::PresentableDraw,
         },
-        pass::{PassClearColor, PassClearDepth, PassId},
+        script::vm::*,
         studio::{AppToStudio, GPUSample, StudioScreenshotResponse},
         texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
-    std::sync::{Arc, Condvar, Mutex},
+    std::fmt::Write,
+    std::sync::Mutex,
     std::time::Instant,
 };
 
+// IOSurface-based texture sharing (replaces XPC service approach)
+// Uses global IOSurface IDs which work across processes without needing Mach port transfer
 #[cfg(target_os = "macos")]
-use crate::metal_xpc::store_xpc_service_texture;
+use crate::os::apple::apple_sys::{
+    CFRelease, IOSurfaceCreate, IOSurfaceGetID, IOSurfaceID, IOSurfaceLookup, IOSurfaceRef,
+};
 
 impl Cx {
     fn render_view(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
         encoder: ObjcId,
-        command_buffer: ObjcId,
-        gpu_read_guards: &mut Vec<MetalRwLockGpuReadGuard>,
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        //self.views[view_id].set_clipping_uniforms();
-        //self.draw_lists[draw_list_id].uniform_view_transform(&Mat4f::identity());
+        let debug_dump_count = self.draw_lists[draw_list_id].debug_dump_count;
+        let debug_dump = debug_dump_count > 0;
+        if self.draw_lists[draw_list_id].debug_dump {
+            self.draw_lists[draw_list_id].debug_dump = false;
+            self.draw_lists[draw_list_id].debug_dump_count = 6; // dump 6 consecutive frames
+        }
+        if debug_dump {
+            println!(
+                "=== DEBUG DUMP draw_list {:?} ({} items) repaint_id={} frames_left={} ===",
+                draw_list_id.index(),
+                draw_items_len,
+                self.repaint_id,
+                debug_dump_count,
+            );
+            self.draw_lists[draw_list_id].debug_dump_count -= 1;
+        }
 
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id]
@@ -45,13 +67,11 @@ impl Cx {
                 .sub_list()
             {
                 self.render_view(
-                    pass_id,
+                    draw_pass_id,
                     sub_list_id,
                     zbias,
                     zbias_step,
                     encoder,
-                    command_buffer,
-                    gpu_read_guards,
                     metal_cx,
                 );
             } else {
@@ -63,7 +83,7 @@ impl Cx {
                     continue;
                 };
 
-                let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
                     // shader didnt compile somehow
                     continue;
@@ -74,16 +94,22 @@ impl Cx {
                     self.demo_time_repaint = true;
                 }
 
+                if debug_dump {
+                    println!(
+                        "  [item {}] instance_dirty={} instances_len={}",
+                        draw_item_id,
+                        draw_call.instance_dirty,
+                        draw_item.instances.as_ref().map(|i| i.len()).unwrap_or(0),
+                    );
+                }
+
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
                     self.os.bytes_written += draw_item.instances.as_ref().unwrap().len() * 4;
-                    draw_item.os.instance_buffer.next();
                     draw_item
                         .os
                         .instance_buffer
-                        .get_mut()
-                        .cpu_write()
                         .update(metal_cx, &draw_item.instances.as_ref().unwrap());
                 }
 
@@ -116,24 +142,25 @@ impl Cx {
                 let geometry = &mut self.geometries[geometry_id];
 
                 if geometry.dirty {
-                    geometry.os.index_buffer.next();
-                    geometry
-                        .os
-                        .index_buffer
-                        .get_mut()
-                        .cpu_write()
-                        .update(metal_cx, &geometry.indices);
-                    geometry.os.vertex_buffer.next();
+                    geometry.os.index_buffer.update(metal_cx, &geometry.indices);
                     geometry
                         .os
                         .vertex_buffer
-                        .get_mut()
-                        .cpu_write()
                         .update(metal_cx, &geometry.vertices);
                     geometry.dirty = false;
                 }
 
-                if let Some(inner) = geometry.os.vertex_buffer.get().cpu_read().inner.as_ref() {
+                if debug_dump {
+                    Self::debug_dump_draw_call(
+                        draw_item_id,
+                        sh,
+                        draw_item.instances.as_ref().unwrap(),
+                        draw_call,
+                        instances,
+                    );
+                }
+
+                if let Some(inner) = geometry.os.vertex_buffer.inner.as_ref() {
                     unsafe {
                         msg_send![
                             encoder,
@@ -146,7 +173,7 @@ impl Cx {
                     crate::error!("Drawing error: vertex_buffer None")
                 }
 
-                if let Some(inner) = draw_item.os.instance_buffer.get().cpu_read().inner.as_ref() {
+                if let Some(inner) = draw_item.os.instance_buffer.inner.as_ref() {
                     unsafe {
                         msg_send![
                             encoder,
@@ -155,18 +182,27 @@ impl Cx {
                             atIndex: 1
                         ]
                     }
+                    // Also bind instance buffer to fragment shader so it can access instance data
+                    unsafe {
+                        msg_send![
+                            encoder,
+                            setFragmentBuffer: inner.buffer.as_id()
+                            offset: 0
+                            atIndex: 1
+                        ]
+                    }
                 } else {
                     crate::error!("Drawing error: instance_buffer None")
                 }
 
-                let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
+                let pass_uniforms = self.passes[draw_pass_id].pass_uniforms.as_slice();
                 let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                 let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
 
                 unsafe {
-                    let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
+                    //let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const //std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
 
-                    let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
+                    //let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
 
                     if let Some(id) = shp.draw_call_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
@@ -180,16 +216,23 @@ impl Cx {
                         let () = msg_send![encoder, setVertexBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                     }
-                    if let Some(id) = shp.user_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];
+                    if let Some(id) = shp.dyn_uniform_buffer_id {
+                        let () = msg_send![encoder, setVertexBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
                     }
-
+                    if let Some(id) = shp.scope_uniform_buffer_id {
+                        let scope_buf = &sh.mapping.scope_uniforms_buf;
+                        if !scope_buf.is_empty() {
+                            let () = msg_send![encoder, setVertexBytes: scope_buf.as_ptr() as *const std::ffi::c_void length: (scope_buf.len() * 4) as u64 atIndex: id];
+                            let () = msg_send![encoder, setFragmentBytes: scope_buf.as_ptr() as *const std::ffi::c_void length: (scope_buf.len() * 4) as u64 atIndex: id];
+                        }
+                    }
+                    /*
                     let ct = &sh.mapping.const_table.table;
-                    if ct.len() > 0 {
+                    if ct.len()>0 {
                         let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 3u64];
                         let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 3u64];
-                    }
+                    }*/
                 }
                 // lets set our textures
                 for i in 0..sh.mapping.textures.len() {
@@ -239,8 +282,20 @@ impl Cx {
                         };
                     }
                 }
+
+                // Debug output when shader has debug flag enabled
+                if sh.mapping.flags.debug {
+                    Self::_debug_call_info(
+                        sh,
+                        draw_item.instances.as_ref().unwrap(),
+                        draw_call,
+                        instances,
+                        geometry,
+                    );
+                }
+
                 self.os.draw_calls_done += 1;
-                if let Some(inner) = geometry.os.index_buffer.get().cpu_read().inner.as_ref() {
+                if let Some(inner) = geometry.os.index_buffer.inner.as_ref() {
                     let () = unsafe {
                         msg_send![
                             encoder,
@@ -255,17 +310,119 @@ impl Cx {
                 } else {
                     crate::error!("Drawing error: index_buffer None")
                 }
-
-                gpu_read_guards.push(draw_item.os.instance_buffer.get().gpu_read());
-                gpu_read_guards.push(geometry.os.vertex_buffer.get().gpu_read());
-                gpu_read_guards.push(geometry.os.index_buffer.get().gpu_read());
             }
         }
     }
 
-    pub fn draw_pass(&mut self, pass_id: PassId, metal_cx: &mut MetalCx, mode: DrawPassMode) {
+    /// Debug helper for printing draw call info. Called when shader has `debug: true` flag.
+    fn debug_dump_draw_call(
+        draw_item_id: usize,
+        sh: &CxDrawShader,
+        instance_data: &[f32],
+        draw_call: &crate::draw_list::CxDrawCall,
+        instances: u64,
+    ) {
+        let total_slots = sh.mapping.instances.total_slots;
+        println!(
+            "-- call {} shader:{:?} instances:{} --",
+            draw_item_id, sh.debug_id, instances
+        );
+
+        // Named dyn_uniforms
+        for input in &sh.mapping.dyn_uniforms.inputs {
+            let end = (input.offset + input.slots).min(draw_call.dyn_uniforms.len());
+            println!(
+                "  u {:?}: {:?}",
+                input.id,
+                &draw_call.dyn_uniforms[input.offset..end]
+            );
+        }
+
+        // All instances with named values
+        for inst_idx in 0..instances as usize {
+            let base = inst_idx * total_slots;
+            if base + total_slots <= instance_data.len() {
+                let mut parts = Vec::new();
+                for input in &sh.mapping.instances.inputs {
+                    let start = base + input.offset;
+                    let end = start + input.slots;
+                    if end <= instance_data.len() {
+                        let vals = &instance_data[start..end];
+                        if input.slots == 1 {
+                            parts.push(format!("{:?}={}", input.id, vals[0]));
+                        } else {
+                            parts.push(format!("{:?}={:?}", input.id, vals));
+                        }
+                    }
+                }
+                println!("  i[{}] {}", inst_idx, parts.join(" "));
+            }
+        }
+    }
+
+    fn _debug_call_info(
+        sh: &CxDrawShader,
+        instance_data: &[f32],
+        draw_call: &crate::draw_list::CxDrawCall,
+        instances: u64,
+        geometry: &crate::geometry::CxGeometry,
+    ) {
+        let total_slots = sh.mapping.instances.total_slots;
+        println!("=== METAL DRAW CALL DEBUG ===");
+        println!("  shader debug_id: {:?}", sh.debug_id);
+        println!(
+            "  instance_count: {}, total_slots: {}, data_len: {}",
+            instances,
+            total_slots,
+            instance_data.len()
+        );
+        for input in &sh.mapping.instances.inputs {
+            println!(
+                "    inst {:?}: offset={}, slots={}",
+                input.id, input.offset, input.slots
+            );
+        }
+        let num = 3.min(instances as usize);
+        for i in 0..num {
+            let base = i * total_slots;
+            if base + total_slots <= instance_data.len() {
+                println!("  --- Instance {} ---", i);
+                for input in &sh.mapping.instances.inputs {
+                    let s = base + input.offset;
+                    let e = s + input.slots;
+                    if e <= instance_data.len() {
+                        println!("    {:?}: {:?}", input.id, &instance_data[s..e]);
+                    }
+                }
+            }
+        }
+        if instances > 3 {
+            println!("  ... ({} more)", instances - 3);
+        }
+        println!(
+            "  dyn_uniforms: {:?}",
+            &draw_call.dyn_uniforms[..draw_call.dyn_uniforms.len().min(8)]
+        );
+        println!(
+            "  draw_call_uniforms: {:?}",
+            draw_call.draw_call_uniforms.as_slice()
+        );
+        println!(
+            "  geom: indices={} vertices={}",
+            geometry.indices.len(),
+            geometry.vertices.len()
+        );
+        println!("=============================");
+    }
+
+    pub fn draw_pass(
+        &mut self,
+        draw_pass_id: DrawPassId,
+        metal_cx: &mut MetalCx,
+        mode: DrawPassMode,
+    ) {
         self.os.draw_calls_done = 0;
-        let draw_list_id = if let Some(draw_list_id) = self.passes[pass_id].main_draw_list_id {
+        let draw_list_id = if let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id {
             draw_list_id
         } else {
             crate::error!("Draw pass has no draw list!");
@@ -285,11 +442,11 @@ impl Cx {
             }
         };
 
-        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
 
         let pass_rect = self
             .get_pass_rect(
-                pass_id,
+                draw_pass_id,
                 if mode.is_drawable().is_some() {
                     1.0
                 } else {
@@ -298,22 +455,22 @@ impl Cx {
             )
             .unwrap();
 
-        self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
 
-        self.passes[pass_id].paint_dirty = false;
+        self.passes[draw_pass_id].paint_dirty = false;
 
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
             return;
         }
 
-        self.passes[pass_id].set_dpi_factor(dpi_factor);
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
 
         if let DrawPassMode::MTKView(_) = mode {
             let color_attachments: ObjcId =
                 unsafe { msg_send![render_pass_descriptor, colorAttachments] };
             let color_attachment: ObjcId =
                 unsafe { msg_send![color_attachments, objectAtIndexedSubscript: 0] };
-            let color = self.passes[pass_id].clear_color;
+            let color = self.passes[draw_pass_id].clear_color;
             unsafe {
                 let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                 let () = msg_send![color_attachment, setClearColor: MTLClearColor {
@@ -336,7 +493,7 @@ impl Cx {
                     setTexture: first_texture
                 ]
             };
-            let color = self.passes[pass_id].clear_color;
+            let color = self.passes[draw_pass_id].clear_color;
             unsafe {
                 let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                 let () = msg_send![color_attachment, setClearColor: MTLClearColor {
@@ -347,7 +504,9 @@ impl Cx {
                 }];
             }
         } else {
-            for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+            for (index, color_texture) in
+                self.passes[draw_pass_id].color_textures.iter().enumerate()
+            {
                 let color_attachments: ObjcId =
                     unsafe { msg_send![render_pass_descriptor, colorAttachments] };
                 let color_attachment: ObjcId =
@@ -372,7 +531,7 @@ impl Cx {
 
                 unsafe { msg_send![color_attachment, setStoreAction: MTLStoreAction::Store] }
                 match color_texture.clear_color {
-                    PassClearColor::InitWith(color) => {
+                    DrawPassClearColor::InitWith(color) => {
                         if is_initial {
                             unsafe {
                                 let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
@@ -390,7 +549,7 @@ impl Cx {
                             }
                         }
                     }
-                    PassClearColor::ClearWith(color) => unsafe {
+                    DrawPassClearColor::ClearWith(color) => unsafe {
                         let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                         let () = msg_send![color_attachment, setClearColor: MTLClearColor {
                             red: color.x as f64,
@@ -403,7 +562,7 @@ impl Cx {
             }
         }
         // attach depth texture
-        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
+        if let Some(depth_texture) = &self.passes[draw_pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture.texture_id()];
             let size = dpi_factor * pass_rect.size;
             cxtexture.update_depth_stencil(metal_cx, size.x as usize, size.y as usize);
@@ -419,8 +578,8 @@ impl Cx {
             }
             let () = unsafe { msg_send![depth_attachment, setStoreAction: MTLStoreAction::Store] };
 
-            match self.passes[pass_id].clear_depth {
-                PassClearDepth::InitWith(depth) => {
+            match self.passes[draw_pass_id].clear_depth {
+                DrawPassClearDepth::InitWith(depth) => {
                     if is_initial {
                         let () = unsafe {
                             msg_send![depth_attachment, setLoadAction: MTLLoadAction::Clear]
@@ -433,14 +592,14 @@ impl Cx {
                         };
                     }
                 }
-                PassClearDepth::ClearWith(depth) => {
+                DrawPassClearDepth::ClearWith(depth) => {
                     let () =
                         unsafe { msg_send![depth_attachment, setLoadAction: MTLLoadAction::Clear] };
                     let () = unsafe { msg_send![depth_attachment, setClearDepth: depth as f64] };
                 }
             }
             // create depth state
-            if self.passes[pass_id].os.mtl_depth_state.is_none() {
+            if self.passes[draw_pass_id].os.mtl_depth_state.is_none() {
                 let desc: ObjcId = unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] };
                 let () = unsafe {
                     msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]
@@ -448,7 +607,7 @@ impl Cx {
                 let () = unsafe { msg_send![desc, setDepthWriteEnabled: true] };
                 let depth_stencil_state: ObjcId =
                     unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc] };
-                self.passes[pass_id].os.mtl_depth_state = Some(depth_stencil_state);
+                self.passes[draw_pass_id].os.mtl_depth_state = Some(depth_stencil_state);
             }
         }
 
@@ -457,7 +616,7 @@ impl Cx {
             msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]
         };
 
-        if let Some(depth_state) = self.passes[pass_id].os.mtl_depth_state {
+        if let Some(depth_state) = self.passes[draw_pass_id].os.mtl_depth_state {
             let () = unsafe { msg_send![encoder, setDepthStencilState: depth_state] };
         }
 
@@ -476,17 +635,14 @@ impl Cx {
         };
 
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
-        let mut gpu_read_guards = Vec::new();
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
 
         self.render_view(
-            pass_id,
+            draw_pass_id,
             draw_list_id,
             &mut zbias,
             zbias_step,
             encoder,
-            command_buffer,
-            &mut gpu_read_guards,
             &metal_cx,
         );
 
@@ -506,13 +662,13 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
+                self.commit_command_buffer(screenshot, None, command_buffer);
             }
             DrawPassMode::Texture => {
-                self.commit_command_buffer(None, None, command_buffer, gpu_read_guards);
+                self.commit_command_buffer(None, None, command_buffer);
             }
             DrawPassMode::StdinMain(stdin_frame, kind_id) => {
-                let main_texture = &self.passes[pass_id].color_textures[0];
+                let main_texture = &self.passes[draw_pass_id].color_textures[0];
                 let tex = &self.textures[main_texture.texture.texture_id()];
                 let screenshot = if let Some(texture) = &tex.os.texture {
                     self.build_screenshot_struct(
@@ -527,12 +683,7 @@ impl Cx {
                 } else {
                     None
                 };
-                self.commit_command_buffer(
-                    screenshot,
-                    Some(stdin_frame),
-                    command_buffer,
-                    gpu_read_guards,
-                );
+                self.commit_command_buffer(screenshot, Some(stdin_frame), command_buffer);
             }
             DrawPassMode::Drawable(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
@@ -546,7 +697,7 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
+                self.commit_command_buffer(screenshot, None, command_buffer);
             }
             DrawPassMode::Resizing(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
@@ -559,7 +710,7 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
+                self.commit_command_buffer(screenshot, None, command_buffer);
                 let () = unsafe { msg_send![command_buffer, waitUntilScheduled] };
                 let () = unsafe { msg_send![drawable, present] };
             }
@@ -630,9 +781,7 @@ impl Cx {
         screenshot_info: Option<ScreenshotInfo>,
         stdin_frame: Option<PresentableDraw>,
         command_buffer: ObjcId,
-        gpu_read_guards: Vec<MetalRwLockGpuReadGuard>,
     ) {
-        let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let screenshot_info = Mutex::new(screenshot_info);
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
@@ -680,8 +829,6 @@ impl Cx {
                     Cx::send_studio_message(AppToStudio::GPUSample(GPUSample{
                         start, end
                     }));
-
-                    drop(gpu_read_guards.lock().unwrap().take().unwrap());
                 })
             ]
         };
@@ -689,32 +836,49 @@ impl Cx {
     }
 
     pub(crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
-        for draw_shader_ptr in &self.draw_shaders.compile_set {
-            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
-                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
-                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
-                let gen = generate_metal::generate_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry,
-                );
+        for draw_shader_id in self
+            .draw_shaders
+            .compile_set
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
 
-                if cx_shader.mapping.flags.debug {
-                    //crate::log!("{}", gen.mtlsl);
-                    println!("{}", gen.mtlsl);
+            let mtlsl = match &cx_shader.mapping.code {
+                CxDrawShaderCode::Combined { code } => code.clone(),
+                CxDrawShaderCode::Separate { .. } => {
+                    crate::error!("Metal does not support separate vertex/fragment sources");
+                    continue;
                 }
-                // lets see if we have the shader already
-                for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.mtlsl == gen.mtlsl {
-                        cx_shader.os_shader_id = Some(index);
-                        break;
-                    }
+            };
+
+            if cx_shader.mapping.flags.debug {
+                println!(
+                    "=== Generated Metal Shader ===\n{}\n=== End Metal Shader ===",
+                    mtlsl
+                );
+            }
+
+            // Get the uniform buffer bindings from the mapping
+            let bindings = cx_shader.mapping.uniform_buffer_bindings.clone();
+
+            // Check if we already have an os_shader with the same source
+            let mut found_os_shader_id = None;
+            for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
+                if ds.mtlsl == mtlsl {
+                    found_os_shader_id = Some(index);
+                    break;
                 }
-                if cx_shader.os_shader_id.is_none() {
-                    if let Some(shp) = CxOsDrawShader::new(metal_cx, gen) {
-                        cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                        self.draw_shaders.os_shaders.push(shp);
-                    }
+            }
+
+            let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
+            if let Some(os_shader_id) = found_os_shader_id {
+                cx_shader.os_shader_id = Some(os_shader_id);
+            } else {
+                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &bindings) {
+                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                    self.draw_shaders.os_shaders.push(shp);
                 }
             }
         }
@@ -722,29 +886,14 @@ impl Cx {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn share_texture_for_presentable_image(
-        &mut self,
-        texture: &Texture,
-    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
+    pub fn share_texture_for_presentable_image(&mut self, texture: &Texture) -> u32 {
         let cxtexture = &mut self.textures[texture.texture_id()];
-        cxtexture.update_shared_texture(self.os.metal_device.unwrap());
-
-        // HACK(eddyb) macOS has no real `SharedPresentableImageOsHandle` because
-        // the texture is actually shared through an XPC helper service instead,
-        // based entirely on its `PresentableImageId`.
-        crate::cx_stdin::SharedPresentableImageOsHandle {
-            _dummy_for_macos: None,
-        }
+        cxtexture.update_shared_texture(self.os.metal_device.unwrap())
     }
 
     #[cfg(any(target_os = "ios", target_os = "tvos"))]
-    pub fn share_texture_for_presentable_image(
-        &mut self,
-        _texture: &Texture,
-    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
-        crate::cx_stdin::SharedPresentableImageOsHandle {
-            _dummy_for_unsupported: None,
-        }
+    pub fn share_texture_for_presentable_image(&mut self, _texture: &Texture) -> u32 {
+        0
     }
 }
 
@@ -813,24 +962,228 @@ pub struct CxOsDrawShader {
     draw_call_uniform_buffer_id: Option<u64>,
     pass_uniform_buffer_id: Option<u64>,
     draw_list_uniform_buffer_id: Option<u64>,
-    user_uniform_buffer_id: Option<u64>,
-    mtlsl: String,
+    dyn_uniform_buffer_id: Option<u64>,
+    scope_uniform_buffer_id: Option<u64>,
+    pub mtlsl: String,
+}
+
+// alright lets go process this shader
+impl DrawVars {
+    pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
+        // Shader caching strategy:
+        // 1. Check object_id cache (fastest - exact same object)
+        // 2. Check function hash cache (same functions even if different object instance)
+        // 3. Check code cache (different functions but identical generated code)
+
+        if let Some(io_self) = value.as_object() {
+            // Cache 1: Check if this exact object has been compiled before
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                    // log!("Shader cache HIT (object_id)");
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            // Cache 2: Compute function hash and check if we've seen these functions before
+            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
+                    // Add to object_id cache for faster lookup next time
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            // Not in function cache, need to compile
+            let mut output = ShaderOutput::default();
+            output.backend = ShaderBackend::Metal;
+
+            output.pre_collect_rust_instance_io(vm, io_self);
+            output.pre_collect_shader_io(vm, io_self);
+
+            if let Some(fnobj) = vm
+                .bx
+                .heap
+                .object_method(io_self, id!(vertex).into(), vm.thread().trap.pass())
+                .as_object()
+            {
+                output.mode = ShaderMode::Vertex;
+                // Entry point shaders don't have script-level arguments to validate, use NoTrap
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    NoTrap,
+                    id!(vertex),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+            if let Some(fnobj) = vm
+                .bx
+                .heap
+                .object_method(io_self, id!(fragment).into(), vm.thread().trap.pass())
+                .as_object()
+            {
+                output.mode = ShaderMode::Fragment;
+                // Entry point shaders don't have script-level arguments to validate, use NoTrap
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    NoTrap,
+                    id!(fragment),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+
+            // Don't proceed if shader compilation had errors
+            if output.has_errors {
+                return;
+            }
+
+            // Assign buffer indices to uniform buffers before generating Metal code
+            // Buffer indices start at 3 (0=vertex buffer, 1=instance buffer, 2=uniform struct)
+            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+
+            let mut out = String::new();
+            write!(out, "#include <metal_stdlib>\nusing namespace metal;\n").ok();
+            output.create_struct_defs(vm, &mut out);
+            output.metal_create_instance_struct(vm, &mut out);
+            output.metal_create_uniform_struct(vm, &mut out);
+            output.metal_create_scope_uniform_struct(vm, &mut out);
+            output.metal_create_varying_struct(vm, &mut out);
+            output.metal_create_vertex_buffer_struct(vm, &mut out);
+            output.metal_create_io_struct(vm, &mut out);
+            output.metal_create_io_vertex_struct(vm, &mut out);
+            output.metal_create_io_framebuffer_struct(vm, &mut out);
+            output.metal_create_io_fragment_struct(vm, &mut out);
+            output.metal_create_sampler_decls(&mut out);
+            output.create_functions(&mut out);
+            output.metal_create_vertex_fn(vm, &mut out);
+            output.metal_create_fragment_main_fn(vm, &mut out);
+
+            let source = vm.bx.heap.new_object_ref(io_self);
+
+            // Create the shader mapping and allocate CxDrawShader
+            let code = CxDrawShaderCode::Combined { code: out };
+
+            // Cache 3: Check if this exact code has been compiled before
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                    // Add to both object_id and function hash caches
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    cx.draw_shaders
+                        .cache_functions_to_shader
+                        .insert(fnhash, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            // Extract geometry_id from the vertex buffer object before creating the mapping
+            let geometry_id = if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
+                let buffer_value =
+                    vm.bx
+                        .heap
+                        .value(vb_obj, id!(buffer).into(), vm.thread().trap.pass());
+                if let Some(handle) = buffer_value.as_handle() {
+                    vm.bx
+                        .heap
+                        .handle_ref::<Geometry>(handle)
+                        .map(|g| g.geometry_id())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut mapping = CxDrawShaderMapping::from_shader_output(
+                source,
+                code.clone(),
+                &vm.bx.heap,
+                &output,
+                geometry_id,
+            );
+
+            // Fill the scope uniform buffer from current script values
+            mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
+
+            // Check for debug: true on the shader object (use NoTrap since it's optional)
+            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
+            if let Some(true) = debug_value.as_bool() {
+                mapping.flags.debug = true;
+            }
+
+            // Set dyn_instance_start and dyn_instance_slots based on mapping
+            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
+            self.dyn_instance_slots = mapping.instances.total_slots;
+
+            // Access Cx from the vm host
+            let cx = vm.host.cx_mut();
+
+            // Allocate CxDrawShader with os_shader_id set to None
+            let index = cx.draw_shaders.shaders.len();
+            cx.draw_shaders.shaders.push(CxDrawShader {
+                debug_id: LiveId(0),
+                os_shader_id: None,
+                mapping,
+            });
+
+            // Create the shader ID
+            let shader_id = DrawShaderId { index };
+
+            // Add to all caches
+            cx.draw_shaders
+                .cache_object_id_to_shader
+                .insert(io_self, shader_id);
+            cx.draw_shaders
+                .cache_functions_to_shader
+                .insert(fnhash, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+
+            // Add to compile set for later Metal compilation
+            cx.draw_shaders.compile_set.insert(index);
+
+            // Set draw_shader on self
+            self.draw_shader_id = Some(shader_id);
+
+            // Use the geometry_id stored on the mapping
+            self.geometry_id = geometry_id;
+        }
+    }
 }
 
 impl CxOsDrawShader {
-    pub(crate) fn new(metal_cx: &MetalCx, shader: MetalGeneratedShader) -> Option<Self> {
+    pub(crate) fn new(
+        metal_cx: &MetalCx,
+        mtlsl: String,
+        bindings: &UniformBufferBindings,
+    ) -> Option<Self> {
         let options = RcObjcId::from_owned(unsafe { msg_send![class!(MTLCompileOptions), new] });
         unsafe {
             let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
         };
 
         let mut error: ObjcId = nil;
-        //std::env::set_var("MTL_IGNORE_WARNINGS","-W");
         let library = RcObjcId::from_owned(
             match NonNull::new(unsafe {
                 msg_send![
                     metal_cx.device,
-                    newLibraryWithSource: str_to_nsstring(&shader.mtlsl)
+                    newLibraryWithSource: str_to_nsstring(&mtlsl)
                     options: options
                     error: &mut error
                 ]
@@ -840,11 +1193,11 @@ impl CxOsDrawShader {
                     let description: ObjcId = unsafe { msg_send![error, localizedDescription] };
                     let string = nsstring_to_string(description);
                     let mut out = format!("{}\n", string);
-                    for (index, line) in shader.mtlsl.split("\n").enumerate() {
+                    for (index, line) in mtlsl.split("\n").enumerate() {
                         out.push_str(&format!("{}: {}\n", index + 1, line));
                     }
                     crate::error!("{}", out);
-                    panic!("{}", string);
+                    return None;
                 }
             },
         );
@@ -870,7 +1223,7 @@ impl CxOsDrawShader {
         let render_pipeline_state = RcObjcId::from_owned(NonNull::new(unsafe {
             let _: () = msg_send![descriptor.as_id(), setVertexFunction: vertex_function];
             let _: () = msg_send![descriptor.as_id(), setFragmentFunction: fragment_function];
-            
+
             let color_attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
             let color_attachment: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: 0];
             let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
@@ -881,9 +1234,9 @@ impl CxOsDrawShader {
             let () = msg_send![color_attachment, setSourceAlphaBlendFactor: MTLBlendFactor::One];
             let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
             let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
-            
+
             let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
-            
+
             let mut error: ObjcId = nil;
             msg_send![
                 metal_cx.device,
@@ -892,22 +1245,20 @@ impl CxOsDrawShader {
             ]
         }).unwrap());
 
-        let mut draw_call_uniform_buffer_id = None;
-        let mut pass_uniform_buffer_id = None;
-        let mut draw_list_uniform_buffer_id = None;
-        let mut user_uniform_buffer_id = None;
-
-        let mut buffer_id = 4;
-        for (field, _) in shader.fields_as_uniform_blocks {
-            match field.0 {
-                live_id!(draw_list) => draw_list_uniform_buffer_id = Some(buffer_id),
-                live_id!(draw_call) => draw_call_uniform_buffer_id = Some(buffer_id),
-                live_id!(pass) => pass_uniform_buffer_id = Some(buffer_id),
-                live_id!(user) => user_uniform_buffer_id = Some(buffer_id),
-                _ => panic!(),
-            }
-            buffer_id += 1;
-        }
+        // Look up buffer IDs from shader output bindings by Pod type name
+        let draw_call_uniform_buffer_id = bindings
+            .get_by_type_name(id!(DrawCallUniforms))
+            .map(|i| i as u64);
+        let pass_uniform_buffer_id = bindings
+            .get_by_type_name(id!(DrawPassUniforms))
+            .map(|i| i as u64);
+        let draw_list_uniform_buffer_id = bindings
+            .get_by_type_name(id!(DrawListUniforms))
+            .map(|i| i as u64);
+        // dyn_uniform_buffer_id is not in bindings, it uses the IoUniform struct at buffer(2)
+        let dyn_uniform_buffer_id = Some(2);
+        // scope_uniform_buffer_id comes from bindings if there are scope uniforms
+        let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u64);
 
         return Some(Self {
             _library: library,
@@ -915,42 +1266,22 @@ impl CxOsDrawShader {
             draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
-            user_uniform_buffer_id,
-            mtlsl: shader.mtlsl,
+            dyn_uniform_buffer_id,
+            scope_uniform_buffer_id,
+            mtlsl,
         });
     }
 }
 
 #[derive(Default)]
 pub struct CxOsDrawCall {
-    //pub uni_dr: MetalBuffer,
-    instance_buffer: MetalBufferQueue,
+    instance_buffer: MetalBuffer,
 }
 
 #[derive(Default)]
 pub struct CxOsGeometry {
-    vertex_buffer: MetalBufferQueue,
-    index_buffer: MetalBufferQueue,
-}
-
-#[derive(Default)]
-struct MetalBufferQueue {
-    queue: [MetalRwLock<MetalBuffer>; 3],
-    index: usize,
-}
-
-impl MetalBufferQueue {
-    fn get(&self) -> &MetalRwLock<MetalBuffer> {
-        &self.queue[self.index]
-    }
-
-    fn get_mut(&mut self) -> &mut MetalRwLock<MetalBuffer> {
-        &mut self.queue[self.index]
-    }
-
-    fn next(&mut self) {
-        self.index = (self.index + 1) % self.queue.len();
-    }
+    vertex_buffer: MetalBuffer,
+    index_buffer: MetalBuffer,
 }
 
 #[derive(Default)]
@@ -959,57 +1290,39 @@ struct MetalBuffer {
 }
 
 impl MetalBuffer {
-    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T])
-    where
-        T: std::fmt::Debug,
-    {
+    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
         let len = data.len() * std::mem::size_of::<T>();
         if len == 0 {
             self.inner = None;
             return;
         }
-        if self.inner.as_ref().map_or(0, |inner| inner.len) < len {
-            self.inner = Some(MetalBufferInner {
-                len,
-                buffer: RcObjcId::from_owned(
-                    NonNull::new(unsafe {
-                        msg_send![
-                            metal_cx.device,
-                            newBufferWithLength: len as u64
-                            options: nil
-                        ]
-                    })
-                    .unwrap(),
-                ),
-            });
-        }
-        let inner = self.inner.as_ref().unwrap();
-        unsafe {
-            let contents: *mut u8 = msg_send![inner.buffer.as_id(), contents];
-
-            //println!("Buffer write {} buf {} data {:?}", command_buffer as *const _ as u64, inner.buffer.as_id() as *const _ as u64, data);
-
-            std::ptr::copy(data.as_ptr() as *const u8, contents, len);
-            /*
-            let _: () = msg_send![
-                inner.buffer.as_id(),
-                didModifyRange: NSRange {
-                    location: 0,
-                    length: len as u64
-                }
-            ];*/
-        }
+        self.inner = Some(MetalBufferInner {
+            buffer: RcObjcId::from_owned(
+                NonNull::new(unsafe {
+                    msg_send![
+                        metal_cx.device,
+                        newBufferWithBytes: data.as_ptr() as *const std::ffi::c_void
+                        length: len as u64
+                        options: nil
+                    ]
+                })
+                .unwrap(),
+            ),
+        });
     }
 }
 
 struct MetalBufferInner {
-    len: usize,
     buffer: RcObjcId,
 }
 
 #[derive(Default)]
 pub struct CxOsTexture {
     texture: Option<RcObjcId>,
+    #[cfg(target_os = "macos")]
+    iosurface: Option<IOSurfaceRef>,
+    #[cfg(target_os = "macos")]
+    iosurface_id: IOSurfaceID,
 }
 fn texture_pixel_to_mtl_pixel(pix: &TexturePixel) -> MTLPixelFormat {
     match pix {
@@ -1180,12 +1493,63 @@ impl CxTexture {
     }
 
     #[cfg(target_os = "macos")]
-    fn update_shared_texture(&mut self, metal_device: ObjcId) {
+    fn update_shared_texture(&mut self, metal_device: ObjcId) -> IOSurfaceID {
         // we need a width/height for this one.
         if !self.alloc_shared() {
-            return;
+            return self.os.iosurface_id;
         }
         let alloc = self.alloc.as_ref().unwrap();
+
+        // Create IOSurface properties dictionary
+        let iosurface_props: ObjcId = unsafe {
+            let dict: ObjcId = msg_send![class!(NSMutableDictionary), new];
+
+            // IOSurfaceWidth
+            let width_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceWidth");
+            let width_val: ObjcId =
+                msg_send![class!(NSNumber), numberWithUnsignedInteger: alloc.width as u64];
+            let _: () = msg_send![dict, setObject: width_val forKey: width_key];
+
+            // IOSurfaceHeight
+            let height_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceHeight");
+            let height_val: ObjcId =
+                msg_send![class!(NSNumber), numberWithUnsignedInteger: alloc.height as u64];
+            let _: () = msg_send![dict, setObject: height_val forKey: height_key];
+
+            // IOSurfaceBytesPerElement (4 for BGRA8)
+            let bpe_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceBytesPerElement");
+            let bpe_val: ObjcId = msg_send![class!(NSNumber), numberWithUnsignedInteger: 4u64];
+            let _: () = msg_send![dict, setObject: bpe_val forKey: bpe_key];
+
+            // IOSurfacePixelFormat (BGRA = 'BGRA' = 0x42475241)
+            let pf_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfacePixelFormat");
+            let pf_val: ObjcId =
+                msg_send![class!(NSNumber), numberWithUnsignedInteger: 0x42475241u64];
+            let _: () = msg_send![dict, setObject: pf_val forKey: pf_key];
+
+            // Mark as global to allow cross-process lookup via IOSurfaceLookup
+            let global_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceIsGlobal");
+            let global_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
+            let _: () = msg_send![dict, setObject: global_val forKey: global_key];
+
+            dict
+        };
+
+        // Create IOSurface
+        let iosurface = unsafe { IOSurfaceCreate(iosurface_props) };
+        unsafe {
+            let _: () = msg_send![iosurface_props, release];
+        }
+
+        if iosurface.is_null() {
+            crate::error!("Failed to create IOSurface");
+            return 0;
+        }
+
+        // Get the global IOSurface ID for cross-process sharing
+        let iosurface_id = unsafe { IOSurfaceGetID(iosurface) };
+
+        // Create Metal texture descriptor
         let descriptor = RcObjcId::from_owned(
             NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
         );
@@ -1201,40 +1565,99 @@ impl CxTexture {
         let _: () = unsafe {
             msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]
         };
-        match &self.format {
-            TextureFormat::SharedBGRAu8 { id, .. } => {
-                let texture: ObjcId =
-                    unsafe { msg_send![metal_device, newSharedTextureWithDescriptor: descriptor] };
-                let shared: ObjcId = unsafe { msg_send![texture, newSharedTextureHandle] };
-                store_xpc_service_texture(*id, shared);
-                let _: () = unsafe { msg_send![shared, release] };
-                self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
+
+        // Create Metal texture from IOSurface
+        let texture: ObjcId = unsafe {
+            msg_send![metal_device, newTextureWithDescriptor: descriptor.as_id() iosurface: iosurface plane: 0u64]
+        };
+
+        if texture.is_null() {
+            crate::error!("Failed to create Metal texture from IOSurface");
+            unsafe {
+                CFRelease(iosurface);
             }
-            _ => panic!(),
+            return 0;
         }
+
+        // Store the IOSurface and ID (keep IOSurface alive)
+        self.os.iosurface = Some(iosurface);
+        self.os.iosurface_id = iosurface_id;
+        self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
+
+        iosurface_id
     }
 
     #[cfg(target_os = "macos")]
-    pub fn update_from_shared_handle(&mut self, metal_cx: &MetalCx, shared_handle: ObjcId) -> bool {
+    pub fn update_from_shared_handle(
+        &mut self,
+        metal_cx: &MetalCx,
+        iosurface_id: IOSurfaceID,
+    ) -> bool {
         // we need a width/height for this one.
         if !self.alloc_shared() {
             return true;
         }
         let alloc = self.alloc.as_ref().unwrap();
 
-        let texture = RcObjcId::from_owned(
-            NonNull::new(unsafe {
-                msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
-            })
-            .unwrap(),
-        );
-        let width: u64 = unsafe { msg_send![texture.as_id(), width] };
-        let height: u64 = unsafe { msg_send![texture.as_id(), height] };
-        // FIXME(eddyb) can these be an assert now?
-        if width != alloc.width as u64 || height != alloc.height as u64 {
+        // Look up IOSurface by its global ID (works across processes!)
+        let iosurface = unsafe { IOSurfaceLookup(iosurface_id) };
+        if iosurface.is_null() {
+            crate::error!("Failed to lookup IOSurface with ID {}", iosurface_id);
             return false;
         }
-        self.os.texture = Some(texture);
+
+        // Create Metal texture descriptor
+        let descriptor = RcObjcId::from_owned(
+            NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
+        );
+
+        let _: () = unsafe { msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2] };
+        let _: () = unsafe { msg_send![descriptor.as_id(), setWidth: alloc.width as u64] };
+        let _: () = unsafe { msg_send![descriptor.as_id(), setHeight: alloc.height as u64] };
+        let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
+        let _: () =
+            unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
+        let _: () =
+            unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget] };
+        let _: () =
+            unsafe { msg_send![descriptor.as_id(), setPixelFormat: MTLPixelFormat::BGRA8Unorm] };
+
+        // Create Metal texture from IOSurface
+        let texture: ObjcId = unsafe {
+            msg_send![metal_cx.device, newTextureWithDescriptor: descriptor.as_id() iosurface: iosurface plane: 0u64]
+        };
+
+        if texture.is_null() {
+            crate::error!("Failed to create Metal texture from IOSurface");
+            unsafe {
+                CFRelease(iosurface);
+            }
+            return false;
+        }
+
+        let width: u64 = unsafe { msg_send![texture, width] };
+        let height: u64 = unsafe { msg_send![texture, height] };
+
+        // FIXME(eddyb) can these be an assert now?
+        if width != alloc.width as u64 || height != alloc.height as u64 {
+            crate::error!(
+                "IOSurface size mismatch: expected {}x{}, got {}x{}",
+                alloc.width,
+                alloc.height,
+                width,
+                height
+            );
+            unsafe {
+                let _: () = msg_send![texture, release];
+                CFRelease(iosurface);
+            }
+            return false;
+        }
+
+        // Store IOSurface and texture
+        self.os.iosurface = Some(iosurface);
+        self.os.iosurface_id = iosurface_id;
+        self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
         true
     }
 
@@ -1297,54 +1720,6 @@ impl CxTexture {
                 .unwrap(),
             );
             self.os.texture = Some(texture);
-        }
-    }
-}
-
-#[derive(Default)]
-struct MetalRwLock<T> {
-    inner: Arc<MetalRwLockInner>,
-    value: T,
-}
-
-impl<T> MetalRwLock<T> {
-    fn cpu_read(&self) -> &T {
-        &self.value
-    }
-
-    fn gpu_read(&self) -> MetalRwLockGpuReadGuard {
-        let mut reader_count = self.inner.reader_count.lock().unwrap();
-        *reader_count += 1;
-        MetalRwLockGpuReadGuard {
-            inner: self.inner.clone(),
-        }
-    }
-
-    fn cpu_write(&mut self) -> &mut T {
-        let mut reader_count = self.inner.reader_count.lock().unwrap();
-        while *reader_count != 0 {
-            reader_count = self.inner.condvar.wait(reader_count).unwrap();
-        }
-        &mut self.value
-    }
-}
-
-#[derive(Default)]
-struct MetalRwLockInner {
-    reader_count: Mutex<usize>,
-    condvar: Condvar,
-}
-
-struct MetalRwLockGpuReadGuard {
-    inner: Arc<MetalRwLockInner>,
-}
-
-impl Drop for MetalRwLockGpuReadGuard {
-    fn drop(&mut self) {
-        let mut reader_count = self.inner.reader_count.lock().unwrap();
-        *reader_count -= 1;
-        if *reader_count == 0 {
-            self.inner.condvar.notify_one();
         }
     }
 }

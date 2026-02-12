@@ -166,7 +166,9 @@ pub struct AnchorPoints<'a>(&'a [u8]);
 impl AnchorPoints<'_> {
     /// Returns a mark and current anchor points at action index.
     pub fn get(&self, action_index: u16) -> Option<(u16, u16)> {
-        let offset = usize::from(action_index) * u16::SIZE;
+        // Each action contains two 16-bit fields, so we must
+        // double the action_index to get the correct offset here.
+        let offset = usize::from(action_index) * u16::SIZE * 2;
         let mut s = Stream::new_at(self.0, offset)?;
         Some((s.read::<u16>()?, s.read::<u16>()?))
     }
@@ -288,7 +290,7 @@ impl<'a> Subtable6<'a> {
                 .value(right)
                 .unwrap_or(0);
 
-            let array_offset = usize::try_from(l + r).ok()?.checked_mul(i16::SIZE)?;
+            let array_offset = usize::from(l + r).checked_mul(i16::SIZE)?;
             let vector_offset: u16 = Stream::read_at(kerning_array_data, array_offset)?;
 
             Stream::read_at(kerning_vector_data, usize::from(vector_offset))
@@ -445,6 +447,8 @@ impl<'a> Iterator for SubtablesIter<'a> {
                 return None;
             }
         };
+
+        self.table_index += 1;
 
         Some(Subtable {
             horizontal: coverage.is_horizontal(),

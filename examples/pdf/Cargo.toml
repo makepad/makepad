@@ -7,5 +7,5 @@ description = "Makepad PDF viewer example"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-makepad-widgets2 = { path = "../../widgets2", version = "2.0.0", features = ["pdf"] }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["pdf"] }
 makepad-pdf-parse = { path = "../../libs/pdf_parse", version = "1.0.0" }

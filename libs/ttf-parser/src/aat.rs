@@ -174,7 +174,7 @@ impl<'a> StateTable<'a> {
     #[inline]
     pub fn class(&self, glyph_id: GlyphId) -> Option<u8> {
         if glyph_id.0 == 0xFFFF {
-            return Some(class::DELETED_GLYPH as u8);
+            return Some(class::DELETED_GLYPH);
         }
 
         let idx = glyph_id.0.checked_sub(self.first_glyph.0)?;
@@ -185,7 +185,7 @@ impl<'a> StateTable<'a> {
     #[inline]
     pub fn entry(&self, state: u16, mut class: u8) -> Option<StateEntry> {
         if u16::from(class) >= self.number_of_classes {
-            class = class::OUT_OF_BOUNDS as u8;
+            class = class::OUT_OF_BOUNDS;
         }
 
         let entry_idx = self

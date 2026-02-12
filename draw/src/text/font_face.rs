@@ -33,6 +33,10 @@ impl FontFace {
     pub fn as_rustybuzz_face(&self) -> &rustybuzz::Face<'_> {
         self.0.rustybuzz_face.as_ref().unwrap()
     }
+
+    pub fn data(&self) -> &Rc<Vec<u8>> {
+        &self.0.data
+    }
 }
 
 struct FontFaceInner {

@@ -1,111 +1,109 @@
+use crate::animator::*;
+use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
 
-    DrawScrollBar= {{DrawScrollBar}} {}
+    //use mod.animator.*
+    set_type_default() do #(DrawScrollBar::script_shader(vm)){
+        ..mod.draw.DrawQuad // splat in draw quad
+    }
 
-    pub ScrollBarBase= {{ScrollBar}} {}
-
-    pub ScrollBar = <ScrollBarBase> {
-        bar_size: 10.0,
+    mod.widgets.ScrollBarBase = #(ScrollBar::script_component(vm))
+    mod.widgets.ScrollBar = set_type_default() do mod.widgets.ScrollBarBase{
+        bar_size: 10.0
         bar_side_margin: 3.0
         min_handle_size: 30.0
+        draw_bg +: {
+            drag: instance(0.0)
+            hover: instance(0.0)
 
-        draw_bg: {
-            instance drag: 0.0
-            instance hover: 0.0
+            size: uniform(6.0)
+            border_size: uniform(theme.beveling)
+            border_radius: uniform(1.5)
 
-            uniform size: 6.0
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: 1.5
+            color: uniform(theme.color_outset)
+            color_hover: uniform(theme.color_outset_hover)
+            color_drag:  uniform(theme.color_outset_drag)
 
-            uniform color: (THEME_COLOR_OUTSET)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_drag: (THEME_COLOR_OUTSET_DRAG)
+            border_color: uniform(theme.color_u_hidden)
+            border_color_hover: uniform(theme.color_u_hidden)
+            border_color_drag: uniform(theme.color_u_hidden)
 
-            uniform border_color: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_drag: (THEME_COLOR_U_HIDDEN)
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 if self.is_vertical > 0.5 {
                     sdf.box(
-                        1.,
-                        self.rect_size.y * self.norm_scroll,
-                        self.size,
-                        self.rect_size.y * self.norm_handle,
+                        1.
+                        self.rect_size.y * self.norm_scroll
+                        self.size
+                        self.rect_size.y * self.norm_handle
                         self.border_radius
-                    );
+                    )
                 }
                 else {
                     sdf.box(
-                        self.rect_size.x * self.norm_scroll,
-                        1.,
-                        self.rect_size.x * self.norm_handle,
-                        self.size,
+                        self.rect_size.x * self.norm_scroll
+                        1.
+                        self.rect_size.x * self.norm_handle
+                        self.size
                         self.border_radius
-                    );
+                    )
                 }
 
                 sdf.fill_keep(mix(
-                    self.color,
+                    self.color
                     mix(
-                        self.color_hover,
-                        self.color_drag,
+                        self.color_hover
+                        self.color_drag
                         self.drag
-                    ),
+                    )
                     self.hover
-                ));
+                ))
 
                 sdf.stroke(mix(
-                    self.border_color,
+                    self.border_color
                     mix(
-                        self.border_color_hover,
-                        self.border_color_drag,
+                        self.border_color_hover
+                        self.border_color_drag
                         self.drag
-                    ),
+                    )
                     self.hover
-                ), self.border_size);
-
+                ) self.border_size)
                 return sdf.result
             }
         }
 
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Play.Forward {duration: 0.1}}
                     apply: {
-                        draw_bg: {drag: 0.0, hover: 0.0}
+                        draw_bg: {drag: 0 hover: 0}
                     }
                 }
-
-                on = {
-                    cursor: Default,
+                on: AnimatorState{
+                    cursor: MouseCursor.Default
                     from: {
-                        all: Forward {duration: 0.1}
-                        drag: Forward {duration: 0.01}
+                        all: Play.Forward {duration: 0.1}
+                        drag: Play.Forward {duration: 0.01}
                     }
                     apply: {
                         draw_bg: {
-                            drag: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
+                            drag: 0
+                            hover: snap(1)
                         }
                     }
                 }
-
-                drag = {
-                    cursor: Default,
-                    from: {all: Snap}
+                drag: AnimatorState{
+                    cursor: MouseCursor.Default
+                    from: {all: Play.Snap}
                     apply: {
                         draw_bg: {
-                            drag: 1.0,
-                            hover: 1.0,
+                            drag: 1
+                            hover: 1
                         }
                     }
                 }
@@ -113,53 +111,53 @@ live_design! {
         }
     }
 
-    pub ScrollBarTabs = <ScrollBar> {
-        draw_bg: {
-            instance drag: 0.0
-            instance hover: 0.0
+    mod.widgets.ScrollBarTabs = mod.widgets.ScrollBar {
+        draw_bg +: {
+            drag: instance(0.0)
+            hover: instance(0.0)
 
-            uniform size: 6.0
-            uniform border_size: 1.0
-            uniform border_radius: 1.5
+            size: uniform(6.0)
+            border_size: uniform(1.0)
+            border_radius: uniform(1.5)
 
-            uniform color: (THEME_COLOR_U_HIDDEN)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_drag: (THEME_COLOR_OUTSET_DRAG)
+            color: uniform(theme.color_u_hidden)
+            color_hover: uniform(theme.color_outset_hover)
+            color_drag: uniform(theme.color_outset_drag)
 
-            uniform border_color: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_drag: (THEME_COLOR_U_HIDDEN)
+            border_color: uniform(theme.color_u_hidden)
+            border_color_hover: uniform(theme.color_u_hidden)
+            border_color_drag: uniform(theme.color_u_hidden)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            pixel: fn() -> vec4 {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 if self.is_vertical > 0.5 {
                     sdf.box(
                         1.,
-                        self.rect_size.y * self.norm_scroll,
-                        self.size,
-                        self.rect_size.y * self.norm_handle,
+                        self.rect_size.y * self.norm_scroll
+                        self.size
+                        self.rect_size.y * self.norm_handle
                         self.border_radius
-                    );
+                    )
                 }
                 else {
                     sdf.box(
-                        self.rect_size.x * self.norm_scroll,
-                        1.,
-                        self.rect_size.x * self.norm_handle,
-                        self.size,
+                        self.rect_size.x * self.norm_scroll
+                        1.
+                        self.rect_size.x * self.norm_handle
+                        self.size
                         self.border_radius
-                    );
+                    )
                 }
 
                 sdf.fill_keep(mix(
-                    self.color,
+                    self.color
                     mix(
-                        self.color_hover,
-                        self.color_drag,
+                        self.color_hover
+                        self.color_drag
                         self.drag
                     ),
                     self.hover
-                ));
+                ))
 
                 sdf.stroke(mix(
                     self.border_color,
@@ -169,7 +167,7 @@ live_design! {
                         self.drag
                     ),
                     self.hover
-                ), self.border_size);
+                ) self.border_size)
 
                 return sdf.result
             }
@@ -179,8 +177,7 @@ live_design! {
 
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[live_ignore]
+#[derive(Copy, Clone, Debug, Script, ScriptHook)]
 pub enum ScrollAxis {
     #[pick]
     Horizontal,
@@ -201,8 +198,10 @@ enum ScrollState {
     Flick { delta: f64, next_frame: NextFrame },
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook, Animator)]
 pub struct ScrollBar {
+    #[source]
+    source: ScriptObjectRef,
     #[live]
     draw_bg: DrawScrollBar,
     #[live]
@@ -235,7 +234,7 @@ pub struct ScrollBar {
     #[live(false)]
     drag_scrolling: bool,
 
-    #[animator]
+    #[apply_default]
     animator: Animator,
 
     #[rust]
@@ -261,7 +260,7 @@ pub struct ScrollBar {
     scroll_state: ScrollState,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawScrollBar {
     #[deref]
@@ -312,7 +311,6 @@ impl ScrollBar {
             / (1. - norm_handle))
             .max(0.)
             .min(self.view_total - self.view_visible);
-        //log!("SCROLL POS {} {}", new_scroll_pos, self.view_total - self.view_visible);
         // lets snap new_scroll_pos
         let changed = self.scroll_pos != new_scroll_pos;
         self.scroll_pos = new_scroll_pos;
@@ -320,16 +318,13 @@ impl ScrollBar {
         changed
     }
 
-    // writes the norm_scroll value into the shader
-    pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
-        let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self.draw_bg.apply_over(
-            cx,
-            live! {
-                norm_scroll: (norm_scroll)
-            },
-        );
-        //self.draw_bg.set_norm_scroll(cx, norm_scroll);
+    // writes the norm_scroll value into the shader.. why did we do this again
+    // doesnt seem to be needed. also apply eval is broken
+    pub fn update_shader_scroll_pos(&mut self, _cx: &mut Cx) {
+        //let (norm_scroll, _) = self.get_normalized_scroll_pos();
+        //script_apply_eval!(cx, self.draw_bg, {
+        //    norm_scroll:#(norm_scroll)
+        //});
     }
 
     // turns scroll_pos into an event on this.event
@@ -782,6 +777,7 @@ impl ScrollBar {
                     .scroll_pos
                     .min(self.view_total - self.view_visible)
                     .max(0.);
+
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     self.draw_bg.is_vertical = 1.0;

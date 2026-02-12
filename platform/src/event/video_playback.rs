@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
+use crate::makepad_live_id::LiveId;
 use crate::TextureId;
-use makepad_shader_compiler::makepad_live_tokenizer::LiveId;
 
 #[derive(Clone, Debug)]
 pub struct VideoPlaybackPreparedEvent {

@@ -1,29 +1,26 @@
 use crate::{makepad_draw::*, scroll_bar::*};
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use link::widgets::*;
-    use makepad_draw::shader::std::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
 
-    pub ScrollBarsBase = {{ScrollBars}} {}
+    mod.widgets.ScrollBarsBase = #(ScrollBars::script_component(vm))
 
-    pub ScrollBarsTabs = <ScrollBarsBase> {
-        show_scroll_x: true,
-        show_scroll_y: true,
-        scroll_bar_x: <ScrollBarTabs> {}
-        scroll_bar_y: <ScrollBarTabs> {}
+    mod.widgets.ScrollBarsTabs = mod.widgets.ScrollBarsBase {
+        show_scroll_x: true
+        show_scroll_y: true
+        scroll_bar_x: mod.widgets.ScrollBarTabs {}
+        scroll_bar_y: mod.widgets.ScrollBarTabs {}
     }
 
-    pub ScrollBars = <ScrollBarsBase> {
-        show_scroll_x: true,
-        show_scroll_y: true,
-        scroll_bar_x: <ScrollBar> {}
-        scroll_bar_y: <ScrollBar> {}
+    mod.widgets.ScrollBars = set_type_default() do mod.widgets.ScrollBarsBase {
+        show_scroll_x: true
+        show_scroll_y: true
+        scroll_bar_x: mod.widgets.ScrollBar {}
+        scroll_bar_y: mod.widgets.ScrollBar {}
     }
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 pub struct ScrollBars {
     #[live]
     show_scroll_x: bool,

@@ -1,8 +1,7 @@
-use crate::action::*;
-use crate::log::LogLevel;
-use crate::makepad_derive_live::*;
 use crate::makepad_micro_serde::*;
 use crate::LiveId;
+//use crate::action::*;
+use crate::log::LogLevel;
 // communication enums for studio
 
 #[derive(SerBin, DeBin, Debug)]
@@ -132,7 +131,7 @@ pub struct StudioScreenshotRequest {
     pub kind_id: u32,
 }
 
-#[derive(Debug, DefaultNone, SerBin, DeBin)]
+#[derive(Debug, Default, SerBin, DeBin)]
 pub enum StudioToApp {
     Screenshot(StudioScreenshotRequest),
     KeepAlive,
@@ -147,6 +146,7 @@ pub enum StudioToApp {
     DesignerSelectFile {
         file_name: String,
     },
+    #[default]
     None,
 }
 

@@ -2,37 +2,42 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::collections::HashMap;
 
-live_design! {
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.draw.KeyCode
 
-    pub WindowMenuBase = {{WindowMenu}}{
+    mod.widgets.MenuItem = mod.std.set_type_default() do #(MenuItem::script_api(vm)),
+
+    mod.widgets.WindowMenuBase = #(WindowMenu::register_widget(vm))
+    mod.widgets.WindowMenu = set_type_default() do mod.widgets.WindowMenuBase{
+        height: 0 width: 0
     }
-
-    pub WindowMenu = <WindowMenuBase> { height: 0, width: 0, }
 }
 
-#[derive(Clone, Debug, Live, LiveHook)]
-#[live_ignore]
-pub enum WindowMenuItem {
-    #[pick {items: vec![]}]
+#[derive(Clone, Debug, Script, ScriptHook)]
+pub enum MenuItem {
+    #[live { items: Vec::new() }]
     Main { items: Vec<LiveId> },
-    #[live {name:"Unknown".to_string(), shift: false, key:KeyCode::Unknown, enabled:true }]
+
+    #[live { name: String::new(), items: Vec::new() }]
+    Sub { name: String, items: Vec<LiveId> },
+
+    #[live { name: String::new(), shift: false, key: KeyCode::Unknown, enabled: true }]
     Item {
         name: String,
         shift: bool,
         key: KeyCode,
         enabled: bool,
     },
-    #[live {name:"Unknown".to_string(), items:vec![] }]
-    Sub { name: String, items: Vec<LiveId> },
-    #[live]
+
+    #[pick]
     Line,
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, Widget)]
 pub struct WindowMenu {
+    #[uid]
+    uid: WidgetUid,
     #[walk]
     walk: Walk,
     #[redraw]
@@ -41,61 +46,70 @@ pub struct WindowMenu {
     #[layout]
     layout: Layout,
     #[rust]
-    menu_items: HashMap<LiveId, WindowMenuItem>,
+    menu_items: HashMap<LiveId, MenuItem>,
+    #[rust]
+    initialized: bool,
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Default)]
 pub enum WindowMenuAction {
     Command(LiveId),
+    #[default]
     None,
 }
 
-impl LiveHook for WindowMenu {
-    fn apply_value_instance(
+impl ScriptHook for WindowMenu {
+    fn on_after_apply(
         &mut self,
-        cx: &mut Cx,
-        apply: &mut Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> usize {
-        let id = nodes[index].id;
-        match apply.from {
-            ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
-                    if nodes[index].value.is_enum() {
-                        let mut dock_item = WindowMenuItem::new(cx);
-                        let index = dock_item.apply(cx, apply, index, nodes);
-                        self.menu_items.insert(id, dock_item);
-                        return index;
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        // Handle menu items from the object's vec (children with $id prefix)
+        if let Some(obj) = value.as_object() {
+            vm.vec_with(obj, |vm, vec| {
+                for kv in vec {
+                    // Only process vec key ids ($main, $app, $quit, etc.)
+                    if kv.key.as_id().is_some() {
+                        if let Some(id) = kv.key.as_id() {
+                            // Check if this is a MenuItem by checking its type
+                            if let Some(val_obj) = kv.value.as_object() {
+                                if vm
+                                    .bx
+                                    .heap
+                                    .type_matches_id(val_obj, MenuItem::script_type_id_static())
+                                {
+                                    let item = MenuItem::script_from_value(vm, kv.value);
+                                    self.menu_items.insert(id, item);
+                                }
+                            }
+                        }
                     }
-                } else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                 }
-            }
-            _ => (),
+            });
         }
-        nodes.skip_node(index)
-    }
 
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        // lets translate the menu into a macos menu
+        // Initialize the macOS menu after applying (defer to first draw)
+        self.initialized = false;
+    }
+}
+
+impl WindowMenu {
+    fn update_macos_menu(&self, cx: &mut Cx) {
         #[cfg(target_os = "macos")]
         {
-            // alright lets fetch this thing
-            fn recur_menu(
-                command: LiveId,
-                menu_items: &HashMap<LiveId, WindowMenuItem>,
-            ) -> MacosMenu {
+            fn recur_menu(command: LiveId, menu_items: &HashMap<LiveId, MenuItem>) -> MacosMenu {
                 if let Some(item) = menu_items.get(&command) {
                     match item.clone() {
-                        WindowMenuItem::Main { items } => {
+                        MenuItem::Main { items } => {
                             let mut out = Vec::new();
                             for item in items {
                                 out.push(recur_menu(item, menu_items));
                             }
                             return MacosMenu::Main { items: out };
                         }
-                        WindowMenuItem::Item {
+                        MenuItem::Item {
                             name,
                             shift,
                             key,
@@ -109,23 +123,34 @@ impl LiveHook for WindowMenu {
                                 enabled,
                             }
                         }
-                        WindowMenuItem::Sub { name, items } => {
+                        MenuItem::Sub { name, items } => {
                             let mut out = Vec::new();
                             for item in items {
                                 out.push(recur_menu(item, menu_items));
                             }
                             return MacosMenu::Sub { name, items: out };
                         }
-                        WindowMenuItem::Line => return MacosMenu::Line,
+                        MenuItem::Line => return MacosMenu::Line,
                     }
                 } else {
                     log!("Menu cannot find item {}", command);
                     MacosMenu::Line
                 }
             }
-            let menu = recur_menu(live_id!(main), &self.menu_items);
-            _cx.update_macos_menu(menu)
+
+            // Find the Main menu item (the root)
+            let main_id = self
+                .menu_items
+                .iter()
+                .find(|(_, item)| matches!(item, MenuItem::Main { .. }))
+                .map(|(id, _)| *id);
+
+            if let Some(main_id) = main_id {
+                let menu = recur_menu(main_id, &self.menu_items);
+                cx.update_macos_menu(menu)
+            }
         }
+        let _ = cx;
     }
 }
 
@@ -141,7 +166,12 @@ impl Widget for WindowMenu {
         }
     }
 
-    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+        // Initialize the macOS menu on first draw
+        if !self.initialized {
+            self.initialized = true;
+            self.update_macos_menu(cx);
+        }
         DrawStep::done()
     }
 }

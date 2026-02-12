@@ -1,4 +1,4 @@
-//! A [Horizontal/Vertical Metrics Variations Table](
+//! A [Horizontal Metrics Variations Table](
 //! https://docs.microsoft.com/en-us/typography/opentype/spec/hvar) implementation.
 
 use crate::delta_set::DeltaSetIndexMap;
@@ -6,7 +6,7 @@ use crate::parser::{Offset, Offset32, Stream};
 use crate::var_store::ItemVariationStore;
 use crate::{GlyphId, NormalizedCoordinate};
 
-/// A [Horizontal/Vertical Metrics Variations Table](
+/// A [Horizontal Metrics Variations Table](
 /// https://docs.microsoft.com/en-us/typography/opentype/spec/hvar).
 #[derive(Clone, Copy)]
 pub struct Table<'a> {
@@ -14,6 +14,7 @@ pub struct Table<'a> {
     variation_store: ItemVariationStore<'a>,
     advance_width_mapping_offset: Option<Offset32>,
     lsb_mapping_offset: Option<Offset32>,
+    rsb_mapping_offset: Option<Offset32>,
 }
 
 impl<'a> Table<'a> {
@@ -35,10 +36,11 @@ impl<'a> Table<'a> {
             variation_store,
             advance_width_mapping_offset: s.read::<Option<Offset32>>()?,
             lsb_mapping_offset: s.read::<Option<Offset32>>()?,
+            rsb_mapping_offset: s.read::<Option<Offset32>>()?,
         })
     }
 
-    /// Returns advance offset for a glyph.
+    /// Returns the advance width offset for a glyph.
     #[inline]
     pub fn advance_offset(
         &self,
@@ -59,14 +61,34 @@ impl<'a> Table<'a> {
             .parse_delta(outer_idx, inner_idx, coordinates)
     }
 
-    /// Returns side bearing offset for a glyph.
+    /// Returns the left side bearing offset for a glyph.
     #[inline]
-    pub fn side_bearing_offset(
+    pub fn left_side_bearing_offset(
         &self,
         glyph_id: GlyphId,
         coordinates: &[NormalizedCoordinate],
     ) -> Option<f32> {
         let set_data = self.data.get(self.lsb_mapping_offset?.to_usize()..)?;
+        self.side_bearing_offset(glyph_id, coordinates, set_data)
+    }
+
+    /// Returns the right side bearing offset for a glyph.
+    #[inline]
+    pub fn right_side_bearing_offset(
+        &self,
+        glyph_id: GlyphId,
+        coordinates: &[NormalizedCoordinate],
+    ) -> Option<f32> {
+        let set_data = self.data.get(self.rsb_mapping_offset?.to_usize()..)?;
+        self.side_bearing_offset(glyph_id, coordinates, set_data)
+    }
+
+    fn side_bearing_offset(
+        &self,
+        glyph_id: GlyphId,
+        coordinates: &[NormalizedCoordinate],
+        set_data: &[u8],
+    ) -> Option<f32> {
         let (outer_idx, inner_idx) = DeltaSetIndexMap::new(set_data).map(glyph_id.0 as u32)?;
         self.variation_store
             .parse_delta(outer_idx, inner_idx, coordinates)

@@ -3,6 +3,7 @@ use std::os::fd::AsFd;
 
 use crate::egl_sys::{EGLNativeWindowType, EGLSurface, NativeWindowType};
 use crate::makepad_math::Vec2d;
+use tempfile;
 use wayland_client::protocol::__interfaces::WL_OUTPUT_INTERFACE;
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Proxy, QueueHandle};

@@ -6,38 +6,37 @@ use crate::{
     widget::*,
 };
 
-live_design! {
-    link widgets;
-    use link::widgets::*;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub ModalBase = {{Modal}} {}
-    pub Modal = <ModalBase> {
+    mod.widgets.ModalBase = #(Modal::register_widget(vm))
+
+    mod.widgets.Modal = mod.widgets.ModalBase{
         width: Fill
         height: Fill
         flow: Overlay
-        align: {x: 0.5, y: 0.5}
+        align: Center
 
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                return vec4(0., 0., 0., 0.0)
+        draw_bg +: {
+            pixel: fn() {
+                return vec4(0. 0. 0. 0.0)
             }
         }
 
-        bg_view: <View> {
+        bg_view := View{
             width: Fill
             height: Fill
             show_bg: true
-            draw_bg: {
-                color: #000000B3
-                fn pixel(self) -> vec4 {
+            draw_bg +: {
+                color: uniform(#000000B3)
+                pixel: fn() {
                     return self.color
                 }
             }
         }
 
-        content: <View> {
+        content := View{
             width: Fit
             height: Fit
             flow: Down
@@ -45,31 +44,26 @@ live_design! {
     }
 }
 
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum ModalAction {
     Dismissed,
+    #[default]
     None,
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, Widget)]
 pub struct Modal {
-    #[live]
-    #[find]
-    content: View,
-    #[live]
-    #[area]
-    bg_view: View,
+    #[source]
+    source: ScriptObjectRef,
 
-    #[redraw]
-    #[rust(DrawList2d::new(cx))]
-    draw_list: DrawList2d,
+    #[deref]
+    view: View,
+
+    #[rust]
+    draw_list: Option<DrawList2d>,
 
     #[live]
     draw_bg: DrawQuad,
-    #[layout]
-    layout: Layout,
-    #[walk]
-    walk: Walk,
 
     #[rust]
     is_open: bool,
@@ -80,9 +74,23 @@ pub struct Modal {
     can_dismiss: bool,
 }
 
-impl LiveHook for Modal {
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        self.draw_list.redraw(cx);
+impl ScriptHook for Modal {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        vm.with_cx_mut(|cx| {
+            if let Some(draw_list) = &self.draw_list {
+                draw_list.redraw(cx);
+            }
+        });
     }
 }
 
@@ -93,7 +101,8 @@ impl Widget for Modal {
         }
 
         // Forward the event to the inner `content` view.
-        self.content.handle_event(cx, event, scope);
+        let content = self.view.widget(cx, ids!(content));
+        content.handle_event(cx, event, scope);
 
         // Proactively consume any hit that occurred in the bg area, which prevents the hit
         // from being handled by any views underneath this modal.
@@ -102,7 +111,7 @@ impl Widget for Modal {
 
         if self.can_dismiss {
             // This is fine, because we already let `content` handle this event above.
-            let content_area_hit = event.hits(cx, self.content.area());
+            let content_area_hit = event.hits(cx, content.area());
 
             // Close the modal if any of the following conditions occur:
             // * If the back navigational action/gesture was triggered (e.g., on Android),
@@ -114,7 +123,7 @@ impl Widget for Modal {
                         key_code: KeyCode::Escape,
                         ..
                     }) => true,
-                    Hit::FingerUp(fe) => !self.content.area().rect(cx).contains(fe.abs),
+                    Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
                 || match content_area_hit {
@@ -125,36 +134,35 @@ impl Widget for Modal {
                     _ => false,
                 };
             if should_close {
-                cx.widget_action(
-                    self.content.widget_uid(),
-                    &scope.path,
-                    ModalAction::Dismissed,
-                );
+                cx.widget_action(content.widget_uid(), ModalAction::Dismissed);
                 self.close(cx);
             }
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_list.begin_overlay_reuse(cx);
-        cx.begin_root_turtle_for_pass(self.layout);
-        self.draw_bg.begin(cx, self.walk, self.layout);
+        let draw_list = self.draw_list.as_mut().unwrap();
+        draw_list.begin_overlay_reuse(cx);
+        cx.begin_root_turtle_for_pass(self.view.layout);
+        self.draw_bg.begin(cx, self.view.walk, self.view.layout);
 
         if self.is_open {
-            let _ = self
-                .bg_view
-                .draw_walk(cx, scope, walk.with_abs_pos(Vec2d { x: 0., y: 0. }));
-            let _ = self.content.draw_all(cx, scope);
+            let bg_view = self.view.widget(cx, ids!(bg_view));
+            let _ = bg_view.draw_walk(cx, scope, walk.with_abs_pos(Vec2d { x: 0., y: 0. }));
+
+            let content = self.view.widget(cx, ids!(content));
+            let _ = content.draw_all(cx, scope);
         }
 
         self.draw_bg.end(cx);
         cx.end_pass_sized_turtle();
-        self.draw_list.end(cx);
+        self.draw_list.as_mut().unwrap().end(cx);
 
         // After drawing the modal content, its area may have changed,
         // so we need to update that area as a scrolling-allowed area bound.
         if self.is_open {
-            cx.block_scrolling_except_within(self.content.area());
+            let content = self.view.widget(cx, ids!(content));
+            cx.block_scrolling_except_within(content.area());
         }
         DrawStep::done()
     }
@@ -164,12 +172,14 @@ impl Modal {
     pub fn open(&mut self, cx: &mut Cx) {
         self.is_open = true;
         self.draw_bg.redraw(cx);
-        cx.set_key_focus(self.content.area());
+        let content = self.view.widget(cx, ids!(content));
+        cx.set_key_focus(content.area());
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
         // Inform the inner modal content that its modal is being dismissed.
-        self.content.handle_event(
+        let content = self.view.widget(cx, ids!(content));
+        content.handle_event(
             cx,
             &Event::Actions(vec![Box::new(ModalAction::Dismissed)]),
             &mut Scope::empty(),

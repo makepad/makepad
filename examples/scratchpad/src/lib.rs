@@ -1,2 +1,2 @@
-pub use makepad_widgets2;
+pub use makepad_widgets;
 pub mod app;

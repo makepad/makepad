@@ -53,7 +53,7 @@ impl DrawListExt for DrawList {
         let pass_id = cx.pass_stack.last().unwrap().pass_id;
         let redraw_id = cx.cx.redraw_id;
 
-        cx.draw_lists[self.id()].pass_id = Some(pass_id);
+        cx.draw_lists[self.id()].draw_pass_id = Some(pass_id);
 
         let codeflow_parent_id = cx.draw_list_stack.last().cloned();
 
@@ -126,6 +126,14 @@ pub struct DrawList2d {
     pub(crate) dirty_check_rect: Rect,
 }
 
+impl ScriptHook for DrawList2d {}
+impl ScriptApply for DrawList2d {}
+impl ScriptNew for DrawList2d {
+    fn script_new(vm: &mut ScriptVm) -> Self {
+        Self::new(vm.cx_mut())
+    }
+}
+
 impl Deref for DrawList2d {
     type Target = DrawList;
     fn deref(&self) -> &Self::Target {
@@ -138,9 +146,8 @@ impl DerefMut for DrawList2d {
     }
 }
 
-impl LiveHook for DrawList2d {}
-impl LiveNew for DrawList2d {
-    fn new(cx: &mut Cx) -> Self {
+impl DrawList2d {
+    pub fn new(cx: &mut Cx) -> Self {
         let draw_list = cx.draw_lists.alloc();
         Self {
             dirty_check_rect: Default::default(),
@@ -148,57 +155,6 @@ impl LiveNew for DrawList2d {
         }
     }
 
-    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: LiveType::of::<Self>(),
-            live_ignore: true,
-            fields: Vec::new(),
-            type_name: id_lut!(View),
-        }
-    }
-}
-impl LiveApply for DrawList2d {
-    //fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
-    fn apply(
-        &mut self,
-        cx: &mut Cx,
-        apply: &mut Apply,
-        start_index: usize,
-        nodes: &[LiveNode],
-    ) -> usize {
-        if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(
-                live_error_origin!(),
-                start_index,
-                nodes,
-                live_id!(View),
-            );
-            return nodes.skip_node(start_index);
-        }
-        cx.draw_lists[self.draw_list.id()].debug_id = nodes[start_index].id;
-        let mut index = start_index + 1;
-        loop {
-            if nodes[index].value.is_close() {
-                index += 1;
-                break;
-            }
-            match nodes[index].id {
-                live_id!(debug_id) => {
-                    cx.draw_lists[self.draw_list.id()].debug_id =
-                        LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes)
-                }
-                _ => {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                    index = nodes.skip_node(index);
-                }
-            }
-        }
-        return index;
-    }
-}
-
-impl DrawList2d {
     pub fn begin_overlay_last(&mut self, cx: &mut Cx2d) {
         self.begin_overlay_inner(cx, true)
     }
@@ -211,7 +167,7 @@ impl DrawList2d {
         let pass_id = cx.pass_stack.last().unwrap().pass_id;
         let redraw_id = cx.cx.redraw_id;
 
-        cx.draw_lists[self.draw_list.id()].pass_id = Some(pass_id);
+        cx.draw_lists[self.draw_list.id()].draw_pass_id = Some(pass_id);
 
         let codeflow_parent_id = cx.draw_list_stack.last().cloned().unwrap();
 
@@ -256,16 +212,12 @@ impl<'a> CxDraw<'a> {
     }
 
     pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
-        if draw_vars.draw_shader.is_none() {
+        if draw_vars.draw_shader_id.is_none() {
             return None;
         }
-        let draw_shader = draw_vars.draw_shader.unwrap();
+        let draw_shader = draw_vars.draw_shader_id.unwrap();
 
-        if draw_shader.draw_shader_generation != self.draw_shaders.generation {
-            return None;
-        }
-
-        let sh = &self.cx.draw_shaders[draw_shader.draw_shader_id];
+        let sh = &self.cx.draw_shaders[draw_shader.index];
 
         let current_draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[current_draw_list_id];

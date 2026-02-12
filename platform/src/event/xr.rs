@@ -1,7 +1,7 @@
 use {
     crate::{
         cx::Cx, makepad_live_id::live_id_num, makepad_math::*, makepad_micro_serde::*, Area,
-        CxWindowPool, DigitDevice, FingerDownEvent, Hit, HitOptions, KeyModifiers, LiveId, Margin,
+        CxWindowPool, DigitDevice, FingerDownEvent, Hit, HitOptions, Inset, KeyModifiers, LiveId,
         SmallVec,
     },
     std::rc::Rc,
@@ -431,7 +431,7 @@ impl XrLocalEvent {
         hit_test: F,
     ) -> Hit
     where
-        F: Fn(Vec2d, &Rect, &Option<Margin>) -> bool,
+        F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     {
         let rect = area.clipped_rect(cx);
         for tip in &self.finger_tips {

@@ -15,7 +15,7 @@ use crate::wayland::xkb_sys;
 use crate::x11::xlib_event::XlibEvent;
 use crate::WindowId;
 use crate::{
-    egl_sys, Area, Cx, CxOsOp, CxPassParent, Event, KeyModifiers, MouseMoveEvent, SignalToUI,
+    egl_sys, Area, Cx, CxDrawPassParent, CxOsOp, Event, KeyModifiers, MouseMoveEvent, SignalToUI,
     WindowClosedEvent, WindowGeomChangeEvent,
 };
 use wayland_client::protocol::{wl_keyboard, wl_pointer};
@@ -331,10 +331,6 @@ impl WaylandCx {
                 CxOsOp::ResizeWindow(window_id, size) => {}
                 CxOsOp::RepositionWindow(window_id, size) => {}
                 CxOsOp::ShowClipboardActions { .. } => {}
-                CxOsOp::HideClipboardActions => {}
-                CxOsOp::SyncImeState { .. } => {
-                    // Linux Wayland IME handled by input method framework
-                }
                 CxOsOp::CopyToClipboard(content) => {}
                 CxOsOp::SetCursor(cursor) => {
                     if let Some(cursor_shape) = state.cursor_shape.as_ref() {
@@ -353,8 +349,8 @@ impl WaylandCx {
                 CxOsOp::StopTimer(timer_id) => {
                     state.stop_timer(timer_id);
                 }
-                CxOsOp::ShowTextIME(_area, _pos, _config) => {
-                    if let Some(_window) = state.current_window {
+                CxOsOp::ShowTextIME(area, pos) => {
+                    if let Some(window) = state.current_window {
                         if let Some(text_input) = state.text_input.as_ref() {
                             text_input.enable();
 
@@ -389,14 +385,14 @@ impl WaylandCx {
         let mut passes_todo = Vec::new();
         cx.compute_pass_repaint_order(&mut passes_todo);
         cx.repaint_id += 1;
-        for pass_id in &passes_todo {
+        for draw_pass_id in &passes_todo {
             let now = state.time_now();
             let windows = &mut state.windows;
-            cx.passes[*pass_id].set_time(now as f32);
-            let parent = cx.passes[*pass_id].parent.clone();
+            cx.passes[*draw_pass_id].set_time(now as f32);
+            let parent = cx.passes[*draw_pass_id].parent.clone();
             match parent {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     if let Some(window) = windows.iter_mut().find(|w| w.window_id == window_id) {
                         window.resize_buffers();
                         let pix_width =
@@ -404,7 +400,12 @@ impl WaylandCx {
                         let pix_height =
                             window.window_geom.inner_size.y * window.window_geom.dpi_factor;
 
-                        cx.draw_pass_to_window(*pass_id, window.egl_surface, pix_width, pix_height);
+                        cx.draw_pass_to_window(
+                            *draw_pass_id,
+                            window.egl_surface,
+                            pix_width,
+                            pix_height,
+                        );
                         window
                             .wl_egl_surface
                             .resize(pix_width as i32, pix_height as i32, 0, 0);
@@ -415,12 +416,12 @@ impl WaylandCx {
                         );
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    cx.draw_pass_to_texture(*pass_id, None);
+                    cx.draw_pass_to_texture(*draw_pass_id, None);
                 }
-                CxPassParent::None => {
-                    cx.draw_pass_to_texture(*pass_id, None);
+                CxDrawPassParent::None => {
+                    cx.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
         }

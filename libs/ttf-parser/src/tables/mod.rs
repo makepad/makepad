@@ -49,6 +49,8 @@ pub mod gvar;
 pub mod hvar;
 #[cfg(feature = "variable-fonts")]
 pub mod mvar;
+#[cfg(feature = "variable-fonts")]
+pub mod vvar;
 
 pub use cff::cff1;
 #[cfg(feature = "variable-fonts")]

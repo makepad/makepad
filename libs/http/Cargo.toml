@@ -8,4 +8,4 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "haeudU1-iRQksGwh105SrBxTSzM="
 
 [dependencies]
-makepad-script = { path = "../../platform2/script", version = "1.0.0" }
+makepad-script = { path = "../../platform/script", version = "1.0.0" }

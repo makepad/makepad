@@ -1,8 +1,8 @@
 use crate::{
     event::{
-        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
-        TextClipboardEvent, TextInputEvent, TimerEvent, WindowCloseRequestedEvent,
-        WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
+        DragEvent, DropEvent, GameInputConnectedEvent, KeyEvent, MouseDownEvent, MouseMoveEvent,
+        MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
+        WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
     },
     makepad_live_id::*,
     permission::PermissionResult,
@@ -37,4 +37,5 @@ pub enum MacosEvent {
     Timer(TimerEvent),
     MacosMenuCommand(LiveId),
     PermissionResult(PermissionResult),
+    GameInputConnected(GameInputConnectedEvent),
 }

@@ -28,6 +28,16 @@ impl GlyphOutline {
         Rect::new(self.origin_in_ems(), self.size_in_ems())
     }
 
+    pub fn commands(&self) -> &[Command] {
+        &self.commands
+    }
+
+    pub fn rasterize_transform(&self, dpxs_per_em: f32) -> Transform<f32> {
+        let origin = self.bounds.origin;
+        Transform::from_translate(-origin.x, -origin.y)
+            .scale_uniform(dpxs_per_em / self.units_per_em)
+    }
+
     pub fn rasterize(&self, dpxs_per_em: f32, output: &mut SubimageMut<R>) {
         use ab_glyph_rasterizer::Rasterizer;
 
@@ -37,11 +47,7 @@ impl GlyphOutline {
 
         let output_size = output.bounds().size;
         let mut rasterizer = Rasterizer::new(output_size.width, output_size.height);
-        let origin = self.bounds.origin;
-        // NOT A FIX, BUT DOES MAKE A BROKEN SDF WORK NOW, WE NEED TO DIFF THE
-        // ALGO CODEFLOW
-        let transform = Transform::from_translate(-origin.x, -origin.y)
-            .scale_uniform(dpxs_per_em / self.units_per_em);
+        let transform = self.rasterize_transform(dpxs_per_em);
         let mut last = Point::ZERO;
         let mut last_move = None;
         for command in self.commands.iter().copied() {

@@ -1,16 +1,31 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, touch_gesture::*, view::*, widget::*};
 
-live_design! {
-    ExpandablePanelBase = {{ExpandablePanel}} {}
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
+
+    mod.widgets.ExpandablePanelBase = #(ExpandablePanel::register_widget(vm))
+
+    mod.widgets.ExpandablePanel = mod.widgets.ExpandablePanelBase{
+        width: Fill
+        height: Fill
+        flow: Overlay
+
+        panel := View{
+            width: Fill
+            height: Fill
+        }
+    }
 }
 
-#[derive(Clone, DefaultNone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum ExpandablePanelAction {
     ScrolledAt(f64),
+    #[default]
     None,
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct ExpandablePanel {
     #[deref]
     view: View,
@@ -18,19 +33,8 @@ pub struct ExpandablePanel {
     touch_gesture: Option<TouchGesture>,
     #[live]
     initial_offset: f64,
-}
-
-impl LiveHook for ExpandablePanel {
-    fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
-        if apply.from.is_from_doc() {
-            self.apply_over(
-                cx,
-                live! {
-                    panel = { margin: { top: (self.initial_offset) }}
-                },
-            );
-        }
-    }
+    #[rust]
+    current_panel_margin: f64,
 }
 
 impl Widget for ExpandablePanel {
@@ -43,18 +47,11 @@ impl Widget for ExpandablePanel {
                 .has_changed()
             {
                 let scrolled_at = touch_gesture.scrolled_at;
-                let panel_margin = self.initial_offset - scrolled_at;
-                self.apply_over(
-                    cx,
-                    live! {
-                        panel = { margin: { top: (panel_margin) }}
-                    },
-                );
+                self.current_panel_margin = self.initial_offset - scrolled_at;
                 self.redraw(cx);
 
                 cx.widget_action(
                     self.widget_uid(),
-                    &scope.path,
                     ExpandablePanelAction::ScrolledAt(scrolled_at),
                 );
             }
@@ -62,6 +59,12 @@ impl Widget for ExpandablePanel {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // Apply the current panel margin before drawing
+        let panel_ref = self.view(cx, ids!(panel));
+        if let Some(mut panel) = panel_ref.borrow_mut() {
+            panel.walk.margin.top = self.current_panel_margin;
+        }
+
         let result = self.view.draw_walk(cx, scope, walk);
 
         if self.touch_gesture.is_none() {
@@ -69,13 +72,43 @@ impl Widget for ExpandablePanel {
             touch_gesture.set_mode(ScrollMode::Swipe);
 
             // Limit the amount of dragging allowed for the panel
-            let panel_height = self.view(ids!(panel)).area().rect(cx).size.y;
+            let panel_height = self.view(cx, ids!(panel)).area().rect(cx).size.y;
             touch_gesture.set_range(0.0, panel_height - self.initial_offset);
 
             touch_gesture.reset_scrolled_at();
+            self.current_panel_margin = self.initial_offset;
             self.touch_gesture = Some(touch_gesture);
         }
 
         result
+    }
+}
+
+impl ExpandablePanelRef {
+    pub fn scrolled_at(&self, actions: &Actions) -> Option<f64> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ExpandablePanelAction::ScrolledAt(value) = item.cast() {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    pub fn reset(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if let Some(touch_gesture) = inner.touch_gesture.as_mut() {
+                touch_gesture.stop();
+            }
+            inner.current_panel_margin = inner.initial_offset;
+            inner.redraw(cx);
+        }
+    }
+
+    pub fn get_current_offset(&self) -> f64 {
+        if let Some(inner) = self.borrow() {
+            inner.current_panel_margin
+        } else {
+            0.0
+        }
     }
 }

@@ -1,5 +1,5 @@
 use crate::types::*;
-use makepad_widgets2::*;
+use makepad_widgets::*;
 use std::collections::HashMap;
 
 /// Identifies an in-flight request

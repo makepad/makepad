@@ -21,6 +21,7 @@ macro_rules! app_main {
     ( $ app: ident) => {
         #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         pub fn app_main() {
+            //Cx::init_log();
             if Cx::pre_start() {
                 return;
             }
@@ -29,24 +30,22 @@ macro_rules! app_main {
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(
                 move |cx, event| {
                     if let Event::Startup = event {
-                        *app.borrow_mut() = $app::new_main(cx);
+                        *app.borrow_mut() = Some(cx.with_vm(|vm| $app::run(vm)));
                     }
                     if let Event::LiveEdit = event {
-                        app.borrow_mut().update_main(cx);
+                        //app.borrow_mut().update_main(cx);
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
                         <dyn AppMain>::handle_event(app, cx, event);
                     }
                 },
             ))));
-            $app::register_main_module(&mut *cx.borrow_mut());
             cx.borrow_mut()
                 .init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
             if std::env::args().find(|v| v == "--stdin-loop").is_some() {
                 cx.borrow_mut().in_makepad_studio = true;
             }
             //cx.borrow_mut().init_websockets("");
-            live_design(&mut *cx.borrow_mut());
             cx.borrow_mut().init_cx_os();
             Cx::event_loop(cx);
         }

@@ -340,9 +340,6 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandState {
                         input: text_str,
                         replace_last: false,
                         was_paste: false,
-                        composition: None,
-                        full_state_sync: None,
-                        replace_range: None,
                     }));
                 }
             }
@@ -409,9 +406,6 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                     input: text_str,
                                     replace_last: false,
                                     was_paste: false,
-                                    composition: None,
-                                    full_state_sync: None,
-                                    replace_range: None,
                                 }));
                                 state.do_callback(XlibEvent::KeyDown(KeyEvent {
                                     key_code: key_code,

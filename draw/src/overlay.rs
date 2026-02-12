@@ -6,46 +6,12 @@ use {
     crate::{cx_2d::Cx2d, makepad_platform::*},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Script, ScriptHook)]
 pub struct Overlay {
     // draw info per UI element
-    pub(crate) draw_list: DrawList,
+    #[new]
+    pub draw_list: DrawList,
     //pub (crate) sweep_lock: Rc<RefCell<Area>>,
-}
-
-impl LiveHook for Overlay {}
-impl LiveNew for Overlay {
-    fn live_design_with(_cx: &mut Cx) {}
-    fn new(cx: &mut Cx) -> Self {
-        let draw_list = cx.draw_lists.alloc();
-        //cx.draw_lists[draw_list.id()].unclipped = true;
-        Self {
-            //sweep_lock: Rc::new(RefCell::new(Area::Empty)),
-            draw_list,
-        }
-    }
-
-    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: LiveType::of::<Self>(),
-            live_ignore: true,
-            fields: Vec::new(),
-            type_name: id_lut!(Overlay),
-        }
-    }
-}
-
-impl LiveApply for Overlay {
-    fn apply(
-        &mut self,
-        _cx: &mut Cx,
-        _applyl: &mut Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> usize {
-        nodes.skip_node(index)
-    }
 }
 
 impl Overlay {

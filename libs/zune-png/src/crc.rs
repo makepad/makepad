@@ -53,14 +53,7 @@ pub fn calc_crc_with_bytes(data: &[u8], value: u32) -> u32 {
 
 #[test]
 fn test_crc_same() {
-    use alloc::vec;
-
-    use nanorand::Rng;
-
-    let mut rng = nanorand::WyRand::new_seed(8966548);
-
-    let mut data = vec![0_u8; 1000];
-    rng.fill(&mut data);
+    let data: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
     let crc_simple = _crc32_slice1(&data, 0);
     let crc_table8 = crc32_slice8(&data, 0);

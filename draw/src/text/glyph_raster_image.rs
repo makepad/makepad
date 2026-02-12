@@ -7,10 +7,14 @@ use {
     rustybuzz::ttf_parser,
 };
 
+use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
+use makepad_zune_png::PngDecoder;
+
 #[derive(Clone, Debug)]
 pub struct GlyphRasterImage<'a> {
     origin_in_dpxs: Point<f32>,
     dpxs_per_em: f32,
+    #[allow(dead_code)]
     format: Format,
     data: &'a [u8],
 }
@@ -49,13 +53,24 @@ impl<'a> GlyphRasterImage<'a> {
     }
 
     fn decode_size_png(&self) -> Size<usize> {
-        let decoder = png::Decoder::new(self.data);
-        let reader = decoder.read_info().unwrap();
-        let info = reader.info();
-        Size {
-            width: info.width as usize,
-            height: info.height as usize,
+        let cursor = ZCursor::new(self.data);
+        let mut decoder = PngDecoder::new(cursor);
+        if decoder.decode_headers().is_err() {
+            return Size {
+                width: 0,
+                height: 0,
+            };
         }
+        decoder
+            .dimensions()
+            .map(|(w, h)| Size {
+                width: w,
+                height: h,
+            })
+            .unwrap_or(Size {
+                width: 0,
+                height: 0,
+            })
     }
 
     pub fn decode(&self, image: &mut SubimageMut<Bgra>) {
@@ -65,52 +80,83 @@ impl<'a> GlyphRasterImage<'a> {
     }
 
     fn decode_png(&self, image: &mut SubimageMut<Bgra>) {
-        let decoder = png::Decoder::new(self.data);
-        let mut reader = decoder.read_info().unwrap();
-        let mut buffer = vec![0; reader.output_buffer_size()];
-        let output_info = reader.next_frame(&mut buffer).unwrap();
-        let info = reader.info();
-        let height = info.height as usize;
-        let width = info.width as usize;
-        match output_info.color_type {
-            png::ColorType::Indexed => {
-                let palette = info.palette.as_ref().unwrap();
-                let trns = info.trns.as_ref();
-                let mut set_pixel = |x, y, index| {
-                    let base = index * 3;
-                    let r = palette[base + 0];
-                    let g = palette[base + 1];
-                    let b = palette[base + 2];
-                    let a = trns.map_or(255, |trns| trns.get(index).copied().unwrap_or(255));
-                    image[Point::new(x, y)] = Bgra::new(b, g, r, a);
-                };
-                match output_info.bit_depth {
-                    png::BitDepth::Four => {
-                        let bytes_per_row = (width + 1) / 2;
-                        for y in 0..height {
-                            for x in 0..width {
-                                let byte = buffer[y * bytes_per_row + x / 2];
-                                set_pixel(
-                                    x,
-                                    y,
-                                    if x % 2 == 0 { byte >> 4 } else { byte & 0x0F } as usize,
-                                );
-                            }
-                        }
-                    }
-                    png::BitDepth::Eight => {
-                        for y in 0..height as usize {
-                            for x in 0..width as usize {
-                                set_pixel(x, y, buffer[y * width + x] as usize);
-                            }
-                        }
-                    }
-                    _ => {
-                        println!("WARNING: encountered rasterized glyph with unsupported bit depth")
+        let cursor = ZCursor::new(self.data);
+        let mut decoder = PngDecoder::new(cursor);
+        if decoder.decode_headers().is_err() {
+            return;
+        }
+
+        let (width, height) = match decoder.dimensions() {
+            Some(dims) => dims,
+            None => return,
+        };
+
+        let colorspace = match decoder.colorspace() {
+            Some(cs) => cs,
+            None => return,
+        };
+
+        let decoded = match decoder.decode() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        let buffer = match decoded.u8() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let num_components = colorspace.num_components();
+
+        match num_components {
+            4 => {
+                // RGBA
+                for y in 0..height {
+                    for x in 0..width {
+                        let i = (y * width + x) * 4;
+                        let r = buffer[i];
+                        let g = buffer[i + 1];
+                        let b = buffer[i + 2];
+                        let a = buffer[i + 3];
+                        image[Point::new(x, y)] = Bgra::new(b, g, r, a);
                     }
                 }
             }
-            _ => println!("WARNING: encountered rasterized glyph with unsupported color type"),
+            3 => {
+                // RGB
+                for y in 0..height {
+                    for x in 0..width {
+                        let i = (y * width + x) * 3;
+                        let r = buffer[i];
+                        let g = buffer[i + 1];
+                        let b = buffer[i + 2];
+                        image[Point::new(x, y)] = Bgra::new(b, g, r, 255);
+                    }
+                }
+            }
+            2 => {
+                // Grayscale + Alpha
+                for y in 0..height {
+                    for x in 0..width {
+                        let i = (y * width + x) * 2;
+                        let gray = buffer[i];
+                        let a = buffer[i + 1];
+                        image[Point::new(x, y)] = Bgra::new(gray, gray, gray, a);
+                    }
+                }
+            }
+            1 => {
+                // Grayscale
+                for y in 0..height {
+                    for x in 0..width {
+                        let gray = buffer[y * width + x];
+                        image[Point::new(x, y)] = Bgra::new(gray, gray, gray, 255);
+                    }
+                }
+            }
+            _ => {
+                println!("WARNING: encountered rasterized glyph with unsupported color type");
+            }
         }
     }
 }

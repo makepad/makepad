@@ -5,6 +5,7 @@ use {
         font_family::{FontFamily, FontFamilyId},
         geom::{Point, Rect, Size},
         loader::{self, FontDefinition, FontFamilyDefinition, Loader},
+        msdfer,
         num::Zero,
         rasterizer::{self, RasterizedGlyph, Rasterizer},
         sdfer,
@@ -64,6 +65,10 @@ impl Layouter {
         self.loader.define_font(id, definition);
     }
 
+    pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
+        self.loader.get_or_load_font_family_rc(id)
+    }
+
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
         if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
             return result.clone();
@@ -106,8 +111,29 @@ impl Default for Settings {
                         radius: 8.0,
                         cutoff: 0.25,
                     },
+                    msdfer: msdfer::Settings {
+                        padding: 4,
+                        radius: 8.0,
+                        cutoff: 0.25,
+                        corner_angle_threshold: 3.0,
+                    },
+                    msdf_resolution: rasterizer::MsdfResolutionSettings {
+                        min_request_dpxs_per_em: 20.0,
+                        min_dpxs_per_em: 32.0,
+                        base_dpxs_per_em: 64.0,
+                        max_dpxs_per_em: 128.0,
+                        target_feature_texels: 1.75,
+                        dpx_quantum: 8.0,
+                        min_feature_floor_ems: 1.0 / 1024.0,
+                    },
+                    msdf_complexity: rasterizer::MsdfComplexitySettings {
+                        max_outline_commands: 180,
+                        max_estimated_segments: 1000,
+                    },
+                    outline_rasterization_mode: rasterizer::OutlineRasterizationMode::Msdf,
                     grayscale_atlas_size: Size::new(4096, 4096),
                     color_atlas_size: Size::new(2048, 2048),
+                    msdf_atlas_size: Size::new(4096, 4096),
                 },
             },
             cache_size: 4096,
@@ -215,11 +241,8 @@ impl LayoutContext {
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
                 Some(text) => self.append_text(&text),
                 None => {
-                    let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
-                    if next_word.chars().all(|char| char.is_whitespace()) {
-                        self.layout_directly(fitter.pop_next_len());
-                    } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
-                        self.layout_by_grapheme(fitter.pop_next_len());
+                    if self.current_row_is_empty() && !self.current_row_is_continuation() {
+                        self.layout_by_grapheme(fitter.pop());
                     } else {
                         self.finish_current_row(false);
                     }
@@ -240,7 +263,7 @@ impl LayoutContext {
                 Some(text) => self.append_text(&text),
                 None => {
                     if self.current_row_is_empty() {
-                        self.layout_directly(fitter.pop_next_len());
+                        self.layout_directly(fitter.pop());
                     } else {
                         self.finish_current_row(false);
                     }
@@ -383,10 +406,6 @@ impl Fitter {
         self.text.is_empty()
     }
 
-    fn next_len(&self) -> usize {
-        self.lens[0]
-    }
-
     fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
         let mut min_count = 1;
         let mut max_count = self.lens.len() + 1;
@@ -426,7 +445,7 @@ impl Fitter {
         true
     }
 
-    fn pop_next_len(&mut self) -> usize {
+    fn pop(&mut self) -> usize {
         let len = self.lens.remove(0);
         self.widths_in_lpxs.remove(0);
         self.text = self.text.substr(len..);
