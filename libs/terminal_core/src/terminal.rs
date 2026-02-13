@@ -6,15 +6,15 @@ use crate::screen::{Cursor, CursorShape, Screen};
 /// Terminal modes
 #[derive(Clone, Debug, Default)]
 pub struct TerminalMode {
-    pub cursor_keys: bool,      // DECCKM: cursor keys send ESC O vs ESC [
-    pub autowrap: bool,         // DECAWM: auto-wrap at right margin
-    pub cursor_visible: bool,   // DECTCEM: cursor visible
+    pub cursor_keys: bool,         // DECCKM: cursor keys send ESC O vs ESC [
+    pub autowrap: bool,            // DECAWM: auto-wrap at right margin
+    pub cursor_visible: bool,      // DECTCEM: cursor visible
     pub synchronized_update: bool, // DEC 2026: synchronized output mode
-    pub alt_screen: bool,       // Alternate screen buffer active
-    pub bracketed_paste: bool,  // Bracketed paste mode
-    pub linefeed_newline: bool, // LNM: LF also does CR
-    pub origin: bool,           // DECOM: origin mode
-    pub insert: bool,           // IRM: insert mode
+    pub alt_screen: bool,          // Alternate screen buffer active
+    pub bracketed_paste: bool,     // Bracketed paste mode
+    pub linefeed_newline: bool,    // LNM: LF also does CR
+    pub origin: bool,              // DECOM: origin mode
+    pub insert: bool,              // IRM: insert mode
     // Mouse modes
     pub mouse_tracking: MouseMode,
     pub mouse_sgr: bool,    // SGR extended mouse coordinates
@@ -579,18 +579,48 @@ impl Terminal {
                 }
             }
             // Default foreground/background/cursor colors.
+            // "?" queries the current value; otherwise set the color.
             10 => {
-                if let Some(rgb) = Self::parse_osc_color(data) {
+                if data == "?" {
+                    let c = self.default_fg;
+                    let reply = format!(
+                        "\x1b]10;rgb:{:04x}/{:04x}/{:04x}\x1b\\",
+                        c.r as u16 * 257,
+                        c.g as u16 * 257,
+                        c.b as u16 * 257
+                    );
+                    self.push_outbound(reply.as_bytes());
+                } else if let Some(rgb) = Self::parse_osc_color(data) {
                     self.default_fg = rgb;
                 }
             }
             11 => {
-                if let Some(rgb) = Self::parse_osc_color(data) {
+                if data == "?" {
+                    let c = self.default_bg;
+                    let reply = format!(
+                        "\x1b]11;rgb:{:04x}/{:04x}/{:04x}\x1b\\",
+                        c.r as u16 * 257,
+                        c.g as u16 * 257,
+                        c.b as u16 * 257
+                    );
+                    self.push_outbound(reply.as_bytes());
+                } else if let Some(rgb) = Self::parse_osc_color(data) {
                     self.default_bg = rgb;
                 }
             }
             12 => {
-                self.cursor_color = Self::parse_osc_color(data);
+                if data == "?" {
+                    let c = self.cursor_color.unwrap_or(self.default_fg);
+                    let reply = format!(
+                        "\x1b]12;rgb:{:04x}/{:04x}/{:04x}\x1b\\",
+                        c.r as u16 * 257,
+                        c.g as u16 * 257,
+                        c.b as u16 * 257
+                    );
+                    self.push_outbound(reply.as_bytes());
+                } else {
+                    self.cursor_color = Self::parse_osc_color(data);
+                }
             }
             // Reset palette entries (empty means all).
             104 => {
@@ -662,7 +692,10 @@ impl Terminal {
             5 => {
                 let idx_idx = mode_idx + 1;
                 if idx_idx < params.len {
-                    Some((Color::Palette(params.params[idx_idx].min(255) as u8), idx_idx))
+                    Some((
+                        Color::Palette(params.params[idx_idx].min(255) as u8),
+                        idx_idx,
+                    ))
                 } else {
                     None
                 }

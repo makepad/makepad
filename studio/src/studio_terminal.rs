@@ -1,6 +1,7 @@
 use crate::makepad_code_editor::draw_selection::DrawSelection;
 use crate::makepad_widgets::*;
 use makepad_terminal_core::{Color, CursorShape, Pty, StyleFlags, TermKeyCode, Terminal};
+use std::collections::VecDeque;
 use std::io;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ script_mod! {
 
     set_type_default() do #(DrawTerminalCellBg::script_shader(vm)) {
         ..mod.draw.DrawQuad
+        draw_call_group: @cell_bg
         color: #x3a3d41
         pixel: fn() {
             return vec4(self.color.rgb * self.color.a, self.color.a)
@@ -202,9 +204,15 @@ pub struct StudioTerminal {
     #[rust]
     enter_coalesce_pending_redraw: bool,
     #[rust]
+    enter_prompt_cursor_x: Option<usize>,
+    #[rust]
     enter_submit_cursor_x: Option<usize>,
     #[rust]
     enter_submit_virtual_row: Option<usize>,
+    #[rust]
+    enter_submit_pending: usize,
+    #[rust]
+    pty_input_backlog: VecDeque<u8>,
     #[rust]
     last_output_at: Option<Instant>,
     #[rust]
@@ -243,7 +251,7 @@ impl StudioTerminal {
     const STREAMING_START_TICKS: u8 = 2;
     const STREAMING_START_CHUNKS: usize = 2;
     const STREAMING_START_BYTES: usize = 1024;
-    const ENTER_COALESCE_DELAY: Duration = Duration::from_millis(80);
+    const ENTER_COALESCE_DELAY: Duration = Duration::from_millis(24);
 
     fn scale_channel(v: u8, factor: f64) -> u8 {
         ((v as f64 * factor).round()).clamp(0.0, 255.0) as u8
@@ -365,12 +373,27 @@ impl StudioTerminal {
         }
     }
 
+    fn enter_waiting_for_local_prompt(&self, now: Instant) -> bool {
+        self.enter_coalesce_deadline.is_some()
+            && self.enter_submit_pending > 0
+            && self
+                .last_input_at
+                .map(|last_input| now.duration_since(last_input) <= Self::LOCAL_ECHO_GRACE)
+                .unwrap_or(false)
+    }
+
     fn update_enter_coalesce_state(&mut self, cx: &mut Cx) {
         if let Some(deadline) = self.enter_coalesce_deadline {
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
+                if self.enter_waiting_for_local_prompt(now) {
+                    self.enter_coalesce_deadline = Some(now + Self::ENTER_COALESCE_DELAY);
+                    return;
+                }
                 self.enter_coalesce_deadline = None;
                 self.enter_submit_cursor_x = None;
                 self.enter_submit_virtual_row = None;
+                self.enter_submit_pending = 0;
                 if self.enter_coalesce_pending_redraw {
                     self.enter_coalesce_pending_redraw = false;
                     if self.pending_scroll_clamp {
@@ -387,10 +410,11 @@ impl StudioTerminal {
         }
     }
 
-    fn note_return_submit(&mut self) {
+    fn start_enter_coalesce_cycle(&mut self) {
         if let Some(terminal) = &self.terminal {
             let screen = terminal.screen();
-            self.enter_submit_cursor_x = Some(screen.cursor.x);
+            let target_x = self.enter_prompt_cursor_x.unwrap_or(screen.cursor.x);
+            self.enter_submit_cursor_x = Some(target_x);
             self.enter_submit_virtual_row = Some(screen.scrollback_len() + screen.cursor.y);
         } else {
             self.enter_submit_cursor_x = None;
@@ -400,6 +424,15 @@ impl StudioTerminal {
         self.enter_coalesce_pending_redraw = false;
     }
 
+    fn note_return_submit(&mut self) {
+        self.enter_submit_pending = self.enter_submit_pending.saturating_add(1);
+        if self.enter_coalesce_deadline.is_none() {
+            self.start_enter_coalesce_cycle();
+        } else {
+            self.enter_coalesce_deadline = Some(Instant::now() + Self::ENTER_COALESCE_DELAY);
+        }
+    }
+
     fn note_local_input(&mut self, cx: &mut Cx) {
         self.last_input_at = Some(Instant::now());
         self.pending_streaming_ticks = 0;
@@ -407,6 +440,25 @@ impl StudioTerminal {
         self.enter_coalesce_pending_redraw = false;
         self.enter_submit_cursor_x = None;
         self.enter_submit_virtual_row = None;
+        self.enter_submit_pending = 0;
+        self.clear_selection();
+        let mut redraw = false;
+        if self.output_streaming {
+            self.output_streaming = false;
+            redraw = true;
+        }
+        if !self.cursor_blink_on {
+            self.cursor_blink_on = true;
+            redraw = true;
+        }
+        if redraw {
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn note_local_input_preserve_enter_coalesce(&mut self, cx: &mut Cx) {
+        self.last_input_at = Some(Instant::now());
+        self.pending_streaming_ticks = 0;
         self.clear_selection();
         let mut redraw = false;
         if self.output_streaming {
@@ -503,6 +555,8 @@ impl StudioTerminal {
         } else {
             true
         };
+        let poll_started_at = Instant::now();
+        let strict_enter_coalesce = self.enter_waiting_for_local_prompt(poll_started_at);
 
         let Some(pty) = &self.pty else { return };
         const MAX_CHUNKS_PER_TICK: usize = 256;
@@ -513,29 +567,83 @@ impl StudioTerminal {
         let mut total_bytes = 0usize;
         let mut chunks = 0usize;
         let mut only_crlf_output = true;
+        let mut prompt_line_settled_in_parse = false;
         let cursor_x: usize;
         let cursor_virtual_row: usize;
         let synchronized_update;
+        let submit_cursor_x = self.enter_submit_cursor_x;
+        let submit_virtual_row = self.enter_submit_virtual_row;
+        let mut pty_input_backlog = std::mem::take(&mut self.pty_input_backlog);
         let (old_scrollback_len, new_scrollback_len) = {
             let Some(terminal) = &mut self.terminal else {
                 return;
             };
             let old_scrollback = terminal.screen().scrollback_len();
             while chunks < MAX_CHUNKS_PER_TICK && total_bytes < MAX_BYTES_PER_TICK {
-                let Some(data) = pty.try_read() else {
-                    break;
-                };
-                if !data.iter().all(|b| *b == b'\r' || *b == b'\n') {
-                    only_crlf_output = false;
+                if pty_input_backlog.is_empty() {
+                    let Some(data) = pty.try_read() else {
+                        break;
+                    };
+                    pty_input_backlog.extend(data);
+                    chunks += 1;
                 }
-                total_bytes += data.len();
-                terminal.process_bytes(&data);
-                let outbound = terminal.take_outbound();
-                if !outbound.is_empty() {
-                    let _ = pty.write(&outbound);
+
+                if strict_enter_coalesce {
+                    let Some(byte) = pty_input_backlog.pop_front() else {
+                        continue;
+                    };
+                    if byte != b'\r' && byte != b'\n' {
+                        only_crlf_output = false;
+                    }
+                    total_bytes += 1;
+                    terminal.process_bytes(&[byte]);
+                    let outbound = terminal.take_outbound();
+                    if !outbound.is_empty() {
+                        let _ = pty.write(&outbound);
+                    }
+                    got_data = true;
+
+                    if let (Some(submit_row), Some(submit_x)) =
+                        (submit_virtual_row, submit_cursor_x)
+                    {
+                        let screen = terminal.screen();
+                        let current_virtual_row = screen.scrollback_len() + screen.cursor.y;
+                        let line_delta = current_virtual_row.saturating_sub(submit_row);
+                        let prompt_line_settled = line_delta >= 1 && screen.cursor.x == submit_x;
+                        if prompt_line_settled {
+                            prompt_line_settled_in_parse = true;
+                            break;
+                        }
+                    }
+                } else {
+                    let remaining = MAX_BYTES_PER_TICK.saturating_sub(total_bytes);
+                    if remaining == 0 {
+                        break;
+                    }
+                    let take = pty_input_backlog.len().min(4096).min(remaining);
+                    if take == 0 {
+                        continue;
+                    }
+                    let mut data = Vec::with_capacity(take);
+                    for _ in 0..take {
+                        if let Some(byte) = pty_input_backlog.pop_front() {
+                            data.push(byte);
+                        }
+                    }
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if !data.iter().all(|b| *b == b'\r' || *b == b'\n') {
+                        only_crlf_output = false;
+                    }
+                    total_bytes += data.len();
+                    terminal.process_bytes(&data);
+                    let outbound = terminal.take_outbound();
+                    if !outbound.is_empty() {
+                        let _ = pty.write(&outbound);
+                    }
+                    got_data = true;
                 }
-                got_data = true;
-                chunks += 1;
             }
             let new_scrollback = terminal.screen().scrollback_len();
             if got_data {
@@ -547,6 +655,7 @@ impl StudioTerminal {
             synchronized_update = terminal.modes.synchronized_update;
             (old_scrollback, new_scrollback)
         };
+        self.pty_input_backlog = pty_input_backlog;
 
         // Adjust selection virtual row indices when scrollback grows/shrinks
         if scrollback_changed {
@@ -604,35 +713,56 @@ impl StudioTerminal {
             }
 
             if let Some(deadline) = self.enter_coalesce_deadline {
-                let non_prompt_like_output = if let (Some(submit_row), Some(submit_x)) =
-                    (self.enter_submit_virtual_row, self.enter_submit_cursor_x)
-                {
-                    let line_delta = cursor_virtual_row.saturating_sub(submit_row);
-                    line_delta > 1 || cursor_x > submit_x
-                } else {
-                    false
-                };
+                let (moved_past_prompt_x, prompt_line_settled) =
+                    if let (Some(submit_row), Some(submit_x)) =
+                        (self.enter_submit_virtual_row, self.enter_submit_cursor_x)
+                    {
+                        let line_delta = cursor_virtual_row.saturating_sub(submit_row);
+                        let prompt_settled = prompt_line_settled_in_parse
+                            || (line_delta >= 1 && cursor_x == submit_x);
+                        (line_delta > 1 || cursor_x > submit_x, prompt_settled)
+                    } else {
+                        (false, false)
+                    };
 
-                if non_prompt_like_output {
+                if is_likely_local_echo && prompt_line_settled {
+                    // End this cycle immediately once one prompt line settles.
                     self.enter_coalesce_deadline = None;
                     self.enter_coalesce_pending_redraw = false;
-                    self.enter_submit_cursor_x = None;
-                    self.enter_submit_virtual_row = None;
+                    self.enter_prompt_cursor_x = Some(cursor_x);
+                    if self.enter_submit_pending > 0 {
+                        self.enter_submit_pending -= 1;
+                    }
+                    if self.enter_submit_pending > 0 {
+                        // Key-repeat submitted more Enter presses: arm next cycle now.
+                        self.enter_submit_cursor_x = self.enter_prompt_cursor_x;
+                        self.enter_submit_virtual_row = Some(cursor_virtual_row);
+                        self.enter_coalesce_deadline = Some(now + Self::ENTER_COALESCE_DELAY);
+                    } else {
+                        self.enter_submit_cursor_x = None;
+                        self.enter_submit_virtual_row = None;
+                    }
                 } else if is_likely_local_echo {
-                    self.enter_coalesce_pending_redraw = true;
-                    suppress_redraw = true;
+                    if moved_past_prompt_x {
+                        self.enter_coalesce_deadline = None;
+                        self.enter_coalesce_pending_redraw = false;
+                        self.enter_submit_cursor_x = None;
+                        self.enter_submit_virtual_row = None;
+                        self.enter_submit_pending = 0;
+                    } else {
+                        self.enter_coalesce_pending_redraw = true;
+                        self.enter_coalesce_deadline = Some(now + Self::ENTER_COALESCE_DELAY);
+                        suppress_redraw = true;
+                    }
                 } else if now < deadline && only_crlf_output {
                     self.enter_coalesce_pending_redraw = true;
                     suppress_redraw = true;
-                } else if now < deadline {
+                } else {
                     self.enter_coalesce_deadline = None;
                     self.enter_coalesce_pending_redraw = false;
                     self.enter_submit_cursor_x = None;
                     self.enter_submit_virtual_row = None;
-                } else {
-                    self.enter_coalesce_deadline = None;
-                    self.enter_submit_cursor_x = None;
-                    self.enter_submit_virtual_row = None;
+                    self.enter_submit_pending = 0;
                 }
             }
 
@@ -648,25 +778,39 @@ impl StudioTerminal {
                     }
                 }
             }
+            if !suppress_redraw && self.pending_scroll_clamp {
+                if self.follow_output {
+                    self.stick_to_bottom(cx);
+                } else {
+                    self.clamp_scroll_position(cx);
+                }
+                self.pending_scroll_clamp = false;
+            }
             if !suppress_redraw {
                 self.draw_bg.redraw(cx);
             }
         } else {
             self.pending_streaming_ticks = 0;
             if self.enter_coalesce_deadline.is_some() && self.enter_coalesce_pending_redraw {
-                self.enter_coalesce_deadline = None;
-                self.enter_coalesce_pending_redraw = false;
-                self.enter_submit_cursor_x = None;
-                self.enter_submit_virtual_row = None;
-                if self.pending_scroll_clamp {
-                    if self.follow_output {
-                        self.stick_to_bottom(cx);
-                    } else {
-                        self.clamp_scroll_position(cx);
+                let now = Instant::now();
+                if self.enter_waiting_for_local_prompt(now) {
+                    self.enter_coalesce_deadline = Some(now + Self::ENTER_COALESCE_DELAY);
+                } else {
+                    self.enter_coalesce_deadline = None;
+                    self.enter_coalesce_pending_redraw = false;
+                    self.enter_submit_cursor_x = None;
+                    self.enter_submit_virtual_row = None;
+                    self.enter_submit_pending = 0;
+                    if self.pending_scroll_clamp {
+                        if self.follow_output {
+                            self.stick_to_bottom(cx);
+                        } else {
+                            self.clamp_scroll_position(cx);
+                        }
+                        self.pending_scroll_clamp = false;
                     }
-                    self.pending_scroll_clamp = false;
+                    self.draw_bg.redraw(cx);
                 }
-                self.draw_bg.redraw(cx);
             }
         }
     }
@@ -848,7 +992,7 @@ impl StudioTerminal {
             (flags, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b)
         };
 
-        // Predefine terminal layer order (like code_editor):
+        // Predefine draw layer order so interleaved draws land in the right z-order:
         // cell-backgrounds -> selection -> cursor -> text -> decorations.
         self.draw_cell_bg.new_draw_call(cx);
         self.draw_selection.new_draw_call(cx);
@@ -903,7 +1047,7 @@ impl StudioTerminal {
         let has_focus = cx.has_key_focus(self.scroll_bars.area());
         self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
 
-        // Cursor is emitted to its own predefined layer so it remains behind text.
+        // Cursor
         if terminal.modes.cursor_visible && !self.output_streaming {
             let cursor = &screen.cursor;
             let cursor_virtual_y = screen.scrollback_len() + cursor.y;
@@ -940,8 +1084,7 @@ impl StudioTerminal {
             }
         }
 
-        // Draw one extra row to handle partial-row viewport offsets near edges.
-        // We emit interleaved while iterating cells; each draw appends to its predefined layer.
+        // Draw cells — interleaved bg/text/decor appends to predefined layers.
         let total_draw_rows = rows.saturating_add(1);
         for row in 0..total_draw_rows {
             let virtual_row = top_row + row;
@@ -970,8 +1113,7 @@ impl StudioTerminal {
 
                 let blink_hidden = flags.has(StyleFlags::BLINK) && !self.cursor_blink_on;
                 let ch = cell.codepoint;
-                if ch == ' ' || ch == '\0' || blink_hidden || flags.has(StyleFlags::INVISIBLE) {
-                } else {
+                if ch != ' ' && ch != '\0' && !blink_hidden && !flags.has(StyleFlags::INVISIBLE) {
                     let mut s = [0u8; 4];
                     let text = ch.encode_utf8(&mut s);
                     self.draw_text.color = vec4(
@@ -1225,9 +1367,12 @@ impl Widget for StudioTerminal {
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyDown(e) => {
-                self.note_local_input(cx);
-                if matches!(e.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter) {
+                let is_enter = matches!(e.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter);
+                if is_enter {
+                    self.note_local_input_preserve_enter_coalesce(cx);
                     self.note_return_submit();
+                } else {
+                    self.note_local_input(cx);
                 }
                 match e.key_code {
                     KeyCode::ReturnKey
