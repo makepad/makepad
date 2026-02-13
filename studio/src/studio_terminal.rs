@@ -27,8 +27,26 @@ script_mod! {
     set_type_default() do #(DrawTerminalCursor::script_shader(vm)) {
         ..mod.draw.DrawQuad
         color: #f007
+        color_unfocused: #f007
+        focus: 0.0
+        border_width: 1.0
         pixel: fn() {
-            return vec4(self.color.rgb * self.color.a, self.color.a)
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            let inset = self.border_width * 0.5
+            let color = self.color_unfocused.mix(self.color, self.focus)
+            sdf.box(
+                inset
+                inset
+                self.rect_size.x - self.border_width
+                self.rect_size.y - self.border_width
+                0.5
+            )
+            if self.focus > 0.5 {
+                sdf.fill(color)
+            } else {
+                sdf.stroke(color, self.border_width)
+            }
+            return sdf.result
         }
     }
 
@@ -93,6 +111,12 @@ struct DrawTerminalCursor {
     draw_super: DrawQuad,
     #[live]
     color: Vec4f,
+    #[live]
+    color_unfocused: Vec4f,
+    #[live]
+    focus: f32,
+    #[live(1.0)]
+    border_width: f32,
 }
 
 #[derive(Script, Widget)]
@@ -568,8 +592,14 @@ impl StudioTerminal {
         self.draw_text.new_draw_call(cx);
         self.draw_decor.new_draw_call(cx);
 
+        self.draw_cursor.focus = if cx.has_key_focus(self.scroll_bars.area()) {
+            1.0
+        } else {
+            0.0
+        };
+
         // Cursor is emitted to its own predefined layer so it remains behind text.
-        if terminal.modes.cursor_visible && self.cursor_blink_on && !self.output_streaming {
+        if terminal.modes.cursor_visible && !self.output_streaming {
             let cursor = &screen.cursor;
             let cursor_virtual_y = screen.scrollback_len() + cursor.y;
             let cursor_content_y = cursor_virtual_y as f64 * cell_height;
@@ -816,6 +846,9 @@ impl Widget for StudioTerminal {
             Hit::FingerDown(_) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 self.cursor_blink_on = true;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyFocus(_) | Hit::KeyFocusLost(_) => {
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyDown(e) => {
