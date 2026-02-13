@@ -8,6 +8,8 @@ use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 pub struct ChildProcess {
     pub child: Child,
@@ -56,6 +58,7 @@ impl ChildProcess {
                 cmd_build.env(key, value);
             }
 
+            prepare_child_process_stdio_isolation(&mut cmd_build);
             let child = cmd_build.spawn()?;
             drop(aux_chan_client_endpoint_inheritable);
             (child, Some(aux_chan_host_endpoint))
@@ -71,6 +74,7 @@ impl ChildProcess {
             for (key, value) in env {
                 cmd_build.env(key, value);
             }
+            prepare_child_process_stdio_isolation(&mut cmd_build);
             (cmd_build.spawn()?, None)
         };
 
@@ -161,5 +165,34 @@ impl ChildProcess {
         let _ = self.stdin_sender.send(ChildStdIn::Term);
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_child_process_stdio_isolation(cmd: &mut Command) {
+    // Make stdin-loop child processes deterministic by dropping all inherited
+    // non-stdio file descriptors (including any leaked PTY-related fds).
+    unsafe {
+        cmd.pre_exec(|| {
+            let max_fd = libc_ffi::getdtablesize();
+            if max_fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for fd in 3..max_fd {
+                let _ = libc_ffi::close(fd);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prepare_child_process_stdio_isolation(_cmd: &mut Command) {}
+
+#[cfg(target_os = "macos")]
+mod libc_ffi {
+    extern "C" {
+        pub fn getdtablesize() -> i32;
+        pub fn close(fd: i32) -> i32;
     }
 }
