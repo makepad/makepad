@@ -205,6 +205,13 @@ script_mod! {
         }
     }
 
+    let TerminalTab = IconTab{
+        draw_icon +: {
+            color: STUDIO_PALETTE_2
+            svg: crate_resource("self://resources/icons/icon_log.svg")
+        }
+    }
+
     let SearchTab = IconTab{
         draw_icon +: {
             color: STUDIO_PALETTE_3
@@ -374,6 +381,8 @@ script_mod! {
         flow: Flow.Down
     }
 
+    let TerminalContent = StudioTerminal{}
+
     mod.widgets.AppUI = Window{
         margin: 5.
         caption_bar +: {
@@ -452,6 +461,7 @@ script_mod! {
                     LogTab := LogTab{}
                     ProfilerTab := ProfilerTab{}
                     SearchTab := SearchTab{}
+                    TerminalTab := TerminalTab{}
                 }
 
                 root := DockSplitter{
@@ -477,8 +487,8 @@ script_mod! {
                 }
 
                 log_tabs := DockTabs{
-                    tabs: [@log_list_tab]
-                    selected: 0
+                    tabs: [@log_list_tab @terminal_tab]
+                    selected: 1
                 }
 
                 file_tree_tab := DockTab{
@@ -526,6 +536,11 @@ script_mod! {
                     template: @OutlineFirstTab
                     kind: @OutlineFirst                }
 
+                terminal_tab := DockTab{
+                    name: "Terminal"
+                    template: @TerminalTab
+                    kind: @Terminal                }
+
                 run_list_tab := DockTab{
                     name: "Run"
                     template: @RunListTab
@@ -556,6 +571,7 @@ script_mod! {
                 StudioFileTree := StudioFileTreeContent{}
                 LogList := LogListContent{}
                 Profiler := ProfilerContent{}
+                Terminal := TerminalContent{}
             }
         }
     }
