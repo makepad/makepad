@@ -208,7 +208,7 @@ script_mod! {
     let TerminalTab = IconTab{
         draw_icon +: {
             color: STUDIO_PALETTE_2
-            svg: crate_resource("self://resources/icons/icon_log.svg")
+            svg: crate_resource("self://resources/icons/icon_terminal.svg")
         }
     }
 
