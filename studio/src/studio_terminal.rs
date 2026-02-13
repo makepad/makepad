@@ -123,6 +123,52 @@ struct DrawTerminalCursor {
     border_width: f32,
 }
 
+struct EnterCoalesce {
+    /// Cursor X at the moment Enter was pressed. We scan the raw backlog
+    /// for a newline followed by >= this many printable chars.
+    target_x: usize,
+    /// Soft deadline — after this we may flush unless that would reveal a
+    /// just-scrolled blank line.
+    deadline: Instant,
+    /// Hard deadline — always flush by this time.
+    hard_deadline: Instant,
+}
+
+/// While the terminal cursor hasn't settled to the prompt position after
+/// Enter, we keep drawing the cursor at the saved (pre-Enter) position
+/// to avoid a visible jump.
+struct CursorHold {
+    /// The virtual row (scrollback_len + cursor.y) where the cursor was.
+    virtual_row: usize,
+    /// Original virtual row at Enter; used for release checks even when
+    /// `virtual_row` is adjusted to keep the held cursor visually anchored
+    /// during scrollback growth.
+    release_virtual_row: usize,
+    /// The column where the cursor was.
+    col: usize,
+    /// We expect the cursor to reach at least this X on a row AFTER `virtual_row`.
+    target_x: usize,
+    /// Safety deadline — don't hold forever.
+    deadline: Instant,
+}
+
+struct EnterPromptScan {
+    settled: bool,
+    saw_newline: bool,
+    saw_visible_after_newline: bool,
+}
+
+#[derive(Clone, Copy)]
+enum EnterScanState {
+    Ground,
+    Esc,
+    Csi,
+    Osc,
+    OscEsc,
+    String,
+    StringEsc,
+}
+
 #[derive(Script, Widget)]
 pub struct StudioTerminal {
     #[uid]
@@ -199,24 +245,17 @@ pub struct StudioTerminal {
     pending_streaming_ticks: u8,
     #[rust]
     pending_sync_redraw: bool,
+    /// When set, we're coalescing: buffer PTY data byte-by-byte into the
+    /// terminal, but don't redraw until cursor.x >= this value on a new
+    /// line, or the deadline expires.
     #[rust]
-    enter_coalesce_deadline: Option<Instant>,
+    enter_coalesce: Option<EnterCoalesce>,
     #[rust]
-    enter_coalesce_pending_redraw: bool,
-    #[rust]
-    enter_prompt_cursor_x: Option<usize>,
-    #[rust]
-    enter_submit_cursor_x: Option<usize>,
-    #[rust]
-    enter_submit_virtual_row: Option<usize>,
-    #[rust]
-    enter_submit_pending: usize,
+    cursor_hold: Option<CursorHold>,
     #[rust]
     pty_input_backlog: VecDeque<u8>,
     #[rust]
     last_output_at: Option<Instant>,
-    #[rust]
-    last_input_at: Option<Instant>,
     #[rust]
     cell_width: f64,
     #[rust]
@@ -247,11 +286,14 @@ impl ScriptHook for StudioTerminal {
 
 impl StudioTerminal {
     const OUTPUT_QUIET_DELAY: Duration = Duration::from_millis(120);
-    const LOCAL_ECHO_GRACE: Duration = Duration::from_millis(80);
     const STREAMING_START_TICKS: u8 = 2;
-    const STREAMING_START_CHUNKS: usize = 2;
     const STREAMING_START_BYTES: usize = 1024;
-    const ENTER_COALESCE_DELAY: Duration = Duration::from_millis(24);
+    /// Maximum time to wait for prompt to settle after Enter before flushing redraw.
+    const ENTER_COALESCE_TIMEOUT: Duration = Duration::from_millis(30);
+    /// Maximum time to hold the cursor at the saved position after Enter.
+    /// Slightly longer than coalesce timeout to cover the frame(s) where
+    /// partial data is being processed.
+    const CURSOR_HOLD_TIMEOUT: Duration = Duration::from_millis(150);
 
     fn scale_channel(v: u8, factor: f64) -> u8 {
         ((v as f64 * factor).round()).clamp(0.0, 255.0) as u8
@@ -373,92 +415,165 @@ impl StudioTerminal {
         }
     }
 
-    fn enter_waiting_for_local_prompt(&self, now: Instant) -> bool {
-        self.enter_coalesce_deadline.is_some()
-            && self.enter_submit_pending > 0
-            && self
-                .last_input_at
-                .map(|last_input| now.duration_since(last_input) <= Self::LOCAL_ECHO_GRACE)
-                .unwrap_or(false)
+    fn scan_enter_prompt_settle(&self, target_x: usize) -> EnterPromptScan {
+        let mut chars_after_newline = 0usize;
+        let mut saw_newline = false;
+        let mut saw_visible_after_newline = false;
+        let mut state = EnterScanState::Ground;
+
+        for &byte in self.pty_input_backlog.iter() {
+            match state {
+                EnterScanState::Ground => match byte {
+                    b'\n' | b'\r' => {
+                        saw_newline = true;
+                        chars_after_newline = 0;
+                    }
+                    0x1b => {
+                        state = EnterScanState::Esc;
+                    }
+                    _ => {
+                        if saw_newline && byte >= 0x20 && byte != 0x7f {
+                            saw_visible_after_newline = true;
+                            chars_after_newline += 1;
+                            if chars_after_newline >= target_x {
+                                return EnterPromptScan {
+                                    settled: true,
+                                    saw_newline,
+                                    saw_visible_after_newline,
+                                };
+                            }
+                        }
+                    }
+                },
+                EnterScanState::Esc => {
+                    state = match byte {
+                        b'[' => EnterScanState::Csi,
+                        b']' => EnterScanState::Osc,
+                        b'P' | b'X' | b'^' | b'_' => EnterScanState::String,
+                        _ => EnterScanState::Ground,
+                    };
+                }
+                EnterScanState::Csi => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        state = EnterScanState::Ground;
+                    }
+                }
+                EnterScanState::Osc => {
+                    if byte == 0x07 {
+                        state = EnterScanState::Ground;
+                    } else if byte == 0x1b {
+                        state = EnterScanState::OscEsc;
+                    }
+                }
+                EnterScanState::OscEsc => {
+                    if byte == b'\\' {
+                        state = EnterScanState::Ground;
+                    } else {
+                        state = EnterScanState::Osc;
+                    }
+                }
+                EnterScanState::String => {
+                    if byte == 0x1b {
+                        state = EnterScanState::StringEsc;
+                    }
+                }
+                EnterScanState::StringEsc => {
+                    if byte == b'\\' {
+                        state = EnterScanState::Ground;
+                    } else {
+                        state = EnterScanState::String;
+                    }
+                }
+            }
+        }
+
+        EnterPromptScan {
+            settled: false,
+            saw_newline,
+            saw_visible_after_newline,
+        }
     }
 
     fn update_enter_coalesce_state(&mut self, cx: &mut Cx) {
-        if let Some(deadline) = self.enter_coalesce_deadline {
-            let now = Instant::now();
-            if now >= deadline {
-                if self.enter_waiting_for_local_prompt(now) {
-                    self.enter_coalesce_deadline = Some(now + Self::ENTER_COALESCE_DELAY);
-                    return;
+        if let Some(ref coal) = self.enter_coalesce {
+            if Instant::now() >= coal.hard_deadline {
+                self.enter_coalesce = None;
+            }
+        }
+        self.update_cursor_hold_state(cx);
+    }
+
+    fn update_cursor_hold_state(&mut self, cx: &mut Cx) {
+        let Some(hold) = self.cursor_hold.as_ref() else {
+            return;
+        };
+
+        let mut release = Instant::now() >= hold.deadline;
+        if !release {
+            if let Some(terminal) = &self.terminal {
+                let screen = terminal.screen();
+                let cur_virtual_row = screen.scrollback_len() + screen.cursor.y;
+                if cur_virtual_row > hold.release_virtual_row && screen.cursor.x >= hold.target_x {
+                    release = true;
                 }
-                self.enter_coalesce_deadline = None;
-                self.enter_submit_cursor_x = None;
-                self.enter_submit_virtual_row = None;
-                self.enter_submit_pending = 0;
-                if self.enter_coalesce_pending_redraw {
-                    self.enter_coalesce_pending_redraw = false;
-                    if self.pending_scroll_clamp {
-                        if self.follow_output {
-                            self.stick_to_bottom(cx);
-                        } else {
-                            self.clamp_scroll_position(cx);
-                        }
-                        self.pending_scroll_clamp = false;
-                    }
-                    self.draw_bg.redraw(cx);
+            }
+        }
+
+        if release {
+            self.cursor_hold = None;
+            if self.pending_scroll_clamp {
+                if self.follow_output {
+                    self.stick_to_bottom(cx);
+                } else {
+                    self.clamp_scroll_position(cx);
+                }
+                self.pending_scroll_clamp = false;
+            }
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    /// Called when the user presses Enter.
+    fn note_enter_pressed(&mut self) {
+        if let Some(terminal) = &self.terminal {
+            let screen = terminal.screen();
+            let cursor_x = screen.cursor.x;
+            // For coalescing we just need to see *some* content on the new
+            // line (the prompt). Using 1 avoids the problem where a long
+            // command like "ls -al" sets target_x too high for the short
+            // prompt to reach.
+            let target_x = 1;
+            let now = Instant::now();
+            self.enter_coalesce = Some(EnterCoalesce {
+                target_x,
+                deadline: now + Self::ENTER_COALESCE_TIMEOUT,
+                hard_deadline: now + Self::CURSOR_HOLD_TIMEOUT,
+            });
+            // Only set cursor hold if there isn't one already (rapid Enter
+            // should keep the original saved position, not overwrite with
+            // an intermediate cursor position).
+            if self.cursor_hold.is_none() {
+                let virtual_row = screen.scrollback_len() + screen.cursor.y;
+                self.cursor_hold = Some(CursorHold {
+                    virtual_row,
+                    release_virtual_row: virtual_row,
+                    col: cursor_x,
+                    target_x,
+                    deadline: Instant::now() + Self::CURSOR_HOLD_TIMEOUT,
+                });
+            } else {
+                // Extend the existing hold's deadline
+                if let Some(ref mut hold) = self.cursor_hold {
+                    hold.deadline = Instant::now() + Self::CURSOR_HOLD_TIMEOUT;
                 }
             }
         }
     }
 
-    fn start_enter_coalesce_cycle(&mut self) {
-        if let Some(terminal) = &self.terminal {
-            let screen = terminal.screen();
-            let target_x = self.enter_prompt_cursor_x.unwrap_or(screen.cursor.x);
-            self.enter_submit_cursor_x = Some(target_x);
-            self.enter_submit_virtual_row = Some(screen.scrollback_len() + screen.cursor.y);
-        } else {
-            self.enter_submit_cursor_x = None;
-            self.enter_submit_virtual_row = None;
-        }
-        self.enter_coalesce_deadline = Some(Instant::now() + Self::ENTER_COALESCE_DELAY);
-        self.enter_coalesce_pending_redraw = false;
-    }
-
-    fn note_return_submit(&mut self) {
-        self.enter_submit_pending = self.enter_submit_pending.saturating_add(1);
-        if self.enter_coalesce_deadline.is_none() {
-            self.start_enter_coalesce_cycle();
-        } else {
-            self.enter_coalesce_deadline = Some(Instant::now() + Self::ENTER_COALESCE_DELAY);
-        }
-    }
-
     fn note_local_input(&mut self, cx: &mut Cx) {
-        self.last_input_at = Some(Instant::now());
         self.pending_streaming_ticks = 0;
-        self.enter_coalesce_deadline = None;
-        self.enter_coalesce_pending_redraw = false;
-        self.enter_submit_cursor_x = None;
-        self.enter_submit_virtual_row = None;
-        self.enter_submit_pending = 0;
-        self.clear_selection();
-        let mut redraw = false;
-        if self.output_streaming {
-            self.output_streaming = false;
-            redraw = true;
-        }
-        if !self.cursor_blink_on {
-            self.cursor_blink_on = true;
-            redraw = true;
-        }
-        if redraw {
-            self.draw_bg.redraw(cx);
-        }
-    }
-
-    fn note_local_input_preserve_enter_coalesce(&mut self, cx: &mut Cx) {
-        self.last_input_at = Some(Instant::now());
-        self.pending_streaming_ticks = 0;
+        self.enter_coalesce = None;
+        self.cursor_hold = None;
         self.clear_selection();
         let mut redraw = false;
         if self.output_streaming {
@@ -555,111 +670,91 @@ impl StudioTerminal {
         } else {
             true
         };
-        let poll_started_at = Instant::now();
-        let strict_enter_coalesce = self.enter_waiting_for_local_prompt(poll_started_at);
 
         let Some(pty) = &self.pty else { return };
-        const MAX_CHUNKS_PER_TICK: usize = 256;
         const MAX_BYTES_PER_TICK: usize = 1 << 20;
 
-        let mut got_data = false;
-        let mut scrollback_changed = false;
-        let mut total_bytes = 0usize;
-        let mut chunks = 0usize;
-        let mut only_crlf_output = true;
-        let mut prompt_line_settled_in_parse = false;
-        let cursor_x: usize;
-        let cursor_virtual_row: usize;
-        let synchronized_update;
-        let submit_cursor_x = self.enter_submit_cursor_x;
-        let submit_virtual_row = self.enter_submit_virtual_row;
-        let mut pty_input_backlog = std::mem::take(&mut self.pty_input_backlog);
-        let (old_scrollback_len, new_scrollback_len) = {
+        // Read all available PTY data into the backlog
+        let mut fresh_bytes = 0usize;
+        loop {
+            let Some(data) = pty.try_read() else { break };
+            fresh_bytes += data.len();
+            self.pty_input_backlog.extend(data);
+            if fresh_bytes >= MAX_BYTES_PER_TICK {
+                break;
+            }
+        }
+        if fresh_bytes > 0 {
+            self.last_output_at = Some(Instant::now());
+        }
+
+        if self.pty_input_backlog.is_empty() {
+            self.pending_streaming_ticks = 0;
+            self.update_cursor_hold_state(cx);
+            return;
+        }
+
+        // During coalescing: DON'T process bytes into the terminal.
+        // Just scan the raw backlog to detect if the next prompt has
+        // arrived (a newline followed by >= target_x visible chars).
+        // This keeps the terminal screen buffer frozen so any redraws
+        // from parent widgets show the clean pre-Enter frame.
+        if let Some(ref coal) = self.enter_coalesce {
+            let scan = self.scan_enter_prompt_settle(coal.target_x);
+            if !scan.settled {
+                let now = Instant::now();
+                if now < coal.deadline {
+                    // Not settled yet — keep buffering, don't process.
+                    return;
+                }
+                if scan.saw_newline
+                    && !scan.saw_visible_after_newline
+                    && now < coal.hard_deadline
+                {
+                    // We've already advanced to a new line, but there is still
+                    // no visible content for it. Keep coalescing so we don't
+                    // briefly reveal an empty scrolled line.
+                    return;
+                }
+            }
+            self.enter_coalesce = None;
+        }
+
+        // Process all backlog bytes through the terminal emulator.
+        let (total_bytes, old_scrollback, new_scrollback, synchronized_update) = {
             let Some(terminal) = &mut self.terminal else {
                 return;
             };
-            let old_scrollback = terminal.screen().scrollback_len();
-            while chunks < MAX_CHUNKS_PER_TICK && total_bytes < MAX_BYTES_PER_TICK {
-                if pty_input_backlog.is_empty() {
-                    let Some(data) = pty.try_read() else {
-                        break;
-                    };
-                    pty_input_backlog.extend(data);
-                    chunks += 1;
+            let old_sb = terminal.screen().scrollback_len();
+            let mut total = 0usize;
+            while !self.pty_input_backlog.is_empty() {
+                let take = self.pty_input_backlog.len().min(4096);
+                let mut data = Vec::with_capacity(take);
+                for _ in 0..take {
+                    if let Some(b) = self.pty_input_backlog.pop_front() {
+                        data.push(b);
+                    }
                 }
-
-                if strict_enter_coalesce {
-                    let Some(byte) = pty_input_backlog.pop_front() else {
-                        continue;
-                    };
-                    if byte != b'\r' && byte != b'\n' {
-                        only_crlf_output = false;
-                    }
-                    total_bytes += 1;
-                    terminal.process_bytes(&[byte]);
-                    let outbound = terminal.take_outbound();
-                    if !outbound.is_empty() {
-                        let _ = pty.write(&outbound);
-                    }
-                    got_data = true;
-
-                    if let (Some(submit_row), Some(submit_x)) =
-                        (submit_virtual_row, submit_cursor_x)
-                    {
-                        let screen = terminal.screen();
-                        let current_virtual_row = screen.scrollback_len() + screen.cursor.y;
-                        let line_delta = current_virtual_row.saturating_sub(submit_row);
-                        let prompt_line_settled = line_delta >= 1 && screen.cursor.x == submit_x;
-                        if prompt_line_settled {
-                            prompt_line_settled_in_parse = true;
-                            break;
-                        }
-                    }
-                } else {
-                    let remaining = MAX_BYTES_PER_TICK.saturating_sub(total_bytes);
-                    if remaining == 0 {
-                        break;
-                    }
-                    let take = pty_input_backlog.len().min(4096).min(remaining);
-                    if take == 0 {
-                        continue;
-                    }
-                    let mut data = Vec::with_capacity(take);
-                    for _ in 0..take {
-                        if let Some(byte) = pty_input_backlog.pop_front() {
-                            data.push(byte);
-                        }
-                    }
-                    if data.is_empty() {
-                        continue;
-                    }
-                    if !data.iter().all(|b| *b == b'\r' || *b == b'\n') {
-                        only_crlf_output = false;
-                    }
-                    total_bytes += data.len();
-                    terminal.process_bytes(&data);
-                    let outbound = terminal.take_outbound();
-                    if !outbound.is_empty() {
-                        let _ = pty.write(&outbound);
-                    }
-                    got_data = true;
+                total += data.len();
+                terminal.process_bytes(&data);
+                let outbound = terminal.take_outbound();
+                if !outbound.is_empty() {
+                    let _ = pty.write(&outbound);
                 }
             }
-            let new_scrollback = terminal.screen().scrollback_len();
-            if got_data {
-                scrollback_changed = new_scrollback != old_scrollback;
-            }
-            let screen = terminal.screen();
-            cursor_x = screen.cursor.x;
-            cursor_virtual_row = screen.scrollback_len() + screen.cursor.y;
-            synchronized_update = terminal.modes.synchronized_update;
-            (old_scrollback, new_scrollback)
+            let new_sb = terminal.screen().scrollback_len();
+            let sync = terminal.modes.synchronized_update;
+            (total, old_sb, new_sb, sync)
         };
-        self.pty_input_backlog = pty_input_backlog;
 
-        // Adjust selection virtual row indices when scrollback grows/shrinks
+        if total_bytes == 0 {
+            return;
+        }
+
+        // Adjust selection and cursor hold when scrollback changes
+        let scrollback_changed = new_scrollback != old_scrollback;
         if scrollback_changed {
-            let delta = new_scrollback_len as isize - old_scrollback_len as isize;
+            let delta = new_scrollback as isize - old_scrollback as isize;
             if delta > 0 {
                 let d = delta as usize;
                 if let Some((row, _)) = &mut self.selection_anchor {
@@ -668,151 +763,81 @@ impl StudioTerminal {
                 if let Some((row, _)) = &mut self.selection_cursor {
                     *row += d;
                 }
+                if let Some(ref mut hold) = self.cursor_hold {
+                    // Keep the held cursor at the same visual row while content
+                    // scrolls; release checks still use `release_virtual_row`.
+                    hold.virtual_row += d;
+                }
             } else {
-                // Scrollback shrank (clear/reset) — selection is invalid
                 self.clear_selection();
             }
         }
 
-        if got_data {
-            let now = Instant::now();
-            self.last_output_at = Some(now);
-            let is_likely_local_echo = self
-                .last_input_at
-                .map(|last_input| now.duration_since(last_input) <= Self::LOCAL_ECHO_GRACE)
-                .unwrap_or(false);
-            if is_likely_local_echo {
-                self.pending_streaming_ticks = 0;
-            } else if !self.output_streaming {
-                self.pending_streaming_ticks = self.pending_streaming_ticks.saturating_add(1);
-                // Enter streaming only for sustained/heavy PTY output to avoid
-                // cursor hide/show flicker on tiny local-echo updates.
-                let should_enter_streaming = self.pending_streaming_ticks
-                    >= Self::STREAMING_START_TICKS
-                    || chunks >= Self::STREAMING_START_CHUNKS
-                    || total_bytes >= Self::STREAMING_START_BYTES;
-                if should_enter_streaming {
+        self.update_cursor_hold_state(cx);
+
+        // Any real scrollback movement means active output is still in flight.
+        // Enter streaming mode immediately so the cursor doesn't blink while
+        // rows are shifting. Keep the held cursor visible during post-Enter
+        // settling, so skip this while cursor_hold is active.
+        if scrollback_changed && !self.output_streaming && self.cursor_hold.is_none() {
+            self.output_streaming = true;
+            self.pending_streaming_ticks = 0;
+            self.cursor_blink_on = false;
+        }
+
+        // Streaming detection
+        if !self.output_streaming {
+            self.pending_streaming_ticks = self.pending_streaming_ticks.saturating_add(1);
+            if self.pending_streaming_ticks >= Self::STREAMING_START_TICKS
+                || total_bytes >= Self::STREAMING_START_BYTES
+            {
+                if self.cursor_hold.is_none() {
                     self.output_streaming = true;
                     self.pending_streaming_ticks = 0;
                     self.cursor_blink_on = false;
+                } else {
+                    self.pending_streaming_ticks = 0;
                 }
+            }
+        } else if self.cursor_blink_on && self.cursor_hold.is_none() {
+            self.cursor_blink_on = false;
+        }
+
+        // Synchronized update mode (DEC 2026)
+        if synchronized_update {
+            self.pending_sync_redraw = true;
+            self.pending_scroll_clamp = true;
+            self.follow_output = was_at_bottom;
+            return;
+        } else if self.pending_sync_redraw {
+            self.pending_sync_redraw = false;
+        }
+
+        // Scroll and redraw
+        if scrollback_changed {
+            // Keep viewport locked while cursor_hold is active so we don't
+            // briefly reveal an empty just-scrolled line.
+            if self.cursor_hold.is_some() && was_at_bottom {
+                self.pending_scroll_clamp = true;
+                self.follow_output = true;
+            } else if was_at_bottom {
+                self.stick_to_bottom(cx);
             } else {
-                self.pending_streaming_ticks = 0;
-                if self.cursor_blink_on {
-                    self.cursor_blink_on = false;
-                }
-            }
-
-            let mut suppress_redraw = false;
-            if synchronized_update {
-                self.pending_sync_redraw = true;
-                suppress_redraw = true;
-            } else if self.pending_sync_redraw {
-                // Flush once synchronized-update mode ends.
-                self.pending_sync_redraw = false;
-            }
-
-            if let Some(deadline) = self.enter_coalesce_deadline {
-                let (moved_past_prompt_x, prompt_line_settled) =
-                    if let (Some(submit_row), Some(submit_x)) =
-                        (self.enter_submit_virtual_row, self.enter_submit_cursor_x)
-                    {
-                        let line_delta = cursor_virtual_row.saturating_sub(submit_row);
-                        let prompt_settled = prompt_line_settled_in_parse
-                            || (line_delta >= 1 && cursor_x == submit_x);
-                        (line_delta > 1 || cursor_x > submit_x, prompt_settled)
-                    } else {
-                        (false, false)
-                    };
-
-                if is_likely_local_echo && prompt_line_settled {
-                    // End this cycle immediately once one prompt line settles.
-                    self.enter_coalesce_deadline = None;
-                    self.enter_coalesce_pending_redraw = false;
-                    self.enter_prompt_cursor_x = Some(cursor_x);
-                    if self.enter_submit_pending > 0 {
-                        self.enter_submit_pending -= 1;
-                    }
-                    if self.enter_submit_pending > 0 {
-                        // Key-repeat submitted more Enter presses: arm next cycle now.
-                        self.enter_submit_cursor_x = self.enter_prompt_cursor_x;
-                        self.enter_submit_virtual_row = Some(cursor_virtual_row);
-                        self.enter_coalesce_deadline = Some(now + Self::ENTER_COALESCE_DELAY);
-                    } else {
-                        self.enter_submit_cursor_x = None;
-                        self.enter_submit_virtual_row = None;
-                    }
-                } else if is_likely_local_echo {
-                    if moved_past_prompt_x {
-                        self.enter_coalesce_deadline = None;
-                        self.enter_coalesce_pending_redraw = false;
-                        self.enter_submit_cursor_x = None;
-                        self.enter_submit_virtual_row = None;
-                        self.enter_submit_pending = 0;
-                    } else {
-                        self.enter_coalesce_pending_redraw = true;
-                        self.enter_coalesce_deadline = Some(now + Self::ENTER_COALESCE_DELAY);
-                        suppress_redraw = true;
-                    }
-                } else if now < deadline && only_crlf_output {
-                    self.enter_coalesce_pending_redraw = true;
-                    suppress_redraw = true;
-                } else {
-                    self.enter_coalesce_deadline = None;
-                    self.enter_coalesce_pending_redraw = false;
-                    self.enter_submit_cursor_x = None;
-                    self.enter_submit_virtual_row = None;
-                    self.enter_submit_pending = 0;
-                }
-            }
-
-            if scrollback_changed {
-                if suppress_redraw {
-                    self.pending_scroll_clamp = true;
-                    self.follow_output = was_at_bottom;
-                } else {
-                    if was_at_bottom {
-                        self.stick_to_bottom(cx);
-                    } else {
-                        self.clamp_scroll_position(cx);
-                    }
-                }
-            }
-            if !suppress_redraw && self.pending_scroll_clamp {
-                if self.follow_output {
-                    self.stick_to_bottom(cx);
-                } else {
-                    self.clamp_scroll_position(cx);
-                }
-                self.pending_scroll_clamp = false;
-            }
-            if !suppress_redraw {
-                self.draw_bg.redraw(cx);
-            }
-        } else {
-            self.pending_streaming_ticks = 0;
-            if self.enter_coalesce_deadline.is_some() && self.enter_coalesce_pending_redraw {
-                let now = Instant::now();
-                if self.enter_waiting_for_local_prompt(now) {
-                    self.enter_coalesce_deadline = Some(now + Self::ENTER_COALESCE_DELAY);
-                } else {
-                    self.enter_coalesce_deadline = None;
-                    self.enter_coalesce_pending_redraw = false;
-                    self.enter_submit_cursor_x = None;
-                    self.enter_submit_virtual_row = None;
-                    self.enter_submit_pending = 0;
-                    if self.pending_scroll_clamp {
-                        if self.follow_output {
-                            self.stick_to_bottom(cx);
-                        } else {
-                            self.clamp_scroll_position(cx);
-                        }
-                        self.pending_scroll_clamp = false;
-                    }
-                    self.draw_bg.redraw(cx);
-                }
+                self.clamp_scroll_position(cx);
             }
         }
+        if self.pending_scroll_clamp && self.cursor_hold.is_none() {
+            if was_at_bottom {
+                self.follow_output = true;
+            }
+            if self.follow_output {
+                self.stick_to_bottom(cx);
+            } else {
+                self.clamp_scroll_position(cx);
+            }
+            self.pending_scroll_clamp = false;
+        }
+        self.draw_bg.redraw(cx);
     }
 
     fn send_key_to_pty(&self, key_code: KeyCode, modifiers: &KeyModifiers) {
@@ -1047,19 +1072,27 @@ impl StudioTerminal {
         let has_focus = cx.has_key_focus(self.scroll_bars.area());
         self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
 
-        // Cursor
-        if terminal.modes.cursor_visible && !self.output_streaming {
-            let cursor = &screen.cursor;
-            let cursor_virtual_y = screen.scrollback_len() + cursor.y;
-            let cursor_content_y = cursor_virtual_y as f64 * cell_height;
+        // Cursor — if we have a cursor hold active (post-Enter, waiting for
+        // prompt to settle), draw cursor at the saved position instead of the
+        // terminal's real cursor position.
+        if terminal.modes.cursor_visible && (!self.output_streaming || self.cursor_hold.is_some()) {
+            let (draw_col, draw_virtual_row, cursor_shape) =
+                if let Some(ref hold) = self.cursor_hold {
+                    (hold.col, hold.virtual_row, CursorShape::Block)
+                } else {
+                    let cursor = &screen.cursor;
+                    (cursor.x, screen.scrollback_len() + cursor.y, cursor.shape)
+                };
+
+            let cursor_content_y = draw_virtual_row as f64 * cell_height;
             if !(cursor_content_y + cell_height < scroll_y
                 || cursor_content_y > scroll_y + self.viewport_rect.size.y)
             {
-                let cx_x = origin_x + cursor.x as f64 * cell_width;
+                let cx_x = origin_x + draw_col as f64 * cell_width;
                 let cx_y = origin_y + cursor_content_y + self.cursor_y_offset;
 
                 let cursor_rect = if has_focus {
-                    match cursor.shape {
+                    match cursor_shape {
                         CursorShape::Block => Rect {
                             pos: dvec2(cx_x, cx_y),
                             size: dvec2(cell_width, cell_height),
@@ -1248,16 +1281,17 @@ impl Widget for StudioTerminal {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let visible = self.is_visible(cx);
-        let enter_coalescing = self.enter_coalesce_deadline.is_some();
 
         if visible {
             self.ensure_pty(cx);
 
-            if !enter_coalescing && self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
-                if let Some(terminal) = &self.terminal {
-                    self.follow_output = self.is_scrolled_to_bottom(terminal.screen());
+            if self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
+                if self.enter_coalesce.is_none() {
+                    if let Some(terminal) = &self.terminal {
+                        self.follow_output = self.is_scrolled_to_bottom(terminal.screen());
+                    }
+                    self.draw_bg.redraw(cx);
                 }
-                self.draw_bg.redraw(cx);
             }
         }
 
@@ -1267,26 +1301,23 @@ impl Widget for StudioTerminal {
                     if !visible {
                         return;
                     }
-                    if self.pending_scroll_clamp {
-                        if !self.enter_coalesce_deadline.is_some() {
-                            if self.follow_output {
-                                self.stick_to_bottom(cx);
-                            } else {
-                                self.clamp_scroll_position(cx);
-                            }
-                            self.pending_scroll_clamp = false;
-                        }
-                    }
                     self.poll_pty_spawn(cx);
+                    self.update_enter_coalesce_state(cx);
                     self.poll_pty_output(cx);
                     self.update_output_streaming_state(cx);
-                    self.update_enter_coalesce_state(cx);
                 }
                 if self.cursor_blink_timer.is_timer(te).is_some() {
                     if !visible {
                         return;
                     }
-                    if self.enter_coalesce_deadline.is_some() {
+                    if self.enter_coalesce.is_some() {
+                        return;
+                    }
+                    if self.cursor_hold.is_some() {
+                        if !self.cursor_blink_on {
+                            self.cursor_blink_on = true;
+                            self.draw_bg.redraw(cx);
+                        }
                         return;
                     }
                     if self.output_streaming {
@@ -1369,8 +1400,7 @@ impl Widget for StudioTerminal {
             Hit::KeyDown(e) => {
                 let is_enter = matches!(e.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter);
                 if is_enter {
-                    self.note_local_input_preserve_enter_coalesce(cx);
-                    self.note_return_submit();
+                    self.note_enter_pressed();
                 } else {
                     self.note_local_input(cx);
                 }
