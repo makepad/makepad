@@ -5,7 +5,7 @@ use {
         cx_stdin::PollTimers,
         draw_pass::CxDrawPassParent,
         event::{
-            Event, GameInputEventChannel, KeyCode, MouseButton, MouseUpEvent, NetworkResponseChannel,
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, NetworkResponseChannel,
             WindowGeom,
         },
         makepad_live_id::*,
@@ -483,26 +483,10 @@ impl Cx {
                 self.drag_drop.cycle_drag();
             }
             MacosEvent::KeyDown(e) => {
-                if e.key_code == KeyCode::Escape {
-                    crate::log!(
-                        "macos backend: Escape KeyDown repeat={} mods={:?} time={}",
-                        e.is_repeat,
-                        e.modifiers,
-                        e.time
-                    );
-                }
                 self.keyboard.process_key_down(e.clone());
                 self.call_event_handler(&Event::KeyDown(e))
             }
             MacosEvent::KeyUp(e) => {
-                if e.key_code == KeyCode::Escape {
-                    crate::log!(
-                        "macos backend: Escape KeyUp repeat={} mods={:?} time={}",
-                        e.is_repeat,
-                        e.modifiers,
-                        e.time
-                    );
-                }
                 self.keyboard.process_key_up(e.clone());
                 self.call_event_handler(&Event::KeyUp(e))
             }
