@@ -71,7 +71,7 @@ impl Terminal {
             active: ScreenKind::Primary,
             modes: TerminalMode::new(),
             palette: Palette::default(),
-            default_fg: Rgb::new(0xc5, 0xc8, 0xc6),
+            default_fg: Rgb::new(0xd9, 0xdc, 0xda),
             default_bg: Rgb::new(0x1d, 0x1f, 0x21),
             cursor_color: None,
             title: String::new(),
@@ -607,7 +607,7 @@ impl Terminal {
                 }
             }
             // Reset default fg/bg/cursor colors.
-            110 => self.default_fg = Rgb::new(0xc5, 0xc8, 0xc6),
+            110 => self.default_fg = Rgb::new(0xd9, 0xdc, 0xda),
             111 => self.default_bg = Rgb::new(0x1d, 0x1f, 0x21),
             112 => self.cursor_color = None,
             _ => {
