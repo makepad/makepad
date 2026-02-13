@@ -58,6 +58,50 @@ fn script_check_capture_logger(
     }
 }
 
+fn skip_rust_raw_string(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    if i >= bytes.len() {
+        return None;
+    }
+    if bytes[i] == b'b' {
+        if i + 1 >= bytes.len() || bytes[i + 1] != b'r' {
+            return None;
+        }
+        i += 2;
+    } else if bytes[i] == b'r' {
+        i += 1;
+    } else {
+        return None;
+    }
+
+    let mut hash_count = 0usize;
+    while i < bytes.len() && bytes[i] == b'#' {
+        hash_count += 1;
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'"' {
+        return None;
+    }
+    i += 1;
+
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            let mut j = i + 1;
+            let mut matched = 0usize;
+            while matched < hash_count && j < bytes.len() && bytes[j] == b'#' {
+                matched += 1;
+                j += 1;
+            }
+            if matched == hash_count {
+                return Some(j);
+            }
+        }
+        i += 1;
+    }
+
+    Some(bytes.len())
+}
+
 /// Maximum Rust value index in script (#(0), #(1), ... or @(0) etc). Parser expects values.len() > max.
 fn max_rust_value_index(code: &str) -> usize {
     let mut max = 0usize;
@@ -93,6 +137,12 @@ fn normalize_rust_interpolations(code: &str) -> String {
 
     while i < bytes.len() {
         let c = bytes[i] as char;
+
+        if let Some(next) = skip_rust_raw_string(bytes, i) {
+            out.push_str(&code[i..next]);
+            i = next;
+            continue;
+        }
 
         // Preserve strings.
         if c == '"' || c == '\'' {
@@ -259,6 +309,7 @@ struct RuntimeHarnessPlan {
     crate_name: String,
     package_dir: PathBuf,
     modules: Vec<RuntimeModule>,
+    needs_widgets_prelude: bool,
 }
 
 fn canonicalize_best(path: &Path) -> PathBuf {
@@ -347,20 +398,40 @@ fn select_metadata_package<'a>(
 
 fn discover_declared_modules(content: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut pending_cfg_attr = false;
     for raw_line in content.lines() {
         let line = raw_line.split("//").next().unwrap_or("").trim();
-        if line.is_empty() || line.starts_with("#[") || !line.ends_with(';') {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("#[") {
+            if line.contains("cfg(") || line.contains("cfg_attr(") {
+                pending_cfg_attr = true;
+            }
+            continue;
+        }
+        if !line.ends_with(';') {
+            pending_cfg_attr = false;
             continue;
         }
         let mut tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.is_empty() {
+            pending_cfg_attr = false;
             continue;
         }
         let mod_index = match tokens.iter().position(|t| *t == "mod") {
             Some(idx) => idx,
-            None => continue,
+            None => {
+                pending_cfg_attr = false;
+                continue;
+            }
         };
+        if pending_cfg_attr {
+            pending_cfg_attr = false;
+            continue;
+        }
         if mod_index + 1 >= tokens.len() {
+            pending_cfg_attr = false;
             continue;
         }
         let mut name = tokens[mod_index + 1].trim_end_matches(';');
@@ -370,6 +441,7 @@ fn discover_declared_modules(content: &str) -> Vec<String> {
         if !name.is_empty() && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
             out.push(name.to_string());
         }
+        pending_cfg_attr = false;
         tokens.clear();
     }
     out
@@ -456,6 +528,7 @@ fn build_runtime_harness_plan(
     cwd: &Path,
     explicit_rs_paths: &HashSet<PathBuf>,
     restrict_to_explicit: bool,
+    needs_widgets_prelude: bool,
 ) -> Result<RuntimeHarnessPlan, String> {
     let manifest_path = find_manifest_path(cwd).ok_or_else(|| "No Cargo.toml found in current directory tree".to_string())?;
     let metadata = read_cargo_metadata(&manifest_path)?;
@@ -480,6 +553,7 @@ fn build_runtime_harness_plan(
         crate_name: lib_target.name.clone(),
         package_dir,
         modules,
+        needs_widgets_prelude,
     })
 }
 
@@ -504,15 +578,31 @@ fn write_runtime_harness(plan: &RuntimeHarnessPlan) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&src_dir).map_err(|e| format!("Failed to create runtime harness dir: {}", e))?;
 
     let script_dep = canonicalize_best(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform/script"));
+    let platform_dep = canonicalize_best(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform"));
+    let widgets_dep = canonicalize_best(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../widgets"));
     let package_dir = canonicalize_best(&plan.package_dir);
-    let cargo_toml = format!(
-        "[package]\nname = \"makepad-script-check-runner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nmakepad-script = {{ path = \"{}\" }}\nchecked_crate = {{ package = \"{}\", path = \"{}\" }}\n",
+    let mut cargo_toml = format!(
+        "[package]\nname = \"makepad-script-check-runner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nmakepad-script = {{ path = \"{}\" }}\nmakepad-platform = {{ path = \"{}\" }}\nchecked_crate = {{ package = \"{}\", path = \"{}\" }}\n",
         script_dep.display(),
+        platform_dep.display(),
         plan.package_name,
         package_dir.display()
     );
+    if plan.needs_widgets_prelude && plan.package_name != "makepad-widgets" {
+        cargo_toml.push_str(&format!(
+            "makepad-widgets = {{ path = \"{}\" }}\n",
+            widgets_dep.display()
+        ));
+    }
     std::fs::write(dir.join("Cargo.toml"), cargo_toml)
         .map_err(|e| format!("Failed to write runtime harness Cargo.toml: {}", e))?;
+
+    let mut bootstrap_calls = String::new();
+    if plan.needs_widgets_prelude && plan.package_name != "makepad-widgets" {
+        bootstrap_calls.push_str(
+            "        run_module(\"makepad_widgets\", \"<makepad-widgets>\", |vm| {\n            makepad_widgets::script_mod(vm);\n        }, vm);\n",
+        );
+    }
 
     let mut calls = String::new();
     for m in &plan.modules {
@@ -524,14 +614,15 @@ fn write_runtime_harness(plan: &RuntimeHarnessPlan) -> Result<PathBuf, String> {
         let call_expr = runtime_module_call_expr("checked_crate", &m.module_path);
         let file_name = m.file_path.display().to_string();
         calls.push_str(&format!(
-            "    run_module(\"{}\", \"{}\", |vm| {{\n        {}(vm);\n    }}, vm);\n",
+            "        run_module(\"{}\", \"{}\", |vm| {{\n            {}(vm);\n        }}, vm);\n",
             module_name, file_name, call_expr
         ));
     }
 
     let source = format!(
-        "use makepad_script::{{makepad_error_log, ScriptVm}};\nuse std::sync::{{Mutex, OnceLock}};\n\nconst PREFIX: &str = \"{}\";\n\n#[derive(Clone)]\nstruct Issue {{\n    file: String,\n    line: u32,\n    column: u32,\n    message: String,\n}}\n\nstatic ISSUES: OnceLock<Mutex<Vec<Issue>>> = OnceLock::new();\n\nfn issues() -> &'static Mutex<Vec<Issue>> {{\n    ISSUES.get_or_init(|| Mutex::new(Vec::new()))\n}}\n\nfn push_issue(file: String, line: u32, column: u32, message: String) {{\n    let mut guard = issues().lock().unwrap();\n    guard.push(Issue {{ file, line, column, message }});\n}}\n\nfn capture_logger(\n    file_name: &str,\n    line_start: u32,\n    column_start: u32,\n    _line_end: u32,\n    _column_end: u32,\n    message: String,\n    level: makepad_error_log::LogLevel,\n) {{\n    if matches!(level, makepad_error_log::LogLevel::Error | makepad_error_log::LogLevel::Warning) {{\n        push_issue(file_name.to_string(), line_start + 1, column_start + 1, message);\n    }}\n}}\n\nfn panic_to_message(payload: Box<dyn std::any::Any + Send>) -> String {{\n    if let Some(s) = payload.downcast_ref::<&str>() {{\n        return (*s).to_string();\n    }}\n    if let Some(s) = payload.downcast_ref::<String>() {{\n        return s.clone();\n    }}\n    \"panic without string payload\".to_string()\n}}\n\nfn run_module<F: FnOnce(&mut ScriptVm)>(module_name: &str, file_name: &str, f: F, vm: &mut ScriptVm) {{\n    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(vm)));\n    if let Err(panic_payload) = result {{\n        push_issue(\n            file_name.to_string(),\n            1,\n            1,\n            format!(\"panic while running {{}}: {{}}\", module_name, panic_to_message(panic_payload)),\n        );\n    }}\n    vm.drain_errors();\n}}\n\nfn sanitize_message(message: &str) -> String {{\n    message.replace('\\n', \"\\\\n\").replace('\\r', \"\\\\r\").replace('\\t', \" \")\n}}\n\nfn main() {{\n    let old_logger = {{\n        let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect(\"logger lock poisoned\");\n        let old = *guard;\n        *guard = capture_logger;\n        old\n    }};\n\n    let mut cx = checked_crate::makepad_widgets::Cx::new(Box::new(|_, _| {{}}));\n    cx.with_vm(|vm| {{\n        checked_crate::makepad_widgets::script_mod(vm);\n{}\n    }});\n\n    {{\n        let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect(\"logger lock poisoned\");\n        *guard = old_logger;\n    }}\n\n    let issues = issues().lock().unwrap();\n    for issue in issues.iter() {{\n        println!(\"{{}}\\truntime_error\\t{{}}\\t{{}}\\t{{}}\\t{{}}\", PREFIX, issue.file, issue.line, issue.column, sanitize_message(&issue.message));\n    }}\n\n    if !issues.is_empty() {{\n        std::process::exit(1);\n    }}\n}}\n",
+        "use makepad_platform::Cx;\nuse makepad_script::{{makepad_error_log, ScriptVm}};\nuse std::sync::{{Mutex, OnceLock}};\n\nconst PREFIX: &str = \"{}\";\n\n#[derive(Clone)]\nstruct Issue {{\n    file: String,\n    line: u32,\n    column: u32,\n    message: String,\n}}\n\nstatic ISSUES: OnceLock<Mutex<Vec<Issue>>> = OnceLock::new();\n\nfn issues() -> &'static Mutex<Vec<Issue>> {{\n    ISSUES.get_or_init(|| Mutex::new(Vec::new()))\n}}\n\nfn push_issue(file: String, line: u32, column: u32, message: String) {{\n    let mut guard = issues().lock().unwrap();\n    guard.push(Issue {{ file, line, column, message }});\n}}\n\nfn capture_logger(\n    file_name: &str,\n    line_start: u32,\n    column_start: u32,\n    _line_end: u32,\n    _column_end: u32,\n    message: String,\n    level: makepad_error_log::LogLevel,\n) {{\n    if matches!(level, makepad_error_log::LogLevel::Error | makepad_error_log::LogLevel::Warning) {{\n        push_issue(file_name.to_string(), line_start + 1, column_start + 1, message);\n    }}\n}}\n\nfn panic_to_message(payload: Box<dyn std::any::Any + Send>) -> String {{\n    if let Some(s) = payload.downcast_ref::<&str>() {{\n        return (*s).to_string();\n    }}\n    if let Some(s) = payload.downcast_ref::<String>() {{\n        return s.clone();\n    }}\n    \"panic without string payload\".to_string()\n}}\n\nfn run_module<F: FnOnce(&mut ScriptVm)>(module_name: &str, file_name: &str, f: F, vm: &mut ScriptVm) {{\n    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(vm)));\n    if let Err(panic_payload) = result {{\n        push_issue(\n            file_name.to_string(),\n            1,\n            1,\n            format!(\"panic while running {{}}: {{}}\", module_name, panic_to_message(panic_payload)),\n        );\n    }}\n    vm.drain_errors();\n}}\n\nfn sanitize_message(message: &str) -> String {{\n    message.replace('\\n', \"\\\\n\").replace('\\r', \"\\\\r\").replace('\\t', \" \")\n}}\n\nfn main() {{\n    let old_logger = {{\n        let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect(\"logger lock poisoned\");\n        let old = *guard;\n        *guard = capture_logger;\n        old\n    }};\n\n    let mut cx = Cx::new(Box::new(|_, _| {{}}));\n    cx.with_vm(|vm| {{\n{}{}\n    }});\n\n    {{\n        let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect(\"logger lock poisoned\");\n        *guard = old_logger;\n    }}\n\n    let issues = issues().lock().unwrap();\n    for issue in issues.iter() {{\n        println!(\"{{}}\\truntime_error\\t{{}}\\t{{}}\\t{{}}\\t{{}}\", PREFIX, issue.file, issue.line, issue.column, sanitize_message(&issue.message));\n    }}\n\n    if !issues.is_empty() {{\n        std::process::exit(1);\n    }}\n}}\n",
         RUNTIME_ISSUE_PREFIX,
+        bootstrap_calls,
         calls
     );
 
@@ -610,6 +701,10 @@ fn extract_script_blocks_from_rust(content: &str) -> Vec<(usize, String, ScriptM
         let bytes = content.as_bytes();
         while i < bytes.len() {
             let c = bytes[i];
+            if let Some(next) = skip_rust_raw_string(bytes, i) {
+                i = next;
+                continue;
+            }
             if c == b'"' || c == b'\'' {
                 let quote = c;
                 i += 1;
@@ -701,6 +796,11 @@ fn extract_balanced_brace_block(content: &str) -> Option<(String, usize)> {
     let bytes = content.as_bytes();
     while i < bytes.len() && depth > 0 {
         let c = bytes[i] as char;
+        if let Some(next) = skip_rust_raw_string(bytes, i) {
+            out.push_str(&content[i..next]);
+            i = next;
+            continue;
+        }
         if c == '"' || c == '\'' {
             let quote = c;
             out.push(c);
@@ -848,6 +948,22 @@ fn runtime_covered_files(modules: &[RuntimeModule]) -> HashSet<PathBuf> {
         .collect::<HashSet<_>>()
 }
 
+fn script_mod_block_counts_by_file(sources: &[ScriptSource]) -> HashMap<PathBuf, usize> {
+    let mut counts = HashMap::new();
+    for source in sources {
+        if let ScriptSource::RustBlock {
+            path,
+            macro_kind: ScriptMacroKind::ScriptMod,
+            ..
+        } = source
+        {
+            let canon = canonicalize_best(path);
+            *counts.entry(canon).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
 /// Check script sources in Rust files, report runtime and parse errors. Exit non-zero if any errors.
 pub fn handle_check_script(args: &[String]) -> Result<(), String> {
     if !args.is_empty() {
@@ -875,6 +991,10 @@ pub fn handle_check_script(args: &[String]) -> Result<(), String> {
 
     let mut issues = Vec::<ScriptCheckIssue>::new();
     let mut runtime_checked_files = HashSet::<PathBuf>::new();
+    let script_mod_counts = script_mod_block_counts_by_file(&sources);
+    let needs_widgets_prelude = sources.iter().any(|source| match source {
+        ScriptSource::RustBlock { code, .. } => code.contains("mod.prelude.widgets"),
+    });
 
     let has_script_mod_sources = sources.iter().any(|s| {
         matches!(
@@ -887,7 +1007,7 @@ pub fn handle_check_script(args: &[String]) -> Result<(), String> {
     });
 
     if has_script_mod_sources {
-        match build_runtime_harness_plan(&cwd, &HashSet::new(), false) {
+        match build_runtime_harness_plan(&cwd, &HashSet::new(), false, needs_widgets_prelude) {
             Ok(plan) => {
                 if plan.modules.is_empty() {
                     add_fallback_warning(
@@ -930,7 +1050,11 @@ pub fn handle_check_script(args: &[String]) -> Result<(), String> {
                 ..
             } => {
                 let canon = canonicalize_best(path);
-                !runtime_checked_files.contains(&canon)
+                if !runtime_checked_files.contains(&canon) {
+                    true
+                } else {
+                    script_mod_counts.get(&canon).copied().unwrap_or(0) > 1
+                }
             }
         })
         .collect();
