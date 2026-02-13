@@ -388,6 +388,8 @@ pub struct PortalList {
     capture_overload: bool,
     #[live(false)]
     keep_invisible: bool,
+    #[live(true)]
+    skip_widget_tree_search: bool,
 
     #[rust]
     draw_state: DrawStateWrap<ListDrawState>,
@@ -1525,6 +1527,10 @@ impl WidgetNode for PortalList {
         for (item_id, item) in self.items.iter() {
             visit(LiveId(*item_id as u64), item.widget.clone());
         }
+    }
+
+    fn skip_widget_tree_search(&self) -> bool {
+        self.skip_widget_tree_search
     }
 
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
