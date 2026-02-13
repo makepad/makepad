@@ -57,12 +57,32 @@ impl App {
     }
 }
 
-#[derive(Script, ScriptHook)]
+#[derive(Script)]
 pub struct App {
     #[live]
     pub ui: WidgetRef,
     #[rust]
     pub data: AppData,
+}
+
+impl ScriptHook for App {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.with_cx_mut(|cx| {
+            cx.widget_tree().set_root_widget(self.ui.clone());
+        });
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        vm.with_cx_mut(|cx| {
+            cx.widget_tree().set_root_widget(self.ui.clone());
+        });
+    }
 }
 
 impl App {
@@ -888,6 +908,7 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         let file_tree = self.ui.file_tree(cx, ids!(file_tree));
         let dock = self.ui.dock(cx, ids!(dock));
+
         for action in actions {
             self.handle_action(cx, action);
         }
@@ -986,7 +1007,8 @@ impl MatchEvent for App {
             }
         }
 
-        if let Some(file_id) = file_tree.file_clicked(&actions) {
+        let file_tree_clicked = file_tree.file_clicked(&actions);
+        if let Some(file_id) = file_tree_clicked {
             // ok lets open the file
             if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id) {
                 // If the tab is already open, focus it

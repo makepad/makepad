@@ -295,6 +295,7 @@ impl ScriptHook for Dock {
         if apply.is_new() {
             self.create_all_items_with_vm(vm);
         }
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 
@@ -309,16 +310,9 @@ impl WidgetNode for Dock {
         self.area
     }
 
-    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
-        if let Some((_, widget)) = self.items.get(&path[0]) {
-            if path.len() > 1 {
-                widget.find_widgets(&path[1..], results);
-            } else {
-                results.push(widget.clone());
-            }
-        }
-        for (_, widget) in self.items.values() {
-            widget.find_widgets(path, results);
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for (id, (_, widget)) in self.items.iter() {
+            visit(*id, widget.clone());
         }
     }
 
@@ -605,6 +599,7 @@ impl Dock {
             let cx = vm.cx_mut();
             self.items
                 .get_or_insert(cx, entry_id, |_cx| (template, widget.clone()));
+            cx.widget_tree_mark_dirty(self.uid);
             Some(widget)
         } else {
             warning!("Template not found: {template}. Did you add it to the <Dock> instance?");
@@ -741,9 +736,13 @@ impl Dock {
     ) -> Option<WidgetRef> {
         if let Some(template_ref) = self.templates.get(&template) {
             let template_value: ScriptValue = template_ref.as_object().into();
+            let existed = self.items.contains_key(&entry_id);
             let entry = self.items.get_or_insert(cx, entry_id, |cx| {
                 cx.with_vm(|vm| (template, WidgetRef::script_from_value(vm, template_value)))
             });
+            if !existed {
+                cx.widget_tree_mark_dirty(self.uid);
+            }
             Some(entry.1.clone())
         } else {
             warning!("Template not found: {template}. Did you add it to the <Dock> instance?");

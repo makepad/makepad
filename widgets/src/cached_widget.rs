@@ -108,6 +108,7 @@ impl ScriptHook for CachedWidget {
             if let Some(template_value) = self.template_value {
                 widget.script_apply(vm, apply, scope, template_value);
             }
+            vm.cx_mut().widget_tree_mark_dirty(self.uid);
             return;
         }
 
@@ -133,6 +134,7 @@ impl ScriptHook for CachedWidget {
                 .insert(self.template_id, widget.clone());
             self.widget = Some(widget);
         }
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 
@@ -156,15 +158,9 @@ impl WidgetNode for CachedWidget {
         }
     }
 
-    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         if let Some(widget) = &self.widget {
-            if self.template_id == path[0] {
-                if path.len() > 1 {
-                    widget.find_widgets(&path[1..], results);
-                } else {
-                    results.push(widget.clone());
-                }
-            }
+            visit(self.template_id, widget.clone());
         }
     }
 

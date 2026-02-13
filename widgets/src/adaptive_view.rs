@@ -138,9 +138,9 @@ impl WidgetNode for AdaptiveView {
         self.area
     }
 
-    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         if let Some(active_widget) = self.active_widget.as_ref() {
-            active_widget.widget_ref.find_widgets(path, results);
+            visit(active_widget.template_id, active_widget.widget_ref.clone());
         }
     }
 
@@ -202,6 +202,7 @@ impl ScriptHook for AdaptiveView {
 
         // Do not override the current selector if we are updating from the doc
         if apply.is_reload() {
+            vm.cx_mut().widget_tree_mark_dirty(self.uid);
             return;
         };
 
@@ -217,6 +218,7 @@ impl ScriptHook for AdaptiveView {
             });
         }
         self.set_default_variant_selector();
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 
@@ -293,6 +295,7 @@ impl AdaptiveView {
 
             self.walk = widget_variant.widget_ref.walk(cx);
             self.active_widget = Some(widget_variant);
+            cx.widget_tree_mark_dirty(self.uid);
             return;
         }
 
@@ -322,6 +325,7 @@ impl AdaptiveView {
             template_id,
             widget_ref,
         });
+        cx.widget_tree_mark_dirty(self.uid);
     }
 
     /// Set a variant selector for this widget.

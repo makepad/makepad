@@ -164,6 +164,8 @@ impl ScriptHook for SlidesView {
                 }
             }
         }
+
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 
@@ -179,9 +181,9 @@ impl WidgetNode for SlidesView {
         self.area
     }
 
-    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
-        for child in self.slides.values() {
-            child.find_widgets(path, results);
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for (id, child) in self.slides.iter() {
+            visit(*id, child.clone());
         }
     }
 
