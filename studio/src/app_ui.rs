@@ -381,7 +381,10 @@ script_mod! {
         flow: Flow.Down
     }
 
-    let TerminalContent = StudioTerminal{}
+    let TerminalContent = View{
+        new_batch: true
+        StudioTerminal{}
+    }
 
     mod.widgets.AppUI = Window{
         margin: 5.

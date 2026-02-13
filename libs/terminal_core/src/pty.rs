@@ -61,6 +61,7 @@ impl Pty {
         let (master, slave) = unsafe { open_pty(cols, rows)? };
         unsafe {
             set_cloexec(master);
+            set_cloexec(slave);
             set_nonblocking(master);
         }
 

@@ -26,7 +26,7 @@ script_mod! {
 
     set_type_default() do #(DrawTerminalCursor::script_shader(vm)) {
         ..mod.draw.DrawQuad
-        color: #f00
+        color: #f007
         pixel: fn() {
             return vec4(self.color.rgb * self.color.a, self.color.a)
         }
@@ -95,7 +95,7 @@ struct DrawTerminalCursor {
     color: Vec4f,
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct StudioTerminal {
     #[uid]
     uid: WidgetUid,
@@ -166,6 +166,8 @@ pub struct StudioTerminal {
     #[rust]
     last_output_at: Option<Instant>,
     #[rust]
+    last_input_at: Option<Instant>,
+    #[rust]
     cell_width: f64,
     #[rust]
     cell_height: f64,
@@ -173,8 +175,17 @@ pub struct StudioTerminal {
     cell_offset_y: f64,
 }
 
+impl ScriptHook for StudioTerminal {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.with_cx_mut(|cx| {
+            self.ensure_pty(cx);
+        });
+    }
+}
+
 impl StudioTerminal {
     const OUTPUT_QUIET_DELAY: Duration = Duration::from_millis(120);
+    const LOCAL_ECHO_GRACE: Duration = Duration::from_millis(80);
 
     fn scale_channel(v: u8, factor: f64) -> u8 {
         ((v as f64 * factor).round()).clamp(0.0, 255.0) as u8
@@ -295,6 +306,22 @@ impl StudioTerminal {
         }
     }
 
+    fn note_local_input(&mut self, cx: &mut Cx) {
+        self.last_input_at = Some(Instant::now());
+        let mut redraw = false;
+        if self.output_streaming {
+            self.output_streaming = false;
+            redraw = true;
+        }
+        if !self.cursor_blink_on {
+            self.cursor_blink_on = true;
+            redraw = true;
+        }
+        if redraw {
+            self.draw_bg.redraw(cx);
+        }
+    }
+
     fn is_visible(&self, cx: &Cx) -> bool {
         self.area.is_valid(cx)
     }
@@ -409,8 +436,13 @@ impl StudioTerminal {
         }
 
         if got_data {
-            self.last_output_at = Some(Instant::now());
-            if !self.output_streaming || self.cursor_blink_on {
+            let now = Instant::now();
+            self.last_output_at = Some(now);
+            let is_likely_local_echo = self
+                .last_input_at
+                .map(|last_input| now.duration_since(last_input) <= Self::LOCAL_ECHO_GRACE)
+                .unwrap_or(false);
+            if !is_likely_local_echo && (!self.output_streaming || self.cursor_blink_on) {
                 self.output_streaming = true;
                 self.cursor_blink_on = false;
             }
@@ -487,15 +519,7 @@ impl StudioTerminal {
         let palette = &terminal.palette.colors;
         let default_fg = terminal.default_fg;
         let default_bg = terminal.default_bg;
-        let default_cursor = terminal.cursor_color.unwrap_or(default_fg);
         let blank_cell = makepad_terminal_core::Cell::default();
-
-        self.draw_cursor.color = vec4(
-            default_cursor.r as f32 / 255.0,
-            default_cursor.g as f32 / 255.0,
-            default_cursor.b as f32 / 255.0,
-            1.0,
-        );
 
         let resolve_style = |style: &makepad_terminal_core::Style| {
             let mut fg_src = style.fg;
@@ -795,7 +819,7 @@ impl Widget for StudioTerminal {
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyDown(e) => {
-                self.cursor_blink_on = true;
+                self.note_local_input(cx);
                 match e.key_code {
                     KeyCode::ReturnKey
                     | KeyCode::Backspace
@@ -834,6 +858,7 @@ impl Widget for StudioTerminal {
                 }
             }
             Hit::TextInput(e) => {
+                self.note_local_input(cx);
                 if !e.was_paste {
                     self.send_text_to_pty(&e.input, &KeyModifiers::default());
                 } else {
