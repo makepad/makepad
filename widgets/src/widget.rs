@@ -43,6 +43,11 @@ pub trait WidgetNode: ScriptApply {
     }
     /// Enumerate direct children for widget-tree indexing.
     fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
+    /// If true, global widget-tree search/flood will not traverse this node's descendants.
+    /// The node is still indexed and can still be matched directly by name/path.
+    fn skip_widget_tree_search(&self) -> bool {
+        false
+    }
     /// Find all widgets whose area contains the given point. Calls the closure for each found widget.
     fn find_widgets_from_point(&self, _cx: &Cx, _point: DVec2, _found: &mut dyn FnMut(&WidgetRef)) {
     }
@@ -647,6 +652,14 @@ impl WidgetRef {
             inner.widget.children(visit);
         }
         true
+    }
+
+    pub fn skip_widget_tree_search(&self) -> bool {
+        self.0
+            .try_borrow()
+            .ok()
+            .and_then(|r| r.as_ref().map(|w| w.widget.skip_widget_tree_search()))
+            .unwrap_or(false)
     }
 
     pub fn find_widgets_from_point(

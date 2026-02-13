@@ -85,6 +85,7 @@ script_mod! {
         width: Fill
         height: Fill
         new_batch: true
+        skip_widget_tree_search: true
         list := FlatList {
             height: Fill
             width: Fill
