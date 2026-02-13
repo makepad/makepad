@@ -330,6 +330,12 @@ impl Screen {
         self.cursor.x = self.cursor.x.min(cols.saturating_sub(1));
         self.cursor.y = self.cursor.y.min(rows.saturating_sub(1));
 
+        // Keep historical rows width-aligned with the active grid width so viewport
+        // rendering can index columns uniformly across scrollback + live grid.
+        for row in &mut self.scrollback {
+            row.resize(cols, Cell::default());
+        }
+
         // Reset tabstops
         self.tabstops = vec![false; cols];
         for i in (0..cols).step_by(8) {
@@ -344,5 +350,25 @@ impl Screen {
 
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
+    }
+
+    /// Total logical rows visible through a virtual viewport
+    /// (`scrollback` + active grid rows).
+    pub fn total_rows(&self) -> usize {
+        self.scrollback.len() + self.rows()
+    }
+
+    /// Row slice by virtual row index where:
+    /// - `0..scrollback_len` maps to historical rows (oldest first)
+    /// - `scrollback_len..total_rows` maps to active grid rows.
+    pub fn row_slice_virtual(&self, row: usize) -> Option<&[Cell]> {
+        if row < self.scrollback.len() {
+            return Some(&self.scrollback[row]);
+        }
+        let grid_row = row - self.scrollback.len();
+        if grid_row < self.rows() {
+            return Some(self.grid.row_slice(grid_row));
+        }
+        None
     }
 }

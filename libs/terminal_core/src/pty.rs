@@ -50,6 +50,7 @@ impl Pty {
         env: &[(&str, &str)],
     ) -> io::Result<Self> {
         use std::os::fd::FromRawFd;
+        use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
 
         let shell = shell
@@ -68,6 +69,20 @@ impl Pty {
         cmd.env("TERM", "xterm-256color");
         for (k, v) in env {
             cmd.env(k, v);
+        }
+
+        // Make the spawned shell/session own the slave PTY as controlling terminal,
+        // so kernel SIGWINCH delivery works for foreground jobs on resize.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc_ffi::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc_ffi::ioctl(0, libc_ffi::TIOCSCTTY, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
 
         // Attach slave side to child stdio. These handles are consumed by Command.
@@ -145,6 +160,9 @@ impl Pty {
             };
             if libc_ffi::ioctl(self.master_fd, libc_ffi::TIOCSWINSZ, &ws) != 0 {
                 return Err(io::Error::last_os_error());
+            }
+            if let Some(child) = &self.child {
+                let _ = libc_ffi::kill(child.id() as i32, libc_ffi::SIGWINCH);
             }
         }
         Ok(())
@@ -269,6 +287,8 @@ mod libc_ffi {
         pub fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
         pub fn ioctl(fd: i32, request: u64, ...) -> i32;
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        pub fn setsid() -> i32;
+        pub fn kill(pid: i32, sig: i32) -> i32;
     }
 
     pub unsafe fn fcntl_int(fd: i32, cmd: i32, arg: i32) -> i32 {
@@ -298,8 +318,14 @@ mod libc_ffi {
 
     #[cfg(target_os = "macos")]
     pub const TIOCSWINSZ: u64 = 0x80087467;
+    #[cfg(target_os = "macos")]
+    pub const TIOCSCTTY: u64 = 0x20007461;
     #[cfg(target_os = "linux")]
     pub const TIOCSWINSZ: u64 = 0x5414;
+    #[cfg(target_os = "linux")]
+    pub const TIOCSCTTY: u64 = 0x540E;
+
+    pub const SIGWINCH: i32 = 28;
 
     #[repr(C)]
     pub struct winsize {
