@@ -73,14 +73,19 @@ impl Pty {
 
         // Make the spawned shell/session own the slave PTY as controlling terminal,
         // so kernel SIGWINCH delivery works for foreground jobs on resize.
+        let master_for_child = master;
+        let slave_for_child = slave;
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 if libc_ffi::setsid() == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc_ffi::ioctl(0, libc_ffi::TIOCSCTTY, 0) == -1 {
+                if libc_ffi::ioctl(slave_for_child, libc_ffi::TIOCSCTTY, 0) == -1 {
                     return Err(io::Error::last_os_error());
                 }
+                // Child no longer needs these raw PTY fds after stdio setup.
+                libc_ffi::close(slave_for_child);
+                libc_ffi::close(master_for_child);
                 Ok(())
             });
         }
@@ -160,9 +165,6 @@ impl Pty {
             };
             if libc_ffi::ioctl(self.master_fd, libc_ffi::TIOCSWINSZ, &ws) != 0 {
                 return Err(io::Error::last_os_error());
-            }
-            if let Some(child) = &self.child {
-                let _ = libc_ffi::kill(child.id() as i32, libc_ffi::SIGWINCH);
             }
         }
         Ok(())
@@ -288,7 +290,6 @@ mod libc_ffi {
         pub fn ioctl(fd: i32, request: u64, ...) -> i32;
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         pub fn setsid() -> i32;
-        pub fn kill(pid: i32, sig: i32) -> i32;
     }
 
     pub unsafe fn fcntl_int(fd: i32, cmd: i32, arg: i32) -> i32 {
@@ -324,8 +325,6 @@ mod libc_ffi {
     pub const TIOCSWINSZ: u64 = 0x5414;
     #[cfg(target_os = "linux")]
     pub const TIOCSCTTY: u64 = 0x540E;
-
-    pub const SIGWINCH: i32 = 28;
 
     #[repr(C)]
     pub struct winsize {

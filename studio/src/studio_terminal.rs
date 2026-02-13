@@ -166,16 +166,6 @@ pub struct StudioTerminal {
     #[rust]
     last_output_at: Option<Instant>,
     #[rust]
-    last_style_debug_at: Option<Instant>,
-    #[rust]
-    last_style_debug_bg_count: usize,
-    #[rust]
-    last_style_debug_inverse_count: usize,
-    #[rust]
-    last_style_debug_rgb_bg_count: usize,
-    #[rust]
-    last_style_debug_palette_bg_count: usize,
-    #[rust]
     cell_width: f64,
     #[rust]
     cell_height: f64,
@@ -185,7 +175,6 @@ pub struct StudioTerminal {
 
 impl StudioTerminal {
     const OUTPUT_QUIET_DELAY: Duration = Duration::from_millis(120);
-    const STYLE_DEBUG_INTERVAL: Duration = Duration::from_millis(900);
 
     fn scale_channel(v: u8, factor: f64) -> u8 {
         ((v as f64 * factor).round()).clamp(0.0, 255.0) as u8
@@ -306,65 +295,8 @@ impl StudioTerminal {
         }
     }
 
-    fn debug_log_style_stats(&mut self) {
-        let now = Instant::now();
-        if self
-            .last_style_debug_at
-            .map(|last| now.duration_since(last) < Self::STYLE_DEBUG_INTERVAL)
-            .unwrap_or(false)
-        {
-            return;
-        }
-        self.last_style_debug_at = Some(now);
-
-        let Some(terminal) = &self.terminal else {
-            return;
-        };
-        let screen = terminal.screen();
-
-        let mut bg_count = 0usize;
-        let mut inverse_count = 0usize;
-        let mut rgb_bg_count = 0usize;
-        let mut palette_bg_count = 0usize;
-
-        for row in 0..screen.rows() {
-            for cell in screen.grid.row_slice(row) {
-                let style = &cell.style;
-                if !matches!(style.bg, Color::Default) {
-                    bg_count += 1;
-                    match style.bg {
-                        Color::Rgb(..) => rgb_bg_count += 1,
-                        Color::Palette(..) => palette_bg_count += 1,
-                        Color::Default => {}
-                    }
-                }
-                if style.flags.has(StyleFlags::INVERSE) {
-                    inverse_count += 1;
-                }
-            }
-        }
-
-        if bg_count != self.last_style_debug_bg_count
-            || inverse_count != self.last_style_debug_inverse_count
-            || rgb_bg_count != self.last_style_debug_rgb_bg_count
-            || palette_bg_count != self.last_style_debug_palette_bg_count
-        {
-            self.last_style_debug_bg_count = bg_count;
-            self.last_style_debug_inverse_count = inverse_count;
-            self.last_style_debug_rgb_bg_count = rgb_bg_count;
-            self.last_style_debug_palette_bg_count = palette_bg_count;
-            log!(
-                "terminal style stats: non_default_bg={} (rgb={}, palette={}) inverse={}",
-                bg_count,
-                rgb_bg_count,
-                palette_bg_count,
-                inverse_count
-            );
-            eprintln!(
-                "terminal style stats: non_default_bg={} (rgb={}, palette={}) inverse={}",
-                bg_count, rgb_bg_count, palette_bg_count, inverse_count
-            );
-        }
+    fn is_visible(&self, cx: &Cx) -> bool {
+        self.area.is_valid(cx)
     }
 
     fn ensure_pty(&mut self, cx: &mut Cx) {
@@ -477,7 +409,6 @@ impl StudioTerminal {
         }
 
         if got_data {
-            self.debug_log_style_stats();
             self.last_output_at = Some(Instant::now());
             if !self.output_streaming || self.cursor_blink_on {
                 self.output_streaming = true;
@@ -804,18 +735,25 @@ impl Widget for StudioTerminal {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.ensure_pty(cx);
+        let visible = self.is_visible(cx);
 
-        if self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
-            if let Some(terminal) = &self.terminal {
-                self.follow_output = self.is_scrolled_to_bottom(terminal.screen());
+        if visible {
+            self.ensure_pty(cx);
+
+            if self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
+                if let Some(terminal) = &self.terminal {
+                    self.follow_output = self.is_scrolled_to_bottom(terminal.screen());
+                }
+                self.draw_bg.redraw(cx);
             }
-            self.draw_bg.redraw(cx);
         }
 
         match event {
             Event::Timer(te) => {
                 if self.poll_timer.is_timer(te).is_some() {
+                    if !visible {
+                        return;
+                    }
                     if self.pending_scroll_clamp {
                         if self.follow_output {
                             self.stick_to_bottom(cx);
@@ -829,6 +767,9 @@ impl Widget for StudioTerminal {
                     self.update_output_streaming_state(cx);
                 }
                 if self.cursor_blink_timer.is_timer(te).is_some() {
+                    if !visible {
+                        return;
+                    }
                     if self.output_streaming {
                         if self.cursor_blink_on {
                             self.cursor_blink_on = false;
@@ -841,6 +782,10 @@ impl Widget for StudioTerminal {
                 }
             }
             _ => {}
+        }
+
+        if !visible {
+            return;
         }
 
         match event.hits(cx, self.scroll_bars.area()) {
