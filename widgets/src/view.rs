@@ -101,6 +101,8 @@ pub struct View {
 
     #[live(true)]
     pub visible: bool,
+    #[live(false)]
+    skip_widget_tree_search: bool,
 
     #[live(true)]
     grab_key_focus: bool,
@@ -582,6 +584,10 @@ impl WidgetNode for View {
         for (id, child) in &self.children {
             visit(*id, child.clone());
         }
+    }
+
+    fn skip_widget_tree_search(&self) -> bool {
+        self.skip_widget_tree_search
     }
 
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {

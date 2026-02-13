@@ -123,6 +123,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 .ident(wrap_field)
                 .add(".children(visit)");
             tb.add("   }");
+            tb.add("   fn skip_widget_tree_search(&self)->bool{");
+            tb.add("       self.")
+                .ident(wrap_field)
+                .add(".skip_widget_tree_search()");
+            tb.add("   }");
             tb.add("   fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
             tb.add("       self.")
                 .ident(wrap_field)
@@ -273,6 +278,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 tb.add("       self.")
                     .ident(deref_field)
                     .add(".children(visit)");
+                tb.add("   }");
+                tb.add("   fn skip_widget_tree_search(&self)->bool{");
+                tb.add("       self.")
+                    .ident(deref_field)
+                    .add(".skip_widget_tree_search()");
                 tb.add("   }");
                 tb.add("   fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
                 tb.add("       self.")
