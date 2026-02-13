@@ -797,6 +797,14 @@ impl WidgetNode for TextFlow {
         self.area.redraw(cx);
     }
 
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        if let Some(items) = self.items.as_ref() {
+            for (id, (widget, _template)) in items.iter() {
+                visit(*id, widget.clone());
+            }
+        }
+    }
+
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
         if let Some(items) = self.items.as_ref() {
             for (_id, (widget, _template)) in items.iter() {
@@ -1378,6 +1386,7 @@ impl TextFlow {
                 let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
                 *entry = (widget, template);
             }
+            cx.widget_tree_mark_dirty(self.uid);
             f(cx, &entry.0, self)
         } else {
             R::default()
@@ -1401,6 +1410,7 @@ impl TextFlow {
                 let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
                 *entry = (widget, template);
             }
+            cx.widget_tree_mark_dirty(self.uid);
             return entry.0.clone();
         }
         WidgetRef::empty()
@@ -1422,6 +1432,7 @@ impl TextFlow {
                 let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
                 *entry = (widget, template);
             }
+            cx.widget_tree_mark_dirty(self.uid);
             return entry.0.clone();
         }
         WidgetRef::empty()
@@ -1458,6 +1469,7 @@ impl TextFlow {
                     });
                     (widget, template)
                 });
+            cx.widget_tree_mark_dirty(self.uid);
             return Some(entry.0.clone());
         }
         None

@@ -86,6 +86,8 @@ impl ScriptHook for PageFlip {
                 }
             }
         }
+
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 
@@ -97,6 +99,7 @@ impl PageFlip {
             if !self.pages.contains_key(&page_id) {
                 let page = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
                 self.pages.insert(page_id, page);
+                cx.widget_tree_mark_dirty(self.uid);
             }
             self.pages.get(&page_id).cloned()
         } else {
@@ -126,16 +129,9 @@ impl WidgetNode for PageFlip {
         self.area
     }
 
-    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
-        if let Some(page) = self.pages.get(&path[0]) {
-            if path.len() > 1 {
-                page.find_widgets(&path[1..], results);
-            } else {
-                results.push(page.clone());
-            }
-        }
-        for page in self.pages.values() {
-            page.find_widgets(path, results);
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for (id, page) in self.pages.iter() {
+            visit(*id, page.clone());
         }
     }
 
