@@ -21,6 +21,7 @@ workspace.members = [
     "studio",
     "studio/ai",
     "tools/cargo_makepad",
+    "libs/terminal_core",
 ]
 
 workspace.exclude = [

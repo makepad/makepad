@@ -1,0 +1,12 @@
+[package]
+name = "makepad-terminal-core"
+version = "1.0.0"
+edition = "2021"
+description = "Terminal emulation core (VT parser, screen buffer, PTY)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[[bin]]
+name = "terminal-test"
+path = "src/bin/terminal_test.rs"
