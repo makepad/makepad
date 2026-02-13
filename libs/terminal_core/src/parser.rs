@@ -30,6 +30,7 @@ pub struct CsiParams {
     pub len: usize,
     pub intermediates: [u8; MAX_INTERMEDIATES],
     pub intermediates_len: usize,
+    pub has_colon: bool,
 }
 
 impl CsiParams {
@@ -39,6 +40,7 @@ impl CsiParams {
             len: 0,
             intermediates: [0; MAX_INTERMEDIATES],
             intermediates_len: 0,
+            has_colon: false,
         }
     }
 
@@ -84,8 +86,10 @@ pub struct Parser {
     param_started: bool,
     intermediates: [u8; MAX_INTERMEDIATES],
     intermediates_len: usize,
+    csi_has_colon: bool,
     // OSC accumulation
     osc_buf: Vec<u8>,
+    osc_esc_pending: bool,
     // UTF-8 decoding
     utf8_buf: [u8; 4],
     utf8_len: usize,
@@ -102,7 +106,9 @@ impl Parser {
             param_started: false,
             intermediates: [0; MAX_INTERMEDIATES],
             intermediates_len: 0,
+            csi_has_colon: false,
             osc_buf: Vec::with_capacity(MAX_OSC_LEN),
+            osc_esc_pending: false,
             utf8_buf: [0; 4],
             utf8_len: 0,
             utf8_expected: 0,
@@ -114,6 +120,7 @@ impl Parser {
         self.param_acc = 0;
         self.param_started = false;
         self.intermediates_len = 0;
+        self.csi_has_colon = false;
     }
 
     fn finish_param(&mut self) {
@@ -138,6 +145,7 @@ impl Parser {
         p.intermediates[..self.intermediates_len]
             .copy_from_slice(&self.intermediates[..self.intermediates_len]);
         p.intermediates_len = self.intermediates_len;
+        p.has_colon = self.csi_has_colon;
         p
     }
 
@@ -147,9 +155,17 @@ impl Parser {
         match byte {
             // ESC always transitions
             0x1b => {
+                if self.state == State::OscString {
+                    // Potential ST terminator for OSC (ESC \).
+                    self.state = State::Escape;
+                    self.clear_params();
+                    self.osc_esc_pending = true;
+                    return;
+                }
                 // If we were in the middle of something, that's abandoned
                 self.state = State::Escape;
                 self.clear_params();
+                self.osc_esc_pending = false;
                 return;
             }
             // C0 controls executable in most states
@@ -203,7 +219,7 @@ impl Parser {
                 self.handle_csi_ignore(byte, actions);
             }
             State::OscString => {
-                self.handle_osc_string(byte);
+                self.handle_osc_string(byte, actions);
             }
             State::DcsEntry | State::DcsParam | State::DcsIntermediate => {
                 // Skip DCS for now — treat like ignore
@@ -291,6 +307,19 @@ impl Parser {
     }
 
     fn handle_escape(&mut self, byte: u8, actions: &mut Vec<Action>) {
+        if self.osc_esc_pending {
+            if byte == b'\\' {
+                // ST terminates OSC and dispatches collected command.
+                let cmd = std::mem::take(&mut self.osc_buf);
+                actions.push(Action::OscDispatch { command: cmd });
+                self.osc_esc_pending = false;
+                self.state = State::Ground;
+                return;
+            }
+            // ESC inside OSC but not ST: abort OSC payload.
+            self.osc_buf.clear();
+            self.osc_esc_pending = false;
+        }
         match byte {
             // Intermediates (space through /)
             0x20..=0x2f => {
@@ -404,7 +433,11 @@ impl Parser {
                     .saturating_add((byte - b'0') as u16);
                 self.param_started = true;
             }
-            b';' | b':' => {
+            b';' => {
+                self.finish_param();
+            }
+            b':' => {
+                self.csi_has_colon = true;
                 self.finish_param();
             }
             0x20..=0x2f => {
@@ -459,7 +492,7 @@ impl Parser {
         }
     }
 
-    fn handle_osc_string(&mut self, byte: u8) {
+    fn handle_osc_string(&mut self, byte: u8, actions: &mut Vec<Action>) {
         match byte {
             // ST via ESC \ is handled in the ESC handler
             // BEL terminator handled in the main advance()
@@ -468,8 +501,8 @@ impl Parser {
             }
             // 0x9c — 8-bit ST
             0x9c => {
-                // Terminate OSC — but we handle this in advance()
-                // This shouldn't be reached, but just in case:
+                let cmd = std::mem::take(&mut self.osc_buf);
+                actions.push(Action::OscDispatch { command: cmd });
                 self.state = State::Ground;
             }
             _ => {
