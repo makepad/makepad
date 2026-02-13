@@ -53,6 +53,18 @@ impl ScriptHook for DrawVars {
         if !apply.is_default() && !apply.is_animate() {
             self.compile_shader(vm, apply, value);
         }
+        // Read draw_call_group from the shader object
+        if let Some(io_self) = value.as_object() {
+            let group_value = vm
+                .bx
+                .heap
+                .value(io_self, id!(draw_call_group).into(), NoTrap);
+            if let Some(id) = group_value.as_id() {
+                self.options.draw_call_group = id;
+            } else if let Some(v) = group_value.as_f64() {
+                self.options.draw_call_group = LiveId(v as u64);
+            }
+        }
         // lets fill our values
         if self.draw_shader_id.is_some() {
             if let Some(io_self) = value.as_object() {
