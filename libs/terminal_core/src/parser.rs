@@ -16,7 +16,9 @@ pub enum State {
     CsiIntermediate,
     CsiIgnore,
     DcsEntry,
+    #[allow(unused)]
     DcsParam,
+    #[allow(unused)]
     DcsIntermediate,
     DcsPassthrough,
     OscString,

@@ -26,7 +26,7 @@ script_mod! {
 
     set_type_default() do #(DrawTerminalCursor::script_shader(vm)) {
         ..mod.draw.DrawQuad
-        color: #xc5c8c6
+        color: #f00
         pixel: fn() {
             return vec4(self.color.rgb * self.color.a, self.color.a)
         }
@@ -55,20 +55,15 @@ script_mod! {
             pixel: fn() {
                 return self.color
             }
-            draw_depth: 0.0
         }
         draw_text +: {
             text_style: theme.font_code
-            draw_depth: 1.0
         }
         draw_selection +: {
-            draw_depth: 1.0
         }
         draw_decor +: {
-            draw_depth: 1.0
         }
         draw_cursor +: {
-            draw_depth: 1.0
         }
     }
 }
@@ -613,7 +608,6 @@ impl StudioTerminal {
 
         // Predefine terminal layer order (like code_editor):
         // background-cells -> cursor -> text -> decorations.
-        self.draw_bg.new_draw_call(cx);
         self.draw_selection.new_draw_call(cx);
         self.draw_cursor.new_draw_call(cx);
         self.draw_text.new_draw_call(cx);
