@@ -15,6 +15,7 @@ pub mod search;
 pub mod snapshot;
 pub mod studio_editor;
 pub mod studio_file_tree;
+pub mod studio_terminal;
 
 pub use makepad_code_editor;
 pub use makepad_widgets;
@@ -50,4 +51,5 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::search::script_mod(vm);
     crate::snapshot::script_mod(vm);
     crate::ai_chat::ai_chat_view::script_mod(vm);
+    crate::studio_terminal::script_mod(vm);
 }
