@@ -52,6 +52,10 @@ fn main() {
         match pty.try_read() {
             Some(data) => {
                 terminal.process_bytes(&data);
+                let outbound = terminal.take_outbound();
+                if !outbound.is_empty() {
+                    let _ = pty.write(&outbound);
+                }
                 render_screen(&terminal);
             }
             None => {

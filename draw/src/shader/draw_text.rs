@@ -727,6 +727,14 @@ impl DrawText {
         self.draw_vars
             .set_instance_on_area(cx, live_id!(total_chars), &[total]);
     }
+    
+    pub fn new_draw_call(&self, cx: &mut Cx2d) {
+        cx.new_draw_call(&self.draw_vars);
+    }
+    
+    pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
+        cx.append_to_draw_call(&self.draw_vars);
+    }
 }
 
 #[derive(Debug, Clone, Script, ScriptHook)]
