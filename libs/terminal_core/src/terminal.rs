@@ -9,6 +9,7 @@ pub struct TerminalMode {
     pub cursor_keys: bool,      // DECCKM: cursor keys send ESC O vs ESC [
     pub autowrap: bool,         // DECAWM: auto-wrap at right margin
     pub cursor_visible: bool,   // DECTCEM: cursor visible
+    pub synchronized_update: bool, // DEC 2026: synchronized output mode
     pub alt_screen: bool,       // Alternate screen buffer active
     pub bracketed_paste: bool,  // Bracketed paste mode
     pub linefeed_newline: bool, // LNM: LF also does CR
@@ -459,6 +460,7 @@ impl Terminal {
                 self.switch_screen(enable, true, true);
             }
             2004 => self.modes.bracketed_paste = enable,
+            2026 => self.modes.synchronized_update = enable,
             _ => {
                 // Unknown DEC mode — ignore
             }
