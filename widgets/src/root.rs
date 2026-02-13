@@ -74,6 +74,7 @@ impl ScriptHook for Root {
                 }
             });
         }
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 
@@ -91,16 +92,9 @@ impl WidgetNode for Root {
         self.area
     }
 
-    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
-        if let Some(component) = self.components.get(&path[0]) {
-            if path.len() > 1 {
-                component.find_widgets(&path[1..], results);
-            } else {
-                results.push(component.clone());
-            }
-        }
-        for component in self.components.values() {
-            component.find_widgets(path, results);
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for (id, component) in self.components.iter() {
+            visit(*id, component.clone());
         }
     }
 

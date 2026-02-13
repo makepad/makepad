@@ -761,6 +761,7 @@ impl PortalList {
             } else {
                 self.items.retain_visible();
             }
+            cx.widget_tree_mark_dirty(self.uid);
         }
 
         cx.end_turtle_with_area(&mut self.area);
@@ -1048,6 +1049,11 @@ impl PortalList {
                             template,
                             widget: widget_ref.clone(),
                         });
+                        cx.widget_tree_insert_child(
+                            self.uid,
+                            LiveId(entry_id as u64),
+                            widget_ref.clone(),
+                        );
                         (widget_ref, false)
                     }
                 }
@@ -1065,6 +1071,11 @@ impl PortalList {
                         template,
                         widget: widget_ref.clone(),
                     });
+                    cx.widget_tree_insert_child(
+                        self.uid,
+                        LiveId(entry_id as u64),
+                        widget_ref.clone(),
+                    );
                     (widget_ref, false)
                 }
             }
@@ -1508,6 +1519,12 @@ impl WidgetNode for PortalList {
 
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
+    }
+
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for (item_id, item) in self.items.iter() {
+            visit(LiveId(*item_id as u64), item.widget.clone());
+        }
     }
 
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {

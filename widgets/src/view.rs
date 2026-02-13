@@ -254,6 +254,8 @@ impl ScriptHook for View {
                 )));
             }
         }
+
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 
@@ -576,16 +578,9 @@ impl WidgetNode for View {
         }
     }
 
-    fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
-        if let Some((_, child)) = self.children.iter().find(|(id, _)| *id == path[0]) {
-            if path.len() > 1 {
-                child.find_widgets(&path[1..], results);
-            } else {
-                results.push(child.clone());
-            }
-        }
-        for (_, child) in &self.children {
-            child.find_widgets(path, results);
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for (id, child) in &self.children {
+            visit(*id, child.clone());
         }
     }
 

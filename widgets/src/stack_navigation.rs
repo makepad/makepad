@@ -442,6 +442,10 @@ impl WidgetNode for StackNavigation {
         self.view.area()
     }
 
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        self.view.children(visit);
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         for (_id, widget_ref) in self.get_visible_views(cx).iter() {
             widget_ref.redraw(cx);

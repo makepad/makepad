@@ -41,10 +41,8 @@ pub trait WidgetNode: ScriptApply {
     fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign> {
         return None;
     }
-    /// Recursively find widgets by path, walking the actual children structure.
-    /// This is a fallback for when the widget tree hasn't been built yet
-    /// (e.g. freshly created list items that haven't been drawn).
-    fn find_widgets(&self, _path: &[LiveId], _results: &mut WidgetSet) {}
+    /// Enumerate direct children for widget-tree indexing.
+    fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
     /// Find all widgets whose area contains the given point. Calls the closure for each found widget.
     fn find_widgets_from_point(&self, _cx: &Cx, _point: DVec2, _found: &mut dyn FnMut(&WidgetRef)) {
     }
@@ -127,20 +125,16 @@ pub trait Widget: WidgetNode {
     }
 
     fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
-        let result = cx.widget_tree().find_within(self.widget_uid(), path);
-        if !result.is_empty() {
-            return result;
-        }
-        // Fallback: widget not in tree yet, walk the children structure directly
-        let mut results = WidgetSet::default();
-        self.find_widgets(path, &mut results);
-        results.into_first()
+        let tree = cx.widget_tree();
+        let uid = self.widget_uid();
+        tree.find_within_from_borrowed(uid, path, |visit| self.children(visit))
     }
 
     fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         let tree = cx.widget_tree();
         let uid = self.widget_uid();
+        tree.refresh_from_borrowed(uid, |visit| self.children(visit));
         for path in paths {
             results.0.extend(tree.find_all_within(uid, path));
         }
@@ -150,7 +144,9 @@ pub trait Widget: WidgetNode {
     /// Flood-fill search: find a widget by path, searching children first,
     /// then expanding outward through parents and their subtrees.
     fn widget_flood(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
-        cx.widget_tree().find_flood(self.widget_uid(), path)
+        let tree = cx.widget_tree();
+        let uid = self.widget_uid();
+        tree.find_flood_from_borrowed(uid, path, |visit| self.children(visit))
     }
 
     /// Flood-fill search returning all matches, ordered by proximity.
@@ -158,6 +154,7 @@ pub trait Widget: WidgetNode {
         let mut results = WidgetSet::default();
         let tree = cx.widget_tree();
         let uid = self.widget_uid();
+        tree.refresh_from_borrowed(uid, |visit| self.children(visit));
         for path in paths {
             results.0.extend(tree.find_all_flood(uid, path));
         }
@@ -379,6 +376,7 @@ impl WidgetSet {
         let mut results = WidgetSet::default();
         let tree = cx.widget_tree();
         for widget in &self.0 {
+            tree.seed_from_widget(widget.clone());
             let uid = widget.widget_uid();
             for path in paths {
                 results.0.extend(tree.find_all_within(uid, path));
@@ -581,11 +579,14 @@ impl WidgetRef {
     ///
     /// Returns `WidgetUid(0)` if the widget is currently borrowed or is empty.
     pub fn widget_uid(&self) -> WidgetUid {
+        self.try_widget_uid().unwrap_or(WidgetUid(0))
+    }
+
+    pub fn try_widget_uid(&self) -> Option<WidgetUid> {
         self.0
             .try_borrow()
             .ok()
             .and_then(|r| r.as_ref().map(|w| w.widget.widget_uid()))
-            .unwrap_or(WidgetUid(0))
     }
 
     pub fn area(&self) -> Area {
@@ -634,10 +635,18 @@ impl WidgetRef {
             }
         }
     */
-    pub fn find_widgets(&self, path: &[LiveId], results: &mut WidgetSet) {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            inner.widget.find_widgets(path, results)
+    pub fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        let _ = self.try_children(visit);
+    }
+
+    pub fn try_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        let Ok(inner) = self.0.try_borrow() else {
+            return false;
+        };
+        if let Some(inner) = inner.as_ref() {
+            inner.widget.children(visit);
         }
+        true
     }
 
     pub fn find_widgets_from_point(
@@ -729,20 +738,38 @@ impl WidgetRef {
     }
 
     pub fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
-        let result = cx.widget_tree().find_within(self.widget_uid(), path);
-        if !result.is_empty() {
-            return result;
+        let tree = cx.widget_tree();
+        tree.seed_from_widget(self.clone());
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                let uid = inner.widget.widget_uid();
+                if uid != WidgetUid(0) {
+                    tree.refresh_from_borrowed(uid, |visit| inner.widget.children(visit));
+                    return tree.find_within(uid, path);
+                }
+            } else {
+                return WidgetRef::empty();
+            }
         }
-        // Fallback: widget not in tree yet, walk the children structure directly
-        let mut results = WidgetSet::default();
-        self.find_widgets(path, &mut results);
-        results.into_first()
+        tree.find_within(self.widget_uid(), path)
     }
 
     pub fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         let tree = cx.widget_tree();
-        let uid = self.widget_uid();
+        tree.seed_from_widget(self.clone());
+        let mut uid = self.widget_uid();
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                let inner_uid = inner.widget.widget_uid();
+                if inner_uid != WidgetUid(0) {
+                    tree.refresh_from_borrowed(inner_uid, |visit| inner.widget.children(visit));
+                    uid = inner_uid;
+                }
+            } else {
+                return results;
+            }
+        }
         for path in paths {
             results.0.extend(tree.find_all_within(uid, path));
         }
@@ -754,13 +781,38 @@ impl WidgetRef {
     }
 
     pub fn widget_flood(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
-        cx.widget_tree().find_flood(self.widget_uid(), path)
+        let tree = cx.widget_tree();
+        tree.seed_from_widget(self.clone());
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                let uid = inner.widget.widget_uid();
+                if uid != WidgetUid(0) {
+                    tree.refresh_from_borrowed(uid, |visit| inner.widget.children(visit));
+                    return tree.find_flood(uid, path);
+                }
+            } else {
+                return WidgetRef::empty();
+            }
+        }
+        tree.find_flood(self.widget_uid(), path)
     }
 
     pub fn widgets_flood(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         let tree = cx.widget_tree();
-        let uid = self.widget_uid();
+        tree.seed_from_widget(self.clone());
+        let mut uid = self.widget_uid();
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                let inner_uid = inner.widget.widget_uid();
+                if inner_uid != WidgetUid(0) {
+                    tree.refresh_from_borrowed(inner_uid, |visit| inner.widget.children(visit));
+                    uid = inner_uid;
+                }
+            } else {
+                return results;
+            }
+        }
         for path in paths {
             results.0.extend(tree.find_all_flood(uid, path));
         }
