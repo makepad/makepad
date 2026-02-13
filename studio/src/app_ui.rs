@@ -488,7 +488,7 @@ script_mod! {
 
                 log_tabs := DockTabs{
                     tabs: [@log_list_tab @terminal_tab]
-                    selected: 1
+                    selected: 0
                 }
 
                 file_tree_tab := DockTab{
