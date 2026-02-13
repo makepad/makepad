@@ -138,11 +138,11 @@ struct EnterCoalesce {
 /// Enter, we keep drawing the cursor at the saved (pre-Enter) position
 /// to avoid a visible jump.
 struct CursorHold {
-    /// The virtual row (scrollback_len + cursor.y) where the cursor was.
-    virtual_row: usize,
+    /// Screen row (0..rows) where the cursor was at Enter.
+    /// We draw hold at this row within the current viewport to keep it stable.
+    screen_row: usize,
     /// Original virtual row at Enter; used for release checks even when
-    /// `virtual_row` is adjusted to keep the held cursor visually anchored
-    /// during scrollback growth.
+    /// viewport/scrollback state changes while coalescing.
     release_virtual_row: usize,
     /// The column where the cursor was.
     col: usize,
@@ -534,7 +534,17 @@ impl StudioTerminal {
     }
 
     /// Called when the user presses Enter.
-    fn note_enter_pressed(&mut self) {
+    fn note_enter_pressed(&mut self, cx: &mut Cx) {
+        let mut redraw = false;
+        if self.output_streaming {
+            self.output_streaming = false;
+            redraw = true;
+        }
+        if !self.cursor_blink_on {
+            self.cursor_blink_on = true;
+            redraw = true;
+        }
+
         if let Some(terminal) = &self.terminal {
             let screen = terminal.screen();
             let cursor_x = screen.cursor.x;
@@ -555,7 +565,7 @@ impl StudioTerminal {
             if self.cursor_hold.is_none() {
                 let virtual_row = screen.scrollback_len() + screen.cursor.y;
                 self.cursor_hold = Some(CursorHold {
-                    virtual_row,
+                    screen_row: screen.cursor.y,
                     release_virtual_row: virtual_row,
                     col: cursor_x,
                     target_x,
@@ -567,6 +577,10 @@ impl StudioTerminal {
                     hold.deadline = Instant::now() + Self::CURSOR_HOLD_TIMEOUT;
                 }
             }
+        }
+
+        if redraw {
+            self.draw_bg.redraw(cx);
         }
     }
 
@@ -763,11 +777,6 @@ impl StudioTerminal {
                 if let Some((row, _)) = &mut self.selection_cursor {
                     *row += d;
                 }
-                if let Some(ref mut hold) = self.cursor_hold {
-                    // Keep the held cursor at the same visual row while content
-                    // scrolls; release checks still use `release_virtual_row`.
-                    hold.virtual_row += d;
-                }
             } else {
                 self.clear_selection();
             }
@@ -779,7 +788,11 @@ impl StudioTerminal {
         // Enter streaming mode immediately so the cursor doesn't blink while
         // rows are shifting. Keep the held cursor visible during post-Enter
         // settling, so skip this while cursor_hold is active.
-        if scrollback_changed && !self.output_streaming && self.cursor_hold.is_none() {
+        if scrollback_changed
+            && !self.output_streaming
+            && self.cursor_hold.is_none()
+            && self.enter_coalesce.is_none()
+        {
             self.output_streaming = true;
             self.pending_streaming_ticks = 0;
             self.cursor_blink_on = false;
@@ -791,7 +804,7 @@ impl StudioTerminal {
             if self.pending_streaming_ticks >= Self::STREAMING_START_TICKS
                 || total_bytes >= Self::STREAMING_START_BYTES
             {
-                if self.cursor_hold.is_none() {
+                if self.cursor_hold.is_none() && self.enter_coalesce.is_none() {
                     self.output_streaming = true;
                     self.pending_streaming_ticks = 0;
                     self.cursor_blink_on = false;
@@ -799,7 +812,10 @@ impl StudioTerminal {
                     self.pending_streaming_ticks = 0;
                 }
             }
-        } else if self.cursor_blink_on && self.cursor_hold.is_none() {
+        } else if self.cursor_blink_on
+            && self.cursor_hold.is_none()
+            && self.enter_coalesce.is_none()
+        {
             self.cursor_blink_on = false;
         }
 
@@ -1075,10 +1091,15 @@ impl StudioTerminal {
         // Cursor — if we have a cursor hold active (post-Enter, waiting for
         // prompt to settle), draw cursor at the saved position instead of the
         // terminal's real cursor position.
-        if terminal.modes.cursor_visible && (!self.output_streaming || self.cursor_hold.is_some()) {
+        if terminal.modes.cursor_visible
+            && (!self.output_streaming
+                || self.cursor_hold.is_some()
+                || self.enter_coalesce.is_some())
+        {
             let (draw_col, draw_virtual_row, cursor_shape) =
                 if let Some(ref hold) = self.cursor_hold {
-                    (hold.col, hold.virtual_row, CursorShape::Block)
+                    let hold_row = hold.screen_row.min(rows.saturating_sub(1));
+                    (hold.col, top_row + hold_row, CursorShape::Block)
                 } else {
                     let cursor = &screen.cursor;
                     (cursor.x, screen.scrollback_len() + cursor.y, cursor.shape)
@@ -1310,10 +1331,7 @@ impl Widget for StudioTerminal {
                     if !visible {
                         return;
                     }
-                    if self.enter_coalesce.is_some() {
-                        return;
-                    }
-                    if self.cursor_hold.is_some() {
+                    if self.enter_coalesce.is_some() || self.cursor_hold.is_some() {
                         if !self.cursor_blink_on {
                             self.cursor_blink_on = true;
                             self.draw_bg.redraw(cx);
@@ -1339,8 +1357,10 @@ impl Widget for StudioTerminal {
             if self.select_scroll_next_frame.is_event(event).is_some() {
                 self.select_scroll_next_frame = cx.new_next_frame();
                 if let Some(abs) = self.last_finger_abs {
-                    let vp_top = self.viewport_rect.pos.y;
-                    let vp_bottom = vp_top + self.viewport_rect.size.y;
+                    // Pointer coordinates are absolute, so compare against the
+                    // unscrolled viewport bounds (also absolute).
+                    let vp_top = self.unscrolled_rect.pos.y;
+                    let vp_bottom = vp_top + self.unscrolled_rect.size.y;
                     let (_, cell_height) = self.cell_metrics();
                     let scroll_speed = cell_height * 2.0;
 
@@ -1400,7 +1420,7 @@ impl Widget for StudioTerminal {
             Hit::KeyDown(e) => {
                 let is_enter = matches!(e.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter);
                 if is_enter {
-                    self.note_enter_pressed();
+                    self.note_enter_pressed(cx);
                 } else {
                     self.note_local_input(cx);
                 }
