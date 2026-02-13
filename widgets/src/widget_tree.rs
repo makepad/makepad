@@ -27,7 +27,7 @@ struct WidgetTreeInner {
     // Hot path (dense query index)
     names: Vec<LiveId>,
     subtree_end: Vec<u32>,
-    no_index: Vec<bool>,
+    skip_search: Vec<bool>,
     nodes: Vec<WidgetTreeNode>,
     uid_map: HashMap<WidgetUid, u32>,
 
@@ -49,7 +49,7 @@ struct WidgetTreeNode {
 struct GraphNode {
     name: LiveId,
     widget: WidgetRef,
-    no_index: bool,
+    skip_search: bool,
     parent: Option<WidgetUid>,
     children: Vec<WidgetUid>,
 }
@@ -74,14 +74,14 @@ impl WidgetTree {
             return;
         }
 
-        let no_index = widget.skip_widget_tree_search();
+        let skip_search = widget.skip_widget_tree_search();
         let mut inner = self.inner.borrow_mut();
 
         let mut old_parent = None;
         let mut node_is_new = false;
         let mut widget_changed = false;
         let mut name_changed = false;
-        let mut no_index_changed = false;
+        let mut skip_search_changed = false;
         let mut parent_changed = false;
 
         match inner.graph.get_mut(&uid) {
@@ -95,9 +95,9 @@ impl WidgetTree {
                     node.widget = widget;
                     widget_changed = true;
                 }
-                if node.no_index != no_index {
-                    node.no_index = no_index;
-                    no_index_changed = true;
+                if node.skip_search != skip_search {
+                    node.skip_search = skip_search;
+                    skip_search_changed = true;
                 }
                 if node.parent != parent {
                     node.parent = parent;
@@ -110,7 +110,7 @@ impl WidgetTree {
                     GraphNode {
                         name,
                         widget,
-                        no_index,
+                        skip_search,
                         parent,
                         children: Vec::new(),
                     },
@@ -119,7 +119,7 @@ impl WidgetTree {
             }
         }
 
-        if node_is_new || name_changed || no_index_changed || parent_changed {
+        if node_is_new || name_changed || skip_search_changed || parent_changed {
             inner.dense_dirty = true;
         }
 
@@ -197,7 +197,7 @@ impl WidgetTree {
         if child_uid == WidgetUid(0) {
             return;
         }
-        let child_no_index = widget.skip_widget_tree_search();
+        let child_skip_search = widget.skip_widget_tree_search();
 
         let mut inner = self.inner.borrow_mut();
 
@@ -207,7 +207,7 @@ impl WidgetTree {
                 GraphNode {
                     name: LiveId(0),
                     widget: WidgetRef::empty(),
-                    no_index: false,
+                    skip_search: false,
                     parent: None,
                     children: Vec::new(),
                 },
@@ -221,7 +221,7 @@ impl WidgetTree {
         let mut old_parent = None;
         let mut child_is_new = false;
         let mut name_changed = false;
-        let mut no_index_changed = false;
+        let mut skip_search_changed = false;
         let mut parent_changed = false;
 
         match inner.graph.get_mut(&child_uid) {
@@ -234,9 +234,9 @@ impl WidgetTree {
                 if node.widget != widget {
                     node.widget = widget;
                 }
-                if node.no_index != child_no_index {
-                    node.no_index = child_no_index;
-                    no_index_changed = true;
+                if node.skip_search != child_skip_search {
+                    node.skip_search = child_skip_search;
+                    skip_search_changed = true;
                 }
                 if node.parent != Some(parent_uid) {
                     node.parent = Some(parent_uid);
@@ -249,7 +249,7 @@ impl WidgetTree {
                     GraphNode {
                         name,
                         widget,
-                        no_index: child_no_index,
+                        skip_search: child_skip_search,
                         parent: Some(parent_uid),
                         children: Vec::new(),
                     },
@@ -258,15 +258,17 @@ impl WidgetTree {
             }
         }
 
-        if child_is_new || name_changed || no_index_changed || parent_changed {
+        if child_is_new || name_changed || skip_search_changed || parent_changed {
             inner.dense_dirty = true;
         }
 
         if old_parent != Some(parent_uid) {
             if let Some(prev_parent_uid) = old_parent {
                 if let Some(prev_parent) = inner.graph.get_mut(&prev_parent_uid) {
-                    if let Some(pos) =
-                        prev_parent.children.iter().position(|entry| *entry == child_uid)
+                    if let Some(pos) = prev_parent
+                        .children
+                        .iter()
+                        .position(|entry| *entry == child_uid)
                     {
                         prev_parent.children.remove(pos);
                         inner.dense_dirty = true;
@@ -338,25 +340,25 @@ impl WidgetTree {
         if uid == WidgetUid(0) {
             return;
         }
-        let no_index = widget.skip_widget_tree_search();
+        let skip_search = widget.skip_widget_tree_search();
 
         let mut inner = self.inner.borrow_mut();
         if let Some(node) = inner.graph.get_mut(&uid) {
             let mut widget_changed = false;
-            let mut no_index_changed = false;
+            let mut skip_search_changed = false;
             if node.widget != widget {
                 node.widget = widget;
                 widget_changed = true;
             }
-            if node.no_index != no_index {
-                node.no_index = no_index;
-                no_index_changed = true;
+            if node.skip_search != skip_search {
+                node.skip_search = skip_search;
+                skip_search_changed = true;
             }
             if widget_changed {
                 inner.dirty.insert(uid);
                 inner.dense_dirty = true;
             }
-            if no_index_changed {
+            if skip_search_changed {
                 inner.dense_dirty = true;
             }
             if inner.root_uid == WidgetUid(0) {
@@ -370,7 +372,7 @@ impl WidgetTree {
             GraphNode {
                 name: LiveId(0),
                 widget,
-                no_index,
+                skip_search,
                 parent: None,
                 children: Vec::new(),
             },
@@ -393,14 +395,14 @@ impl WidgetTree {
         if uid == WidgetUid(0) {
             return;
         }
-        let no_index = widget.skip_widget_tree_search();
+        let skip_search = widget.skip_widget_tree_search();
 
         let mut inner = self.inner.borrow_mut();
         let mut old_parent = None;
         let mut node_is_new = false;
         let mut widget_changed = false;
         let mut name_changed = false;
-        let mut no_index_changed = false;
+        let mut skip_search_changed = false;
         let mut parent_changed = false;
 
         match inner.graph.get_mut(&uid) {
@@ -414,9 +416,9 @@ impl WidgetTree {
                     node.widget = widget;
                     widget_changed = true;
                 }
-                if node.no_index != no_index {
-                    node.no_index = no_index;
-                    no_index_changed = true;
+                if node.skip_search != skip_search {
+                    node.skip_search = skip_search;
+                    skip_search_changed = true;
                 }
                 if node.parent.is_some() {
                     node.parent = None;
@@ -429,7 +431,7 @@ impl WidgetTree {
                     GraphNode {
                         name: LiveId(0),
                         widget,
-                        no_index,
+                        skip_search,
                         parent: None,
                         children: Vec::new(),
                     },
@@ -454,7 +456,7 @@ impl WidgetTree {
             inner.dense_dirty = true;
         }
 
-        if node_is_new || widget_changed || name_changed || no_index_changed || parent_changed {
+        if node_is_new || widget_changed || name_changed || skip_search_changed || parent_changed {
             inner.dense_dirty = true;
         }
 
@@ -486,7 +488,7 @@ impl WidgetTree {
                 GraphNode {
                     name: LiveId(0),
                     widget: WidgetRef::empty(),
-                    no_index: false,
+                    skip_search: false,
                     parent: None,
                     children: Vec::new(),
                 },
@@ -597,12 +599,12 @@ impl WidgetTree {
             if !new_children.iter().any(|entry| *entry == child_uid) {
                 new_children.push(child_uid);
             }
-            let child_no_index = child_widget.skip_widget_tree_search();
+            let child_skip_search = child_widget.skip_widget_tree_search();
 
             let mut old_parent = None;
             let mut child_is_new = false;
             let mut child_widget_changed = false;
-            let mut child_no_index_changed = false;
+            let mut child_skip_search_changed = false;
 
             match inner.graph.get_mut(&child_uid) {
                 Some(child_node) => {
@@ -615,9 +617,9 @@ impl WidgetTree {
                         child_node.widget = child_widget;
                         child_widget_changed = true;
                     }
-                    if child_node.no_index != child_no_index {
-                        child_node.no_index = child_no_index;
-                        child_no_index_changed = true;
+                    if child_node.skip_search != child_skip_search {
+                        child_node.skip_search = child_skip_search;
+                        child_skip_search_changed = true;
                     }
                     if child_node.parent != Some(uid) {
                         child_node.parent = Some(uid);
@@ -630,7 +632,7 @@ impl WidgetTree {
                         GraphNode {
                             name: child_name,
                             widget: child_widget,
-                            no_index: child_no_index,
+                            skip_search: child_skip_search,
                             parent: Some(uid),
                             children: Vec::new(),
                         },
@@ -643,8 +645,10 @@ impl WidgetTree {
             if old_parent != Some(uid) {
                 if let Some(prev_parent_uid) = old_parent {
                     if let Some(prev_parent) = inner.graph.get_mut(&prev_parent_uid) {
-                        if let Some(pos) =
-                            prev_parent.children.iter().position(|entry| *entry == child_uid)
+                        if let Some(pos) = prev_parent
+                            .children
+                            .iter()
+                            .position(|entry| *entry == child_uid)
                         {
                             prev_parent.children.remove(pos);
                             inner.dense_dirty = true;
@@ -653,7 +657,7 @@ impl WidgetTree {
                 }
             }
 
-            if child_no_index_changed {
+            if child_skip_search_changed {
                 inner.dense_dirty = true;
             }
 
@@ -677,10 +681,9 @@ impl WidgetTree {
         }
 
         for removed_uid in old_children {
-            let still_child = inner
-                .graph
-                .get(&uid)
-                .map_or(false, |node| node.children.iter().any(|child| *child == removed_uid));
+            let still_child = inner.graph.get(&uid).map_or(false, |node| {
+                node.children.iter().any(|child| *child == removed_uid)
+            });
             if still_child {
                 continue;
             }
@@ -719,7 +722,7 @@ impl WidgetTree {
     fn rebuild_dense(inner: &mut WidgetTreeInner) {
         inner.names.clear();
         inner.subtree_end.clear();
-        inner.no_index.clear();
+        inner.skip_search.clear();
         inner.nodes.clear();
         inner.uid_map.clear();
 
@@ -778,13 +781,13 @@ impl WidgetTree {
 
         let name = node.name;
         let widget = node.widget.clone();
-        let no_index = node.no_index;
+        let skip_search = node.skip_search;
         let children = node.children.clone();
 
         let idx = inner.names.len() as u32;
         inner.names.push(name);
         inner.subtree_end.push(idx + 1);
-        inner.no_index.push(no_index);
+        inner.skip_search.push(skip_search);
         inner.nodes.push(WidgetTreeNode {
             uid,
             widget,
@@ -877,7 +880,9 @@ impl WidgetTree {
             {
                 result = inner.nodes[i].widget.clone();
             }
-            if inner.no_index[i] {
+            // skip_search on the root node itself: don't skip, we explicitly
+            // asked to search within this subtree
+            if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
             } else {
                 i += 1;
@@ -911,7 +916,9 @@ impl WidgetTree {
             {
                 results.push(inner.nodes[i].widget.clone());
             }
-            if inner.no_index[i] {
+            // skip_search on the root node itself: don't skip, we explicitly
+            // asked to search within this subtree
+            if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
             } else {
                 i += 1;
@@ -1043,20 +1050,20 @@ impl WidgetTree {
         let origin_idx = match inner.uid_map.get(&origin_uid) {
             Some(&idx) => idx as usize,
             None => {
-                Self::collect_within_range(&inner, &mut results, 0, inner.names.len(), target, path);
+                Self::collect_within_range(
+                    &inner,
+                    &mut results,
+                    0,
+                    inner.names.len(),
+                    target,
+                    path,
+                );
                 return results;
             }
         };
 
         let origin_end = inner.subtree_end[origin_idx] as usize;
-        Self::collect_within_range(
-            &inner,
-            &mut results,
-            origin_idx,
-            origin_end,
-            target,
-            path,
-        );
+        Self::collect_within_range(&inner, &mut results, origin_idx, origin_end, target, path);
 
         let mut exclude_start = origin_idx;
         let mut exclude_end = origin_end;
@@ -1110,7 +1117,7 @@ impl WidgetTree {
             {
                 return inner.nodes[i].widget.clone();
             }
-            if inner.no_index[i] {
+            if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
             } else {
                 i += 1;
@@ -1139,7 +1146,7 @@ impl WidgetTree {
             {
                 return inner.nodes[i].widget.clone();
             }
-            if inner.no_index[i] {
+            if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
             } else {
                 i += 1;
@@ -1163,7 +1170,7 @@ impl WidgetTree {
             {
                 results.push(inner.nodes[i].widget.clone());
             }
-            if inner.no_index[i] {
+            if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
             } else {
                 i += 1;
@@ -1192,7 +1199,7 @@ impl WidgetTree {
             {
                 results.push(inner.nodes[i].widget.clone());
             }
-            if inner.no_index[i] {
+            if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
             } else {
                 i += 1;
@@ -1310,12 +1317,7 @@ impl CxWidgetExt for Cx {
         state.tree.mark_dirty(uid);
     }
 
-    fn widget_tree_insert_child(
-        &mut self,
-        parent_uid: WidgetUid,
-        name: LiveId,
-        widget: WidgetRef,
-    ) {
+    fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
         let state = get_or_init_state(self);
         state.tree.insert_child(parent_uid, name, widget);
     }
@@ -1376,12 +1378,7 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
         state.tree.mark_dirty(uid);
     }
 
-    fn widget_tree_insert_child(
-        &mut self,
-        parent_uid: WidgetUid,
-        name: LiveId,
-        widget: WidgetRef,
-    ) {
+    fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
         let cx: &mut Cx = self;
         let state = get_or_init_state(cx);
         state.tree.insert_child(parent_uid, name, widget);
@@ -1443,12 +1440,7 @@ impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
         state.tree.mark_dirty(uid);
     }
 
-    fn widget_tree_insert_child(
-        &mut self,
-        parent_uid: WidgetUid,
-        name: LiveId,
-        widget: WidgetRef,
-    ) {
+    fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
         let cx: &mut Cx = self;
         let state = get_or_init_state(cx);
         state.tree.insert_child(parent_uid, name, widget);
