@@ -49,10 +49,12 @@ pub struct Terminal {
     pub palette: Palette,
     pub default_fg: Rgb,
     pub default_bg: Rgb,
+    pub cursor_color: Option<Rgb>,
     pub title: String,
 
     parser: Parser,
     actions_buf: Vec<Action>,
+    outbound: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,9 +73,11 @@ impl Terminal {
             palette: Palette::default(),
             default_fg: Rgb::new(0xc5, 0xc8, 0xc6),
             default_bg: Rgb::new(0x1d, 0x1f, 0x21),
+            cursor_color: None,
             title: String::new(),
             parser: Parser::new(),
             actions_buf: Vec::with_capacity(64),
+            outbound: Vec::with_capacity(64),
         }
     }
 
@@ -114,6 +118,15 @@ impl Terminal {
             self.handle_action(action);
         }
         self.actions_buf = actions;
+    }
+
+    /// Take terminal-generated reply bytes (DSR/DA/CPR/etc.) to send back to the PTY.
+    pub fn take_outbound(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.outbound)
+    }
+
+    fn push_outbound(&mut self, bytes: &[u8]) {
+        self.outbound.extend_from_slice(bytes);
     }
 
     fn handle_action(&mut self, action: &Action) {
@@ -309,8 +322,31 @@ impl Terminal {
             }
             // DSR — Device Status Report
             b'n' if !is_private => {
-                // We don't respond to the PTY here — the caller should handle this.
-                // For now, just ignore.
+                match params.get(0, 0) {
+                    5 => {
+                        // Report terminal OK.
+                        self.push_outbound(b"\x1b[0n");
+                    }
+                    6 => {
+                        // CPR — Report cursor position (1-based row/col).
+                        let screen = self.screen();
+                        let row = screen.cursor.y + 1;
+                        let col = screen.cursor.x + 1;
+                        let reply = format!("\x1b[{};{}R", row, col);
+                        self.push_outbound(reply.as_bytes());
+                    }
+                    _ => {}
+                }
+            }
+            // DEC-specific DSR / DECXCPR
+            b'n' if is_private => {
+                if params.get(0, 0) == 6 {
+                    let screen = self.screen();
+                    let row = screen.cursor.y + 1;
+                    let col = screen.cursor.x + 1;
+                    let reply = format!("\x1b[?{};{}R", row, col);
+                    self.push_outbound(reply.as_bytes());
+                }
             }
             // DECSTBM — Set Top and Bottom Margins
             b'r' if !is_private => {
@@ -330,7 +366,13 @@ impl Terminal {
             }
             // DA — Device Attributes
             b'c' if !is_private => {
-                // Ignore — we'd need to write response to PTY
+                if params.has_intermediate(b'>') {
+                    // Secondary DA.
+                    self.push_outbound(b"\x1b[>0;0;0c");
+                } else {
+                    // Primary DA: VT100 with Advanced Video Option.
+                    self.push_outbound(b"\x1b[?1;2c");
+                }
             }
             // DECSET / DECRST — DEC Private Mode Set/Reset
             b'h' if is_private => {
@@ -519,9 +561,137 @@ impl Terminal {
             }
             // Icon name (ignore, we use title)
             1 => {}
+            // Set color palette entries: "index;spec(;index;spec...)"
+            4 => {
+                let mut parts = data.split(';');
+                while let (Some(idx_str), Some(spec)) = (parts.next(), parts.next()) {
+                    let Ok(idx) = idx_str.parse::<usize>() else {
+                        continue;
+                    };
+                    if idx >= 256 {
+                        continue;
+                    }
+                    if let Some(rgb) = Self::parse_osc_color(spec) {
+                        self.palette.colors[idx] = rgb;
+                    }
+                }
+            }
+            // Default foreground/background/cursor colors.
+            10 => {
+                if let Some(rgb) = Self::parse_osc_color(data) {
+                    self.default_fg = rgb;
+                }
+            }
+            11 => {
+                if let Some(rgb) = Self::parse_osc_color(data) {
+                    self.default_bg = rgb;
+                }
+            }
+            12 => {
+                self.cursor_color = Self::parse_osc_color(data);
+            }
+            // Reset palette entries (empty means all).
+            104 => {
+                let defaults = Palette::default_palette();
+                if data.trim().is_empty() {
+                    self.palette = defaults;
+                } else {
+                    for idx_str in data.split(';') {
+                        let Ok(idx) = idx_str.parse::<usize>() else {
+                            continue;
+                        };
+                        if idx < 256 {
+                            self.palette.colors[idx] = defaults.colors[idx];
+                        }
+                    }
+                }
+            }
+            // Reset default fg/bg/cursor colors.
+            110 => self.default_fg = Rgb::new(0xc5, 0xc8, 0xc6),
+            111 => self.default_bg = Rgb::new(0x1d, 0x1f, 0x21),
+            112 => self.cursor_color = None,
             _ => {
                 // Other OSC — ignore for now
             }
+        }
+    }
+
+    fn parse_osc_color(spec: &str) -> Option<Rgb> {
+        if let Some(hex) = spec.strip_prefix('#') {
+            if hex.len() == 6 {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                return Some(Rgb::new(r, g, b));
+            }
+            return None;
+        }
+        if let Some(rest) = spec.strip_prefix("rgb:") {
+            let mut it = rest.split('/');
+            let r = Self::parse_osc_hex_component(it.next()?)?;
+            let g = Self::parse_osc_hex_component(it.next()?)?;
+            let b = Self::parse_osc_hex_component(it.next()?)?;
+            return Some(Rgb::new(r, g, b));
+        }
+        None
+    }
+
+    fn parse_osc_hex_component(comp: &str) -> Option<u8> {
+        if comp.is_empty() || comp.len() > 4 {
+            return None;
+        }
+        let value = u16::from_str_radix(comp, 16).ok()?;
+        let max = (1u32 << (comp.len() as u32 * 4)) - 1;
+        if max == 0 {
+            return None;
+        }
+        Some(((value as u32 * 255) / max) as u8)
+    }
+
+    fn parse_sgr_extended_color(
+        params: &crate::parser::CsiParams,
+        i: usize,
+    ) -> Option<(Color, usize)> {
+        let mode_idx = i + 1;
+        if mode_idx >= params.len {
+            return None;
+        }
+        match params.params[mode_idx] {
+            5 => {
+                let idx_idx = mode_idx + 1;
+                if idx_idx < params.len {
+                    Some((Color::Palette(params.params[idx_idx].min(255) as u8), idx_idx))
+                } else {
+                    None
+                }
+            }
+            2 => {
+                // Colon form may include a color-space id before RGB, e.g. 38:2::R:G:B.
+                let rgb_start = if params.has_colon && mode_idx + 4 < params.len {
+                    let color_space = params.params[mode_idx + 1];
+                    if color_space <= 1 {
+                        mode_idx + 2
+                    } else {
+                        mode_idx + 1
+                    }
+                } else {
+                    mode_idx + 1
+                };
+                let b_idx = rgb_start + 2;
+                if b_idx < params.len {
+                    Some((
+                        Color::Rgb(
+                            params.params[rgb_start].min(255) as u8,
+                            params.params[rgb_start + 1].min(255) as u8,
+                            params.params[b_idx].min(255) as u8,
+                        ),
+                        b_idx,
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -614,56 +784,27 @@ impl Terminal {
                 49 => self.screen_mut().cursor.style.bg = Color::Default,
                 // Extended foreground (38;5;N or 38;2;R;G;B)
                 38 => {
-                    i += 1;
-                    if i < params.len {
-                        match params.params[i] {
-                            5 => {
-                                // 256-color
-                                i += 1;
-                                if i < params.len {
-                                    self.screen_mut().cursor.style.fg =
-                                        Color::Palette(params.params[i] as u8);
-                                }
-                            }
-                            2 => {
-                                // RGB
-                                if i + 3 < params.len {
-                                    let r = params.params[i + 1] as u8;
-                                    let g = params.params[i + 2] as u8;
-                                    let b = params.params[i + 3] as u8;
-                                    self.screen_mut().cursor.style.fg = Color::Rgb(r, g, b);
-                                    i += 3;
-                                }
-                            }
-                            _ => {}
-                        }
+                    if let Some((fg, new_i)) = Self::parse_sgr_extended_color(params, i) {
+                        self.screen_mut().cursor.style.fg = fg;
+                        i = new_i;
                     }
                 }
                 // Extended background (48;5;N or 48;2;R;G;B)
                 48 => {
-                    i += 1;
-                    if i < params.len {
-                        match params.params[i] {
-                            5 => {
-                                i += 1;
-                                if i < params.len {
-                                    self.screen_mut().cursor.style.bg =
-                                        Color::Palette(params.params[i] as u8);
-                                }
-                            }
-                            2 => {
-                                if i + 3 < params.len {
-                                    let r = params.params[i + 1] as u8;
-                                    let g = params.params[i + 2] as u8;
-                                    let b = params.params[i + 3] as u8;
-                                    self.screen_mut().cursor.style.bg = Color::Rgb(r, g, b);
-                                    i += 3;
-                                }
-                            }
-                            _ => {}
-                        }
+                    if let Some((bg, new_i)) = Self::parse_sgr_extended_color(params, i) {
+                        self.screen_mut().cursor.style.bg = bg;
+                        i = new_i;
                     }
                 }
+                // Extended underline color (58;...)
+                58 => {
+                    if let Some((_ul, new_i)) = Self::parse_sgr_extended_color(params, i) {
+                        // Underline color is not stored yet; consume params to keep parsing in sync.
+                        i = new_i;
+                    }
+                }
+                // Reset underline color (ignored for now).
+                59 => {}
                 // Bright foreground (90-97)
                 90..=97 => {
                     self.screen_mut().cursor.style.fg = Color::Palette((p - 90 + 8) as u8);
@@ -904,5 +1045,55 @@ fn func_key(ss3_char: u8, csi_num: u16, modifier: u8) -> Vec<u8> {
         format!("\x1b[{};{}~", csi_num, modifier).into_bytes()
     } else {
         vec![0x1b, b'O', ss3_char]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Color, Terminal};
+
+    #[test]
+    fn dsr_cursor_position_reply() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x1b[12;34H");
+        terminal.process_bytes(b"\x1b[6n");
+        assert_eq!(terminal.take_outbound(), b"\x1b[12;34R".to_vec());
+    }
+
+    #[test]
+    fn da_primary_reply() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x1b[c");
+        assert_eq!(terminal.take_outbound(), b"\x1b[?1;2c".to_vec());
+    }
+
+    #[test]
+    fn sgr_truecolor_applies_to_cell_style() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x1b[38;2;10;20;30mX");
+        let cell = terminal.screen().grid.cell(0, 0);
+        assert_eq!(cell.style.fg, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn osc_updates_default_colors() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x1b]10;#112233\x07");
+        terminal.process_bytes(b"\x1b]11;rgb:44/55/66\x07");
+        assert_eq!(terminal.default_fg.r, 0x11);
+        assert_eq!(terminal.default_fg.g, 0x22);
+        assert_eq!(terminal.default_fg.b, 0x33);
+        assert_eq!(terminal.default_bg.r, 0x44);
+        assert_eq!(terminal.default_bg.g, 0x55);
+        assert_eq!(terminal.default_bg.b, 0x66);
+    }
+
+    #[test]
+    fn osc_with_st_terminator_is_applied() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x1b]10;#abcdef\x1b\\");
+        assert_eq!(terminal.default_fg.r, 0xab);
+        assert_eq!(terminal.default_fg.g, 0xcd);
+        assert_eq!(terminal.default_fg.b, 0xef);
     }
 }
