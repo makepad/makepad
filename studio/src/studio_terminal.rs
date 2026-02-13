@@ -186,6 +186,8 @@ pub struct StudioTerminal {
     #[rust]
     viewport_rect: Rect,
     #[rust]
+    unscrolled_rect: Rect,
+    #[rust]
     pending_scroll_clamp: bool,
     #[rust]
     area: Area,
@@ -514,7 +516,7 @@ impl StudioTerminal {
         let cursor_x: usize;
         let cursor_virtual_row: usize;
         let synchronized_update;
-        {
+        let (old_scrollback_len, new_scrollback_len) = {
             let Some(terminal) = &mut self.terminal else {
                 return;
             };
@@ -535,13 +537,32 @@ impl StudioTerminal {
                 got_data = true;
                 chunks += 1;
             }
+            let new_scrollback = terminal.screen().scrollback_len();
             if got_data {
-                scrollback_changed = terminal.screen().scrollback_len() != old_scrollback;
+                scrollback_changed = new_scrollback != old_scrollback;
             }
             let screen = terminal.screen();
             cursor_x = screen.cursor.x;
             cursor_virtual_row = screen.scrollback_len() + screen.cursor.y;
             synchronized_update = terminal.modes.synchronized_update;
+            (old_scrollback, new_scrollback)
+        };
+
+        // Adjust selection virtual row indices when scrollback grows/shrinks
+        if scrollback_changed {
+            let delta = new_scrollback_len as isize - old_scrollback_len as isize;
+            if delta > 0 {
+                let d = delta as usize;
+                if let Some((row, _)) = &mut self.selection_anchor {
+                    *row += d;
+                }
+                if let Some((row, _)) = &mut self.selection_cursor {
+                    *row += d;
+                }
+            } else {
+                // Scrollback shrank (clear/reset) — selection is invalid
+                self.clear_selection();
+            }
         }
 
         if got_data {
@@ -695,8 +716,11 @@ impl StudioTerminal {
 
     fn pick(&self, abs: Vec2d) -> (usize, usize) {
         let (cell_width, cell_height) = self.cell_metrics();
-        let local_x = abs.x - self.viewport_rect.pos.x - self.pad_x;
-        let local_y = abs.y - self.viewport_rect.pos.y - self.pad_y + self.current_scroll_pixels();
+        let local_x = abs.x - self.unscrolled_rect.pos.x - self.pad_x;
+        // Use unscrolled rect + explicit scroll so pick() works correctly
+        // even when called after scroll position changes (e.g. auto-scroll)
+        let local_y =
+            abs.y - self.unscrolled_rect.pos.y - self.pad_y + self.current_scroll_pixels();
 
         let col = (local_x / cell_width).floor().max(0.0) as usize;
         let row = (local_y / cell_height).floor().max(0.0) as usize;
@@ -1055,6 +1079,7 @@ impl Widget for StudioTerminal {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.scroll_bars.begin(cx, walk, Layout::default());
         self.viewport_rect = cx.turtle().rect();
+        self.unscrolled_rect = cx.turtle().rect_unscrolled();
         self.refresh_cell_metrics(cx);
         self.update_terminal_size(cx);
         if let Some(terminal) = &self.terminal {
