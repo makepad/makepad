@@ -110,6 +110,13 @@ fn show_help(err: &str) {
     println!();
     println!("    linux apt-get-install-makepad-deps           Call apt-get install with all dependencies needed for makepad.");
     println!();
+    println!("Check commands:");
+    println!();
+    println!("    check script                                  Check script with runtime-first validation and parser fallback.");
+    println!("                                                 Auto-discovers script_mod!/script! in src/**/*.rs.");
+    println!("    check all                                    Check Rust build on all configured platforms.");
+    println!("    check install-toolchain                       Install toolchains for check all.");
+    println!();
     println!();
 }
 
@@ -158,7 +165,8 @@ fn main() {
         }
         "check" => {
             if let Err(e) = handle_check(&args[1..]) {
-                println!("Got error: {}", e);
+                eprintln!("Got error: {}", e);
+                std::process::exit(1);
             }
         }
         _ => show_help("not implemented yet"),
