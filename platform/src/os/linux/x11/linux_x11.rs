@@ -50,12 +50,18 @@ impl X11Cx {
             }
         }));
 
+        // Stdin-loop runs Linux child rendering through the X11 backend.
+        // Keep EGL platform selection consistent to avoid mixed X11/Wayland
+        // context behavior in WSL/Xwayland setups.
         cx.borrow_mut().os.opengl_cx = Some(unsafe {
             OpenglCx::from_egl_platform_display(
                 egl_sys::EGL_PLATFORM_X11_EXT,
                 get_xlib_app_global().display,
             )
         });
+        if is_stdin_loop {
+            println!("stdin-loop EGL platform: X11");
+        }
 
         if is_stdin_loop {
             cx.borrow_mut().in_makepad_studio = true;
