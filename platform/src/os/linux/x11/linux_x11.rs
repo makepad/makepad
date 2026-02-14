@@ -13,9 +13,11 @@ use {
         makepad_math::dvec2,
         os::cx_native::EventFlow,
         thread::SignalToUI,
+        CxWindowPool,
     },
     std::cell::RefCell,
     std::rc::Rc,
+    std::sync::{Arc, Mutex},
 };
 
 pub fn x11_event_loop(cx: Rc<RefCell<Cx>>) {
@@ -24,11 +26,15 @@ pub fn x11_event_loop(cx: Rc<RefCell<Cx>>) {
 
 pub struct X11Cx {
     pub cx: Rc<RefCell<Cx>>,
+    internal_drag_items: Option<Arc<Vec<DragItem>>>,
 }
 
 impl X11Cx {
     pub fn event_loop_impl(cx: Rc<RefCell<Cx>>) {
-        let mut x11_cx = X11Cx { cx: cx.clone() };
+        let mut x11_cx = X11Cx {
+            cx: cx.clone(),
+            internal_drag_items: None,
+        };
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::LinuxWindow(LinuxWindowParams {
             custom_window_chrome: false,
@@ -164,16 +170,43 @@ impl X11Cx {
             }
             XlibEvent::MouseMove(e) => {
                 let mut cx = self.cx.borrow_mut();
+                let abs = e.abs;
+                let modifiers = e.modifiers;
                 cx.call_event_handler(&Event::MouseMove(e.into()));
+                if let Some(items) = self.internal_drag_items.as_ref() {
+                    cx.call_event_handler(&Event::Drag(DragEvent {
+                        modifiers,
+                        handled: Arc::new(Mutex::new(false)),
+                        abs,
+                        items: items.clone(),
+                        response: Arc::new(Mutex::new(DragResponse::None)),
+                    }));
+                    cx.drag_drop.cycle_drag();
+                }
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
                 cx.fingers.switch_captures();
             }
             XlibEvent::MouseUp(e) => {
                 let mut cx = self.cx.borrow_mut();
                 let button = e.button;
+                let abs = e.abs;
+                let modifiers = e.modifiers;
                 cx.call_event_handler(&Event::MouseUp(e.into()));
                 cx.fingers.mouse_up(button);
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
+                if button == MouseButton::PRIMARY {
+                    if let Some(items) = self.internal_drag_items.take() {
+                        cx.call_event_handler(&Event::Drop(DropEvent {
+                            modifiers,
+                            handled: Arc::new(Mutex::new(false)),
+                            abs,
+                            items,
+                        }));
+                        cx.drag_drop.cycle_drag();
+                        cx.call_event_handler(&Event::DragEnd);
+                        cx.drag_drop.cycle_drag();
+                    }
+                }
             }
             XlibEvent::Scroll(e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -193,15 +226,27 @@ impl X11Cx {
             }
             XlibEvent::Drag(e) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::Drag(e))
+                cx.call_event_handler(&Event::Drag(e));
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::Drop(e) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::Drop(e))
+                cx.call_event_handler(&Event::Drop(e));
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::DragEnd => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::DragEnd)
+                cx.call_event_handler(&Event::MouseUp(MouseUpEvent {
+                    abs: dvec2(-100000.0, -100000.0),
+                    button: MouseButton::PRIMARY,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0,
+                }));
+                cx.fingers.mouse_up(MouseButton::PRIMARY);
+                cx.fingers.cycle_hover_area(live_id!(mouse).into());
+                cx.call_event_handler(&Event::DragEnd);
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::KeyDown(e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -387,6 +432,9 @@ impl X11Cx {
                             )
                         }
                     }
+                }
+                CxOsOp::StartDragging(items) => {
+                    self.internal_drag_items = Some(Arc::new(items));
                 }
                 CxOsOp::SetCursor(cursor) => {
                     xlib_app.set_mouse_cursor(cursor);
