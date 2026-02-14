@@ -4,7 +4,6 @@ use {
         audio::*,
         //implement_com,
         makepad_live_id::*,
-        os::windows::win32_app::FALSE,
         thread::SignalToUI,
         windows::{
             core::implement,
@@ -57,7 +56,7 @@ use {
             Win32::System::Threading::{
                 AvSetMmThreadCharacteristicsW, CreateEventA, SetEvent, WaitForSingleObject,
             },
-            Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
+            Win32::Foundation::PROPERTYKEY,
         },
     },
     std::collections::HashSet,
@@ -335,10 +334,18 @@ impl WasapiAccess {
         let dev_id = device.GetId().unwrap();
         let props = device.OpenPropertyStore(STGM_READ).unwrap();
         let value = props.GetValue(&PKEY_Device_FriendlyName).unwrap();
-        let dev_name = value.to_string();
-        //assert!(value.Anonymous.Anonymous.vt == VT_LPWSTR);
-        //let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
-        (dev_name.to_string(), dev_id.to_string().unwrap())
+        let dev_name = if value.Anonymous.Anonymous.vt.0 == 31 {
+            value
+                .Anonymous
+                .Anonymous
+                .Anonymous
+                .pwszVal
+                .to_string()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        (dev_name, dev_id.to_string().unwrap())
     }
 
     /// Get the native channel count from the device's mix format
@@ -517,6 +524,9 @@ struct WasapiBaseRef {
     event: HANDLE,
 }
 
+unsafe impl Send for WasapiBaseRef {}
+unsafe impl Sync for WasapiBaseRef {}
+
 struct WasapiBase {
     device_id: AudioDeviceId,
     device: IMMDevice,
@@ -587,7 +597,7 @@ impl WasapiBase {
                 return Err(());
             }
 
-            let event = CreateEventA(None, FALSE, FALSE, None).unwrap();
+            let event = CreateEventA(None, false, false, None).unwrap();
             client3.SetEventHandle(event).unwrap();
             client3.Start().unwrap();
 
@@ -649,7 +659,7 @@ impl WasapiBase {
                 return Err(());
             }
 
-            let event = CreateEventA(None, FALSE, FALSE, None).unwrap();
+            let event = CreateEventA(None, false, false, None).unwrap();
             client.SetEventHandle(event).unwrap();
             client.Start().unwrap();
 
@@ -880,7 +890,7 @@ implement_com!{
     }
 }*/
 
-impl IMMNotificationClient_Impl for WasapiChangeListener {
+impl IMMNotificationClient_Impl for WasapiChangeListener_Impl {
     fn OnDeviceStateChanged(
         &self,
         _pwstrdeviceid: &PCWSTR,

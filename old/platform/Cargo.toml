@@ -74,11 +74,11 @@ path = "../libs/futures_legacy"
 version = "1.0.0"
 
 [target.'cfg(windows)'.dependencies.windows-core]
-version = "0.56"
+version = "0.62.2"
 
 [target.'cfg(windows)'.dependencies.windows]
-#path = "../libs/windows"
-version = "0.56"
+path = "../libs/windows-rs"
+version = "0.62.2"
 features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -121,7 +121,6 @@ features = [
     "Web_Http",
     "Web_Http_Headers",
     "Storage_Streams",
-    "implement"
 ]
 
 ## The vast majority of the Rust ecosystem is currently on

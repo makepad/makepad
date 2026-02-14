@@ -22,7 +22,7 @@ use {
         windows::Win32::Foundation::HANDLE,
         CxOsApi,
     },
-    std::{cell::RefCell, io, io::prelude::*, io::BufReader, rc::Rc},
+    std::{cell::RefCell, ffi::c_void, io, io::prelude::*, io::BufReader, rc::Rc},
 };
 
 struct LocalPresentableImage {
@@ -231,7 +231,7 @@ impl Cx {
                     let window_id = new_swapchain.window_id;
                     let local_swapchain = LocalSwapchain {
                         presentable_images: new_swapchain.presentable_images.map(|pi| {
-                            let handle = HANDLE(pi.handle as isize);
+                            let handle = HANDLE(pi.handle as usize as *mut c_void);
                             let format = TextureFormat::SharedBGRAu8 {
                                 id: pi.id,
                                 width: new_swapchain.alloc_width as usize,
