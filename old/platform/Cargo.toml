@@ -74,11 +74,11 @@ path = "../libs/futures_legacy"
 version = "1.0.0"
 
 [target.'cfg(windows)'.dependencies.windows-core]
-path = "../libs/windows-core"
+path = "../libs/windows/windows-core"
 version = "0.62.2"
 
 [target.'cfg(windows)'.dependencies.windows]
-path = "../libs/windows-rs"
+path = "../libs/windows/windows-rs"
 version = "0.62.2"
 features = [
     "Win32_Foundation",
