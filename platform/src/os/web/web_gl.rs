@@ -104,6 +104,19 @@ impl Cx {
                                         data: WasmPtrU8::new((*data).as_ref().unwrap()),
                                     });
                                 }
+                                TextureFormat::VecRGBAf32 {
+                                    width,
+                                    height,
+                                    data,
+                                    ..
+                                } => {
+                                    self.os.from_wasm(FromWasmAllocTextureImage2D_RGBAf32 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        data: WasmPtrF32::new((*data).as_ref().unwrap()),
+                                    });
+                                }
                                 x => panic!("Texture format not implemented for webGL {:?}", x),
                             }
                         }

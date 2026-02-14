@@ -242,6 +242,15 @@ pub struct FromWasmAllocTextureImage2D_Ru8 {
     pub data: WasmPtrU8,
 }
 
+#[allow(non_camel_case_types)]
+#[derive(FromWasm)]
+pub struct FromWasmAllocTextureImage2D_RGBAf32 {
+    pub texture_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data: WasmPtrF32,
+}
+
 #[derive(FromWasm, Default)]
 pub struct WColorTarget {
     pub texture_id: usize,
