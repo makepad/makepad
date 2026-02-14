@@ -934,6 +934,20 @@ impl ShaderFnCompiler {
                     let (kind, prefix) = output
                         .backend
                         .get_shader_io_kind_and_prefix(output.mode, io_type);
+                    let mut resolved_prefix = prefix;
+                    if let Some(existing) = output.io.iter().find(|io| io.name == field_id) {
+                        resolved_prefix = match (&existing.kind, &kind) {
+                            (ShaderIoKind::RustInstance, ShaderIoKind::DynInstance) => output
+                                .backend
+                                .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE)
+                                .1,
+                            (ShaderIoKind::DynInstance, ShaderIoKind::RustInstance) => output
+                                .backend
+                                .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_DYN_INSTANCE)
+                                .1,
+                            _ => resolved_prefix,
+                        };
+                    }
 
                     // Handle texture types specially - they don't have a concrete pod type
                     if let ShaderIoKind::Texture(tex_type) = &kind {
@@ -946,7 +960,7 @@ impl ShaderFnCompiler {
                             });
                         }
                         let mut s = self.stack.new_string();
-                        match prefix {
+                        match &resolved_prefix {
                             ShaderIoPrefix::Prefix(prefix) => {
                                 let io_name = output.backend.map_io_name(field_id);
                                 write!(s, "{}{}", prefix, io_name).ok()
@@ -973,7 +987,7 @@ impl ShaderFnCompiler {
                             });
                         }
                         let mut s = self.stack.new_string();
-                        match prefix {
+                        match &resolved_prefix {
                             ShaderIoPrefix::Prefix(prefix) => {
                                 let io_name = output.backend.map_io_name(field_id);
                                 write!(s, "{}{}", prefix, io_name).ok()
