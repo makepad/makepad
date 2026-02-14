@@ -214,17 +214,10 @@ fn handle_connection(
             e
         })?;
 
-    // Store the child so it can be killed by future connections
-    {
-        let mut lock = cargo_child.lock().unwrap();
-        // We already killed the old one above, but just in case
-        *lock = None;
-    }
-
     let child_stdout = child.stdout.take().unwrap();
     let child_stderr = child.stderr.take().unwrap();
 
-    // Store child for killing
+    // Store child so it can be killed by future connections
     {
         let mut lock = cargo_child.lock().unwrap();
         *lock = Some(child);
