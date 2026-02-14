@@ -77,11 +77,7 @@ pub struct MathView {
     #[rust]
     components: Vec<MathComponent>,
     #[rust]
-    debug_missing_font_logged: bool,
-    #[rust]
-    debug_layout_failed_logged: bool,
-    #[rust]
-    debug_layout_success_logged: bool,
+    debug_reason: Option<String>,
 }
 
 impl Widget for MathView {
@@ -91,6 +87,11 @@ impl Widget for MathView {
         self.compile_math(cx);
 
         let Some(layout) = self.layout_cache.as_ref() else {
+            if let Some(reason) = &self.debug_reason {
+                let debug_text = format!("[{}]", reason);
+                self.draw_text
+                    .draw_walk(cx, walk, Align::default(), debug_text.as_str());
+            }
             return DrawStep::done();
         };
 
@@ -136,6 +137,9 @@ impl Widget for MathView {
 
 impl MathView {
     fn compile_math(&mut self, cx: &mut Cx2d) {
+        // Match DrawText behavior so crate/http resources start loading
+        // before we attempt to resolve the math font family.
+        cx.cx.cx.load_all_script_resources();
         let font_family_id = self.draw_text.text_style.font_family_id();
         self.draw_text.text_style.ensure_fonts_loaded(cx.cx.cx);
         if self.text == self.old_text
@@ -154,9 +158,7 @@ impl MathView {
             self.layout_cache = None;
             self.components.clear();
             self.draw_glyph.clear_shapes();
-            self.debug_missing_font_logged = false;
-            self.debug_layout_failed_logged = false;
-            self.debug_layout_success_logged = false;
+            self.debug_reason = None;
             return;
         }
 
@@ -167,13 +169,10 @@ impl MathView {
         };
 
         let Some(layout_font) = layout_font else {
-            if !self.debug_missing_font_logged {
-                self.debug_missing_font_logged = true;
-                log!("math_view: missing layout font for family {:?}", font_family_id);
-            }
             self.layout_cache = None;
             self.components.clear();
             self.draw_glyph.clear_shapes();
+            self.debug_reason = Some("missing-math-font".to_string());
             return;
         };
 
@@ -185,13 +184,10 @@ impl MathView {
             layout_size,
             MathStyle::Display,
         ) else {
-            if !self.debug_layout_failed_logged {
-                self.debug_layout_failed_logged = true;
-                log!("math_view: latex layout failed for text len {}", self.text.len());
-            }
             self.layout_cache = None;
             self.components.clear();
             self.draw_glyph.clear_shapes();
+            self.debug_reason = Some("math-layout-failed".to_string());
             return;
         };
 
@@ -232,16 +228,7 @@ impl MathView {
 
         self.layout_cache = Some(layout);
         self.components = components;
-        self.debug_missing_font_logged = false;
-        self.debug_layout_failed_logged = false;
-        if !self.debug_layout_success_logged {
-            self.debug_layout_success_logged = true;
-            log!(
-                "math_view: layout success items={} components={}",
-                self.layout_cache.as_ref().map(|l| l.items.len()).unwrap_or(0),
-                self.components.len()
-            );
-        }
+        self.debug_reason = None;
     }
 }
 

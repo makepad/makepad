@@ -311,6 +311,28 @@ impl Cx {
         for item in items {
             // Handle http_resource responses (resource loading via HTTP)
             if self.script_data.resources.is_http_resource(item.request_id) {
+                let resource_info = {
+                    let handle = self
+                        .script_data
+                        .resources
+                        .http_resources
+                        .iter()
+                        .find(|r| r.request_id == item.request_id)
+                        .map(|r| r.handle);
+                    if let Some(handle) = handle {
+                        let resources = self.script_data.resources.resources.borrow();
+                        if let Some(res) = resources.iter().find(|r| r.handle == handle) {
+                            format!(
+                                "abs_path={} web_url={:?} dependency_path={:?}",
+                                res.abs_path, res.web_url, res.dependency_path
+                            )
+                        } else {
+                            format!("handle={:?} (resource entry not found)", handle)
+                        }
+                    } else {
+                        "unknown resource".to_string()
+                    }
+                };
                 match &item.response {
                     NetworkResponse::HttpResponse(res) => {
                         if let Some(body) = res.get_body() {
@@ -319,12 +341,21 @@ impl Cx {
                                     .resources
                                     .handle_http_response(item.request_id, body.clone());
                             } else {
+                                crate::log!(
+                                    "Script resource HTTP load failed: status={} {}",
+                                    res.status_code,
+                                    resource_info
+                                );
                                 self.script_data.resources.handle_http_error(
                                     item.request_id,
                                     format!("HTTP error: status {}", res.status_code),
                                 );
                             }
                         } else {
+                            crate::log!(
+                                "Script resource HTTP load failed: empty response body {}",
+                                resource_info
+                            );
                             self.script_data.resources.handle_http_error(
                                 item.request_id,
                                 "HTTP error: empty response body".to_string(),
@@ -333,6 +364,11 @@ impl Cx {
                         self.redraw_all();
                     }
                     NetworkResponse::HttpRequestError(err) => {
+                        crate::log!(
+                            "Script resource HTTP request error: message={} {}",
+                            err.message,
+                            resource_info
+                        );
                         self.script_data.resources.handle_http_error(
                             item.request_id,
                             format!("HTTP request error: {}", err.message),
