@@ -304,6 +304,8 @@ pub struct CxDrawShaderMapping {
     pub dyn_uniforms: DrawShaderInputs,
     pub geometries: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
+    pub samplers: Vec<ShaderSampler>,
+    pub texture_sampler_indices: Vec<usize>,
     pub uses_time: bool,
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
@@ -354,6 +356,7 @@ impl CxDrawShaderMapping {
         // Geometries for vertex buffer fields
         let mut geometries = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut textures = Vec::new();
+        let mut texture_sampler_indices = Vec::new();
 
         let mut rect_pos = None;
         let mut rect_size = None;
@@ -416,11 +419,19 @@ impl CxDrawShaderMapping {
             }
         }
 
-        // Process Texture and Sampler fields
+        // Process texture fields.
         for io in &output.io {
             match &io.kind {
-                ShaderIoKind::Texture(_) | ShaderIoKind::Sampler(_) => {
+                ShaderIoKind::Texture(_) => {
                     textures.push(DrawShaderTextureInput { id: io.name });
+                    let texture_name = format!("tex_{}", io.name);
+                    let sampler_idx = output
+                        .texture_sampler_bindings
+                        .iter()
+                        .find(|(bound_texture, _)| bound_texture == &texture_name)
+                        .map(|(_, idx)| *idx)
+                        .unwrap_or(0);
+                    texture_sampler_indices.push(sampler_idx);
                 }
                 _ => (),
             }
@@ -477,6 +488,8 @@ impl CxDrawShaderMapping {
             dyn_uniforms,
             geometries,
             textures,
+            samplers: output.samplers.clone(),
+            texture_sampler_indices,
             uses_time,
             rect_pos,
             rect_size,

@@ -43,7 +43,38 @@ impl ShaderFnCompiler {
         };
         let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
-        write!(s, "({} {} {})", s1, op, s2).ok();
+
+        let is_simple_int_literal = |value: &str| {
+            value
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        };
+        let is_float_like = |ty: &ShaderType| match ty {
+            ShaderType::Pod(pt) => vm.bx.heap.pod_types[pt.index as usize].ty.is_float_type(),
+            ShaderType::AbstractFloat => true,
+            _ => false,
+        };
+
+        let lhs = if matches!(output.backend, ShaderBackend::Glsl)
+            && matches!(t1, ShaderType::AbstractInt)
+            && is_float_like(&t2)
+            && is_simple_int_literal(&s1)
+        {
+            format!("{}.0", s1)
+        } else {
+            s1.to_string()
+        };
+        let rhs = if matches!(output.backend, ShaderBackend::Glsl)
+            && matches!(t2, ShaderType::AbstractInt)
+            && is_float_like(&t1)
+            && is_simple_int_literal(&s2)
+        {
+            format!("{}.0", s2)
+        } else {
+            s2.to_string()
+        };
+
+        write!(s, "({} {} {})", lhs, op, rhs).ok();
         let ty = type_table_eq(&t1, &t2, self.trap.pass(), &vm.bx.code.builtins.pod);
         self.stack.push(self.trap.pass(), ty, s);
     }
@@ -137,6 +168,39 @@ impl ShaderFnCompiler {
         };
         let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
+
+        let is_simple_int_literal = |value: &str| {
+            value
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        };
+        let is_float_like = |ty: &ShaderType| match ty {
+            ShaderType::Pod(pt) => vm.bx.heap.pod_types[pt.index as usize].ty.is_float_type(),
+            ShaderType::AbstractFloat => true,
+            _ => false,
+        };
+
+        let lhs = if matches!(output.backend, ShaderBackend::Glsl)
+            && !is_int
+            && matches!(t1, ShaderType::AbstractInt)
+            && is_float_like(&t2)
+            && is_simple_int_literal(&s1)
+        {
+            format!("{}.0", s1)
+        } else {
+            s1.to_string()
+        };
+        let rhs = if matches!(output.backend, ShaderBackend::Glsl)
+            && !is_int
+            && matches!(t2, ShaderType::AbstractInt)
+            && is_float_like(&t1)
+            && is_simple_int_literal(&s2)
+        {
+            format!("{}.0", s2)
+        } else {
+            s2.to_string()
+        };
+
         let is_hlsl_matrix_mul = if op == "*" && matches!(output.backend, ShaderBackend::Hlsl) {
             let is_matrix = |ty: &ShaderType| match ty {
                 ShaderType::Pod(pod_ty) => matches!(
@@ -151,9 +215,9 @@ impl ShaderFnCompiler {
         };
 
         if is_hlsl_matrix_mul {
-            write!(s, "mul({}, {})", s1, s2).ok();
+            write!(s, "mul({}, {})", lhs, rhs).ok();
         } else {
-            write!(s, "({} {} {})", s1, op, s2).ok();
+            write!(s, "({} {} {})", lhs, op, rhs).ok();
         }
         let ty = if is_int {
             type_table_int_arithmetic(&t1, &t2, self.trap.pass(), &vm.bx.code.builtins.pod)

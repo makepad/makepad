@@ -62,6 +62,7 @@ fn main() {
             println!("cargo:rustc-link-lib=framework=GameController");
         }
         "linux" => {
+            println!("cargo:rustc-cfg=use_gles_3");
             println!("cargo:rustc-link-lib=xkbcommon");
         }
         _ => (),

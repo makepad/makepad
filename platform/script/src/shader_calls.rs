@@ -742,11 +742,131 @@ impl ShaderFnCompiler {
     ) {
         // we should compare number of arguments (needs to be exact)
         // Note: fn_name already includes "(" at the end from compile_shader_def
+        let arg_types = args.clone();
+        let resolved_arg_types = Self::resolve_script_call_arg_types(
+            vm,
+            fnobj,
+            &arg_types,
+            self.trap.pass(),
+        );
         let (ret, fn_name) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
+        if matches!(output.backend, ShaderBackend::Glsl) {
+            out = Self::glsl_rewrite_call_args(vm, &out, &arg_types, &resolved_arg_types);
+        }
         out.insert_str(0, &fn_name);
         out.push_str(")");
         self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
+    }
+
+    fn resolve_script_call_arg_types(
+        vm: &ScriptVm,
+        fnobj: ScriptObject,
+        args: &[ShaderType],
+        trap: ScriptTrap,
+    ) -> Vec<ScriptPodType> {
+        let builtins = &vm.bx.code.builtins.pod;
+        let argc = vm.bx.heap.vec_len(fnobj);
+        let mut resolved_args: Vec<ScriptPodType> = Vec::new();
+        let mut argi = 0;
+
+        for i in 0..argc {
+            let kv = vm.bx.heap.vec_key_value(fnobj, i, trap);
+            if kv.key == id!(self).into() {
+                continue;
+            }
+            if argi >= args.len() {
+                break;
+            }
+            let arg = &args[argi];
+            let declared_ty = kv
+                .value
+                .as_pod_type()
+                .or_else(|| vm.bx.heap.pod_type(kv.value));
+
+            let resolved = match arg {
+                ShaderType::AbstractInt | ShaderType::AbstractFloat => declared_ty
+                    .unwrap_or_else(|| arg.make_concrete(builtins).unwrap_or(builtins.pod_void)),
+                _ => arg.make_concrete(builtins).unwrap_or(builtins.pod_void),
+            };
+            resolved_args.push(resolved);
+            argi += 1;
+        }
+
+        resolved_args
+    }
+
+    fn glsl_rewrite_call_args(
+        vm: &ScriptVm,
+        raw_args: &str,
+        arg_types: &[ShaderType],
+        resolved_arg_types: &[ScriptPodType],
+    ) -> String {
+        let mut parts = Self::split_call_args_top_level(raw_args);
+        if parts.is_empty() || arg_types.is_empty() || parts.len() < arg_types.len() {
+            return raw_args.to_string();
+        }
+
+        let explicit_start = parts.len() - arg_types.len();
+        let explicit_len = arg_types.len().min(resolved_arg_types.len());
+        for i in 0..explicit_len {
+            if !matches!(arg_types[i], ShaderType::AbstractInt) {
+                continue;
+            }
+            let resolved_ty = resolved_arg_types[i];
+            if !vm.bx.heap.pod_types[resolved_ty.index as usize]
+                .ty
+                .is_float_type()
+            {
+                continue;
+            }
+            let arg_index = explicit_start + i;
+            let value = parts[arg_index].trim();
+            if Self::is_simple_int_literal(value) {
+                parts[arg_index] = format!("{}.0", value);
+            }
+        }
+
+        parts.join(", ")
+    }
+
+    fn split_call_args_top_level(raw_args: &str) -> Vec<String> {
+        if raw_args.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+
+        for (idx, ch) in raw_args.char_indices() {
+            match ch {
+                '(' => paren_depth += 1,
+                ')' => paren_depth = paren_depth.saturating_sub(1),
+                '[' => bracket_depth += 1,
+                ']' => bracket_depth = bracket_depth.saturating_sub(1),
+                '{' => brace_depth += 1,
+                '}' => brace_depth = brace_depth.saturating_sub(1),
+                ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    out.push(raw_args[start..idx].trim().to_string());
+                    start = idx + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+
+        if start < raw_args.len() {
+            out.push(raw_args[start..].trim().to_string());
+        }
+        out
+    }
+
+    fn is_simple_int_literal(value: &str) -> bool {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
     }
 
     pub(crate) fn handle_call_exec(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
@@ -1019,13 +1139,11 @@ impl ShaderFnCompiler {
                             .ok();
                         }
                         ShaderBackend::Glsl => {
-                            // GLSL 4.0+: texture(sampler2D(texture, sampler), coord)
-                            write!(
-                                s,
-                                "texture(sampler2D({}, _s{}), {})",
-                                texture_expr, sampler_idx, coord
-                            )
-                            .ok();
+                            // GLSL ES uses runtime-bound sampler state (glBindSampler),
+                            // so we sample via helper functions and track texture->sampler
+                            // bindings separately in ShaderOutput.
+                            output.bind_texture_sampler(&texture_expr, sampler_idx);
+                            write!(s, "sample2d({}, {})", texture_expr, coord).ok();
                         }
                     }
                     self.stack.push(

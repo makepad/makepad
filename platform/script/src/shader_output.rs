@@ -185,6 +185,9 @@ pub struct ShaderOutput {
     pub scope_uniforms: Vec<ScopeUniformSource>,
     pub scope_uniform_buffers: Vec<ScopeUniformBufferSource>,
     pub scope_textures: Vec<ScopeTextureSource>,
+    /// Per-texture sampler bindings inferred during shader lowering.
+    /// Entries are `(texture_expr, sampler_index)`.
+    pub texture_sampler_bindings: Vec<(String, usize)>,
     /// HLSL helper: needs _mpTexSize helper function for texture.size()
     pub hlsl_needs_tex_size: bool,
     /// Set to true if any errors occurred during shader compilation
@@ -541,5 +544,19 @@ impl ShaderOutput {
         let idx = self.samplers.len();
         self.samplers.push(sampler);
         idx
+    }
+
+    /// Record sampler usage for a texture expression.
+    /// If the same texture is sampled multiple times, the first sampler wins.
+    pub fn bind_texture_sampler(&mut self, texture_expr: &str, sampler_idx: usize) {
+        if self
+            .texture_sampler_bindings
+            .iter()
+            .any(|(expr, _)| expr == texture_expr)
+        {
+            return;
+        }
+        self.texture_sampler_bindings
+            .push((texture_expr.to_string(), sampler_idx));
     }
 }

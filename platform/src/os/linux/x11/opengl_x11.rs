@@ -1,7 +1,7 @@
 use {
     self::super::{
         super::{
-            egl_sys::{self, LibEgl},
+            egl_sys::{self},
             gl_sys::{self, LibGl},
         },
         x11_sys,
@@ -9,17 +9,14 @@ use {
     },
     crate::{
         cx::Cx,
-        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::*,
         makepad_math::Vec2d,
         opengl_cx::OpenglCx,
         os::cx_stdin::{LinuxOwnedImage, LinuxOwnedImagePlane},
         texture::{CxTexture, Texture},
         window::WindowId,
-        x11::linux_x11::X11Cx,
     },
     std::{
-        ffi::CString,
         mem,
         os::{
             self,
