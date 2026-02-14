@@ -33,10 +33,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.signal_timeout = null;
         this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
-        this._debug_logged_load_deps = false;
-        this._debug_request_animation_frame_count = 0;
-        this._debug_animation_frame_count = 0;
-        this._debug_set_document_title_count = 0;
         this.init_detection();
         this.midi_inputs = [];
         this.midi_outputs = [];
@@ -45,11 +41,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     async load_deps() {
-        if (!this._debug_logged_load_deps) {
-            this._debug_logged_load_deps = true;
-            console.log("web.load_deps.start");
-        }
-        
         this.to_wasm = this.new_to_wasm();
         
         await this.query_xr_capabilities();
@@ -98,7 +89,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
         this.do_wasm_pump();
-        console.log("web.load_deps.done");
         var loaders = document.getElementsByClassName('canvas_loader');
         for (var i = 0; i < loaders.length; i ++) {
             loaders[i].parentNode.removeChild(loaders[i])
@@ -205,25 +195,16 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmRequestAnimationFrame() {
-        this._debug_request_animation_frame_count += 1;
-        if (this._debug_request_animation_frame_count <= 20) {
-            console.log("web.request_animation_frame", this._debug_request_animation_frame_count);
-        }
         if (this.xr !== undefined || this.req_anim_frame_id) {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
-            //console.log("drawing")
             if (this.wasm == null) {
                 return
             }
             this.req_anim_frame_id = 0;
             if (this.xr !== undefined) {
                 return
-            }
-            this._debug_animation_frame_count += 1;
-            if (this._debug_animation_frame_count <= 20) {
-                console.log("web.animation_frame", this._debug_animation_frame_count);
             }
             this.to_wasm.ToWasmAnimationFrame({time: time / 1000.0});
             this.in_animation_frame = true;
@@ -233,11 +214,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmSetDocumentTitle(args) {
-        this._debug_set_document_title_count += 1;
-        if (this._debug_set_document_title_count <= 20) {
-            console.log("web.set_document_title", this._debug_set_document_title_count, args.title);
-        }
-        // document.title = args.title
+        document.title = args.title
     }
     
     FromWasmSetMouseCursor(args) {
@@ -551,6 +528,13 @@ export class WasmWebBrowser extends WasmBridge {
 
         req.addEventListener("load", event => {
             let responseEvent = event.target;
+            if (responseEvent.status < 200 || responseEvent.status >= 300) {
+                report_browser_issue("xhr.http_error", {
+                    method: args.method,
+                    url: args.url,
+                    status: responseEvent.status,
+                });
+            }
 
             this.to_wasm.ToWasmHTTPResponse({
                 request_id_lo: args.request_id_lo,
@@ -569,6 +553,11 @@ export class WasmWebBrowser extends WasmBridge {
             if (!navigator.onLine) {
                 errorMessage = "The browser is offline.";
             }
+            report_browser_issue("xhr.error", {
+                method: args.method,
+                url: args.url,
+                message: errorMessage,
+            });
 
             this.to_wasm.ToWasmHttpRequestError({
                 request_id_lo: args.request_id_lo,
@@ -579,6 +568,10 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("timeout", event => {
+            report_browser_issue("xhr.timeout", {
+                method: args.method,
+                url: args.url,
+            });
             this.to_wasm.ToWasmHttpRequestError({
                 request_id_lo: args.request_id_lo,
                 request_id_hi: args.request_id_hi,
@@ -588,6 +581,10 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("abort", event => {
+            report_browser_issue("xhr.abort", {
+                method: args.method,
+                url: args.url,
+            });
             this.to_wasm.ToWasmHttpRequestError({
                 request_id_lo: args.request_id_lo,
                 request_id_hi: args.request_id_hi,
@@ -597,7 +594,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("progress", event => {
-            console.log("progress", event);
             if (event.lengthComputable) {
                 this.to_wasm.ToWasmHttpResponseProgress({
                     request_id_lo: args.request_id_lo,
@@ -783,7 +779,6 @@ export class WasmWebBrowser extends WasmBridge {
 
     wasm_process_msg(to_wasm) {
         if(this.debug_sum_ptr !== undefined){
-            console.log("CECKING IN PROCESS MSG");
             let ptr = this.debug_sum_ptr;
             this.debug_sum_ptr = undefined;
             var u8_out = new Uint8Array(this.memory.buffer, ptr.ptr, ptr.len);
@@ -791,7 +786,6 @@ export class WasmWebBrowser extends WasmBridge {
             for(let i = 0; i<ptr.len;i++){
                 sum += u8_out[i];
             }
-            console.log("Got sum"+sum);
         }
         
         
@@ -1431,17 +1425,44 @@ function is_fullscreen() {
     return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)? true: false
 }
 
+function report_browser_issue(kind, data) {
+    try {
+        if (typeof window.makepad_report_browser_issue === "function") {
+            window.makepad_report_browser_issue(kind, data);
+            return;
+        }
+        const payload = JSON.stringify({
+            kind,
+            href: location.href,
+            user_agent: navigator.userAgent,
+            data
+        });
+        const encoded = encodeURIComponent(payload.slice(0, 8192));
+        fetch('/$report_error?data=' + encoded, {cache: 'no-store'});
+    } catch (_error) {
+    }
+}
+
 function fetch_path(base, path) {
     
     
     return new Promise(function(resolve, reject) {
         var req = new XMLHttpRequest()
         req.addEventListener("error", function() {
-            reject(resource)
+            report_browser_issue("deps.fetch.error", {
+                url: base + path,
+                path: path
+            });
+            reject(path)
         })
         req.responseType = 'arraybuffer'
         req.addEventListener("load", function() {
             if (req.status !== 200) {
+                report_browser_issue("deps.fetch.http_error", {
+                    url: base + path,
+                    path: path,
+                    status: req.status
+                });
                 return reject(req.status)
             }
             resolve({

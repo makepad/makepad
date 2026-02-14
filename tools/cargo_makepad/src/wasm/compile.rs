@@ -72,45 +72,8 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
                 }} catch (_error) {{
                 }}
             }};
+            window.makepad_report_browser_issue = reportBrowserIssue;
             
-            const makepadConsoleError = console.error.bind(console);
-            const makepadConsoleLog = console.log.bind(console);
-            let makepadConsoleErrorCount = 0;
-            let makepadConsoleLogCount = 0;
-            const makepadConsoleToString = (arg) => {{
-                if (typeof arg === 'string') return arg;
-                try {{
-                    return JSON.stringify(arg);
-                }} catch (_jsonErr) {{
-                    return '' + arg;
-                }}
-            }};
-            console.error = (...args) => {{
-                if (makepadConsoleErrorCount < 200) {{
-                    makepadConsoleErrorCount += 1;
-                    let message = '';
-                    try {{
-                        message = args.map(makepadConsoleToString).join(' ');
-                    }} catch (_err) {{
-                    }}
-                    reportBrowserIssue('console.error', {{message}});
-                }}
-                makepadConsoleError(...args);
-            }};
-            console.log = (...args) => {{
-                if (makepadConsoleLogCount < 200) {{
-                    makepadConsoleLogCount += 1;
-                    let message = '';
-                    try {{
-                        message = args.map(makepadConsoleToString).join(' ');
-                    }} catch (_err) {{
-                    }}
-                    reportBrowserIssue('console.log', {{message}});
-                }}
-                makepadConsoleLog(...args);
-            }};
-            console.log('makepad.bootstrap.loaded');
-
             window.addEventListener('error', (event) => {{
                 let stack = '';
                 if (event.error && event.error.stack) {{
@@ -141,7 +104,6 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
             }});
 
             try {{
-                console.log('makepad.bootstrap.init');
                 {init}
                 class MyWasmApp {{
                     constructor(wasm) {{
@@ -387,6 +349,43 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 Ok(())
             })?;
         }
+
+        // Some widgets reference resources under crate-local fonts/*/resources.
+        // Mirror those folders into the wasm package so res.crate("self:fonts/...") resolves.
+        let fonts_path = dep_dir.join("fonts");
+        if fonts_path.is_dir() {
+            let entries = fs::read_dir(&fonts_path)
+                .map_err(|e| format!("Unable to read fonts dir {:?}: {:?}", fonts_path, e))?;
+            for entry in entries {
+                let entry = entry
+                    .map_err(|e| format!("Unable to read fonts entry in {:?}: {:?}", fonts_path, e))?;
+                let sub_path = entry.path();
+                let resources_subdir = sub_path.join("resources");
+                if !resources_subdir.is_dir() {
+                    continue;
+                }
+                let sub_name = entry.file_name().to_string_lossy().to_string();
+                let dst_dir = app_dir
+                    .join(&name)
+                    .join("fonts")
+                    .join(&sub_name)
+                    .join("resources");
+                mkdir(&dst_dir)?;
+                walk_all(&resources_subdir, &dst_dir, &mut |source_path, dest_dir| {
+                    let source_file_name = source_path
+                        .file_name()
+                        .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
+                        .to_string_lossy()
+                        .to_string();
+                    let dest_path = dest_dir.join(&source_file_name);
+                    cp(source_path, &dest_path, false)?;
+                    if config.brotli {
+                        brotli_compress(&dest_path);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
     }
     let wasm_source = if config.bindgen {
         shell(
@@ -593,6 +592,10 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                         "application/ttf"
                     } else if path.ends_with(".ttf.2") {
                         "application/ttf"
+                    } else if path.ends_with(".otf") {
+                        "font/otf"
+                    } else if path.ends_with(".otf.2") {
+                        "font/otf"
                     } else if path.ends_with(".png") {
                         "image/png"
                     } else if path.ends_with(".jpg") {
@@ -606,6 +609,7 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                     } else if path.ends_with(".woff2") {
                         "font/woff2"
                     } else {
+                        println!("Wasm webserver 404 (unknown mime/path): {}", headers.path);
                         let body = b"Not found".to_vec();
                         let header = format!(
                             "HTTP/1.1 404 Not Found\r\n\
@@ -652,6 +656,7 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                             let _ = response_sender.send(HttpServerResponse { header, body });
                         }
                     } else {
+                        println!("Wasm webserver 404 (missing file): {}", headers.path);
                         let body = b"Not found".to_vec();
                         let header = format!(
                             "HTTP/1.1 404 Not Found\r\n\
