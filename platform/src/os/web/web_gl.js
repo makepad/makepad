@@ -13,14 +13,7 @@ export class WasmWebGL extends WasmWebBrowser {
         this.textures = [];
         this.framebuffers = [];
         this.xr = undefined;
-        this._debug_logged_first_compile = false;
-        this._debug_logged_first_begin_render_texture = false;
-        this._debug_logged_first_begin_render_canvas = false;
-        this._debug_logged_first_draw_call = false;
-        this._debug_missing_shader_ids = new Set();
-        this._debug_compile_count = 0;
-        this._debug_compile_fail_count = 0;
-        this._debug_logged_compile_summary = false;
+        this._missing_shader_ids = new Set();
         this.init_webgl_context();
         
         this.load_deps();
@@ -148,7 +141,6 @@ export class WasmWebGL extends WasmWebBrowser {
     
     FromWasmXrStartPresenting(args) {
         if (this.xr !== undefined) {
-            console.log("XR already presenting")
             return
         }
         // alright lets fire up the xr stuff
@@ -227,23 +219,15 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     report_missing_shader_once(where, shader_id, vao_id) {
-        if (this._debug_missing_shader_ids.has(shader_id)) {
+        if (this._missing_shader_ids.has(shader_id)) {
             return;
         }
-        this._debug_missing_shader_ids.add(shader_id);
+        this._missing_shader_ids.add(shader_id);
         console.error("Missing shader in " + where, shader_id, vao_id);
     }
     
     
     FromWasmCompileWebGLShader(args) {
-        this._debug_compile_count += 1;
-        if (!this._debug_logged_first_compile) {
-            this._debug_logged_first_compile = true;
-            console.log("webgl.first_compile", args.shader_id, args.geometry_slots, args.instance_slots, args.textures.length);
-        }
-        if (args.shader_id < 5) {
-            console.log("webgl.compile_shader", args.shader_id, args.geometry_slots, args.instance_slots, args.textures.length);
-        }
         function get_attrib_locations(gl, program, base, slots) {
             let attrib_locs = [];
             let attribs = slots >> 2;
@@ -272,7 +256,6 @@ export class WasmWebGL extends WasmWebBrowser {
             console.error(message);
             gl.deleteShader(vsh);
             this.draw_shaders[args.shader_id] = {compile_failed: true};
-            this._debug_compile_fail_count += 1;
             return;
         }
         
@@ -286,7 +269,6 @@ export class WasmWebGL extends WasmWebBrowser {
             gl.deleteShader(vsh);
             gl.deleteShader(fsh);
             this.draw_shaders[args.shader_id] = {compile_failed: true};
-            this._debug_compile_fail_count += 1;
             return;
         }
         var program = gl.createProgram()
@@ -300,7 +282,6 @@ export class WasmWebGL extends WasmWebBrowser {
             gl.deleteShader(fsh);
             gl.deleteProgram(program);
             this.draw_shaders[args.shader_id] = {compile_failed: true};
-            this._debug_compile_fail_count += 1;
             return;
         }
         
@@ -440,10 +421,6 @@ export class WasmWebGL extends WasmWebBrowser {
     
     FromWasmDrawCall(args) {
         var gl = this.gl;
-        if (!this._debug_logged_first_draw_call) {
-            this._debug_logged_first_draw_call = true;
-            console.log("webgl.first_draw_call", args.shader_id, args.vao_id);
-        }
         
         let shader = this.draw_shaders[args.shader_id];
         if (!shader || shader.compile_failed) {
@@ -555,8 +532,8 @@ export class WasmWebGL extends WasmWebBrowser {
         let data_array = new Uint8Array(this.memory.buffer, args.data.ptr, args.width * args.height);
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, args.width, args.height, 0, gl.RED, gl.UNSIGNED_BYTE, data_array);
-        // Keep legacy alpha-texture sampling behavior on WebGL2:
-        // map RED -> ALPHA and force RGB = 0 so sample2d(...).zyxw still yields alpha in .w.
+        // Keep alpha-texture sampling behavior:
+        // map RED -> ALPHA and force RGB = 0.
         if (gl.TEXTURE_SWIZZLE_R !== undefined) {
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_R, gl.ZERO);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_G, gl.ZERO);
@@ -583,10 +560,6 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     FromWasmBeginRenderTexture(args) {
-        if (!this._debug_logged_first_begin_render_texture) {
-            this._debug_logged_first_begin_render_texture = true;
-            console.log("webgl.first_begin_render_texture", args.pass_id, args.width, args.height);
-        }
         if(this.xr !== undefined){
             this.xr.in_xr_pass = false;
         }
@@ -637,14 +610,6 @@ export class WasmWebGL extends WasmWebBrowser {
     FromWasmBeginRenderCanvas(args) {
         let gl = this.gl
         let xr = this.xr;
-        if (!this._debug_logged_first_begin_render_canvas) {
-            this._debug_logged_first_begin_render_canvas = true;
-            console.log("webgl.first_begin_render_canvas", args.clear_color.r, args.clear_color.g, args.clear_color.b, args.clear_color.a, args.clear_depth);
-        }
-        if (!this._debug_logged_compile_summary && this._debug_compile_count > 0) {
-            this._debug_logged_compile_summary = true;
-            console.log("webgl.compile_summary", this._debug_compile_count, this._debug_compile_fail_count);
-        }
         
         if(xr !== undefined){
             xr.in_xr_pass = true;
