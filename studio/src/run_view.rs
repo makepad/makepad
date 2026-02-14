@@ -126,6 +126,27 @@ impl RunView {
 
                 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
                 if let Some(buffer) = drawn.software_buffer.as_ref() {
+                    {
+                        use std::sync::atomic::{AtomicBool, Ordering};
+                        static LOG_ONCE: AtomicBool = AtomicBool::new(true);
+                        if LOG_ONCE.swap(false, Ordering::Relaxed) {
+                            let bytes = buffer.as_bytes();
+                            if bytes.len() >= 8 {
+                                let decode = |hi: u8, lo: u8| (u32::from(hi) << 8) | u32::from(lo);
+                                crate::error!(
+                                    "RunView decode p0={:02x?} p1={:02x?} rgba={}x{} draw={}x{} alloc={}x{}",
+                                    &bytes[0..4],
+                                    &bytes[4..8],
+                                    decode(bytes[0], bytes[2]),
+                                    decode(bytes[4], bytes[6]),
+                                    presentable_draw.width,
+                                    presentable_draw.height,
+                                    swapchain.alloc_width,
+                                    swapchain.alloc_height
+                                );
+                            }
+                        }
+                    }
                     cx.upload_presentable_image_software_buffer(
                         &drawn.texture,
                         swapchain.alloc_width,
@@ -269,7 +290,21 @@ impl RunView {
                 .filter(|v| {
                     v.swapchain(self.window_id)
                         .map(|swapchain| {
-                            min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
+                            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                            let uses_software_fallback = swapchain
+                                .presentable_images
+                                .iter()
+                                .any(|image| image.software_buffer.is_some());
+                            #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+                            let uses_software_fallback = false;
+
+                            if uses_software_fallback {
+                                // Software readback fallback is sensitive to alloc-vs-draw
+                                // offsets; keep swapchain exact-sized while resizing.
+                                min_width != swapchain.alloc_width || min_height != swapchain.alloc_height
+                            } else {
+                                min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
+                            }
                         })
                         .unwrap_or(true)
                 });
@@ -299,10 +334,26 @@ impl RunView {
                     swapchain.regenerate_ids();
                 }
 
-                // Update the swapchain allocated size, rounding it up to
-                // reduce the need for further swapchain recreation.
-                let alloc_width = min_width.max(64).next_power_of_two();
-                let alloc_height = min_height.max(64).next_power_of_two();
+                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                let existing_uses_software_fallback = v
+                    .swapchain(self.window_id)
+                    .map(|swapchain| {
+                        swapchain
+                            .presentable_images
+                            .iter()
+                            .any(|image| image.software_buffer.is_some())
+                    })
+                    .unwrap_or(false);
+                #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+                let existing_uses_software_fallback = false;
+
+                // Keep DMA-BUF path rounded-up (fewer recreations), but make Linux
+                // software fallback exact-sized to avoid vertical rolling offsets.
+                let (alloc_width, alloc_height) = if existing_uses_software_fallback {
+                    (min_width.max(1), min_height.max(1))
+                } else {
+                    (min_width.max(64).next_power_of_two(), min_height.max(64).next_power_of_two())
+                };
 
                 let swapchain = v.swapchain_mut(self.window_id).get_or_insert_with(|| {
                     cx_stdin::HostSwapchain::new(self.window_id, alloc_width, alloc_height, cx)
