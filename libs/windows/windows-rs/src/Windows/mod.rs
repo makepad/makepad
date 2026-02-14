@@ -20590,6 +20590,11 @@ pub unsafe fn GlobalFree(hmem: Option<HGLOBAL>) -> windows_core::Result<HGLOBAL>
     let result__ = unsafe { GlobalFree(hmem.unwrap_or(core::mem::zeroed()) as _) };
     (!result__.is_invalid()).then_some(result__).ok_or_else(windows_core::Error::from_thread)
 }
+#[inline]
+pub unsafe fn SetHandleInformation(hobject: HANDLE, dwmask: u32, dwflags: HANDLE_FLAGS) -> windows_core::Result<()> {
+    windows_core::link!("kernel32.dll" "system" fn SetHandleInformation(hobject : HANDLE, dwmask : u32, dwflags : HANDLE_FLAGS) -> windows_core::BOOL);
+    unsafe { SetHandleInformation(hobject, dwmask, dwflags).ok() }
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct COLORREF(pub u32);
@@ -20687,6 +20692,43 @@ impl Default for HANDLE {
         unsafe { core::mem::zeroed() }
     }
 }
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HANDLE_FLAGS(pub u32);
+impl HANDLE_FLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl core::ops::BitOr for HANDLE_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl core::ops::BitAnd for HANDLE_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl core::ops::BitOrAssign for HANDLE_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl core::ops::BitAndAssign for HANDLE_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl core::ops::Not for HANDLE_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+pub const HANDLE_FLAG_INHERIT: HANDLE_FLAGS = HANDLE_FLAGS(1u32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HGLOBAL(pub *mut core::ffi::c_void);
@@ -41860,6 +41902,51 @@ pub struct VERSIONEDSTREAM {
 }
 }
 }
+pub mod Console{
+#[inline]
+pub unsafe fn ClosePseudoConsole(hpc: HPCON) {
+    windows_core::link!("kernel32.dll" "system" fn ClosePseudoConsole(hpc : HPCON));
+    unsafe { ClosePseudoConsole(hpc) }
+}
+#[inline]
+pub unsafe fn CreatePseudoConsole(size: COORD, hinput: super::super::Foundation::HANDLE, houtput: super::super::Foundation::HANDLE, dwflags: u32) -> windows_core::Result<HPCON> {
+    windows_core::link!("kernel32.dll" "system" fn CreatePseudoConsole(size : COORD, hinput : super::super::Foundation:: HANDLE, houtput : super::super::Foundation:: HANDLE, dwflags : u32, phpc : *mut HPCON) -> windows_core::HRESULT);
+    unsafe {
+        let mut result__ = core::mem::zeroed();
+        CreatePseudoConsole(core::mem::transmute(size), hinput, houtput, dwflags, &mut result__).map(|| result__)
+    }
+}
+#[inline]
+pub unsafe fn ResizePseudoConsole(hpc: HPCON, size: COORD) -> windows_core::Result<()> {
+    windows_core::link!("kernel32.dll" "system" fn ResizePseudoConsole(hpc : HPCON, size : COORD) -> windows_core::HRESULT);
+    unsafe { ResizePseudoConsole(hpc, core::mem::transmute(size)).ok() }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct COORD {
+    pub X: i16,
+    pub Y: i16,
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct HPCON(pub isize);
+impl HPCON {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == -1 || self.0 == 0
+    }
+}
+impl windows_core::Free for HPCON {
+    #[inline]
+    unsafe fn free(&mut self) {
+        if !self.is_invalid() {
+            windows_core::link!("kernel32.dll" "system" fn ClosePseudoConsole(hpc : isize));
+            unsafe {
+                ClosePseudoConsole(self.0);
+            }
+        }
+    }
+}
+}
 pub mod DataExchange{
 #[inline]
 pub unsafe fn CloseClipboard() -> windows_core::Result<()> {
@@ -42399,6 +42486,9 @@ impl IRecordInfo_Vtbl {
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl windows_core::RuntimeName for IRecordInfo {}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PARAMFLAGS(pub u16);
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42412,9 +42502,11 @@ pub struct PARAMDESCEX {
     pub cBytes: u32,
     pub varDefaultValue: super::Variant::VARIANT,
 }
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PARAMFLAGS(pub u16);
+impl PARAMFLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESC {
     fn default() -> Self {
@@ -42427,21 +42519,16 @@ impl Clone for PARAMDESCEX {
         unsafe { core::mem::transmute_copy(self) }
     }
 }
-impl PARAMFLAGS {
-    pub const fn contains(&self, other: Self) -> bool {
-        self.0 & other.0 == other.0
+impl core::ops::BitOr for PARAMFLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESCEX {
     fn default() -> Self {
         unsafe { core::mem::zeroed() }
-    }
-}
-impl core::ops::BitOr for PARAMFLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
     }
 }
 impl core::ops::BitAnd for PARAMFLAGS {
@@ -42477,6 +42564,14 @@ pub unsafe fn QueryPerformanceCounter(lpperformancecount: *mut i64) -> windows_c
 pub unsafe fn QueryPerformanceFrequency(lpfrequency: *mut i64) -> windows_core::Result<()> {
     windows_core::link!("kernel32.dll" "system" fn QueryPerformanceFrequency(lpfrequency : *mut i64) -> windows_core::BOOL);
     unsafe { QueryPerformanceFrequency(lpfrequency as _).ok() }
+}
+}
+pub mod Pipes{
+#[cfg(feature = "Win32_Security")]
+#[inline]
+pub unsafe fn CreatePipe(hreadpipe: *mut super::super::Foundation::HANDLE, hwritepipe: *mut super::super::Foundation::HANDLE, lppipeattributes: Option<*const super::super::Security::SECURITY_ATTRIBUTES>, nsize: u32) -> windows_core::Result<()> {
+    windows_core::link!("kernel32.dll" "system" fn CreatePipe(hreadpipe : *mut super::super::Foundation:: HANDLE, hwritepipe : *mut super::super::Foundation:: HANDLE, lppipeattributes : *const super::super::Security:: SECURITY_ATTRIBUTES, nsize : u32) -> windows_core::BOOL);
+    unsafe { CreatePipe(hreadpipe as _, hwritepipe as _, lppipeattributes.unwrap_or(core::mem::zeroed()) as _, nsize).ok() }
 }
 }
 pub mod SystemServices{
@@ -42540,10 +42635,30 @@ where
     let result__ = unsafe { CreateEventA(lpeventattributes.unwrap_or(core::mem::zeroed()) as _, bmanualreset.into(), binitialstate.into(), lpname.param().abi()) };
     (!result__.is_invalid()).then_some(result__).ok_or_else(windows_core::Error::from_thread)
 }
+#[cfg(feature = "Win32_Security")]
+#[inline]
+pub unsafe fn CreateProcessW<P0, P7>(lpapplicationname: P0, lpcommandline: Option<windows_core::PWSTR>, lpprocessattributes: Option<*const super::super::Security::SECURITY_ATTRIBUTES>, lpthreadattributes: Option<*const super::super::Security::SECURITY_ATTRIBUTES>, binherithandles: bool, dwcreationflags: PROCESS_CREATION_FLAGS, lpenvironment: Option<*const core::ffi::c_void>, lpcurrentdirectory: P7, lpstartupinfo: *const STARTUPINFOW, lpprocessinformation: *mut PROCESS_INFORMATION) -> windows_core::Result<()>
+where
+    P0: windows_core::Param<windows_core::PCWSTR>,
+    P7: windows_core::Param<windows_core::PCWSTR>,
+{
+    windows_core::link!("kernel32.dll" "system" fn CreateProcessW(lpapplicationname : windows_core::PCWSTR, lpcommandline : windows_core::PWSTR, lpprocessattributes : *const super::super::Security:: SECURITY_ATTRIBUTES, lpthreadattributes : *const super::super::Security:: SECURITY_ATTRIBUTES, binherithandles : windows_core::BOOL, dwcreationflags : PROCESS_CREATION_FLAGS, lpenvironment : *const core::ffi::c_void, lpcurrentdirectory : windows_core::PCWSTR, lpstartupinfo : *const STARTUPINFOW, lpprocessinformation : *mut PROCESS_INFORMATION) -> windows_core::BOOL);
+    unsafe { CreateProcessW(lpapplicationname.param().abi(), lpcommandline.unwrap_or(core::mem::zeroed()) as _, lpprocessattributes.unwrap_or(core::mem::zeroed()) as _, lpthreadattributes.unwrap_or(core::mem::zeroed()) as _, binherithandles.into(), dwcreationflags, lpenvironment.unwrap_or(core::mem::zeroed()) as _, lpcurrentdirectory.param().abi(), lpstartupinfo, lpprocessinformation as _).ok() }
+}
+#[inline]
+pub unsafe fn DeleteProcThreadAttributeList(lpattributelist: LPPROC_THREAD_ATTRIBUTE_LIST) {
+    windows_core::link!("kernel32.dll" "system" fn DeleteProcThreadAttributeList(lpattributelist : LPPROC_THREAD_ATTRIBUTE_LIST));
+    unsafe { DeleteProcThreadAttributeList(lpattributelist as _) }
+}
 #[inline]
 pub unsafe fn ExitProcess(uexitcode: u32) -> ! {
     windows_core::link!("kernel32.dll" "system" fn ExitProcess(uexitcode : u32) -> !);
     unsafe { ExitProcess(uexitcode) }
+}
+#[inline]
+pub unsafe fn InitializeProcThreadAttributeList(lpattributelist: Option<LPPROC_THREAD_ATTRIBUTE_LIST>, dwattributecount: u32, dwflags: Option<u32>, lpsize: *mut usize) -> windows_core::Result<()> {
+    windows_core::link!("kernel32.dll" "system" fn InitializeProcThreadAttributeList(lpattributelist : LPPROC_THREAD_ATTRIBUTE_LIST, dwattributecount : u32, dwflags : u32, lpsize : *mut usize) -> windows_core::BOOL);
+    unsafe { InitializeProcThreadAttributeList(lpattributelist.unwrap_or(core::mem::zeroed()) as _, dwattributecount, dwflags.unwrap_or(core::mem::zeroed()) as _, lpsize as _).ok() }
 }
 #[inline]
 pub unsafe fn SetEvent(hevent: super::super::Foundation::HANDLE) -> windows_core::Result<()> {
@@ -42551,9 +42666,158 @@ pub unsafe fn SetEvent(hevent: super::super::Foundation::HANDLE) -> windows_core
     unsafe { SetEvent(hevent).ok() }
 }
 #[inline]
+pub unsafe fn TerminateProcess(hprocess: super::super::Foundation::HANDLE, uexitcode: u32) -> windows_core::Result<()> {
+    windows_core::link!("kernel32.dll" "system" fn TerminateProcess(hprocess : super::super::Foundation:: HANDLE, uexitcode : u32) -> windows_core::BOOL);
+    unsafe { TerminateProcess(hprocess, uexitcode).ok() }
+}
+#[inline]
+pub unsafe fn UpdateProcThreadAttribute(lpattributelist: LPPROC_THREAD_ATTRIBUTE_LIST, dwflags: u32, attribute: usize, lpvalue: Option<*const core::ffi::c_void>, cbsize: usize, lppreviousvalue: Option<*mut core::ffi::c_void>, lpreturnsize: Option<*const usize>) -> windows_core::Result<()> {
+    windows_core::link!("kernel32.dll" "system" fn UpdateProcThreadAttribute(lpattributelist : LPPROC_THREAD_ATTRIBUTE_LIST, dwflags : u32, attribute : usize, lpvalue : *const core::ffi::c_void, cbsize : usize, lppreviousvalue : *mut core::ffi::c_void, lpreturnsize : *const usize) -> windows_core::BOOL);
+    unsafe { UpdateProcThreadAttribute(lpattributelist as _, dwflags, attribute, lpvalue.unwrap_or(core::mem::zeroed()) as _, cbsize, lppreviousvalue.unwrap_or(core::mem::zeroed()) as _, lpreturnsize.unwrap_or(core::mem::zeroed()) as _).ok() }
+}
+#[inline]
 pub unsafe fn WaitForSingleObject(hhandle: super::super::Foundation::HANDLE, dwmilliseconds: u32) -> super::super::Foundation::WAIT_EVENT {
     windows_core::link!("kernel32.dll" "system" fn WaitForSingleObject(hhandle : super::super::Foundation:: HANDLE, dwmilliseconds : u32) -> super::super::Foundation:: WAIT_EVENT);
     unsafe { WaitForSingleObject(hhandle, dwmilliseconds) }
+}
+pub const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(524288u32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LPPROC_THREAD_ATTRIBUTE_LIST(pub *mut core::ffi::c_void);
+impl LPPROC_THREAD_ATTRIBUTE_LIST {
+    pub fn is_invalid(&self) -> bool {
+        self.0.is_null()
+    }
+}
+impl windows_core::Free for LPPROC_THREAD_ATTRIBUTE_LIST {
+    #[inline]
+    unsafe fn free(&mut self) {
+        if !self.is_invalid() {
+            windows_core::link!("kernel32.dll" "system" fn DeleteProcThreadAttributeList(lpattributelist : *mut core::ffi::c_void));
+            unsafe {
+                DeleteProcThreadAttributeList(self.0);
+            }
+        }
+    }
+}
+impl Default for LPPROC_THREAD_ATTRIBUTE_LIST {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PROCESS_CREATION_FLAGS(pub u32);
+impl PROCESS_CREATION_FLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl core::ops::BitOr for PROCESS_CREATION_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl core::ops::BitAnd for PROCESS_CREATION_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl core::ops::BitOrAssign for PROCESS_CREATION_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl core::ops::BitAndAssign for PROCESS_CREATION_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl core::ops::Not for PROCESS_CREATION_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PROCESS_INFORMATION {
+    pub hProcess: super::super::Foundation::HANDLE,
+    pub hThread: super::super::Foundation::HANDLE,
+    pub dwProcessId: u32,
+    pub dwThreadId: u32,
+}
+pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: u32 = 131094u32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct STARTUPINFOEXW {
+    pub StartupInfo: STARTUPINFOW,
+    pub lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct STARTUPINFOW {
+    pub cb: u32,
+    pub lpReserved: windows_core::PWSTR,
+    pub lpDesktop: windows_core::PWSTR,
+    pub lpTitle: windows_core::PWSTR,
+    pub dwX: u32,
+    pub dwY: u32,
+    pub dwXSize: u32,
+    pub dwYSize: u32,
+    pub dwXCountChars: u32,
+    pub dwYCountChars: u32,
+    pub dwFillAttribute: u32,
+    pub dwFlags: STARTUPINFOW_FLAGS,
+    pub wShowWindow: u16,
+    pub cbReserved2: u16,
+    pub lpReserved2: *mut u8,
+    pub hStdInput: super::super::Foundation::HANDLE,
+    pub hStdOutput: super::super::Foundation::HANDLE,
+    pub hStdError: super::super::Foundation::HANDLE,
+}
+impl Default for STARTUPINFOW {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct STARTUPINFOW_FLAGS(pub u32);
+impl STARTUPINFOW_FLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl core::ops::BitOr for STARTUPINFOW_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl core::ops::BitAnd for STARTUPINFOW_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl core::ops::BitOrAssign for STARTUPINFOW_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl core::ops::BitAndAssign for STARTUPINFOW_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl core::ops::Not for STARTUPINFOW_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
 }
 }
 pub mod Variant{

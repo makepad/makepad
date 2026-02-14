@@ -7,6 +7,17 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 
+[target.'cfg(windows)'.dependencies.windows]
+path = "../windows/windows-rs"
+version = "0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+]
+
 [[bin]]
 name = "terminal-test"
 path = "src/bin/terminal_test.rs"

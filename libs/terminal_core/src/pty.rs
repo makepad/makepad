@@ -1,14 +1,63 @@
 use std::io;
 
+#[cfg(windows)]
+use std::{
+    fs::File,
+    io::{Read, Write},
+    os::windows::io::FromRawHandle,
+    sync::{mpsc, Arc, Mutex},
+};
+#[cfg(windows)]
+use windows::{
+    core::{PCWSTR, PWSTR},
+    Win32::{
+        Foundation::{CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT},
+        Security::SECURITY_ATTRIBUTES,
+        System::{
+            Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
+            Pipes::CreatePipe,
+            Threading::{
+                CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+                InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+                PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
+                TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+            },
+        },
+    },
+};
+
 /// PTY writer handle for optional cross-thread input forwarding.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PtyWriter {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     master_fd: i32,
+    #[cfg(windows)]
+    stdin: Arc<Mutex<File>>,
 }
 
 impl PtyWriter {
     pub fn send(&self, data: Vec<u8>) -> io::Result<()> {
-        write_all_fd(self.master_fd, &data)
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            return write_all_fd(self.master_fd, &data);
+        }
+        #[cfg(windows)]
+        {
+            let mut stdin = self.stdin.lock().map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "terminal stdin lock poisoned")
+            })?;
+            stdin.write_all(&data)?;
+            stdin.flush()?;
+            return Ok(());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            let _ = data;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PTY not implemented for this platform",
+            ));
+        }
     }
 }
 
@@ -17,7 +66,19 @@ impl PtyWriter {
 /// Unix implementation uses `openpty` plus `std::process::Command::spawn`.
 /// I/O is done directly on a nonblocking master fd (no background worker threads).
 pub struct Pty {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     master_fd: i32,
+    #[cfg(windows)]
+    stdin: Arc<Mutex<File>>,
+    #[cfg(windows)]
+    read_rx: mpsc::Receiver<Vec<u8>>,
+    #[cfg(windows)]
+    child_pid: i32,
+    #[cfg(windows)]
+    process_handle: isize,
+    #[cfg(windows)]
+    pseudo_console: isize,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     child: Option<std::process::Child>,
 }
 
@@ -32,7 +93,11 @@ impl Pty {
         {
             Self::spawn_unix(cols, rows, shell, env)
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(windows)]
+        {
+            Self::spawn_windows(cols, rows, shell, env)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
             let _ = (cols, rows, shell, env);
             Err(io::Error::new(
@@ -40,6 +105,134 @@ impl Pty {
                 "PTY not implemented for this platform",
             ))
         }
+    }
+
+    #[cfg(windows)]
+    fn spawn_windows(
+        cols: u16,
+        rows: u16,
+        shell: Option<&str>,
+        _env: &[(&str, &str)],
+    ) -> io::Result<Self> {
+        let shell = shell
+            .map(str::to_owned)
+            .unwrap_or_else(|| "cmd.exe".to_owned());
+        let command_line = windows_shell_command(&shell);
+        let mut command_line_wide = wide_null(&command_line);
+        let mut startup_info = STARTUPINFOEXW::default();
+        startup_info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        // STARTF_USESTDHANDLES
+        startup_info.StartupInfo.dwFlags.0 |= 0x00000100;
+        startup_info.StartupInfo.hStdInput = invalid_handle();
+        startup_info.StartupInfo.hStdOutput = invalid_handle();
+        startup_info.StartupInfo.hStdError = invalid_handle();
+
+        let pipe_security = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: true.into(),
+        };
+
+        let mut conpty_input_read = WinHandle::invalid();
+        let mut host_input_write = WinHandle::invalid();
+        let mut host_output_read = WinHandle::invalid();
+        let mut conpty_output_write = WinHandle::invalid();
+
+        unsafe {
+            CreatePipe(
+                &mut conpty_input_read.0,
+                &mut host_input_write.0,
+                Some(&pipe_security),
+                0,
+            )
+            .map_err(windows_err)?;
+            CreatePipe(
+                &mut host_output_read.0,
+                &mut conpty_output_write.0,
+                Some(&pipe_security),
+                0,
+            )
+            .map_err(windows_err)?;
+            SetHandleInformation(
+                host_input_write.raw(),
+                HANDLE_FLAG_INHERIT.0,
+                HANDLE_FLAGS::default(),
+            )
+            .map_err(windows_err)?;
+            SetHandleInformation(
+                host_output_read.raw(),
+                HANDLE_FLAG_INHERIT.0,
+                HANDLE_FLAGS::default(),
+            )
+            .map_err(windows_err)?;
+        }
+
+        let mut pseudo_console = WinPseudoConsole(unsafe {
+            CreatePseudoConsole(
+                to_conpty_coord(cols, rows),
+                conpty_input_read.raw(),
+                conpty_output_write.raw(),
+                0,
+            )
+            .map_err(windows_err)?
+        });
+
+        // ConPTY owns these ends now.
+        drop(conpty_input_read);
+        drop(conpty_output_write);
+
+        let attr_list = ProcThreadAttributeList::new(1)?;
+        let pseudo_console_value = pseudo_console.raw();
+        unsafe {
+            UpdateProcThreadAttribute(
+                attr_list.raw(),
+                0,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+                Some(pseudo_console_value.0 as *const std::ffi::c_void),
+                std::mem::size_of::<HPCON>(),
+                None,
+                None,
+            )
+            .map_err(windows_err)?;
+        }
+        startup_info.lpAttributeList = attr_list.raw();
+
+        let mut process_info = PROCESS_INFORMATION::default();
+        unsafe {
+            CreateProcessW(
+                PCWSTR::null(),
+                Some(PWSTR(command_line_wide.as_mut_ptr())),
+                None,
+                None,
+                false,
+                EXTENDED_STARTUPINFO_PRESENT,
+                None,
+                PCWSTR::null(),
+                &startup_info.StartupInfo,
+                &mut process_info,
+            )
+            .map_err(windows_err)?;
+        }
+
+        unsafe {
+            let _ = CloseHandle(process_info.hThread);
+        }
+        drop(attr_list);
+
+        let stdin_file = host_input_write.into_file();
+        let stdout_file = host_output_read.into_file();
+        let stdin = Arc::new(Mutex::new(stdin_file));
+
+        let (read_tx, read_rx) = mpsc::channel::<Vec<u8>>();
+        spawn_pipe_reader(stdout_file, read_tx);
+
+        Ok(Self {
+            stdin,
+            read_rx,
+            child_pid: process_info.dwProcessId as i32,
+            process_handle: process_info.hProcess.0 as isize,
+            pseudo_console: pseudo_console.take().0,
+        })
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -116,12 +309,45 @@ impl Pty {
     }
 
     pub fn write(&self, data: &[u8]) -> io::Result<()> {
-        write_all_fd(self.master_fd, data)
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            return write_all_fd(self.master_fd, data);
+        }
+        #[cfg(windows)]
+        {
+            let mut stdin = self.stdin.lock().map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "terminal stdin lock poisoned")
+            })?;
+            stdin.write_all(data)?;
+            stdin.flush()?;
+            return Ok(());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            let _ = data;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PTY not implemented for this platform",
+            ));
+        }
     }
 
     pub fn writer_clone(&self) -> PtyWriter {
-        PtyWriter {
-            master_fd: self.master_fd,
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            return PtyWriter {
+                master_fd: self.master_fd,
+            };
+        }
+        #[cfg(windows)]
+        {
+            return PtyWriter {
+                stdin: self.stdin.clone(),
+            };
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            unreachable!()
         }
     }
 
@@ -151,7 +377,14 @@ impl Pty {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            None
+            #[cfg(windows)]
+            {
+                return self.read_rx.try_recv().ok();
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
         }
     }
 
@@ -168,11 +401,37 @@ impl Pty {
                 return Err(io::Error::last_os_error());
             }
         }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            #[cfg(windows)]
+            {
+                let pseudo_console = raw_hpcon(self.pseudo_console);
+                unsafe {
+                    ResizePseudoConsole(pseudo_console, to_conpty_coord(cols, rows))
+                        .map_err(windows_err)?;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (cols, rows);
+            }
+        }
         Ok(())
     }
 
     pub fn child_pid(&self) -> i32 {
-        self.child.as_ref().map(|c| c.id() as i32).unwrap_or(-1)
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.child.as_ref().map(|c| c.id() as i32).unwrap_or(-1)
+        }
+        #[cfg(windows)]
+        {
+            self.child_pid
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            -1
+        }
     }
 }
 
@@ -182,11 +441,192 @@ impl Drop for Pty {
         unsafe {
             libc_ffi::close(self.master_fd);
         }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.try_wait();
         }
+        #[cfg(windows)]
+        unsafe {
+            let process_handle = raw_handle(self.process_handle);
+            if !process_handle.is_invalid() {
+                let _ = TerminateProcess(process_handle, 1);
+                let _ = WaitForSingleObject(process_handle, 50);
+                let _ = CloseHandle(process_handle);
+                self.process_handle = 0;
+            }
+            let pseudo_console = raw_hpcon(self.pseudo_console);
+            if !pseudo_console.is_invalid() {
+                ClosePseudoConsole(pseudo_console);
+                self.pseudo_console = 0;
+            }
+        }
     }
+}
+
+#[cfg(windows)]
+fn windows_err(err: windows::core::Error) -> io::Error {
+    io::Error::other(err.to_string())
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn windows_shell_command(shell: &str) -> String {
+    shell.to_string()
+}
+
+#[cfg(windows)]
+fn to_conpty_coord(cols: u16, rows: u16) -> COORD {
+    COORD {
+        X: cols.clamp(1, i16::MAX as u16) as i16,
+        Y: rows.clamp(1, i16::MAX as u16) as i16,
+    }
+}
+
+#[cfg(windows)]
+fn raw_handle(raw: isize) -> HANDLE {
+    HANDLE(raw as *mut std::ffi::c_void)
+}
+
+#[cfg(windows)]
+fn raw_hpcon(raw: isize) -> HPCON {
+    HPCON(raw)
+}
+
+#[cfg(windows)]
+fn invalid_handle() -> HANDLE {
+    HANDLE((-1isize) as *mut std::ffi::c_void)
+}
+
+#[cfg(windows)]
+struct WinPseudoConsole(HPCON);
+
+#[cfg(windows)]
+impl WinPseudoConsole {
+    fn raw(&self) -> HPCON {
+        self.0
+    }
+
+    fn take(&mut self) -> HPCON {
+        let handle = self.0;
+        self.0 = HPCON::default();
+        handle
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WinPseudoConsole {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0.is_invalid() {
+                ClosePseudoConsole(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct WinHandle(HANDLE);
+
+#[cfg(windows)]
+impl WinHandle {
+    fn invalid() -> Self {
+        Self(HANDLE::default())
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+
+    fn take(&mut self) -> HANDLE {
+        let handle = self.0;
+        self.0 = HANDLE::default();
+        handle
+    }
+
+    fn into_file(mut self) -> File {
+        let handle = self.take();
+        unsafe { File::from_raw_handle(handle.0) }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WinHandle {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0.is_invalid() {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ProcThreadAttributeList {
+    _storage: Vec<u8>,
+    list: LPPROC_THREAD_ATTRIBUTE_LIST,
+}
+
+#[cfg(windows)]
+impl ProcThreadAttributeList {
+    fn new(attribute_count: u32) -> io::Result<Self> {
+        let mut size = 0usize;
+        unsafe {
+            let _ = InitializeProcThreadAttributeList(None, attribute_count, Some(0), &mut size);
+        }
+        if size == 0 {
+            return Err(io::Error::other(
+                "InitializeProcThreadAttributeList returned size 0",
+            ));
+        }
+
+        let mut storage = vec![0u8; size];
+        let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
+        unsafe {
+            InitializeProcThreadAttributeList(Some(list), attribute_count, Some(0), &mut size)
+                .map_err(windows_err)?;
+        }
+        Ok(Self {
+            _storage: storage,
+            list,
+        })
+    }
+
+    fn raw(&self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+        self.list
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcThreadAttributeList {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteProcThreadAttributeList(self.list);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_pipe_reader<R: Read + Send + 'static>(mut reader: R, tx: mpsc::Sender<Vec<u8>>) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -220,7 +660,7 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn write_all_fd(_fd: i32, _data: &[u8]) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
