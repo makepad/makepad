@@ -1,25 +1,21 @@
 use {
     self::super::super::{
-        egl_sys, gl_sys::LibGl, linux_media::CxLinuxMedia, opengl_cx::OpenglCx, x11::x11_sys,
-        x11::xlib_app::*, x11::xlib_event::*,
+        egl_sys, opengl_cx::OpenglCx, x11::x11_sys, x11::xlib_app::*, x11::xlib_event::*,
     },
     self::super::opengl_x11::OpenglWindow,
     crate::{
         cx::{Cx, LinuxWindowParams, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_api::CxOsOp,
         draw_pass::CxDrawPassParent,
         event::*,
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::dvec2,
         os::cx_native::EventFlow,
-        os::cx_stdin::PollTimers,
-        permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
     },
     std::cell::RefCell,
     std::rc::Rc,
-    std::time::Instant,
 };
 
 pub fn x11_event_loop(cx: Rc<RefCell<Cx>>) {
@@ -232,8 +228,12 @@ impl X11Cx {
                         cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
                     }
-                    cx.handle_action_receiver();
+                    if SignalToUI::check_and_clear_action_signal() {
+                        cx.handle_action_receiver();
+                    }
+                    cx.handle_networking_events();
                 } else {
+                    cx.handle_script_timer(&e);
                     cx.call_event_handler(&Event::Timer(e))
                 }
 
@@ -399,6 +399,17 @@ impl X11Cx {
                 }
                 CxOsOp::StopTimer(timer_id) => {
                     xlib_app.stop_timer(timer_id);
+                }
+                CxOsOp::HttpRequest {
+                    request_id,
+                    request,
+                } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::open(request_id, request, cx.os.network_response.sender.clone());
+                }
+                CxOsOp::CancelHttpRequest { request_id } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::cancel(request_id);
                 }
                 CxOsOp::ShowTextIME(area, pos) => {
                     let pos = area.clipped_rect(&cx).pos + pos;

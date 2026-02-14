@@ -408,7 +408,11 @@ impl ShaderBackend {
                     SHADER_IO_VARYING => (ShaderIoKind::Varying, ShaderIoPrefix::Prefix("var_")),
                     SHADER_IO_VERTEX_POSITION => (
                         ShaderIoKind::VertexPosition,
-                        ShaderIoPrefix::Prefix("vtx_pos"),
+                        ShaderIoPrefix::Full("vtx_pos"),
+                    ),
+                    SHADER_IO_VERTEX_BUFFER => (
+                        ShaderIoKind::VertexBuffer,
+                        ShaderIoPrefix::Prefix("vb_"),
                     ),
                     SHADER_IO_TEXTURE_1D => (
                         ShaderIoKind::Texture(TextureType::Texture1d),

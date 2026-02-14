@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables)]
 //! Main Wayland backend implementation
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -246,10 +247,15 @@ impl WaylandCx {
                 if e.timer_id == 0 {
                     if SignalToUI::check_and_clear_ui_signal() {
                         cx.handle_media_signals();
+                        cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
                     }
-                    cx.handle_action_receiver();
+                    if SignalToUI::check_and_clear_action_signal() {
+                        cx.handle_action_receiver();
+                    }
+                    cx.handle_networking_events();
                 } else {
+                    cx.handle_script_timer(&e);
                     cx.call_event_handler(&Event::Timer(e))
                 }
 
@@ -289,17 +295,14 @@ impl WaylandCx {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
                     let compositor = state.compositor.as_ref().unwrap();
                     let wm_base = state.wm_base.as_ref().unwrap();
-                    let decoration_manager = state.decoration_manager.as_ref().unwrap();
-                    let scale_manager = state.scale_manager.as_ref().unwrap();
-                    let viewporter = state.viewporter.as_ref().unwrap();
                     let window = &cx.windows[window_id];
                     let window = WaylandWindow::new(
                         window_id,
                         compositor,
                         wm_base,
-                        decoration_manager,
-                        scale_manager,
-                        viewporter,
+                        state.decoration_manager.as_ref(),
+                        state.scale_manager.as_ref(),
+                        state.viewporter.as_ref(),
                         self.qhandle.as_ref().unwrap(),
                         gl_cx,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
@@ -349,6 +352,17 @@ impl WaylandCx {
                 CxOsOp::StopTimer(timer_id) => {
                     state.stop_timer(timer_id);
                 }
+                CxOsOp::HttpRequest {
+                    request_id,
+                    request,
+                } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::open(request_id, request, cx.os.network_response.sender.clone());
+                }
+                CxOsOp::CancelHttpRequest { request_id } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::cancel(request_id);
+                }
                 CxOsOp::ShowTextIME(area, pos) => {
                     if let Some(window) = state.current_window {
                         if let Some(text_input) = state.text_input.as_ref() {
@@ -394,7 +408,28 @@ impl WaylandCx {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
                     if let Some(window) = windows.iter_mut().find(|w| w.window_id == window_id) {
+                        if !window.configured {
+                            continue;
+                        }
                         window.resize_buffers();
+                        if std::env::var_os("MAKEPAD_WAYLAND_TRACE").is_some() {
+                            crate::log!(
+                                "Wayland paint window={:?} inner=({}, {}) dpi={} pix=({}, {})",
+                                window.window_id,
+                                window.window_geom.inner_size.x,
+                                window.window_geom.inner_size.y,
+                                window.window_geom.dpi_factor,
+                                window.window_geom.inner_size.x * window.window_geom.dpi_factor,
+                                window.window_geom.inner_size.y * window.window_geom.dpi_factor
+                            );
+                        }
+                        if let Some(viewport) = window.viewport.as_ref() {
+                            viewport.set_source(-1., -1., -1., -1.);
+                            viewport.set_destination(
+                                window.window_geom.inner_size.x as i32,
+                                window.window_geom.inner_size.y as i32,
+                            );
+                        }
                         let pix_width =
                             window.window_geom.inner_size.x * window.window_geom.dpi_factor;
                         let pix_height =
@@ -406,14 +441,8 @@ impl WaylandCx {
                             pix_width,
                             pix_height,
                         );
-                        window
-                            .wl_egl_surface
-                            .resize(pix_width as i32, pix_height as i32, 0, 0);
-                        window.viewport.set_source(-1., -1., -1., -1.);
-                        window.viewport.set_destination(
-                            window.window_geom.inner_size.x as i32,
-                            window.window_geom.inner_size.y as i32,
-                        );
+                        window.base_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+                        window.base_surface.commit();
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {

@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 use std::{
     option,
     os::fd::{AsFd, AsRawFd},
@@ -67,13 +68,26 @@ impl WaylandApp {
         }
     }
     fn event_loop_poll(&mut self) {
-        self.event_queue.flush().unwrap();
+        if let Err(err) = self.event_queue.flush() {
+            crate::warning!("Wayland flush failed: {}", err);
+            self.terminate_event_loop();
+            return;
+        }
         if let Some(guard) = self.event_queue.prepare_read() {
-            if guard.read().is_ok() {
-                self.event_queue.dispatch_pending(&mut self.state).unwrap();
+            if let Err(err) = guard.read() {
+                crate::warning!("Wayland read failed: {}", err);
+                self.terminate_event_loop();
+                return;
             }
-        } else {
-            self.event_queue.dispatch_pending(&mut self.state).unwrap();
+            if let Err(err) = self.event_queue.dispatch_pending(&mut self.state) {
+                crate::warning!("Wayland dispatch failed: {}", err);
+                self.terminate_event_loop();
+                return;
+            }
+        } else if let Err(err) = self.event_queue.dispatch_pending(&mut self.state) {
+            crate::warning!("Wayland dispatch failed: {}", err);
+            self.terminate_event_loop();
+            return;
         }
 
         self.do_callback(XlibEvent::Paint);

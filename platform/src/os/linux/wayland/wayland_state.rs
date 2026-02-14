@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables)]
 use crate::{
     libc_sys::{self, munmap},
     makepad_math::{dvec2, Vec2d},
@@ -284,6 +285,23 @@ impl Dispatch<xdg_surface::XdgSurface, WindowId> for WaylandState {
     ) {
         if let xdg_surface::Event::Configure { serial, .. } = event {
             xdg_surface.ack_configure(serial);
+            let mut first_configure_event = None;
+            if let Some(window) = state.windows.iter_mut().find(|win| win.window_id == *window_id) {
+                if !window.configured {
+                    let mut old_geom = window.window_geom.clone();
+                    old_geom.inner_size = dvec2(0., 0.);
+                    old_geom.outer_size = dvec2(0., 0.);
+                    first_configure_event = Some(WindowGeomChangeEvent {
+                        window_id: *window_id,
+                        old_geom,
+                        new_geom: window.window_geom.clone(),
+                    });
+                }
+                window.configured = true;
+            }
+            if let Some(event) = first_configure_event {
+                state.do_callback(XlibEvent::WindowGeomChange(event));
+            }
         }
     }
 }
@@ -590,8 +608,6 @@ impl WaylandState {
     pub(crate) fn available(&self) -> bool {
         self.compositor.is_some()
             && self.wm_base.is_some()
-            && self.seat.is_some()
-            && self.decoration_manager.is_some()
     }
     fn do_callback(&mut self, event: XlibEvent) {
         if let Some(mut callback) = self.event_callback.take() {
