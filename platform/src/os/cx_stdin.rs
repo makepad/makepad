@@ -204,10 +204,211 @@ impl SharedSwapchain {
 // Linux: DMA-BUF-based swapchain
 // ============================================================================
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct LinuxSharedImagePlane {
+    pub dma_buf_fd: aux_chan::AuxChannedImageFd,
+    pub offset: u32,
+    pub stride: u32,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct LinuxSharedImage {
+    pub drm_format: crate::os::linux::dma_buf::DrmFormat,
+    pub plane: LinuxSharedImagePlane,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Debug)]
+pub struct LinuxOwnedImagePlane {
+    pub dma_buf_fd: std::os::fd::OwnedFd,
+    pub offset: u32,
+    pub stride: u32,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Debug)]
+pub struct LinuxOwnedImage {
+    pub drm_format: crate::os::linux::dma_buf::DrmFormat,
+    pub plane: LinuxOwnedImagePlane,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl SerBin for LinuxSharedImagePlane {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.dma_buf_fd.ser_bin(s);
+        self.offset.ser_bin(s);
+        self.stride.ser_bin(s);
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl DeBin for LinuxSharedImagePlane {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        Ok(Self {
+            dma_buf_fd: DeBin::de_bin(o, d)?,
+            offset: DeBin::de_bin(o, d)?,
+            stride: DeBin::de_bin(o, d)?,
+        })
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl SerJson for LinuxSharedImagePlane {
+    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
+        s.st_pre();
+        s.field(d + 1, "dma_buf_fd");
+        self.dma_buf_fd.ser_json(d + 1, s);
+        s.conl();
+        s.field(d + 1, "offset");
+        self.offset.ser_json(d + 1, s);
+        s.conl();
+        s.field(d + 1, "stride");
+        self.stride.ser_json(d + 1, s);
+        s.st_post(d);
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl DeJson for LinuxSharedImagePlane {
+    fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> Result<Self, DeJsonErr> {
+        let mut dma_buf_fd = None;
+        let mut offset = None;
+        let mut stride = None;
+
+        s.curly_open(i)?;
+        while s.tok != DeJsonTok::CurlyClose {
+            let key = s.as_string()?;
+            s.next_colon(i)?;
+            match key.as_str() {
+                "dma_buf_fd" => dma_buf_fd = Some(DeJson::de_json(s, i)?),
+                "offset" => offset = Some(DeJson::de_json(s, i)?),
+                "stride" => stride = Some(DeJson::de_json(s, i)?),
+                _ => {
+                    if s.lenient {
+                        s.skip_value(i)?;
+                    } else {
+                        return Err(s.err_exp(&s.strbuf));
+                    }
+                }
+            }
+            s.eat_comma_curly(i)?;
+        }
+        s.curly_close(i)?;
+
+        let dma_buf_fd = match dma_buf_fd {
+            Some(v) => v,
+            None => return Err(s.err_nf("dma_buf_fd")),
+        };
+        let offset = match offset {
+            Some(v) => v,
+            None => return Err(s.err_nf("offset")),
+        };
+        let stride = match stride {
+            Some(v) => v,
+            None => return Err(s.err_nf("stride")),
+        };
+
+        Ok(Self {
+            dma_buf_fd,
+            offset,
+            stride,
+        })
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl SerBin for LinuxSharedImage {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.drm_format.ser_bin(s);
+        self.plane.ser_bin(s);
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl DeBin for LinuxSharedImage {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        Ok(Self {
+            drm_format: DeBin::de_bin(o, d)?,
+            plane: DeBin::de_bin(o, d)?,
+        })
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl SerJson for LinuxSharedImage {
+    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
+        s.st_pre();
+        s.field(d + 1, "drm_format");
+        self.drm_format.ser_json(d + 1, s);
+        s.conl();
+        s.field(d + 1, "plane");
+        self.plane.ser_json(d + 1, s);
+        s.st_post(d);
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl DeJson for LinuxSharedImage {
+    fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> Result<Self, DeJsonErr> {
+        let mut drm_format = None;
+        let mut plane = None;
+
+        s.curly_open(i)?;
+        while s.tok != DeJsonTok::CurlyClose {
+            let key = s.as_string()?;
+            s.next_colon(i)?;
+            match key.as_str() {
+                "drm_format" => drm_format = Some(DeJson::de_json(s, i)?),
+                "plane" => plane = Some(DeJson::de_json(s, i)?),
+                _ => {
+                    if s.lenient {
+                        s.skip_value(i)?;
+                    } else {
+                        return Err(s.err_exp(&s.strbuf));
+                    }
+                }
+            }
+            s.eat_comma_curly(i)?;
+        }
+        s.curly_close(i)?;
+
+        let drm_format = match drm_format {
+            Some(v) => v,
+            None => return Err(s.err_nf("drm_format")),
+        };
+        let plane = match plane {
+            Some(v) => v,
+            None => return Err(s.err_nf("plane")),
+        };
+
+        Ok(Self { drm_format, plane })
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedPresentableImage {
     pub id: PresentableImageId,
-    pub image: crate::os::linux::dma_buf::Image<aux_chan::AuxChannedImageFd>,
+    pub image: LinuxSharedImage,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Debug)]
+pub struct LinuxPresentableImage {
+    pub id: PresentableImageId,
+    pub image: LinuxOwnedImage,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl SharedPresentableImage {
+    pub fn recv_fds_from_aux_chan(
+        self,
+        client_endpoint: &aux_chan::ClientEndpoint,
+    ) -> std::io::Result<LinuxPresentableImage> {
+        let image = aux_chan::recv_image_fds_from_aux_chan(self.id, self.image, client_endpoint)?;
+        Ok(LinuxPresentableImage { id: self.id, image })
+    }
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -221,6 +422,28 @@ pub struct SharedSwapchain {
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 impl SharedSwapchain {
+    pub fn from_host_swapchain(
+        host: &HostSwapchain,
+        cx: &mut crate::cx::Cx,
+        host_endpoint: &aux_chan::HostEndpoint,
+    ) -> Self {
+        Self {
+            window_id: host.window_id,
+            alloc_width: host.alloc_width,
+            alloc_height: host.alloc_height,
+            presentable_images: std::array::from_fn(|i| {
+                let id = host.presentable_images[i].id;
+                let image =
+                    cx.share_texture_for_presentable_image(&host.presentable_images[i].texture);
+                let image = aux_chan::send_image_fds_to_aux_chan(id, image, host_endpoint)
+                    .unwrap_or_else(|err| {
+                        panic!("send_image_fds_to_aux_chan failed for image {id:?}: {err:?}")
+                    });
+                SharedPresentableImage { id, image }
+            }),
+        }
+    }
+
     pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
         self.presentable_images.iter().find(|pi| pi.id == id)
     }
@@ -340,69 +563,47 @@ pub mod aux_chan {
         // HACK(eddyb) non-`()` field working around deriving limitations.
         _private: Option<u32>,
     }
-    type PrDmaBufImg<FD> = PresentableImage<crate::os::linux::dma_buf::Image<FD>>;
-    impl PrDmaBufImg<OwnedFd> {
-        pub fn send_fds_to_aux_chan(
-            self,
-            host_endpoint: &HostEndpoint,
-        ) -> io::Result<PrDmaBufImg<AuxChannedImageFd>> {
-            let Self { id, image } = self;
-            let mut plane_idx = 0;
-            let mut success = Ok(());
-            let image = image.planes_fd_map(|fd| {
-                assert_eq!(
-                    plane_idx, 0,
-                    "only images with one DMA-BUF plane are supported"
-                );
-                plane_idx += 1;
-                if success.is_ok() {
-                    success = host_endpoint.send((self.id, fd));
-                }
-                AuxChannedImageFd { _private: None }
-            });
-            success?;
-            Ok(PresentableImage { id, image })
-        }
+    pub fn send_image_fds_to_aux_chan(
+        id: PresentableImageId,
+        image: LinuxOwnedImage,
+        host_endpoint: &HostEndpoint,
+    ) -> io::Result<LinuxSharedImage> {
+        let LinuxOwnedImage { drm_format, plane } = image;
+        host_endpoint.send((id, plane.dma_buf_fd))?;
+        Ok(LinuxSharedImage {
+            drm_format,
+            plane: LinuxSharedImagePlane {
+                dma_buf_fd: AuxChannedImageFd { _private: None },
+                offset: plane.offset,
+                stride: plane.stride,
+            },
+        })
     }
-    impl PrDmaBufImg<AuxChannedImageFd> {
-        pub fn recv_fds_from_aux_chan(
-            self,
-            client_endpoint: &ClientEndpoint,
-        ) -> io::Result<PrDmaBufImg<OwnedFd>> {
-            let Self { id, image } = self;
-            let mut plane_idx = 0;
-            let mut success = Ok(());
-            let image = image.planes_fd_map(|_| {
-                assert_eq!(
-                    plane_idx, 0,
-                    "only images with one DMA-BUF plane are supported"
-                );
-                plane_idx += 1;
 
-                client_endpoint
-                    .recv()
-                    .and_then(|(recv_id, recv_fd)| {
-                        if recv_id != id {
-                            Err(io_error_other(format!(
-                                "recv_fds_from_aux_chan: ID mismatch \
-                         (expected {id:?}, got {recv_id:?}",
-                            )))
-                        } else {
-                            Ok(recv_fd)
-                        }
-                    })
-                    .map_err(|err| {
-                        if success.is_ok() {
-                            success = Err(err);
-                        }
-                    })
-            });
-            success?;
-            Ok(PresentableImage {
-                id,
-                image: image.planes_fd_map(Result::unwrap),
-            })
-        }
+    pub fn recv_image_fds_from_aux_chan(
+        id: PresentableImageId,
+        image: LinuxSharedImage,
+        client_endpoint: &ClientEndpoint,
+    ) -> io::Result<LinuxOwnedImage> {
+        let LinuxSharedImage { drm_format, plane } = image;
+        let dma_buf_fd = client_endpoint.recv().and_then(|(recv_id, recv_fd)| {
+            if recv_id != id {
+                Err(io_error_other(format!(
+                    "recv_fds_from_aux_chan: ID mismatch \
+                     (expected {id:?}, got {recv_id:?}",
+                )))
+            } else {
+                Ok(recv_fd)
+            }
+        })?;
+        Ok(LinuxOwnedImage {
+            drm_format,
+            plane: LinuxOwnedImagePlane {
+                dma_buf_fd,
+                offset: plane.offset,
+                stride: plane.stride,
+            },
+        })
     }
 }
 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]

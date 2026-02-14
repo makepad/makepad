@@ -350,3 +350,9 @@ impl Cx {
         }
     }
 }
+
+impl Cx {
+    pub fn handle_live_edit(&mut self) -> bool {
+        false
+    }
+}
