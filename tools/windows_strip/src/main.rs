@@ -3,11 +3,73 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     fs,
+    io,
     path::{Path, PathBuf},
 };
 
-const WINDOWS_CRATE_NAME: &str = "windows";
-const WINDOWS_CRATE_VERSION: &str = "0.62.2";
+#[derive(Clone, Copy, Debug)]
+struct VendoredCrate {
+    crate_name: &'static str,
+    version: &'static str,
+    local_dir: &'static str,
+}
+
+const WINDOWS_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows",
+    version: "0.62.2",
+    local_dir: "windows-rs",
+};
+const WINDOWS_COLLECTIONS_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-collections",
+    version: "0.3.2",
+    local_dir: "windows-collections",
+};
+const WINDOWS_CORE_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-core",
+    version: "0.62.2",
+    local_dir: "windows-core",
+};
+const WINDOWS_FUTURE_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-future",
+    version: "0.3.2",
+    local_dir: "windows-future",
+};
+const WINDOWS_NUMERICS_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-numerics",
+    version: "0.3.1",
+    local_dir: "windows-numerics",
+};
+const WINDOWS_THREADING_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-threading",
+    version: "0.2.1",
+    local_dir: "windows-threading",
+};
+const WINDOWS_LINK_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-link",
+    version: "0.2.1",
+    local_dir: "windows-link",
+};
+const WINDOWS_RESULT_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-result",
+    version: "0.4.1",
+    local_dir: "windows-result",
+};
+const WINDOWS_STRINGS_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-strings",
+    version: "0.5.1",
+    local_dir: "windows-strings",
+};
+
+const SUPPORT_CRATES: &[VendoredCrate] = &[
+    WINDOWS_COLLECTIONS_CRATE,
+    WINDOWS_CORE_CRATE,
+    WINDOWS_FUTURE_CRATE,
+    WINDOWS_NUMERICS_CRATE,
+    WINDOWS_THREADING_CRATE,
+    WINDOWS_LINK_CRATE,
+    WINDOWS_RESULT_CRATE,
+    WINDOWS_STRINGS_CRATE,
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TokenWithString {
@@ -1438,8 +1500,8 @@ fn cargo_home_candidates() -> Vec<PathBuf> {
     homes
 }
 
-fn find_crate_in_cargo_registry(crate_name: &str, version: &str) -> Option<PathBuf> {
-    let crate_dir_name = format!("{}-{}", crate_name, version);
+fn find_crate_in_cargo_registry(crate_spec: VendoredCrate) -> Option<PathBuf> {
+    let crate_dir_name = format!("{}-{}", crate_spec.crate_name, crate_spec.version);
     for cargo_home in cargo_home_candidates() {
         let registry_src = cargo_home.join("registry").join("src");
         let Ok(entries) = fs::read_dir(registry_src) else {
@@ -1468,11 +1530,11 @@ fn resolve_windows_source_input() -> PathBuf {
         return PathBuf::from(arg);
     }
 
-    find_crate_in_cargo_registry(WINDOWS_CRATE_NAME, WINDOWS_CRATE_VERSION).unwrap_or_else(|| {
+    find_crate_in_cargo_registry(WINDOWS_CRATE).unwrap_or_else(|| {
         panic!(
             "could not locate {}-{} in the Cargo registry; run `cargo fetch --manifest-path tools/windows_strip/Cargo.toml --features fetch-windows-upstream` or pass an explicit source path",
-            WINDOWS_CRATE_NAME,
-            WINDOWS_CRATE_VERSION
+            WINDOWS_CRATE.crate_name,
+            WINDOWS_CRATE.version
         )
     })
 }
@@ -1506,6 +1568,251 @@ fn resolve_windows_source_and_mod_root(windows_source: &Path) -> (PathBuf, PathB
         "windows source path '{}' must contain 'src/Windows' or 'Windows'",
         windows_source.display()
     );
+}
+
+fn resolve_sibling_crate_source(windows_source_root: &Path, crate_spec: VendoredCrate) -> Option<PathBuf> {
+    let Some(parent) = windows_source_root.parent() else {
+        return None;
+    };
+    let candidate = parent.join(format!("{}-{}", crate_spec.crate_name, crate_spec.version));
+    if candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn resolve_support_crate_source(windows_source_root: &Path, crate_spec: VendoredCrate) -> PathBuf {
+    if let Some(path) = resolve_sibling_crate_source(windows_source_root, crate_spec) {
+        return path;
+    }
+    find_crate_in_cargo_registry(crate_spec).unwrap_or_else(|| {
+        panic!(
+            "could not locate {}-{} in the Cargo registry; run `cargo fetch --manifest-path tools/windows_strip/Cargo.toml --features fetch-windows-upstream`",
+            crate_spec.crate_name, crate_spec.version
+        )
+    })
+}
+
+fn vendored_crate_root(crate_spec: VendoredCrate) -> PathBuf {
+    Path::new("./libs").join(crate_spec.local_dir)
+}
+
+fn copy_tree(src_root: &Path, dst_root: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst_root)?;
+    for entry in fs::read_dir(src_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if matches!(name_str.as_ref(), ".cargo-ok" | ".cargo_vcs_info.json" | "Cargo.lock") {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst_root.join(name);
+        if src_path.is_dir() {
+            copy_tree(&src_path, &dst_path)?;
+        } else if src_path.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_crate_source(crate_spec: VendoredCrate, source_root: &Path) -> PathBuf {
+    let dest_root = vendored_crate_root(crate_spec);
+    if dest_root.exists() {
+        fs::remove_dir_all(&dest_root).unwrap();
+    }
+    copy_tree(source_root, &dest_root).unwrap();
+    dest_root
+}
+
+fn remove_manifest_section(manifest: &mut String, section_name: &str) {
+    let header = format!("[{}]", section_name);
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            skipping = trimmed == header;
+        }
+        if skipping {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    *manifest = out;
+}
+
+fn set_manifest_dependency_path(manifest: &mut String, section_name: &str, path: &str) {
+    let header = format!("[{}]", section_name);
+    let mut out = String::new();
+    let mut in_section = false;
+    let mut saw_section = false;
+    let mut wrote_path = false;
+
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_section && !wrote_path {
+                out.push_str(&format!("path = \"{}\"\n", path));
+            }
+            in_section = trimmed == header;
+            if in_section {
+                saw_section = true;
+                wrote_path = false;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        if in_section && trimmed.starts_with("path") {
+            if !wrote_path {
+                out.push_str(&format!("path = \"{}\"\n", path));
+                wrote_path = true;
+            }
+            continue;
+        }
+
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    if in_section && !wrote_path {
+        out.push_str(&format!("path = \"{}\"\n", path));
+    }
+
+    if !saw_section {
+        panic!("missing dependency section [{}] in Cargo.toml", section_name);
+    }
+
+    *manifest = out;
+}
+
+fn patch_manifest_for_crate(crate_spec: VendoredCrate, crate_root: &Path) {
+    let manifest_path = crate_root.join("Cargo.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+
+    match crate_spec.crate_name {
+        "windows" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-collections",
+                "../windows-collections",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-core",
+                "../windows-core",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-future",
+                "../windows-future",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-numerics",
+                "../windows-numerics",
+            );
+            let old_std_feature = "std = [\n    \"windows-collections/std\",\n    \"windows-core/std\",\n    \"windows-future/std\",\n    \"windows-numerics/std\",\n]\n";
+            let new_std_feature =
+                "std = [\n    \"windows-core/std\",\n    \"windows-future/std\",\n]\n";
+            if !manifest.contains(old_std_feature) {
+                panic!("windows std feature block did not match expected upstream shape");
+            }
+            manifest = manifest.replacen(old_std_feature, new_std_feature, 1);
+        }
+        "windows-core" => {
+            remove_manifest_section(&mut manifest, "dependencies.windows-implement");
+            remove_manifest_section(&mut manifest, "dependencies.windows-interface");
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-link",
+                "../windows-link",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-result",
+                "../windows-result",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-strings",
+                "../windows-strings",
+            );
+        }
+        "windows-collections" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-core",
+                "../windows-core",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dev-dependencies.windows-strings",
+                "../windows-strings",
+            );
+        }
+        "windows-future" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-core",
+                "../windows-core",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-link",
+                "../windows-link",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-threading",
+                "../windows-threading",
+            );
+        }
+        "windows-numerics" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-core",
+                "../windows-core",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-link",
+                "../windows-link",
+            );
+        }
+        "windows-threading" | "windows-result" | "windows-strings" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-link",
+                "../windows-link",
+            );
+        }
+        "windows-link" => {}
+        _ => panic!("unsupported vendored crate {}", crate_spec.crate_name),
+    }
+
+    fs::write(manifest_path, manifest).unwrap();
+}
+
+fn strip_windows_core_macros(crate_root: &Path) {
+    let lib_path = crate_root.join("src/lib.rs");
+    let mut source = fs::read_to_string(&lib_path).unwrap();
+    source = source.replace("pub use windows_implement::implement;\n", "");
+    source = source.replace("pub use windows_interface::interface;\n", "");
+    fs::write(lib_path, source).unwrap();
+}
+
+fn strip_windows_future_implement_helpers(crate_root: &Path) {
+    let lib_path = crate_root.join("src/lib.rs");
+    let mut source = fs::read_to_string(&lib_path).unwrap();
+    source = source.replace("#[cfg(feature = \"std\")]\nmod async_ready;\n", "");
+    source = source.replace("#[cfg(feature = \"std\")]\nmod async_spawn;\n", "");
+    fs::write(lib_path, source).unwrap();
 }
 
 fn load_module<'a>(
@@ -1558,18 +1865,26 @@ fn render_module(node: &ModuleNode, out: &mut String) {
 }
 
 fn regenerate_vendored_windows_crate(source_root: &Path, generated_mod: &str) {
-    let vendored_root = PathBuf::from("./libs/windows-rs");
-    if vendored_root.exists() {
-        fs::remove_dir_all(&vendored_root).unwrap();
-    }
-    fs::create_dir_all(vendored_root.join("src/Windows")).unwrap();
-
-    fs::copy(source_root.join("Cargo.toml"), vendored_root.join("Cargo.toml")).unwrap();
+    let vendored_root = copy_crate_source(WINDOWS_CRATE, source_root);
+    patch_manifest_for_crate(WINDOWS_CRATE, &vendored_root);
     let mut lib_source = fs::read_to_string(source_root.join("src/lib.rs")).unwrap();
     lib_source = lib_source.replace("\nmod extensions;\n", "\n");
     lib_source = lib_source.replace("\r\nmod extensions;\r\n", "\r\n");
     fs::write(vendored_root.join("src/lib.rs"), lib_source).unwrap();
     fs::write(vendored_root.join("src/Windows/mod.rs"), generated_mod).unwrap();
+}
+
+fn regenerate_vendored_support_crates(windows_source_root: &Path) {
+    for crate_spec in SUPPORT_CRATES {
+        let source_root = resolve_support_crate_source(windows_source_root, *crate_spec);
+        let vendored_root = copy_crate_source(*crate_spec, &source_root);
+        patch_manifest_for_crate(*crate_spec, &vendored_root);
+        if crate_spec.crate_name == "windows-core" {
+            strip_windows_core_macros(&vendored_root);
+        } else if crate_spec.crate_name == "windows-future" {
+            strip_windows_future_implement_helpers(&vendored_root);
+        }
+    }
 }
 
 fn main() {
@@ -1709,4 +2024,5 @@ fn main() {
     render_module(&root, &mut generated);
 
     regenerate_vendored_windows_crate(&windows_source_root, &generated);
+    regenerate_vendored_support_crates(&windows_source_root);
 }

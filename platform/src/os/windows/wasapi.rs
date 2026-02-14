@@ -2,11 +2,9 @@
 use {
     crate::{
         audio::*,
-        //implement_com,
         makepad_live_id::*,
         thread::SignalToUI,
         windows::{
-            core::implement,
             core::Interface,
             core::PCWSTR,
             Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
@@ -875,20 +873,19 @@ impl WasapiLoopback {
     }
 }
 
-#[implement(IMMNotificationClient)]
-struct WasapiChangeListener {
+pub(crate) struct WasapiChangeListener {
     change_signal: SignalToUI,
 }
-/*
-implement_com!{
+
+crate::implement_com! {
     for_struct: WasapiChangeListener,
     identity: IMMNotificationClient,
-    wrapper_struct: WasapiChangeListener_Com,
+    wrapper_struct: WasapiChangeListener_Impl,
     interface_count: 1,
     interfaces: {
         0: IMMNotificationClient
     }
-}*/
+}
 
 impl IMMNotificationClient_Impl for WasapiChangeListener_Impl {
     fn OnDeviceStateChanged(
