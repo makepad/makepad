@@ -6,7 +6,7 @@ use {
         event::DragItem,
         os::windows::{dropfiles::*, enumformatetc::*},
         windows::{
-            core::{self as wcore, implement, BOOL},
+            core::{self as wcore, BOOL},
             Win32::{
                 Foundation::{
                     DATA_S_SAMEFORMATETC, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_LINDEX,
@@ -221,8 +221,16 @@ implement_com!{
     }
 }
 */
-#[implement(IDataObject)]
-pub struct DragItemWindows(pub DragItem);
+pub(crate) struct DragItemWindows(pub DragItem);
+crate::implement_com! {
+    for_struct: DragItemWindows,
+    identity: IDataObject,
+    wrapper_struct: DragItemWindows_Impl,
+    interface_count: 1,
+    interfaces: {
+        0: IDataObject
+    }
+}
 // IDataObject implementation for DragItem
 
 #[allow(non_snake_case)]
