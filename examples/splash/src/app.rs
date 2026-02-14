@@ -1405,7 +1405,7 @@ script_mod! {
         // Center panel - content widgets
         center_tabs := DockTabs{
             tabs: [@bigtext_tab, @math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
-            selected: 1
+            selected: 4
             closable: true
         }
 

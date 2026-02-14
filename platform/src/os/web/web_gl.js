@@ -14,6 +14,7 @@ export class WasmWebGL extends WasmWebBrowser {
         this.framebuffers = [];
         this.xr = undefined;
         this._missing_shader_ids = new Set();
+        this._gl_error_reports = new Set();
         this.init_webgl_context();
         
         this.load_deps();
@@ -214,7 +215,19 @@ export class WasmWebGL extends WasmWebBrowser {
     assert_no_gl_error(gl, where) {
         let err = gl.getError();
         if (err !== gl.NO_ERROR) {
-            throw new Error("WebGL2 error " + err + " at " + where);
+            const key = where + ":" + err;
+            if (!this._gl_error_reports.has(key)) {
+                this._gl_error_reports.add(key);
+                const message = "WebGL2 error " + err + " at " + where;
+                console.error(message);
+                if (typeof window.makepad_report_browser_issue === "function") {
+                    window.makepad_report_browser_issue("webgl.error", {
+                        where: where,
+                        error: err,
+                        message: message,
+                    });
+                }
+            }
         }
     }
 
@@ -532,14 +545,6 @@ export class WasmWebGL extends WasmWebBrowser {
         let data_array = new Uint8Array(this.memory.buffer, args.data.ptr, args.width * args.height);
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, args.width, args.height, 0, gl.RED, gl.UNSIGNED_BYTE, data_array);
-        // Keep alpha-texture sampling behavior:
-        // map RED -> ALPHA and force RGB = 0.
-        if (gl.TEXTURE_SWIZZLE_R !== undefined) {
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_R, gl.ZERO);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_G, gl.ZERO);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_B, gl.ZERO);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_A, gl.RED);
-        }
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
         this.textures[args.texture_id] = gl_tex;
     }
