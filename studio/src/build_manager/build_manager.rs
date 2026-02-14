@@ -249,6 +249,34 @@ fn get_local_ip() -> String {
 }
 
 impl BuildManager {
+    fn print_incoming_subprocess_log(cmd_id: LiveId, item: &LogItem) {
+        match item {
+            LogItem::Bare(bare) => {
+                println!(
+                    "[studio-subprocess {cmd_id:?}][{:?}] {}",
+                    bare.level,
+                    bare.line.trim()
+                );
+            }
+            LogItem::Location(loc) => {
+                println!(
+                    "[studio-subprocess {cmd_id:?}][{:?}] {}:{}:{} {}",
+                    loc.level,
+                    loc.file_name,
+                    loc.start.line_index + 1,
+                    loc.start.byte_index + 1,
+                    loc.message.trim()
+                );
+            }
+            LogItem::StdinToHost(line) => {
+                println!(
+                    "[studio-subprocess {cmd_id:?}][stdin->host] {}",
+                    line.trim()
+                );
+            }
+        }
+    }
+
     pub fn init(&mut self, cx: &mut Cx, roots: FileSystemRoots) {
         self.http_port = if std::option_env!("MAKEPAD_STUDIO_HTTP").is_some() {
             8002
@@ -642,6 +670,9 @@ impl BuildManager {
             }
 
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv() {
+                if let BuildClientMessage::LogItem(ref item) = wrap.message {
+                    Self::print_incoming_subprocess_log(wrap.cmd_id, item);
+                }
                 match wrap.message {
                     BuildClientMessage::LogItem(LogItem::Location(mut loc)) => {
                         loc.file_name = if let Some(build) = active.builds.get(&wrap.cmd_id) {

@@ -4,14 +4,15 @@ use {
         cx_api::CxOsOp,
         draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
         event::{Event, TextClipboardEvent, WindowGeom},
+        gl_sys,
         makepad_live_id::*,
         makepad_math::*,
         makepad_micro_serde::*,
         os::cx_stdin::{
-            aux_chan, HostPresentableImage, HostSwapchain, HostToStdin, PollTimer,
-            PresentableDraw, StdinToHost,
+            aux_chan, HostPresentableImage, HostSwapchain, HostToStdin,
+            LinuxSharedSoftwareBuffer, PollTimer, PresentableDraw, StdinToHost,
         },
-        texture::{Texture, TextureFormat},
+        texture::{Texture, TextureFormat, TextureSize},
         thread::SignalToUI,
         window::CxWindowPool,
         CxOsApi,
@@ -27,6 +28,7 @@ use {
 pub(crate) struct StdinWindow {
     swapchain: Option<HostSwapchain>,
     present_index: usize,
+    readback_framebuffer: Option<u32>,
 }
 
 impl Cx {
@@ -44,10 +46,11 @@ impl Cx {
                 CxDrawPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
                     let window = &mut windows[window_id.id()];
-                    if let Some(swapchain) = &window.swapchain {
-                        let current_image = &swapchain.presentable_images[window.present_index];
+                    if let Some(swapchain) = &mut window.swapchain {
+                        let current_index = window.present_index;
                         window.present_index =
                             (window.present_index + 1) % swapchain.presentable_images.len();
+                        let current_image = &mut swapchain.presentable_images[current_index];
 
                         // render to swapchain
                         self.draw_pass_to_texture(draw_pass_id, Some(&current_image.texture));
@@ -65,6 +68,89 @@ impl Cx {
                             width: (pass_rect.size.x * dpi_factor) as u32,
                             height: (pass_rect.size.y * dpi_factor) as u32,
                         };
+
+                        if let Some(software_buffer) = current_image.software_buffer.as_mut() {
+                            software_buffer.as_bytes_mut().fill(0);
+                            unsafe {
+                                let gl = self.os.gl();
+
+                                while (gl.glGetError)() != 0 {}
+
+                                if window.readback_framebuffer.is_none() {
+                                    let mut framebuffer = std::mem::MaybeUninit::uninit();
+                                    (gl.glGenFramebuffers)(1, framebuffer.as_mut_ptr());
+                                    window.readback_framebuffer = Some(framebuffer.assume_init());
+                                }
+                                let readback_framebuffer = window.readback_framebuffer.unwrap();
+                                let gl_texture = match self.textures[current_image.texture.texture_id()]
+                                    .os
+                                    .gl_texture
+                                {
+                                    Some(texture) => texture,
+                                    None => continue,
+                                };
+
+                                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, readback_framebuffer);
+                                (gl.glFramebufferTexture2D)(
+                                    gl_sys::FRAMEBUFFER,
+                                    gl_sys::COLOR_ATTACHMENT0,
+                                    gl_sys::TEXTURE_2D,
+                                    gl_texture,
+                                    0,
+                                );
+                                (gl.glPixelStorei)(gl_sys::PACK_ALIGNMENT, 1);
+                                (gl.glPixelStorei)(gl_sys::PACK_ROW_LENGTH, 0);
+                                (gl.glPixelStorei)(gl_sys::PACK_SKIP_PIXELS, 0);
+                                (gl.glPixelStorei)(gl_sys::PACK_SKIP_ROWS, 0);
+                                (gl.glReadPixels)(
+                                    0,
+                                    0,
+                                    swapchain.alloc_width as i32,
+                                    swapchain.alloc_height as i32,
+                                    gl_sys::RGBA,
+                                    gl_sys::UNSIGNED_BYTE,
+                                    software_buffer.as_mut_ptr(),
+                                );
+                                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+
+                                let gl_error = (gl.glGetError)();
+                                if gl_error != 0 {
+                                    crate::error!(
+                                        "software fallback readback glReadPixels error={}",
+                                        gl_error
+                                    );
+                                }
+                            }
+
+                            // Keep RunView size pixels in-band, matching other backends.
+                            let encode_size_pixel = |size: u32| {
+                                [
+                                    ((size >> 8) & 0xff) as u8,
+                                    0,
+                                    (size & 0xff) as u8,
+                                    0xff,
+                                ]
+                            };
+                            if let Ok(stride) = usize::try_from(software_buffer.stride) {
+                                let width_px = encode_size_pixel(presentable_draw.width);
+                                let height_px = encode_size_pixel(presentable_draw.height);
+                                let bytes = software_buffer.as_bytes_mut();
+                                if stride >= 8 && bytes.len() >= 8 {
+                                    bytes[0..4].copy_from_slice(&width_px);
+                                    bytes[4..8].copy_from_slice(&height_px);
+
+                                    if swapchain.alloc_height > 1 {
+                                        let last_row =
+                                            (swapchain.alloc_height as usize - 1).saturating_mul(stride);
+                                        if last_row + 8 <= bytes.len() {
+                                            bytes[last_row..last_row + 4].copy_from_slice(&width_px);
+                                            bytes[last_row + 4..last_row + 8]
+                                                .copy_from_slice(&height_px);
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         // inform host that frame is ready
                         let _ = io::stdout().write_all(
@@ -218,21 +304,62 @@ impl Cx {
                     let presentable_images = std::array::from_fn(|i| {
                         let shared_pi = shared_images[i];
                         let mut texture = Texture::new(self);
+                        let mut software_buffer = None;
                         match shared_pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
                             Ok(pi) => {
-                                let desc = TextureFormat::SharedBGRAu8 {
-                                    id: pi.id,
-                                    width: alloc_width as usize,
-                                    height: alloc_height as usize,
-                                    initial: true,
-                                };
-                                texture = Texture::new_with_format(self, desc);
-                                self.textures[texture.texture_id()]
-                                    .update_from_shared_dma_buf_image(
-                                        self.os.gl(),
-                                        self.os.opengl_cx.as_ref().unwrap(),
-                                        &pi.image,
+                                if pi.image.is_software_fallback() {
+                                    texture = Texture::new_with_format(
+                                        self,
+                                        TextureFormat::RenderBGRAu8 {
+                                            size: TextureSize::Fixed {
+                                                width: alloc_width as usize,
+                                                height: alloc_height as usize,
+                                            },
+                                            initial: true,
+                                        },
                                     );
+                                    let stride = pi.image.plane.stride;
+                                    let maybe_len = usize::try_from(alloc_height)
+                                        .ok()
+                                        .and_then(|height| {
+                                            usize::try_from(stride)
+                                                .ok()
+                                                .and_then(|stride| stride.checked_mul(height))
+                                        });
+                                    match maybe_len {
+                                        Some(len) => match LinuxSharedSoftwareBuffer::from_fd(
+                                            pi.image.plane.dma_buf_fd,
+                                            len,
+                                            stride,
+                                        ) {
+                                            Ok(buffer) => software_buffer = Some(buffer),
+                                            Err(err) => {
+                                                crate::error!(
+                                                    "failed to map software fallback swapchain image: {err:?}"
+                                                );
+                                            }
+                                        },
+                                        None => {
+                                            crate::error!(
+                                                "software fallback swapchain size overflow ({alloc_width}x{alloc_height}, stride={stride})"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    let desc = TextureFormat::SharedBGRAu8 {
+                                        id: pi.id,
+                                        width: alloc_width as usize,
+                                        height: alloc_height as usize,
+                                        initial: true,
+                                    };
+                                    texture = Texture::new_with_format(self, desc);
+                                    self.textures[texture.texture_id()]
+                                        .update_from_shared_dma_buf_image(
+                                            self.os.gl(),
+                                            self.os.opengl_cx.as_ref().unwrap(),
+                                            &pi.image,
+                                        );
+                                }
                             }
                             Err(err) => {
                                 crate::error!(
@@ -243,6 +370,7 @@ impl Cx {
                         HostPresentableImage {
                             id: shared_pi.id,
                             texture,
+                            software_buffer,
                         }
                     });
                     let new_swapchain = HostSwapchain {

@@ -30,12 +30,19 @@ impl Cx {
     pub fn share_texture_for_presentable_image(
         &mut self,
         texture: &Texture,
-    ) -> LinuxOwnedImage {
+    ) -> Option<LinuxOwnedImage> {
+        let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
+        // RunView swapchains can be created during UI draw before the normal
+        // repaint path calls `make_current`, especially on Wayland hosts.
+        opengl_cx.make_current();
+
         let cxtexture = &mut self.textures[texture.texture_id()];
         cxtexture.update_shared_texture(self.os.gl());
 
-        let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
         unsafe {
+            // Ensure texture allocation/upload work is visible before export.
+            (self.os.gl().glFinish)();
+
             let egl_image = (opengl_cx.libegl.eglCreateImageKHR.unwrap())(
                 opengl_cx.egl_display,
                 opengl_cx.egl_context,
@@ -43,68 +50,161 @@ impl Cx {
                 cxtexture.os.gl_texture.unwrap() as egl_sys::EGLClientBuffer,
                 std::ptr::null(),
             );
-            assert!(!egl_image.is_null(), "eglCreateImageKHR failed");
+            if egl_image.is_null() {
+                crate::error!("eglCreateImageKHR failed for shared texture export");
+                return None;
+            }
 
             let (mut fourcc, mut num_planes) = (0, 0);
-            assert!(
-                (opengl_cx
-                    .libegl
-                    .eglExportDMABUFImageQueryMESA
-                    .expect("eglExportDMABUFImageQueryMESA unsupported"))(
+            if (opengl_cx
+                .libegl
+                .eglExportDMABUFImageQueryMESA
+                .expect("eglExportDMABUFImageQueryMESA unsupported"))(
+                opengl_cx.egl_display,
+                egl_image,
+                &mut fourcc as *mut u32 as *mut i32,
+                &mut num_planes,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                crate::error!("eglExportDMABUFImageQueryMESA failed");
+                let _ = (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(
                     opengl_cx.egl_display,
                     egl_image,
-                    &mut fourcc as *mut u32 as *mut i32,
-                    &mut num_planes,
-                    std::ptr::null_mut(),
-                ) != 0,
-                "eglExportDMABUFImageQueryMESA failed",
-            );
-            assert!(
-                num_planes == 1,
-                "planar DRM format {:?} ({fourcc:#x}) unsupported (num_planes={num_planes})",
-                std::str::from_utf8(&u32::to_le_bytes(fourcc))
-            );
+                );
+                return None;
+            }
+            if num_planes != 1 {
+                crate::error!(
+                    "unsupported planar DRM format {:?} ({:#x}), num_planes={}",
+                    std::str::from_utf8(&u32::to_le_bytes(fourcc)),
+                    fourcc,
+                    num_planes
+                );
+                let _ = (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(
+                    opengl_cx.egl_display,
+                    egl_image,
+                );
+                return None;
+            }
 
             // HACK(eddyb) `modifiers` are reported per-plane, so to avoid UB,
             // a second query call is used *after* the `num_planes == 1` check.
             let mut modifiers = 0;
-            assert!(
-                (opengl_cx.libegl.eglExportDMABUFImageQueryMESA.unwrap())(
+            if (opengl_cx.libegl.eglExportDMABUFImageQueryMESA.unwrap())(
+                opengl_cx.egl_display,
+                egl_image,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut modifiers,
+            ) == 0
+            {
+                crate::error!("eglExportDMABUFImageQueryMESA(modifiers) failed");
+                let _ = (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(
                     opengl_cx.egl_display,
                     egl_image,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &mut modifiers,
-                ) != 0,
-                "eglExportDMABUFImageQueryMESA failed",
-            );
+                );
+                return None;
+            }
 
             let (mut dma_buf_fd, mut offset, mut stride) = (0, 0, 0);
-            assert!(
-                (opengl_cx.libegl.eglExportDMABUFImageMESA.unwrap())(
+            if (opengl_cx.libegl.eglExportDMABUFImageMESA.unwrap())(
+                opengl_cx.egl_display,
+                egl_image,
+                &mut dma_buf_fd,
+                &mut stride as *mut u32 as *mut i32,
+                &mut offset as *mut u32 as *mut i32,
+            ) == 0
+            {
+                crate::error!("eglExportDMABUFImageMESA failed");
+                let _ = (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(
                     opengl_cx.egl_display,
                     egl_image,
-                    &mut dma_buf_fd,
-                    &mut stride as *mut u32 as *mut i32,
-                    &mut offset as *mut u32 as *mut i32,
-                ) != 0,
-                "eglExportDMABUFImageMESA failed",
-            );
+                );
+                return None;
+            }
+            if dma_buf_fd < 0 {
+                crate::error!(
+                    "eglExportDMABUFImageMESA returned invalid fd (fourcc={:#x} modifiers={:#x} stride={} offset={})",
+                    fourcc,
+                    modifiers,
+                    stride,
+                    offset
+                );
+                let _ = (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(
+                    opengl_cx.egl_display,
+                    egl_image,
+                );
+                return None;
+            }
 
-            assert!(
-                (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(opengl_cx.egl_display, egl_image,)
-                    != 0,
-                "eglDestroyImageKHR failed",
-            );
+            if (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(opengl_cx.egl_display, egl_image)
+                == 0
+            {
+                crate::error!("eglDestroyImageKHR failed after DMA-BUF export");
+                return None;
+            }
 
-            LinuxOwnedImage {
+            Some(LinuxOwnedImage {
                 drm_format: crate::os::linux::dma_buf::DrmFormat { fourcc, modifiers },
                 plane: LinuxOwnedImagePlane {
                     dma_buf_fd: os::fd::OwnedFd::from_raw_fd(dma_buf_fd),
                     offset,
                     stride,
                 },
-            }
+            })
+        }
+    }
+
+    pub fn upload_presentable_image_software_buffer(
+        &mut self,
+        texture: &Texture,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) {
+        let expected_len = width as usize * height as usize * 4;
+        if pixels.len() < expected_len {
+            crate::error!(
+                "software fallback frame too small: got {} bytes, need {}",
+                pixels.len(),
+                expected_len
+            );
+            return;
+        }
+        let row_len = width as usize * 4;
+        let mut flipped = vec![0u8; expected_len];
+        for y in 0..height as usize {
+            let src = y * row_len;
+            let dst = (height as usize - 1 - y) * row_len;
+            flipped[dst..dst + row_len].copy_from_slice(&pixels[src..src + row_len]);
+        }
+
+        let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
+        opengl_cx.make_current();
+
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        cxtexture.update_shared_texture(self.os.gl());
+
+        unsafe {
+            let gl = self.os.gl();
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, cxtexture.os.gl_texture.unwrap());
+            (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 1);
+            (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
+            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
+            (gl.glTexSubImage2D)(
+                gl_sys::TEXTURE_2D,
+                0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                gl_sys::RGBA,
+                gl_sys::UNSIGNED_BYTE,
+                flipped.as_ptr() as *const c_void,
+            );
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
         }
     }
 }
