@@ -59,9 +59,6 @@ impl X11Cx {
                 get_xlib_app_global().display,
             )
         });
-        if is_stdin_loop {
-            println!("stdin-loop EGL platform: X11");
-        }
 
         if is_stdin_loop {
             cx.borrow_mut().in_makepad_studio = true;
@@ -124,7 +121,6 @@ impl X11Cx {
                         }
                     }
                 }
-                println!("re: {:?}", re);
                 // ok lets not redraw all, just this window
                 cx.call_event_handler(&Event::WindowGeomChange(re));
             }
@@ -312,7 +308,6 @@ impl X11Cx {
         let mut ret = EventFlow::Poll;
         let mut cx = self.cx.borrow_mut();
         while let Some(op) = cx.platform_ops.pop() {
-            println!("handle op: {:?}", op);
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();

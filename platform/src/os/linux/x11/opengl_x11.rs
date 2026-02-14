@@ -124,13 +124,17 @@ impl Cx {
                 return None;
             }
             if dma_buf_fd < 0 {
-                crate::error!(
-                    "eglExportDMABUFImageMESA returned invalid fd (fourcc={:#x} modifiers={:#x} stride={} offset={})",
-                    fourcc,
-                    modifiers,
-                    stride,
-                    offset
-                );
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static LOG_INVALID_DMABUF_FD: AtomicBool = AtomicBool::new(false);
+                if !LOG_INVALID_DMABUF_FD.swap(true, Ordering::Relaxed) {
+                    crate::warning!(
+                        "eglExportDMABUFImageMESA returned invalid fd (fourcc={:#x} modifiers={:#x} stride={} offset={})",
+                        fourcc,
+                        modifiers,
+                        stride,
+                        offset
+                    );
+                }
                 let _ = (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(
                     opengl_cx.egl_display,
                     egl_image,

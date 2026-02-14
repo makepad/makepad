@@ -635,9 +635,13 @@ impl SharedSwapchain {
         }
 
         if use_software_fallback {
-            crate::error!(
-                "Linux DMA-BUF export unavailable for RunView; using software readback fallback"
-            );
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOG_SOFTWARE_FALLBACK: AtomicBool = AtomicBool::new(false);
+            if !LOG_SOFTWARE_FALLBACK.swap(true, Ordering::Relaxed) {
+                crate::warning!(
+                    "Linux DMA-BUF export unavailable for RunView; using software readback fallback"
+                );
+            }
             for i in 0..SWAPCHAIN_IMAGE_COUNT {
                 owned_images[i] = Some(Self::software_fallback_image(
                     &mut host.presentable_images[i],

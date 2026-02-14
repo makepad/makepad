@@ -4,23 +4,26 @@ use crate::{
     makepad_math::{dvec2, Vec2d},
     wayland::{wayland_type, xkb_sys},
     Area, KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    TextInputEvent, WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse,
+    TextClipboardEvent, TextInputEvent, WindowClosedEvent, WindowDragQueryEvent,
+    WindowDragQueryResponse,
 };
 use std::{
     cell::{Cell, RefCell},
     fs::File,
-    io::Read,
+    io::{Read, Write},
     os::{
         fd::{AsFd, AsRawFd, FromRawFd},
         unix::fs::FileExt,
     },
     rc::Rc,
+    sync::Arc,
 };
 
 use wayland_client::{
     delegate_noop,
     protocol::{
-        wl_buffer, wl_compositor, wl_keyboard, wl_output,
+        wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer,
+        wl_data_source, wl_keyboard, wl_output,
         wl_pointer::{self, ButtonState},
         wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
     },
@@ -45,21 +48,33 @@ use wayland_protocols::{
 
 use crate::{
     cx_native::EventFlow, event::WindowGeom, select_timer::SelectTimers,
-    wayland::wayland_app::WaylandApp, x11::xlib_event::XlibEvent, WindowCloseRequestedEvent,
-    WindowGeomChangeEvent, WindowId, WindowMovedEvent,
+    wayland::wayland_app::WaylandApp, x11::xlib_event::XlibEvent, KeyCode,
+    WindowCloseRequestedEvent, WindowGeomChangeEvent, WindowId, WindowMovedEvent,
 };
 
 use super::opengl_wayland::WaylandWindow;
+
+pub(crate) struct ClipboardOffer {
+    offer: wl_data_offer::WlDataOffer,
+    mime_types: Vec<String>,
+}
 
 pub(crate) struct WaylandState {
     pub(crate) compositor: Option<wl_compositor::WlCompositor>,
     pub(crate) wm_base: Option<xdg_wm_base::XdgWmBase>,
     pub(crate) seat: Option<wl_seat::WlSeat>,
+    pub(crate) data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+    pub(crate) data_device: Option<wl_data_device::WlDataDevice>,
+    pub(crate) clipboard_source: Option<wl_data_source::WlDataSource>,
+    pub(crate) clipboard_offer: Option<ClipboardOffer>,
+    pub(crate) data_offers: Vec<ClipboardOffer>,
+    pub(crate) clipboard_text: String,
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
     pub(crate) last_mouse_pos: Vec2d,
     pub(crate) pointer_serial: Option<u32>,
+    pub(crate) keyboard_serial: Option<u32>,
     pub(crate) decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) current_window: Option<WindowId>,
@@ -83,6 +98,12 @@ impl WaylandState {
             compositor: None,
             wm_base: None,
             seat: None,
+            data_device_manager: None,
+            data_device: None,
+            clipboard_source: None,
+            clipboard_offer: None,
+            data_offers: Vec::new(),
+            clipboard_text: String::new(),
             cursor_manager: None,
             cursor_shape: None,
             pointer: None,
@@ -92,6 +113,7 @@ impl WaylandState {
             windows: Vec::new(),
             current_window: None,
             pointer_serial: None,
+            keyboard_serial: None,
             modifiers: KeyModifiers::default(),
             xkb_state: None,
             xkb_cx: xkb_sys::XkbContext::new().unwrap(),
@@ -135,6 +157,18 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                 "wl_seat" => {
                     let seat = wl_registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qhandle, ());
                     state.seat = Some(seat);
+                    state.ensure_data_device(qhandle);
+                }
+                "wl_data_device_manager" => {
+                    let data_device_manager = wl_registry
+                        .bind::<wl_data_device_manager::WlDataDeviceManager, _, _>(
+                            name,
+                            version.min(3),
+                            qhandle,
+                            (),
+                        );
+                    state.data_device_manager = Some(data_device_manager);
+                    state.ensure_data_device(qhandle);
                 }
                 "zxdg_decoration_manager_v1" => {
                     let decoration_manager = wl_registry
@@ -321,6 +355,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
         conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        state.ensure_data_device(qhandle);
         if let Some(input_manager) = state.text_input_manager.as_ref() {
             state.text_input = Some(input_manager.get_text_input(&seat, qhandle, ()));
         }
@@ -341,6 +376,137 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
         }
     }
 }
+
+impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _proxy: &wl_data_device::WlDataDevice,
+        event: wl_data_device::Event,
+        _: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_device::Event::DataOffer { id } => {
+                if state
+                    .data_offers
+                    .iter()
+                    .all(|entry| entry.offer != id)
+                {
+                    state.data_offers.push(ClipboardOffer {
+                        offer: id,
+                        mime_types: Vec::new(),
+                    });
+                }
+            }
+            wl_data_device::Event::Selection { id } => {
+                state.clipboard_offer = id.map(|offer| {
+                    if let Some(index) =
+                        state.data_offers.iter().position(|entry| entry.offer == offer)
+                    {
+                        state.data_offers.swap_remove(index)
+                    } else {
+                        ClipboardOffer {
+                            offer,
+                            mime_types: Vec::new(),
+                        }
+                    }
+                });
+                state.data_offers.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn event_created_child(
+        opcode: u16,
+        qhandle: &QueueHandle<Self>,
+    ) -> Arc<dyn wayland_client::backend::ObjectData> {
+        match opcode {
+            wl_data_device::EVT_DATA_OFFER_OPCODE => {
+                qhandle.make_data::<wl_data_offer::WlDataOffer, ()>(())
+            }
+            _ => unreachable!("wl_data_device created unknown child for opcode {}", opcode),
+        }
+    }
+}
+
+impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        proxy: &wl_data_offer::WlDataOffer,
+        event: wl_data_offer::Event,
+        _: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_offer::Event::Offer { mime_type } => {
+                if let Some(active_offer) = state.clipboard_offer.as_mut() {
+                    if active_offer.offer == *proxy
+                        && !active_offer.mime_types.iter().any(|m| m == &mime_type)
+                    {
+                        active_offer.mime_types.push(mime_type.clone());
+                    }
+                }
+                if let Some(offer) = state
+                    .data_offers
+                    .iter_mut()
+                    .find(|entry| entry.offer == *proxy)
+                {
+                    if !offer.mime_types.iter().any(|m| m == &mime_type) {
+                        offer.mime_types.push(mime_type);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        proxy: &wl_data_source::WlDataSource,
+        event: wl_data_source::Event,
+        _: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_source::Event::Send { mime_type, fd } => {
+                if Self::is_text_mime_type(&mime_type) {
+                    let mut file = File::from(fd);
+                    let _ = file.write_all(state.clipboard_text.as_bytes());
+                    let _ = file.flush();
+                }
+            }
+            wl_data_source::Event::Cancelled => {
+                if state
+                    .clipboard_source
+                    .as_ref()
+                    .is_some_and(|source| source == proxy)
+                {
+                    state.clipboard_source = None;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_data_device_manager::WlDataDeviceManager, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_data_device_manager::WlDataDeviceManager,
+        _event: wl_data_device_manager::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandState {
     fn event(
         state: &mut Self,
@@ -413,43 +579,82 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                 // state.do_callback(XlibEvent::AppLostFocus);
             }
             wl_keyboard::Event::Key {
-                serial: _,
+                serial,
                 time: _,
                 key,
                 state: key_state,
             } => {
-                if let Some(xkb_state) = state.xkb_state.as_mut() {
-                    if let WEnum::Value(key_state) = key_state {
-                        match key_state {
-                            wl_keyboard::KeyState::Pressed => {
-                                let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
-                                let text_str = xkb_state.key_get_utf8(key + 8);
+                if let WEnum::Value(key_state) = key_state {
+                    match key_state {
+                        wl_keyboard::KeyState::Pressed => {
+                            state.keyboard_serial = Some(serial);
+                            let (key_code, text_str) = if let Some(xkb_state) = state.xkb_state.as_mut()
+                            {
+                                (
+                                    xkb_state.keycode_to_makepad_keycode(key + 8),
+                                    xkb_state.key_get_utf8(key + 8),
+                                )
+                            } else {
+                                return;
+                            };
 
-                                // todo(drindr): distinguish `block_text`
+                            let primary_mod = state.modifiers.control || state.modifiers.logo;
+                            if primary_mod {
+                                match key_code {
+                                    KeyCode::KeyV => state.request_clipboard_paste(conn),
+                                    KeyCode::KeyC => {
+                                        let response = Rc::new(RefCell::new(None));
+                                        state.do_callback(XlibEvent::TextCopy(TextClipboardEvent {
+                                            response: response.clone(),
+                                        }));
+                                        let content = response.borrow().clone();
+                                        if let Some(content) = content {
+                                            state.set_clipboard_text(qhandle, serial, content);
+                                        }
+                                    }
+                                    KeyCode::KeyX => {
+                                        let response = Rc::new(RefCell::new(None));
+                                        state.do_callback(XlibEvent::TextCut(TextClipboardEvent {
+                                            response: response.clone(),
+                                        }));
+                                        let content = response.borrow().clone();
+                                        if let Some(content) = content {
+                                            state.set_clipboard_text(qhandle, serial, content);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            let block_text = primary_mod || state.modifiers.alt;
+                            state.do_callback(XlibEvent::KeyDown(KeyEvent {
+                                key_code,
+                                is_repeat: false,
+                                modifiers: state.modifiers,
+                                time: state.time_now(),
+                            }));
+
+                            if !block_text && !text_str.is_empty() {
                                 state.do_callback(XlibEvent::TextInput(TextInputEvent {
                                     input: text_str,
                                     replace_last: false,
                                     was_paste: false,
                                 }));
-                                state.do_callback(XlibEvent::KeyDown(KeyEvent {
-                                    key_code: key_code,
+                            }
+                        }
+                        wl_keyboard::KeyState::Released => {
+                            if let Some(xkb_state) = state.xkb_state.as_mut() {
+                                let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
+                                state.do_callback(XlibEvent::KeyUp(KeyEvent {
+                                    key_code,
                                     is_repeat: false,
                                     modifiers: state.modifiers,
                                     time: state.time_now(),
                                 }));
                             }
-                            wl_keyboard::KeyState::Released => {
-                                let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
-                                state.do_callback(XlibEvent::KeyUp(KeyEvent {
-                                    key_code: key_code,
-                                    is_repeat: false,
-                                    modifiers: state.modifiers,
-                                    time: state.time_now(),
-                                }))
-                            }
-                            _ => {}
-                        };
-                    }
+                        }
+                        _ => {}
+                    };
                 }
             }
             // wl_keyboard::Event::RepeatInfo { rate, delay } => {},
@@ -634,6 +839,97 @@ delegate_noop!(WaylandState: ignore zxdg_toplevel_decoration_v1::ZxdgToplevelDec
 // delegate_noop!(WaylandState: ignore xdg_positioner::XdgPositioner);
 
 impl WaylandState {
+    fn ensure_data_device(&mut self, qhandle: &QueueHandle<Self>) {
+        if self.data_device.is_none() {
+            if let (Some(data_device_manager), Some(seat)) =
+                (self.data_device_manager.as_ref(), self.seat.as_ref())
+            {
+                self.data_device = Some(data_device_manager.get_data_device(seat, qhandle, ()));
+            }
+        }
+    }
+
+    fn is_text_mime_type(mime_type: &str) -> bool {
+        matches!(
+            mime_type,
+            "text/plain;charset=utf-8" | "text/plain" | "UTF8_STRING" | "STRING" | "TEXT"
+        )
+    }
+
+    fn preferred_clipboard_mime_type(offer: &ClipboardOffer) -> Option<&str> {
+        for preferred in [
+            "text/plain;charset=utf-8",
+            "text/plain",
+            "UTF8_STRING",
+            "STRING",
+            "TEXT",
+        ] {
+            if let Some(mime_type) = offer.mime_types.iter().find(|m| m.as_str() == preferred) {
+                return Some(mime_type.as_str());
+            }
+        }
+        offer.mime_types.first().map(String::as_str)
+    }
+
+    pub(crate) fn set_clipboard_text(
+        &mut self,
+        qhandle: &QueueHandle<Self>,
+        serial: u32,
+        text: String,
+    ) {
+        self.ensure_data_device(qhandle);
+        if let (Some(data_device_manager), Some(data_device)) =
+            (self.data_device_manager.as_ref(), self.data_device.as_ref())
+        {
+            let source = data_device_manager.create_data_source(qhandle, ());
+            source.offer("text/plain;charset=utf-8".to_string());
+            source.offer("text/plain".to_string());
+            source.offer("UTF8_STRING".to_string());
+            source.offer("STRING".to_string());
+            source.offer("TEXT".to_string());
+            data_device.set_selection(Some(&source), serial);
+            self.clipboard_source = Some(source);
+            self.clipboard_text = text;
+        }
+    }
+
+    fn request_clipboard_paste(&mut self, conn: &Connection) {
+        if let Some(offer) = self.clipboard_offer.as_ref() {
+            if let Some(mime_type) = Self::preferred_clipboard_mime_type(offer) {
+                let mut pipe_fds = [0; 2];
+                if unsafe { libc_sys::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+                    return;
+                }
+                let mut read_file = unsafe { File::from_raw_fd(pipe_fds[0]) };
+                let write_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe_fds[1]) };
+                offer.offer.receive(mime_type.to_string(), write_fd.as_fd());
+                drop(write_fd);
+                let _ = conn.flush();
+
+                let mut bytes = Vec::new();
+                if read_file.read_to_end(&mut bytes).is_ok() {
+                    while bytes.last() == Some(&0) {
+                        bytes.pop();
+                    }
+                    let input = String::from_utf8_lossy(&bytes).into_owned();
+                    if !input.is_empty() {
+                        self.do_callback(XlibEvent::TextInput(TextInputEvent {
+                            input,
+                            replace_last: false,
+                            was_paste: true,
+                        }));
+                    }
+                }
+            }
+        } else if !self.clipboard_text.is_empty() {
+            self.do_callback(XlibEvent::TextInput(TextInputEvent {
+                input: self.clipboard_text.clone(),
+                replace_last: false,
+                was_paste: true,
+            }));
+        }
+    }
+
     pub(crate) fn available(&self) -> bool {
         self.compositor.is_some()
             && self.wm_base.is_some()
