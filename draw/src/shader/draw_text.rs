@@ -823,7 +823,11 @@ impl ScriptHook for FontFamily {
                             );
                         }
                     }
-                    font_ids.push(font_id);
+                    // Only keep font IDs that are actually available.
+                    // On some platforms/resources, optional family members may not resolve.
+                    if fonts.is_font_known(font_id) {
+                        font_ids.push(font_id);
+                    }
                 }
             }
 

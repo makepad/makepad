@@ -31397,9 +31397,16 @@ pub const DXGI_FORMAT_B8G8R8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(87i32);
 pub const DXGI_FORMAT_D32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(40i32);
 pub const DXGI_FORMAT_R16_FLOAT: DXGI_FORMAT = DXGI_FORMAT(54i32);
 pub const DXGI_FORMAT_R32G32B32A32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(2i32);
+pub const DXGI_FORMAT_R32G32B32A32_SINT: DXGI_FORMAT = DXGI_FORMAT(4i32);
+pub const DXGI_FORMAT_R32G32B32A32_UINT: DXGI_FORMAT = DXGI_FORMAT(3i32);
 pub const DXGI_FORMAT_R32G32B32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(6i32);
+pub const DXGI_FORMAT_R32G32B32_SINT: DXGI_FORMAT = DXGI_FORMAT(8i32);
+pub const DXGI_FORMAT_R32G32B32_UINT: DXGI_FORMAT = DXGI_FORMAT(7i32);
 pub const DXGI_FORMAT_R32G32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(16i32);
+pub const DXGI_FORMAT_R32G32_SINT: DXGI_FORMAT = DXGI_FORMAT(18i32);
+pub const DXGI_FORMAT_R32G32_UINT: DXGI_FORMAT = DXGI_FORMAT(17i32);
 pub const DXGI_FORMAT_R32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(41i32);
+pub const DXGI_FORMAT_R32_SINT: DXGI_FORMAT = DXGI_FORMAT(43i32);
 pub const DXGI_FORMAT_R32_UINT: DXGI_FORMAT = DXGI_FORMAT(42i32);
 pub const DXGI_FORMAT_R8G8_UNORM: DXGI_FORMAT = DXGI_FORMAT(49i32);
 pub const DXGI_FORMAT_R8_UNORM: DXGI_FORMAT = DXGI_FORMAT(61i32);
@@ -42399,24 +42406,19 @@ pub struct PARAMDESC {
     pub pparamdescex: *mut PARAMDESCEX,
     pub wParamFlags: PARAMFLAGS,
 }
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PARAMFLAGS(pub u16);
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 pub struct PARAMDESCEX {
     pub cBytes: u32,
     pub varDefaultValue: super::Variant::VARIANT,
 }
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PARAMFLAGS(pub u16);
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESC {
     fn default() -> Self {
         unsafe { core::mem::zeroed() }
-    }
-}
-impl PARAMFLAGS {
-    pub const fn contains(&self, other: Self) -> bool {
-        self.0 & other.0 == other.0
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
@@ -42425,16 +42427,21 @@ impl Clone for PARAMDESCEX {
         unsafe { core::mem::transmute_copy(self) }
     }
 }
-impl core::ops::BitOr for PARAMFLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+impl PARAMFLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESCEX {
     fn default() -> Self {
         unsafe { core::mem::zeroed() }
+    }
+}
+impl core::ops::BitOr for PARAMFLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 impl core::ops::BitAnd for PARAMFLAGS {

@@ -355,6 +355,21 @@ impl ShaderStack {
 }
 
 impl ShaderFnCompiler {
+    fn shader_math_const_value(id: LiveId) -> Option<f64> {
+        match id {
+            id!(PI) => Some(3.141592653589793),
+            id!(E) => Some(2.718281828459045),
+            id!(LN2) => Some(0.6931471805599453),
+            id!(LN10) => Some(2.302585092994046),
+            id!(LOG2E) => Some(1.4426950408889634),
+            id!(LOG10E) => Some(0.4342944819032518),
+            id!(SQRT1_2) => Some(0.70710678118654757),
+            id!(TORAD) => Some(0.017453292519943295),
+            id!(GOLDEN) => Some(1.618033988749895),
+            _ => None,
+        }
+    }
+
     pub fn new(script_scope: ScriptObject) -> Self {
         ShaderFnCompiler {
             script_scope,
@@ -617,6 +632,15 @@ impl ShaderFnCompiler {
                         // Return ScopeObject so handle_field can process property access
                         self.stack.free_string(s);
                         return (ShaderType::ScopeObject(value_obj), self.stack.new_string());
+                    }
+
+                    // Inline built-in math constants directly as literals.
+                    // This avoids routing constants (e.g. PI) through scope uniform buffers.
+                    if let Some(c) = Self::shader_math_const_value(id) {
+                        let mut s2 = self.stack.new_string();
+                        write_shader_float(&mut s2, c);
+                        self.stack.free_string(s);
+                        return (ShaderType::Pod(vm.bx.code.builtins.pod.pod_f32), s2);
                     }
 
                     // It's a direct value - add as scope uniform
