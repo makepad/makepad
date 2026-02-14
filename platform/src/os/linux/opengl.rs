@@ -15,7 +15,10 @@ use {
         makepad_math::{Vec2d, Vec4f},
         makepad_script::{
             apply::Apply,
-            shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
+            shader::{
+                SamplerAddress, SamplerFilter, ShaderFnCompiler, ShaderMode, ShaderOutput,
+                ShaderType,
+            },
             shader_backend::ShaderBackend,
             trap::NoTrap,
             value::ScriptValue,
@@ -101,11 +104,30 @@ impl DrawVars {
                 return;
             }
 
-            // TODO: replace with full GLSL generation from ShaderOutput.
+            if std::env::var_os("MAKEPAD_DUMP_GLSL_IR").is_some() {
+                crate::log!("---- Linux GLSL IR io list ----");
+                for io in &output.io {
+                    crate::log!("io kind={:?} name={} ty={:?}", io.kind, io.name, io.ty);
+                }
+                crate::log!("---- Linux GLSL IR functions ----");
+                for f in &output.functions {
+                    crate::log!("{} {{\n{}\n}}", f.call_sig, f.out);
+                }
+            }
+
+            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+
+            let mut shared_defs = String::new();
+            output.create_struct_defs(vm, &mut shared_defs);
+
+            let mut vertex = String::new();
+            let mut fragment = String::new();
+            output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
+            output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
+
             let code = CxDrawShaderCode::Separate {
-                vertex: "void main(){gl_Position=vec4(0.0,0.0,0.0,1.0);}".to_string(),
-                fragment:
-                    "void main(){\n#if __VERSION__ >= 300\nfragColor=vec4(1.0,0.0,1.0,1.0);\n#else\ngl_FragColor=vec4(1.0,0.0,1.0,1.0);\n#endif\n}".to_string(),
+                vertex,
+                fragment,
             };
 
             {
@@ -244,6 +266,7 @@ impl Cx {
                     ));
                 }
                 let shgl = shp.gl_shader[shader_variant].as_ref().unwrap();
+                let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
 
                 if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none() {
                     draw_call.instance_dirty = false;
@@ -376,6 +399,16 @@ impl Cx {
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
                         (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
                     }
+                    if trace_draw {
+                        crate::log!(
+                            "GL VAO rebuilt shader={} vao={:?} geom_vb={:?} inst_vb={:?} geom_ib={:?}",
+                            draw_call.draw_shader_id.index,
+                            vao.vao,
+                            vao.geom_vb,
+                            vao.inst_vb,
+                            vao.geom_ib
+                        );
+                    }
                 }
                 unsafe {
                     (gl.glUseProgram)(shgl.program);
@@ -485,6 +518,24 @@ impl Cx {
                         if let Some(loc) = shgl.textures[i].loc {
                             (gl.glUniform1i)(loc, i as i32);
                         }
+                        if let Some(gl_bind_sampler) = gl.glBindSampler {
+                            let sampler = shgl
+                                .samplers
+                                .get(i)
+                                .and_then(|sampler| sampler.sampler)
+                                .unwrap_or(0);
+                            gl_bind_sampler(i as u32, sampler);
+                        }
+                    }
+                    if trace_draw {
+                        crate::log!(
+                            "GL draw shader={} variant={} indices={} instances={} textures={}",
+                            draw_call.draw_shader_id.index,
+                            shader_variant,
+                            indices,
+                            instances,
+                            sh.mapping.textures.len()
+                        );
                     }
 
                     (gl.glDrawElementsInstanced)(
@@ -839,6 +890,7 @@ pub struct GlShader {
     pub geometries: Vec<OpenglAttribute>,
     pub instances: Vec<OpenglAttribute>,
     pub textures: Vec<OpenglUniform>,
+    pub samplers: Vec<OpenglSampler>,
     pub xr_depth_texture: OpenglUniform,
     // all these things need to be uniform buffers
     pub uniforms: GlShaderUniforms,
@@ -966,14 +1018,14 @@ impl GlShader {
                 let vs = (gl.glCreateShader)(gl_sys::VERTEX_SHADER);
                 (gl.glShaderSource)(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
                 (gl.glCompileShader)(vs);
-                //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
+                Self::opengl_log_shader_info(gl, true, vs as usize, "vertex", vertex);
                 if let Some(error) = Self::opengl_has_shader_error(gl, true, vs as usize, &vertex) {
                     panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
                 }
                 let fs = (gl.glCreateShader)(gl_sys::FRAGMENT_SHADER);
                 (gl.glShaderSource)(fs, 1, [pixel.as_ptr() as *const _].as_ptr(), ptr::null());
                 (gl.glCompileShader)(fs);
-                //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
+                Self::opengl_log_shader_info(gl, true, fs as usize, "fragment", pixel);
                 if let Some(error) = Self::opengl_has_shader_error(gl, true, fs as usize, &pixel) {
                     panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
                 }
@@ -982,6 +1034,7 @@ impl GlShader {
                 (gl.glAttachShader)(program, vs);
                 (gl.glAttachShader)(program, fs);
                 (gl.glLinkProgram)(program);
+                Self::opengl_log_shader_info(gl, false, program as usize, "program", "");
                 if let Some(error) = Self::opengl_has_shader_error(gl, false, program as usize, "")
                 {
                     panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
@@ -1082,6 +1135,7 @@ impl GlShader {
                     mapping.instances.total_slots,
                 ),
                 textures: Self::opengl_get_texture_slots(gl, program, &mapping.textures),
+                samplers: Self::opengl_create_samplers(gl, mapping),
                 xr_depth_texture: Self::opengl_get_uniform(gl, program, "xr_depth_texture"),
                 uniforms,
             };
@@ -1137,24 +1191,69 @@ impl GlShader {
             } else {
                 (gl.glGetProgramiv)(shader as u32, gl_sys::INFO_LOG_LENGTH, &mut length);
             }
-            let mut log = Vec::with_capacity(length as usize);
+
+            let mut log = vec![0u8; length.max(1) as usize];
             if compile {
-                (gl.glGetShaderInfoLog)(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
+                (gl.glGetShaderInfoLog)(
+                    shader as u32,
+                    length,
+                    ptr::null_mut(),
+                    log.as_mut_ptr() as *mut _,
+                );
             } else {
-                (gl.glGetProgramInfoLog)(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
+                (gl.glGetProgramInfoLog)(
+                    shader as u32,
+                    length,
+                    ptr::null_mut(),
+                    log.as_mut_ptr() as *mut _,
+                );
             }
-            log.set_len(length as usize);
-            let mut r = "".to_string();
-            r.push_str(CStr::from_ptr(log.as_ptr()).to_str().unwrap());
+            let c_end = log.iter().position(|b| *b == 0).unwrap_or(log.len());
+            let info_log = String::from_utf8_lossy(&log[..c_end]);
+
+            let mut r = String::new();
+            r.push_str(info_log.trim_end());
             r.push_str("\n");
-            let split = source.split("\n");
-            for (line, chunk) in split.enumerate() {
-                r.push_str(&(line + 1).to_string());
-                r.push_str(":");
-                r.push_str(chunk);
-                r.push_str("\n");
+            if !source.is_empty() {
+                for (line, chunk) in source.split('\n').enumerate() {
+                    r.push_str(&(line + 1).to_string());
+                    r.push_str(":");
+                    r.push_str(chunk);
+                    r.push_str("\n");
+                }
             }
             r
+        }
+    }
+
+    fn opengl_log_shader_info(
+        gl: &LibGl,
+        compile: bool,
+        shader: usize,
+        stage_name: &str,
+        source: &str,
+    ) {
+        let info = Self::opengl_get_info_log(gl, compile, shader, "");
+        let has_errors = info
+            .lines()
+            .any(|line| line.to_ascii_lowercase().contains("error"));
+        let dump_sources = std::env::var_os("MAKEPAD_LOG_GLSL_SOURCES").is_some();
+
+        if has_errors || dump_sources {
+            let kind = if compile { "compile" } else { "link" };
+            crate::warning!(
+                "GLSL {} {} info:\n{}",
+                kind,
+                stage_name,
+                if has_errors {
+                    info
+                } else {
+                    "(no compiler errors)\n".to_string()
+                }
+            );
+            if dump_sources && !source.is_empty() {
+                crate::warning!("GLSL {} {} source:\n{}", kind, stage_name, source);
+            }
         }
     }
 
@@ -1200,6 +1299,7 @@ impl GlShader {
 
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = ceil_div4(slots);
+        let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
         for i in 0..num_attr {
             let mut name0 = prefix.to_string();
             name0.push_str(&i.to_string());
@@ -1210,16 +1310,21 @@ impl GlShader {
                 size = 4;
             }
             unsafe {
+                let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _);
+                if trace_draw {
+                    crate::log!(
+                        "GL attrib program={} name={} loc={} size={} stride={} offset={}",
+                        program,
+                        name0.trim_end_matches('\0'),
+                        loc,
+                        size,
+                        stride,
+                        (i * 4 * mem::size_of::<f32>())
+                    );
+                }
                 attribs.push(OpenglAttribute {
                     name: name0.to_string(),
-                    loc: {
-                        let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _);
-                        if loc < 0 {
-                            None
-                        } else {
-                            Some(loc as u32)
-                        }
-                    },
+                    loc: if loc < 0 { None } else { Some(loc as u32) },
                     offset: (i * 4 * mem::size_of::<f32>()) as usize,
                     size: size,
                     stride: stride,
@@ -1237,11 +1342,17 @@ impl GlShader {
         let mut gl_texture_slots = Vec::new();
 
         for slot in texture_slots {
-            let mut name0 = "ds_".to_string();
+            let mut name0 = "tex_".to_string();
             name0.push_str(&slot.id.to_string());
             name0.push_str("\0");
             unsafe {
-                let loc = (gl.glGetUniformLocation)(program, name0.as_ptr().cast());
+                let mut loc = (gl.glGetUniformLocation)(program, name0.as_ptr().cast());
+                if loc < 0 {
+                    let mut fallback_name = "ds_".to_string();
+                    fallback_name.push_str(&slot.id.to_string());
+                    fallback_name.push_str("\0");
+                    loc = (gl.glGetUniformLocation)(program, fallback_name.as_ptr().cast());
+                }
                 // crate::warning!("opengl_get_texture_slots(): texture slot: ({:?}, {:?}), name0: {:X?}, loc: {loc:#X}", slot.id, slot.ty, name0.as_bytes());
                 gl_texture_slots.push(OpenglUniform {
                     loc: if loc < 0 { None } else { Some(loc) },
@@ -1251,7 +1362,70 @@ impl GlShader {
         gl_texture_slots
     }
 
+    pub fn opengl_create_samplers(gl: &LibGl, mapping: &CxDrawShaderMapping) -> Vec<OpenglSampler> {
+        let mut samplers = Vec::with_capacity(mapping.textures.len());
+        let Some(gl_gen_samplers) = gl.glGenSamplers else {
+            samplers.resize(mapping.textures.len(), OpenglSampler::default());
+            return samplers;
+        };
+        let Some(gl_sampler_parameteri) = gl.glSamplerParameteri else {
+            samplers.resize(mapping.textures.len(), OpenglSampler::default());
+            return samplers;
+        };
+
+        for texture_slot in 0..mapping.textures.len() {
+            let sampler_desc = mapping
+                .texture_sampler_indices
+                .get(texture_slot)
+                .and_then(|sampler_idx| mapping.samplers.get(*sampler_idx))
+                .copied()
+                .unwrap_or_default();
+
+            let mut sampler = 0u32;
+            unsafe {
+                gl_gen_samplers(1, &mut sampler);
+            }
+            if sampler == 0 {
+                samplers.push(OpenglSampler::default());
+                continue;
+            }
+
+            let filter = match sampler_desc.filter {
+                SamplerFilter::Nearest => gl_sys::NEAREST,
+                SamplerFilter::Linear => gl_sys::LINEAR,
+            };
+            let address = match sampler_desc.address {
+                SamplerAddress::Repeat => gl_sys::REPEAT,
+                SamplerAddress::ClampToEdge => gl_sys::CLAMP_TO_EDGE,
+                // CLAMP_TO_BORDER is not universally available on GLES3, keep it edge-safe.
+                SamplerAddress::ClampToZero => gl_sys::CLAMP_TO_EDGE,
+                SamplerAddress::MirroredRepeat => gl_sys::MIRRORED_REPEAT,
+            };
+
+            unsafe {
+                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_MIN_FILTER, filter as i32);
+                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_MAG_FILTER, filter as i32);
+                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_S, address as i32);
+                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_T, address as i32);
+                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_R, address as i32);
+            }
+
+            samplers.push(OpenglSampler {
+                sampler: Some(sampler),
+            });
+        }
+
+        samplers
+    }
+
     pub fn free_resources(self, gl: &LibGl) {
+        if let Some(gl_delete_samplers) = gl.glDeleteSamplers {
+            for sampler in &self.samplers {
+                if let Some(sampler) = sampler.sampler {
+                    unsafe { gl_delete_samplers(1, &sampler) };
+                }
+            }
+        }
         unsafe {
             (gl.glDeleteShader)(self.program);
         }
@@ -1468,6 +1642,11 @@ pub struct OpenglAttribute {
 pub struct OpenglUniform {
     pub loc: Option<i32>,
     //pub name: String,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct OpenglSampler {
+    pub sampler: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone)]

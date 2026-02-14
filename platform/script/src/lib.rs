@@ -49,6 +49,7 @@ pub mod shader_backend;
 pub mod shader_builtins;
 pub mod shader_calls;
 pub mod shader_control;
+pub mod shader_glsl;
 pub mod shader_hlsl;
 pub mod shader_metal;
 pub mod shader_ops;

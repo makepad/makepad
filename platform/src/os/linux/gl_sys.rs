@@ -79,6 +79,8 @@ pub const VERTEX_SHADER: GLenum = 0x8B31;
 pub const FRAGMENT_SHADER: GLenum = 0x8B30;
 pub const TEXTURE_MIN_FILTER: GLenum = 0x2801;
 pub const LINEAR: GLenum = 0x2601;
+pub const REPEAT: GLenum = 0x2901;
+pub const MIRRORED_REPEAT: GLenum = 0x8370;
 pub const LINEAR_MIPMAP_LINEAR: GLenum = 0x2703;
 pub const TEXTURE_BASE_LEVEL: GLenum = 0x813C;
 pub const TEXTURE_MAX_LEVEL: GLenum = 0x813D;
@@ -104,6 +106,7 @@ pub const STATIC_DRAW: GLenum = 0x88E4;
 pub const NEAREST: GLenum = 0x2600;
 pub const TEXTURE_WRAP_S: GLenum = 0x2802;
 pub const TEXTURE_WRAP_T: GLenum = 0x2803;
+pub const TEXTURE_WRAP_R: GLenum = 0x8072;
 pub const CLAMP_TO_EDGE: GLenum = 0x812F;
 pub const CLAMP_TO_BORDER: GLenum = 0x812D;
 pub const PROGRAM_BINARY_LENGTH: GLenum = 0x8741;
@@ -255,6 +258,11 @@ pub type TglBufferData = unsafe extern "C" fn(
 ) -> ();
 pub type TglUniform1i = unsafe extern "C" fn(location: GLint, v0: GLint) -> ();
 pub type TglGetError = unsafe extern "C" fn() -> GLenum;
+pub type TglGenSamplers = unsafe extern "C" fn(n: GLsizei, samplers: *mut GLuint) -> ();
+pub type TglDeleteSamplers = unsafe extern "C" fn(n: GLsizei, samplers: *const GLuint) -> ();
+pub type TglBindSampler = unsafe extern "C" fn(unit: GLuint, sampler: GLuint) -> ();
+pub type TglSamplerParameteri =
+    unsafe extern "C" fn(sampler: GLuint, pname: GLenum, param: GLint) -> ();
 pub type TglFlush = unsafe extern "C" fn() -> ();
 pub type TglFinish = unsafe extern "C" fn() -> ();
 pub type TglGetProgramBinary = unsafe extern "C" fn(
@@ -411,6 +419,10 @@ pub struct LibGl {
     pub glBufferData: TglBufferData,
     pub glUniform1i: TglUniform1i,
     pub glGetError: TglGetError,
+    pub glGenSamplers: Option<TglGenSamplers>,
+    pub glDeleteSamplers: Option<TglDeleteSamplers>,
+    pub glBindSampler: Option<TglBindSampler>,
+    pub glSamplerParameteri: Option<TglSamplerParameteri>,
     pub glDisableVertexAttribArray: TglDisableVertexAttribArray,
     pub glDrawArrays: TglDrawArrays,
     pub glReadPixels: TglReadPixels,
@@ -663,6 +675,10 @@ impl LibGl {
             glBufferData: load!(loadfn, TglBufferData, "glBufferData", "glBufferDataARB")?,
             glUniform1i: load!(loadfn, TglUniform1i, "glUniform1i", "glUniform1iARB")?,
             glGetError: load!(loadfn, TglGetError, "glGetError")?,
+            glGenSamplers: load!(loadfn, TglGenSamplers, "glGenSamplers").ok(),
+            glDeleteSamplers: load!(loadfn, TglDeleteSamplers, "glDeleteSamplers").ok(),
+            glBindSampler: load!(loadfn, TglBindSampler, "glBindSampler").ok(),
+            glSamplerParameteri: load!(loadfn, TglSamplerParameteri, "glSamplerParameteri").ok(),
             glFlush: load!(loadfn, TglFlush, "glFlush")?,
             glFinish: load!(loadfn, TglFinish, "glFinish")?,
             glClearDepthf: load!(loadfn, TglClearDepthf, "glClearDepthf", "glClearDepthfOES")?,

@@ -355,6 +355,21 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.stdin_timers.timers.remove(&timer_id);
                 }
+                CxOsOp::HttpRequest {
+                    request_id,
+                    request,
+                } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::open(
+                        request_id,
+                        request,
+                        self.os.network_response.sender.clone(),
+                    );
+                }
+                CxOsOp::CancelHttpRequest { request_id } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::cancel(request_id);
+                }
                 CxOsOp::CopyToClipboard(content) => {
                     let _ = io::stdout()
                         .write_all(StdinToHost::SetClipboard(content).to_json().as_bytes());
