@@ -94,6 +94,15 @@ impl WaylandCx {
     }
 
     fn state_event_callback(&mut self, state: &mut WaylandState, event: XlibEvent) -> EventFlow {
+        state.pump_pending_clipboard_read();
+        if let Some(input) = state.take_pending_paste_text_input() {
+            let mut cx = self.cx.borrow_mut();
+            cx.call_event_handler(&Event::TextInput(crate::TextInputEvent {
+                input,
+                replace_last: false,
+                was_paste: true,
+            }));
+        }
         if let EventFlow::Exit = self.handle_platform_ops(state) {
             state.event_loop_running = false;
             return EventFlow::Exit;

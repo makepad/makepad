@@ -9,11 +9,8 @@ use crate::{
 };
 use std::{
     cell::{Cell, RefCell},
-    fs::File,
-    io::{Read, Write},
     os::{
         fd::{AsFd, AsRawFd, FromRawFd},
-        unix::fs::FileExt,
     },
     rc::Rc,
     sync::Arc,
@@ -59,6 +56,11 @@ pub(crate) struct ClipboardOffer {
     mime_types: Vec<String>,
 }
 
+struct PendingClipboardRead {
+    fd: std::os::fd::OwnedFd,
+    bytes: Vec<u8>,
+}
+
 pub(crate) struct WaylandState {
     pub(crate) compositor: Option<wl_compositor::WlCompositor>,
     pub(crate) wm_base: Option<xdg_wm_base::XdgWmBase>,
@@ -68,6 +70,8 @@ pub(crate) struct WaylandState {
     pub(crate) clipboard_source: Option<wl_data_source::WlDataSource>,
     pub(crate) clipboard_offer: Option<ClipboardOffer>,
     pub(crate) data_offers: Vec<ClipboardOffer>,
+    pending_clipboard_read: Option<PendingClipboardRead>,
+    pending_paste_text_input: Option<String>,
     pub(crate) clipboard_text: String,
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
@@ -103,6 +107,8 @@ impl WaylandState {
             clipboard_source: None,
             clipboard_offer: None,
             data_offers: Vec::new(),
+            pending_clipboard_read: None,
+            pending_paste_text_input: None,
             clipboard_text: String::new(),
             cursor_manager: None,
             cursor_shape: None,
@@ -476,9 +482,23 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandState {
         match event {
             wl_data_source::Event::Send { mime_type, fd } => {
                 if Self::is_text_mime_type(&mime_type) {
-                    let mut file = File::from(fd);
-                    let _ = file.write_all(state.clipboard_text.as_bytes());
-                    let _ = file.flush();
+                    let raw_fd = fd.as_raw_fd();
+                    unsafe {
+                        let flags = libc_sys::fcntl(raw_fd, libc_sys::F_GETFL, 0);
+                        if flags >= 0 {
+                            let _ = libc_sys::fcntl(
+                                raw_fd,
+                                libc_sys::F_SETFL,
+                                flags | libc_sys::O_NONBLOCK,
+                            );
+                        }
+                        let bytes = state.clipboard_text.as_bytes();
+                        let _ = libc_sys::write(
+                            raw_fd,
+                            bytes.as_ptr() as *const std::os::raw::c_void,
+                            bytes.len(),
+                        );
+                    }
                 }
             }
             wl_data_source::Event::Cancelled => {
@@ -893,6 +913,73 @@ impl WaylandState {
         }
     }
 
+    fn dispatch_paste_bytes(&mut self, mut bytes: Vec<u8>) {
+        while bytes.last() == Some(&0) {
+            bytes.pop();
+        }
+        let input = String::from_utf8_lossy(&bytes).into_owned();
+        if !input.is_empty() {
+            self.pending_paste_text_input = Some(input);
+        }
+    }
+
+    pub(crate) fn take_pending_paste_text_input(&mut self) -> Option<String> {
+        self.pending_paste_text_input.take()
+    }
+
+    pub(crate) fn pump_pending_clipboard_read(&mut self) {
+        let mut pending = match self.pending_clipboard_read.take() {
+            Some(pending) => pending,
+            None => return,
+        };
+
+        let read_raw_fd = pending.fd.as_raw_fd();
+        let mut readfds = unsafe { std::mem::zeroed::<libc_sys::fd_set>() };
+        let mut timeout = libc_sys::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        unsafe {
+            libc_sys::FD_ZERO(&mut readfds);
+            libc_sys::FD_SET(read_raw_fd, &mut readfds);
+        }
+        let ready = unsafe {
+            libc_sys::select(
+                read_raw_fd + 1,
+                &mut readfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut timeout,
+            )
+        };
+        if ready <= 0 {
+            self.pending_clipboard_read = Some(pending);
+            return;
+        }
+
+        loop {
+            let mut chunk = [0u8; 4096];
+            let count = unsafe {
+                libc_sys::read(
+                    read_raw_fd,
+                    chunk.as_mut_ptr() as *mut std::os::raw::c_void,
+                    chunk.len(),
+                )
+            };
+            if count > 0 {
+                pending.bytes.extend_from_slice(&chunk[..count as usize]);
+                continue;
+            }
+
+            if pending.bytes.is_empty() {
+                self.pending_clipboard_read = Some(pending);
+            } else {
+                self.dispatch_paste_bytes(pending.bytes);
+            }
+            return;
+        }
+    }
+
     fn request_clipboard_paste(&mut self, conn: &Connection) {
         if let Some(offer) = self.clipboard_offer.as_ref() {
             if let Some(mime_type) = Self::preferred_clipboard_mime_type(offer) {
@@ -900,26 +987,28 @@ impl WaylandState {
                 if unsafe { libc_sys::pipe(pipe_fds.as_mut_ptr()) } != 0 {
                     return;
                 }
-                let mut read_file = unsafe { File::from_raw_fd(pipe_fds[0]) };
+                let read_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe_fds[0]) };
+                let read_raw_fd = read_fd.as_raw_fd();
                 let write_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe_fds[1]) };
                 offer.offer.receive(mime_type.to_string(), write_fd.as_fd());
                 drop(write_fd);
                 let _ = conn.flush();
 
-                let mut bytes = Vec::new();
-                if read_file.read_to_end(&mut bytes).is_ok() {
-                    while bytes.last() == Some(&0) {
-                        bytes.pop();
-                    }
-                    let input = String::from_utf8_lossy(&bytes).into_owned();
-                    if !input.is_empty() {
-                        self.do_callback(XlibEvent::TextInput(TextInputEvent {
-                            input,
-                            replace_last: false,
-                            was_paste: true,
-                        }));
+                unsafe {
+                    let flags = libc_sys::fcntl(read_raw_fd, libc_sys::F_GETFL, 0);
+                    if flags >= 0 {
+                        let _ = libc_sys::fcntl(
+                            read_raw_fd,
+                            libc_sys::F_SETFL,
+                            flags | libc_sys::O_NONBLOCK,
+                        );
                     }
                 }
+                self.pending_clipboard_read = Some(PendingClipboardRead {
+                    fd: read_fd,
+                    bytes: Vec::new(),
+                });
+                self.pump_pending_clipboard_read();
             }
         } else if !self.clipboard_text.is_empty() {
             self.do_callback(XlibEvent::TextInput(TextInputEvent {
