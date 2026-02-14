@@ -3,7 +3,8 @@ use crate::{
     draw_list::DrawListId,
     draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
     draw_shader::{
-        CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId, UniformBufferBindings,
+        CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderId,
+        UniformBufferBindings,
     },
     draw_vars::DrawVars,
     event::WindowGeom,
@@ -30,7 +31,8 @@ use crate::{
             Foundation::{HANDLE, HMODULE, S_FALSE},
             Graphics::{
                 Direct3D::{
-                    Fxc::D3DCompile, ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                    Fxc::D3DCompile,
+                    ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
                 },
                 Direct3D11::{
@@ -63,9 +65,16 @@ use crate::{
                         DXGI_FORMAT_D32_FLOAT,
                         DXGI_FORMAT_R16_FLOAT,
                         DXGI_FORMAT_R32G32B32A32_FLOAT,
+                        DXGI_FORMAT_R32G32B32A32_SINT,
+                        DXGI_FORMAT_R32G32B32A32_UINT,
                         DXGI_FORMAT_R32G32B32_FLOAT,
+                        DXGI_FORMAT_R32G32B32_SINT,
+                        DXGI_FORMAT_R32G32B32_UINT,
                         DXGI_FORMAT_R32G32_FLOAT,
+                        DXGI_FORMAT_R32G32_SINT,
+                        DXGI_FORMAT_R32G32_UINT,
                         DXGI_FORMAT_R32_FLOAT,
+                        DXGI_FORMAT_R32_SINT,
                         DXGI_FORMAT_R32_UINT,
                         DXGI_FORMAT_R8G8_UNORM,
                         DXGI_FORMAT_R8_UNORM,
@@ -242,7 +251,7 @@ impl Cx {
                     buffer_slot_opt(
                         d3d11_cx,
                         shp.dyn_uniform_buffer_id,
-                        &draw_item.os.draw_call_uniforms.buffer,
+                        &draw_item.os.user_uniforms.buffer,
                     );
                     buffer_slot_opt(
                         d3d11_cx,
@@ -259,7 +268,11 @@ impl Cx {
                         shp.draw_list_uniform_buffer_id,
                         &draw_list.os.draw_list_uniforms.buffer,
                     );
-                    buffer_slot(d3d11_cx, 5, &draw_item.os.user_uniforms.buffer);
+                    buffer_slot_opt(
+                        d3d11_cx,
+                        shp.scope_uniform_buffer_id,
+                        &shp.scope_uniforms.buffer,
+                    );
                 }
 
                 for i in 0..sh.mapping.textures.len() {
@@ -1397,6 +1410,7 @@ impl DrawVars {
             output.create_struct_defs(vm, &mut out);
             output.hlsl_create_uniform_buffer_cbuffers(vm, &mut out);
             output.hlsl_create_uniform_struct(vm, &mut out);
+            output.hlsl_create_scope_uniform_cbuffer(vm, &mut out);
             output.hlsl_create_instance_struct(vm, &mut out);
             output.hlsl_create_varying_struct(vm, &mut out);
             output.hlsl_create_vertex_buffer_struct(vm, &mut out);
@@ -1404,6 +1418,7 @@ impl DrawVars {
             output.hlsl_create_io_structs(vm, &mut out);
             output.hlsl_create_fragment_output_struct(vm, &mut out);
             output.hlsl_create_texture_samplers(vm, &mut out);
+            output.hlsl_create_helpers(vm, &mut out);
             output.create_functions(&mut out);
             output.hlsl_create_vertex_fn(vm, &mut out);
             output.hlsl_create_fragment_fn(vm, &mut out);
@@ -1508,6 +1523,7 @@ pub struct CxOsDrawShader {
     pub hlsl: String,
     pub const_table_uniforms: D3d11Buffer,
     pub live_uniforms: D3d11Buffer,
+    pub scope_uniforms: D3d11Buffer,
     pub pixel_shader: ID3D11PixelShader,
     pub vertex_shader: ID3D11VertexShader,
     pub pixel_shader_blob: ID3DBlob,
@@ -1518,6 +1534,7 @@ pub struct CxOsDrawShader {
     pub pass_uniform_buffer_id: Option<u32>,
     pub draw_list_uniform_buffer_id: Option<u32>,
     pub dyn_uniform_buffer_id: Option<u32>,
+    pub scope_uniform_buffer_id: Option<u32>,
 }
 
 impl CxOsDrawShader {
@@ -1528,6 +1545,7 @@ impl CxOsDrawShader {
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
         fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<ID3DBlob, String> {
+            const D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
             unsafe {
                 let shader_bytes = shader.as_bytes();
                 let mut blob = None;
@@ -1540,7 +1558,7 @@ impl CxOsDrawShader {
                     None,                               // include
                     PCSTR(entry.as_ptr()),              // entry point
                     PCSTR(target.as_ptr()),             // target
-                    0,                                  // flags1
+                    D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY,
                     0,                                  // flags2
                     &mut blob,
                     Some(&mut errors),
@@ -1568,14 +1586,51 @@ impl CxOsDrawShader {
             return r;
         }
 
-        fn slots_to_dxgi_format(slots: usize) -> DXGI_FORMAT {
-            match slots {
-                1 => DXGI_FORMAT_R32_FLOAT,
-                2 => DXGI_FORMAT_R32G32_FLOAT,
-                3 => DXGI_FORMAT_R32G32B32_FLOAT,
-                4 => DXGI_FORMAT_R32G32B32A32_FLOAT,
-                _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots),
+        fn slots_to_dxgi_format(slots: usize, attr_format: DrawShaderAttrFormat) -> DXGI_FORMAT {
+            match attr_format {
+                DrawShaderAttrFormat::Float => match slots {
+                    1 => DXGI_FORMAT_R32_FLOAT,
+                    2 => DXGI_FORMAT_R32G32_FLOAT,
+                    3 => DXGI_FORMAT_R32G32B32_FLOAT,
+                    4 => DXGI_FORMAT_R32G32B32A32_FLOAT,
+                    _ => panic!("slots_to_dxgi_format unsupported float slotcount {}", slots),
+                },
+                DrawShaderAttrFormat::UInt => match slots {
+                    1 => DXGI_FORMAT_R32_UINT,
+                    2 => DXGI_FORMAT_R32G32_UINT,
+                    3 => DXGI_FORMAT_R32G32B32_UINT,
+                    4 => DXGI_FORMAT_R32G32B32A32_UINT,
+                    _ => panic!("slots_to_dxgi_format unsupported uint slotcount {}", slots),
+                },
+                DrawShaderAttrFormat::SInt => match slots {
+                    1 => DXGI_FORMAT_R32_SINT,
+                    2 => DXGI_FORMAT_R32G32_SINT,
+                    3 => DXGI_FORMAT_R32G32B32_SINT,
+                    4 => DXGI_FORMAT_R32G32B32A32_SINT,
+                    _ => panic!("slots_to_dxgi_format unsupported sint slotcount {}", slots),
+                },
             }
+        }
+        fn slot_chunks(slots: usize) -> Vec<usize> {
+            match slots {
+                0 => Vec::new(),
+                // Keep matrix layouts aligned with HLSL matrix input expansion.
+                9 => vec![3, 3, 3],
+                16 => vec![4, 4, 4, 4],
+                _ => {
+                    let mut rem = slots;
+                    let mut chunks = Vec::new();
+                    while rem > 0 {
+                        let chunk = rem.min(4);
+                        chunks.push(chunk);
+                        rem -= chunk;
+                    }
+                    chunks
+                }
+            }
+        }
+        fn index_to_char(index: usize) -> char {
+            std::char::from_u32(index as u32 + 65).unwrap_or('?')
         }
 
         let vs_blob = match compile_shader("vs_5_0\0", "vertex_main\0", &hlsl) {
@@ -1585,7 +1640,7 @@ impl CxOsDrawShader {
                     msg,
                     split_source(&hlsl)
                 );
-                return None;
+                std::process::exit(1);
             }
             Ok(blob) => blob,
         };
@@ -1597,7 +1652,7 @@ impl CxOsDrawShader {
                     msg,
                     split_source(&hlsl)
                 );
-                return None;
+                std::process::exit(1);
             }
             Ok(blob) => blob,
         };
@@ -1633,84 +1688,113 @@ impl CxOsDrawShader {
         };
 
         let mut layout_desc = Vec::new();
-        let strings: Vec<String> = Vec::new();
+        let mut layout_debug = Vec::new();
+        let mut strings: Vec<String> = Vec::new();
+        let geom_desc_count: usize = mapping
+            .geometries
+            .inputs
+            .iter()
+            .map(|geom| slot_chunks(geom.slots).len())
+            .sum();
+        let inst_desc_count: usize = mapping
+            .instances
+            .inputs
+            .iter()
+            .map(|inst| slot_chunks(inst.slots).len())
+            .sum();
+        let total_desc_count = geom_desc_count + inst_desc_count;
+        layout_desc.reserve(total_desc_count);
+        strings.reserve(mapping.geometries.inputs.len() + mapping.instances.inputs.len());
 
-        for (_index, geom) in mapping.geometries.inputs.iter().enumerate() {
-            //strings.push(format!("GEOM{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
-
-            layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
-                SemanticName: PCSTR(strings.last().unwrap().as_ptr()),
-                SemanticIndex: 0,
-                Format: slots_to_dxgi_format(geom.slots),
-                InputSlot: 0,
-                AlignedByteOffset: (geom.offset * 4) as u32,
-                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
-                InstanceDataStepRate: 0,
-            })
+        let mut geom_sem_index = 0usize;
+        for geom in &mapping.geometries.inputs {
+            strings.push(format!("GEOM{}\0", index_to_char(geom_sem_index)));
+            let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
+            let mut slot_offset = 0usize;
+            for (semantic_chunk_index, chunk_slots) in slot_chunks(geom.slots).into_iter().enumerate()
+            {
+                layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
+                    SemanticName: semantic_name,
+                    SemanticIndex: semantic_chunk_index as u32,
+                    Format: slots_to_dxgi_format(chunk_slots, geom.attr_format),
+                    InputSlot: 0,
+                    AlignedByteOffset: ((geom.offset + slot_offset) * 4) as u32,
+                    InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                    InstanceDataStepRate: 0,
+                });
+                layout_debug.push(format!(
+                    "{}{} slot={} slots={} byte_off={}",
+                    strings.last().unwrap().trim_end_matches('\0'),
+                    semantic_chunk_index,
+                    0,
+                    chunk_slots,
+                    (geom.offset + slot_offset) * 4
+                ));
+                slot_offset += chunk_slots;
+            }
+            geom_sem_index += 1;
         }
 
-        //let mut index = 0;
+        let mut inst_sem_index = 0usize;
         for inst in &mapping.instances.inputs {
-            if inst.slots == 16 {
-                for i in 0..4 {
-                    //strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
-                    layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
-                        SemanticName: PCSTR(strings.last().unwrap().as_ptr()),
-                        SemanticIndex: 0,
-                        Format: slots_to_dxgi_format(4),
-                        InputSlot: 1,
-                        AlignedByteOffset: (inst.offset * 4 + i * 16) as u32,
-                        InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
-                        InstanceDataStepRate: 1,
-                    });
-                    //index += 1;
-                }
-            } else if inst.slots == 9 {
-                for i in 0..3 {
-                    //strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
-                    layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
-                        SemanticName: PCSTR(strings.last().unwrap().as_ptr()),
-                        SemanticIndex: 0,
-                        Format: slots_to_dxgi_format(3),
-                        InputSlot: 1,
-                        AlignedByteOffset: (inst.offset * 4 + i * 9) as u32,
-                        InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
-                        InstanceDataStepRate: 1,
-                    });
-                    //index += 1;
-                }
-            } else {
-                //strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+            strings.push(format!("INST{}\0", index_to_char(inst_sem_index)));
+            let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
+            let mut slot_offset = 0usize;
+            for (semantic_chunk_index, chunk_slots) in slot_chunks(inst.slots).into_iter().enumerate()
+            {
                 layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
-                    SemanticName: PCSTR(strings.last().unwrap().as_ptr()),
-                    SemanticIndex: 0,
-                    Format: slots_to_dxgi_format(inst.slots),
+                    SemanticName: semantic_name,
+                    SemanticIndex: semantic_chunk_index as u32,
+                    Format: slots_to_dxgi_format(chunk_slots, inst.attr_format),
                     InputSlot: 1,
-                    AlignedByteOffset: (inst.offset * 4) as u32,
+                    AlignedByteOffset: ((inst.offset + slot_offset) * 4) as u32,
                     InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
                     InstanceDataStepRate: 1,
                 });
-                //index += 1;
+                layout_debug.push(format!(
+                    "{}{} slot={} slots={} byte_off={}",
+                    strings.last().unwrap().trim_end_matches('\0'),
+                    semantic_chunk_index,
+                    1,
+                    chunk_slots,
+                    (inst.offset + slot_offset) * 4
+                ));
+                slot_offset += chunk_slots;
             }
+            inst_sem_index += 1;
         }
 
         let mut input_layout = None;
-        unsafe {
-            d3d11_cx
-                .device
-                .CreateInputLayout(
-                    &layout_desc,
-                    std::slice::from_raw_parts(
-                        vs_blob.GetBufferPointer() as *const u8,
-                        vs_blob.GetBufferSize() as usize,
-                    ),
-                    Some(&mut input_layout),
-                )
-                .unwrap()
+        let input_layout_res = unsafe {
+            d3d11_cx.device.CreateInputLayout(
+                &layout_desc,
+                std::slice::from_raw_parts(
+                    vs_blob.GetBufferPointer() as *const u8,
+                    vs_blob.GetBufferSize() as usize,
+                ),
+                Some(&mut input_layout),
+            )
         };
+        if let Err(err) = input_layout_res {
+            println!("Cannot create input layout: {:?}", err);
+            println!("Input layout descriptors:");
+            for item in &layout_debug {
+                println!("  {}", item);
+            }
+            if std::env::var("MAKEPAD_D3D11_DUMP_HLSL").is_ok() {
+                println!("HLSL source\n{}", split_source(&hlsl));
+            } else {
+                println!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
+            }
+            std::process::exit(1);
+        }
 
         let live_uniforms = D3d11Buffer::default();
         let const_table_uniforms = D3d11Buffer::default();
+        let mut scope_uniforms = D3d11Buffer::default();
+        if !mapping.scope_uniforms_buf.is_empty() {
+            scope_uniforms.update_with_f32_constant_data(d3d11_cx, &mapping.scope_uniforms_buf);
+        }
 
         // Look up buffer IDs from shader output bindings by Pod type name
         let draw_call_uniform_buffer_id = bindings
@@ -1724,11 +1808,13 @@ impl CxOsDrawShader {
             .map(|i| i as u32);
         // dyn_uniform_buffer_id uses the IoUniform cbuffer at register b2
         let dyn_uniform_buffer_id = Some(2);
+        let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u32);
 
         Some(Self {
             hlsl,
             const_table_uniforms,
             live_uniforms,
+            scope_uniforms,
             pixel_shader: ps.unwrap(),
             vertex_shader: vs.unwrap(),
             pixel_shader_blob: ps_blob,
@@ -1738,6 +1824,7 @@ impl CxOsDrawShader {
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
             dyn_uniform_buffer_id,
+            scope_uniform_buffer_id,
         })
     }
 }

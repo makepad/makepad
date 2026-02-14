@@ -2,6 +2,7 @@ use {
     crate::{
         cx::Cx, draw_vars::DrawVars, geometry::GeometryId, makepad_live_id::*,
         makepad_script::heap::ScriptHeap, makepad_script::shader::*,
+        makepad_script::pod::{ScriptPodTy, ScriptPodVec},
         makepad_script::value::ScriptObject, makepad_script::ScriptObjectRef, os::CxOsDrawShader,
     },
     std::{
@@ -143,12 +144,20 @@ pub enum DrawShaderInputPacking {
     UniformsMetal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawShaderAttrFormat {
+    Float,
+    UInt,
+    SInt,
+}
+
 #[derive(Clone, Debug)]
 pub struct DrawShaderInput {
     pub id: LiveId,
     //pub ty: ShaderTy,
     pub offset: usize,
     pub slots: usize,
+    pub attr_format: DrawShaderAttrFormat,
     // pub live_ptr: Option<LivePtr>
 }
 
@@ -188,13 +197,14 @@ impl DrawShaderInputs {
         }
     }
 
-    pub fn push(&mut self, id: LiveId, slots: usize) {
+    pub fn push(&mut self, id: LiveId, slots: usize, attr_format: DrawShaderAttrFormat) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
                 self.inputs.push(DrawShaderInput {
                     id,
                     offset: self.total_slots,
                     slots,
+                    attr_format,
                 });
                 self.total_slots += slots;
             }
@@ -203,6 +213,7 @@ impl DrawShaderInputs {
                     id,
                     offset: self.total_slots,
                     slots,
+                    attr_format,
                 });
                 self.total_slots += slots;
             }
@@ -215,6 +226,7 @@ impl DrawShaderInputs {
                     id,
                     offset: self.total_slots,
                     slots,
+                    attr_format,
                 });
                 self.total_slots += slots;
             }
@@ -227,6 +239,7 @@ impl DrawShaderInputs {
                     id,
                     offset: self.total_slots,
                     slots,
+                    attr_format,
                 });
                 self.total_slots += slots;
             }
@@ -240,6 +253,7 @@ impl DrawShaderInputs {
                     id,
                     offset: self.total_slots,
                     slots,
+                    attr_format,
                 });
                 self.total_slots += aligned_slots;
             }
@@ -302,6 +316,27 @@ pub struct CxDrawShaderMapping {
 }
 
 impl CxDrawShaderMapping {
+    fn attr_format_from_pod_type(ty: &ScriptPodTy) -> DrawShaderAttrFormat {
+        match ty {
+            ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => DrawShaderAttrFormat::UInt,
+            ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => DrawShaderAttrFormat::SInt,
+            ScriptPodTy::Bool => DrawShaderAttrFormat::UInt,
+            ScriptPodTy::Vec(vec_ty) => match vec_ty {
+                ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u => {
+                    DrawShaderAttrFormat::UInt
+                }
+                ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i => {
+                    DrawShaderAttrFormat::SInt
+                }
+                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b => {
+                    DrawShaderAttrFormat::UInt
+                }
+                _ => DrawShaderAttrFormat::Float,
+            },
+            _ => DrawShaderAttrFormat::Float,
+        }
+    }
+
     pub fn from_shader_output(
         source: ScriptObjectRef,
         code: CxDrawShaderCode,
@@ -332,8 +367,9 @@ impl CxDrawShaderMapping {
             if let ShaderIoKind::DynInstance = io.kind {
                 let pod_ty = heap.pod_type_ref(io.ty);
                 let slots = pod_ty.ty.slots();
-                instances.push(io.name, slots);
-                dyn_instances.push(io.name, slots);
+                let attr_format = Self::attr_format_from_pod_type(&pod_ty.ty);
+                instances.push(io.name, slots, attr_format);
+                dyn_instances.push(io.name, slots, attr_format);
             }
         }
 
@@ -345,6 +381,7 @@ impl CxDrawShaderMapping {
         {
             let pod_ty = heap.pod_type_ref(io.ty);
             let slots = pod_ty.ty.slots();
+            let attr_format = Self::attr_format_from_pod_type(&pod_ty.ty);
 
             // Track special field offsets
             if io.name == live_id!(rect_pos) {
@@ -357,7 +394,7 @@ impl CxDrawShaderMapping {
                 draw_clip = Some(instances.total_slots);
             }
 
-            instances.push(io.name, slots);
+            instances.push(io.name, slots, attr_format);
         }
 
         // Process Uniform fields
@@ -365,7 +402,7 @@ impl CxDrawShaderMapping {
             if let ShaderIoKind::Uniform = io.kind {
                 let pod_ty = heap.pod_type_ref(io.ty);
                 let slots = pod_ty.ty.slots();
-                dyn_uniforms.push(io.name, slots);
+                dyn_uniforms.push(io.name, slots, DrawShaderAttrFormat::Float);
             }
         }
 
@@ -374,7 +411,8 @@ impl CxDrawShaderMapping {
             if let ShaderIoKind::VertexBuffer = io.kind {
                 let pod_ty = heap.pod_type_ref(io.ty);
                 let slots = pod_ty.ty.slots();
-                geometries.push(io.name, slots);
+                let attr_format = Self::attr_format_from_pod_type(&pod_ty.ty);
+                geometries.push(io.name, slots, attr_format);
             }
         }
 
@@ -412,7 +450,7 @@ impl CxDrawShaderMapping {
                 {
                     let pod_ty = heap.pod_type_ref(source.ty);
                     let slots = pod_ty.ty.slots();
-                    scope_uniforms.push(io.name, slots);
+                    scope_uniforms.push(io.name, slots, DrawShaderAttrFormat::Float);
                     scope_uniform_sources.push((source.source_obj, source.key));
                 }
             }
@@ -476,6 +514,7 @@ impl CxDrawShaderMapping {
                 &mut self.scope_uniforms_buf,
                 input.offset,
                 input.slots,
+                DrawShaderAttrFormat::Float,
             );
         }
     }

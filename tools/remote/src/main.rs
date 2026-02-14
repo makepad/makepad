@@ -80,6 +80,141 @@ fn decode_file_data(payload: &[u8]) -> io::Result<(&str, &[u8])> {
     Ok((path, data))
 }
 
+// --- Platform-specific process tree killing ---
+
+#[cfg(windows)]
+mod process_group {
+    use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::{Child, Command};
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(lp_job_attributes: *mut u8, lp_name: *const u16) -> *mut u8;
+        fn AssignProcessToJobObject(h_job: *mut u8, h_process: *mut u8) -> i32;
+        fn TerminateJobObject(h_job: *mut u8, exit_code: u32) -> i32;
+        fn CloseHandle(h_object: *mut u8) -> i32;
+    }
+
+    pub struct JobHandle(*mut u8);
+    unsafe impl Send for JobHandle {}
+
+    impl JobHandle {
+        pub fn new() -> io::Result<Self> {
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+                if job.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(JobHandle(job))
+            }
+        }
+
+        pub fn assign(&self, child: &Child) -> io::Result<()> {
+            unsafe {
+                let proc_handle = child.as_raw_handle() as *mut u8;
+                if AssignProcessToJobObject(self.0, proc_handle) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+
+        pub fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for JobHandle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    pub fn configure_command(_cmd: &mut Command) {
+        // On Windows, job object handles it
+    }
+}
+
+#[cfg(unix)]
+mod process_group {
+    use std::io;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command};
+
+    pub struct JobHandle(u32);
+
+    impl JobHandle {
+        pub fn new() -> io::Result<Self> {
+            // pid filled in after spawn
+            Ok(JobHandle(0))
+        }
+
+        pub fn assign(&mut self, child: &Child) -> io::Result<()> {
+            self.0 = child.id();
+            Ok(())
+        }
+
+        pub fn terminate(&self) {
+            if self.0 == 0 {
+                return;
+            }
+            extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            const SIGKILL: i32 = 9;
+            unsafe {
+                kill(-(self.0 as i32), SIGKILL);
+            }
+        }
+    }
+
+    pub fn configure_command(cmd: &mut Command) {
+        // Set the child as its own process group leader BEFORE exec.
+        // This way all children it spawns (rustc, etc.) inherit the group.
+        unsafe {
+            cmd.pre_exec(|| {
+                extern "C" {
+                    fn setpgid(pid: i32, pgid: i32) -> i32;
+                }
+                setpgid(0, 0);
+                Ok(())
+            });
+        }
+    }
+}
+
+// --- Shared state for the running cargo ---
+
+struct RunningCargo {
+    child: Child,
+    job: process_group::JobHandle,
+    old_stream: TcpStream,
+}
+
+type CargoState = Arc<Mutex<Option<RunningCargo>>>;
+
+fn kill_previous(state: &CargoState) {
+    let mut lock = state.lock().unwrap();
+    if let Some(ref mut running) = *lock {
+        eprintln!(
+            "server: killing previous cargo (pid {})",
+            running.child.id()
+        );
+        // Kill entire process tree first
+        running.job.terminate();
+        // Wait for the direct child to be reaped
+        let _ = running.child.wait();
+        // Shutdown old client TCP so pipe writer threads also unblock
+        let _ = running.old_stream.shutdown(Shutdown::Both);
+    }
+    *lock = None;
+}
+
 // --- Server ---
 
 fn run_server(port: u16) -> io::Result<()> {
@@ -90,7 +225,7 @@ fn run_server(port: u16) -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     eprintln!("server: listening on {}", addr);
 
-    let cargo_child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    let state: CargoState = Arc::new(Mutex::new(None));
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -103,10 +238,13 @@ fn run_server(port: u16) -> io::Result<()> {
         let peer = stream.peer_addr().ok();
         eprintln!("server: connection from {:?}", peer);
 
+        // Kill any previous cargo before handling new connection
+        kill_previous(&state);
+
         let cwd = cwd.clone();
-        let cargo_child = cargo_child.clone();
+        let state = state.clone();
         thread::spawn(move || {
-            if let Err(e) = handle_connection(stream, &cwd, &cargo_child) {
+            if let Err(e) = handle_connection(stream, &cwd, &state) {
                 eprintln!("server: connection error: {}", e);
             }
         });
@@ -117,7 +255,6 @@ fn run_server(port: u16) -> io::Result<()> {
 fn validate_and_resolve_path(cwd: &Path, rel_path: &str) -> io::Result<PathBuf> {
     let rel = Path::new(rel_path);
 
-    // Reject absolute paths
     if rel.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -125,7 +262,6 @@ fn validate_and_resolve_path(cwd: &Path, rel_path: &str) -> io::Result<PathBuf> 
         ));
     }
 
-    // Reject paths with .. components
     for component in rel.components() {
         if let std::path::Component::ParentDir = component {
             return Err(io::Error::new(
@@ -137,7 +273,6 @@ fn validate_and_resolve_path(cwd: &Path, rel_path: &str) -> io::Result<PathBuf> 
 
     let full = cwd.join(rel);
 
-    // Ensure parent dir exists so we can canonicalize it
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent)?;
         let canonical_parent = parent.canonicalize()?;
@@ -152,22 +287,7 @@ fn validate_and_resolve_path(cwd: &Path, rel_path: &str) -> io::Result<PathBuf> 
     Ok(full)
 }
 
-fn kill_cargo(cargo_child: &Mutex<Option<Child>>) {
-    let mut lock = cargo_child.lock().unwrap();
-    if let Some(ref mut child) = *lock {
-        eprintln!("server: killing previous cargo (pid {})", child.id());
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    *lock = None;
-}
-
-fn handle_connection(
-    mut stream: TcpStream,
-    cwd: &Path,
-    cargo_child: &Arc<Mutex<Option<Child>>>,
-) -> io::Result<()> {
-    // Read messages until we get CargoRun
+fn handle_connection(mut stream: TcpStream, cwd: &Path, state: &CargoState) -> io::Result<()> {
     let cargo_args;
     loop {
         let (tag, payload) = read_msg(&mut stream)?;
@@ -198,32 +318,40 @@ fn handle_connection(
 
     eprintln!("server: cargo {}", cargo_args.join(" "));
 
-    // Kill any previous cargo
-    kill_cargo(cargo_child);
+    // Kill any previous cargo (in case it wasn't killed at accept time)
+    kill_previous(state);
 
-    // Spawn cargo
-    let mut child = Command::new("cargo")
-        .args(&cargo_args)
+    // Build cargo command with process group configured
+    let mut cmd = Command::new("cargo");
+    cmd.args(&cargo_args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            let msg = format!("failed to spawn cargo: {}", e);
-            let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
-            e
-        })?;
+        .stderr(Stdio::piped());
+    process_group::configure_command(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| {
+        let msg = format!("failed to spawn cargo: {}", e);
+        let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
+        e
+    })?;
+
+    // Create job handle and assign the child to it
+    let mut job = process_group::JobHandle::new()?;
+    job.assign(&child)?;
 
     let child_stdout = child.stdout.take().unwrap();
     let child_stderr = child.stderr.take().unwrap();
 
-    // Store child so it can be killed by future connections
+    // Store everything so a future connection can kill + unblock us
     {
-        let mut lock = cargo_child.lock().unwrap();
-        *lock = Some(child);
+        let mut lock = state.lock().unwrap();
+        *lock = Some(RunningCargo {
+            child,
+            job,
+            old_stream: stream.try_clone()?,
+        });
     }
 
-    // Stream stdout and stderr back to client via two threads
     let stream_out = stream.try_clone()?;
     let stream_err = stream.try_clone()?;
 
@@ -233,17 +361,16 @@ fn handle_connection(
     stdout_thread.join().unwrap();
     stderr_thread.join().unwrap();
 
-    // Wait for cargo to finish and get exit code
     let exit_code = {
-        let mut lock = cargo_child.lock().unwrap();
-        if let Some(ref mut child) = *lock {
-            let status = child.wait()?;
+        let mut lock = state.lock().unwrap();
+        if let Some(ref mut running) = *lock {
+            let status = running.child.wait()?;
             let code = status.code().unwrap_or(1);
             *lock = None;
             code
         } else {
             // Was killed by another connection
-            137 // SIGKILL
+            137
         }
     };
 
@@ -251,7 +378,7 @@ fn handle_connection(
 
     let mut payload = Vec::new();
     payload.extend_from_slice(&(exit_code as i32).to_be_bytes());
-    write_msg(&mut stream, TAG_EXIT_CODE, &payload)?;
+    let _ = write_msg(&mut stream, TAG_EXIT_CODE, &payload);
     let _ = stream.shutdown(Shutdown::Both);
     Ok(())
 }
@@ -264,7 +391,6 @@ fn stream_pipe(reader: impl Read, mut writer: TcpStream, stream_id: u8) {
             Ok(0) => break,
             Ok(n) => {
                 let chunk = &buf[..n];
-                // Also print on server's own stdout/stderr
                 match stream_id {
                     STREAM_STDOUT => {
                         let _ = io::stdout().write_all(chunk);
@@ -289,24 +415,19 @@ fn stream_pipe(reader: impl Read, mut writer: TcpStream, stream_id: u8) {
 // --- Client ---
 
 fn run_client(addr: &str, cargo_args: &[String]) -> io::Result<i32> {
-    // Get changed files from git
     let files = get_changed_files()?;
 
     eprintln!("client: connecting to {}", addr);
     let mut stream = TcpStream::connect(addr)?;
     eprintln!("client: connected");
 
-    // Send changed files
     for (rel_path, is_tracked) in &files {
-        // Filter: skip local/ directory
         if rel_path.starts_with("local/") || rel_path.starts_with("local\\") {
             continue;
         }
-        // Filter: skip files in repo root (no path separator)
         if !rel_path.contains('/') {
             continue;
         }
-        // Filter: untracked files — only *.rs
         if !is_tracked && !rel_path.ends_with(".rs") {
             continue;
         }
@@ -323,12 +444,10 @@ fn run_client(addr: &str, cargo_args: &[String]) -> io::Result<i32> {
         write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
     }
 
-    // Send cargo run command (also signals end of files)
     let args_str = cargo_args.join("\n");
     write_msg(&mut stream, TAG_CARGO_RUN, args_str.as_bytes())?;
     eprintln!("client: cargo {}", cargo_args.join(" "));
 
-    // Read output from server
     let exit_code;
     loop {
         let (tag, payload) = read_msg(&mut stream)?;
@@ -378,11 +497,9 @@ fn run_client(addr: &str, cargo_args: &[String]) -> io::Result<i32> {
     Ok(exit_code)
 }
 
-/// Returns list of (relative_path, is_tracked) for changed/untracked files.
 fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
     let mut files = Vec::new();
 
-    // Tracked files that have been modified (unstaged + staged)
     let output = Command::new("git").args(["diff", "--name-only"]).output()?;
     if output.status.success() {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -393,7 +510,6 @@ fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
         }
     }
 
-    // Staged changes (in case of files that are staged but also show in diff above — dedup later)
     let output = Command::new("git")
         .args(["diff", "--name-only", "--cached"])
         .output()?;
@@ -406,7 +522,6 @@ fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
         }
     }
 
-    // Untracked files
     let output = Command::new("git")
         .args(["ls-files", "--others", "--exclude-standard"])
         .output()?;
@@ -419,7 +534,6 @@ fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
         }
     }
 
-    // Deduplicate by path, preferring tracked
     files.sort_by(|a, b| a.0.cmp(&b.0));
     files.dedup_by(|a, b| a.0 == b.0);
 
@@ -464,7 +578,6 @@ fn main() -> ExitCode {
         }
         ExitCode::SUCCESS
     } else {
-        // Client mode: <addr> cargo [args...]
         let addr = &args[0];
 
         if args.len() < 2 || args[1] != "cargo" {

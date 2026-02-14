@@ -411,7 +411,19 @@ impl ShaderOutput {
 
     pub fn create_functions(&self, out: &mut String) {
         for fns in &self.functions {
-            writeln!(out, "{}{{\n{}}}\n", fns.call_sig, fns.out).ok();
+            writeln!(out, "{}{{", fns.call_sig).ok();
+            if matches!(self.backend, ShaderBackend::Hlsl) {
+                if fns.call_sig.contains("inout IoV _iov") {
+                    // DXC requires explicit definite assignment for inout params.
+                    writeln!(out, "    _iov = _iov;").ok();
+                }
+                if fns.call_sig.contains("inout IoF _iof") {
+                    // DXC requires explicit definite assignment for inout params.
+                    writeln!(out, "    _iof = _iof;").ok();
+                }
+            }
+            writeln!(out, "{}", fns.out).ok();
+            writeln!(out, "}}\n").ok();
         }
     }
 

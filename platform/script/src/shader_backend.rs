@@ -220,11 +220,11 @@ impl ShaderBackend {
                         match io_type {
                             SHADER_IO_RUST_INSTANCE => (
                                 ShaderIoKind::RustInstance,
-                                ShaderIoPrefix::Prefix("input.i_"),
+                                ShaderIoPrefix::Prefix("_mp_iov.i."),
                             ),
                             SHADER_IO_DYN_INSTANCE => (
                                 ShaderIoKind::DynInstance,
-                                ShaderIoPrefix::Prefix("input.i_"),
+                                ShaderIoPrefix::Prefix("_mp_iov.i."),
                             ),
                             SHADER_IO_DYN_UNIFORM => {
                                 (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("u_"))
@@ -233,15 +233,15 @@ impl ShaderBackend {
                                 (ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("u_"))
                             }
                             SHADER_IO_VARYING => {
-                                (ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v->"))
+                                (ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_mp_iov.v."))
                             }
                             SHADER_IO_VERTEX_POSITION => (
                                 ShaderIoKind::VertexPosition,
-                                ShaderIoPrefix::Full("_iov.v->_position"),
+                                ShaderIoPrefix::Full("_mp_iov.v._position"),
                             ),
                             SHADER_IO_VERTEX_BUFFER => (
                                 ShaderIoKind::VertexBuffer,
-                                ShaderIoPrefix::Prefix("input.vb_"),
+                                ShaderIoPrefix::Prefix("_mp_iov.vb."),
                             ),
                             SHADER_IO_TEXTURE_1D => (
                                 ShaderIoKind::Texture(TextureType::Texture1d),
@@ -301,16 +301,16 @@ impl ShaderBackend {
                             let index = io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0;
                             return (
                                 ShaderIoKind::FragmentOutput(index as u8),
-                                ShaderIoPrefix::FullOwned(format!("_iofb.fb{}", index)),
+                                ShaderIoPrefix::FullOwned(format!("_mp_iof.fb{}", index)),
                             );
                         }
                         match io_type {
                             SHADER_IO_RUST_INSTANCE => (
                                 ShaderIoKind::RustInstance,
-                                ShaderIoPrefix::Prefix("_iof.v."),
+                                ShaderIoPrefix::Prefix("_mp_iof.v."),
                             ),
                             SHADER_IO_DYN_INSTANCE => {
-                                (ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_iof.v."))
+                                (ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_mp_iof.v."))
                             }
                             SHADER_IO_DYN_UNIFORM => {
                                 (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("u_"))
@@ -319,11 +319,11 @@ impl ShaderBackend {
                                 (ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("u_"))
                             }
                             SHADER_IO_VARYING => {
-                                (ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iof.v."))
+                                (ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_mp_iof.v."))
                             }
                             SHADER_IO_VERTEX_POSITION => (
                                 ShaderIoKind::VertexPosition,
-                                ShaderIoPrefix::Full("_iof.v._position"),
+                                ShaderIoPrefix::Full("_mp_iof.v._position"),
                             ),
                             SHADER_IO_TEXTURE_1D => (
                                 ShaderIoKind::Texture(TextureType::Texture1d),
@@ -466,7 +466,7 @@ impl ShaderBackend {
     pub fn get_io_all(&self, _mode: ShaderMode) -> &'static str {
         match self {
             Self::Metal => "_io",
-            Self::Hlsl => "_io",
+            Self::Hlsl => "",
             _ => "",
         }
     }
@@ -474,7 +474,7 @@ impl ShaderBackend {
     pub fn get_io_all_decl(&self, _mode: ShaderMode) -> &'static str {
         match self {
             Self::Metal => "thread Io &_io",
-            Self::Hlsl => "Io _io",
+            Self::Hlsl => "",
             _ => "",
         }
     }
@@ -487,8 +487,8 @@ impl ShaderBackend {
                 _ => "",
             },
             Self::Hlsl => match mode {
-                ShaderMode::Vertex => "_iov",
-                ShaderMode::Fragment => "_iof",
+                ShaderMode::Vertex => "",
+                ShaderMode::Fragment => "",
                 _ => "",
             },
             _ => "",
@@ -503,8 +503,8 @@ impl ShaderBackend {
                 _ => "",
             },
             Self::Hlsl => match mode {
-                ShaderMode::Vertex => "inout IoV _iov",
-                ShaderMode::Fragment => "inout IoF _iof",
+                ShaderMode::Vertex => "",
+                ShaderMode::Fragment => "",
                 _ => "",
             },
             _ => "",
@@ -549,7 +549,7 @@ impl ShaderBackend {
     /// Returns the zero literal for a given backend type name.
     fn zero_literal(&self, ty_name: LiveId) -> String {
         match self {
-            Self::Metal | Self::Hlsl => {
+            Self::Metal => {
                 match ty_name {
                     // Scalars
                     id!(float) => "0.0".to_string(),
@@ -584,6 +584,49 @@ impl ShaderBackend {
                     | id!(float4x3)
                     | id!(float4x4) => format!("{}(0.0)", ty_name),
                     // Default: use constructor with zero
+                    _ => format!("{}()", ty_name),
+                }
+            }
+            Self::Hlsl => {
+                fn join_n(lit: &str, n: usize) -> String {
+                    std::iter::repeat(lit).take(n).collect::<Vec<_>>().join(", ")
+                }
+                match ty_name {
+                    // Scalars
+                    id!(float) => "0.0".to_string(),
+                    id!(half) => "0.0h".to_string(),
+                    id!(uint) => "0".to_string(),
+                    id!(int) => "0".to_string(),
+                    id!(bool) => "false".to_string(),
+                    // Float/half vectors
+                    id!(float2) => "float2(0.0, 0.0)".to_string(),
+                    id!(float3) => "float3(0.0, 0.0, 0.0)".to_string(),
+                    id!(float4) => "float4(0.0, 0.0, 0.0, 0.0)".to_string(),
+                    id!(half2) => "half2(0.0h, 0.0h)".to_string(),
+                    id!(half3) => "half3(0.0h, 0.0h, 0.0h)".to_string(),
+                    id!(half4) => "half4(0.0h, 0.0h, 0.0h, 0.0h)".to_string(),
+                    // Int/uint vectors
+                    id!(uint2) => "uint2(0, 0)".to_string(),
+                    id!(uint3) => "uint3(0, 0, 0)".to_string(),
+                    id!(uint4) => "uint4(0, 0, 0, 0)".to_string(),
+                    id!(int2) => "int2(0, 0)".to_string(),
+                    id!(int3) => "int3(0, 0, 0)".to_string(),
+                    id!(int4) => "int4(0, 0, 0, 0)".to_string(),
+                    // Bool vectors
+                    id!(bool2) => "bool2(false, false)".to_string(),
+                    id!(bool3) => "bool3(false, false, false)".to_string(),
+                    id!(bool4) => "bool4(false, false, false, false)".to_string(),
+                    // Matrices
+                    id!(float2x2) => format!("float2x2({})", join_n("0.0", 4)),
+                    id!(float2x3) => format!("float2x3({})", join_n("0.0", 6)),
+                    id!(float2x4) => format!("float2x4({})", join_n("0.0", 8)),
+                    id!(float3x2) => format!("float3x2({})", join_n("0.0", 6)),
+                    id!(float3x3) => format!("float3x3({})", join_n("0.0", 9)),
+                    id!(float3x4) => format!("float3x4({})", join_n("0.0", 12)),
+                    id!(float4x2) => format!("float4x2({})", join_n("0.0", 8)),
+                    id!(float4x3) => format!("float4x3({})", join_n("0.0", 12)),
+                    id!(float4x4) => format!("float4x4({})", join_n("0.0", 16)),
+                    // Default: use constructor with no args
                     _ => format!("{}()", ty_name),
                 }
             }
@@ -711,6 +754,8 @@ impl ShaderBackend {
                 id_lut!(ddy);
                 id_lut!(rsqrt);
                 id_lut!(fmod);
+                id_lut!(frac);
+                id_lut!(lerp);
                 id_lut!(discard_fragment);
             }
             Self::Glsl => {
@@ -760,6 +805,8 @@ impl ShaderBackend {
                 id!(dFdy) => id!(ddy),
                 id!(inverseSqrt) => id!(rsqrt),
                 id!(modf) => id!(fmod),
+                id!(fract) => id!(frac),
+                id!(mix) => id!(lerp),
                 x => x,
             },
             Self::Glsl => {
@@ -987,6 +1034,30 @@ impl ShaderBackend {
                 Self::Wgsl => {
                     writeln!(out, "}}").ok();
                 }
+            }
+
+            if matches!(self, Self::Hlsl) {
+                let struct_name = if let Some(name) = pod_type.name {
+                    format!("{}", self.map_pod_name(name))
+                } else {
+                    format!("S{}", pod_ty.index)
+                };
+
+                write!(out, "{} consfn_{}(", struct_name, struct_name).ok();
+                for (index, field) in fields.iter().enumerate() {
+                    if index > 0 {
+                        write!(out, ", ").ok();
+                    }
+                    self.pod_type_name_referenced(&field.ty, referenced, out);
+                    write!(out, " {}", field.name).ok();
+                }
+                writeln!(out, "){{").ok();
+                writeln!(out, "    {} r;", struct_name).ok();
+                for field in fields {
+                    writeln!(out, "    r.{0} = {0};", field.name).ok();
+                }
+                writeln!(out, "    return r;").ok();
+                writeln!(out, "}}").ok();
             }
         }
     }

@@ -5,6 +5,7 @@
 
 use crate::opcode::*;
 use crate::shader::*;
+use crate::shader_backend::ShaderBackend;
 use crate::shader_tables::*;
 use crate::suggest::*;
 use crate::vm::*;
@@ -136,7 +137,24 @@ impl ShaderFnCompiler {
         };
         let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
-        write!(s, "({} {} {})", s1, op, s2).ok();
+        let is_hlsl_matrix_mul = if op == "*" && matches!(output.backend, ShaderBackend::Hlsl) {
+            let is_matrix = |ty: &ShaderType| match ty {
+                ShaderType::Pod(pod_ty) => matches!(
+                    vm.bx.heap.pod_types[pod_ty.index as usize].ty,
+                    crate::pod::ScriptPodTy::Mat(_)
+                ),
+                _ => false,
+            };
+            is_matrix(&t1) || is_matrix(&t2)
+        } else {
+            false
+        };
+
+        if is_hlsl_matrix_mul {
+            write!(s, "mul({}, {})", s1, s2).ok();
+        } else {
+            write!(s, "({} {} {})", s1, op, s2).ok();
+        }
         let ty = if is_int {
             type_table_int_arithmetic(&t1, &t2, self.trap.pass(), &vm.bx.code.builtins.pod)
         } else {
