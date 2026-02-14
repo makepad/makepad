@@ -24,8 +24,8 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
     let init = if config.bindgen {
         format!(
             "
-            import {{init_env}} from './makepad_wasm_bridge/wasm_bridge.js'
-            import init from './bindgen.js';
+            const {{init_env}} = await import('./makepad_wasm_bridge/wasm_bridge.js');
+            const init = (await import('./bindgen.js')).default;
     
             let env = {{}};
             let set_wasm = init_env(env);
@@ -36,13 +36,13 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
             wasm._has_thread_support = wasm.exports.memory.buffer instanceof SharedArrayBuffer;
             wasm._memory = wasm.exports.memory;
             wasm._module = module;
-            import {{WasmWebGL}} from './makepad_platform/web_gl.js'
+            const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             "
         )
     } else {
         format!(
             "
-            import {{WasmWebGL}} from './makepad_platform/web_gl.js'
+            const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
                 './{wasm}.wasm'
             );
@@ -59,14 +59,104 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
         <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
         <title>{wasm}</title>
         <script type='module'>
-            {init}
-            class MyWasmApp {{
-                constructor(wasm) {{
-                    let canvas = document.getElementsByClassName('full_canvas')[0];
-                    this.webgl = new WasmWebGL (wasm, this, canvas);
+            const reportBrowserIssue = async (kind, data) => {{
+                try {{
+                    const payload = JSON.stringify({{
+                        kind,
+                        href: location.href,
+                        user_agent: navigator.userAgent,
+                        data
+                    }});
+                    const encoded = encodeURIComponent(payload.slice(0, 8192));
+                    await fetch('/$report_error?data=' + encoded, {{cache: 'no-store'}});
+                }} catch (_error) {{
                 }}
+            }};
+            
+            const makepadConsoleError = console.error.bind(console);
+            const makepadConsoleLog = console.log.bind(console);
+            let makepadConsoleErrorCount = 0;
+            let makepadConsoleLogCount = 0;
+            const makepadConsoleToString = (arg) => {{
+                if (typeof arg === 'string') return arg;
+                try {{
+                    return JSON.stringify(arg);
+                }} catch (_jsonErr) {{
+                    return '' + arg;
+                }}
+            }};
+            console.error = (...args) => {{
+                if (makepadConsoleErrorCount < 200) {{
+                    makepadConsoleErrorCount += 1;
+                    let message = '';
+                    try {{
+                        message = args.map(makepadConsoleToString).join(' ');
+                    }} catch (_err) {{
+                    }}
+                    reportBrowserIssue('console.error', {{message}});
+                }}
+                makepadConsoleError(...args);
+            }};
+            console.log = (...args) => {{
+                if (makepadConsoleLogCount < 200) {{
+                    makepadConsoleLogCount += 1;
+                    let message = '';
+                    try {{
+                        message = args.map(makepadConsoleToString).join(' ');
+                    }} catch (_err) {{
+                    }}
+                    reportBrowserIssue('console.log', {{message}});
+                }}
+                makepadConsoleLog(...args);
+            }};
+            console.log('makepad.bootstrap.loaded');
+
+            window.addEventListener('error', (event) => {{
+                let stack = '';
+                if (event.error && event.error.stack) {{
+                    stack = '' + event.error.stack;
+                }}
+                reportBrowserIssue('window.error', {{
+                    message: event.message || '',
+                    filename: event.filename || '',
+                    lineno: event.lineno || 0,
+                    colno: event.colno || 0,
+                    stack
+                }});
+            }});
+
+            window.addEventListener('unhandledrejection', (event) => {{
+                let reason_message = '';
+                let reason_stack = '';
+                if (typeof event.reason === 'string') {{
+                    reason_message = event.reason;
+                }} else if (event.reason) {{
+                    reason_message = event.reason.message ? '' + event.reason.message : '' + event.reason;
+                    reason_stack = event.reason.stack ? '' + event.reason.stack : '';
+                }}
+                reportBrowserIssue('window.unhandledrejection', {{
+                    reason_message,
+                    reason_stack
+                }});
+            }});
+
+            try {{
+                console.log('makepad.bootstrap.init');
+                {init}
+                class MyWasmApp {{
+                    constructor(wasm) {{
+                        let canvas = document.getElementsByClassName('full_canvas')[0];
+                        this.webgl = new WasmWebGL (wasm, this, canvas);
+                    }}
+                }}
+                let app = new MyWasmApp(wasm);
+            }} catch (error) {{
+                reportBrowserIssue('startup.exception', {{
+                    message: error && error.message ? '' + error.message : '' + error,
+                    stack: error && error.stack ? '' + error.stack : ''
+                }});
+                throw error;
             }}
-            let app = new MyWasmApp(wasm);
         </script>
         <link rel='stylesheet' type='text/css' href='./makepad_platform/full_canvas.css'>
     </head> 
@@ -392,6 +482,45 @@ pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
     return Err("Run is not implemented yet".into());
 }
 
+fn from_hex_digit(v: u8) -> Option<u8> {
+    match v {
+        b'0'..=b'9' => Some(v - b'0'),
+        b'a'..=b'f' => Some(v - b'a' + 10),
+        b'A'..=b'F' => Some(v - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_query_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) =
+                    (from_hex_digit(bytes[i + 1]), from_hex_digit(bytes[i + 2]))
+                {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            value => {
+                out.push(value);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
     let addr = if lan {
         SocketAddr::new("0.0.0.0".parse().unwrap(), port)
@@ -419,10 +548,28 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                     headers,
                     response_sender,
                 } => {
-                    let path = &headers.path;
+                    let mut path = headers.path.as_str();
+                    let query = headers.search.as_deref().unwrap_or("");
+                    if path == "/" {
+                        path = "/index.html";
+                    }
 
                     // alright wasm http server
                     if path == "/$watch" || path == "/favicon.ico" {
+                        let header = "HTTP/1.1 200 OK\r\n\
+                        Cache-Control: max-age:0\r\n\
+                        Connection: close\r\n\r\n"
+                            .to_string();
+                        let _ = response_sender.send(HttpServerResponse {
+                            header,
+                            body: vec![],
+                        });
+                        continue;
+                    }
+                    if path == "/$report_error" {
+                        let encoded = query.strip_prefix("data=").unwrap_or(query);
+                        let decoded = decode_query_component(encoded);
+                        println!("Browser error report: {}", decoded);
                         let header = "HTTP/1.1 200 OK\r\n\
                         Cache-Control: max-age:0\r\n\
                         Connection: close\r\n\r\n"
@@ -454,18 +601,40 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                         "image/svg+xml"
                     } else if path.ends_with(".md") {
                         "text/markdown"
+                    } else if path.ends_with(".woff") {
+                        "font/woff"
+                    } else if path.ends_with(".woff2") {
+                        "font/woff2"
                     } else {
+                        let body = b"Not found".to_vec();
+                        let header = format!(
+                            "HTTP/1.1 404 Not Found\r\n\
+                            Content-Type: text/plain\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = response_sender.send(HttpServerResponse { header, body });
                         continue;
                     };
 
                     if path.contains("..") || path.contains('\\') {
+                        let body = b"Bad request".to_vec();
+                        let header = format!(
+                            "HTTP/1.1 400 Bad Request\r\n\
+                            Content-Type: text/plain\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = response_sender.send(HttpServerResponse { header, body });
                         continue;
                     }
                     let path = path.strip_prefix("/").unwrap();
 
                     let path = root.join(&path);
                     //println!("OPENING {:?}", path);
-                    if let Ok(mut file_handle) = File::open(path) {
+                    if let Ok(mut file_handle) = File::open(&path) {
                         let mut body = Vec::<u8>::new();
                         if file_handle.read_to_end(&mut body).is_ok() {
                             let header = format!(
@@ -482,10 +651,46 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                             );
                             let _ = response_sender.send(HttpServerResponse { header, body });
                         }
+                    } else {
+                        let body = b"Not found".to_vec();
+                        let header = format!(
+                            "HTTP/1.1 404 Not Found\r\n\
+                            Content-Type: text/plain\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = response_sender.send(HttpServerResponse { header, body });
                     }
                 }
-                HttpServerRequest::Post { .. } => { //headers, body, response}=>{
-                     // TODO
+                HttpServerRequest::Post {
+                    headers,
+                    body,
+                    response,
+                } => {
+                    let path = headers.path.split('?').next().unwrap_or(headers.path.as_str());
+                    if path == "/$report_error" {
+                        let message = String::from_utf8_lossy(&body);
+                        println!("Browser error report: {}", message);
+                        let header = "HTTP/1.1 200 OK\r\n\
+                            Cache-Control: max-age:0\r\n\
+                            Connection: close\r\n\r\n"
+                            .to_string();
+                        let _ = response.send(HttpServerResponse {
+                            header,
+                            body: vec![],
+                        });
+                    } else {
+                        let body = b"Not found".to_vec();
+                        let header = format!(
+                            "HTTP/1.1 404 Not Found\r\n\
+                            Content-Type: text/plain\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = response.send(HttpServerResponse { header, body });
+                    }
                 }
             }
         }

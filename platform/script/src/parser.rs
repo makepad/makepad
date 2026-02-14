@@ -3288,7 +3288,10 @@ impl ScriptParser {
                 }
                 if id == id!(match) {
                     // Generate temp variable name based on code position
-                    let temp_name = format!("_match_{}", self.code_len());
+                    // Avoid double-underscore identifiers in generated GLSL locals.
+                    // The shader backend prefixes locals with `l_`, so `_match_*` would
+                    // become `l__match_*`, which is reserved in GLSL ES.
+                    let temp_name = format!("match_{}", self.code_len());
                     // Use from_str_with_lut to register the temp name in the LUT for lookup
                     let temp_id = LiveId::from_str_with_lut(&temp_name)
                         .unwrap_or_else(|_| LiveId::from_str(&temp_name));

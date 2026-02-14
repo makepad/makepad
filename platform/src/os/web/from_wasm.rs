@@ -19,7 +19,7 @@ pub struct FromWasmStartTimer {
 
 #[derive(FromWasm)]
 pub struct FromWasmStopTimer {
-    pub id: f64,
+    pub timer_id: f64,
 }
 
 #[derive(FromWasm)]
@@ -130,7 +130,7 @@ pub struct WTextureInput {
 impl DrawShaderTextureInput {
     pub fn to_from_wasm_texture_input(&self) -> WTextureInput {
         WTextureInput {
-            ty: self.ty.to_string(),
+            ty: "sampler2D".to_string(),
             name: self.id.to_string(),
         }
     }
