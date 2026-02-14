@@ -23,7 +23,7 @@ pub use page::PdfPage;
 /// Creates varied pages: title page, data tables, charts, vector art, multi-column text, code listings.
 pub fn generate_test_pdf(num_pages: usize) -> Vec<u8> {
     let mut pdf = PdfWriter::new();
-    let total = num_pages.max(6);
+    let total = num_pages.max(1);
 
     for page_idx in 0..total {
         let mut c = String::new();

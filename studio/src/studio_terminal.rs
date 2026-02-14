@@ -899,6 +899,80 @@ impl StudioTerminal {
         }
     }
 
+    fn is_clipboard_paste_shortcut(key_code: KeyCode, modifiers: &KeyModifiers) -> bool {
+        matches!(key_code, KeyCode::KeyV) && (modifiers.control || modifiers.logo) && !modifiers.alt
+    }
+
+    fn is_special_pty_key(key_code: KeyCode) -> bool {
+        matches!(
+            key_code,
+            KeyCode::ReturnKey
+                | KeyCode::NumpadEnter
+                | KeyCode::Backspace
+                | KeyCode::Tab
+                | KeyCode::Escape
+                | KeyCode::Delete
+                | KeyCode::ArrowUp
+                | KeyCode::ArrowDown
+                | KeyCode::ArrowLeft
+                | KeyCode::ArrowRight
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Insert
+                | KeyCode::F1
+                | KeyCode::F2
+                | KeyCode::F3
+                | KeyCode::F4
+                | KeyCode::F5
+                | KeyCode::F6
+                | KeyCode::F7
+                | KeyCode::F8
+                | KeyCode::F9
+                | KeyCode::F10
+                | KeyCode::F11
+                | KeyCode::F12
+        )
+    }
+
+    fn word_kind(ch: char) -> Option<bool> {
+        if ch == '\0' || ch.is_whitespace() {
+            None
+        } else {
+            Some(ch.is_alphanumeric() || ch == '_')
+        }
+    }
+
+    fn word_range_at(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let terminal = self.terminal.as_ref()?;
+        let row_slice = terminal.screen().row_slice_virtual(row)?;
+        if row_slice.is_empty() {
+            return None;
+        }
+
+        let col = col.min(row_slice.len().saturating_sub(1));
+        let kind = Self::word_kind(row_slice[col].codepoint)?;
+
+        let mut start = col;
+        while start > 0 {
+            if Self::word_kind(row_slice[start - 1].codepoint) != Some(kind) {
+                break;
+            }
+            start -= 1;
+        }
+
+        let mut end = col + 1;
+        while end < row_slice.len() {
+            if Self::word_kind(row_slice[end].codepoint) != Some(kind) {
+                break;
+            }
+            end += 1;
+        }
+
+        Some((start, end))
+    }
+
     fn pick(&self, abs: Vec2d) -> (usize, usize) {
         let (cell_width, cell_height) = self.cell_metrics();
         let local_x = abs.x - self.unscrolled_rect.pos.x - self.pad_x;
@@ -1390,22 +1464,36 @@ impl Widget for StudioTerminal {
         }
 
         match event.hits(cx, self.scroll_bars.area()) {
-            Hit::FingerDown(FingerDownEvent { abs, .. }) => {
+            Hit::FingerDown(FingerDownEvent { abs, tap_count, .. }) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 self.cursor_blink_on = true;
                 let pos = self.pick(abs);
-                self.selection_anchor = Some(pos);
-                self.selection_cursor = Some(pos);
-                self.selecting = true;
-                self.last_finger_abs = Some(abs);
-                self.select_scroll_next_frame = cx.new_next_frame();
+                if tap_count == 2 {
+                    if let Some((start_col, end_col)) = self.word_range_at(pos.0, pos.1) {
+                        self.selection_anchor = Some((pos.0, start_col));
+                        self.selection_cursor = Some((pos.0, end_col));
+                    } else {
+                        self.selection_anchor = Some(pos);
+                        self.selection_cursor = Some(pos);
+                    }
+                    self.selecting = false;
+                    self.last_finger_abs = None;
+                } else {
+                    self.selection_anchor = Some(pos);
+                    self.selection_cursor = Some(pos);
+                    self.selecting = true;
+                    self.last_finger_abs = Some(abs);
+                    self.select_scroll_next_frame = cx.new_next_frame();
+                }
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
                 cx.set_cursor(MouseCursor::Text);
-                self.selection_cursor = Some(self.pick(abs));
-                self.last_finger_abs = Some(abs);
-                self.draw_bg.redraw(cx);
+                if self.selecting {
+                    self.selection_cursor = Some(self.pick(abs));
+                    self.last_finger_abs = Some(abs);
+                    self.draw_bg.redraw(cx);
+                }
             }
             Hit::FingerUp(_) => {
                 self.selecting = false;
@@ -1418,47 +1506,27 @@ impl Widget for StudioTerminal {
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyDown(e) => {
+                if Self::is_clipboard_paste_shortcut(e.key_code, &e.modifiers) {
+                    // The platform emits `TextInput { was_paste: true }` for this
+                    // shortcut. Ignore keydown so we don't send an extra Ctrl+V
+                    // control byte to the PTY before/after the pasted text.
+                    return;
+                }
+                let sends_special_key = Self::is_special_pty_key(e.key_code);
+                let sends_ctrl_char = e.modifiers.control && e.key_code.to_char(false).is_some();
+                let sends_to_pty = sends_special_key || sends_ctrl_char;
                 let is_enter = matches!(e.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter);
                 if is_enter {
                     self.note_enter_pressed(cx);
-                } else {
+                } else if sends_to_pty {
                     self.note_local_input(cx);
                 }
-                match e.key_code {
-                    KeyCode::ReturnKey
-                    | KeyCode::NumpadEnter
-                    | KeyCode::Backspace
-                    | KeyCode::Tab
-                    | KeyCode::Escape
-                    | KeyCode::Delete
-                    | KeyCode::ArrowUp
-                    | KeyCode::ArrowDown
-                    | KeyCode::ArrowLeft
-                    | KeyCode::ArrowRight
-                    | KeyCode::Home
-                    | KeyCode::End
-                    | KeyCode::PageUp
-                    | KeyCode::PageDown
-                    | KeyCode::Insert
-                    | KeyCode::F1
-                    | KeyCode::F2
-                    | KeyCode::F3
-                    | KeyCode::F4
-                    | KeyCode::F5
-                    | KeyCode::F6
-                    | KeyCode::F7
-                    | KeyCode::F8
-                    | KeyCode::F9
-                    | KeyCode::F10
-                    | KeyCode::F11
-                    | KeyCode::F12 => self.send_key_to_pty(e.key_code, &e.modifiers),
-                    _ => {
-                        if e.modifiers.control {
-                            if let Some(c) = e.key_code.to_char(false) {
-                                let s = c.to_string();
-                                self.send_text_to_pty(&s, &e.modifiers);
-                            }
-                        }
+                if sends_special_key {
+                    self.send_key_to_pty(e.key_code, &e.modifiers);
+                } else if sends_ctrl_char {
+                    if let Some(c) = e.key_code.to_char(false) {
+                        let s = c.to_string();
+                        self.send_text_to_pty(&s, &e.modifiers);
                     }
                 }
             }

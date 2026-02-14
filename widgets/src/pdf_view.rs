@@ -992,8 +992,6 @@ pub struct PdfView {
     page_cache: Vec<Rc<CachedPage>>,
     #[rust]
     page_count: usize,
-    #[rust]
-    pdf_data: Option<Vec<u8>>,
 }
 
 impl Widget for PdfView {
@@ -1022,7 +1020,10 @@ impl PdfView {
                 for i in 0..self.page_count {
                     match doc.page(i) {
                         Ok(page) => {
-                            let ops = parse_content_stream(&page.content_data).unwrap_or_default();
+                            let ops = match parse_content_stream(&page.content_data) {
+                                Ok(ops) => ops,
+                                Err(_) => Vec::new(),
+                            };
                             self.page_cache.push(Rc::new(CachedPage { ops, page }));
                         }
                         Err(_) => {
@@ -1033,16 +1034,17 @@ impl PdfView {
                         }
                     }
                 }
-                self.pdf_data = Some(data);
             }
-            Err(e) => {
-                log!("PDF parse error: {}", e.msg);
-            }
+            Err(_) => {}
         }
         self.view.redraw(cx);
     }
 
     fn draw_pages(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
+        if self.page_count == 0 {
+            return;
+        }
+
         list.set_item_range(cx, 0, self.page_count);
         let zoom = self.zoom;
 
