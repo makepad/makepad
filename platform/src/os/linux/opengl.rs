@@ -2306,6 +2306,9 @@ impl OpenglBuffer {
     }
 
     pub fn update_uniform_buffer(&mut self, gl: &LibGl, data: &[f32]) {
+        if data.is_empty() {
+            return;
+        }
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }
@@ -2318,6 +2321,7 @@ impl OpenglBuffer {
                 gl_sys::STATIC_DRAW,
             );
             (gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, 0);
+            #[cfg(debug_assertions)]
             crate::gl_log_error!(gl);
         }
     }

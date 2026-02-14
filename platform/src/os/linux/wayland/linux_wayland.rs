@@ -329,7 +329,6 @@ impl WaylandCx {
                         windows[index].close_window();
                         windows.remove(index);
                         if windows.len() == 0 {
-                            println!("exit");
                             ret = EventFlow::Exit
                         }
                     }
@@ -361,7 +360,15 @@ impl WaylandCx {
                 CxOsOp::ResizeWindow(window_id, size) => {}
                 CxOsOp::RepositionWindow(window_id, size) => {}
                 CxOsOp::ShowClipboardActions { .. } => {}
-                CxOsOp::CopyToClipboard(content) => {}
+                CxOsOp::CopyToClipboard(content) => {
+                    if let Some(serial) = state.keyboard_serial.or(state.pointer_serial) {
+                        if let Some(qhandle) = self.qhandle.as_ref() {
+                            state.set_clipboard_text(qhandle, serial, content);
+                        }
+                    } else {
+                        state.clipboard_text = content;
+                    }
+                }
                 CxOsOp::SetCursor(cursor) => {
                     if let Some(cursor_shape) = state.cursor_shape.as_ref() {
                         if let Some(serial) = state.pointer_serial.as_ref() {

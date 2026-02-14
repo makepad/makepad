@@ -126,27 +126,6 @@ impl RunView {
 
                 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
                 if let Some(buffer) = drawn.software_buffer.as_ref() {
-                    {
-                        use std::sync::atomic::{AtomicBool, Ordering};
-                        static LOG_ONCE: AtomicBool = AtomicBool::new(true);
-                        if LOG_ONCE.swap(false, Ordering::Relaxed) {
-                            let bytes = buffer.as_bytes();
-                            if bytes.len() >= 8 {
-                                let decode = |hi: u8, lo: u8| (u32::from(hi) << 8) | u32::from(lo);
-                                crate::error!(
-                                    "RunView decode p0={:02x?} p1={:02x?} rgba={}x{} draw={}x{} alloc={}x{}",
-                                    &bytes[0..4],
-                                    &bytes[4..8],
-                                    decode(bytes[0], bytes[2]),
-                                    decode(bytes[4], bytes[6]),
-                                    presentable_draw.width,
-                                    presentable_draw.height,
-                                    swapchain.alloc_width,
-                                    swapchain.alloc_height
-                                );
-                            }
-                        }
-                    }
                     cx.upload_presentable_image_software_buffer(
                         &drawn.texture,
                         swapchain.alloc_width,
