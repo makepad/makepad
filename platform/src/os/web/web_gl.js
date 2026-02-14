@@ -567,6 +567,21 @@ export class WasmWebGL extends WasmWebBrowser {
         this.textures[args.texture_id] = gl_tex;
     }
 
+    FromWasmAllocTextureImage2D_RGBAf32(args) {
+        let gl = this.gl;
+        let gl_tex = this.textures[args.texture_id] || gl.createTexture();
+
+        gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+        // Data textures are sampled as lookup tables; avoid interpolation artifacts.
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        let data_array = new Float32Array(this.memory.buffer, args.data.ptr, args.width * args.height * 4);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, args.width, args.height, 0, gl.RGBA, gl.FLOAT, data_array);
+        this.textures[args.texture_id] = gl_tex;
+    }
+
     FromWasmBeginRenderTexture(args) {
         if (!this._debug_logged_first_begin_render_texture) {
             this._debug_logged_first_begin_render_texture = true;
