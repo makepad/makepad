@@ -15,8 +15,36 @@ fn env_var_is_nonempty(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
+fn is_stdin_loop_mode() -> bool {
+    std::env::args().any(|arg| arg == "--stdin-loop")
+}
+
+fn forced_windowing_protocol_from_args() -> Option<WindowingProtocol> {
+    for arg in std::env::args() {
+        if let Some(value) = arg.strip_prefix("--linux-backend=") {
+            match value {
+                "x11" => return Some(WindowingProtocol::X11),
+                "wayland" => return Some(WindowingProtocol::Wayland),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 // Protocol detection for windowing system
 fn detect_windowing_protocol() -> WindowingProtocol {
+    // Linux stdin-loop rendering path is currently implemented for X11.
+    // Force child processes started by Studio into that backend so they
+    // render into RunView instead of opening a standalone window.
+    if is_stdin_loop_mode() {
+        return WindowingProtocol::X11;
+    }
+
+    if let Some(protocol) = forced_windowing_protocol_from_args() {
+        return protocol;
+    }
+
     // Check for Wayland first
     if env_var_is_nonempty("WAYLAND_DISPLAY") {
         return WindowingProtocol::Wayland;
@@ -71,11 +99,19 @@ impl Cx {
         match protocol {
             WindowingProtocol::Wayland => {
                 println!("Selected: Wayland backend");
-                println!("Reason: WAYLAND_DISPLAY environment variable is set");
+                if forced_windowing_protocol_from_args() == Some(WindowingProtocol::Wayland) {
+                    println!("Reason: --linux-backend=wayland override");
+                } else {
+                    println!("Reason: WAYLAND_DISPLAY environment variable is set");
+                }
             }
             WindowingProtocol::X11 => {
                 println!("Selected: X11 backend");
-                if env_var_is_nonempty("DISPLAY") {
+                if is_stdin_loop_mode() {
+                    println!("Reason: --stdin-loop mode uses X11 stdin backend");
+                } else if forced_windowing_protocol_from_args() == Some(WindowingProtocol::X11) {
+                    println!("Reason: --linux-backend=x11 override");
+                } else if env_var_is_nonempty("DISPLAY") {
                     println!("Reason: DISPLAY environment variable is set");
                 } else {
                     println!("Reason: Default fallback (no display variables set)");

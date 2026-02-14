@@ -68,13 +68,129 @@ impl PresentableImageId {
 // ============================================================================
 use crate::texture::Texture;
 
-#[derive(Clone, Debug)]
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+const LINUX_SOFTWARE_FALLBACK_DRM_FOURCC: u32 = 0;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+const LINUX_SOFTWARE_FALLBACK_DRM_MODIFIERS: u64 = u64::MAX;
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Debug)]
+pub struct LinuxSharedSoftwareBuffer {
+    fd: std::os::fd::OwnedFd,
+    ptr: *mut u8,
+    len: usize,
+    pub stride: u32,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl LinuxSharedSoftwareBuffer {
+    pub fn create(len: usize, stride: u32) -> std::io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        const MFD_CLOEXEC: u32 = 0x0001;
+
+        unsafe extern "C" {
+            fn memfd_create(name: *const std::os::raw::c_char, flags: u32) -> i32;
+            fn ftruncate(fd: i32, length: i64) -> i32;
+        }
+
+        let name = b"makepad-runview\0";
+        let raw_fd = unsafe { memfd_create(name.as_ptr() as *const _, MFD_CLOEXEC) };
+        if raw_fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) };
+
+        let len_i64 = i64::try_from(len).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "software buffer too large")
+        })?;
+        if unsafe { ftruncate(fd.as_raw_fd(), len_i64) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let ptr = unsafe {
+            crate::os::linux::libc_sys::mmap(
+                std::ptr::null_mut(),
+                len,
+                crate::os::linux::libc_sys::PROT_READ | crate::os::linux::libc_sys::PROT_WRITE,
+                crate::os::linux::libc_sys::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr as isize == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(Self {
+            fd,
+            ptr: ptr.cast::<u8>(),
+            len,
+            stride,
+        })
+    }
+
+    pub fn from_fd(fd: std::os::fd::OwnedFd, len: usize, stride: u32) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+
+        let ptr = unsafe {
+            crate::os::linux::libc_sys::mmap(
+                std::ptr::null_mut(),
+                len,
+                crate::os::linux::libc_sys::PROT_READ | crate::os::linux::libc_sys::PROT_WRITE,
+                crate::os::linux::libc_sys::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr as isize == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(Self {
+            fd,
+            ptr: ptr.cast::<u8>(),
+            len,
+            stride,
+        })
+    }
+
+    pub fn clone_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::AsFd;
+        self.fd.as_fd().try_clone_to_owned()
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut std::os::raw::c_void {
+        self.ptr.cast::<std::os::raw::c_void>()
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl Drop for LinuxSharedSoftwareBuffer {
+    fn drop(&mut self) {
+        let _ = unsafe {
+            crate::os::linux::libc_sys::munmap(self.ptr.cast::<std::os::raw::c_void>(), self.len)
+        };
+    }
+}
+
+#[derive(Debug)]
 pub struct HostPresentableImage {
     pub id: PresentableImageId,
     pub texture: Texture,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub software_buffer: Option<LinuxSharedSoftwareBuffer>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HostSwapchain {
     pub window_id: usize,
     pub alloc_width: u32,
@@ -107,6 +223,8 @@ impl HostSwapchain {
                             initial: true,
                         },
                     ),
+                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                    software_buffer: None,
                 }
             }),
         }
@@ -231,6 +349,28 @@ pub struct LinuxOwnedImagePlane {
 pub struct LinuxOwnedImage {
     pub drm_format: crate::os::linux::dma_buf::DrmFormat,
     pub plane: LinuxOwnedImagePlane,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl LinuxOwnedImage {
+    pub fn is_software_fallback(&self) -> bool {
+        self.drm_format.fourcc == LINUX_SOFTWARE_FALLBACK_DRM_FOURCC
+            && self.drm_format.modifiers == LINUX_SOFTWARE_FALLBACK_DRM_MODIFIERS
+    }
+
+    pub fn software_fallback(dma_buf_fd: std::os::fd::OwnedFd, stride: u32) -> Self {
+        Self {
+            drm_format: crate::os::linux::dma_buf::DrmFormat {
+                fourcc: LINUX_SOFTWARE_FALLBACK_DRM_FOURCC,
+                modifiers: LINUX_SOFTWARE_FALLBACK_DRM_MODIFIERS,
+            },
+            plane: LinuxOwnedImagePlane {
+                dma_buf_fd,
+                offset: 0,
+                stride,
+            },
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -421,27 +561,113 @@ pub struct SharedSwapchain {
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Debug)]
+pub enum SharedSwapchainCreateError {
+    AuxChannelSend(std::io::Error),
+    SoftwareFallback(std::io::Error),
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 impl SharedSwapchain {
+    fn software_fallback_image(
+        host_image: &mut HostPresentableImage,
+        alloc_width: u32,
+        alloc_height: u32,
+    ) -> Result<LinuxOwnedImage, SharedSwapchainCreateError> {
+        let stride = alloc_width
+            .checked_mul(4)
+            .ok_or_else(|| SharedSwapchainCreateError::SoftwareFallback(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "software fallback stride overflow",
+            )))?;
+        let len = usize::try_from(stride)
+            .ok()
+            .and_then(|stride| {
+                usize::try_from(alloc_height)
+                    .ok()
+                    .and_then(|height| stride.checked_mul(height))
+            })
+            .ok_or_else(|| {
+                SharedSwapchainCreateError::SoftwareFallback(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "software fallback buffer size overflow",
+                ))
+            })?;
+
+        let needs_new_buffer = match host_image.software_buffer.as_ref() {
+            Some(buffer) => buffer.as_bytes().len() != len || buffer.stride != stride,
+            None => true,
+        };
+        if needs_new_buffer {
+            host_image.software_buffer =
+                Some(LinuxSharedSoftwareBuffer::create(len, stride).map_err(
+                    SharedSwapchainCreateError::SoftwareFallback,
+                )?);
+        }
+
+        let send_fd = host_image
+            .software_buffer
+            .as_ref()
+            .expect("software buffer initialized")
+            .clone_fd()
+            .map_err(SharedSwapchainCreateError::SoftwareFallback)?;
+
+        Ok(LinuxOwnedImage::software_fallback(send_fd, stride))
+    }
+
     pub fn from_host_swapchain(
-        host: &HostSwapchain,
+        host: &mut HostSwapchain,
         cx: &mut crate::cx::Cx,
         host_endpoint: &aux_chan::HostEndpoint,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SharedSwapchainCreateError> {
+        let mut owned_images: [Option<LinuxOwnedImage>; SWAPCHAIN_IMAGE_COUNT] =
+            std::array::from_fn(|_| None);
+        let mut use_software_fallback = false;
+        for i in 0..SWAPCHAIN_IMAGE_COUNT {
+            if let Some(image) =
+                cx.share_texture_for_presentable_image(&host.presentable_images[i].texture)
+            {
+                owned_images[i] = Some(image);
+            } else {
+                use_software_fallback = true;
+                break;
+            }
+        }
+
+        if use_software_fallback {
+            crate::error!(
+                "Linux DMA-BUF export unavailable for RunView; using software readback fallback"
+            );
+            for i in 0..SWAPCHAIN_IMAGE_COUNT {
+                owned_images[i] = Some(Self::software_fallback_image(
+                    &mut host.presentable_images[i],
+                    host.alloc_width,
+                    host.alloc_height,
+                )?);
+            }
+        } else {
+            for image in &mut host.presentable_images {
+                image.software_buffer = None;
+            }
+        }
+
+        let mut presentable_images: [Option<SharedPresentableImage>; SWAPCHAIN_IMAGE_COUNT] =
+            [None; SWAPCHAIN_IMAGE_COUNT];
+        for i in 0..SWAPCHAIN_IMAGE_COUNT {
+            let id = host.presentable_images[i].id;
+            let image = owned_images[i].take().expect("image exported");
+            let image = aux_chan::send_image_fds_to_aux_chan(id, image, host_endpoint)
+                .map_err(SharedSwapchainCreateError::AuxChannelSend)?;
+            presentable_images[i] = Some(SharedPresentableImage { id, image });
+        }
+        let presentable_images = presentable_images.map(|image| image.expect("filled"));
+
+        Ok(Self {
             window_id: host.window_id,
             alloc_width: host.alloc_width,
             alloc_height: host.alloc_height,
-            presentable_images: std::array::from_fn(|i| {
-                let id = host.presentable_images[i].id;
-                let image =
-                    cx.share_texture_for_presentable_image(&host.presentable_images[i].texture);
-                let image = aux_chan::send_image_fds_to_aux_chan(id, image, host_endpoint)
-                    .unwrap_or_else(|err| {
-                        panic!("send_image_fds_to_aux_chan failed for image {id:?}: {err:?}")
-                    });
-                SharedPresentableImage { id, image }
-            }),
-        }
+            presentable_images,
+        })
     }
 
     pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {

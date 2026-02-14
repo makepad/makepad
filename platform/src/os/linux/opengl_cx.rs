@@ -83,6 +83,9 @@ impl OpenglCx {
             // egl_sys::EGL_STENCIL_SIZE,
             // 8,
             egl_sys::EGL_RENDERABLE_TYPE,
+            #[cfg(use_gles_3)]
+            egl_sys::EGL_OPENGL_ES3_BIT_KHR,
+            #[cfg(not(use_gles_3))]
             egl_sys::EGL_OPENGL_ES2_BIT,
             egl_sys::EGL_NONE,
         ];
@@ -165,10 +168,6 @@ impl Cx {
     ) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        self.setup_render_pass(draw_pass_id);
-
-        self.passes[draw_pass_id].paint_dirty = false;
-
         unsafe {
             let gl = self.os.gl();
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
@@ -190,6 +189,10 @@ impl Cx {
             }
             (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
+
+        self.setup_render_pass(draw_pass_id);
+
+        self.passes[draw_pass_id].paint_dirty = false;
 
         let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
             self.passes[draw_pass_id].clear_color
