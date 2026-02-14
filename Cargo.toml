@@ -21,6 +21,7 @@ workspace.members = [
     "studio",
     "studio/ai",
     "tools/cargo_makepad",
+    "tools/remote",
     "libs/terminal_core",
 ]
 
