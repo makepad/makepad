@@ -291,18 +291,13 @@ impl RunView {
                     v.swapchain(self.window_id)
                         .map(|swapchain| {
                             #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                            let uses_software_fallback = swapchain
-                                .presentable_images
-                                .iter()
-                                .any(|image| image.software_buffer.is_some());
-                            #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-                            let uses_software_fallback = false;
-
-                            if uses_software_fallback {
-                                // Software readback fallback is sensitive to alloc-vs-draw
-                                // offsets; keep swapchain exact-sized while resizing.
+                            {
+                                // Keep Linux swapchains exact-sized to prevent
+                                // alloc-vs-draw Y offsets in subprocess presentation.
                                 min_width != swapchain.alloc_width || min_height != swapchain.alloc_height
-                            } else {
+                            }
+                            #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+                            {
                                 min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
                             }
                         })
@@ -335,25 +330,10 @@ impl RunView {
                 }
 
                 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                let existing_uses_software_fallback = v
-                    .swapchain(self.window_id)
-                    .map(|swapchain| {
-                        swapchain
-                            .presentable_images
-                            .iter()
-                            .any(|image| image.software_buffer.is_some())
-                    })
-                    .unwrap_or(false);
+                let (alloc_width, alloc_height) = (min_width.max(1), min_height.max(1));
                 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-                let existing_uses_software_fallback = false;
-
-                // Keep DMA-BUF path rounded-up (fewer recreations), but make Linux
-                // software fallback exact-sized to avoid vertical rolling offsets.
-                let (alloc_width, alloc_height) = if existing_uses_software_fallback {
-                    (min_width.max(1), min_height.max(1))
-                } else {
-                    (min_width.max(64).next_power_of_two(), min_height.max(64).next_power_of_two())
-                };
+                let (alloc_width, alloc_height) =
+                    (min_width.max(64).next_power_of_two(), min_height.max(64).next_power_of_two());
 
                 let swapchain = v.swapchain_mut(self.window_id).get_or_insert_with(|| {
                     cx_stdin::HostSwapchain::new(self.window_id, alloc_width, alloc_height, cx)
