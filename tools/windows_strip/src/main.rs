@@ -39,11 +39,6 @@ const WINDOWS_NUMERICS_CRATE: VendoredCrate = VendoredCrate {
     version: "0.3.1",
     local_dir: "windows-numerics",
 };
-const WINDOWS_THREADING_CRATE: VendoredCrate = VendoredCrate {
-    crate_name: "windows-threading",
-    version: "0.2.1",
-    local_dir: "windows-threading",
-};
 const WINDOWS_LINK_CRATE: VendoredCrate = VendoredCrate {
     crate_name: "windows-link",
     version: "0.2.1",
@@ -60,16 +55,43 @@ const WINDOWS_STRINGS_CRATE: VendoredCrate = VendoredCrate {
     local_dir: "windows-strings",
 };
 
-const SUPPORT_CRATES: &[VendoredCrate] = &[
-    WINDOWS_COLLECTIONS_CRATE,
+const BASE_SUPPORT_CRATES: &[VendoredCrate] = &[
     WINDOWS_CORE_CRATE,
-    WINDOWS_FUTURE_CRATE,
-    WINDOWS_NUMERICS_CRATE,
-    WINDOWS_THREADING_CRATE,
     WINDOWS_LINK_CRATE,
     WINDOWS_RESULT_CRATE,
     WINDOWS_STRINGS_CRATE,
 ];
+
+const LEGACY_FLAT_VENDORED_DIRS: &[&str] = &[
+    "windows-rs",
+    "windows-core",
+    "windows-collections",
+    "windows-future",
+    "windows-numerics",
+    "windows-link",
+    "windows-result",
+    "windows-strings",
+];
+
+const LEGACY_WINDOWS_SUBDIRS: &[&str] = &[
+    "windows-collections",
+    "windows-future",
+    "windows-numerics",
+    "windows-threading",
+];
+
+#[derive(Clone, Copy, Debug)]
+struct StripDecisions {
+    use_collections: bool,
+    use_future: bool,
+    use_numerics: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MethodUsage {
+    global_methods: HashSet<String>,
+    typed_methods: HashMap<String, HashSet<String>>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TokenWithString {
@@ -1483,6 +1505,73 @@ fn collect_imports_from_file(
     (explicit, globs)
 }
 
+fn collect_method_usage_from_source(
+    source: &str,
+    usage: &mut MethodUsage,
+    promote_assoc_calls_to_global: bool,
+) {
+    let tokens = parse_to_tokens(source);
+
+    for i in 0..tokens.len() {
+        if token_is_punct(&tokens, i, live_id!(.)) {
+            let Some(name) = token_ident(&tokens, i + 1) else {
+                continue;
+            };
+            let looks_like_call = matches!(
+                tokens.get(i + 2),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Paren),
+                    ..
+                })
+            ) || token_is_punct(&tokens, i + 2, live_id!(<));
+            if looks_like_call {
+                usage.global_methods.insert(name.to_string());
+            }
+        }
+
+        if !is_colon_colon(&tokens, i) {
+            continue;
+        }
+        let Some(method_name) = token_ident(&tokens, i + 1) else {
+            continue;
+        };
+        let looks_like_call = matches!(
+            tokens.get(i + 2),
+            Some(TokenWithString {
+                token: FullToken::Open(Delim::Paren),
+                ..
+            })
+        ) || token_is_punct(&tokens, i + 2, live_id!(<));
+        if !looks_like_call {
+            continue;
+        }
+        if promote_assoc_calls_to_global {
+            usage.global_methods.insert(method_name.to_string());
+        }
+        if i > 0 {
+            if let Some(type_name) = token_ident(&tokens, i - 1) {
+                if type_name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false)
+                {
+                    usage
+                        .typed_methods
+                        .entry(type_name.to_string())
+                        .or_default()
+                        .insert(method_name.to_string());
+                }
+            }
+        }
+    }
+}
+
+fn collect_method_usage_from_file(file_path: &Path, usage: &mut MethodUsage) {
+    let source = fs::read_to_string(file_path).unwrap();
+    collect_method_usage_from_source(&source, usage, true);
+}
+
 fn cargo_home_candidates() -> Vec<PathBuf> {
     let mut homes = Vec::new();
     if let Ok(cargo_home) = env::var("CARGO_HOME") {
@@ -1595,7 +1684,7 @@ fn resolve_support_crate_source(windows_source_root: &Path, crate_spec: Vendored
 }
 
 fn vendored_crate_root(crate_spec: VendoredCrate) -> PathBuf {
-    Path::new("./libs").join(crate_spec.local_dir)
+    Path::new("./libs/windows").join(crate_spec.local_dir)
 }
 
 fn copy_tree(src_root: &Path, dst_root: &Path) -> io::Result<()> {
@@ -1616,6 +1705,21 @@ fn copy_tree(src_root: &Path, dst_root: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn remove_legacy_flat_vendored_dirs() {
+    for dir_name in LEGACY_FLAT_VENDORED_DIRS {
+        let legacy = Path::new("./libs").join(dir_name);
+        if legacy.exists() {
+            fs::remove_dir_all(legacy).unwrap();
+        }
+    }
+    for dir_name in LEGACY_WINDOWS_SUBDIRS {
+        let legacy = Path::new("./libs/windows").join(dir_name);
+        if legacy.exists() {
+            fs::remove_dir_all(legacy).unwrap();
+        }
+    }
 }
 
 fn copy_crate_source(crate_spec: VendoredCrate, source_root: &Path) -> PathBuf {
@@ -1691,39 +1795,65 @@ fn set_manifest_dependency_path(manifest: &mut String, section_name: &str, path:
     *manifest = out;
 }
 
-fn patch_manifest_for_crate(crate_spec: VendoredCrate, crate_root: &Path) {
+fn replace_windows_std_feature_block(
+    manifest: &mut String,
+    include_future_std: bool,
+) {
+    let old_std_feature = "std = [\n    \"windows-collections/std\",\n    \"windows-core/std\",\n    \"windows-future/std\",\n    \"windows-numerics/std\",\n]\n";
+    let mut new_std_feature = String::from("std = [\n    \"windows-core/std\",\n");
+    if include_future_std {
+        new_std_feature.push_str("    \"windows-future/std\",\n");
+    }
+    new_std_feature.push_str("]\n");
+    if !manifest.contains(old_std_feature) {
+        panic!("windows std feature block did not match expected upstream shape");
+    }
+    *manifest = manifest.replacen(old_std_feature, &new_std_feature, 1);
+}
+
+fn patch_manifest_for_crate(
+    crate_spec: VendoredCrate,
+    crate_root: &Path,
+    decisions: StripDecisions,
+) {
     let manifest_path = crate_root.join("Cargo.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
 
     match crate_spec.crate_name {
         "windows" => {
-            set_manifest_dependency_path(
-                &mut manifest,
-                "dependencies.windows-collections",
-                "../windows-collections",
-            );
+            if decisions.use_collections {
+                set_manifest_dependency_path(
+                    &mut manifest,
+                    "dependencies.windows-collections",
+                    "../windows-collections",
+                );
+            } else {
+                remove_manifest_section(&mut manifest, "dependencies.windows-collections");
+            }
             set_manifest_dependency_path(
                 &mut manifest,
                 "dependencies.windows-core",
                 "../windows-core",
             );
-            set_manifest_dependency_path(
-                &mut manifest,
-                "dependencies.windows-future",
-                "../windows-future",
-            );
-            set_manifest_dependency_path(
-                &mut manifest,
-                "dependencies.windows-numerics",
-                "../windows-numerics",
-            );
-            let old_std_feature = "std = [\n    \"windows-collections/std\",\n    \"windows-core/std\",\n    \"windows-future/std\",\n    \"windows-numerics/std\",\n]\n";
-            let new_std_feature =
-                "std = [\n    \"windows-core/std\",\n    \"windows-future/std\",\n]\n";
-            if !manifest.contains(old_std_feature) {
-                panic!("windows std feature block did not match expected upstream shape");
+            if decisions.use_future {
+                set_manifest_dependency_path(
+                    &mut manifest,
+                    "dependencies.windows-future",
+                    "../windows-future",
+                );
+            } else {
+                remove_manifest_section(&mut manifest, "dependencies.windows-future");
             }
-            manifest = manifest.replacen(old_std_feature, new_std_feature, 1);
+            if decisions.use_numerics {
+                set_manifest_dependency_path(
+                    &mut manifest,
+                    "dependencies.windows-numerics",
+                    "../windows-numerics",
+                );
+            } else {
+                remove_manifest_section(&mut manifest, "dependencies.windows-numerics");
+            }
+            replace_windows_std_feature_block(&mut manifest, decisions.use_future);
         }
         "windows-core" => {
             remove_manifest_section(&mut manifest, "dependencies.windows-implement");
@@ -1755,6 +1885,7 @@ fn patch_manifest_for_crate(crate_spec: VendoredCrate, crate_root: &Path) {
                 "dev-dependencies.windows-strings",
                 "../windows-strings",
             );
+            manifest = manifest.replacen("default = [\"std\"]", "default = []", 1);
         }
         "windows-future" => {
             set_manifest_dependency_path(
@@ -1762,16 +1893,8 @@ fn patch_manifest_for_crate(crate_spec: VendoredCrate, crate_root: &Path) {
                 "dependencies.windows-core",
                 "../windows-core",
             );
-            set_manifest_dependency_path(
-                &mut manifest,
-                "dependencies.windows-link",
-                "../windows-link",
-            );
-            set_manifest_dependency_path(
-                &mut manifest,
-                "dependencies.windows-threading",
-                "../windows-threading",
-            );
+            remove_manifest_section(&mut manifest, "dependencies.windows-link");
+            remove_manifest_section(&mut manifest, "dependencies.windows-threading");
         }
         "windows-numerics" => {
             set_manifest_dependency_path(
@@ -1785,14 +1908,14 @@ fn patch_manifest_for_crate(crate_spec: VendoredCrate, crate_root: &Path) {
                 "../windows-link",
             );
         }
-        "windows-threading" | "windows-result" | "windows-strings" => {
+        "windows-result" | "windows-strings" => {
             set_manifest_dependency_path(
                 &mut manifest,
                 "dependencies.windows-link",
                 "../windows-link",
             );
         }
-        "windows-link" => {}
+        "windows-link" | "windows-threading" => {}
         _ => panic!("unsupported vendored crate {}", crate_spec.crate_name),
     }
 
@@ -1807,12 +1930,77 @@ fn strip_windows_core_macros(crate_root: &Path) {
     fs::write(lib_path, source).unwrap();
 }
 
+fn replace_function_block(source: &mut String, signature: &str, replacement: &str) {
+    let Some(start) = source.find(signature) else {
+        panic!("missing function signature `{}`", signature);
+    };
+    let body_start = source[start..]
+        .find('{')
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("missing function body for `{}`", signature));
+    let bytes = source.as_bytes();
+    let mut depth: i32 = 0;
+    let mut end = None;
+    for (index, byte) in bytes.iter().enumerate().skip(body_start) {
+        if *byte == b'{' {
+            depth += 1;
+        } else if *byte == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                end = Some(index + 1);
+                break;
+            }
+        }
+    }
+    let end = end.unwrap_or_else(|| panic!("unbalanced braces for `{}`", signature));
+    source.replace_range(start..end, replacement);
+}
+
 fn strip_windows_future_implement_helpers(crate_root: &Path) {
     let lib_path = crate_root.join("src/lib.rs");
     let mut source = fs::read_to_string(&lib_path).unwrap();
+    source = source.replace("mod bindings_impl;\n", "");
+    source = source.replace("mod join;\n", "");
+    source = source.replace("mod waiter;\n", "");
+    source = source.replace("mod when;\n", "");
+    source = source.replace("use bindings_impl::*;\n", "");
+    source = source.replace("use waiter::*;\n", "");
     source = source.replace("#[cfg(feature = \"std\")]\nmod async_ready;\n", "");
     source = source.replace("#[cfg(feature = \"std\")]\nmod async_spawn;\n", "");
     fs::write(lib_path, source).unwrap();
+
+    let async_path = crate_root.join("src/async.rs");
+    let mut async_source = fs::read_to_string(&async_path).unwrap();
+    replace_function_block(
+        &mut async_source,
+        "fn join(&self) -> Result<Self::Output>",
+        "fn join(&self) -> Result<Self::Output> {\n        while self.status()? == AsyncStatus::Started {\n            core::hint::spin_loop();\n        }\n        self.get_results()\n    }",
+    );
+    fs::write(async_path, async_source).unwrap();
+
+    let _ = fs::remove_file(crate_root.join("src/async_ready.rs"));
+    let _ = fs::remove_file(crate_root.join("src/async_spawn.rs"));
+    let _ = fs::remove_file(crate_root.join("src/bindings_impl.rs"));
+    let _ = fs::remove_file(crate_root.join("src/join.rs"));
+    let _ = fs::remove_file(crate_root.join("src/waiter.rs"));
+    let _ = fs::remove_file(crate_root.join("src/when.rs"));
+}
+
+fn strip_windows_collections_helpers(crate_root: &Path) {
+    let lib_path = crate_root.join("src/lib.rs");
+    let mut source = fs::read_to_string(&lib_path).unwrap();
+    source = source.replace(
+        "\n#[cfg(feature = \"std\")]\nconst E_BOUNDS: windows_core::HRESULT = windows_core::HRESULT(0x8000000B_u32 as _);\n",
+        "\n",
+    );
+    source = source.replace("#[cfg(feature = \"std\")]\nmod iterable;\n", "");
+    source = source.replace("#[cfg(feature = \"std\")]\nmod map_view;\n", "");
+    source = source.replace("#[cfg(feature = \"std\")]\nmod vector_view;\n", "");
+    fs::write(lib_path, source).unwrap();
+
+    let _ = fs::remove_file(crate_root.join("src/iterable.rs"));
+    let _ = fs::remove_file(crate_root.join("src/map_view.rs"));
+    let _ = fs::remove_file(crate_root.join("src/vector_view.rs"));
 }
 
 fn load_module<'a>(
@@ -1864,23 +2052,421 @@ fn render_module(node: &ModuleNode, out: &mut String) {
     }
 }
 
-fn regenerate_vendored_windows_crate(source_root: &Path, generated_mod: &str) {
+fn impl_target_name(header: &[TokenWithString]) -> Option<String> {
+    let mut i = skip_outer_attributes(header, 0);
+    if !ident_eq(header, i, "impl") {
+        return None;
+    }
+    i += 1;
+
+    let mut angle_depth = 0isize;
+    if token_is_punct(header, i, live_id!(<)) {
+        angle_depth = 1;
+        i += 1;
+        while i < header.len() {
+            if token_is_punct(header, i, live_id!(<)) {
+                angle_depth += 1;
+            } else if token_is_punct(header, i, live_id!(>)) {
+                angle_depth -= 1;
+                if angle_depth == 0 {
+                    i += 1;
+                    break;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    for j in i..header.len() {
+        if token_is_punct(header, j, live_id!(<)) {
+            angle_depth += 1;
+            continue;
+        }
+        if token_is_punct(header, j, live_id!(>)) {
+            angle_depth -= 1;
+            continue;
+        }
+        if angle_depth == 0 && ident_eq(header, j, "for") {
+            return None;
+        }
+    }
+
+    let (path, _) = parse_ident_path(header, i);
+    path.last().cloned()
+}
+
+fn impl_for_target_name(header: &[TokenWithString]) -> Option<String> {
+    let mut i = 0usize;
+    while i < header.len() {
+        if ident_eq(header, i, "for") {
+            i += 1;
+            while i < header.len()
+                && (is_ampersand(header, i) || ident_eq(header, i, "mut"))
+            {
+                i += 1;
+            }
+            let (path, _) = parse_ident_path(header, i);
+            return path.last().cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
+fn collect_called_method_names_for_target(
+    item_tokens: &[TokenWithString],
+    impl_target: &str,
+) -> HashSet<String> {
+    let mut called = HashSet::new();
+    for i in 0..item_tokens.len() {
+        if token_is_punct(item_tokens, i, live_id!(.)) {
+            let Some(method_name) = token_ident(item_tokens, i + 1) else {
+                continue;
+            };
+            let looks_like_call = matches!(
+                item_tokens.get(i + 2),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Paren),
+                    ..
+                })
+            ) || token_is_punct(item_tokens, i + 2, live_id!(<));
+            if looks_like_call {
+                called.insert(method_name.to_string());
+            }
+            continue;
+        }
+
+        let Some(owner) = token_ident(item_tokens, i) else {
+            continue;
+        };
+        if owner != "Self" && owner != impl_target {
+            continue;
+        }
+        if !is_colon_colon(item_tokens, i + 1) {
+            continue;
+        }
+        let Some(method_name) = token_ident(item_tokens, i + 2) else {
+            continue;
+        };
+        let looks_like_call = matches!(
+            item_tokens.get(i + 3),
+            Some(TokenWithString {
+                token: FullToken::Open(Delim::Paren),
+                ..
+            })
+        ) || token_is_punct(item_tokens, i + 3, live_id!(<));
+        if looks_like_call {
+            called.insert(method_name.to_string());
+        }
+    }
+    called
+}
+
+fn collect_generated_impl_method_usage(source: &str, usage: &mut MethodUsage) {
+    let tokens = parse_to_tokens(source);
+    let raw_items = parse_top_level_items(&tokens);
+
+    for item in raw_items {
+        if item.keyword.as_deref() == Some("mod") {
+            let open_index = item
+                .tokens
+                .iter()
+                .position(|token| matches!(token.token, FullToken::Open(Delim::Brace)));
+            let Some(open_index) = open_index else {
+                continue;
+            };
+            let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace) else {
+                continue;
+            };
+            let body = tokens_to_string(&item.tokens[open_index + 1..close_index]);
+            collect_generated_impl_method_usage(&body, usage);
+            continue;
+        }
+        if item.keyword.as_deref() != Some("impl") {
+            continue;
+        }
+
+        let header = header_tokens(&item.tokens);
+        let target = impl_target_name(header).or_else(|| impl_for_target_name(header));
+        let Some(target) = target else {
+            continue;
+        };
+        let called = collect_called_method_names_for_target(&item.tokens, &target);
+        if called.is_empty() {
+            continue;
+        }
+        usage
+            .typed_methods
+            .entry(target)
+            .or_default()
+            .extend(called);
+    }
+}
+
+fn public_function_name(item_tokens: &[TokenWithString]) -> Option<String> {
+    let mut i = skip_outer_attributes(item_tokens, 0);
+    if !ident_eq(item_tokens, i, "pub") {
+        return None;
+    }
+    i += 1;
+    if matches!(
+        item_tokens.get(i),
+        Some(TokenWithString {
+            token: FullToken::Open(Delim::Paren),
+            ..
+        })
+    ) {
+        return None;
+    }
+    if ident_eq(item_tokens, i, "unsafe") {
+        i += 1;
+    }
+    if !ident_eq(item_tokens, i, "fn") {
+        return None;
+    }
+    token_ident(item_tokens, i + 1).map(|v| v.to_string())
+}
+
+fn method_used_for_target(
+    target: &str,
+    method: &str,
+    used_methods: &MethodUsage,
+) -> bool {
+    if used_methods.global_methods.contains(method) {
+        return true;
+    }
+    used_methods
+        .typed_methods
+        .get(target)
+        .map(|methods| methods.contains(method))
+        .unwrap_or(false)
+}
+
+fn collect_called_impl_methods(
+    item_tokens: &[TokenWithString],
+    impl_target: &str,
+    available_methods: &HashSet<String>,
+) -> HashSet<String> {
+    let mut called = HashSet::new();
+    for i in 0..item_tokens.len() {
+        if token_is_punct(item_tokens, i, live_id!(.)) {
+            let Some(method_name) = token_ident(item_tokens, i + 1) else {
+                continue;
+            };
+            if !available_methods.contains(method_name) {
+                continue;
+            }
+            let looks_like_call = matches!(
+                item_tokens.get(i + 2),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Paren),
+                    ..
+                })
+            ) || token_is_punct(item_tokens, i + 2, live_id!(<));
+            if looks_like_call {
+                called.insert(method_name.to_string());
+            }
+            continue;
+        }
+
+        let Some(owner) = token_ident(item_tokens, i) else {
+            continue;
+        };
+        if owner != "Self" && owner != impl_target {
+            continue;
+        }
+        if !is_colon_colon(item_tokens, i + 1) {
+            continue;
+        }
+        let Some(method_name) = token_ident(item_tokens, i + 2) else {
+            continue;
+        };
+        if !available_methods.contains(method_name) {
+            continue;
+        }
+        let looks_like_call = matches!(
+            item_tokens.get(i + 3),
+            Some(TokenWithString {
+                token: FullToken::Open(Delim::Paren),
+                ..
+            })
+        ) || token_is_punct(item_tokens, i + 3, live_id!(<));
+        if looks_like_call {
+            called.insert(method_name.to_string());
+        }
+    }
+    called
+}
+
+fn strip_impl_item_methods(item: &RawItem, used_methods: &MethodUsage) -> String {
+    if item.keyword.as_deref() != Some("impl") {
+        return tokens_to_string(&item.tokens);
+    }
+    let header = header_tokens(&item.tokens);
+    let Some(target) = impl_target_name(header) else {
+        return tokens_to_string(&item.tokens);
+    };
+
+    let open_index = item
+        .tokens
+        .iter()
+        .position(|token| matches!(token.token, FullToken::Open(Delim::Brace)));
+    let Some(open_index) = open_index else {
+        return tokens_to_string(&item.tokens);
+    };
+    let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace) else {
+        return tokens_to_string(&item.tokens);
+    };
+
+    let body_tokens = item.tokens[open_index + 1..close_index].to_vec();
+    let body_items = parse_top_level_items(&body_tokens);
+    if body_items.is_empty() {
+        return tokens_to_string(&item.tokens);
+    }
+
+    let mut available_methods = HashSet::new();
+    for body_item in &body_items {
+        if let Some(method_name) = public_function_name(&body_item.tokens) {
+            available_methods.insert(method_name);
+        }
+    }
+
+    let mut kept_methods: HashSet<String> = available_methods
+        .iter()
+        .filter(|method| method_used_for_target(&target, method, used_methods))
+        .cloned()
+        .collect();
+
+    loop {
+        let mut changed = false;
+        for body_item in &body_items {
+            let include = if let Some(method_name) = public_function_name(&body_item.tokens) {
+                kept_methods.contains(&method_name)
+            } else {
+                true
+            };
+            if !include {
+                continue;
+            }
+            for called in collect_called_impl_methods(&body_item.tokens, &target, &available_methods) {
+                if kept_methods.insert(called) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut kept_body = String::new();
+    for body_item in body_items {
+        if let Some(method_name) = public_function_name(&body_item.tokens) {
+            if !kept_methods.contains(&method_name) {
+                continue;
+            }
+        }
+        kept_body.push_str(&tokens_to_string(&body_item.tokens));
+    }
+
+    if kept_body.trim().is_empty() {
+        return String::new();
+    }
+
+    let mut rebuilt = String::new();
+    rebuilt.push_str(&tokens_to_string(&item.tokens[..=open_index]));
+    rebuilt.push_str(&kept_body);
+    rebuilt.push_str(&tokens_to_string(&item.tokens[close_index..]));
+    rebuilt
+}
+
+fn strip_unused_impl_methods(source: &str, used_methods: &MethodUsage) -> String {
+    let tokens = parse_to_tokens(source);
+    let raw_items = parse_top_level_items(&tokens);
+    if raw_items.is_empty() {
+        return source.to_string();
+    }
+
+    let mut out = String::new();
+    for item in raw_items {
+        if item.keyword.as_deref() == Some("mod") {
+            let open_index = item
+                .tokens
+                .iter()
+                .position(|token| matches!(token.token, FullToken::Open(Delim::Brace)));
+            if let Some(open_index) = open_index {
+                if let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace) {
+                    let body = tokens_to_string(&item.tokens[open_index + 1..close_index]);
+                    let stripped_body = strip_unused_impl_methods(&body, used_methods);
+                    out.push_str(&tokens_to_string(&item.tokens[..=open_index]));
+                    out.push_str(&stripped_body);
+                    out.push_str(&tokens_to_string(&item.tokens[close_index..]));
+                    continue;
+                }
+            }
+            out.push_str(&tokens_to_string(&item.tokens));
+            continue;
+        }
+
+        if item.keyword.as_deref() == Some("impl") {
+            out.push_str(&strip_impl_item_methods(&item, used_methods));
+            continue;
+        }
+
+        out.push_str(&tokens_to_string(&item.tokens));
+    }
+    out
+}
+
+fn decide_strip_from_generated(generated_mod: &str) -> StripDecisions {
+    StripDecisions {
+        use_collections: generated_mod.contains("windows_collections::"),
+        use_future: generated_mod.contains("windows_future::"),
+        use_numerics: generated_mod.contains("windows_numerics::"),
+    }
+}
+
+fn regenerate_vendored_windows_crate(
+    source_root: &Path,
+    generated_mod: &str,
+    decisions: StripDecisions,
+) {
     let vendored_root = copy_crate_source(WINDOWS_CRATE, source_root);
-    patch_manifest_for_crate(WINDOWS_CRATE, &vendored_root);
+    patch_manifest_for_crate(WINDOWS_CRATE, &vendored_root, decisions);
     let mut lib_source = fs::read_to_string(source_root.join("src/lib.rs")).unwrap();
     lib_source = lib_source.replace("\nmod extensions;\n", "\n");
     lib_source = lib_source.replace("\r\nmod extensions;\r\n", "\r\n");
     fs::write(vendored_root.join("src/lib.rs"), lib_source).unwrap();
-    fs::write(vendored_root.join("src/Windows/mod.rs"), generated_mod).unwrap();
+    let windows_mod_dir = vendored_root.join("src/Windows");
+    if windows_mod_dir.exists() {
+        fs::remove_dir_all(&windows_mod_dir).unwrap();
+    }
+    fs::create_dir_all(&windows_mod_dir).unwrap();
+    fs::write(windows_mod_dir.join("mod.rs"), generated_mod).unwrap();
 }
 
-fn regenerate_vendored_support_crates(windows_source_root: &Path) {
-    for crate_spec in SUPPORT_CRATES {
+fn regenerate_vendored_support_crates(windows_source_root: &Path, decisions: StripDecisions) {
+    let mut support_crates: Vec<VendoredCrate> = BASE_SUPPORT_CRATES.to_vec();
+    if decisions.use_collections {
+        support_crates.push(WINDOWS_COLLECTIONS_CRATE);
+    }
+    if decisions.use_future {
+        support_crates.push(WINDOWS_FUTURE_CRATE);
+    }
+    if decisions.use_numerics {
+        support_crates.push(WINDOWS_NUMERICS_CRATE);
+    }
+    support_crates.sort_by_key(|c| c.crate_name);
+    support_crates.dedup_by_key(|c| c.crate_name);
+
+    for crate_spec in &support_crates {
         let source_root = resolve_support_crate_source(windows_source_root, *crate_spec);
         let vendored_root = copy_crate_source(*crate_spec, &source_root);
-        patch_manifest_for_crate(*crate_spec, &vendored_root);
+        patch_manifest_for_crate(*crate_spec, &vendored_root, decisions);
         if crate_spec.crate_name == "windows-core" {
             strip_windows_core_macros(&vendored_root);
+        } else if crate_spec.crate_name == "windows-collections" {
+            strip_windows_collections_helpers(&vendored_root);
         } else if crate_spec.crate_name == "windows-future" {
             strip_windows_future_implement_helpers(&vendored_root);
         }
@@ -1888,6 +2474,8 @@ fn regenerate_vendored_support_crates(windows_source_root: &Path) {
 }
 
 fn main() {
+    remove_legacy_flat_vendored_dirs();
+
     let windows_source_arg = resolve_windows_source_input();
     let (windows_source_root, windows_mod_root) =
         resolve_windows_source_and_mod_root(&windows_source_arg);
@@ -1895,6 +2483,7 @@ fn main() {
 
     let mut explicit_imports = HashSet::new();
     let mut glob_imports: Vec<(Vec<String>, HashSet<String>)> = Vec::new();
+    let mut used_methods = MethodUsage::default();
 
     let windows_src_dir = Path::new("./platform/src/os/windows");
     for entry in fs::read_dir(windows_src_dir).unwrap() {
@@ -1906,6 +2495,7 @@ fn main() {
         let (file_explicit, file_globs) = collect_imports_from_file(&path);
         explicit_imports.extend(file_explicit);
         glob_imports.extend(file_globs);
+        collect_method_usage_from_file(&path, &mut used_methods);
     }
 
     let mut module_cache: HashMap<Vec<String>, Option<ModuleData>> = HashMap::new();
@@ -2022,7 +2612,10 @@ fn main() {
 
     let mut generated = String::new();
     render_module(&root, &mut generated);
+    collect_generated_impl_method_usage(&generated, &mut used_methods);
+    generated = strip_unused_impl_methods(&generated, &used_methods);
 
-    regenerate_vendored_windows_crate(&windows_source_root, &generated);
-    regenerate_vendored_support_crates(&windows_source_root);
+    let decisions = decide_strip_from_generated(&generated);
+    regenerate_vendored_windows_crate(&windows_source_root, &generated, decisions);
+    regenerate_vendored_support_crates(&windows_source_root, decisions);
 }
