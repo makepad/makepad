@@ -11,6 +11,7 @@ use std::thread;
 
 const TAG_FILE_DATA: u8 = 0x01;
 const TAG_CARGO_RUN: u8 = 0x02;
+const TAG_SHELL_RUN: u8 = 0x03;
 
 const TAG_OUTPUT: u8 = 0x01;
 const TAG_EXIT_CODE: u8 = 0x02;
@@ -217,9 +218,12 @@ fn kill_previous(state: &CargoState) {
 
 // --- Server ---
 
-fn run_server(port: u16) -> io::Result<()> {
+fn run_server(port: u16, allow_all: bool) -> io::Result<()> {
     let cwd = env::current_dir()?.canonicalize()?;
     eprintln!("server: cwd = {}", cwd.display());
+    if allow_all {
+        eprintln!("server: --all enabled, accepting arbitrary shell commands");
+    }
 
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = TcpListener::bind(addr)?;
@@ -244,7 +248,7 @@ fn run_server(port: u16) -> io::Result<()> {
         let cwd = cwd.clone();
         let state = state.clone();
         thread::spawn(move || {
-            if let Err(e) = handle_connection(stream, &cwd, &state) {
+            if let Err(e) = handle_connection(stream, &cwd, &state, allow_all) {
                 eprintln!("server: connection error: {}", e);
             }
         });
@@ -287,8 +291,14 @@ fn validate_and_resolve_path(cwd: &Path, rel_path: &str) -> io::Result<PathBuf> 
     Ok(full)
 }
 
-fn handle_connection(mut stream: TcpStream, cwd: &Path, state: &CargoState) -> io::Result<()> {
-    let cargo_args;
+fn handle_connection(
+    mut stream: TcpStream,
+    cwd: &Path,
+    state: &CargoState,
+    allow_all: bool,
+) -> io::Result<()> {
+    let run_args: Vec<String>;
+    let mut is_shell = false;
     loop {
         let (tag, payload) = read_msg(&mut stream)?;
         match tag {
@@ -301,11 +311,27 @@ fn handle_connection(mut stream: TcpStream, cwd: &Path, state: &CargoState) -> i
             TAG_CARGO_RUN => {
                 let args_str = String::from_utf8(payload)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                cargo_args = args_str
+                run_args = args_str
                     .lines()
                     .filter(|l| !l.is_empty())
                     .map(String::from)
-                    .collect::<Vec<_>>();
+                    .collect();
+                break;
+            }
+            TAG_SHELL_RUN => {
+                if !allow_all {
+                    let msg = "shell commands not allowed (server not started with --all)";
+                    let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, msg));
+                }
+                let args_str = String::from_utf8(payload)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                run_args = args_str
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect();
+                is_shell = true;
                 break;
             }
             _ => {
@@ -316,15 +342,32 @@ fn handle_connection(mut stream: TcpStream, cwd: &Path, state: &CargoState) -> i
         }
     }
 
-    eprintln!("server: cargo {}", cargo_args.join(" "));
-
-    // Kill any previous cargo (in case it wasn't killed at accept time)
+    // Kill any previous process (in case it wasn't killed at accept time)
     kill_previous(state);
 
-    // Build cargo command with process group configured
-    let mut cmd = Command::new("cargo");
-    cmd.args(&cargo_args)
-        .current_dir(cwd)
+    // Build command
+    let mut cmd = if is_shell {
+        eprintln!("server: shell {}", run_args.join(" "));
+        let shell_line = run_args.join(" ");
+        #[cfg(unix)]
+        {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(&shell_line);
+            c
+        }
+        #[cfg(windows)]
+        {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&shell_line);
+            c
+        }
+    } else {
+        eprintln!("server: cargo {}", run_args.join(" "));
+        let mut c = Command::new("cargo");
+        c.args(&run_args);
+        c
+    };
+    cmd.current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     process_group::configure_command(&mut cmd);
@@ -414,7 +457,7 @@ fn stream_pipe(reader: impl Read, mut writer: TcpStream, stream_id: u8) {
 
 // --- Client ---
 
-fn run_client(addr: &str, cargo_args: &[String]) -> io::Result<i32> {
+fn run_client(addr: &str, cmd_args: &[String], is_shell: bool) -> io::Result<i32> {
     let files = get_changed_files()?;
 
     eprintln!("client: connecting to {}", addr);
@@ -444,9 +487,18 @@ fn run_client(addr: &str, cargo_args: &[String]) -> io::Result<i32> {
         write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
     }
 
-    let args_str = cargo_args.join("\n");
-    write_msg(&mut stream, TAG_CARGO_RUN, args_str.as_bytes())?;
-    eprintln!("client: cargo {}", cargo_args.join(" "));
+    let args_str = cmd_args.join("\n");
+    let tag = if is_shell {
+        TAG_SHELL_RUN
+    } else {
+        TAG_CARGO_RUN
+    };
+    write_msg(&mut stream, tag, args_str.as_bytes())?;
+    if is_shell {
+        eprintln!("client: shell {}", cmd_args.join(" "));
+    } else {
+        eprintln!("client: cargo {}", cmd_args.join(" "));
+    }
 
     let exit_code;
     loop {
@@ -544,8 +596,9 @@ fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  Server: makepad-remote --server [--port PORT]");
+    eprintln!("  Server: makepad-remote --server [--port PORT] [--all]");
     eprintln!("  Client: makepad-remote <ip:port> cargo [args...]");
+    eprintln!("          makepad-remote <ip:port> shell <command...>  (requires --all on server)");
 }
 
 fn main() -> ExitCode {
@@ -558,6 +611,7 @@ fn main() -> ExitCode {
 
     if args[0] == "--server" {
         let mut port: u16 = 8384;
+        let mut allow_all = false;
         let mut i = 1;
         while i < args.len() {
             if args[i] == "--port" && i + 1 < args.len() {
@@ -566,13 +620,16 @@ fn main() -> ExitCode {
                     std::process::exit(1);
                 });
                 i += 2;
+            } else if args[i] == "--all" {
+                allow_all = true;
+                i += 1;
             } else {
                 eprintln!("unknown server option: {}", args[i]);
                 print_usage();
                 std::process::exit(1);
             }
         }
-        if let Err(e) = run_server(port) {
+        if let Err(e) = run_server(port, allow_all) {
             eprintln!("server error: {}", e);
             return ExitCode::from(1);
         }
@@ -580,15 +637,16 @@ fn main() -> ExitCode {
     } else {
         let addr = &args[0];
 
-        if args.len() < 2 || args[1] != "cargo" {
-            eprintln!("client mode requires: <ip:port> cargo [args...]");
+        if args.len() < 2 || (args[1] != "cargo" && args[1] != "shell") {
+            eprintln!("client mode requires: <ip:port> cargo|shell [args...]");
             print_usage();
             return ExitCode::from(1);
         }
 
-        let cargo_args = &args[2..];
+        let is_shell = args[1] == "shell";
+        let cmd_args = &args[2..];
 
-        match run_client(addr, cargo_args) {
+        match run_client(addr, cmd_args, is_shell) {
             Ok(code) => {
                 if code == 0 {
                     ExitCode::SUCCESS

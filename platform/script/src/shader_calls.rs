@@ -536,12 +536,13 @@ impl ShaderFnCompiler {
             .iter()
             .find(|v| v.fnobj == fnobj && v.args == resolved_args)
         {
-            let mut fn_name = String::new();
+            let mut fn_name_base = String::new();
             if fun.overload != 0 {
-                write!(fn_name, "_f{}{}{}", fun.overload, method_name_prefix, name).ok();
+                write!(fn_name_base, "_f{}{}{}", fun.overload, method_name_prefix, name).ok();
             } else {
-                write!(fn_name, "{}{}", method_name_prefix, name).ok();
+                write!(fn_name_base, "{}{}", method_name_prefix, name).ok();
             }
+            let mut fn_name = output.backend.map_function_name(&fn_name_base);
             write!(fn_name, "(").ok(); // Add opening paren to match new function path
             return (fun.ret, fn_name);
         }
@@ -551,14 +552,15 @@ impl ShaderFnCompiler {
         let mut compiler = ShaderFnCompiler::new(fnobj);
         let mut call_sig = String::new();
 
-        let mut fn_name = String::new();
+        let mut fn_name_base = String::new();
         let mut fn_args = String::new();
 
         if overload != 0 {
-            write!(fn_name, "_f{}{}{}", overload, method_name_prefix, name).ok();
+            write!(fn_name_base, "_f{}{}{}", overload, method_name_prefix, name).ok();
         } else {
-            write!(fn_name, "{}{}", method_name_prefix, name).ok();
+            write!(fn_name_base, "{}{}", method_name_prefix, name).ok();
         }
+        let mut fn_name = output.backend.map_function_name(&fn_name_base);
 
         let mut has_self = false;
         write!(fn_args, "{}", output.backend.get_io_all_decl(output.mode)).ok();
@@ -604,7 +606,7 @@ impl ShaderFnCompiler {
                     }
                 }
             }
-            compiler.shader_scope.define_let(id!(self), ty);
+            compiler.shader_scope.define_param(id!(self), ty);
         } else if let ShaderType::PodType(ty) = sself {
             compiler.shader_scope.define_pod_type(id!(self), ty);
         } else if let ShaderType::IoSelf(obj) = sself {
@@ -642,10 +644,12 @@ impl ShaderFnCompiler {
                     break;
                 }
                 let arg_ty = resolved_args[argi];
+                let param_shadow = compiler.shader_scope.define_param(id, arg_ty);
+                let param_name = output.backend.map_param_name(id, param_shadow);
 
                 match output.backend {
                     ShaderBackend::Wgsl => {
-                        write!(fn_args, "{}:", id).ok();
+                        write!(fn_args, "{}:", param_name).ok();
                         if let Some(name) = vm.bx.heap.pod_type_name(arg_ty) {
                             let name = output.backend.map_pod_name(name);
                             write!(fn_args, "{}", name).ok();
@@ -656,13 +660,12 @@ impl ShaderFnCompiler {
                     ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
                         if let Some(name) = vm.bx.heap.pod_type_name(arg_ty) {
                             let name = output.backend.map_pod_name(name);
-                            write!(fn_args, "{} {}", name, id).ok();
+                            write!(fn_args, "{} {}", name, param_name).ok();
                         } else {
                             // todo!()
                         }
                     }
                 }
-                compiler.shader_scope.define_let(id, arg_ty);
             }
             argi += 1;
         }
