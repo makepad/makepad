@@ -19,8 +19,8 @@ use crate::{
     cx::{LinuxWindowParams, OsType},
     egl_sys,
     gpu_info::GpuPerformance,
-    Area, Cx, CxDrawPassParent, CxOsOp, Event, KeyModifiers, MouseMoveEvent, SignalToUI,
-    WindowClosedEvent, WindowGeomChangeEvent,
+    Area, Cx, CxDrawPassParent, CxOsOp, CxWindowPool, Event, KeyModifiers, MouseButton,
+    MouseMoveEvent, MouseUpEvent, SignalToUI, WindowClosedEvent, WindowGeomChangeEvent,
 };
 use wayland_client::protocol::{wl_keyboard, wl_pointer};
 use wayland_client::{Connection, Proxy};
@@ -232,15 +232,28 @@ impl WaylandCx {
             }
             XlibEvent::Drag(e) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::Drag(e))
+                cx.call_event_handler(&Event::Drag(e));
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::Drop(e) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::Drop(e))
+                cx.call_event_handler(&Event::Drop(e));
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::DragEnd => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::DragEnd)
+                cx.call_event_handler(&Event::MouseUp(MouseUpEvent {
+                    abs: dvec2(-100000.0, -100000.0),
+                    button: MouseButton::PRIMARY,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0,
+                }));
+                cx.fingers.mouse_up(MouseButton::PRIMARY);
+                cx.fingers.cycle_hover_area(live_id!(mouse).into());
+
+                cx.call_event_handler(&Event::DragEnd);
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::KeyDown(e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -377,6 +390,9 @@ impl WaylandCx {
                     } else {
                         state.clipboard_text = content;
                     }
+                }
+                CxOsOp::StartDragging(items) => {
+                    state.start_internal_drag(items);
                 }
                 CxOsOp::SetCursor(cursor) => {
                     if let Some(cursor_shape) = state.cursor_shape.as_ref() {
