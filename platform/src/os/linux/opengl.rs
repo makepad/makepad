@@ -6,7 +6,7 @@ use {
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         draw_shader::{
             CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId,
-            DrawShaderTextureInput,
+            DrawShaderAttrFormat, DrawShaderTextureInput,
         },
         draw_vars::DrawVars,
         event::{Event, TextureHandleReadyEvent},
@@ -366,28 +366,72 @@ impl Cx {
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.geom_vb.unwrap());
                         for attr in &shgl.geometries {
                             if let Some(loc) = attr.loc {
-                                (gl.glVertexAttribPointer)(
-                                    loc,
-                                    attr.size,
-                                    gl_sys::FLOAT,
-                                    0,
-                                    attr.stride,
-                                    attr.offset as *const () as *const _,
-                                );
+                                match attr.attr_format {
+                                    DrawShaderAttrFormat::Float => {
+                                        (gl.glVertexAttribPointer)(
+                                            loc,
+                                            attr.size,
+                                            gl_sys::FLOAT,
+                                            0,
+                                            attr.stride,
+                                            attr.offset as *const () as *const _,
+                                        );
+                                    }
+                                    DrawShaderAttrFormat::UInt => {
+                                        (gl.glVertexAttribIPointer)(
+                                            loc,
+                                            attr.size,
+                                            gl_sys::UNSIGNED_INT,
+                                            attr.stride,
+                                            attr.offset as *const () as *const _,
+                                        );
+                                    }
+                                    DrawShaderAttrFormat::SInt => {
+                                        (gl.glVertexAttribIPointer)(
+                                            loc,
+                                            attr.size,
+                                            gl_sys::INT,
+                                            attr.stride,
+                                            attr.offset as *const () as *const _,
+                                        );
+                                    }
+                                }
                                 (gl.glEnableVertexAttribArray)(loc);
                             }
                         }
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.inst_vb.unwrap());
                         for attr in &shgl.instances {
                             if let Some(loc) = attr.loc {
-                                (gl.glVertexAttribPointer)(
-                                    loc,
-                                    attr.size,
-                                    gl_sys::FLOAT,
-                                    0,
-                                    attr.stride,
-                                    attr.offset as *const () as *const _,
-                                );
+                                match attr.attr_format {
+                                    DrawShaderAttrFormat::Float => {
+                                        (gl.glVertexAttribPointer)(
+                                            loc,
+                                            attr.size,
+                                            gl_sys::FLOAT,
+                                            0,
+                                            attr.stride,
+                                            attr.offset as *const () as *const _,
+                                        );
+                                    }
+                                    DrawShaderAttrFormat::UInt => {
+                                        (gl.glVertexAttribIPointer)(
+                                            loc,
+                                            attr.size,
+                                            gl_sys::UNSIGNED_INT,
+                                            attr.stride,
+                                            attr.offset as *const () as *const _,
+                                        );
+                                    }
+                                    DrawShaderAttrFormat::SInt => {
+                                        (gl.glVertexAttribIPointer)(
+                                            loc,
+                                            attr.size,
+                                            gl_sys::INT,
+                                            attr.stride,
+                                            attr.offset as *const () as *const _,
+                                        );
+                                    }
+                                }
                                 (gl.glEnableVertexAttribArray)(loc);
                                 (gl.glVertexAttribDivisor)(loc, 1 as gl_sys::GLuint);
                             }
@@ -1127,12 +1171,14 @@ impl GlShader {
                     program,
                     "packed_geometry_",
                     mapping.geometries.total_slots,
+                    &mapping.geometries.inputs,
                 ),
                 instances: Self::opengl_get_attributes(
                     gl,
                     program,
                     "packed_instance_",
                     mapping.instances.total_slots,
+                    &mapping.instances.inputs,
                 ),
                 textures: Self::opengl_get_texture_slots(gl, program, &mapping.textures),
                 samplers: Self::opengl_create_samplers(gl, mapping),
@@ -1286,6 +1332,7 @@ impl GlShader {
         program: u32,
         prefix: &str,
         slots: usize,
+        inputs: &[crate::draw_shader::DrawShaderInput],
     ) -> Vec<OpenglAttribute> {
         let mut attribs = Vec::new();
 
@@ -1299,6 +1346,15 @@ impl GlShader {
 
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = ceil_div4(slots);
+        let mut chunk_formats = vec![DrawShaderAttrFormat::Float; num_attr];
+        for input in inputs {
+            if input.attr_format == DrawShaderAttrFormat::Float {
+                continue;
+            }
+            for slot in input.offset..(input.offset + input.slots) {
+                chunk_formats[slot / 4] = input.attr_format;
+            }
+        }
         let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
         for i in 0..num_attr {
             let mut name0 = prefix.to_string();
@@ -1313,13 +1369,14 @@ impl GlShader {
                 let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _);
                 if trace_draw {
                     crate::log!(
-                        "GL attrib program={} name={} loc={} size={} stride={} offset={}",
+                        "GL attrib program={} name={} loc={} size={} stride={} offset={} format={:?}",
                         program,
                         name0.trim_end_matches('\0'),
                         loc,
                         size,
                         stride,
-                        (i * 4 * mem::size_of::<f32>())
+                        (i * 4 * mem::size_of::<f32>()),
+                        chunk_formats[i]
                     );
                 }
                 attribs.push(OpenglAttribute {
@@ -1328,6 +1385,7 @@ impl GlShader {
                     offset: (i * 4 * mem::size_of::<f32>()) as usize,
                     size: size,
                     stride: stride,
+                    attr_format: chunk_formats[i],
                 })
             }
         }
@@ -1636,6 +1694,7 @@ pub struct OpenglAttribute {
     pub size: i32,
     pub offset: usize,
     pub stride: i32,
+    pub attr_format: DrawShaderAttrFormat,
 }
 
 #[derive(Debug, Default, Clone)]

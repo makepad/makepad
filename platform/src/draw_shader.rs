@@ -151,6 +151,12 @@ pub enum DrawShaderAttrFormat {
     SInt,
 }
 
+impl Default for DrawShaderAttrFormat {
+    fn default() -> Self {
+        Self::Float
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DrawShaderInput {
     pub id: LiveId,
@@ -200,6 +206,9 @@ impl DrawShaderInputs {
     pub fn push(&mut self, id: LiveId, slots: usize, attr_format: DrawShaderAttrFormat) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
+                if attr_format != DrawShaderAttrFormat::Float && (self.total_slots & 3) != 0 {
+                    self.total_slots += 4 - (self.total_slots & 3);
+                }
                 self.inputs.push(DrawShaderInput {
                     id,
                     offset: self.total_slots,
@@ -207,6 +216,9 @@ impl DrawShaderInputs {
                     attr_format,
                 });
                 self.total_slots += slots;
+                if attr_format != DrawShaderAttrFormat::Float && (self.total_slots & 3) != 0 {
+                    self.total_slots += 4 - (self.total_slots & 3);
+                }
             }
             DrawShaderInputPacking::UniformsGLSLTight => {
                 self.inputs.push(DrawShaderInput {
