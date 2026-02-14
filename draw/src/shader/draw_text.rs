@@ -820,6 +820,10 @@ impl TextStyle {
     pub fn font_family_id(&self) -> FontFamilyId {
         self.font_family.to_font_family_id()
     }
+
+    pub fn ensure_fonts_loaded(&self, cx: &mut Cx) {
+        self.font_family.ensure_fonts_loaded(cx);
+    }
 }
 
 impl ScriptHook for FontFamily {

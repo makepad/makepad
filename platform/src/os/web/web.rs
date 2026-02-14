@@ -713,6 +713,7 @@ impl CxOsApi for Cx {
             FromWasmAllocVao::to_js_code(),
             FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
+            FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
             FromWasmBeginRenderTexture::to_js_code(),
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
