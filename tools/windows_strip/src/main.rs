@@ -1818,6 +1818,7 @@ fn patch_manifest_for_crate(
 ) {
     let manifest_path = crate_root.join("Cargo.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    remove_manifest_section(&mut manifest, "hints");
 
     match crate_spec.crate_name {
         "windows" => {
@@ -2479,7 +2480,10 @@ fn main() {
     let windows_source_arg = resolve_windows_source_input();
     let (windows_source_root, windows_mod_root) =
         resolve_windows_source_and_mod_root(&windows_source_arg);
-    let enabled_features = load_enabled_windows_features(Path::new("./platform/Cargo.toml"));
+    let mut enabled_features = load_enabled_windows_features(Path::new("./platform/Cargo.toml"));
+    enabled_features.extend(load_enabled_windows_features(Path::new(
+        "./libs/terminal_core/Cargo.toml",
+    )));
 
     let mut explicit_imports = HashSet::new();
     let mut glob_imports: Vec<(Vec<String>, HashSet<String>)> = Vec::new();
@@ -2496,6 +2500,13 @@ fn main() {
         explicit_imports.extend(file_explicit);
         glob_imports.extend(file_globs);
         collect_method_usage_from_file(&path, &mut used_methods);
+    }
+    let terminal_pty_path = Path::new("./libs/terminal_core/src/pty.rs");
+    if terminal_pty_path.is_file() {
+        let (file_explicit, file_globs) = collect_imports_from_file(terminal_pty_path);
+        explicit_imports.extend(file_explicit);
+        glob_imports.extend(file_globs);
+        collect_method_usage_from_file(terminal_pty_path, &mut used_methods);
     }
 
     let mut module_cache: HashMap<Vec<String>, Option<ModuleData>> = HashMap::new();

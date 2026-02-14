@@ -744,5 +744,3 @@ level = "warn"
 priority = 0
 check-cfg = ["cfg(windows_raw_dylib, windows_slim_errors)"]
 
-[hints]
-mostly-unused = true
