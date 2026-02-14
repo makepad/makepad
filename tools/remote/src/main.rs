@@ -270,9 +270,20 @@ fn stream_pipe(reader: impl Read, mut writer: TcpStream, stream_id: u8) {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                let chunk = &buf[..n];
+                // Also print on server's own stdout/stderr
+                match stream_id {
+                    STREAM_STDOUT => {
+                        let _ = io::stdout().write_all(chunk);
+                    }
+                    STREAM_STDERR => {
+                        let _ = io::stderr().write_all(chunk);
+                    }
+                    _ => {}
+                }
                 let mut payload = Vec::with_capacity(1 + n);
                 payload.push(stream_id);
-                payload.extend_from_slice(&buf[..n]);
+                payload.extend_from_slice(chunk);
                 if write_msg(&mut writer, TAG_OUTPUT, &payload).is_err() {
                     break;
                 }
