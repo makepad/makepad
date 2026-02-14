@@ -1,7 +1,6 @@
 use {
     self::super::{
         super::{
-            dma_buf,
             egl_sys::{self, LibEgl},
             gl_sys::{self, LibGl},
         },
@@ -14,6 +13,7 @@ use {
         event::*,
         makepad_math::Vec2d,
         opengl_cx::OpenglCx,
+        os::cx_stdin::{LinuxOwnedImage, LinuxOwnedImagePlane},
         texture::{CxTexture, Texture},
         window::WindowId,
         x11::linux_x11::X11Cx,
@@ -23,7 +23,7 @@ use {
         mem,
         os::{
             self,
-            fd::{AsRawFd as _, FromRawFd as _, OwnedFd},
+            fd::{AsRawFd as _, FromRawFd as _},
             raw::{c_long, c_void},
         },
     },
@@ -33,7 +33,7 @@ impl Cx {
     pub fn share_texture_for_presentable_image(
         &mut self,
         texture: &Texture,
-    ) -> dma_buf::Image<OwnedFd> {
+    ) -> LinuxOwnedImage {
         let cxtexture = &mut self.textures[texture.texture_id()];
         cxtexture.update_shared_texture(self.os.gl());
 
@@ -100,9 +100,9 @@ impl Cx {
                 "eglDestroyImageKHR failed",
             );
 
-            dma_buf::Image {
-                drm_format: dma_buf::DrmFormat { fourcc, modifiers },
-                planes: dma_buf::ImagePlane {
+            LinuxOwnedImage {
+                drm_format: crate::os::linux::dma_buf::DrmFormat { fourcc, modifiers },
+                plane: LinuxOwnedImagePlane {
                     dma_buf_fd: os::fd::OwnedFd::from_raw_fd(dma_buf_fd),
                     offset,
                     stride,
@@ -167,7 +167,7 @@ impl CxTexture {
         &mut self,
         gl: &LibGl,
         opengl_cx: &OpenglCx,
-        dma_buf_image: &dma_buf::Image<os::fd::OwnedFd>,
+        dma_buf_image: &LinuxOwnedImage,
     ) {
         if !self.alloc_shared() {
             return;
@@ -179,10 +179,8 @@ impl CxTexture {
         opengl_cx.make_current();
         while unsafe { (gl.glGetError)() } != 0 {}
 
-        let dma_buf::Image {
-            drm_format,
-            planes: ref plane0,
-        } = *dma_buf_image;
+        let drm_format = dma_buf_image.drm_format;
+        let plane0 = &dma_buf_image.plane;
 
         let image_attribs = [
             egl_sys::EGL_LINUX_DRM_FOURCC_EXT,

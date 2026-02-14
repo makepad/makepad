@@ -471,8 +471,23 @@ fn run_client(addr: &str, cmd_args: &[String], is_shell: bool) -> io::Result<i32
         if !rel_path.contains('/') {
             continue;
         }
-        if !is_tracked && !rel_path.ends_with(".rs") {
-            continue;
+        let normalized = rel_path.replace('\\', "/");
+        let is_vendored = normalized.starts_with("libs/vendored/");
+        let is_common_src = normalized.ends_with(".rs") || normalized.ends_with(".toml");
+        if !is_tracked {
+            if is_vendored {
+                let in_src = normalized.contains("/src/") && !normalized.contains("/src/test/");
+                let keep_vendored = normalized.ends_with("/Cargo.toml")
+                    || normalized.ends_with("/build.rs")
+                    || in_src
+                    || normalized.ends_with("/wayland.xml")
+                    || (normalized.contains("/protocols/") && normalized.ends_with(".xml"));
+                if !keep_vendored {
+                    continue;
+                }
+            } else if !is_common_src {
+                continue;
+            }
         }
 
         let data = match fs::read(rel_path) {

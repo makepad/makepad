@@ -4,11 +4,24 @@ use {
         cx::{Cx, OsType},
         draw_list::DrawListId,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-        draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
+        draw_shader::{
+            CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId,
+            DrawShaderTextureInput,
+        },
+        draw_vars::DrawVars,
         event::{Event, TextureHandleReadyEvent},
+        geometry::Geometry,
         makepad_live_id::*,
         makepad_math::{Vec2d, Vec4f},
-        makepad_shader_compiler::generate_glsl,
+        makepad_script::{
+            apply::Apply,
+            shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
+            shader_backend::ShaderBackend,
+            trap::NoTrap,
+            value::ScriptValue,
+            ScriptVm,
+        },
+        script::vm::ScriptVmCx,
         texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated},
     },
     gl_sys::LibGl,
@@ -19,6 +32,155 @@ use {
         mem, ptr,
     },
 };
+
+impl DrawVars {
+    pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
+        if let Some(io_self) = value.as_object() {
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            let mut output = ShaderOutput::default();
+            output.backend = ShaderBackend::Glsl;
+            output.pre_collect_rust_instance_io(vm, io_self);
+            output.pre_collect_shader_io(vm, io_self);
+
+            if let Some(fnobj) = vm
+                .bx
+                .heap
+                .object_method(io_self, id!(vertex).into(), vm.thread().trap.pass())
+                .as_object()
+            {
+                output.mode = ShaderMode::Vertex;
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    NoTrap,
+                    id!(vertex),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+            if let Some(fnobj) = vm
+                .bx
+                .heap
+                .object_method(io_self, id!(fragment).into(), vm.thread().trap.pass())
+                .as_object()
+            {
+                output.mode = ShaderMode::Fragment;
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    NoTrap,
+                    id!(fragment),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+
+            if output.has_errors {
+                return;
+            }
+
+            // TODO: replace with full GLSL generation from ShaderOutput.
+            let code = CxDrawShaderCode::Separate {
+                vertex: "void main(){gl_Position=vec4(0.0,0.0,0.0,1.0);}".to_string(),
+                fragment:
+                    "void main(){\n#if __VERSION__ >= 300\nfragColor=vec4(1.0,0.0,1.0,1.0);\n#else\ngl_FragColor=vec4(1.0,0.0,1.0,1.0);\n#endif\n}".to_string(),
+            };
+
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    cx.draw_shaders
+                        .cache_functions_to_shader
+                        .insert(fnhash, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            let geometry_id = if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
+                let buffer_value =
+                    vm.bx
+                        .heap
+                        .value(vb_obj, id!(buffer).into(), vm.thread().trap.pass());
+                if let Some(handle) = buffer_value.as_handle() {
+                    vm.bx
+                        .heap
+                        .handle_ref::<Geometry>(handle)
+                        .map(|g: &Geometry| g.geometry_id())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let source = vm.bx.heap.new_object_ref(io_self);
+            let mut mapping = CxDrawShaderMapping::from_shader_output(
+                source,
+                code.clone(),
+                &vm.bx.heap,
+                &output,
+                geometry_id,
+            );
+            mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
+
+            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
+            if let Some(true) = debug_value.as_bool() {
+                mapping.flags.debug = true;
+            }
+
+            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
+            self.dyn_instance_slots = mapping.instances.total_slots;
+
+            let cx = vm.host.cx_mut();
+            let index = cx.draw_shaders.shaders.len();
+            cx.draw_shaders.shaders.push(CxDrawShader {
+                debug_id: LiveId(0),
+                os_shader_id: None,
+                mapping,
+            });
+
+            let shader_id = DrawShaderId { index };
+            cx.draw_shaders
+                .cache_object_id_to_shader
+                .insert(io_self, shader_id);
+            cx.draw_shaders
+                .cache_functions_to_shader
+                .insert(fnhash, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+            cx.draw_shaders.compile_set.insert(index);
+
+            self.draw_shader_id = Some(shader_id);
+            self.geometry_id = geometry_id;
+        }
+    }
+}
 
 impl Cx {
     pub(crate) fn render_view(
@@ -60,7 +222,7 @@ impl Cx {
                     continue;
                 };
 
-                let sh = &self.draw_shaders.shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &self.draw_shaders.shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
                     // shader didnt compile somehow
                     continue;
@@ -129,11 +291,15 @@ impl Cx {
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                     #[cfg(use_gles_3)]
-                    if draw_call.draw_call_uniforms.len() != 0 {
+                    {
                         draw_item
                             .os
                             .draw_call_uniforms
-                            .update_uniform_buffer(gl, &mut draw_call.draw_call_uniforms);
+                            .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
+                        draw_item
+                            .os
+                            .user_uniforms
+                            .update_uniform_buffer(gl, draw_call.dyn_uniforms.as_slice());
                     }
                 }
 
@@ -155,7 +321,7 @@ impl Cx {
                 if vao.inst_vb != draw_item.os.inst_vb.gl_buffer
                     || vao.geom_vb != geometry.os.vb.gl_buffer
                     || vao.geom_ib != geometry.os.ib.gl_buffer
-                    || vao.shader_id != Some(draw_call.draw_shader.draw_shader_id)
+                    || vao.shader_id != Some(draw_call.draw_shader_id.index)
                 {
                     if let Some(vao) = vao.vao.take() {
                         unsafe { (gl.glDeleteVertexArrays)(1, &vao) };
@@ -167,7 +333,7 @@ impl Cx {
                         vao
                     });
 
-                    vao.shader_id = Some(draw_call.draw_shader.draw_shader_id);
+                    vao.shader_id = Some(draw_call.draw_shader_id.index);
                     vao.inst_vb = draw_item.os.inst_vb.gl_buffer;
                     vao.geom_vb = geometry.os.vb.gl_buffer;
                     vao.geom_ib = geometry.os.ib.gl_buffer;
@@ -229,11 +395,9 @@ impl Cx {
                         shgl.uniforms
                             .draw_call_uniforms_binding
                             .bind_buffer(gl, &draw_item.os.draw_call_uniforms);
-                        if draw_call.draw_call_uniforms.len() != 0 {
-                            shgl.uniforms
-                                .user_uniforms_binding
-                                .bind_buffer(gl, &draw_item.os.draw_call_uniforms);
-                        }
+                        shgl.uniforms
+                            .user_uniforms_binding
+                            .bind_buffer(gl, &draw_item.os.user_uniforms);
                         shgl.uniforms
                             .live_uniforms_binding
                             .bind_buffer(gl, &shgl.uniforms.live_uniforms);
@@ -260,8 +424,8 @@ impl Cx {
                         );
                         GlShader::set_uniform_array(
                             gl,
-                            &shgl.uniforms.draw_call_uniforms,
-                            &draw_call.draw_call_uniforms,
+                            &shgl.uniforms.user_uniforms,
+                            draw_call.dyn_uniforms.as_slice(),
                         );
                     }
 
@@ -547,59 +711,38 @@ impl Cx {
     }
 
     pub fn opengl_compile_shaders(&mut self) {
-        //let p = profile_start();
-        for draw_shader_ptr in &self.draw_shaders.compile_set {
-            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
-                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
-                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
+        let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
 
-                #[cfg(use_gles_3)]
-                let glsl_options = generate_glsl::GlslOptions {
-                    use_ovr_multiview: self.os_type.has_xr_mode(),
-                    use_uniform_buffers: true,
-                    use_inout: true,
-                };
-                #[cfg(not(use_gles_3))]
-                let glsl_options = generate_glsl::GlslOptions {
-                    use_ovr_multiview: false,
-                    use_uniform_buffers: false,
-                    use_inout: false,
-                };
+        for shader_index in compile_set {
+            let cx_shader = &mut self.draw_shaders.shaders[shader_index];
+            if cx_shader.os_shader_id.is_some() {
+                continue;
+            }
 
-                let vertex = generate_glsl::generate_vertex_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry,
-                    glsl_options,
-                );
-
-                let pixel = generate_glsl::generate_pixel_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry,
-                    glsl_options,
-                );
-
-                if cx_shader.mapping.flags.debug {
-                    crate::log!("{}\n{}", vertex, pixel);
+            let (vertex, pixel) = match &cx_shader.mapping.code {
+                CxDrawShaderCode::Separate { vertex, fragment } => {
+                    (vertex.clone(), fragment.clone())
                 }
+                CxDrawShaderCode::Combined { code } => (code.clone(), code.clone()),
+            };
 
-                // lets see if we have the shader already
-                for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.vertex[0] == vertex && ds.pixel[0] == pixel {
-                        cx_shader.os_shader_id = Some(index);
-                        break;
-                    }
-                }
+            if cx_shader.mapping.flags.debug {
+                crate::log!("{}\n{}", vertex, pixel);
+            }
 
-                if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(self.os.gl(), &vertex, &pixel, &self.os_type);
-                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                    self.draw_shaders.os_shaders.push(shp);
+            for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
+                if ds.in_vertex == vertex && ds.in_pixel == pixel {
+                    cx_shader.os_shader_id = Some(index);
+                    break;
                 }
             }
+
+            if cx_shader.os_shader_id.is_none() {
+                let shp = CxOsDrawShader::new(self.os.gl(), &vertex, &pixel, &self.os_type);
+                cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                self.draw_shaders.os_shaders.push(shp);
+            }
         }
-        self.draw_shaders.compile_set.clear();
     }
     /*
     pub fn maybe_warn_hardware_support(&self) {
@@ -625,7 +768,7 @@ pub struct GlShaderUniforms {
     pub pass_uniforms: OpenglUniform,
     pub draw_list_uniforms: OpenglUniform,
     pub draw_call_uniforms: OpenglUniform,
-    pub draw_call_uniforms: OpenglUniform,
+    pub user_uniforms: OpenglUniform,
     pub live_uniforms: OpenglUniform,
     pub const_table_uniform: OpenglUniform,
 }
@@ -636,7 +779,7 @@ impl GlShaderUniforms {
             pass_uniforms: GlShader::opengl_get_uniform(gl, program, "pass_table"),
             draw_list_uniforms: GlShader::opengl_get_uniform(gl, program, "draw_list_table"),
             draw_call_uniforms: GlShader::opengl_get_uniform(gl, program, "draw_call_table"),
-            draw_call_uniforms: GlShader::opengl_get_uniform(gl, program, "user_table"),
+            user_uniforms: GlShader::opengl_get_uniform(gl, program, "user_table"),
             live_uniforms: GlShader::opengl_get_uniform(gl, program, "live_table"),
             const_table_uniform: GlShader::opengl_get_uniform(gl, program, "const_table"),
         }
@@ -657,7 +800,7 @@ pub struct GlShaderUniforms {
 impl GlShaderUniforms {
     fn new(gl: &LibGl, program: u32, mapping: &CxDrawShaderMapping) -> Self {
         let mut live_uniforms = OpenglBuffer::default();
-        live_uniforms.update_uniform_buffer(gl, mapping.live_uniforms_buf.as_ref());
+        live_uniforms.update_uniform_buffer(gl, mapping.scope_uniforms_buf.as_ref());
 
         Self {
             pass_uniforms_binding: GlShader::opengl_get_uniform_block_binding(
@@ -915,11 +1058,11 @@ impl GlShader {
                 .bind_buffer(gl, &uniforms.live_uniforms);
 
             #[cfg(not(use_gles_3))]
-            GlShader::set_uniform_array(gl, &uniforms.live_uniforms, &mapping.live_uniforms_buf);
+            GlShader::set_uniform_array(gl, &uniforms.live_uniforms, &mapping.scope_uniforms_buf);
 
-            let ct = &mapping.const_table.table;
-            if ct.len() > 0 {
-                GlShader::set_uniform_array(gl, &uniforms.const_table_uniform, ct);
+            if !mapping.dyn_uniforms.inputs.is_empty() {
+                let zeros = vec![0.0f32; mapping.dyn_uniforms.total_slots];
+                GlShader::set_uniform_array(gl, &uniforms.const_table_uniform, &zeros);
             }
 
             (gl.glUseProgram)(0);
@@ -1389,7 +1532,7 @@ impl CxOsDrawCallVao {
 #[derive(Default, Clone)]
 pub struct CxOsDrawCall {
     pub draw_call_uniforms: OpenglBuffer,
-    pub draw_call_uniforms: OpenglBuffer,
+    pub user_uniforms: OpenglBuffer,
     pub inst_vb: OpenglBuffer,
     pub vao: Option<CxOsDrawCallVao>,
 }

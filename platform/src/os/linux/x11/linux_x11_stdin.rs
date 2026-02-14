@@ -7,7 +7,10 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         makepad_micro_serde::*,
-        os::cx_stdin::{aux_chan, HostToStdin, PollTimer, PresentableDraw, StdinToHost, Swapchain},
+        os::cx_stdin::{
+            aux_chan, HostPresentableImage, HostSwapchain, HostToStdin, PollTimer,
+            PresentableDraw, StdinToHost,
+        },
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         window::CxWindowPool,
@@ -22,7 +25,7 @@ use {
 
 #[derive(Default)]
 pub(crate) struct StdinWindow {
-    swapchain: Option<Swapchain<Texture>>,
+    swapchain: Option<HostSwapchain>,
     present_index: usize,
 }
 
@@ -47,7 +50,7 @@ impl Cx {
                             (window.present_index + 1) % swapchain.presentable_images.len();
 
                         // render to swapchain
-                        self.draw_pass_to_texture(draw_pass_id, Some(&current_image.image));
+                        self.draw_pass_to_texture(draw_pass_id, Some(&current_image.texture));
 
                         // wait for GPU to finish rendering
                         unsafe {
@@ -208,19 +211,23 @@ impl Cx {
                     self.redraw_all();
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
-                    let new_swapchain = new_swapchain.images_map(|pi| {
-                        let mut new_texture = Texture::new(self);
-                        match pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
+                    let window_id = new_swapchain.window_id;
+                    let alloc_width = new_swapchain.alloc_width;
+                    let alloc_height = new_swapchain.alloc_height;
+                    let shared_images = new_swapchain.presentable_images;
+                    let presentable_images = std::array::from_fn(|i| {
+                        let shared_pi = shared_images[i];
+                        let mut texture = Texture::new(self);
+                        match shared_pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
                             Ok(pi) => {
-                                // update texture
                                 let desc = TextureFormat::SharedBGRAu8 {
                                     id: pi.id,
-                                    width: new_swapchain.alloc_width as usize,
-                                    height: new_swapchain.alloc_height as usize,
+                                    width: alloc_width as usize,
+                                    height: alloc_height as usize,
                                     initial: true,
                                 };
-                                new_texture = Texture::new_with_format(self, desc);
-                                self.textures[new_texture.texture_id()]
+                                texture = Texture::new_with_format(self, desc);
+                                self.textures[texture.texture_id()]
                                     .update_from_shared_dma_buf_image(
                                         self.os.gl(),
                                         self.os.opengl_cx.as_ref().unwrap(),
@@ -233,9 +240,17 @@ impl Cx {
                                 );
                             }
                         }
-                        new_texture
+                        HostPresentableImage {
+                            id: shared_pi.id,
+                            texture,
+                        }
                     });
-                    let window_id = new_swapchain.window_id;
+                    let new_swapchain = HostSwapchain {
+                        window_id,
+                        alloc_width,
+                        alloc_height,
+                        presentable_images,
+                    };
                     let stdin_window = &mut stdin_windows[window_id];
                     stdin_window.swapchain = Some(new_swapchain);
 
@@ -250,7 +265,7 @@ impl Cx {
                             clear_color: DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
                             //clear_color: DrawPassClearColor::ClearWith(pass.clear_color),
                             texture: swapchain.presentable_images[stdin_window.present_index]
-                                .image
+                                .texture
                                 .clone(),
                         }];
                     }
