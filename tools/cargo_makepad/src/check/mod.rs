@@ -208,15 +208,63 @@ fn normalize_rust_interpolations(code: &str) -> String {
             i += 2; // skip marker and '('
             let mut depth = 1u32;
             while i < bytes.len() && depth > 0 {
-                let b = bytes[i];
-                if b == b'\\' {
-                    i = (i + 2).min(bytes.len());
+                if let Some(next) = skip_rust_raw_string(bytes, i) {
+                    i = next;
                     continue;
+                }
+                let b = bytes[i];
+                if b == b'"' || b == b'\'' {
+                    let quote = b;
+                    i += 1;
+                    while i < bytes.len() {
+                        let c = bytes[i];
+                        if c == b'\\' {
+                            i = (i + 2).min(bytes.len());
+                            continue;
+                        }
+                        i += 1;
+                        if c == quote {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if b == b'/' && i + 1 < bytes.len() {
+                    if bytes[i + 1] == b'/' {
+                        i += 2;
+                        while i < bytes.len() && bytes[i] != b'\n' {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if bytes[i + 1] == b'*' {
+                        i += 2;
+                        let mut comment_depth = 1u32;
+                        while i + 1 < bytes.len() && comment_depth > 0 {
+                            if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                                comment_depth += 1;
+                                i += 2;
+                                continue;
+                            }
+                            if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                                comment_depth -= 1;
+                                i += 2;
+                                continue;
+                            }
+                            i += 1;
+                        }
+                        continue;
+                    }
                 }
                 if b == b'(' {
                     depth += 1;
-                } else if b == b')' {
+                    i += 1;
+                    continue;
+                }
+                if b == b')' {
                     depth -= 1;
+                    i += 1;
+                    continue;
                 }
                 i += 1;
             }
@@ -556,6 +604,9 @@ fn discover_runtime_modules(
     }
 
     let call_order = script_mod_call_order_from_lib(lib_src_path);
+    if !call_order.is_empty() {
+        out.retain(|module| !module.module_path.is_empty());
+    }
     out.sort_by(|a, b| {
         let order_index = |path: &[String]| {
             call_order.iter().position(|o| o.as_slice() == path)
@@ -1617,4 +1668,63 @@ fn rustup_toolchain_install() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), stamp));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn normalize_interpolation_ignores_parentheses_in_literals_and_comments() {
+        let with_string = r#"x = #(foo(")")) y"#;
+        assert_eq!(normalize_rust_interpolations(with_string), "x = #(0) y");
+
+        let with_comment = "x = #(foo(/* ) */ bar)) y";
+        assert_eq!(normalize_rust_interpolations(with_comment), "x = #(0) y");
+    }
+
+    #[test]
+    fn discover_runtime_modules_skips_root_orchestration_module() {
+        let temp_dir = unique_temp_dir("makepad-script-check");
+        let lib = temp_dir.join("lib.rs");
+        let foo = temp_dir.join("foo.rs");
+
+        fs::write(
+            &lib,
+            r#"
+pub mod foo;
+pub fn script_mod(vm: &mut ()) {
+    crate::foo::script_mod(vm);
+}
+script_mod! { mod.root = {} }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &foo,
+            r#"
+pub fn script_mod(_vm: &mut ()) {}
+script_mod! { mod.foo = {} }
+"#,
+        )
+        .unwrap();
+
+        let modules = discover_runtime_modules(&lib, &HashSet::new(), false);
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].module_path, vec!["foo".to_string()]);
+    }
 }
