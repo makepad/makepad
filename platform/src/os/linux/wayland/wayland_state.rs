@@ -3,8 +3,8 @@ use crate::{
     libc_sys::{self, munmap},
     makepad_math::{dvec2, Vec2d},
     wayland::{wayland_type, xkb_sys},
-    Area, KeyEvent, KeyModifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextInputEvent,
-    WindowClosedEvent,
+    Area, KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    TextInputEvent, WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -245,10 +245,16 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                 height,
                 states,
             } => {
-                if width <= 0 || height <= 0 {
-                    return;
-                }
                 if let Some(window) = state.windows.iter().find(|win| win.window_id == *window_id) {
+                    let inner_size = if width > 0 && height > 0 {
+                        dvec2(width as f64, height as f64)
+                    } else {
+                        window.window_geom.inner_size
+                    };
+                    let is_maximized =
+                        WaylandState::xdg_toplevel_has_state(&states, 1 /* maximized */);
+                    let is_fullscreen =
+                        WaylandState::xdg_toplevel_has_state(&states, 2 /* fullscreen */);
                     state.do_callback(XlibEvent::WindowGeomChange(WindowGeomChangeEvent {
                         window_id: *window_id,
                         old_geom: window.window_geom.clone(),
@@ -256,11 +262,11 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                             dpi_factor: window.window_geom.dpi_factor,
                             can_fullscreen: false,
                             xr_is_presenting: false,
-                            is_fullscreen: false,
+                            is_fullscreen: is_fullscreen || is_maximized,
                             is_topmost: false,
                             position: dvec2(0., 0.),
-                            inner_size: dvec2(width as f64, height as f64),
-                            outer_size: dvec2(width as f64, height as f64),
+                            inner_size,
+                            outer_size: inner_size,
                         },
                     }));
                 }
@@ -540,10 +546,33 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 button,
                 state: key_state,
             } => {
+                state.pointer_serial = Some(serial);
                 if let Some(btn) = wayland_type::from_mouse(button) {
                     if let Some(window_id) = state.current_window {
                         match key_state {
                             WEnum::Value(ButtonState::Pressed) => {
+                                if btn == MouseButton::PRIMARY {
+                                    let response =
+                                        Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
+                                    state.do_callback(XlibEvent::WindowDragQuery(
+                                        WindowDragQueryEvent {
+                                            window_id,
+                                            abs: state.last_mouse_pos,
+                                            response: response.clone(),
+                                        },
+                                    ));
+                                    if matches!(response.get(), WindowDragQueryResponse::Caption) {
+                                        if let (Some(seat), Some(window)) = (
+                                            state.seat.as_ref(),
+                                            state.windows
+                                                .iter()
+                                                .find(|win| win.window_id == window_id),
+                                        ) {
+                                            window.toplevel._move(seat, serial);
+                                            return;
+                                        }
+                                    }
+                                }
                                 state.do_callback(XlibEvent::MouseDown(MouseDownEvent {
                                     abs: state.last_mouse_pos,
                                     button: btn,
@@ -609,6 +638,13 @@ impl WaylandState {
         self.compositor.is_some()
             && self.wm_base.is_some()
     }
+
+    fn xdg_toplevel_has_state(states: &[u8], needle: u32) -> bool {
+        states
+            .chunks_exact(4)
+            .any(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) == needle)
+    }
+
     fn do_callback(&mut self, event: XlibEvent) {
         if let Some(mut callback) = self.event_callback.take() {
             callback(self, event);
