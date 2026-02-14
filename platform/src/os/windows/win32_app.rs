@@ -13,13 +13,14 @@ use {
         },
         window::WindowId,
         windows::{
+            core::BOOL,
             core::HRESULT,
             core::PCSTR,
             core::PCWSTR,
             //core::IntoParam,
             Win32::{
                 Foundation::{
-                    BOOL, COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK,
+                    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK,
                 },
                 Graphics::Gdi::{
                     CreateSolidBrush, GetDC, GetDeviceCaps, MonitorFromWindow, HMONITOR,
@@ -172,7 +173,7 @@ impl Win32App {
 
         unsafe {
             RegisterClassExW(&class);
-            let _ = IsGUIThread(TRUE);
+            let _ = IsGUIThread(true);
 
             // initialize COM using OleInitialize to allow Drag&Drop and other shell features
             OleInitialize(None).unwrap();
@@ -506,10 +507,10 @@ impl Win32App {
             self.current_cursor = Some(cursor);
             unsafe {
                 if win32_cursor == PCWSTR::null() {
-                    ShowCursor(FALSE);
+                    ShowCursor(false);
                 } else {
-                    SetCursor(LoadCursorW(None, win32_cursor).unwrap());
-                    ShowCursor(TRUE);
+                    SetCursor(Some(LoadCursorW(None, win32_cursor).unwrap()));
+                    ShowCursor(true);
                 }
             }
             //TODO
@@ -652,7 +653,7 @@ impl DpiFunctions {
 
     pub fn hwnd_dpi_factor(&self, hwnd: HWND) -> f32 {
         unsafe {
-            let hdc = GetDC(hwnd);
+            let hdc = GetDC(Some(hwnd));
             if hdc.is_invalid() {
                 panic!("`GetDC` returned null!");
             }
@@ -683,7 +684,7 @@ impl DpiFunctions {
                 if IsProcessDPIAware() == TRUE {
                     // If the process is DPI aware, then scaling must be handled by the application using
                     // this DPI value.
-                    GetDeviceCaps(hdc, LOGPIXELSX) as u32
+                    GetDeviceCaps(Some(hdc), LOGPIXELSX) as u32
                 } else {
                     // If the process is DPI unaware, then scaling is performed by the OS; we thus return
                     // 96 (scale factor 1.0) to prevent the window from being re-scaled by both the

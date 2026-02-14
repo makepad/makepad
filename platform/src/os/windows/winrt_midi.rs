@@ -6,7 +6,7 @@ use {
         windows::{
             Devices::Enumeration::{DeviceInformation, DeviceInformationUpdate, DeviceWatcher},
             Devices::Midi::{IMidiOutPort, MidiInPort, MidiMessageReceivedEventArgs, MidiOutPort},
-            Foundation::{EventRegistrationToken, TypedEventHandler},
+            Foundation::TypedEventHandler,
             Storage::Streams::{DataReader, DataWriter},
         },
     },
@@ -53,7 +53,7 @@ pub struct WinRTMidiPort {
 #[derive(Clone)]
 pub struct WinRTMidiInput {
     port_id: MidiPortId,
-    event_token: EventRegistrationToken,
+    event_token: i64,
     midi_input: MidiInPort,
 }
 

@@ -1,9 +1,26 @@
 use {
     crate::{
-        event::game_input::*, makepad_live_id::*, makepad_math::Vec2, windows::core::*,
-        windows::Win32::Devices::HumanInterfaceDevice::*, windows::Win32::Foundation::*,
+        event::game_input::*,
+        makepad_live_id::*,
+        makepad_math::Vec2,
+        windows::core::{BOOL, GUID, Interface},
+        windows::Win32::Devices::HumanInterfaceDevice::{
+            DirectInput8Create, GUID_RxAxis, GUID_RyAxis, GUID_RzAxis, GUID_Slider, GUID_XAxis,
+            GUID_YAxis, GUID_ZAxis, IDirectInput8W, IDirectInputDevice8W, IDirectInputEffect,
+            DI8DEVCLASS_GAMECTRL, DI8DEVTYPE_DRIVING, DICONSTANTFORCE, DIDATAFORMAT,
+            DIDEVICEINSTANCEW, DIDFT_ANYINSTANCE, DIDFT_AXIS, DIDFT_BUTTON, DIDFT_POV,
+            DIDF_ABSAXIS, DIEB_NOTRIGGER, DIEDFL_ATTACHEDONLY, DIEFFECT, DIEFF_CARTESIAN,
+            DIEFF_OBJECTOFFSETS, DIENUM_CONTINUE, DIEP_START, DIEP_TYPESPECIFICPARAMS, DIJOYSTATE2,
+            DIOBJECTDATAFORMAT, DISCL_BACKGROUND, DISCL_EXCLUSIVE, GUID_POV,
+        },
         windows::Win32::System::LibraryLoader::GetModuleHandleW,
-        windows::Win32::UI::Input::XboxController::*,
+        windows::Win32::UI::Input::XboxController::{
+            XInputGetState, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_BACK,
+            XINPUT_GAMEPAD_BUTTON_FLAGS, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT,
+            XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER,
+            XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_RIGHT_THUMB,
+            XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE,
+        },
     },
     std::mem::size_of,
 };
@@ -100,7 +117,7 @@ impl WindowsGameInput {
             let mut di_out: Option<IDirectInput8W> = None;
             // DIRECTINPUT_VERSION is 0x0800
             match DirectInput8Create(
-                hinstance,
+                hinstance.into(),
                 0x0800,
                 &IDirectInput8W::IID,
                 &mut di_out as *mut _ as *mut _,
@@ -166,10 +183,7 @@ impl WindowsGameInput {
                         let x_state = state.Gamepad;
 
                         // Buttons
-                        let z =
-                            windows::Win32::UI::Input::XboxController::XINPUT_GAMEPAD_BUTTON_FLAGS(
-                                0,
-                            );
+                        let z = XINPUT_GAMEPAD_BUTTON_FLAGS(0);
                         gp_state.dpad_up = if (x_state.wButtons & XINPUT_GAMEPAD_DPAD_UP) != z {
                             1.0
                         } else {
@@ -316,7 +330,7 @@ impl WindowsGameInput {
                         ctx.found_devices.push((instance.guidInstance, name));
                     }
 
-                    BOOL(1) // DIENUM_CONTINUE
+                    BOOL(DIENUM_CONTINUE as i32)
                 }
 
                 // Enumerate attached devices (Throttle this to every 200 polls ~ 3 seconds at 60fps)
@@ -400,7 +414,7 @@ impl WindowsGameInput {
                                             let mut effect: Option<IDirectInputEffect> = None;
 
                                             // Only try if we have a valid window handle, otherwise FFB creation might fail or be invalid
-                                            if hwnd.0 != 0 {
+                                            if hwnd.0 != std::ptr::null_mut() {
                                                 let mut axes: [u32; 1] = [0]; // Offset 0 is X axis
                                                 let mut directions: [i32; 1] = [0];
                                                 let mut cf_params =

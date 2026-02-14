@@ -8,7 +8,7 @@ use {
         makepad_math::*,
         os::windows::{
             droptarget::*,
-            win32_app::{encode_wide, with_win32_app, Win32App, FALSE},
+            win32_app::{encode_wide, with_win32_app, Win32App},
             win32_event::*,
         },
         window::WindowId,
@@ -160,9 +160,10 @@ impl Win32Window {
                 CW_USEDEFAULT,
                 None,
                 None,
-                GetModuleHandleW(None).unwrap(),
+                Some(GetModuleHandleW(None).unwrap().into()),
                 None,
             )
+            .unwrap()
         };
 
         // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
@@ -381,7 +382,7 @@ impl Win32Window {
                 let modifiers = Self::get_key_modifiers();
                 let key_code = Self::virtual_key_to_key_code(wparam);
                 if modifiers.alt && key_code == KeyCode::F4 {
-                    PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
+                    PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
                 }
                 if modifiers.control || modifiers.logo {
                     match key_code {
@@ -634,7 +635,7 @@ impl Win32Window {
             GlobalUnlock(h_clipboard_data).unwrap();
             SetClipboardData(
                 CF_UNICODETEXT.0 as u32,
-                std::mem::transmute::<_, HANDLE>(h_clipboard_data),
+                Some(std::mem::transmute::<_, HANDLE>(h_clipboard_data)),
             )
             .unwrap();
             CloseClipboard().unwrap();
@@ -670,14 +671,14 @@ impl Win32Window {
     pub fn restore(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_RESTORE);
-            PostMessageW(self.hwnd, WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
+            PostMessageW(Some(self.hwnd), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
 
     pub fn maximize(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_MAXIMIZE);
-            PostMessageW(self.hwnd, WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
+            PostMessageW(Some(self.hwnd), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
 
@@ -702,11 +703,20 @@ impl Win32Window {
     pub fn set_topmost(&self, topmost: bool) {
         unsafe {
             if topmost {
-                SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE).unwrap();
+                SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE,
+                )
+                .unwrap();
             } else {
                 SetWindowPos(
                     self.hwnd,
-                    HWND_NOTOPMOST,
+                    Some(HWND_NOTOPMOST),
                     0,
                     0,
                     0,
@@ -832,7 +842,7 @@ impl Win32Window {
                 (pos.y * dpi) as i32,
                 window_rect.right - window_rect.left,
                 window_rect.bottom - window_rect.top,
-                FALSE,
+                false,
             )
             .unwrap();
         }
@@ -854,7 +864,7 @@ impl Win32Window {
                 window_rect.top,
                 (size.x * dpi) as i32,
                 (size.y * dpi) as i32,
-                FALSE,
+                false,
             )
             .unwrap();
         }
@@ -887,7 +897,7 @@ impl Win32Window {
                 (size.y * dpi) as i32
                     + ((window_rect.bottom - window_rect.top)
                         - (client_rect.bottom - client_rect.top)),
-                FALSE,
+                false,
             )
             .unwrap();
         }
