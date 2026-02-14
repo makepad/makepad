@@ -296,18 +296,20 @@ impl Cx {
                     //if allow_rendering {
 
                     // check if GPU is ready to flip frames
-                    for window in &mut stdin_windows {
-                        if let Some(presentable_draw) = window.new_frame_being_rendered {
-                            while !d3d11_cx.is_gpu_done() {
-                                std::thread::sleep(std::time::Duration::from_millis(3));
+                    let has_pending_draws = stdin_windows
+                        .iter()
+                        .any(|window| window.new_frame_being_rendered.is_some());
+                    if has_pending_draws && d3d11_cx.is_gpu_done() {
+                        for window in &mut stdin_windows {
+                            if let Some(presentable_draw) = window.new_frame_being_rendered.take() {
+                                let _ = io::stdout().write_all(
+                                    StdinToHost::DrawCompleteAndFlip(presentable_draw)
+                                        .to_json()
+                                        .as_bytes(),
+                                );
                             }
-                            let _ = io::stdout().write_all(
-                                StdinToHost::DrawCompleteAndFlip(presentable_draw)
-                                    .to_json()
-                                    .as_bytes(),
-                            );
-                            window.new_frame_being_rendered = None;
                         }
+                        let _ = io::stdout().flush();
                     }
                     //}
 
