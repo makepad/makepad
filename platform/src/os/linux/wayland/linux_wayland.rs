@@ -16,7 +16,10 @@ use crate::wayland::xkb_sys;
 use crate::x11::xlib_event::XlibEvent;
 use crate::WindowId;
 use crate::{
-    egl_sys, Area, Cx, CxDrawPassParent, CxOsOp, Event, KeyModifiers, MouseMoveEvent, SignalToUI,
+    cx::{LinuxWindowParams, OsType},
+    egl_sys,
+    gpu_info::GpuPerformance,
+    Area, Cx, CxDrawPassParent, CxOsOp, Event, KeyModifiers, MouseMoveEvent, SignalToUI,
     WindowClosedEvent, WindowGeomChangeEvent,
 };
 use wayland_client::protocol::{wl_keyboard, wl_pointer};
@@ -34,6 +37,12 @@ pub(crate) struct WaylandCx {
 
 impl WaylandCx {
     pub fn event_loop_impl(cx: Rc<RefCell<Cx>>) {
+        cx.borrow_mut().self_ref = Some(cx.clone());
+        cx.borrow_mut().os_type = OsType::LinuxWindow(LinuxWindowParams {
+            custom_window_chrome: true,
+        });
+        cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
+
         let wayland_cx = Rc::new(RefCell::new(WaylandCx {
             cx: cx.clone(),
             qhandle: None,
@@ -326,11 +335,29 @@ impl WaylandCx {
                     }
                 }
                 CxOsOp::Quit => ret = EventFlow::Exit,
-                CxOsOp::MinimizeWindow(window_id) => {}
+                CxOsOp::MinimizeWindow(window_id) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_minimized();
+                    }
+                }
                 CxOsOp::Deminiaturize(_window_id) => todo!(),
                 CxOsOp::HideWindow(_window_id) => todo!(),
-                CxOsOp::MaximizeWindow(window_id) => {}
-                CxOsOp::RestoreWindow(window_id) => {}
+                CxOsOp::MaximizeWindow(window_id) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_maximized();
+                    }
+                }
+                CxOsOp::FullscreenWindow(window_id) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_fullscreen(None);
+                    }
+                }
+                CxOsOp::RestoreWindow(window_id) | CxOsOp::NormalizeWindow(window_id) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.unset_maximized();
+                        window.toplevel.unset_fullscreen();
+                    }
+                }
                 CxOsOp::ResizeWindow(window_id, size) => {}
                 CxOsOp::RepositionWindow(window_id, size) => {}
                 CxOsOp::ShowClipboardActions { .. } => {}
@@ -441,8 +468,6 @@ impl WaylandCx {
                             pix_width,
                             pix_height,
                         );
-                        window.base_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-                        window.base_surface.commit();
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {
