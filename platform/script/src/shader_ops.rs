@@ -201,11 +201,12 @@ impl ShaderFnCompiler {
                 };
 
                 let mut s = self.stack.new_string();
-                if shadow > 0 {
-                    write!(s, "_s{}{}", shadow, id).ok();
+                let var_name = if matches!(var, ShaderScopeItem::Param { .. }) {
+                    output.backend.map_param_name(id, shadow)
                 } else {
-                    write!(s, "{}", id).ok();
-                }
+                    output.backend.map_local_name(id, shadow)
+                };
+                write!(s, "{}", var_name).ok();
                 write!(s, " {} {}", op, s2).ok();
                 self.stack.push(
                     self.trap.pass(),
@@ -293,7 +294,8 @@ impl ShaderFnCompiler {
                     }
 
                     let mut s = self.stack.new_string();
-                    write!(s, "{0}.{1} {2} {3}", instance_s, field_id, op, s2).ok();
+                    let field_name = output.backend.map_field_name(field_id);
+                    write!(s, "{0}.{1} {2} {3}", instance_s, field_name, op, s2).ok();
                     self.stack.push(
                         self.trap.pass(),
                         ShaderType::Pod(vm.bx.code.builtins.pod.pod_void),
@@ -344,7 +346,8 @@ impl ShaderFnCompiler {
                     }
 
                     let mut s = self.stack.new_string();
-                    write!(s, "{0}->{1} {2} {3}", instance_s, field_id, op, s2).ok();
+                    let field_name = output.backend.map_field_name(field_id);
+                    write!(s, "{0}->{1} {2} {3}", instance_s, field_name, op, s2).ok();
                     self.stack.push(
                         self.trap.pass(),
                         ShaderType::Pod(vm.bx.code.builtins.pod.pod_void),

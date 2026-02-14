@@ -519,14 +519,15 @@ impl ShaderFnCompiler {
                     );
                 }
                 self.shader_scope.enter_scope();
-                self.shader_scope.define_var(id, ty);
+                let shadow = self.shader_scope.define_var(id, ty);
+                let loop_var_name = backend.map_local_name(id, shadow);
                 let ty_name = backend.map_pod_name(id!(u32));
                 match backend {
                     ShaderBackend::Wgsl => {
                         write!(
                             self.out,
                             "for(var {0}: {3} = {1}; {0} < {2}; {0}++){{\n",
-                            id, start, end, ty_name
+                            loop_var_name, start, end, ty_name
                         )
                         .ok();
                     }
@@ -534,7 +535,7 @@ impl ShaderFnCompiler {
                         write!(
                             self.out,
                             "for({3} {0} = {1}; {0} < {2}; {0}++){{\n",
-                            id, start, end, ty_name
+                            loop_var_name, start, end, ty_name
                         )
                         .ok();
                     }
