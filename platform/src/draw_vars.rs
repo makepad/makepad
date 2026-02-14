@@ -444,6 +444,7 @@ impl DrawVars {
                         &mut self.dyn_instances,
                         base_offset + input.offset,
                         input.slots,
+                        input.attr_format,
                     );
                 }
             }
@@ -475,6 +476,7 @@ impl DrawVars {
                         &mut self.dyn_uniforms,
                         input.offset,
                         input.slots,
+                        DrawShaderAttrFormat::Float,
                     );
                 }
             }
@@ -519,10 +521,15 @@ impl DrawVars {
         output: &mut [f32],
         offset: usize,
         slots: usize,
+        attr_format: DrawShaderAttrFormat,
     ) {
         // Try f64 first (most common for abstract numbers)
         if let Some(v) = value.as_f64() {
-            let v = v as f32;
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v as f32,
+                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            };
             for i in 0..slots {
                 output[offset + i] = v;
             }
@@ -531,7 +538,11 @@ impl DrawVars {
 
         // Try u40 (common integer format in script)
         if let Some(v) = value.as_u40() {
-            let v = v as f32;
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v as f32,
+                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            };
             for i in 0..slots {
                 output[offset + i] = v;
             }
@@ -540,6 +551,11 @@ impl DrawVars {
 
         // Try f32
         if let Some(v) = value.as_f32() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v,
+                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            };
             for i in 0..slots {
                 output[offset + i] = v;
             }
@@ -548,6 +564,11 @@ impl DrawVars {
 
         // Try f16
         if let Some(v) = value.as_f16() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v,
+                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            };
             for i in 0..slots {
                 output[offset + i] = v;
             }
@@ -556,14 +577,22 @@ impl DrawVars {
 
         // Try u32/i32
         if let Some(v) = value.as_u32() {
-            let v = v as f32;
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v as f32,
+                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => f32::from_bits(v),
+            };
             for i in 0..slots {
                 output[offset + i] = v;
             }
             return;
         }
         if let Some(v) = value.as_i32() {
-            let v = v as f32;
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v as f32,
+                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                    f32::from_bits(v as u32)
+                }
+            };
             for i in 0..slots {
                 output[offset + i] = v;
             }
@@ -572,7 +601,18 @@ impl DrawVars {
 
         // Try bool
         if let Some(v) = value.as_bool() {
-            let v = if v { 1.0 } else { 0.0 };
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => {
+                    if v {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                    f32::from_bits(if v { 1 } else { 0 })
+                }
+            };
             for i in 0..slots {
                 output[offset + i] = v;
             }
@@ -597,19 +637,96 @@ impl DrawVars {
             return;
         }
 
+        // Try repr(u32) enum variant objects used by script APIs.
+        // These carry the numeric payload in `_repr_u32_enum_value`.
+        if let Some(obj) = value.as_object() {
+            let enum_value = heap.value(obj, live_id!(_repr_u32_enum_value).into(), NoTrap);
+            if let Some(v) = enum_value.as_f64() {
+                let v = match attr_format {
+                    DrawShaderAttrFormat::Float => v as f32,
+                    DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                    DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+                };
+                for i in 0..slots {
+                    output[offset + i] = v;
+                }
+                return;
+            }
+            if let Some(v) = enum_value.as_u32() {
+                let v = match attr_format {
+                    DrawShaderAttrFormat::Float => v as f32,
+                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => f32::from_bits(v),
+                };
+                for i in 0..slots {
+                    output[offset + i] = v;
+                }
+                return;
+            }
+        }
+
         // Try pod (Vec2f, Vec3f, Vec4f, etc.)
         if let Some(pod) = value.as_pod() {
             let (pod_type, data) = heap.pod_data(pod);
 
             match &pod_type.ty {
                 ScriptPodTy::F32 => {
-                    let v = f32::from_bits(data[0]);
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => f32::from_bits(data[0]),
+                        DrawShaderAttrFormat::UInt => f32::from_bits(f32::from_bits(data[0]) as u32),
+                        DrawShaderAttrFormat::SInt => {
+                            f32::from_bits(f32::from_bits(data[0]) as i32 as u32)
+                        }
+                    };
                     for i in 0..slots {
                         output[offset + i] = v;
                     }
                 }
                 ScriptPodTy::F16 => {
                     let v = pod_heap::f16_to_f32(data[0] as u16);
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => v,
+                        DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                        DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+                    };
+                    for i in 0..slots {
+                        output[offset + i] = v;
+                    }
+                }
+                ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => {
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => data[0] as f32,
+                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                            f32::from_bits(data[0])
+                        }
+                    };
+                    for i in 0..slots {
+                        output[offset + i] = v;
+                    }
+                }
+                ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => {
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => data[0] as i32 as f32,
+                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                            f32::from_bits(data[0])
+                        }
+                    };
+                    for i in 0..slots {
+                        output[offset + i] = v;
+                    }
+                }
+                ScriptPodTy::Bool => {
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => {
+                            if data[0] != 0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                            f32::from_bits(if data[0] != 0 { 1 } else { 0 })
+                        }
+                    };
                     for i in 0..slots {
                         output[offset + i] = v;
                     }
@@ -634,17 +751,38 @@ impl DrawVars {
                         }
                         ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u => {
                             for i in 0..dims.min(slots) {
-                                output[offset + i] = data[i] as f32;
+                                output[offset + i] = match attr_format {
+                                    DrawShaderAttrFormat::Float => data[i] as f32,
+                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                        f32::from_bits(data[i])
+                                    }
+                                };
                             }
                         }
                         ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i => {
                             for i in 0..dims.min(slots) {
-                                output[offset + i] = data[i] as i32 as f32;
+                                output[offset + i] = match attr_format {
+                                    DrawShaderAttrFormat::Float => data[i] as i32 as f32,
+                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                        f32::from_bits(data[i])
+                                    }
+                                };
                             }
                         }
                         ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b => {
                             for i in 0..dims.min(slots) {
-                                output[offset + i] = if data[i] != 0 { 1.0 } else { 0.0 };
+                                output[offset + i] = match attr_format {
+                                    DrawShaderAttrFormat::Float => {
+                                        if data[i] != 0 {
+                                            1.0
+                                        } else {
+                                            0.0
+                                        }
+                                    }
+                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                        f32::from_bits(if data[i] != 0 { 1 } else { 0 })
+                                    }
+                                };
                             }
                         }
                     }

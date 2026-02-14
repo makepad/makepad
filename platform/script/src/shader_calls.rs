@@ -222,9 +222,16 @@ impl ShaderFnCompiler {
                 ShaderBackend::Wgsl => {
                     write!(out, "{}(", name).ok();
                 }
-                ShaderBackend::Metal | ShaderBackend::Hlsl => {
+                ShaderBackend::Metal => {
                     if let ScriptPodTy::Struct { .. } = &pod_ty_data.ty {
                         write!(out, "{{").ok();
+                    } else {
+                        write!(out, "{}(", name).ok();
+                    }
+                }
+                ShaderBackend::Hlsl => {
+                    if let ScriptPodTy::Struct { .. } = &pod_ty_data.ty {
+                        write!(out, "consfn_{}(", name).ok();
                     } else {
                         write!(out, "{}(", name).ok();
                     }
@@ -318,6 +325,35 @@ impl ShaderFnCompiler {
                 }
             } else {
                 // Positional args
+                let pod_name = vm
+                    .bx
+                    .heap
+                    .pod_type_name(pod_ty)
+                    .map(|name| output.backend.map_pod_name(name));
+                let hlsl_splat_len = if matches!(output.backend, ShaderBackend::Hlsl) && args.len() == 1
+                {
+                    match pod_name {
+                        Some(id!(float2))
+                        | Some(id!(half2))
+                        | Some(id!(uint2))
+                        | Some(id!(int2))
+                        | Some(id!(bool2)) => Some(2usize),
+                        Some(id!(float3))
+                        | Some(id!(half3))
+                        | Some(id!(uint3))
+                        | Some(id!(int3))
+                        | Some(id!(bool3)) => Some(3usize),
+                        Some(id!(float4))
+                        | Some(id!(half4))
+                        | Some(id!(uint4))
+                        | Some(id!(int4))
+                        | Some(id!(bool4)) => Some(4usize),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -365,6 +401,18 @@ impl ShaderFnCompiler {
                         | ShaderType::PodType(_)
                         | ShaderType::Texture(_) => {}
                     }
+
+                    if i == 0 {
+                        if let Some(n) = hlsl_splat_len {
+                            for j in 0..n {
+                                if j > 0 {
+                                    out.push_str(", ");
+                                }
+                                out.push_str(&arg.s);
+                            }
+                            break;
+                        }
+                    }
                     out.push_str(&arg.s);
                 }
                 vm.bx
@@ -381,12 +429,15 @@ impl ShaderFnCompiler {
             ShaderBackend::Wgsl => {
                 out.push_str(")");
             }
-            ShaderBackend::Metal | ShaderBackend::Hlsl => {
+            ShaderBackend::Metal => {
                 if let ScriptPodTy::Struct { .. } = &pod_ty_data.ty {
                     out.push_str("}");
                 } else {
                     out.push_str(")");
                 }
+            }
+            ShaderBackend::Hlsl => {
+                out.push_str(")");
             }
             ShaderBackend::Glsl => {
                 out.push_str(")");
@@ -806,6 +857,29 @@ impl ShaderFnCompiler {
         let mut concrete_args = Vec::new();
         let mut out = self.stack.new_string();
         let mapped_name = output.backend.map_builtin_name(name);
+        let hlsl_ctor_splat_len = if matches!(output.backend, ShaderBackend::Hlsl) && args.len() == 1
+        {
+            match mapped_name {
+                id!(float2)
+                | id!(half2)
+                | id!(uint2)
+                | id!(int2)
+                | id!(bool2) => Some(2usize),
+                id!(float3)
+                | id!(half3)
+                | id!(uint3)
+                | id!(int3)
+                | id!(bool3) => Some(3usize),
+                id!(float4)
+                | id!(half4)
+                | id!(uint4)
+                | id!(int4)
+                | id!(bool4) => Some(4usize),
+                _ => None,
+            }
+        } else {
+            None
+        };
         write!(out, "{}(", mapped_name).ok();
 
         for (i, (ty, s)) in args.into_iter().enumerate() {
@@ -813,6 +887,7 @@ impl ShaderFnCompiler {
                 out.push_str(", ");
             }
 
+            let mut formatted = s.clone();
             match &ty {
                 ShaderType::AbstractInt | ShaderType::AbstractFloat => {
                     if has_float {
@@ -820,25 +895,33 @@ impl ShaderFnCompiler {
                         concrete_args.push(builtins.pod_f32);
                         // Check if s is a simple integer that needs .0 suffix
                         if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
-                            out.push_str(&s);
-                            out.push_str(".0");
-                        } else {
-                            out.push_str(&s);
+                            formatted.push_str(".0");
                         }
                     } else {
                         concrete_args.push(ty.make_concrete(builtins).unwrap_or(builtins.pod_void));
-                        out.push_str(&s);
                     }
                 }
                 ShaderType::Pod(pt) => {
                     concrete_args.push(*pt);
-                    out.push_str(&s);
                 }
                 _ => {
                     concrete_args.push(ty.make_concrete(builtins).unwrap_or(builtins.pod_void));
-                    out.push_str(&s);
                 }
             }
+
+            if i == 0 {
+                if let Some(n) = hlsl_ctor_splat_len {
+                    for j in 0..n {
+                        if j > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(&formatted);
+                    }
+                    self.stack.free_string(s);
+                    break;
+                }
+            }
+            out.push_str(&formatted);
             self.stack.free_string(s);
         }
 
@@ -924,8 +1007,13 @@ impl ShaderFnCompiler {
                             .ok();
                         }
                         ShaderBackend::Hlsl => {
-                            // HLSL: texture.Sample(sampler, coord)
-                            write!(s, "{}.Sample(_s{}, {})", texture_expr, sampler_idx, coord).ok();
+                            // Use explicit LOD in HLSL so sampling is valid inside dynamic loops.
+                            write!(
+                                s,
+                                "{}.SampleLevel(_s{}, {}, 0.0)",
+                                texture_expr, sampler_idx, coord
+                            )
+                            .ok();
                         }
                         ShaderBackend::Glsl => {
                             // GLSL 4.0+: texture(sampler2D(texture, sampler), coord)

@@ -1,9 +1,155 @@
-use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
+use crate::pod::ScriptPodTy;
+use crate::shader::{SamplerAddress, SamplerFilter, ShaderIoKind, ShaderOutput, TextureType};
 use crate::vm::ScriptVm;
 use makepad_live_id::{id, LiveId};
 use std::fmt::Write;
 
 impl ShaderOutput {
+    fn hlsl_is_integer_like_input(vm: &ScriptVm, ty: crate::ScriptPodType) -> bool {
+        let pod_ty = vm.bx.heap.pod_type_ref(ty);
+        match pod_ty.ty {
+            ScriptPodTy::U32
+            | ScriptPodTy::I32
+            | ScriptPodTy::Bool
+            | ScriptPodTy::AtomicU32
+            | ScriptPodTy::AtomicI32 => true,
+            ScriptPodTy::Vec(vec_ty) => matches!(
+                vec_ty,
+                crate::pod::ScriptPodVec::Vec2u
+                    | crate::pod::ScriptPodVec::Vec3u
+                    | crate::pod::ScriptPodVec::Vec4u
+                    | crate::pod::ScriptPodVec::Vec2i
+                    | crate::pod::ScriptPodVec::Vec3i
+                    | crate::pod::ScriptPodVec::Vec4i
+                    | crate::pod::ScriptPodVec::Vec2b
+                    | crate::pod::ScriptPodVec::Vec3b
+                    | crate::pod::ScriptPodVec::Vec4b
+            ),
+            _ => false,
+        }
+    }
+
+    fn hlsl_slot_chunks(slots: usize) -> Vec<usize> {
+        match slots {
+            0 => Vec::new(),
+            // Keep matrix layouts aligned with D3D input layout chunking.
+            9 => vec![3, 3, 3],
+            16 => vec![4, 4, 4, 4],
+            _ => {
+                let mut rem = slots;
+                let mut chunks = Vec::new();
+                while rem > 0 {
+                    let chunk = rem.min(4);
+                    chunks.push(chunk);
+                    rem -= chunk;
+                }
+                chunks
+            }
+        }
+    }
+
+    fn hlsl_chunk_ty(slots: usize) -> &'static str {
+        match slots {
+            1 => "float",
+            2 => "float2",
+            3 => "float3",
+            4 => "float4",
+            _ => "float4",
+        }
+    }
+
+    fn hlsl_input_needs_chunks(vm: &ScriptVm, ty: crate::ScriptPodType) -> bool {
+        let pod_ty = vm.bx.heap.pod_type_ref(ty);
+        let slots = pod_ty.ty.slots();
+        slots > 4 || matches!(pod_ty.ty, ScriptPodTy::Struct { .. })
+    }
+
+    fn hlsl_reconstruct_from_scalars(
+        &self,
+        vm: &ScriptVm,
+        ty: &crate::pod::ScriptPodTypeInline,
+        scalars: &[String],
+        scalar_idx: &mut usize,
+    ) -> String {
+        match &ty.data.ty {
+            ScriptPodTy::Struct { fields, .. } => {
+                let struct_name = if let Some(name) = vm.bx.heap.pod_type_name(ty.self_ref) {
+                    format!("{}", self.backend.map_pod_name(name))
+                } else {
+                    format!("S{}", ty.self_ref.index)
+                };
+                let mut field_exprs = Vec::new();
+                for field in fields {
+                    field_exprs.push(self.hlsl_reconstruct_from_scalars(
+                        vm,
+                        &field.ty,
+                        scalars,
+                        scalar_idx,
+                    ));
+                }
+                format!("consfn_{}({})", struct_name, field_exprs.join(", "))
+            }
+            _ => {
+                let slot_count = ty.data.ty.slots();
+                if slot_count <= 1 {
+                    let v = scalars
+                        .get(*scalar_idx)
+                        .cloned()
+                        .unwrap_or_else(|| "0.0".to_string());
+                    *scalar_idx += 1;
+                    return v;
+                }
+                let start = *scalar_idx;
+                let end = (start + slot_count).min(scalars.len());
+                *scalar_idx = end;
+                let args = scalars[start..end].join(", ");
+                let mut ty_name = String::new();
+                self.backend.pod_type_name(ty, &mut ty_name);
+                format!("{}({})", ty_name, args)
+            }
+        }
+    }
+
+    fn hlsl_reconstruct_input_value(
+        &self,
+        vm: &ScriptVm,
+        ty: crate::ScriptPodType,
+        input_prefix: &str,
+        io_name: LiveId,
+    ) -> String {
+        let pod_ty = vm.bx.heap.pod_type_ref(ty);
+        let slots = pod_ty.ty.slots();
+
+        if !Self::hlsl_input_needs_chunks(vm, ty) {
+            return format!("input.{}_{}", input_prefix, io_name);
+        }
+
+        let mut args: Vec<String> = Vec::new();
+        for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate() {
+            let base = format!("input.{}_{}_{}", input_prefix, io_name, chunk_idx);
+            if chunk_slots == 1 {
+                args.push(base);
+            } else {
+                for comp in 0..chunk_slots {
+                    let swiz = match comp {
+                        0 => "x",
+                        1 => "y",
+                        2 => "z",
+                        3 => "w",
+                        _ => "x",
+                    };
+                    args.push(format!("{}.{}", base, swiz));
+                }
+            }
+        }
+        let inline = crate::pod::ScriptPodTypeInline {
+            self_ref: ty,
+            data: pod_ty.clone(),
+        };
+        let mut scalar_idx = 0usize;
+        self.hlsl_reconstruct_from_scalars(vm, &inline, &args, &mut scalar_idx)
+    }
+
     /// Emit HLSL helper functions that are needed by the shader
     pub fn hlsl_create_helpers(&self, _vm: &ScriptVm, out: &mut String) {
         if self.hlsl_needs_tex_size {
@@ -50,6 +196,39 @@ impl ShaderOutput {
         writeln!(out, "}};").ok();
     }
 
+    pub fn hlsl_create_scope_uniform_cbuffer(&self, vm: &ScriptVm, out: &mut String) {
+        let has_scope_uniforms = self
+            .io
+            .iter()
+            .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
+        if !has_scope_uniforms {
+            return;
+        }
+
+        let scope_uniform_buffer_idx = self
+            .io
+            .iter()
+            .filter_map(|io| io.buffer_index)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(3);
+
+        writeln!(
+            out,
+            "cbuffer IoScopeUniform : register(b{}) {{",
+            scope_uniform_buffer_idx
+        )
+        .ok();
+        for io in &self.io {
+            if let ShaderIoKind::ScopeUniform = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                writeln!(out, " su_{};", io.name).ok();
+            }
+        }
+        writeln!(out, "}};").ok();
+    }
+
     pub fn hlsl_create_uniform_buffer_cbuffers(&self, vm: &ScriptVm, out: &mut String) {
         // Create cbuffer declarations for each uniform buffer using pre-assigned buffer indices
         for io in &self.io {
@@ -66,18 +245,29 @@ impl ShaderOutput {
 
     pub fn hlsl_create_varying_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoVarying {{").ok();
+        let mut semantic_idx = 0usize;
         for io in &self.io {
             match io.kind {
-                ShaderIoKind::Varying => {
+                ShaderIoKind::DynInstance | ShaderIoKind::RustInstance | ShaderIoKind::Varying => {
                     write!(out, "    ").ok();
+                    if Self::hlsl_is_integer_like_input(vm, io.ty) {
+                        write!(out, "nointerpolation ").ok();
+                    }
                     self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    writeln!(out, " {};", io.name).ok();
+                    writeln!(
+                        out,
+                        " {} : VARY{};",
+                        io.name,
+                        index_to_char(semantic_idx)
+                    )
+                    .ok();
+                    semantic_idx += 1;
                 }
                 _ => (),
             }
         }
+        writeln!(out, "    nointerpolation uint _iid : TEXCOORD0;").ok();
         writeln!(out, "    float4 _position : SV_POSITION;").ok();
-        writeln!(out, "    uint _iid : TEXCOORD0;").ok();
         writeln!(out, "}};").ok();
     }
 
@@ -100,15 +290,33 @@ impl ShaderOutput {
         let mut semantic_idx = 0;
         for io in &self.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
-                write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(
-                    out,
-                    " vb_{} : GEOM{};",
-                    io.name,
-                    index_to_char(semantic_idx)
-                )
-                .ok();
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                let slots = pod_ty.ty.slots();
+                if Self::hlsl_input_needs_chunks(vm, io.ty) {
+                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    {
+                        writeln!(
+                            out,
+                            "    {} vb_{}_{} : GEOM{}{};",
+                            Self::hlsl_chunk_ty(chunk_slots),
+                            io.name,
+                            chunk_idx,
+                            index_to_char(semantic_idx),
+                            chunk_idx
+                        )
+                        .ok();
+                    }
+                } else {
+                    write!(out, "    ").ok();
+                    self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                    writeln!(
+                        out,
+                        " vb_{} : GEOM{};",
+                        io.name,
+                        index_to_char(semantic_idx)
+                    )
+                    .ok();
+                }
                 semantic_idx += 1;
             }
         }
@@ -118,18 +326,54 @@ impl ShaderOutput {
         // Dyn instance fields first
         for io in &self.io {
             if let ShaderIoKind::DynInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " i_{} : INST{};", io.name, index_to_char(semantic_idx)).ok();
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                let slots = pod_ty.ty.slots();
+                if Self::hlsl_input_needs_chunks(vm, io.ty) {
+                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    {
+                        writeln!(
+                            out,
+                            "    {} i_{}_{} : INST{}{};",
+                            Self::hlsl_chunk_ty(chunk_slots),
+                            io.name,
+                            chunk_idx,
+                            index_to_char(semantic_idx),
+                            chunk_idx
+                        )
+                        .ok();
+                    }
+                } else {
+                    write!(out, "    ").ok();
+                    self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                    writeln!(out, " i_{} : INST{};", io.name, index_to_char(semantic_idx)).ok();
+                }
                 semantic_idx += 1;
             }
         }
         // Rust instance fields
         for io in &self.io {
             if let ShaderIoKind::RustInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " i_{} : INST{};", io.name, index_to_char(semantic_idx)).ok();
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                let slots = pod_ty.ty.slots();
+                if Self::hlsl_input_needs_chunks(vm, io.ty) {
+                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    {
+                        writeln!(
+                            out,
+                            "    {} i_{}_{} : INST{}{};",
+                            Self::hlsl_chunk_ty(chunk_slots),
+                            io.name,
+                            chunk_idx,
+                            index_to_char(semantic_idx),
+                            chunk_idx
+                        )
+                        .ok();
+                    }
+                } else {
+                    write!(out, "    ").ok();
+                    self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                    writeln!(out, " i_{} : INST{};", io.name, index_to_char(semantic_idx)).ok();
+                }
                 semantic_idx += 1;
             }
         }
@@ -139,10 +383,12 @@ impl ShaderOutput {
         writeln!(out, "}};").ok();
     }
 
-    pub fn hlsl_create_io_structs(&self, _vm: &ScriptVm, out: &mut String) {
+    pub fn hlsl_create_io_structs(&self, vm: &ScriptVm, out: &mut String) {
         // IoV for vertex shader
         writeln!(out, "struct IoV {{").ok();
         writeln!(out, "    IoVarying v;").ok();
+        writeln!(out, "    IoVertexBuffer vb;").ok();
+        writeln!(out, "    IoInstance i;").ok();
         writeln!(out, "    uint vid;").ok();
         writeln!(out, "    uint iid;").ok();
         writeln!(out, "}};").ok();
@@ -151,12 +397,22 @@ impl ShaderOutput {
         // IoF for fragment shader
         writeln!(out, "struct IoF {{").ok();
         writeln!(out, "    IoVarying v;").ok();
+        for io in &self.io {
+            if let ShaderIoKind::FragmentOutput(index) = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                writeln!(out, " fb{};", index).ok();
+            }
+        }
         writeln!(out, "}};").ok();
         writeln!(out).ok();
 
         // Io for passing to shader functions
         writeln!(out, "struct Io {{").ok();
         writeln!(out, "}};").ok();
+        writeln!(out, "static Io _mp_io;").ok();
+        writeln!(out, "static IoV _mp_iov;").ok();
+        writeln!(out, "static IoF _mp_iof;").ok();
     }
 
     pub fn hlsl_create_fragment_output_struct(&self, vm: &ScriptVm, out: &mut String) {
@@ -199,20 +455,53 @@ impl ShaderOutput {
                 _ => (),
             }
         }
+
+        for (idx, sampler) in self.samplers.iter().enumerate() {
+            let filter = match sampler.filter {
+                SamplerFilter::Nearest => "MIN_MAG_MIP_POINT",
+                SamplerFilter::Linear => "MIN_MAG_MIP_LINEAR",
+            };
+            let address = match sampler.address {
+                SamplerAddress::Repeat => "Wrap",
+                SamplerAddress::ClampToEdge => "Clamp",
+                SamplerAddress::ClampToZero => "Border",
+                SamplerAddress::MirroredRepeat => "Mirror",
+            };
+            writeln!(
+                out,
+                "SamplerState _s{} {{ Filter = {}; AddressU = {}; AddressV = {}; AddressW = {}; }};",
+                idx, filter, address, address, address
+            )
+            .ok();
+        }
     }
 
-    pub fn hlsl_create_vertex_fn(&self, _vm: &ScriptVm, out: &mut String) {
+    pub fn hlsl_create_vertex_fn(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "IoVarying vertex_main(VertexInput input) {{").ok();
-        writeln!(out, "    Io _io;").ok();
-        writeln!(out, "    IoV _iov;").ok();
-        writeln!(out, "    _iov.vid = input.vid;").ok();
-        writeln!(out, "    _iov.iid = input.iid;").ok();
+        writeln!(out, "    _mp_iov.vid = input.vid;").ok();
+        writeln!(out, "    _mp_iov.iid = input.iid;").ok();
+        writeln!(out, "    _mp_iov.v._iid = input.iid;").ok();
         writeln!(out).ok();
 
-        // Copy vertex buffer fields to local struct
+        // Copy vertex/instance input into IoV so helper functions can access it.
         for io in &self.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
-                // Vertex buffer fields are accessed directly via input.vb_name
+                let expr = self.hlsl_reconstruct_input_value(vm, io.ty, "vb", io.name);
+                writeln!(out, "    _mp_iov.vb.{0} = {1};", io.name, expr).ok();
+            }
+        }
+        for io in &self.io {
+            if let ShaderIoKind::DynInstance = io.kind {
+                let expr = self.hlsl_reconstruct_input_value(vm, io.ty, "i", io.name);
+                writeln!(out, "    _mp_iov.i.{0} = {1};", io.name, expr).ok();
+                writeln!(out, "    _mp_iov.v.{0} = _mp_iov.i.{0};", io.name).ok();
+            }
+        }
+        for io in &self.io {
+            if let ShaderIoKind::RustInstance = io.kind {
+                let expr = self.hlsl_reconstruct_input_value(vm, io.ty, "i", io.name);
+                writeln!(out, "    _mp_iov.i.{0} = {1};", io.name, expr).ok();
+                writeln!(out, "    _mp_iov.v.{0} = _mp_iov.i.{0};", io.name).ok();
             }
         }
 
@@ -221,25 +510,29 @@ impl ShaderOutput {
             .functions
             .iter()
             .find(|f| f.name == id!(vertex))
-            .map(|f| f.ret == _vm.bx.code.builtins.pod.pod_vec4f)
+            .map(|f| f.ret == vm.bx.code.builtins.pod.pod_vec4f)
             .unwrap_or(false);
 
         if vertex_returns_vec4f {
-            writeln!(out, "    _iov.v._position = io_vertex(_io, _iov);").ok();
+            writeln!(out, "    _mp_iov.v._position = io_vertex();").ok();
         } else {
-            writeln!(out, "    io_vertex(_io, _iov);").ok();
+            writeln!(out, "    io_vertex();").ok();
         }
-        writeln!(out, "    return _iov.v;").ok();
+        writeln!(out, "    _mp_iov.v._iid = input.iid;").ok();
+        writeln!(out, "    return _mp_iov.v;").ok();
         writeln!(out, "}}").ok();
     }
 
     pub fn hlsl_create_fragment_fn(&self, _vm: &ScriptVm, out: &mut String) {
         writeln!(out, "IoFb pixel_main(IoVarying v) {{").ok();
-        writeln!(out, "    Io _io;").ok();
-        writeln!(out, "    IoF _iof;").ok();
-        writeln!(out, "    _iof.v = v;").ok();
+        writeln!(out, "    _mp_iof.v = v;").ok();
+        writeln!(out, "    io_fragment();").ok();
         writeln!(out, "    IoFb _iofb;").ok();
-        writeln!(out, "    io_fragment(_io, _iof);").ok();
+        for io in &self.io {
+            if let ShaderIoKind::FragmentOutput(index) = io.kind {
+                writeln!(out, "    _iofb.fb{0} = _mp_iof.fb{0};", index).ok();
+            }
+        }
         writeln!(out, "    return _iofb;").ok();
         writeln!(out, "}}").ok();
     }
