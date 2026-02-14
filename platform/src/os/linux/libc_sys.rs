@@ -33,6 +33,9 @@ pub const FD_SETSIZE: usize = 1024;
 pub const EPIPE: c_int = 32;
 pub const ESPIPE: c_int = 29;
 pub const O_RDWR: c_int = 2;
+pub const O_NONBLOCK: c_int = 0o4000;
+pub const F_GETFL: c_int = 3;
+pub const F_SETFL: c_int = 4;
 pub const PROT_READ: c_int = 1;
 pub const PROT_WRITE: c_int = 2;
 pub const MAP_SHARED: c_int = 1;
@@ -53,6 +56,7 @@ extern "C" {
     pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
     pub fn close(fd: c_int) -> c_int;
+    pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     pub fn free(arg1: *mut c_void);
     pub fn pipe(fds: *mut c_int) -> c_int;
     pub fn select(
@@ -72,6 +76,7 @@ extern "C" {
     ) -> *mut c_void;
     pub fn munmap(addr: *mut c_void, length: size_t) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, count: size_t) -> c_int;
+    pub fn write(fd: c_int, buf: *const c_void, count: size_t) -> c_int;
     pub fn syscall(num: c_long, ...) -> c_long;
 }
 
