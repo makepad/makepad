@@ -3,8 +3,9 @@ use crate::{
     libc_sys::{self, munmap},
     makepad_math::{dvec2, Vec2d},
     wayland::{wayland_type, xkb_sys},
-    Area, KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    TextClipboardEvent, TextInputEvent, WindowClosedEvent, WindowDragQueryEvent,
+    Area, DragEvent, DragItem, DragResponse, DropEvent, KeyEvent, KeyModifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextClipboardEvent, TextInputEvent,
+    WindowClosedEvent, WindowDragQueryEvent,
     WindowDragQueryResponse,
 };
 use std::{
@@ -14,6 +15,7 @@ use std::{
     },
     rc::Rc,
     sync::Arc,
+    sync::Mutex,
 };
 
 use wayland_client::{
@@ -72,6 +74,7 @@ pub(crate) struct WaylandState {
     pub(crate) data_offers: Vec<ClipboardOffer>,
     pending_clipboard_read: Option<PendingClipboardRead>,
     pending_paste_text_input: Option<String>,
+    pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
     pub(crate) clipboard_text: String,
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
@@ -109,6 +112,7 @@ impl WaylandState {
             data_offers: Vec::new(),
             pending_clipboard_read: None,
             pending_paste_text_input: None,
+            internal_drag_items: None,
             clipboard_text: String::new(),
             cursor_manager: None,
             cursor_shape: None,
@@ -763,6 +767,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         time: state.time_now(),
                         handled: Cell::new(Area::Empty),
                     }));
+                    if let Some(items) = state.internal_drag_items.as_ref() {
+                        state.do_callback(XlibEvent::Drag(DragEvent {
+                            modifiers: state.modifiers,
+                            handled: Arc::new(Mutex::new(false)),
+                            abs: pos,
+                            items: items.clone(),
+                            response: Arc::new(Mutex::new(DragResponse::None)),
+                        }));
+                    }
                 }
             }
             wl_pointer::Event::Button {
@@ -814,7 +827,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                     window_id,
                                     modifiers: state.modifiers,
                                     time: state.time_now(),
-                                }))
+                                }));
+                                if btn == MouseButton::PRIMARY {
+                                    if let Some(items) = state.internal_drag_items.take() {
+                                        state.do_callback(XlibEvent::Drop(DropEvent {
+                                            modifiers: state.modifiers,
+                                            handled: Arc::new(Mutex::new(false)),
+                                            abs: state.last_mouse_pos,
+                                            items,
+                                        }));
+                                        state.do_callback(XlibEvent::DragEnd);
+                                    }
+                                }
                             }
                             WEnum::Unknown(_) | WEnum::Value(_) => {}
                         }
@@ -911,6 +935,10 @@ impl WaylandState {
             self.clipboard_source = Some(source);
             self.clipboard_text = text;
         }
+    }
+
+    pub(crate) fn start_internal_drag(&mut self, items: Vec<DragItem>) {
+        self.internal_drag_items = Some(Arc::new(items));
     }
 
     fn dispatch_paste_bytes(&mut self, mut bytes: Vec<u8>) {
