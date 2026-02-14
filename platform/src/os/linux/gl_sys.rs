@@ -56,6 +56,7 @@ pub const TEXTURE0: GLenum = 0x84C0;
 pub const TEXTURE_2D: GLenum = 0x0DE1;
 pub const TRIANGLES: GLenum = 0x0004;
 pub const UNSIGNED_INT: GLenum = 0x1405;
+pub const INT: GLenum = 0x1404;
 pub const DEPTH_TEST: GLenum = 0x0B71;
 pub const LEQUAL: GLenum = 0x0203;
 pub const FUNC_ADD: GLenum = 0x8006;
@@ -133,6 +134,13 @@ pub type TglVertexAttribPointer = unsafe extern "C" fn(
     size: GLint,
     type_: GLenum,
     normalized: GLboolean,
+    stride: GLsizei,
+    pointer: *const raw::c_void,
+) -> ();
+pub type TglVertexAttribIPointer = unsafe extern "C" fn(
+    index: GLuint,
+    size: GLint,
+    type_: GLenum,
     stride: GLsizei,
     pointer: *const raw::c_void,
 ) -> ();
@@ -373,6 +381,7 @@ pub struct LibGl {
     pub glBindVertexArray: TglBindVertexArray,
     pub glBindBuffer: TglBindBuffer,
     pub glVertexAttribPointer: TglVertexAttribPointer,
+    pub glVertexAttribIPointer: TglVertexAttribIPointer,
     pub glEnableVertexAttribArray: TglEnableVertexAttribArray,
     pub glVertexAttribDivisor: TglVertexAttribDivisor,
     pub glUseProgram: TglUseProgram,
@@ -522,6 +531,12 @@ impl LibGl {
                 TglVertexAttribPointer,
                 "glVertexAttribPointer",
                 "glVertexAttribPointerARB"
+            )?,
+            glVertexAttribIPointer: load!(
+                loadfn,
+                TglVertexAttribIPointer,
+                "glVertexAttribIPointer",
+                "glVertexAttribIPointerEXT"
             )?,
             glEnableVertexAttribArray: load!(
                 loadfn,
