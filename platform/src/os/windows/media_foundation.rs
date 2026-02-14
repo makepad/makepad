@@ -6,7 +6,6 @@ use {
         video::*,
         windows::{
             core::{
-                implement,
                 AsImpl,
                 GUID,
                 HRESULT,
@@ -334,21 +333,19 @@ struct SourceReaderConfig {
     callback: Arc<Mutex<Option<VideoInputFn>>>,
 }
 
-#[implement(IMFSourceReaderCallback)]
-struct SourceReaderCallback {
+pub(crate) struct SourceReaderCallback {
     config: Mutex<Option<SourceReaderConfig>>,
     source_reader: Mutex<Option<IMFSourceReader>>,
 }
-/*
-implement_com!{
+crate::implement_com! {
     for_struct: SourceReaderCallback,
     identity: IMFSourceReaderCallback,
-    wrapper_struct: SourceReaderCallback_Com,
+    wrapper_struct: SourceReaderCallback_Impl,
     interface_count: 1,
     interfaces: {
         0: IMFSourceReaderCallback
     }
-}*/
+}
 
 impl IMFSourceReaderCallback_Impl for SourceReaderCallback_Impl {
     fn OnReadSample(
@@ -436,20 +433,18 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback_Impl {
     }
 }
 
-#[implement(IMMNotificationClient)]
-struct MediaFoundationChangeListener {
+pub(crate) struct MediaFoundationChangeListener {
     change_signal: SignalToUI,
 }
-/*
-implement_com!{
+crate::implement_com! {
     for_struct: MediaFoundationChangeListener,
     identity: IMMNotificationClient,
-    wrapper_struct: MediaFoundationChangeListener_Com,
+    wrapper_struct: MediaFoundationChangeListener_Impl,
     interface_count: 1,
     interfaces: {
         0: IMMNotificationClient
     }
-}*/
+}
 
 impl IMMNotificationClient_Impl for MediaFoundationChangeListener_Impl {
     fn OnDeviceStateChanged(

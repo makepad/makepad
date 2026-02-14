@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 use crate::{
-    windows::core::{self as wcore, implement, BOOL},
+    windows::core::{self as wcore, BOOL},
     windows::{
         Win32::{
             Foundation::{DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK},
@@ -14,18 +14,16 @@ use crate::{
     },
 };
 
-#[implement(IDropSource)]
-pub struct DropSource {}
-/*
-implement_com!{
+pub(crate) struct DropSource {}
+crate::implement_com! {
     for_struct: DropSource,
     identity: IDropSource,
-    wrapper_struct: DropSource_Com,
+    wrapper_struct: DropSource_Impl,
     interface_count: 1,
     interfaces: {
         0: IDropSource
     }
-}*/
+}
 
 // IDropSource implementation for DropSource, which validates a drop on left mouse button up
 

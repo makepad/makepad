@@ -8,7 +8,7 @@ use {
         log,
         os::windows::dropfiles::*,
         windows::{
-            core::{self as wcore, implement},
+            core::{self as wcore},
             Win32::{
                 Foundation::{HWND, LPARAM, POINTL, WPARAM},
                 System::{
@@ -35,21 +35,19 @@ pub enum DropTargetMessage {
 pub const WM_DROPTARGET: u32 = WM_USER + 0;
 
 #[derive(Clone)]
-#[implement(IDropTarget)]
-pub struct DropTarget {
+pub(crate) struct DropTarget {
     pub drag_item: RefCell<Option<DragItem>>, // Windows only provides the data item for Enter and Drop, but makepad needs it for Over as well
     pub hwnd: HWND,                           // which window to send the messages to
 }
-/*
-implement_com!{
+crate::implement_com! {
     for_struct: DropTarget,
     identity: IDropTarget,
-    wrapper_struct: DropTarget_Com,
+    wrapper_struct: DropTarget_Impl,
     interface_count: 1,
     interfaces: {
         0: IDropTarget
     }
-}*/
+}
 
 fn create_dragitem_from_idataobject(data_object: &IDataObject) -> Option<DragItem> {
     // obtain enumerator for all DATADIR_GET formats of this object

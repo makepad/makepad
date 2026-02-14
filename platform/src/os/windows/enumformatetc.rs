@@ -3,7 +3,7 @@
 #![allow(non_camel_case_types)]
 use {
     crate::windows::{
-        core::{self as wcore, implement},
+        core::{self as wcore},
         Win32::{
             Foundation::{E_UNEXPECTED, S_FALSE, S_OK},
             System::Com::{IEnumFORMATETC, IEnumFORMATETC_Impl, FORMATETC},
@@ -145,21 +145,19 @@ impl IEnumFORMATETC_Vtbl {
     }
 }*/
 
-#[implement(IEnumFORMATETC)]
-pub struct EnumFormatEtc {
+pub(crate) struct EnumFormatEtc {
     pub formats: Vec<FORMATETC>,
     pub index: RefCell<usize>,
 }
-/*
-implement_com!{
+crate::implement_com! {
     for_struct: EnumFormatEtc,
     identity: IEnumFORMATETC,
-    wrapper_struct: EnumFormatEtc_Com,
+    wrapper_struct: EnumFormatEtc_Impl,
     interface_count: 1,
     interfaces: {
         0: IEnumFORMATETC
     }
-}*/
+}
 
 // IEnumFORMATETC implementation for EnumFormatEtc, which hosts a list of FORMATETCs that can be queried by COM and DoDragDrop
 
