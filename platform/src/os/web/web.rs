@@ -50,12 +50,19 @@ impl Cx {
                     for (path, _) in &self.dependencies {
                         deps.push(path.to_string());
                     }
+                    crate::log!(
+                        "wasm.deps count={} has_ibm_plex={}",
+                        deps.len(),
+                        deps.iter()
+                            .any(|p| p.contains("makepad_widgets/resources/IBMPlexSans-Text.ttf"))
+                    );
 
                     self.os.from_wasm(FromWasmLoadDeps { deps });
                 }
 
                 live_id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
+                    crate::log!("wasm.init deps_received={}", tw.deps.len());
 
                     for dep_in in tw.deps {
                         if let Some(dep) = self.dependencies.get_mut(&dep_in.path) {
@@ -66,6 +73,10 @@ impl Cx {
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
                     self.call_event_handler(&Event::Startup);
+                    self.redraw_all();
+                    self.os.from_wasm(FromWasmSetDocumentTitle {
+                        title: "debug got ToWasmInit".to_string(),
+                    });
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 }
 
@@ -196,6 +207,9 @@ impl Cx {
 
                 live_id!(ToWasmRedrawAll) => {
                     self.redraw_all();
+                    self.os.from_wasm(FromWasmSetDocumentTitle {
+                        title: "debug got ToWasmRedrawAll".to_string(),
+                    });
                 }
 
                 live_id!(ToWasmPaintDirty) => {
@@ -369,7 +383,26 @@ impl Cx {
         }
 
         if let Some(time) = is_animation_frame {
+            if self.repaint_id <= 10 {
+                self.os.from_wasm(FromWasmSetDocumentTitle {
+                    title: format!(
+                        "debug frame repaint_id={} need_redrawing={}",
+                        self.repaint_id,
+                        self.need_redrawing()
+                    ),
+                });
+            }
+            if self.repaint_id <= 200 {
+                crate::log!(
+                    "wasm.frame repaint_id={} need_redrawing={}",
+                    self.repaint_id,
+                    self.need_redrawing()
+                );
+            }
             if self.need_redrawing() {
+                if self.repaint_id <= 200 {
+                    crate::log!("wasm.frame calling draw_event+compile");
+                }
                 self.call_draw_event(time);
                 self.webgl_compile_shaders();
             }
@@ -405,9 +438,44 @@ impl Cx {
         let mut passes_todo = Vec::new();
 
         self.compute_pass_repaint_order(&mut passes_todo);
+        if self.repaint_id <= 10 {
+            let pass_count = self.passes.id_iter().count();
+            let main_pass = self.windows[CxWindowPool::id_zero()]
+                .main_pass_id
+                .map(|v| v.0 as i64)
+                .unwrap_or(-1);
+            let main_draw_list = self.windows[CxWindowPool::id_zero()]
+                .main_pass_id
+                .and_then(|pass_id| self.passes[pass_id].main_draw_list_id)
+                .map(|v| format!("{:?}", v))
+                .unwrap_or("-1".to_string());
+            self.os.from_wasm(FromWasmSetDocumentTitle {
+                title: format!(
+                    "debug passes_todo={} pass_count={} main_pass={} main_draw_list={}",
+                    passes_todo.len(),
+                    pass_count,
+                    main_pass,
+                    main_draw_list
+                ),
+            });
+        }
+        if self.repaint_id <= 200 {
+            crate::log!(
+                "wasm.handle_repaint repaint_id={} passes_todo={}",
+                self.repaint_id,
+                passes_todo.len()
+            );
+        }
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].set_time(time as f32);
+            if self.repaint_id <= 200 {
+                crate::log!(
+                    "wasm.handle_repaint drawing pass={} parent={:?}",
+                    draw_pass_id.0,
+                    self.passes[*draw_pass_id].parent
+                );
+            }
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(_) => {
@@ -496,7 +564,7 @@ impl Cx {
                 }
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.from_wasm(FromWasmStopTimer {
-                        id: timer_id as f64,
+                        timer_id: timer_id as f64,
                     });
                 }
                 CxOsOp::HttpRequest {
@@ -580,9 +648,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
-        self.live_registry.borrow_mut().package_root = Some("".to_string());
-        self.live_expand();
-        self.live_scan_dependencies();
+        self.package_root = Some(String::new());
 
         self.os.append_to_wasm_js(&[
             ToWasmGetDeps::to_js_code(),

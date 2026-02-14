@@ -13,6 +13,14 @@ export class WasmWebGL extends WasmWebBrowser {
         this.textures = [];
         this.framebuffers = [];
         this.xr = undefined;
+        this._debug_logged_first_compile = false;
+        this._debug_logged_first_begin_render_texture = false;
+        this._debug_logged_first_begin_render_canvas = false;
+        this._debug_logged_first_draw_call = false;
+        this._debug_missing_shader_ids = new Set();
+        this._debug_compile_count = 0;
+        this._debug_compile_fail_count = 0;
+        this._debug_logged_compile_summary = false;
         this.init_webgl_context();
         
         this.load_deps();
@@ -177,8 +185,65 @@ export class WasmWebGL extends WasmWebBrowser {
         
     }
     
+    get_uniform_block_binding(program, name) {
+        let gl = this.gl;
+        let index = gl.getUniformBlockIndex(program, name);
+        if (index === gl.INVALID_INDEX) {
+            return null;
+        }
+        gl.uniformBlockBinding(program, index, index);
+        return index;
+    }
+    
+    upload_uniform_buffer_from_ptr(gl, gl_buf, ptr_f32) {
+        if (!gl_buf || ptr_f32.ptr == 0 || ptr_f32.len == 0) {
+            return;
+        }
+        let data = new Float32Array(this.memory.buffer, ptr_f32.ptr, ptr_f32.len);
+        this.upload_uniform_buffer_data(gl, gl_buf, data);
+    }
+    
+    upload_uniform_buffer_data(gl, gl_buf, data) {
+        if (!gl_buf || !data || data.length == 0) {
+            return;
+        }
+        gl.bindBuffer(gl.UNIFORM_BUFFER, gl_buf);
+        gl.bufferData(gl.UNIFORM_BUFFER, data, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+    }
+    
+    bind_uniform_block(gl, binding, gl_buf) {
+        if (binding === null || !gl_buf) {
+            return;
+        }
+        gl.bindBufferBase(gl.UNIFORM_BUFFER, binding, gl_buf);
+    }
+    
+    assert_no_gl_error(gl, where) {
+        let err = gl.getError();
+        if (err !== gl.NO_ERROR) {
+            throw new Error("WebGL2 error " + err + " at " + where);
+        }
+    }
+
+    report_missing_shader_once(where, shader_id, vao_id) {
+        if (this._debug_missing_shader_ids.has(shader_id)) {
+            return;
+        }
+        this._debug_missing_shader_ids.add(shader_id);
+        console.error("Missing shader in " + where, shader_id, vao_id);
+    }
+    
     
     FromWasmCompileWebGLShader(args) {
+        this._debug_compile_count += 1;
+        if (!this._debug_logged_first_compile) {
+            this._debug_logged_first_compile = true;
+            console.log("webgl.first_compile", args.shader_id, args.geometry_slots, args.instance_slots, args.textures.length);
+        }
+        if (args.shader_id < 5) {
+            console.log("webgl.compile_shader", args.shader_id, args.geometry_slots, args.instance_slots, args.textures.length);
+        }
         function get_attrib_locations(gl, program, base, slots) {
             let attrib_locs = [];
             let attribs = slots >> 2;
@@ -203,10 +268,12 @@ export class WasmWebGL extends WasmWebBrowser {
         gl.shaderSource(vsh, args.vertex)
         gl.compileShader(vsh)
         if (!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) {
-            return console.log(
-                gl.getShaderInfoLog(vsh),
-                add_line_numbers_to_string(args.vertex)
-            )
+            let message = "webgl.compile_fail.vertex " + args.shader_id + " " + gl.getShaderInfoLog(vsh);
+            console.error(message);
+            gl.deleteShader(vsh);
+            this.draw_shaders[args.shader_id] = {compile_failed: true};
+            this._debug_compile_fail_count += 1;
+            return;
         }
         
         // compile pixelshader
@@ -214,49 +281,75 @@ export class WasmWebGL extends WasmWebBrowser {
         gl.shaderSource(fsh, args.pixel)
         gl.compileShader(fsh)
         if (!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) {
-            return console.log(
-                gl.getShaderInfoLog(fsh),
-                add_line_numbers_to_string(args.pixel)
-            )
+            let message = "webgl.compile_fail.fragment " + args.shader_id + " " + gl.getShaderInfoLog(fsh);
+            console.error(message);
+            gl.deleteShader(vsh);
+            gl.deleteShader(fsh);
+            this.draw_shaders[args.shader_id] = {compile_failed: true};
+            this._debug_compile_fail_count += 1;
+            return;
         }
         var program = gl.createProgram()
         gl.attachShader(program, vsh)
         gl.attachShader(program, fsh)
         gl.linkProgram(program)
         if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-            return console.log(
-                gl.getProgramInfoLog(program),
-                add_line_numbers_to_string(args.vertex),
-                add_line_numbers_to_string(args.pixel)
-            )
+            let message = "webgl.compile_fail.link " + args.shader_id + " " + gl.getProgramInfoLog(program);
+            console.error(message);
+            gl.deleteShader(vsh);
+            gl.deleteShader(fsh);
+            gl.deleteProgram(program);
+            this.draw_shaders[args.shader_id] = {compile_failed: true};
+            this._debug_compile_fail_count += 1;
+            return;
         }
-       //console.log(args.pixel)
+        
+        gl.deleteShader(vsh);
+        gl.deleteShader(fsh);
+        this.assert_no_gl_error(gl, "compile_shader");
+        
         let texture_locs = [];
         for (let i = 0; i < args.textures.length; i ++) {
+            let tex_name = args.textures[i].name;
+            let loc = gl.getUniformLocation(program, "tex_" + tex_name);
+            if (loc === null) {
+                // Keep old fallback names for non-script shaders.
+                loc = gl.getUniformLocation(program, "ds_" + tex_name);
+            }
             texture_locs.push({
-                name: args.textures[i].name,
+                name: tex_name,
                 ty: args.textures[i].ty,
-                loc: gl.getUniformLocation(program, "ds_" + args.textures[i].name),
+                loc: loc,
             });
         }
         
-        // fetch all attribs and uniforms
+        let pass_uniforms_binding = this.get_uniform_block_binding(program, "passUniforms");
+        let draw_list_uniforms_binding = this.get_uniform_block_binding(program, "draw_listUniforms");
+        let draw_call_uniforms_binding = this.get_uniform_block_binding(program, "draw_callUniforms");
+        let user_uniforms_binding = this.get_uniform_block_binding(program, "userUniforms");
+        let live_uniforms_binding = this.get_uniform_block_binding(program, "liveUniforms");
+        
         this.draw_shaders[args.shader_id] = {
             vertex: args.vertex,
             pixel: args.pixel,
             geom_attribs: get_attrib_locations(gl, program, "packed_geometry_", args.geometry_slots),
             inst_attribs: get_attrib_locations(gl, program, "packed_instance_", args.instance_slots),
-            pass_uniform: gl.getUniformLocation(program, "pass_table"),
-            draw_list_uniform: gl.getUniformLocation(program, "draw_list_table"),
-            draw_call_uniform: gl.getUniformLocation(program, "draw_call_table"),
-            user_uniform: gl.getUniformLocation(program, "user_table"),
-            live_uniform: gl.getUniformLocation(program, "live_table"),
-            const_uniform: gl.getUniformLocation(program, "const_table"),
+            pass_uniforms_binding: pass_uniforms_binding,
+            draw_list_uniforms_binding: draw_list_uniforms_binding,
+            draw_call_uniforms_binding: draw_call_uniforms_binding,
+            user_uniforms_binding: user_uniforms_binding,
+            live_uniforms_binding: live_uniforms_binding,
+            pass_uniform_buf: gl.createBuffer(),
+            draw_list_uniform_buf: gl.createBuffer(),
+            draw_call_uniform_buf: gl.createBuffer(),
+            user_uniform_buf: gl.createBuffer(),
+            live_uniform_buf: gl.createBuffer(),
             texture_locs: texture_locs,
             geometry_slots: args.geometry_slots,
             instance_slots: args.instance_slots,
             program: program,
         };
+        this.assert_no_gl_error(gl, "compile_shader_end");
     }
     
     FromWasmAllocIndexBuffer(args) {
@@ -298,9 +391,9 @@ export class WasmWebGL extends WasmWebBrowser {
         let gl = this.gl;
         let old_vao = this.vaos[args.vao_id];
         if (old_vao) {
-            this.OES_vertex_array_object.deleteVertexArrayOES(old_vao.gl);
+            gl.deleteVertexArray(old_vao.gl_vao);
         }
-        let gl_vao = this.OES_vertex_array_object.createVertexArrayOES();
+        let gl_vao = gl.createVertexArray();
         let vao = this.vaos[args.vao_id] = {
             gl_vao: gl_vao,
             geom_ib_id: args.geom_ib_id,
@@ -308,10 +401,14 @@ export class WasmWebGL extends WasmWebBrowser {
             inst_vb_id: args.inst_vb_id
         };
         
-        this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao)
+        gl.bindVertexArray(vao.gl_vao);
         gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.geom_vb_id].gl_buf);
         
         let shader = this.draw_shaders[args.shader_id];
+        if (!shader || shader.compile_failed) {
+            this.report_missing_shader_once("FromWasmAllocVao", args.shader_id, args.vao_id);
+            return;
+        }
         
         for (let i = 0; i < shader.geom_attribs.length; i ++) {
             let attr = shader.geom_attribs[i];
@@ -320,7 +417,7 @@ export class WasmWebGL extends WasmWebBrowser {
             }
             gl.vertexAttribPointer(attr.loc, attr.size, gl.FLOAT, false, attr.stride, attr.offset);
             gl.enableVertexAttribArray(attr.loc);
-            this.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 0);
+            gl.vertexAttribDivisor(attr.loc, 0);
         }
         
         gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.inst_vb_id].gl_buf);
@@ -332,35 +429,47 @@ export class WasmWebGL extends WasmWebBrowser {
             }
             gl.vertexAttribPointer(attr.loc, attr.size, gl.FLOAT, false, attr.stride, attr.offset);
             gl.enableVertexAttribArray(attr.loc);
-            this.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 1);
+            gl.vertexAttribDivisor(attr.loc, 1);
         }
         
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.index_buffers[args.geom_ib_id].gl_buf);
-        this.OES_vertex_array_object.bindVertexArrayOES(null);
+        gl.bindVertexArray(null);
+        this.assert_no_gl_error(gl, "alloc_vao");
     }
     
     
     FromWasmDrawCall(args) {
         var gl = this.gl;
+        if (!this._debug_logged_first_draw_call) {
+            this._debug_logged_first_draw_call = true;
+            console.log("webgl.first_draw_call", args.shader_id, args.vao_id);
+        }
         
         let shader = this.draw_shaders[args.shader_id];
+        if (!shader || shader.compile_failed) {
+            this.report_missing_shader_once("FromWasmDrawCall", args.shader_id, args.vao_id);
+            return;
+        }
         
         gl.useProgram(shader.program);
         
         let vao = this.vaos[args.vao_id];
         
-        this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao);
+        gl.bindVertexArray(vao.gl_vao);
         
         let index_buffer = this.index_buffers[vao.geom_ib_id];
         let instance_buffer = this.array_buffers[vao.inst_vb_id];
-        // if vr_presenting
-        // TODO CACHE buffers
-        gl.uniform1fv(shader.draw_list_uniform, new Float32Array(this.memory.buffer, args.draw_list_uniforms.ptr, args.draw_list_uniforms.len));
-        gl.uniform1fv(shader.draw_call_uniform, new Float32Array(this.memory.buffer, args.draw_call_uniforms.ptr, args.draw_call_uniforms.len));
         
-        if (args.draw_call_uniforms.ptr != 0) gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.draw_call_uniforms.ptr, args.draw_call_uniforms.len));
-        if (args.live_uniforms.ptr != 0) gl.uniform1fv(shader.live_uniform, new Float32Array(this.memory.buffer, args.live_uniforms.ptr, args.live_uniforms.len));
-        if (args.const_table.ptr != 0) gl.uniform1fv(shader.const_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
+        this.upload_uniform_buffer_from_ptr(gl, shader.draw_list_uniform_buf, args.draw_list_uniforms);
+        this.upload_uniform_buffer_from_ptr(gl, shader.draw_call_uniform_buf, args.draw_call_uniforms);
+        this.upload_uniform_buffer_from_ptr(gl, shader.user_uniform_buf, args.user_uniforms);
+        this.upload_uniform_buffer_from_ptr(gl, shader.live_uniform_buf, args.live_uniforms);
+        
+        this.bind_uniform_block(gl, shader.pass_uniforms_binding, shader.pass_uniform_buf);
+        this.bind_uniform_block(gl, shader.draw_list_uniforms_binding, shader.draw_list_uniform_buf);
+        this.bind_uniform_block(gl, shader.draw_call_uniforms_binding, shader.draw_call_uniform_buf);
+        this.bind_uniform_block(gl, shader.user_uniforms_binding, shader.user_uniform_buf);
+        this.bind_uniform_block(gl, shader.live_uniforms_binding, shader.live_uniform_buf);
 
         let indices = index_buffer.length;
         let instances = instance_buffer.length / shader.instance_slots;
@@ -379,9 +488,8 @@ export class WasmWebGL extends WasmWebBrowser {
         }
         
         let xr = this.xr;
+        let pass_uniforms = new Float32Array(this.memory.buffer, args.pass_uniforms.ptr, args.pass_uniforms.len);
         if (xr !== undefined && xr.in_xr_pass) {
-            let pass_uniforms = new Float32Array(this.memory.buffer, args.pass_uniforms.ptr, args.pass_uniforms.len);
-
             let left = xr.left_eye;
             let lvp = left.viewport;
             gl.viewport(lvp.x, lvp.y, lvp.width, lvp.height);
@@ -391,8 +499,9 @@ export class WasmWebGL extends WasmWebBrowser {
             for(let i = 0; i < 16; i++) pass_uniforms[i + 16] = mlt[i];
             let mli = left.invtransform_matrix;
             for(let i = 0; i < 16; i++) pass_uniforms[i + 32] = mli[i];
-            gl.uniform1fv(shader.pass_uniform, pass_uniforms);
-            this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms);
+            gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            this.assert_no_gl_error(gl, "draw_left_eye");
             
             let right = xr.right_eye;
             let rvp = right.viewport;
@@ -403,15 +512,17 @@ export class WasmWebGL extends WasmWebBrowser {
             for(let i = 0; i < 16; i++) pass_uniforms[i + 16] = mrt[i];
             let mri = right.invtransform_matrix;
             for(let i = 0; i < 16; i++) pass_uniforms[i + 32] = mri[i];
-            gl.uniform1fv(shader.pass_uniform, pass_uniforms);
-            this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms);
+            gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            this.assert_no_gl_error(gl, "draw_right_eye");
         }
         else {
-            gl.uniform1fv(shader.pass_uniform, new Float32Array(this.memory.buffer, args.pass_uniforms.ptr, args.pass_uniforms.len));
-            this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms);
+            gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            this.assert_no_gl_error(gl, "draw");
         }
         
-        this.OES_vertex_array_object.bindVertexArrayOES(null);
+        gl.bindVertexArray(null);
     }
     
     
@@ -442,18 +553,31 @@ export class WasmWebGL extends WasmWebBrowser {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
         //gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
         let data_array = new Uint8Array(this.memory.buffer, args.data.ptr, args.width * args.height);
-        //agdconsole.log(args.width, args.height);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, args.width, args.height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data_array);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, args.width, args.height, 0, gl.RED, gl.UNSIGNED_BYTE, data_array);
+        // Keep legacy alpha-texture sampling behavior on WebGL2:
+        // map RED -> ALPHA and force RGB = 0 so sample2d(...).zyxw still yields alpha in .w.
+        if (gl.TEXTURE_SWIZZLE_R !== undefined) {
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_R, gl.ZERO);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_G, gl.ZERO);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_B, gl.ZERO);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_A, gl.RED);
+        }
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
         this.textures[args.texture_id] = gl_tex;
     }
 
     FromWasmBeginRenderTexture(args) {
+        if (!this._debug_logged_first_begin_render_texture) {
+            this._debug_logged_first_begin_render_texture = true;
+            console.log("webgl.first_begin_render_texture", args.pass_id, args.width, args.height);
+        }
         if(this.xr !== undefined){
             this.xr.in_xr_pass = false;
         }
 
         let gl = this.gl
-        var gl_framebuffer = this.framebuffers[args.draw_pass_id] || (this.framebuffers[args.draw_pass_id] = gl.createFramebuffer());
+        var gl_framebuffer = this.framebuffers[args.pass_id] || (this.framebuffers[args.pass_id] = gl.createFramebuffer());
         gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
         
         let clear_flags = 0;
@@ -498,6 +622,14 @@ export class WasmWebGL extends WasmWebBrowser {
     FromWasmBeginRenderCanvas(args) {
         let gl = this.gl
         let xr = this.xr;
+        if (!this._debug_logged_first_begin_render_canvas) {
+            this._debug_logged_first_begin_render_canvas = true;
+            console.log("webgl.first_begin_render_canvas", args.clear_color.r, args.clear_color.g, args.clear_color.b, args.clear_color.a, args.clear_depth);
+        }
+        if (!this._debug_logged_compile_summary && this._debug_compile_count > 0) {
+            this._debug_logged_compile_summary = true;
+            console.log("webgl.compile_summary", this._debug_compile_count, this._debug_compile_fail_count);
+        }
         
         if(xr !== undefined){
             xr.in_xr_pass = true;
@@ -510,7 +642,7 @@ export class WasmWebGL extends WasmWebBrowser {
         }
         let c = args.clear_color;
         gl.clearColor(c.r, c.g, c.b, c.a);
-        gl.clearDepth(args.depth);
+        gl.clearDepth(args.clear_depth);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     }
     
@@ -531,7 +663,7 @@ export class WasmWebGL extends WasmWebBrowser {
         }
         else { // poll for it. yes. its terrible
             window.setInterval(_ => {
-                if (window.devicePixelRation != this.dpi_factor) {
+                if (window.devicePixelRatio != this.dpi_factor) {
                     this.handlers.on_screen_resize();
                 }
             }, 1000);
@@ -549,22 +681,15 @@ export class WasmWebGL extends WasmWebBrowser {
             //xrCompatible: true
         }
         
-        var gl = this.gl = canvas.getContext('webgl', options)
-            || canvas.getContext('webgl-experimental', options)
-            || canvas.getContext('experimental-webgl', options)
+        var gl = this.gl = canvas.getContext('webgl2', options)
         
         if (!gl) {
             var span = document.createElement('span')
             span.style.color = 'white'
             canvas.parentNode.replaceChild(span, canvas)
-            span.innerHTML = "Sorry, makepad needs browser support for WebGL to run<br/>Please update your browser to a more modern one<br/>Update to atleast iOS 10, Safari 10, latest Chrome, Edge or Firefox<br/>Go and update and come back, your browser will be better, faster and more secure!<br/>If you are using chrome on OSX on a 2011/2012 mac please enable your GPU at: Override software rendering list:Enable (the top item) in: <a href='about://flags'>about://flags</a>. Or switch to Firefox or Safari."
+            span.innerHTML = "Sorry, makepad needs browser support for WebGL2 to run.<br/>Please update your browser or GPU drivers and try again."
             return
         }
-        
-        this.OES_standard_derivatives = gl.getExtension('OES_standard_derivatives')
-        this.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
-        this.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
-        this.ANGLE_instanced_arrays = gl.getExtension('ANGLE_instanced_arrays')
         
         // check uniform count
         var max_vertex_uniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
@@ -581,14 +706,6 @@ export class WasmWebGL extends WasmWebBrowser {
             this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
             this.gpu_info.renderer = gl.getParameter(debug_info.UNMASKED_RENDERER_WEBGL);
         }
-        
-        
-        //gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
-        //gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')
-        //gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')
-        //gl.OES_texture_half_float = gl.getExtension('OES_texture_half_float')
-        //gl.OES_texture_float = gl.getExtension('OES_texture_float')
-        //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")
     }
     
 }

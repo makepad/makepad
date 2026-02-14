@@ -19,6 +19,8 @@ pub enum CxScriptResourceData {
 #[derive(Clone)]
 pub struct CxScriptResource {
     pub abs_path: String,
+    pub dependency_path: Option<String>,
+    pub web_url: Option<String>,
     pub data: CxScriptResourceData,
     pub handle: ScriptHandle,
 }
@@ -128,6 +130,68 @@ impl CxScriptResources {
     }
 }
 
+impl Cx {
+    /// Load all script resources that are still pending.
+    ///
+    /// On web we first try wasm dependencies (`dependency_path`) and fall back to
+    /// async HTTP fetch via `web_url`.
+    pub fn load_all_script_resources(&mut self) {
+        let mut pending_http = Vec::<(LiveId, ScriptHandle, String)>::new();
+        let is_web = self.os_type().is_web();
+
+        {
+            let mut resources = self.script_data.resources.resources.borrow_mut();
+            for res in resources.iter_mut() {
+                if !matches!(res.data, CxScriptResourceData::NotLoaded) {
+                    continue;
+                }
+
+                if let Some(dep_path) = res.dependency_path.as_deref() {
+                    if let Ok(data) = self.get_dependency(dep_path) {
+                        res.data = CxScriptResourceData::Loaded(data);
+                        continue;
+                    }
+                }
+
+                if is_web {
+                    if let Some(url) = res.web_url.clone() {
+                        let request_id = LiveId::unique();
+                        res.data = CxScriptResourceData::Loading;
+                        pending_http.push((request_id, res.handle, url));
+                        continue;
+                    }
+                }
+
+                match File::open(&res.abs_path) {
+                    Ok(mut file) => {
+                        let mut data = Vec::new();
+                        match file.read_to_end(&mut data) {
+                            Ok(_) => {
+                                res.data = CxScriptResourceData::Loaded(Rc::new(data));
+                            }
+                            Err(e) => {
+                                res.data =
+                                    CxScriptResourceData::Error(format!("Failed to read file: {}", e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        res.data = CxScriptResourceData::Error(format!("Failed to open file: {}", e));
+                    }
+                }
+            }
+        }
+
+        for (request_id, handle, url) in pending_http {
+            self.script_data
+                .resources
+                .http_resources
+                .push(CxScriptHttpResource { request_id, handle });
+            self.http_request(request_id, HttpRequest::new(url, Default::default()));
+        }
+    }
+}
+
 pub struct CxScriptResourceGc {
     pub resources: Rc<RefCell<Vec<CxScriptResource>>>,
     pub handle: ScriptHandle,
@@ -151,6 +215,23 @@ fn parse_crate_path(path: &str) -> Option<(&str, &str)> {
     let crate_part = split.next()?;
     let file_path = split.next()?;
     Some((crate_part, file_path))
+}
+
+fn normalize_dependency_file_path(path: &str) -> Option<String> {
+    let mut stack: Vec<&str> = Vec::new();
+    let normalized = path.replace('\\', "/");
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if stack.pop().is_none() {
+                    return None;
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    Some(stack.join("/"))
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -214,7 +295,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         move |vm, args| {
             let value = script_value!(vm, args.value);
             let cx = vm.host.cx_mut();
-            cx.script_data.resources.load_all_resources();
+            cx.load_all_script_resources();
             value
         },
     );
@@ -245,6 +326,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     .borrow_mut()
                     .push(CxScriptResource {
                         abs_path,
+                        dependency_path: None,
+                        web_url: None,
                         data: CxScriptResourceData::NotLoaded,
                         handle,
                     });
@@ -273,7 +356,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             if let Some(path_string) = path_string {
                 // Parse "crate:path" format
                 if let Some((crate_part, file_path)) = parse_crate_path(&path_string) {
-                    let abs_path = if crate_part == "self" {
+                    let (abs_path, crate_name) = if crate_part == "self" {
                         // Get cargo_manifest_path from current script body
                         let bodies = vm.bx.code.bodies.borrow();
                         let body_id = vm.thread().trap.ip.body as usize;
@@ -282,12 +365,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
                                 let mut final_path = script_mod.cargo_manifest_path.clone();
                                 final_path.push('/');
                                 final_path.push_str(file_path);
-                                Some(final_path)
+                                let self_crate_name = script_mod
+                                    .module_path
+                                    .split("::")
+                                    .next()
+                                    .unwrap_or("")
+                                    .replace('-', "_");
+                                (Some(final_path), Some(self_crate_name))
                             } else {
-                                None
+                                (None, None)
                             }
                         } else {
-                            None
+                            (None, None)
                         }
                     } else {
                         // Look up crate name in the manifest table on ScriptCode
@@ -297,12 +386,20 @@ pub fn script_mod(vm: &mut ScriptVm) {
                             let mut final_path = manifest_path.clone();
                             final_path.push('/');
                             final_path.push_str(file_path);
-                            Some(final_path)
+                            (Some(final_path), Some(crate_name))
                         } else {
-                            None
+                            (None, None)
                         }
                     };
                     if let Some(abs_path) = abs_path {
+                        let dependency_path = if let Some(crate_name) = crate_name {
+                            normalize_dependency_file_path(file_path)
+                                .map(|file_path| format!("{}/{}", crate_name, file_path))
+                        } else {
+                            None
+                        };
+                        let web_url = dependency_path.as_ref().map(|path| format!("/{}", path));
+
                         let cx = vm.host.cx_mut();
                         let handle_gc = CxScriptResourceGc {
                             resources: cx.script_data.resources.resources.clone(),
@@ -316,6 +413,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                             .borrow_mut()
                             .push(CxScriptResource {
                                 abs_path,
+                                dependency_path,
+                                web_url,
                                 data: CxScriptResourceData::NotLoaded,
                                 handle,
                             });
@@ -356,6 +455,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     .borrow_mut()
                     .push(CxScriptResource {
                         abs_path: url_string.clone(),
+                        dependency_path: None,
+                        web_url: None,
                         data: CxScriptResourceData::Loading,
                         handle,
                     });

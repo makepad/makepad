@@ -9,6 +9,9 @@ use crate::{
     makepad_script::mod_shader::SHADER_IO_DYN_UNIFORM,
     makepad_script::pod::{ScriptPodTy, ScriptPodVec},
     makepad_script::pod_heap,
+    makepad_script::shader::{ShaderFnCompiler, ShaderType},
+    makepad_script::shader_backend::ShaderBackend,
+    makepad_script::shader_output::{ShaderMode, ShaderOutput},
     makepad_script::ScriptFnPtr,
     makepad_script::*,
     script::vm::*,
@@ -807,6 +810,159 @@ impl DrawVars {
         // Default: fill with zeros
         for i in 0..slots {
             output[offset + i] = 0.0;
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
+        if let Some(io_self) = value.as_object() {
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            let mut output = ShaderOutput::default();
+            output.backend = ShaderBackend::Glsl;
+            output.pre_collect_rust_instance_io(vm, io_self);
+            output.pre_collect_shader_io(vm, io_self);
+
+            if let Some(fnobj) = vm
+                .bx
+                .heap
+                .object_method(io_self, id!(vertex).into(), vm.thread().trap.pass())
+                .as_object()
+            {
+                output.mode = ShaderMode::Vertex;
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    NoTrap,
+                    id!(vertex),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+            if let Some(fnobj) = vm
+                .bx
+                .heap
+                .object_method(io_self, id!(fragment).into(), vm.thread().trap.pass())
+                .as_object()
+            {
+                output.mode = ShaderMode::Fragment;
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    NoTrap,
+                    id!(fragment),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+
+            if output.has_errors {
+                return;
+            }
+
+            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+
+            let mut shared_defs = String::new();
+            output.create_struct_defs(vm, &mut shared_defs);
+
+            let mut vertex = String::new();
+            let mut fragment = String::new();
+            output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
+            output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
+
+            let code = CxDrawShaderCode::Separate { vertex, fragment };
+
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    cx.draw_shaders
+                        .cache_functions_to_shader
+                        .insert(fnhash, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            let geometry_id = if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
+                let buffer_value =
+                    vm.bx
+                        .heap
+                        .value(vb_obj, id!(buffer).into(), vm.thread().trap.pass());
+                if let Some(handle) = buffer_value.as_handle() {
+                    vm.bx
+                        .heap
+                        .handle_ref::<crate::geometry::Geometry>(handle)
+                        .map(|g: &crate::geometry::Geometry| g.geometry_id())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let source = vm.bx.heap.new_object_ref(io_self);
+            let mut mapping = CxDrawShaderMapping::from_shader_output(
+                source,
+                code.clone(),
+                &vm.bx.heap,
+                &output,
+                geometry_id,
+            );
+            mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
+
+            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
+            if let Some(true) = debug_value.as_bool() {
+                mapping.flags.debug = true;
+            }
+
+            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
+            self.dyn_instance_slots = mapping.instances.total_slots;
+
+            let cx = vm.host.cx_mut();
+            let index = cx.draw_shaders.shaders.len();
+            cx.draw_shaders.shaders.push(CxDrawShader {
+                debug_id: LiveId(0),
+                os_shader_id: None,
+                mapping,
+            });
+
+            let shader_id = DrawShaderId { index };
+            cx.draw_shaders
+                .cache_object_id_to_shader
+                .insert(io_self, shader_id);
+            cx.draw_shaders
+                .cache_functions_to_shader
+                .insert(fnhash, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+            cx.draw_shaders.compile_set.insert(index);
+
+            self.draw_shader_id = Some(shader_id);
+            self.geometry_id = geometry_id;
         }
     }
 

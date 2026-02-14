@@ -1,10 +1,10 @@
 use crate::{
     cx::Cx,
+    draw_shader::CxDrawShaderCode,
     draw_list::DrawListId,
     draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
     draw_vars::DRAW_CALL_TEXTURE_SLOTS,
     makepad_math::*,
-    makepad_shader_compiler::generate_glsl,
     makepad_wasm_bridge::*,
     os::web::from_wasm::*,
     texture::TextureFormat,
@@ -39,7 +39,7 @@ impl Cx {
                     continue;
                 };
 
-                let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
                     // shader didnt compile somehow
                     continue;
@@ -188,9 +188,9 @@ impl Cx {
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
-                    dyn_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
-                    live_uniforms: WasmPtrF32::new(&sh.mapping.live_uniforms_buf),
-                    const_table: WasmPtrF32::new(&sh.mapping.const_table.table),
+                    user_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
+                    live_uniforms: WasmPtrF32::new(&sh.mapping.scope_uniforms_buf),
+                    const_table: WasmPtrF32::new(&[]),
                     textures,
                 });
             }
@@ -304,7 +304,7 @@ impl Cx {
         }
 
         self.os.from_wasm(FromWasmBeginRenderTexture {
-            draw_pass_id: draw_pass_id.0,
+            pass_id: draw_pass_id.0,
             width: (pass_size.x * dpi_factor) as usize,
             height: (pass_size.y * dpi_factor) as usize,
             color_targets,
@@ -320,60 +320,65 @@ impl Cx {
     }
 
     pub fn webgl_compile_shaders(&mut self) {
-        for draw_shader_ptr in &self.draw_shaders.compile_set {
-            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
-                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
-                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
-
-                let glsl_options = generate_glsl::GlslOptions {
-                    use_ovr_multiview: false,
-                    use_uniform_buffers: false,
-                    use_inout: false,
+        let compile_set: Vec<usize> = self.draw_shaders.compile_set.iter().copied().collect();
+        for draw_shader_id in compile_set {
+            let (vertex, pixel, geometry_slots, instance_slots, textures, debug) = {
+                let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
+                let (vertex, pixel) = match &cx_shader.mapping.code {
+                    CxDrawShaderCode::Separate { vertex, fragment } => {
+                        (vertex.clone(), fragment.clone())
+                    }
+                    CxDrawShaderCode::Combined { .. } => {
+                        crate::error!("Combined shader code is not supported on wasm webgl");
+                        continue;
+                    }
                 };
+                let textures: Vec<WTextureInput> = cx_shader
+                    .mapping
+                    .textures
+                    .iter()
+                    .map(|v| v.to_from_wasm_texture_input())
+                    .collect();
+                (
+                    vertex,
+                    pixel,
+                    cx_shader.mapping.geometries.total_slots,
+                    cx_shader.mapping.instances.total_slots,
+                    textures,
+                    cx_shader.mapping.flags.debug,
+                )
+            };
 
-                let vertex = generate_glsl::generate_vertex_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry,
-                    glsl_options,
-                );
-                let pixel = generate_glsl::generate_pixel_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry,
-                    glsl_options,
-                );
+            if debug {
+                crate::log!("{}\n{}", vertex, pixel);
+            }
 
-                if cx_shader.mapping.flags.debug {
-                    crate::log!("{}\n{}", vertex, pixel);
-                }
-                // lets see if we have the shader already
+            let mut os_shader_id = self.draw_shaders.shaders[draw_shader_id].os_shader_id;
+            if os_shader_id.is_none() {
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
                     if ds.in_vertex == vertex && ds.in_pixel == pixel {
-                        cx_shader.os_shader_id = Some(index);
+                        os_shader_id = Some(index);
                         break;
                     }
                 }
-                if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(vertex.clone(), pixel.clone());
-                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                    self.os.from_wasm(FromWasmCompileWebGLShader {
-                        shader_id: cx_shader.os_shader_id.unwrap(),
-                        vertex: shp.vertex.clone(),
-                        pixel: shp.pixel.clone(),
-                        geometry_slots: cx_shader.mapping.geometries.total_slots,
-                        instance_slots: cx_shader.mapping.instances.total_slots,
-                        textures: cx_shader
-                            .mapping
-                            .textures
-                            .iter()
-                            .map(|v| v.to_from_wasm_texture_input())
-                            .collect(),
-                    });
-
-                    self.draw_shaders.os_shaders.push(shp);
-                }
             }
+
+            if os_shader_id.is_none() {
+                let shp = CxOsDrawShader::new(vertex, pixel);
+                let shader_id = self.draw_shaders.os_shaders.len();
+                self.os.from_wasm(FromWasmCompileWebGLShader {
+                    shader_id,
+                    vertex: shp.vertex.clone(),
+                    pixel: shp.pixel.clone(),
+                    geometry_slots,
+                    instance_slots,
+                    textures,
+                });
+                self.draw_shaders.os_shaders.push(shp);
+                os_shader_id = Some(shader_id);
+            }
+
+            self.draw_shaders.shaders[draw_shader_id].os_shader_id = os_shader_id;
         }
         self.draw_shaders.compile_set.clear();
     }
@@ -381,26 +386,27 @@ impl Cx {
 
 impl CxOsDrawShader {
     pub fn new(in_vertex: String, in_pixel: String) -> Self {
-        let vertex = format!("
-            precision highp float;
-            precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0 - pos.y));}}             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}", in_vertex);
+        let vertex = format!(
+            "#version 300 es
+precision highp float;
+precision highp int;
+vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
+vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
+vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
+{}",
+            in_vertex
+        );
 
-        let pixel = format!("
-            #extension GL_OES_standard_derivatives : enable
-            precision highp float;
-            precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0 - pos.y));}}
-            vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
-            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}", in_pixel);
+        let pixel = format!(
+            "#version 300 es
+precision highp float;
+precision highp int;
+vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
+vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
+vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
+{}",
+            in_pixel
+        );
 
         Self {
             in_vertex,

@@ -61,6 +61,12 @@ impl Layouter {
         self.loader.define_font_family(id, definition);
     }
 
+    pub fn set_font_family_definition(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
+        self.loader.set_font_family_definition(id, definition);
+        self.cached_params.clear();
+        self.cached_results.clear();
+    }
+
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
         self.loader.define_font(id, definition);
     }

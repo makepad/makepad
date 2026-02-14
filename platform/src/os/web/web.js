@@ -33,6 +33,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.signal_timeout = null;
         this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
+        this._debug_logged_load_deps = false;
+        this._debug_request_animation_frame_count = 0;
+        this._debug_animation_frame_count = 0;
+        this._debug_set_document_title_count = 0;
         this.init_detection();
         this.midi_inputs = [];
         this.midi_outputs = [];
@@ -41,6 +45,10 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     async load_deps() {
+        if (!this._debug_logged_load_deps) {
+            this._debug_logged_load_deps = true;
+            console.log("web.load_deps.start");
+        }
         
         this.to_wasm = this.new_to_wasm();
         
@@ -90,6 +98,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
         this.do_wasm_pump();
+        console.log("web.load_deps.done");
         var loaders = document.getElementsByClassName('canvas_loader');
         for (var i = 0; i < loaders.length; i ++) {
             loaders[i].parentNode.removeChild(loaders[i])
@@ -196,6 +205,10 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmRequestAnimationFrame() {
+        this._debug_request_animation_frame_count += 1;
+        if (this._debug_request_animation_frame_count <= 20) {
+            console.log("web.request_animation_frame", this._debug_request_animation_frame_count);
+        }
         if (this.xr !== undefined || this.req_anim_frame_id) {
             return;
         }
@@ -208,6 +221,10 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.xr !== undefined) {
                 return
             }
+            this._debug_animation_frame_count += 1;
+            if (this._debug_animation_frame_count <= 20) {
+                console.log("web.animation_frame", this._debug_animation_frame_count);
+            }
             this.to_wasm.ToWasmAnimationFrame({time: time / 1000.0});
             this.in_animation_frame = true;
             this.do_wasm_pump();
@@ -216,6 +233,10 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmSetDocumentTitle(args) {
+        this._debug_set_document_title_count += 1;
+        if (this._debug_set_document_title_count <= 20) {
+            console.log("web.set_document_title", this._debug_set_document_title_count, args.title);
+        }
         // document.title = args.title
     }
     
