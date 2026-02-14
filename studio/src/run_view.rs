@@ -243,6 +243,12 @@ impl RunView {
                 });
 
             if let Some(v) = active_build_needs_new_swapchain {
+                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                let aux_chan_host_endpoint = v
+                    .aux_chan_host_endpoint
+                    .clone()
+                    .expect("missing Linux aux channel host endpoint");
+
                 // HACK(eddyb) there is no check that there were any draws on
                 // the current swapchain, but the absence of an older swapchain
                 // (i.e. `last_swapchain_with_completed_draws`) implies either
@@ -271,8 +277,14 @@ impl RunView {
                 });
 
                 // Create shared swapchain for cross-process serialization
-                let shared_swapchain =
-                    cx_stdin::SharedSwapchain::from_host_swapchain(swapchain, cx);
+                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                let shared_swapchain = cx_stdin::SharedSwapchain::from_host_swapchain(
+                    swapchain,
+                    cx,
+                    &aux_chan_host_endpoint,
+                );
+                #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+                let shared_swapchain = cx_stdin::SharedSwapchain::from_host_swapchain(swapchain, cx);
 
                 // Inform the client about the new swapchain it *should* use
                 manager.send_host_to_stdin(run_view_id, HostToStdin::Swapchain(shared_swapchain));
