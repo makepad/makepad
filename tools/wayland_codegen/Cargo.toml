@@ -1,0 +1,12 @@
+[package]
+name = "wayland_codegen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+proc-macro2 = "1.0"
+quick-xml = "0.38.3"
+quote = "1.0"
+
+[workspace]

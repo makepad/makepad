@@ -524,6 +524,18 @@ impl ShaderBackend {
                     format!("l_{}", id)
                 }
             }
+            Self::Glsl => {
+                let base = if id == id!(self) {
+                    "_self".to_string()
+                } else {
+                    format!("{}", id)
+                };
+                if shadow > 0 {
+                    format!("l_{}_{}", base, shadow)
+                } else {
+                    format!("l_{}", base)
+                }
+            }
             _ => {
                 if shadow > 0 {
                     format!("_s{}{}", shadow, id)
@@ -541,7 +553,7 @@ impl ShaderBackend {
             return "_self".to_string();
         }
         match self {
-            Self::Hlsl => {
+            Self::Hlsl | Self::Glsl => {
                 if shadow > 0 {
                     format!("p_{}_{}", id, shadow)
                 } else {
@@ -855,6 +867,7 @@ impl ShaderBackend {
                 id_lut!(dFdx);
                 id_lut!(dFdy);
                 id_lut!(inversesqrt);
+                id_lut!(mod);
             }
             Self::Wgsl => {
                 // Builtin function names
@@ -887,6 +900,7 @@ impl ShaderBackend {
                 match name_in {
                     // GLSL uses dFdx/dFdy natively, mod is native
                     id!(inverseSqrt) => id!(inversesqrt),
+                    id!(modf) => id!(mod),
                     x => x,
                 }
             }

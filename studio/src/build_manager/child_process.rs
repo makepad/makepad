@@ -8,7 +8,7 @@ use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::os::unix::process::CommandExt;
 
 pub struct ChildProcess {
