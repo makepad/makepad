@@ -18,7 +18,7 @@ use {
         full_token::{TokenWithLen, Delim, FullToken},
         colorhex,
     },
-    makepad_live_id::{LiveId, LIVE_ID_SEED}
+    makepad_live_id::LiveId
 };
 
 /// The state of the tokenizer.
@@ -587,24 +587,24 @@ impl<'a> Cursor<'a> {
     }
     
     fn id_from_1(&self) -> LiveId {
-        LiveId::from_bytes(LIVE_ID_SEED, &[
+        LiveId::from_bytes(LiveId::SEED, &[
             self.chars[self.index + 0] as u8,
-        ], 0, 1)
+        ], 0, 1, 0)
     }
     
     fn id_from_2(&self) -> LiveId {
-        LiveId::from_bytes(LIVE_ID_SEED, &[
+        LiveId::from_bytes(LiveId::SEED, &[
             self.chars[self.index + 0] as u8,
             self.chars[self.index + 1] as u8,
-        ], 0, 2)
+        ], 0, 2, 0)
     }
     
     fn id_from_3(&self) -> LiveId {
-        LiveId::from_bytes(LIVE_ID_SEED, &[
+        LiveId::from_bytes(LiveId::SEED, &[
             self.chars[self.index + 0] as u8,
             self.chars[self.index + 1] as u8,
             self.chars[self.index + 2] as u8,
-        ], 0, 3)
+        ], 0, 3, 0)
     }
     
     fn skip(&mut self, count: usize) {
