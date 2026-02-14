@@ -263,7 +263,13 @@ impl Window {
                     self.view(cx, ids!(caption_bar)).set_visible(cx, true);
                 }
             }
-            OsType::LinuxWindow(_) | OsType::LinuxDirect | OsType::Android(_) => {
+            OsType::LinuxWindow(params) => {
+                if params.custom_window_chrome && !cx.in_makepad_studio() {
+                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
+                }
+            }
+            OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
             }
             OsType::Web(_) => {
@@ -501,6 +507,8 @@ impl Widget for Window {
                         if dq.abs.y < 25. {
                             if dq.abs.x < size.x - 135.0 {
                                 dq.response.set(WindowDragQueryResponse::Caption);
+                            } else {
+                                dq.response.set(WindowDragQueryResponse::Client);
                             }
                             cx.set_cursor(MouseCursor::Default);
                         }

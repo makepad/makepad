@@ -68,7 +68,7 @@ impl WaylandWindow {
 
         let decoration = decoration_manager.map(|manager| {
             let decoration = manager.get_toplevel_decoration(&toplevel, qhandle, ());
-            decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+            decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ClientSide);
             decoration
         });
 
