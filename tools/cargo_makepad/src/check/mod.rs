@@ -287,6 +287,7 @@ struct CargoMetadataPackage {
     id: String,
     name: String,
     manifest_path: String,
+    dependencies: Vec<CargoMetadataDependency>,
     targets: Vec<CargoMetadataTarget>,
 }
 
@@ -295,6 +296,18 @@ struct CargoMetadataTarget {
     name: String,
     kind: Vec<String>,
     src_path: String,
+}
+
+#[derive(Debug, DeJson)]
+struct CargoMetadataDependency {
+    name: String,
+    req: String,
+    source: Option<String>,
+    path: Option<String>,
+    uses_default_features: bool,
+    features: Vec<String>,
+    optional: bool,
+    target: Option<String>,
 }
 
 #[derive(Debug)]
@@ -309,7 +322,12 @@ struct RuntimeHarnessPlan {
     crate_name: String,
     package_dir: PathBuf,
     modules: Vec<RuntimeModule>,
-    needs_widgets_prelude: bool,
+    runtime_dependency_entries: Vec<String>,
+    runtime_cx_path: String,
+    runtime_log_path: String,
+    widgets_bootstrap_expr: Option<String>,
+    /// Extra script_mod bootstrap calls (e.g. openpad_widgets) to run after widgets, before checked_crate modules.
+    extra_bootstrap_calls: Vec<(String, String)>,
 }
 
 fn canonicalize_best(path: &Path) -> PathBuf {
@@ -482,6 +500,34 @@ fn discover_module_files(
     }
 }
 
+/// Parse lib.rs (or root script_mod caller) for `crate::module::script_mod(vm)` call order
+/// so runtime harness runs script_mods in dependency order instead of alphabetical.
+fn script_mod_call_order_from_lib(lib_src_path: &Path) -> Vec<Vec<String>> {
+    let content = match std::fs::read_to_string(lib_src_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut order = Vec::new();
+    // Match crate::name1::script_mod(vm) or crate::name1::name2::script_mod(vm)
+    for line in content.lines() {
+        let line = line.trim();
+        if !line.contains("script_mod") {
+            continue;
+        }
+        if let Some(start) = line.find("crate::") {
+            let rest = &line[start + "crate::".len()..];
+            if let Some(end) = rest.find("::script_mod") {
+                let path = &rest[..end];
+                let module_path: Vec<String> = path.split("::").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                if !module_path.is_empty() {
+                    order.push(module_path);
+                }
+            }
+        }
+    }
+    order
+}
+
 fn discover_runtime_modules(
     lib_src_path: &Path,
     explicit_rs_paths: &HashSet<PathBuf>,
@@ -508,20 +554,123 @@ fn discover_runtime_modules(
             file_path: file,
         });
     }
+
+    let call_order = script_mod_call_order_from_lib(lib_src_path);
     out.sort_by(|a, b| {
-        let pa = if a.module_path.is_empty() {
-            String::new()
-        } else {
-            a.module_path.join("::")
+        let order_index = |path: &[String]| {
+            call_order.iter().position(|o| o.as_slice() == path)
         };
-        let pb = if b.module_path.is_empty() {
-            String::new()
-        } else {
-            b.module_path.join("::")
-        };
-        pa.cmp(&pb)
+        let ia = order_index(&a.module_path);
+        let ib = order_index(&b.module_path);
+        match (ia, ib) {
+            (Some(i), Some(j)) => i.cmp(&j),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => {
+                let pa = if a.module_path.is_empty() { String::new() } else { a.module_path.join("::") };
+                let pb = if b.module_path.is_empty() { String::new() } else { b.module_path.join("::") };
+                pa.cmp(&pb)
+            }
+        }
     });
     out
+}
+
+fn select_runtime_dependency<'a>(
+    package: &'a CargoMetadataPackage,
+    name: &str,
+) -> Option<&'a CargoMetadataDependency> {
+    package.dependencies.iter().find(|dep| {
+        dep.name == name && !dep.optional && dep.target.is_none()
+    })
+}
+
+fn parse_git_source(source: &str) -> (String, Option<String>, Option<String>, Option<String>) {
+    let mut raw = source.strip_prefix("git+").unwrap_or(source);
+    let mut fragment = None;
+    if let Some((before_hash, frag)) = raw.split_once('#') {
+        raw = before_hash;
+        if !frag.is_empty() {
+            fragment = Some(frag.to_string());
+        }
+    }
+
+    let (url, query) = if let Some((u, q)) = raw.split_once('?') {
+        (u.to_string(), Some(q))
+    } else {
+        (raw.to_string(), None)
+    };
+
+    let mut branch = None;
+    let mut tag = None;
+    let mut rev = None;
+    if let Some(query) = query {
+        for kv in query.split('&') {
+            if let Some((k, v)) = kv.split_once('=') {
+                if v.is_empty() {
+                    continue;
+                }
+                match k {
+                    "branch" => branch = Some(v.to_string()),
+                    "tag" => tag = Some(v.to_string()),
+                    "rev" => rev = Some(v.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if rev.is_none() && branch.is_none() && tag.is_none() {
+        rev = fragment;
+    }
+
+    (url, branch, tag, rev)
+}
+
+fn dependency_entry(alias: &str, dep: &CargoMetadataDependency) -> String {
+    let mut fields = Vec::<String>::new();
+    fields.push(format!("package = \"{}\"", dep.name));
+    if let Some(path) = &dep.path {
+        fields.push(format!("path = \"{}\"", path));
+    } else if let Some(source) = &dep.source {
+        if source.starts_with("git+") {
+            let (url, branch, tag, rev) = parse_git_source(source);
+            fields.push(format!("git = \"{}\"", url));
+            if let Some(branch) = branch {
+                fields.push(format!("branch = \"{}\"", branch));
+            }
+            if let Some(tag) = tag {
+                fields.push(format!("tag = \"{}\"", tag));
+            }
+            if let Some(rev) = rev {
+                fields.push(format!("rev = \"{}\"", rev));
+            }
+        } else {
+            fields.push(format!("version = \"{}\"", dep.req));
+        }
+    } else {
+        fields.push(format!("version = \"{}\"", dep.req));
+    }
+
+    if !dep.uses_default_features {
+        fields.push("default-features = false".to_string());
+    }
+    if !dep.features.is_empty() {
+        let mut features = String::new();
+        features.push('[');
+        for (index, feature) in dep.features.iter().enumerate() {
+            if index > 0 {
+                features.push_str(", ");
+            }
+            features.push('"');
+            features.push_str(feature);
+            features.push('"');
+        }
+        features.push(']');
+        fields.push(format!("features = {}", features));
+    }
+
+    format!("{} = {{ {} }}\n", alias, fields.join(", "))
 }
 
 fn build_runtime_harness_plan(
@@ -548,12 +697,60 @@ fn build_runtime_harness_plan(
         .ok_or_else(|| "Invalid package manifest path".to_string())?;
     let modules = discover_runtime_modules(&lib_src_path, explicit_rs_paths, restrict_to_explicit);
 
+    let mut runtime_dependency_entries = Vec::<String>::new();
+
+    let mut extra_bootstrap_calls = Vec::new();
+    let (runtime_cx_path, runtime_log_path, widgets_bootstrap_expr) = if package.name == "makepad-widgets" {
+        (
+            "checked_crate::Cx".to_string(),
+            "checked_crate::makepad_platform::makepad_error_log".to_string(),
+            None,
+        )
+    } else if let Some(widgets_dep) = select_runtime_dependency(package, "makepad-widgets") {
+        runtime_dependency_entries.push(dependency_entry("runtime_makepad_widgets", widgets_dep));
+        if let Some(ow_dep) = select_runtime_dependency(package, "openpad-widgets") {
+            runtime_dependency_entries.push(dependency_entry("runtime_openpad_widgets", ow_dep));
+            extra_bootstrap_calls.push(("openpad_widgets".to_string(), "runtime_openpad_widgets::script_mod(vm);".to_string()));
+        }
+        (
+            "runtime_makepad_widgets::Cx".to_string(),
+            "runtime_makepad_widgets::makepad_platform::makepad_error_log".to_string(),
+            if needs_widgets_prelude {
+                Some("runtime_makepad_widgets::script_mod(vm);".to_string())
+            } else {
+                None
+            },
+        )
+    } else if let Some(platform_dep) = select_runtime_dependency(package, "makepad-platform") {
+        runtime_dependency_entries.push(dependency_entry("runtime_makepad_platform", platform_dep));
+        (
+            "runtime_makepad_platform::Cx".to_string(),
+            "runtime_makepad_platform::makepad_error_log".to_string(),
+            None,
+        )
+    } else {
+        let platform_dep = canonicalize_best(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform"));
+        runtime_dependency_entries.push(format!(
+            "runtime_makepad_platform = {{ package = \"makepad-platform\", path = \"{}\" }}\n",
+            platform_dep.display()
+        ));
+        (
+            "runtime_makepad_platform::Cx".to_string(),
+            "runtime_makepad_platform::makepad_error_log".to_string(),
+            None,
+        )
+    };
+
     Ok(RuntimeHarnessPlan {
         package_name: package.name.clone(),
         crate_name: lib_target.name.clone(),
         package_dir,
         modules,
-        needs_widgets_prelude,
+        runtime_dependency_entries,
+        runtime_cx_path,
+        runtime_log_path,
+        widgets_bootstrap_expr,
+        extra_bootstrap_calls,
     })
 }
 
@@ -569,6 +766,18 @@ fn write_runtime_harness(plan: &RuntimeHarnessPlan) -> Result<PathBuf, String> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     plan.package_name.hash(&mut hasher);
     plan.crate_name.hash(&mut hasher);
+    plan.runtime_cx_path.hash(&mut hasher);
+    plan.runtime_log_path.hash(&mut hasher);
+    for dep in &plan.runtime_dependency_entries {
+        dep.hash(&mut hasher);
+    }
+    if let Some(expr) = &plan.widgets_bootstrap_expr {
+        expr.hash(&mut hasher);
+    }
+    for (name, expr) in &plan.extra_bootstrap_calls {
+        name.hash(&mut hasher);
+        expr.hash(&mut hasher);
+    }
     for m in &plan.modules {
         m.module_path.hash(&mut hasher);
     }
@@ -577,31 +786,38 @@ fn write_runtime_harness(plan: &RuntimeHarnessPlan) -> Result<PathBuf, String> {
     let src_dir = dir.join("src");
     std::fs::create_dir_all(&src_dir).map_err(|e| format!("Failed to create runtime harness dir: {}", e))?;
 
-    let script_dep = canonicalize_best(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform/script"));
-    let platform_dep = canonicalize_best(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform"));
-    let widgets_dep = canonicalize_best(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../widgets"));
     let package_dir = canonicalize_best(&plan.package_dir);
-    let mut cargo_toml = format!(
-        "[package]\nname = \"makepad-script-check-runner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nmakepad-script = {{ path = \"{}\" }}\nmakepad-platform = {{ path = \"{}\" }}\nchecked_crate = {{ package = \"{}\", path = \"{}\" }}\n",
-        script_dep.display(),
-        platform_dep.display(),
+    let mut cargo_toml = String::new();
+    cargo_toml.push_str(
+        "[package]\nname = \"makepad-script-check-runner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    );
+    for dep in &plan.runtime_dependency_entries {
+        cargo_toml.push_str(dep);
+    }
+    cargo_toml.push_str(&format!(
+        "checked_crate = {{ package = \"{}\", path = \"{}\" }}\n",
         plan.package_name,
         package_dir.display()
-    );
-    if plan.needs_widgets_prelude && plan.package_name != "makepad-widgets" {
-        cargo_toml.push_str(&format!(
-            "makepad-widgets = {{ path = \"{}\" }}\n",
-            widgets_dep.display()
-        ));
-    }
+    ));
     std::fs::write(dir.join("Cargo.toml"), cargo_toml)
         .map_err(|e| format!("Failed to write runtime harness Cargo.toml: {}", e))?;
 
     let mut bootstrap_calls = String::new();
-    if plan.needs_widgets_prelude && plan.package_name != "makepad-widgets" {
+    if let Some(bootstrap_expr) = &plan.widgets_bootstrap_expr {
         bootstrap_calls.push_str(
-            "        run_module(\"makepad_widgets\", \"<makepad-widgets>\", |vm| {\n            makepad_widgets::script_mod(vm);\n        }, vm);\n",
+            "        run_module(\"makepad_widgets\", \"<makepad-widgets>\", || {\n",
         );
+        bootstrap_calls.push_str("            ");
+        bootstrap_calls.push_str(bootstrap_expr);
+        bootstrap_calls.push('\n');
+        bootstrap_calls.push_str("        });\n");
+        bootstrap_calls.push_str("        vm.drain_errors();\n");
+    }
+    for (module_name, call_expr) in &plan.extra_bootstrap_calls {
+        bootstrap_calls.push_str(&format!(
+            "        run_module(\"{}\", \"<{}>\", || {{\n            {}\n        }});\n        vm.drain_errors();\n",
+            module_name, module_name, call_expr
+        ));
     }
 
     let mut calls = String::new();
@@ -614,16 +830,22 @@ fn write_runtime_harness(plan: &RuntimeHarnessPlan) -> Result<PathBuf, String> {
         let call_expr = runtime_module_call_expr("checked_crate", &m.module_path);
         let file_name = m.file_path.display().to_string();
         calls.push_str(&format!(
-            "        run_module(\"{}\", \"{}\", |vm| {{\n            {}(vm);\n        }}, vm);\n",
+            "        run_module(\"{}\", \"{}\", || {{\n            {}(vm);\n        }});\n        vm.drain_errors();\n",
             module_name, file_name, call_expr
         ));
     }
 
     let source = format!(
-        "use makepad_platform::Cx;\nuse makepad_script::{{makepad_error_log, ScriptVm}};\nuse std::sync::{{Mutex, OnceLock}};\n\nconst PREFIX: &str = \"{}\";\n\n#[derive(Clone)]\nstruct Issue {{\n    file: String,\n    line: u32,\n    column: u32,\n    message: String,\n}}\n\nstatic ISSUES: OnceLock<Mutex<Vec<Issue>>> = OnceLock::new();\n\nfn issues() -> &'static Mutex<Vec<Issue>> {{\n    ISSUES.get_or_init(|| Mutex::new(Vec::new()))\n}}\n\nfn push_issue(file: String, line: u32, column: u32, message: String) {{\n    let mut guard = issues().lock().unwrap();\n    guard.push(Issue {{ file, line, column, message }});\n}}\n\nfn capture_logger(\n    file_name: &str,\n    line_start: u32,\n    column_start: u32,\n    _line_end: u32,\n    _column_end: u32,\n    message: String,\n    level: makepad_error_log::LogLevel,\n) {{\n    if matches!(level, makepad_error_log::LogLevel::Error | makepad_error_log::LogLevel::Warning) {{\n        push_issue(file_name.to_string(), line_start + 1, column_start + 1, message);\n    }}\n}}\n\nfn panic_to_message(payload: Box<dyn std::any::Any + Send>) -> String {{\n    if let Some(s) = payload.downcast_ref::<&str>() {{\n        return (*s).to_string();\n    }}\n    if let Some(s) = payload.downcast_ref::<String>() {{\n        return s.clone();\n    }}\n    \"panic without string payload\".to_string()\n}}\n\nfn run_module<F: FnOnce(&mut ScriptVm)>(module_name: &str, file_name: &str, f: F, vm: &mut ScriptVm) {{\n    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(vm)));\n    if let Err(panic_payload) = result {{\n        push_issue(\n            file_name.to_string(),\n            1,\n            1,\n            format!(\"panic while running {{}}: {{}}\", module_name, panic_to_message(panic_payload)),\n        );\n    }}\n    vm.drain_errors();\n}}\n\nfn sanitize_message(message: &str) -> String {{\n    message.replace('\\n', \"\\\\n\").replace('\\r', \"\\\\r\").replace('\\t', \" \")\n}}\n\nfn main() {{\n    let old_logger = {{\n        let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect(\"logger lock poisoned\");\n        let old = *guard;\n        *guard = capture_logger;\n        old\n    }};\n\n    let mut cx = Cx::new(Box::new(|_, _| {{}}));\n    cx.with_vm(|vm| {{\n{}{}\n    }});\n\n    {{\n        let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect(\"logger lock poisoned\");\n        *guard = old_logger;\n    }}\n\n    let issues = issues().lock().unwrap();\n    for issue in issues.iter() {{\n        println!(\"{{}}\\truntime_error\\t{{}}\\t{{}}\\t{{}}\\t{{}}\", PREFIX, issue.file, issue.line, issue.column, sanitize_message(&issue.message));\n    }}\n\n    if !issues.is_empty() {{\n        std::process::exit(1);\n    }}\n}}\n",
+        "use {};\nuse std::sync::{{Mutex, OnceLock}};\n\nconst PREFIX: &str = \"{}\";\n\n#[derive(Clone)]\nstruct Issue {{\n    file: String,\n    line: u32,\n    column: u32,\n    message: String,\n}}\n\nstatic ISSUES: OnceLock<Mutex<Vec<Issue>>> = OnceLock::new();\n\nfn issues() -> &'static Mutex<Vec<Issue>> {{\n    ISSUES.get_or_init(|| Mutex::new(Vec::new()))\n}}\n\nfn push_issue(file: String, line: u32, column: u32, message: String) {{\n    let mut guard = issues().lock().unwrap();\n    guard.push(Issue {{ file, line, column, message }});\n}}\n\nfn capture_logger(\n    file_name: &str,\n    line_start: u32,\n    column_start: u32,\n    _line_end: u32,\n    _column_end: u32,\n    message: String,\n    level: {}::LogLevel,\n) {{\n    if matches!(level, {}::LogLevel::Error | {}::LogLevel::Warning) {{\n        push_issue(file_name.to_string(), line_start + 1, column_start + 1, message);\n    }}\n}}\n\nfn panic_to_message(payload: Box<dyn std::any::Any + Send>) -> String {{\n    if let Some(s) = payload.downcast_ref::<&str>() {{\n        return (*s).to_string();\n    }}\n    if let Some(s) = payload.downcast_ref::<String>() {{\n        return s.clone();\n    }}\n    \"panic without string payload\".to_string()\n}}\n\nfn run_module<F: FnOnce()>(module_name: &str, file_name: &str, f: F) {{\n    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));\n    if let Err(panic_payload) = result {{\n        push_issue(\n            file_name.to_string(),\n            1,\n            1,\n            format!(\"panic while running {{}}: {{}}\", module_name, panic_to_message(panic_payload)),\n        );\n    }}\n}}\n\nfn sanitize_message(message: &str) -> String {{\n    message.replace('\\n', \"\\\\n\").replace('\\r', \"\\\\r\").replace('\\t', \" \")\n}}\n\nfn main() {{\n    let old_logger = {{\n        let mut guard = {}::LOG_WITH_LEVEL.write().expect(\"logger lock poisoned\");\n        let old = *guard;\n        *guard = capture_logger;\n        old\n    }};\n\n    let mut cx = Cx::new(Box::new(|_, _| {{}}));\n    cx.with_vm(|vm| {{\n{}{}\n    }});\n\n    {{\n        let mut guard = {}::LOG_WITH_LEVEL.write().expect(\"logger lock poisoned\");\n        *guard = old_logger;\n    }}\n\n    let issues = issues().lock().unwrap();\n    for issue in issues.iter() {{\n        println!(\"{{}}\\truntime_error\\t{{}}\\t{{}}\\t{{}}\\t{{}}\", PREFIX, issue.file, issue.line, issue.column, sanitize_message(&issue.message));\n    }}\n\n    if !issues.is_empty() {{\n        std::process::exit(1);\n    }}\n}}\n",
+        plan.runtime_cx_path,
         RUNTIME_ISSUE_PREFIX,
+        plan.runtime_log_path,
+        plan.runtime_log_path,
+        plan.runtime_log_path,
+        plan.runtime_log_path,
         bootstrap_calls,
-        calls
+        calls,
+        plan.runtime_log_path
     );
 
     let mut f = std::fs::File::create(src_dir.join("main.rs"))
