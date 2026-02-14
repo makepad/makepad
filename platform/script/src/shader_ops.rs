@@ -45,31 +45,60 @@ impl ShaderFnCompiler {
         let mut s = self.stack.new_string();
 
         let is_simple_int_literal = |value: &str| {
-            value
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        };
+        let is_simple_uint_literal = |value: &str| {
+            value.ends_with('u') && is_simple_int_literal(&value[..value.len() - 1])
+        };
+        let to_float_literal = |value: &str| {
+            if is_simple_int_literal(value) {
+                Some(format!("{}.0", value))
+            } else if is_simple_uint_literal(value) {
+                Some(format!("{}.0", &value[..value.len() - 1]))
+            } else {
+                None
+            }
         };
         let is_float_like = |ty: &ShaderType| match ty {
             ShaderType::Pod(pt) => vm.bx.heap.pod_types[pt.index as usize].ty.is_float_type(),
             ShaderType::AbstractFloat => true,
             _ => false,
         };
+        let is_int_like = |ty: &ShaderType| match ty {
+            ShaderType::AbstractInt => true,
+            ShaderType::Pod(pt)
+                if *pt == vm.bx.code.builtins.pod.pod_i32
+                    || *pt == vm.bx.code.builtins.pod.pod_u32 =>
+            {
+                true
+            }
+            _ => false,
+        };
 
         let lhs = if matches!(output.backend, ShaderBackend::Glsl)
-            && matches!(t1, ShaderType::AbstractInt)
+            && is_int_like(&t1)
             && is_float_like(&t2)
-            && is_simple_int_literal(&s1)
         {
-            format!("{}.0", s1)
+            if let Some(v) = to_float_literal(&s1) {
+                v
+            } else {
+                format!("float({})", s1)
+            }
         } else {
             s1.to_string()
         };
         let rhs = if matches!(output.backend, ShaderBackend::Glsl)
-            && matches!(t2, ShaderType::AbstractInt)
+            && is_int_like(&t2)
             && is_float_like(&t1)
-            && is_simple_int_literal(&s2)
         {
-            format!("{}.0", s2)
+            if let Some(v) = to_float_literal(&s2) {
+                v
+            } else {
+                format!("float({})", s2)
+            }
         } else {
             s2.to_string()
         };

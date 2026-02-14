@@ -170,7 +170,7 @@ pub struct DrawShaderInput {
 fn uniform_packing() -> DrawShaderInputPacking {
     #[cfg(any(target_arch = "wasm32"))]
     {
-        return DrawShaderInputPacking::UniformsGLSLTight;
+        return DrawShaderInputPacking::UniformsGLSL140;
     }
 
     #[cfg(all(any(target_os = "android", target_os = "linux"), use_gles_3))]

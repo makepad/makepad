@@ -134,6 +134,7 @@ impl MathView {
         if self.text == self.old_text
             && self.font_size == self.old_font_size
             && self.old_font_family_id == Some(font_family_id)
+            && (self.layout_cache.is_some() || self.text.is_empty())
         {
             return;
         }

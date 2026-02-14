@@ -116,6 +116,10 @@ impl Fonts {
         self.layouter.define_font_family(id, definition);
     }
 
+    pub fn set_font_family_definition(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
+        self.layouter.set_font_family_definition(id, definition);
+    }
+
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
         self.layouter.define_font(id, definition);
     }

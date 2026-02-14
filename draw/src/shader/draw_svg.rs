@@ -330,7 +330,7 @@ impl DrawSvg {
         let data = if let Some(data) = cx.get_resource(handle) {
             data
         } else {
-            cx.script_data.resources.load_all_resources();
+            cx.load_all_script_resources();
             match cx.get_resource(handle) {
                 Some(data) => data,
                 // Resource not yet available (may be loading via HTTP) - don't

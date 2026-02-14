@@ -11,6 +11,7 @@ workspace.members = [
     "examples/comfyui",
     "examples/aichat",
     "examples/pdf",
+    "examples/matrix",
     "libs/latex_math",
     "libs/mbtile_reader",
     "libs/pdf_parse",
@@ -23,6 +24,7 @@ workspace.members = [
     "tools/cargo_makepad",
     "tools/remote",
     "libs/terminal_core",
+    "libs/matrix",
 ]
 
 workspace.exclude = [

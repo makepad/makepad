@@ -68,6 +68,15 @@ impl Loader {
         self.font_family_definitions.insert(id, definition);
     }
 
+    pub fn set_font_family_definition(
+        &mut self,
+        id: FontFamilyId,
+        definition: FontFamilyDefinition,
+    ) {
+        self.font_family_cache.remove(&id);
+        self.font_family_definitions.insert(id, definition);
+    }
+
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
         debug_assert!(
             !self.is_font_known(id),
