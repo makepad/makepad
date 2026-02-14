@@ -44,16 +44,14 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "1.0.0" }
 makepad-objc-sys = { path = "../libs/objc-sys", version = "1.0.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
-wayland-client = { path = "../libs/linux/wayland-client-0.31.12" }
-wayland-protocols = { path = "../libs/linux/wayland-protocols-0.32.10", features = ["client", "unstable", "staging"] }
-wayland-egl = { path = "../libs/linux/wayland-egl-0.32.9" }
-tempfile = "3.22"
+wayland-client = { path = "../libs/linux/wayland-client" }
+wayland-protocols = { path = "../libs/linux/wayland-protocols", features = ["client", "unstable", "staging"] }
+wayland-egl = { path = "../libs/linux/wayland-egl" }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-wayland-client = { path = "../libs/linux/wayland-client-0.31.12" }
-wayland-protocols = { path = "../libs/linux/wayland-protocols-0.32.10", features = ["client", "unstable", "staging"] }
-wayland-egl = { path = "../libs/linux/wayland-egl-0.32.9" }
-tempfile = "3.22"
+wayland-client = { path = "../libs/linux/wayland-client" }
+wayland-protocols = { path = "../libs/linux/wayland-protocols", features = ["client", "unstable", "staging"] }
+wayland-egl = { path = "../libs/linux/wayland-egl" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ## Note: we must not use local 'path' dependencies on `makepad-jni-sys` or `makepad-android-state`
