@@ -511,6 +511,76 @@ impl ShaderBackend {
         }
     }
 
+    pub fn map_local_name(&self, id: LiveId, shadow: usize) -> String {
+        match self {
+            Self::Hlsl => {
+                if shadow > 0 {
+                    format!("l_{}_{}", id, shadow)
+                } else {
+                    format!("l_{}", id)
+                }
+            }
+            _ => {
+                if shadow > 0 {
+                    format!("_s{}{}", shadow, id)
+                } else if id == id!(self) {
+                    "_self".to_string()
+                } else {
+                    format!("{}", id)
+                }
+            }
+        }
+    }
+
+    pub fn map_param_name(&self, id: LiveId, shadow: usize) -> String {
+        if id == id!(self) {
+            return "_self".to_string();
+        }
+        match self {
+            Self::Hlsl => {
+                if shadow > 0 {
+                    format!("p_{}_{}", id, shadow)
+                } else {
+                    format!("p_{}", id)
+                }
+            }
+            _ => self.map_local_name(id, shadow),
+        }
+    }
+
+    pub fn map_function_name(&self, name: &str) -> String {
+        match self {
+            Self::Hlsl => format!("f_{}", name),
+            _ => name.to_string(),
+        }
+    }
+
+    pub fn map_io_name(&self, id: LiveId) -> String {
+        match self {
+            Self::Hlsl => format!("io_{}", id),
+            _ => format!("{}", id),
+        }
+    }
+
+    pub fn map_field_name(&self, id: LiveId) -> String {
+        match self {
+            Self::Hlsl => {
+                let id_str = format!("{}", id);
+                let len = id_str.len();
+                let is_swizzle = (1..=4).contains(&len)
+                    && id_str
+                        .bytes()
+                        .all(|c| matches!(c, b'x' | b'y' | b'z' | b'w' | b'r' | b'g' | b'b' | b'a'));
+                if is_swizzle {
+                    id_str
+                } else {
+                    format!("f_{}", id_str)
+                }
+            }
+            _ => format!("{}", id),
+        }
+    }
+
     /// Generate a variable declaration statement for the backend.
     /// For C-style backends (Metal, HLSL, GLSL): `type_name var_name;\n`
     /// For WGSL: `var var_name:type_name;\n`
@@ -1017,7 +1087,8 @@ impl ShaderBackend {
                             self.pod_type_def_metal_array(&field.ty, &field.name, referenced, out);
                         } else {
                             self.pod_type_name_referenced(&field.ty, referenced, out);
-                            writeln!(out, " {};", field.name).ok();
+                            let field_name = self.map_field_name(field.name);
+                            writeln!(out, " {};", field_name).ok();
                         }
                     }
                     Self::Wgsl => {
@@ -1049,12 +1120,15 @@ impl ShaderBackend {
                         write!(out, ", ").ok();
                     }
                     self.pod_type_name_referenced(&field.ty, referenced, out);
-                    write!(out, " {}", field.name).ok();
+                    let field_param = self.map_param_name(field.name, 0);
+                    write!(out, " {}", field_param).ok();
                 }
                 writeln!(out, "){{").ok();
                 writeln!(out, "    {} r;", struct_name).ok();
                 for field in fields {
-                    writeln!(out, "    r.{0} = {0};", field.name).ok();
+                    let field_name = self.map_field_name(field.name);
+                    let field_param = self.map_param_name(field.name, 0);
+                    writeln!(out, "    r.{0} = {1};", field_name, field_param).ok();
                 }
                 writeln!(out, "    return r;").ok();
                 writeln!(out, "}}").ok();
@@ -1081,7 +1155,8 @@ impl ShaderBackend {
             }
         }
         self.pod_type_name_referenced(curr, referenced, out);
-        writeln!(out, " {}{};", name, dims).ok();
+        let mapped = self.map_field_name(*name);
+        writeln!(out, " {}{};", mapped, dims).ok();
     }
 
     fn pod_type_name_referenced(

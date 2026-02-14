@@ -166,6 +166,7 @@ impl ShaderType {
 pub enum ShaderScopeItem {
     IoSelf(ScriptObject),
     ScopeObject(ScriptObject),
+    Param { ty: ScriptPodType, shadow: usize },
     Let { ty: ScriptPodType, shadow: usize },
     Var { ty: ScriptPodType, shadow: usize },
     PodType { ty: ScriptPodType, shadow: usize },
@@ -176,6 +177,7 @@ impl ShaderScopeItem {
         match self {
             Self::IoSelf(_) => ScriptPodType::VOID,
             Self::ScopeObject(_) => ScriptPodType::VOID,
+            Self::Param { ty, .. } => *ty,
             Self::Let { ty, .. } => *ty,
             Self::Var { ty, .. } => *ty,
             Self::PodType { ty, .. } => *ty,
@@ -186,6 +188,7 @@ impl ShaderScopeItem {
         match self {
             Self::IoSelf(_) => 0,
             Self::ScopeObject(_) => 0,
+            Self::Param { shadow, .. } => *shadow,
             Self::Let { shadow, .. } => *shadow,
             Self::Var { shadow, .. } => *shadow,
             Self::PodType { shadow, .. } => *shadow,
@@ -295,6 +298,18 @@ impl ShaderScope {
             shadow
         } else {
             scope.insert(id, ShaderScopeItem::Let { ty, shadow: 0 });
+            0
+        }
+    }
+
+    pub fn define_param(&mut self, id: LiveId, ty: ScriptPodType) -> usize {
+        let scope = self.shader_scope.last_mut().unwrap();
+        if let Some(item) = scope.get_mut(&id) {
+            let shadow = item.shadow() + 1;
+            *item = ShaderScopeItem::Param { ty, shadow };
+            shadow
+        } else {
+            scope.insert(id, ShaderScopeItem::Param { ty, shadow: 0 });
             0
         }
     }
@@ -505,13 +520,17 @@ impl ShaderFnCompiler {
                         // `self` is a ScopeObject - return it for field access handling
                         return (ShaderType::ScopeObject(*obj), s2);
                     }
-                    if shadow > 0 {
-                        write!(s2, "_s{}{}", shadow, id).ok();
-                    } else if id == id!(self) {
-                        write!(s2, "_self").ok();
-                    } else {
-                        write!(s2, "{}", id).ok();
-                    }
+                    let scoped_name = match sc {
+                        ShaderScopeItem::Param { .. } => output.backend.map_param_name(id, shadow),
+                        ShaderScopeItem::Let { .. } | ShaderScopeItem::Var { .. } => {
+                            output.backend.map_local_name(id, shadow)
+                        }
+                        ShaderScopeItem::PodType { .. } => output.backend.map_local_name(id, shadow),
+                        ShaderScopeItem::IoSelf(_) | ShaderScopeItem::ScopeObject(_) => {
+                            String::new()
+                        }
+                    };
+                    write!(s2, "{}", scoped_name).ok();
                     self.stack.free_string(s);
                     return (ShaderType::Pod(sc.ty()), s2);
                 }
@@ -607,7 +626,8 @@ impl ShaderFnCompiler {
                                     .get_shader_io_kind_and_prefix(output.mode, io_type);
                                 match prefix {
                                     ShaderIoPrefix::Prefix(prefix) => {
-                                        write!(s2, "{}{}", prefix, shader_name).ok()
+                                        let mapped_name = output.backend.map_io_name(shader_name);
+                                        write!(s2, "{}{}", prefix, mapped_name).ok()
                                     }
                                     ShaderIoPrefix::Full(full) => write!(s2, "{}", full).ok(),
                                     ShaderIoPrefix::FullOwned(full) => write!(s2, "{}", full).ok(),
@@ -685,7 +705,8 @@ impl ShaderFnCompiler {
                             .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_SCOPE_UNIFORM);
                         match prefix {
                             ShaderIoPrefix::Prefix(prefix) => {
-                                write!(s2, "{}{}", prefix, shader_name).ok()
+                                let mapped_name = output.backend.map_io_name(shader_name);
+                                write!(s2, "{}{}", prefix, mapped_name).ok()
                             }
                             ShaderIoPrefix::Full(full) => write!(s2, "{}", full).ok(),
                             ShaderIoPrefix::FullOwned(full) => write!(s2, "{}", full).ok(),
@@ -939,7 +960,22 @@ impl ShaderFnCompiler {
             return push_fmt!(self, ShaderType::AbstractInt, "{}", v);
         }
         if let Some(id) = value.as_id() {
-            return push_fmt!(self, ShaderType::Id(id), "{}", id);
+            let mut s = self.stack.new_string();
+            if let Some((sc, shadow)) = self.shader_scope.find_var(id) {
+                let mapped = match sc {
+                    ShaderScopeItem::Param { .. } => backend.map_param_name(id, shadow),
+                    ShaderScopeItem::Let { .. }
+                    | ShaderScopeItem::Var { .. }
+                    | ShaderScopeItem::PodType { .. } => backend.map_local_name(id, shadow),
+                    ShaderScopeItem::IoSelf(_) | ShaderScopeItem::ScopeObject(_) => {
+                        format!("{}", id)
+                    }
+                };
+                write!(s, "{}", mapped).ok();
+            } else {
+                write!(s, "{}", id).ok();
+            }
+            return self.stack.push(self.trap.pass(), ShaderType::Id(id), s);
         }
         if let Some(v) = value.as_f32() {
             let mut s = self.stack.new_string();
@@ -1036,7 +1072,7 @@ impl ShaderFnCompiler {
             Opcode::XOR => self.handle_arithmetic(vm, output, opargs, "^", true),
 
             // ASSIGN
-            Opcode::ASSIGN => self.handle_assign(vm),
+            Opcode::ASSIGN => self.handle_assign(vm, output),
             Opcode::ASSIGN_ADD => {
                 self.handle_arithmetic_assign(vm, output, opargs, "+=", false);
             }
