@@ -125,8 +125,7 @@ impl ScriptHandleGc for CxWidgetHandleGc {
 }
 
 #[doc(hidden)]
-pub fn set_widget_async_trace(_cx: &mut Cx, _enabled: bool) {
-}
+pub fn set_widget_async_trace(_cx: &mut Cx, _enabled: bool) {}
 
 fn force_set_map_value(heap: &mut ScriptHeap, obj: ScriptObject, key: LiveId, value: ScriptValue) {
     heap.map_mut_with((key, value), obj, |(key, value), map| {

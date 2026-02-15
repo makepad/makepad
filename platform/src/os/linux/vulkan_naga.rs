@@ -23,6 +23,8 @@ pub struct CxVulkanShaderBinary {
     pub dyn_uniform_binding: u32,
     pub texture_binding_base: u32,
     pub sampler_binding_base: u32,
+    pub geometry_slots: usize,
+    pub instance_slots: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -755,7 +757,11 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
         writeln!(out, "    {}();", vertex_fn_name).ok();
     }
     writeln!(out, "    var out_data: VertexMainOut;").ok();
-    writeln!(out, "    out_data.position = vtx_pos;").ok();
+    writeln!(
+        out,
+        "    out_data.position = vec4f((in.packed_geometry_0.x * 2.0) - 1.0, (in.packed_geometry_0.y * 2.0) - 1.0, 0.0, 1.0);"
+    )
+    .ok();
     for field in &varying_fields {
         let mut scalars = Vec::new();
         wgsl_flatten_exprs(output, vm, field.ty, &field.name, &mut scalars);
@@ -850,7 +856,7 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
         writeln!(out, "    {}();", fragment_fn_name).ok();
         writeln!(out, "    var out_data: FragmentMainOut;").ok();
         for (index, _) in &fragment_outputs {
-            writeln!(out, "    out_data.fb{} = frag_fb{};", index, index).ok();
+            writeln!(out, "    out_data.fb{} = vec4f(1.0, 0.0, 1.0, 1.0);", index).ok();
         }
         writeln!(out, "    return out_data;").ok();
         writeln!(out, "}}").ok();
@@ -1060,6 +1066,15 @@ pub(crate) fn compile_draw_shader_wgsl_to_spirv(
 
     output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
+    let geometry_slots = wgsl_collect_geometry_fields(&output, vm)
+        .last()
+        .map(|field| field.offset + field.slots)
+        .unwrap_or(0);
+    let instance_slots = wgsl_collect_instance_fields(&output, vm)
+        .last()
+        .map(|field| field.offset + field.slots)
+        .unwrap_or(0);
+
     let (wgsl, dyn_uniform_binding, texture_binding_base, sampler_binding_base) =
         build_draw_shader_wgsl(vm, &mut output);
 
@@ -1086,5 +1101,7 @@ pub(crate) fn compile_draw_shader_wgsl_to_spirv(
         dyn_uniform_binding,
         texture_binding_base,
         sampler_binding_base,
+        geometry_slots,
+        instance_slots,
     })
 }

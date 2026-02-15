@@ -57,18 +57,12 @@ impl App {
     }
 }
 
-#[derive(Script)]
+#[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     pub ui: WidgetRef,
     #[rust]
     pub data: AppData,
-}
-
-impl ScriptHook for App {
-    fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        vm.set_ui(&self.ui);
-    }
 }
 
 impl App {
