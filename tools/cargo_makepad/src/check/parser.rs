@@ -474,7 +474,9 @@ pub fn extract_script_blocks_from_rust(content: &str) -> Vec<(usize, String, Scr
             None => continue,
         };
 
-        let line_1based = content[..open].lines().count();
+        // Use newline counting instead of `lines().count()` because `lines()`
+        // drops a trailing empty line, which undercounts when `{` starts a new line.
+        let line_1based = content[..open].bytes().filter(|&b| b == b'\n').count() + 1;
         blocks.push((line_1based, block_content.clone(), macro_kind));
         search = open + 1 + block_content.len() + 1; // past closing }
     }
@@ -619,6 +621,21 @@ fn main() {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].2, ScriptMacroKind::ScriptMod);
         assert_eq!(blocks[1].2, ScriptMacroKind::Script);
+    }
+
+    #[test]
+    fn test_extract_script_blocks_brace_on_next_line_line_number() {
+        let content = r#"fn main() {
+    script!
+    {
+        x = 1
+    }
+}"#;
+
+        let blocks = extract_script_blocks_from_rust(content);
+        assert_eq!(blocks.len(), 1);
+        // The opening `{` is on line 3 and is used for block-relative offset mapping.
+        assert_eq!(blocks[0].0, 3);
     }
 
     #[test]
