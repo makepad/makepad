@@ -470,7 +470,7 @@ Here is the complete Splash scripting manual. Follow it exactly:
     }
 }
 
-#[derive(Script)]
+#[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
@@ -486,12 +486,6 @@ pub struct App {
     active_backend: Option<BackendType>,
     #[rust]
     history_injected: bool,
-}
-
-impl ScriptHook for App {
-    fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        vm.set_ui(&self.ui);
-    }
 }
 
 impl App {

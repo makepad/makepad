@@ -60,18 +60,12 @@ impl App {
     }
 }
 
-#[derive(Script)]
+#[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
     #[rust]
     pdf_data: Option<Vec<u8>>,
-}
-
-impl ScriptHook for App {
-    fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        vm.set_ui(&self.ui);
-    }
 }
 
 impl MatchEvent for App {

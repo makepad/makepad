@@ -1,6 +1,5 @@
 use {
     crate::makepad_draw::{cx_2d::Cx2d, cx_3d::Cx3d, *},
-    crate::makepad_platform::script::vm::ScriptVmCx,
     crate::widget::{WidgetRef, WidgetUid},
     crate::widget_async::update_global_ui_handle,
     std::cell::RefCell,
@@ -1244,13 +1243,19 @@ impl WidgetTreeState {
 
 pub trait CxWidgetExt {
     fn widget_tree(&self) -> &WidgetTree;
-    fn set_ui(&mut self, ui: &WidgetRef);
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
 }
 
 fn get_or_init_state(cx: &mut Cx) -> &mut WidgetTreeState {
     WidgetTreeState::get_or_init(cx)
+}
+
+pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
+    let state = get_or_init_state(cx);
+    state.tree.set_root_widget(ui.clone());
+    let root_uid = ui.widget_uid();
+    update_global_ui_handle(cx, root_uid);
 }
 
 impl CxWidgetExt for Cx {
@@ -1261,11 +1266,6 @@ impl CxWidgetExt for Cx {
         }
         let state = unsafe { &*(self.widget_tree_ptr as *const WidgetTreeState) };
         &state.tree
-    }
-
-    fn set_ui(&mut self, ui: &WidgetRef) {
-        let root_uid = ui.widget_uid();
-        update_global_ui_handle(self, root_uid);
     }
 
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid) {
@@ -1290,11 +1290,6 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
         &state.tree
     }
 
-    fn set_ui(&mut self, ui: &WidgetRef) {
-        let cx: &mut Cx = self;
-        cx.set_ui(ui);
-    }
-
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid) {
         let cx: &mut Cx = self;
         let state = get_or_init_state(cx);
@@ -1308,19 +1303,6 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
     }
 }
 
-pub trait ScriptVmWidgetExt {
-    fn set_ui(&mut self, ui: &WidgetRef);
-}
-
-impl<'a> ScriptVmWidgetExt for ScriptVm<'a> {
-    fn set_ui(&mut self, ui: &WidgetRef) {
-        let root_uid = ui.widget_uid();
-        self.with_cx_mut(|cx| {
-            update_global_ui_handle(cx, root_uid);
-        });
-    }
-}
-
 impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
     fn widget_tree(&self) -> &WidgetTree {
         let cx: &Cx = self;
@@ -1330,11 +1312,6 @@ impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
         }
         let state = unsafe { &*(cx.widget_tree_ptr as *const WidgetTreeState) };
         &state.tree
-    }
-
-    fn set_ui(&mut self, ui: &WidgetRef) {
-        let cx: &mut Cx = self;
-        cx.set_ui(ui);
     }
 
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid) {

@@ -1560,16 +1560,10 @@ impl App {
     }
 }
 
-#[derive(Script)]
+#[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
-}
-
-impl ScriptHook for App {
-    fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        vm.set_ui(&self.ui);
-    }
 }
 
 impl MatchEvent for App {

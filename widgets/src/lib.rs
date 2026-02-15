@@ -202,7 +202,7 @@ pub use crate::{
         ScriptAsyncResult,
     },
     widget_match_event::WidgetMatchEvent,
-    widget_tree::{CxWidgetExt, ScriptVmWidgetExt},
+    widget_tree::{set_ui_root, CxWidgetExt},
 
     window::*,
 
