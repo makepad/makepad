@@ -8,6 +8,7 @@ use crate::{
     os::linux::android::ndk_sys,
 };
 use ash::vk;
+use std::ffi::CStr;
 use std::collections::HashMap;
 
 #[link(name = "nativewindow")]
@@ -92,6 +93,8 @@ pub struct CxAndroidVulkan {
     window: *mut ndk_sys::ANativeWindow,
     requested_width: u32,
     requested_height: u32,
+    present_count: u64,
+    present_debug_remaining: u32,
     has_logged_present: bool,
     has_logged_draw_stats: bool,
 }
@@ -148,6 +151,22 @@ impl CxAndroidVulkan {
                 return Err(err);
             }
         };
+
+        let props = unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        crate::log!(
+            "Android Vulkan device: name='{}' vendor=0x{:04X} device=0x{:04X} api={}.{}.{} driver=0x{:X} queue_family={}",
+            device_name,
+            props.vendor_id,
+            props.device_id,
+            vk::api_version_major(props.api_version),
+            vk::api_version_minor(props.api_version),
+            vk::api_version_patch(props.api_version),
+            props.driver_version,
+            queue_family_index
+        );
 
         let queue_priorities = [1.0f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
@@ -293,6 +312,8 @@ impl CxAndroidVulkan {
             window,
             requested_width: width.max(1),
             requested_height: height.max(1),
+            present_count: 0,
+            present_debug_remaining: 120,
             has_logged_present: false,
             has_logged_draw_stats: false,
         };
@@ -345,6 +366,9 @@ impl CxAndroidVulkan {
     }
 
     pub fn draw_pass_and_present(&mut self, cx: &mut Cx, draw_pass_id: DrawPassId) -> Result<(), String> {
+        const FORCE_TRANSFER_CLEAR_DEBUG: bool = false;
+        const FORCE_RENDERPASS_CLEAR_ONLY_DEBUG: bool = false;
+
         if self.surface == vk::SurfaceKHR::null() || self.swapchain == vk::SwapchainKHR::null() {
             return Ok(());
         }
@@ -379,6 +403,23 @@ impl CxAndroidVulkan {
                 DrawPassClearColor::ClearWith(color) => color,
             }
         };
+        let dont_clear = cx.passes[draw_pass_id].dont_clear;
+
+        static PASS_LOG_ONCE: std::sync::Once = std::sync::Once::new();
+        PASS_LOG_ONCE.call_once(|| {
+            crate::log!(
+                "Android Vulkan first pass: rect=({}, {}) {}x{}, dpi_factor={}, clear=({}, {}, {}, {})",
+                pass_rect.pos.x,
+                pass_rect.pos.y,
+                pass_rect.size.x,
+                pass_rect.size.y,
+                dpi_factor,
+                clear_color.x,
+                clear_color.y,
+                clear_color.z,
+                clear_color.w
+            );
+        });
 
         unsafe {
             self.device
@@ -423,91 +464,164 @@ impl CxAndroidVulkan {
                 .map_err(|e| format!("begin_command_buffer failed: {e:?}"))?;
         }
 
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [
-                    clear_color.x as f32,
-                    clear_color.y as f32,
-                    clear_color.z as f32,
-                    clear_color.w as f32,
-                ],
-            },
-        }];
-        let framebuffer = *self
-            .framebuffers
-            .get(image_index as usize)
-            .ok_or_else(|| format!("invalid framebuffer index {image_index}"))?;
-        let render_pass_info = vk::RenderPassBeginInfo::default()
-            .render_pass(self.render_pass)
-            .framebuffer(framebuffer)
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: self.swapchain_extent,
-            })
-            .clear_values(&clear_values);
-
-        unsafe {
-            self.device.cmd_begin_render_pass(
-                self.command_buffer,
-                &render_pass_info,
-                vk::SubpassContents::INLINE,
-            );
-            self.device.cmd_set_viewport(
-                self.command_buffer,
-                0,
-                &[vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: self.swapchain_extent.width as f32,
-                    height: self.swapchain_extent.height as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                }],
-            );
-            self.device.cmd_set_scissor(
-                self.command_buffer,
-                0,
-                &[vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: self.swapchain_extent,
-                }],
-            );
-        }
-
         let mut zbias = 0.0f32;
         let zbias_step = cx.passes[draw_pass_id].zbias_step;
         let mut draw_stats = VulkanDrawStats::default();
-        self.record_draw_list(
-            cx,
-            draw_pass_id,
-            draw_list_id,
-            &mut zbias,
-            zbias_step,
-            &mut draw_stats,
-        )?;
-        if !self.has_logged_draw_stats {
-            self.has_logged_draw_stats = true;
-            crate::log!(
-                "Android Vulkan draw stats: draw_items={}, draw_calls={}, packets={}, skip_non_draw_call={}, skip_no_os_shader={}, skip_no_vulkan_shader={}, skip_missing_spirv={}, skip_textured={}, skip_no_instance_slots={}, skip_no_instances_buffer={}, skip_instances_too_short={}, skip_zero_instances={}, skip_no_geometry_id={}, skip_empty_geometry={}",
-                draw_stats.draw_items,
-                draw_stats.draw_calls,
-                draw_stats.packets_recorded,
-                draw_stats.skipped_non_draw_call,
-                draw_stats.skipped_no_os_shader,
-                draw_stats.skipped_no_vulkan_shader,
-                draw_stats.skipped_missing_spirv,
-                draw_stats.skipped_textured_shader,
-                draw_stats.skipped_no_instance_slots,
-                draw_stats.skipped_no_instances_buffer,
-                draw_stats.skipped_instances_too_short,
-                draw_stats.skipped_zero_instances,
-                draw_stats.skipped_no_geometry_id,
-                draw_stats.skipped_empty_geometry
-            );
+        if FORCE_TRANSFER_CLEAR_DEBUG {
+            static TRANSFER_CLEAR_LOG_ONCE: std::sync::Once = std::sync::Once::new();
+            TRANSFER_CLEAR_LOG_ONCE.call_once(|| {
+                crate::warning!(
+                    "Android Vulkan debug: FORCE_TRANSFER_CLEAR_DEBUG enabled (render pass + shaders bypassed)"
+                );
+            });
+
+            let image = *self
+                .swapchain_images
+                .get(image_index as usize)
+                .ok_or_else(|| format!("invalid swapchain image index {image_index}"))?;
+
+            let range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            let to_transfer = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .image(image)
+                .subresource_range(range);
+            let clear = vk::ClearColorValue {
+                float32: [0.0, 1.0, 0.0, 1.0],
+            };
+            let to_present = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .image(image)
+                .subresource_range(range);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_transfer],
+                );
+                self.device.cmd_clear_color_image(
+                    self.command_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &clear,
+                    &[range],
+                );
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_present],
+                );
+            }
+        } else {
+            let clear_values = [vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 1.0, 0.0, 1.0],
+                },
+            }];
+            let framebuffer = *self
+                .framebuffers
+                .get(image_index as usize)
+                .ok_or_else(|| format!("invalid framebuffer index {image_index}"))?;
+            let render_pass_info = vk::RenderPassBeginInfo::default()
+                .render_pass(self.render_pass)
+                .framebuffer(framebuffer)
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: self.swapchain_extent,
+                })
+                .clear_values(&clear_values);
+
+            unsafe {
+                self.device.cmd_begin_render_pass(
+                    self.command_buffer,
+                    &render_pass_info,
+                    vk::SubpassContents::INLINE,
+                );
+                self.device.cmd_set_viewport(
+                    self.command_buffer,
+                    0,
+                    &[vk::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: self.swapchain_extent.width as f32,
+                        height: self.swapchain_extent.height as f32,
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
+                self.device.cmd_set_scissor(
+                    self.command_buffer,
+                    0,
+                    &[vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: self.swapchain_extent,
+                    }],
+                );
+            }
+
+            if FORCE_RENDERPASS_CLEAR_ONLY_DEBUG {
+                static RENDERPASS_CLEAR_ONLY_LOG_ONCE: std::sync::Once = std::sync::Once::new();
+                RENDERPASS_CLEAR_ONLY_LOG_ONCE.call_once(|| {
+                    crate::warning!(
+                        "Android Vulkan debug: FORCE_RENDERPASS_CLEAR_ONLY_DEBUG enabled (render pass clear only, draw list skipped)"
+                    );
+                });
+            } else {
+                self.record_draw_list(
+                    cx,
+                    draw_pass_id,
+                    draw_list_id,
+                    &mut zbias,
+                    zbias_step,
+                    &mut draw_stats,
+                )?;
+                if !self.has_logged_draw_stats {
+                    self.has_logged_draw_stats = true;
+                    crate::log!(
+                        "Android Vulkan draw stats: draw_items={}, draw_calls={}, packets={}, skip_non_draw_call={}, skip_no_os_shader={}, skip_no_vulkan_shader={}, skip_missing_spirv={}, skip_textured={}, skip_no_instance_slots={}, skip_no_instances_buffer={}, skip_instances_too_short={}, skip_zero_instances={}, skip_no_geometry_id={}, skip_empty_geometry={}",
+                        draw_stats.draw_items,
+                        draw_stats.draw_calls,
+                        draw_stats.packets_recorded,
+                        draw_stats.skipped_non_draw_call,
+                        draw_stats.skipped_no_os_shader,
+                        draw_stats.skipped_no_vulkan_shader,
+                        draw_stats.skipped_missing_spirv,
+                        draw_stats.skipped_textured_shader,
+                        draw_stats.skipped_no_instance_slots,
+                        draw_stats.skipped_no_instances_buffer,
+                        draw_stats.skipped_instances_too_short,
+                        draw_stats.skipped_zero_instances,
+                        draw_stats.skipped_no_geometry_id,
+                        draw_stats.skipped_empty_geometry
+                    );
+                }
+            }
+
+            unsafe {
+                self.device.cmd_end_render_pass(self.command_buffer);
+            }
         }
 
         unsafe {
-            self.device.cmd_end_render_pass(self.command_buffer);
             self.device
                 .end_command_buffer(self.command_buffer)
                 .map_err(|e| format!("end_command_buffer failed: {e:?}"))?;
@@ -552,6 +666,26 @@ impl CxAndroidVulkan {
             crate::log!("Android Vulkan: native swapchain present path is active");
         }
 
+        self.present_count += 1;
+        if self.present_debug_remaining > 0 {
+            self.present_debug_remaining -= 1;
+            crate::log!(
+                "Android Vulkan present#{}: pass={} clear=({}, {}, {}, {}) dont_clear={} packets={} draw_calls={} skip_textured={} acquire_suboptimal={} present_suboptimal={}",
+                self.present_count,
+                draw_pass_id.0,
+                clear_color.x,
+                clear_color.y,
+                clear_color.z,
+                clear_color.w,
+                dont_clear,
+                draw_stats.packets_recorded,
+                draw_stats.draw_calls,
+                draw_stats.skipped_textured_shader,
+                acquire_suboptimal,
+                present_suboptimal
+            );
+        }
+
         if acquire_suboptimal || present_suboptimal {
             self.recreate_swapchain()?;
         }
@@ -568,8 +702,13 @@ impl CxAndroidVulkan {
         zbias_step: f32,
         draw_stats: &mut VulkanDrawStats,
     ) -> Result<(), String> {
+        const MAX_DRAW_PACKETS_DEBUG: usize = 2;
+
         let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
         for draw_item_id in 0..draw_items_len {
+            if MAX_DRAW_PACKETS_DEBUG != 0 && draw_stats.packets_recorded >= MAX_DRAW_PACKETS_DEBUG {
+                return Ok(());
+            }
             draw_stats.draw_items += 1;
             if let Some(sub_list_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id]
                 .kind
@@ -912,6 +1051,19 @@ impl CxAndroidVulkan {
             .fragment_spirv
             .as_ref()
             .ok_or_else(|| format!("shader {} missing fragment SPIR-V", shader_index))?;
+
+        if vk_shader.geometry_slots != sh.mapping.geometries.total_slots
+            || vk_shader.instance_slots != sh.mapping.instances.total_slots
+        {
+            crate::warning!(
+                "Android Vulkan slot mismatch: shader={}, wgsl_geom_slots={}, map_geom_slots={}, wgsl_inst_slots={}, map_inst_slots={}",
+                shader_index,
+                vk_shader.geometry_slots,
+                sh.mapping.geometries.total_slots,
+                vk_shader.instance_slots,
+                sh.mapping.instances.total_slots
+            );
+        }
 
         let has_descriptors = !sh.mapping.uniform_buffer_bindings.bindings.is_empty()
             || !sh.mapping.dyn_uniforms.inputs.is_empty()
@@ -1373,7 +1525,17 @@ impl CxAndroidVulkan {
         self.swapchain = new_swapchain;
         self.swapchain_images = new_images;
         self.swapchain_format = format.format;
-        self.swapchain_extent = extent;
+            self.swapchain_extent = extent;
+
+        crate::log!(
+            "Android Vulkan swapchain: format={:?} color_space={:?} extent={}x{} images={} present_mode={:?}",
+            format.format,
+            format.color_space,
+            extent.width,
+            extent.height,
+            self.swapchain_images.len(),
+            present_mode
+        );
 
         let color_attachment = vk::AttachmentDescription::default()
             .format(self.swapchain_format)
