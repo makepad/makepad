@@ -1522,7 +1522,7 @@ impl ShaderFnCompiler {
         self.maybe_pop_to_me(vm, output, opargs);
     }
 
-    pub(crate) fn pop_to_me(&mut self, vm: &ScriptVm, output: &ShaderOutput) {
+    pub(crate) fn pop_to_me(&mut self, vm: &ScriptVm, output: &mut ShaderOutput) {
         // Skip if we just closed an if block that had a return without a value
         if self.skip_next_pop_to_me {
             self.skip_next_pop_to_me = false;
@@ -1621,10 +1621,7 @@ impl ShaderFnCompiler {
                         && out.contains("rcx")
                         && s.contains("(rcx")
                     {
-                        static RUST_TMP_COUNTER: std::sync::atomic::AtomicUsize =
-                            std::sync::atomic::AtomicUsize::new(0);
-                        let id =
-                            RUST_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let id = output.next_rust_tmp_id();
                         let tmp = format!("_rcx_tmp{}", id);
                         writeln!(self.out, "let {} = {};", tmp, s).ok();
                         out.push_str(&tmp);
@@ -1661,7 +1658,7 @@ impl ShaderFnCompiler {
     pub(crate) fn maybe_pop_to_me(
         &mut self,
         vm: &ScriptVm,
-        output: &ShaderOutput,
+        output: &mut ShaderOutput,
         opargs: OpcodeArgs,
     ) {
         if opargs.is_pop_to_me() {

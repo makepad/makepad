@@ -1,6 +1,9 @@
 /// A software rasterizer that interpolates float varyings and calls a fragment
 /// shader callback per pixel.
 
+#[cfg(feature = "nightly_simd")]
+use std::simd::f32x4;
+
 pub struct Framebuffer {
     pub width: usize,
     pub height: usize,
@@ -43,13 +46,6 @@ impl Framebuffer {
     }
 }
 
-/// A transformed vertex from the vertex shader: clip-space position + varyings.
-#[derive(Clone)]
-pub struct ShadedVertex {
-    pub pos: [f32; 4],      // clip-space (x, y, z, w)
-    pub varyings: Vec<f32>, // interpolated data for fragment shader
-}
-
 /// Per-fragment derivative deltas.
 /// `dvary_dx[i]` ~= varying(i) at (x+1,y) minus current varying(i),
 /// `dvary_dy[i]` ~= varying(i) at (x,y+1) minus current varying(i).
@@ -58,23 +54,44 @@ pub struct TriangleDerivatives {
     pub dvary_dy: Vec<f32>,
 }
 
-/// Rasterize a triangle with varying interpolation. For each covered pixel,
-/// interpolates the varyings and calls `fragment_fn` to get the output color.
-///
-/// `fragment_fn(interpolated_varyings, derivatives) -> Option<[r, g, b, a]>`
-/// Returns `None` for discard, `Some(color)` for premultiplied alpha color.
-pub fn rasterize_triangle<F>(
-    fb: &mut Framebuffer,
-    v0: &ShadedVertex,
-    v1: &ShadedVertex,
-    v2: &ShadedVertex,
+/// Rasterize only a row range `[row_start, row_end)` of the framebuffer.
+/// `color`/`depth_buf` are row-contiguous slices sized `(row_end-row_start)*width`.
+pub fn rasterize_triangle_rows<F>(
+    width: usize,
+    height: usize,
+    row_start: usize,
+    row_end: usize,
+    color: &mut [[f32; 4]],
+    depth_buf: &mut [f32],
+    p0: &[f32; 4],
+    vary0: &[f32],
+    p1: &[f32; 4],
+    vary1: &[f32],
+    p2: &[f32; 4],
+    vary2: &[f32],
     flat_slots: usize,
     fragment_fn: &mut F,
 ) where
     F: FnMut(&[f32], &TriangleDerivatives, u32, u32, i32, i32) -> Option<[f32; 4]>,
 {
-    let w = fb.width as f32;
-    let h = fb.height as f32;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let row_start = row_start.min(height);
+    let row_end = row_end.min(height);
+    if row_start >= row_end {
+        return;
+    }
+    let expected_len = (row_end - row_start) * width;
+    if color.len() < expected_len || depth_buf.len() < expected_len {
+        return;
+    }
+    if vary0.len() != vary1.len() || vary1.len() != vary2.len() {
+        return;
+    }
+
+    let w = width as f32;
+    let h = height as f32;
 
     // Convert from clip space [-1,1] to screen space [0, width/height].
     let ndc_to_screen = |pos: &[f32; 4]| -> (f32, f32, f32) {
@@ -88,31 +105,31 @@ pub fn rasterize_triangle<F>(
         (sx, sy, sz)
     };
 
-    let (sx0, sy0, sz0) = ndc_to_screen(&v0.pos);
-    let (sx1, sy1, sz1) = ndc_to_screen(&v1.pos);
-    let (sx2, sy2, sz2) = ndc_to_screen(&v2.pos);
+    let (sx0, sy0, sz0) = ndc_to_screen(p0);
+    let (sx1, sy1, sz1) = ndc_to_screen(p1);
+    let (sx2, sy2, sz2) = ndc_to_screen(p2);
 
     let mut sx = [sx0, sx1, sx2];
     let mut sy = [sy0, sy1, sy2];
     let mut sz = [sz0, sz1, sz2];
     let mut inv_clip_w = [
-        if v0.pos[3].abs() > f32::EPSILON {
-            1.0 / v0.pos[3]
+        if p0[3].abs() > f32::EPSILON {
+            1.0 / p0[3]
         } else {
             0.0
         },
-        if v1.pos[3].abs() > f32::EPSILON {
-            1.0 / v1.pos[3]
+        if p1[3].abs() > f32::EPSILON {
+            1.0 / p1[3]
         } else {
             0.0
         },
-        if v2.pos[3].abs() > f32::EPSILON {
-            1.0 / v2.pos[3]
+        if p2[3].abs() > f32::EPSILON {
+            1.0 / p2[3]
         } else {
             0.0
         },
     ];
-    let mut vary_src = [&v0.varyings[..], &v1.varyings[..], &v2.varyings[..]];
+    let mut vary_src = [vary0, vary1, vary2];
 
     // Ensure a positive area so a single top-left rule works for all triangles.
     let mut area = edge(sx[0], sy[0], sx[1], sy[1], sx[2], sy[2]);
@@ -129,9 +146,17 @@ pub fn rasterize_triangle<F>(
     }
 
     let min_x = sx[0].min(sx[1]).min(sx[2]).floor().max(0.0) as i32;
-    let min_y = sy[0].min(sy[1]).min(sy[2]).floor().max(0.0) as i32;
+    let min_y = sy[0]
+        .min(sy[1])
+        .min(sy[2])
+        .floor()
+        .max(row_start as f32) as i32;
     let max_x = sx[0].max(sx[1]).max(sx[2]).ceil().min(w - 1.0) as i32;
-    let max_y = sy[0].max(sy[1]).max(sy[2]).ceil().min(h - 1.0) as i32;
+    let max_y = sy[0]
+        .max(sy[1])
+        .max(sy[2])
+        .ceil()
+        .min(row_end as f32 - 1.0) as i32;
 
     if max_x < min_x || max_y < min_y {
         return;
@@ -197,10 +222,11 @@ pub fn rasterize_triangle<F>(
             let w2 = e2 * inv_area;
 
             let depth = sz[0] * w0 + sz[1] * w1 + sz[2] * w2;
-            let index = y as usize * fb.width + x as usize;
+            let local_y = y as usize - row_start;
+            let index = local_y * width + x as usize;
 
             // Depth test (less-or-equal for overlapping widgets with same zbias)
-            if depth > fb.depth[index] {
+            if depth > depth_buf[index] {
                 continue;
             }
 
@@ -251,18 +277,12 @@ pub fn rasterize_triangle<F>(
 
             // Premultiplied alpha blending (source-over)
             let src_a = frag_color[3];
-            let inv_src_a = 1.0 - src_a;
-            let dst = fb.color[index];
-            fb.color[index] = [
-                frag_color[0] + dst[0] * inv_src_a,
-                frag_color[1] + dst[1] * inv_src_a,
-                frag_color[2] + dst[2] * inv_src_a,
-                frag_color[3] + dst[3] * inv_src_a,
-            ];
+            let dst = color[index];
+            color[index] = blend_premul_src_over(frag_color, dst);
             // Match common UI blending behavior: fully transparent pixels should
             // not occlude subsequent geometry in depth.
             if src_a > 0.02 {
-                fb.depth[index] = depth;
+                depth_buf[index] = depth;
             }
         }
     }
@@ -290,5 +310,26 @@ fn edge_pass(edge_value: f32, top_left: bool) -> bool {
         true
     } else {
         top_left
+    }
+}
+
+#[inline]
+fn blend_premul_src_over(src: [f32; 4], dst: [f32; 4]) -> [f32; 4] {
+    #[cfg(feature = "nightly_simd")]
+    {
+        let src_v = f32x4::from_array(src);
+        let dst_v = f32x4::from_array(dst);
+        let out = src_v + dst_v * f32x4::splat(1.0 - src[3]);
+        out.to_array()
+    }
+    #[cfg(not(feature = "nightly_simd"))]
+    {
+        let inv_src_a = 1.0 - src[3];
+        [
+            src[0] + dst[0] * inv_src_a,
+            src[1] + dst[1] * inv_src_a,
+            src[2] + dst[2] * inv_src_a,
+            src[3] + dst[3] * inv_src_a,
+        ]
     }
 }

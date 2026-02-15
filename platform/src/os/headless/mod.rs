@@ -12,6 +12,7 @@ use crate::{
     midi::{MidiData, MidiInput, MidiOutput, MidiPortId},
     video::{VideoFormatId, VideoInputFn, VideoInputId},
     web_socket::WebSocketMessage,
+    thread::MessageThreadPool,
     Cx,
 };
 use std::path::PathBuf;
@@ -45,6 +46,8 @@ pub struct CxOsDrawShader {
     /// Number of packed varying slots that come from dyn/rust instances.
     /// These must be treated as flat (non-interpolated) in rasterization.
     pub flat_varying_slots: usize,
+    /// True when fragment code uses screen-space derivatives (dFdx/dFdy).
+    pub uses_derivatives: bool,
     /// RenderCx layout — queried once from the loaded module.
     pub rcx_size: usize, // total byte size of RenderCx
     pub rcx_vary_offset: usize, // byte offset of varying region (Group 1)
@@ -58,6 +61,8 @@ pub struct CxOs {
     pub(crate) start_time: Option<Instant>,
     pub(crate) shader_jit: jit::HeadlessShaderJit,
     pub(crate) frame_dir: Option<PathBuf>,
+    pub(crate) render_pool: Option<MessageThreadPool<()>>,
+    pub(crate) render_pool_threads: usize,
 }
 
 impl Default for CxOs {
@@ -67,6 +72,8 @@ impl Default for CxOs {
             start_time: None,
             shader_jit: Default::default(),
             frame_dir: None,
+            render_pool: None,
+            render_pool_threads: 0,
         }
     }
 }
