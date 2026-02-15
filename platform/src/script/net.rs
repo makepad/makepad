@@ -307,6 +307,7 @@ impl Cx {
         }
     }
 
+    #[allow(unused)]
     pub(crate) fn handle_script_network_events(&mut self, items: &[NetworkResponseItem]) {
         for item in items {
             // Handle http_resource responses (resource loading via HTTP)

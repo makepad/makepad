@@ -334,6 +334,7 @@ pub(crate) enum TexturePixel {
 }
 
 impl CxTexture {
+    #[allow(unused)]
     pub(crate) fn updated(&self) -> TextureUpdated {
         match self.format {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
@@ -358,6 +359,7 @@ impl CxTexture {
         }
     }
 
+    #[allow(unused)]
     pub(crate) fn set_updated(&mut self, updated: TextureUpdated) {
         *match &mut self.format {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
@@ -381,6 +383,7 @@ impl CxTexture {
         } = initial;
     }
 
+    #[allow(unused)]
     pub(crate) fn take_updated(&mut self) -> TextureUpdated {
         let updated = self.updated();
         self.set_updated(TextureUpdated::Empty);
@@ -393,6 +396,7 @@ impl CxTexture {
         initial
     }
 
+    #[allow(unused)]
     pub(crate) fn alloc_vec(&mut self) -> bool {
         if let Some(alloc) = self.format.as_vec_alloc() {
             if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc {
@@ -414,6 +418,7 @@ impl CxTexture {
         false
     }
 
+    #[allow(unused)]
     pub(crate) fn alloc_render(&mut self, width: usize, height: usize) -> bool {
         if let Some(alloc) = self.format.as_render_alloc(width, height) {
             if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc {
@@ -424,6 +429,7 @@ impl CxTexture {
         false
     }
 
+    #[allow(unused)]
     pub(crate) fn alloc_depth(&mut self, width: usize, height: usize) -> bool {
         if let Some(alloc) = self.format.as_depth_alloc(width, height) {
             if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc {
@@ -502,6 +508,7 @@ impl TextureFormat {
         }
     }
 
+    #[allow(unused)]
     pub(crate) fn as_vec_alloc(&self) -> Option<TextureAlloc> {
         match self {
             Self::VecBGRAu8_32 { width, height, .. } => Some(TextureAlloc {
@@ -577,6 +584,7 @@ impl TextureFormat {
         }
     }
 
+    #[allow(unused)]
     pub(crate) fn as_depth_alloc(&self, width: usize, height: usize) -> Option<TextureAlloc> {
         match self {
             Self::DepthD32 { size, .. } => {

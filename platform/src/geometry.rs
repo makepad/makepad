@@ -82,5 +82,6 @@ pub struct CxGeometry {
     pub indices: Vec<u32>,
     pub vertices: Vec<f32>,
     pub dirty: bool,
+    #[allow(unused)]
     pub os: CxOsGeometry,
 }

@@ -1026,6 +1026,7 @@ fn type_name(
     s
 }
 
+#[allow(unused)]
 fn zero_val(_output: &ShaderOutput, ty_name: &str) -> String {
     match ty_name {
         "f32" => "0.0f32".to_string(),
