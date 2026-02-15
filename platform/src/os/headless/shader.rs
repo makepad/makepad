@@ -213,6 +213,7 @@ impl Cx {
                 source_hash,
                 ..Default::default()
             };
+            let mut has_derivative_export = false;
             match self.os.shader_jit.compile_and_load(source_hash, source) {
                 Ok(jit_output) => {
                     os_shader.dylib_path = Some(jit_output.dylib_path);
@@ -237,6 +238,11 @@ impl Cx {
                         if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_flat_varying_slots")
                         {
                             os_shader.flat_varying_slots = f() as usize;
+                        }
+                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_uses_derivatives")
+                        {
+                            os_shader.uses_derivatives = f() != 0;
+                            has_derivative_export = true;
                         }
                         if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_rcx_frag_offset")
                         {
@@ -263,6 +269,11 @@ impl Cx {
                     .instances
                     .total_slots
                     .min(cx_shader.mapping.varying_total_slots);
+            }
+            if !has_derivative_export {
+                // Conservative back-compat fallback for older JIT modules without
+                // the derivative usage export.
+                os_shader.uses_derivatives = true;
             }
 
             let os_shader_id = self.draw_shaders.os_shaders.len();
