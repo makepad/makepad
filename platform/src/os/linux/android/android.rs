@@ -720,7 +720,6 @@ impl Cx {
             // SAFETY: This attaches the current thread to the JVM. It's safe as long as we're in the correct thread.
             unsafe { attach_jni_env() };
             let mut cx = startup();
-            cx.android_load_dependencies();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
             cx.os.activity_thread_id = Some(activity_thread_id);
@@ -1172,9 +1171,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
-        self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
-        self.live_expand();
-        self.live_scan_dependencies();
+        self.package_root = Some("makepad".to_string());
     }
 
     fn spawn_thread<F>(&mut self, f: F)

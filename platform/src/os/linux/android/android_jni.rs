@@ -244,13 +244,24 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
             let lib = ModuleLoader::load("libandroid.so").expect("Failed to load libandroid.so");
             let func: Option<ndk_sys::AChoreographerPostCallbackFn> =
                 lib.get_symbol("AChoreographer_postVsyncCallback").ok();
-            CHOREOGRAPHER_POST_CALLBACK_FN = func;
+            // Some runtimes/NDK combos may not expose postVsyncCallback even on API 33+.
+            // Fall back to the older frame callback to keep rendering alive.
+            CHOREOGRAPHER_POST_CALLBACK_FN =
+                func.or(Some(ndk_sys::AChoreographer_postFrameCallback64 as _));
         } else if sdk_version >= 29 {
             CHOREOGRAPHER_POST_CALLBACK_FN = Some(ndk_sys::AChoreographer_postFrameCallback64 as _);
         } else {
             init_simple_render_loop(device_refresh_rate);
         }
-        post_vsync_callback();
+        let has_choreographer_callback = match CHOREOGRAPHER_POST_CALLBACK_FN {
+            Some(_) => true,
+            None => false,
+        };
+        if has_choreographer_callback {
+            post_vsync_callback();
+        } else {
+            init_simple_render_loop(device_refresh_rate);
+        }
     }
 }
 
