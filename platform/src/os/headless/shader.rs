@@ -1,6 +1,9 @@
 use super::CxOsDrawShader;
 use crate::{
-    draw_shader::{CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId},
+    draw_shader::{
+        CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat,
+        DrawShaderId, DrawShaderInputPacking, DrawShaderInputs,
+    },
     draw_vars::DrawVars,
     geometry::Geometry,
     makepad_live_id::*,
@@ -1019,6 +1022,34 @@ fn zero_val(_output: &ShaderOutput, ty_name: &str) -> String {
     }
 }
 
+/// Keep headless uniform unpack offsets consistent with draw shader mapping.
+fn headless_uniform_packing() -> DrawShaderInputPacking {
+    #[cfg(any(target_arch = "wasm32"))]
+    {
+        return DrawShaderInputPacking::UniformsGLSL140;
+    }
+
+    #[cfg(all(any(target_os = "android", target_os = "linux"), use_gles_3))]
+    {
+        return DrawShaderInputPacking::UniformsGLSL140;
+    }
+
+    #[cfg(all(any(target_os = "android", target_os = "linux"), not(use_gles_3)))]
+    {
+        return DrawShaderInputPacking::UniformsGLSLTight;
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    {
+        return DrawShaderInputPacking::UniformsMetal;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return DrawShaderInputPacking::UniformsHLSL;
+    }
+}
+
 /// Assign a value from a float buffer to a variable.
 fn write_static_assign(out: &mut String, var_name: &str, buf: &str, offset: usize, slots: usize) {
     write_static_assign_typed(out, var_name, buf, offset, slots, "f32");
@@ -1197,6 +1228,17 @@ fn write_uniform_unpack(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, 
             .iter()
             .any(|io| matches!(io.kind, ShaderIoKind::Uniform));
         if has_dyn {
+            let mut dyn_layout = DrawShaderInputs::new(headless_uniform_packing());
+            for io in &output.io {
+                if !matches!(io.kind, ShaderIoKind::Uniform) {
+                    continue;
+                }
+                let slots = vm.bx.heap.pod_type_ref(io.ty).ty.slots();
+                dyn_layout.push(io.name, slots, DrawShaderAttrFormat::Float);
+            }
+            dyn_layout.finalize();
+            let mut dyn_inputs = dyn_layout.inputs.iter();
+
             writeln!(out, "    if ({dyn_buf} as u32) < uniform_count {{").ok();
             writeln!(out, "        let dp = *uniform_ptrs.add({dyn_buf});").ok();
             writeln!(
@@ -1209,21 +1251,20 @@ fn write_uniform_unpack(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, 
                 "        let dyn_uni = std::slice::from_raw_parts(dp, dl);"
             )
             .ok();
-            let mut slot = 0usize;
             for io in &output.io {
                 if !matches!(io.kind, ShaderIoKind::Uniform) {
                     continue;
                 }
                 let io_name = output.backend.map_io_name(io.name);
                 let slots = vm.bx.heap.pod_type_ref(io.ty).ty.slots();
+                let offset = dyn_inputs.next().map(|i| i.offset).unwrap_or(0usize);
                 write_static_assign(
                     out,
                     &format!("{prefix}uni_{io_name}"),
                     "dyn_uni",
-                    slot,
+                    offset,
                     slots,
                 );
-                slot += slots;
             }
             writeln!(out, "    }}").ok();
         }
@@ -1245,6 +1286,17 @@ fn write_uniform_unpack(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, 
             .iter()
             .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
         if has_scope {
+            let mut scope_layout = DrawShaderInputs::new(headless_uniform_packing());
+            for io in &output.io {
+                if !matches!(io.kind, ShaderIoKind::ScopeUniform) {
+                    continue;
+                }
+                let slots = vm.bx.heap.pod_type_ref(io.ty).ty.slots();
+                scope_layout.push(io.name, slots, DrawShaderAttrFormat::Float);
+            }
+            scope_layout.finalize();
+            let mut scope_inputs = scope_layout.inputs.iter();
+
             writeln!(out, "    if ({scope_buf} as u32) < uniform_count {{").ok();
             writeln!(out, "        let sp = *uniform_ptrs.add({scope_buf});").ok();
             writeln!(
@@ -1257,21 +1309,20 @@ fn write_uniform_unpack(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, 
                 "        let scope_uni = std::slice::from_raw_parts(sp, sl);"
             )
             .ok();
-            let mut slot = 0usize;
             for io in &output.io {
                 if !matches!(io.kind, ShaderIoKind::ScopeUniform) {
                     continue;
                 }
                 let io_name = output.backend.map_io_name(io.name);
                 let slots = vm.bx.heap.pod_type_ref(io.ty).ty.slots();
+                let offset = scope_inputs.next().map(|i| i.offset).unwrap_or(0usize);
                 write_static_assign(
                     out,
                     &format!("{prefix}su_{io_name}"),
                     "scope_uni",
-                    slot,
+                    offset,
                     slots,
                 );
-                slot += slots;
             }
             writeln!(out, "    }}").ok();
         }
