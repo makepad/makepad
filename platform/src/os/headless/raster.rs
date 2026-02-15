@@ -1,4 +1,6 @@
-use super::virtual_gpu::{rasterize_triangle, Framebuffer, ShadedVertex, TriangleDerivatives};
+use super::virtual_gpu::{
+    rasterize_triangle_rows, Framebuffer, TriangleDerivatives,
+};
 use crate::{
     cx::Cx,
     draw_list::{CxDrawKind, DrawListId},
@@ -12,6 +14,7 @@ use makepad_zune_png::{
     makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
     PngEncoder,
 };
+use std::sync::mpsc;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JIT shader function pointer types
@@ -66,16 +69,288 @@ fn clear_quad_buffers(buf: &mut [u8], quad_mode_offset: usize, rcx_size: usize) 
     }
 }
 
+#[derive(Clone, Copy)]
+struct RowChunk {
+    start: usize,
+    end: usize,
+}
+
+fn configured_render_threads(default_threads: usize) -> usize {
+    // Efficiency-first default: avoid blasting all cores unless explicitly requested.
+    let auto_threads = default_threads.min(4).max(1);
+    std::env::var("MAKEPAD_HEADLESS_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(auto_threads)
+}
+
+fn configured_parallel_min_tris(default_min: usize) -> usize {
+    std::env::var("MAKEPAD_HEADLESS_PARALLEL_MIN_TRIS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(default_min)
+}
+
+fn compute_row_chunks(height: usize, desired_threads: usize) -> Vec<RowChunk> {
+    const MIN_ROWS_PER_CHUNK: usize = 32;
+    if height == 0 {
+        return Vec::new();
+    }
+    let max_chunks = (height / MIN_ROWS_PER_CHUNK).max(1);
+    let chunk_count = desired_threads.max(1).min(max_chunks);
+    if chunk_count <= 1 {
+        return vec![RowChunk {
+            start: 0,
+            end: height,
+        }];
+    }
+
+    let mut chunks = Vec::with_capacity(chunk_count);
+    let base = height / chunk_count;
+    let rem = height % chunk_count;
+    let mut y = 0usize;
+    for i in 0..chunk_count {
+        let rows = base + usize::from(i < rem);
+        let start = y;
+        let end = (y + rows).min(height);
+        if end > start {
+            chunks.push(RowChunk { start, end });
+        }
+        y = end;
+    }
+    if chunks.is_empty() {
+        chunks.push(RowChunk {
+            start: 0,
+            end: height,
+        });
+    }
+    chunks
+}
+
+#[derive(Default)]
+struct RenderProfile {
+    draw_calls: usize,
+    parallel_draw_calls: usize,
+    serial_draw_calls: usize,
+    total_instances: usize,
+    total_triangles: usize,
+    vertex_ms: f64,
+    raster_ms: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_instances_rows(
+    color_chunk: &mut [[f32; 4]],
+    depth_chunk: &mut [f32],
+    width: usize,
+    height: usize,
+    row_start: usize,
+    row_end: usize,
+    indices: &[u32],
+    instance_count: usize,
+    vertex_count: usize,
+    varying_slots: usize,
+    shaded_positions: &[[f32; 4]],
+    shaded_varyings: &[f32],
+    flat_slots: usize,
+    rcx_template: &[u8],
+    rcx_size: usize,
+    rcx_f32s: usize,
+    rcx_vary_offset: usize,
+    rcx_quad_mode_offset: usize,
+    rcx_frag_offset: usize,
+    fragment_fn: FragmentFn,
+    debug_text: bool,
+    is_draw_text_shader: bool,
+) {
+    let mut rcx_buf = rcx_template.to_vec();
+    let mut dx_varyings = vec![0.0f32; varying_slots];
+    let mut dy_varyings = vec![0.0f32; varying_slots];
+    let shift_start = flat_slots.min(varying_slots);
+    let tri_count = indices.len() / 3;
+    let vary_bytes = varying_slots * std::mem::size_of::<f32>();
+    let mut debug_text_prints = 0usize;
+
+    for inst_idx in 0..instance_count {
+        let inst_base = inst_idx * vertex_count;
+        for tri_idx in 0..tri_count {
+            let i0 = indices[tri_idx * 3] as usize;
+            let i1 = indices[tri_idx * 3 + 1] as usize;
+            let i2 = indices[tri_idx * 3 + 2] as usize;
+
+            if i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count {
+                continue;
+            }
+
+            let v0_idx = inst_base + i0;
+            let v1_idx = inst_base + i1;
+            let v2_idx = inst_base + i2;
+
+            if v0_idx >= shaded_positions.len()
+                || v1_idx >= shaded_positions.len()
+                || v2_idx >= shaded_positions.len()
+            {
+                continue;
+            }
+
+            let v0_off = v0_idx * varying_slots;
+            let v1_off = v1_idx * varying_slots;
+            let v2_off = v2_idx * varying_slots;
+
+            if v0_off + varying_slots > shaded_varyings.len()
+                || v1_off + varying_slots > shaded_varyings.len()
+                || v2_off + varying_slots > shaded_varyings.len()
+            {
+                continue;
+            }
+
+            let p0 = &shaded_positions[v0_idx];
+            let p1 = &shaded_positions[v1_idx];
+            let p2 = &shaded_positions[v2_idx];
+            let vary0 = &shaded_varyings[v0_off..v0_off + varying_slots];
+            let vary1 = &shaded_varyings[v1_off..v1_off + varying_slots];
+            let vary2 = &shaded_varyings[v2_off..v2_off + varying_slots];
+
+            let mut frag_closure = |varyings: &[f32],
+                                    derivs: &TriangleDerivatives,
+                                    lane_x: u32,
+                                    lane_y: u32,
+                                    x: i32,
+                                    y: i32|
+             -> Option<[f32; 4]> {
+                for i in 0..varyings.len() {
+                    if i < shift_start {
+                        dx_varyings[i] = varyings[i];
+                        dy_varyings[i] = varyings[i];
+                    } else {
+                        dx_varyings[i] = varyings[i] + derivs.dvary_dx[i];
+                        dy_varyings[i] = varyings[i] + derivs.dvary_dy[i];
+                    }
+                }
+
+                clear_quad_buffers(&mut rcx_buf, rcx_quad_mode_offset, rcx_size);
+                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
+                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
+                write_varyings(
+                    &mut rcx_buf,
+                    rcx_vary_offset,
+                    &dx_varyings,
+                    vary_bytes,
+                    rcx_size,
+                );
+                set_u32(&mut rcx_buf, rcx_quad_mode_offset, 0);
+                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                unsafe {
+                    fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                }
+
+                write_varyings(
+                    &mut rcx_buf,
+                    rcx_vary_offset,
+                    &dy_varyings,
+                    vary_bytes,
+                    rcx_size,
+                );
+                set_u32(&mut rcx_buf, rcx_quad_mode_offset, 1);
+                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                unsafe {
+                    fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                }
+
+                write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
+                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                let write_pixel = unsafe { fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32) };
+                if write_pixel == 0 {
+                    return None;
+                }
+
+                if rcx_frag_offset + 16 <= rcx_size {
+                    let color_ptr = unsafe { rcx_buf.as_ptr().add(rcx_frag_offset) as *const [f32; 4] };
+                    let color = unsafe { *color_ptr };
+                    if debug_text && is_draw_text_shader && debug_text_prints < 120 {
+                        let text_t_slot = shift_start + 2;
+                        if text_t_slot + 1 < varyings.len() {
+                            let a = color[3];
+                            if a > 0.0 && a < 1.0 {
+                                eprintln!(
+                                    "[headless][draw_text] px=({}, {}) lane=({}, {}) t=({:.6}, {:.6}) dFdx(t)=({:.6}, {:.6}) dFdy(t)=({:.6}, {:.6}) a={:.5}",
+                                    x,
+                                    y,
+                                    lane_x,
+                                    lane_y,
+                                    varyings[text_t_slot],
+                                    varyings[text_t_slot + 1],
+                                    derivs.dvary_dx[text_t_slot],
+                                    derivs.dvary_dx[text_t_slot + 1],
+                                    derivs.dvary_dy[text_t_slot],
+                                    derivs.dvary_dy[text_t_slot + 1],
+                                    a,
+                                );
+                                debug_text_prints += 1;
+                            }
+                        }
+                    }
+                    Some(color)
+                } else {
+                    Some([0.0, 0.0, 0.0, 0.0])
+                }
+            };
+
+            rasterize_triangle_rows(
+                width,
+                height,
+                row_start,
+                row_end,
+                color_chunk,
+                depth_chunk,
+                p0,
+                vary0,
+                p1,
+                vary1,
+                p2,
+                vary2,
+                flat_slots,
+                &mut frag_closure,
+            );
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl Cx {
+    fn headless_render_thread_count(&self) -> usize {
+        let cpu_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(self.cpu_cores.max(1));
+        configured_render_threads(cpu_threads.max(1))
+    }
+
+    fn headless_ensure_render_pool(&mut self, threads: usize) {
+        let threads = threads.max(1);
+        if threads <= 1 {
+            return;
+        }
+        if self.os.render_pool.is_none() || self.os.render_pool_threads != threads {
+            self.os.render_pool = Some(crate::thread::MessageThreadPool::new(self, threads));
+            self.os.render_pool_threads = threads;
+        }
+    }
+
     /// Render all dirty passes and return framebuffers keyed by window_id.
     pub(crate) fn headless_render_all_passes(&mut self, time: f64) -> Vec<(usize, Framebuffer)> {
         let frame_start = std::time::Instant::now();
+        let profile_enabled = std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok();
+        let parallel_min_tris = configured_parallel_min_tris(1);
+        let mut profile = RenderProfile::default();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
+        let render_threads = self.headless_render_thread_count();
+        self.headless_ensure_render_pool(render_threads);
 
         let mut results = Vec::new();
 
@@ -101,7 +376,7 @@ impl Cx {
                     let clear = self.passes[*draw_pass_id].clear_color;
                     fb.clear([clear.x, clear.y, clear.z, clear.w], 1.0);
 
-                    self.headless_draw_pass(*draw_pass_id, &mut fb);
+                    self.headless_draw_pass(*draw_pass_id, render_threads, parallel_min_tris, &mut fb, if profile_enabled { Some(&mut profile) } else { None });
                     results.push((window_id.id(), fb));
                 }
                 CxDrawPassParent::DrawPass(_dep_pass_id) => {
@@ -116,11 +391,30 @@ impl Cx {
             "[headless] frame render: {:.1}ms",
             elapsed.as_secs_f64() * 1000.0
         );
+        if profile_enabled {
+            eprintln!(
+                "[headless][profile] draws={} serial={} parallel={} inst={} tris={} vertex={:.1}ms raster={:.1}ms",
+                profile.draw_calls,
+                profile.serial_draw_calls,
+                profile.parallel_draw_calls,
+                profile.total_instances,
+                profile.total_triangles,
+                profile.vertex_ms,
+                profile.raster_ms
+            );
+        }
 
         results
     }
 
-    fn headless_draw_pass(&mut self, draw_pass_id: DrawPassId, fb: &mut Framebuffer) {
+    fn headless_draw_pass(
+        &mut self,
+        draw_pass_id: DrawPassId,
+        render_threads: usize,
+        parallel_min_tris: usize,
+        fb: &mut Framebuffer,
+        mut profile: Option<&mut RenderProfile>,
+    ) {
         let draw_list_id = match self.passes[draw_pass_id].main_draw_list_id {
             Some(id) => id,
             None => return,
@@ -129,7 +423,16 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
         let mut zbias = 0.0f32;
 
-        self.headless_render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step, fb);
+        self.headless_render_view(
+            draw_pass_id,
+            draw_list_id,
+            &mut zbias,
+            zbias_step,
+            render_threads,
+            parallel_min_tris,
+            fb,
+            profile.as_deref_mut(),
+        );
     }
 
     fn headless_render_view(
@@ -138,7 +441,10 @@ impl Cx {
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
+        render_threads: usize,
+        parallel_min_tris: usize,
         fb: &mut Framebuffer,
+        mut profile: Option<&mut RenderProfile>,
     ) {
         let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
         let debug_text = std::env::var("MAKEPAD_HEADLESS_DEBUG_TEXT").is_ok();
@@ -152,7 +458,16 @@ impl Cx {
             };
 
             if let Some(sub_list_id) = kind_tag {
-                self.headless_render_view(draw_pass_id, sub_list_id, zbias, zbias_step, fb);
+                self.headless_render_view(
+                    draw_pass_id,
+                    sub_list_id,
+                    zbias,
+                    zbias_step,
+                    render_threads,
+                    parallel_min_tris,
+                    fb,
+                    profile.as_deref_mut(),
+                );
                 continue;
             }
 
@@ -219,9 +534,9 @@ impl Cx {
                 continue;
             }
 
-            // Allocate RenderCx buffer (reused across all instances/triangles/pixels)
+            // Per-draw-call RenderCx template (uniforms + textures) copied per worker.
             let rcx_f32s = rcx_size / std::mem::size_of::<f32>();
-            let mut rcx_buf = vec![0u8; rcx_size];
+            let mut rcx_template = vec![0u8; rcx_size];
 
             // ── Per-draw-call: build uniform buffer arrays ──
             let draw_call_uniforms_slice = draw_call.draw_call_uniforms.as_slice();
@@ -283,17 +598,9 @@ impl Cx {
             let uniform_lens = lens.as_ptr();
 
             // ── Convert texture data to RGBA f32, store pointers ──
-            // tex_rgba_bufs must live through rendering so the pointers in rcx_buf stay valid.
+            // tex_rgba_bufs must live through rendering so rcx texture pointers stay valid.
             let mut tex_rgba_bufs: Vec<Vec<f32>> = Vec::new();
-
-            // Collect texture (data_ptr, data_len, width, height) for each texture slot
-            struct TexInfo {
-                data_ptr: usize, // *const f32 as usize
-                data_len: usize,
-                width: usize,
-                height: usize,
-            }
-            let mut tex_infos: Vec<TexInfo> = Vec::new();
+            let mut tex_infos: Vec<[usize; 4]> = Vec::with_capacity(sh.mapping.textures.len());
 
             for tex_idx in 0..sh.mapping.textures.len() {
                 if let Some(texture) = &draw_call.texture_slots[tex_idx] {
@@ -305,12 +612,7 @@ impl Cx {
                             data: Some(data),
                             ..
                         } => {
-                            tex_infos.push(TexInfo {
-                                data_ptr: data.as_ptr() as usize,
-                                data_len: data.len(),
-                                width: *width,
-                                height: *height,
-                            });
+                            tex_infos.push([data.as_ptr() as usize, data.len(), *width, *height]);
                         }
                         TextureFormat::VecBGRAu8_32 {
                             width,
@@ -329,12 +631,7 @@ impl Cx {
                                 rgba.push(b);
                                 rgba.push(a);
                             }
-                            tex_infos.push(TexInfo {
-                                data_ptr: rgba.as_ptr() as usize,
-                                data_len: rgba.len(),
-                                width: *width,
-                                height: *height,
-                            });
+                            tex_infos.push([rgba.as_ptr() as usize, rgba.len(), *width, *height]);
                             tex_rgba_bufs.push(rgba);
                         }
                         TextureFormat::VecRu8 {
@@ -351,12 +648,7 @@ impl Cx {
                                 rgba.push(v);
                                 rgba.push(v);
                             }
-                            tex_infos.push(TexInfo {
-                                data_ptr: rgba.as_ptr() as usize,
-                                data_len: rgba.len(),
-                                width: *width,
-                                height: *height,
-                            });
+                            tex_infos.push([rgba.as_ptr() as usize, rgba.len(), *width, *height]);
                             tex_rgba_bufs.push(rgba);
                         }
                         TextureFormat::VecRf32 {
@@ -372,30 +664,15 @@ impl Cx {
                                 rgba.push(v);
                                 rgba.push(v);
                             }
-                            tex_infos.push(TexInfo {
-                                data_ptr: rgba.as_ptr() as usize,
-                                data_len: rgba.len(),
-                                width: *width,
-                                height: *height,
-                            });
+                            tex_infos.push([rgba.as_ptr() as usize, rgba.len(), *width, *height]);
                             tex_rgba_bufs.push(rgba);
                         }
                         _ => {
-                            tex_infos.push(TexInfo {
-                                data_ptr: 0,
-                                data_len: 0,
-                                width: 0,
-                                height: 0,
-                            });
+                            tex_infos.push([0, 0, 0, 0]);
                         }
                     }
                 } else {
-                    tex_infos.push(TexInfo {
-                        data_ptr: 0,
-                        data_len: 0,
-                        width: 0,
-                        height: 0,
-                    });
+                    tex_infos.push([0, 0, 0, 0]);
                 }
             }
 
@@ -410,19 +687,15 @@ impl Cx {
                 tex_count: u32,
             );
             if let Ok(fill_fn) = module.symbol::<FillUniformsFn>("makepad_headless_fill_rcx") {
-                let tex_tuples: Vec<[usize; 4]> = tex_infos
-                    .iter()
-                    .map(|t| [t.data_ptr, t.data_len, t.width, t.height])
-                    .collect();
                 unsafe {
                     fill_fn(
-                        rcx_buf.as_mut_ptr() as *mut f32,
+                        rcx_template.as_mut_ptr() as *mut f32,
                         rcx_f32s as u32,
                         uniform_ptrs,
                         uniform_lens,
                         uniform_count,
-                        tex_tuples.as_ptr(),
-                        tex_tuples.len() as u32,
+                        tex_infos.as_ptr(),
+                        tex_infos.len() as u32,
                     );
                 }
             }
@@ -462,20 +735,36 @@ impl Cx {
             } else {
                 0
             };
+            if vertex_count == 0 {
+                continue;
+            }
+            let tri_count = indices.len() / 3;
+            if tri_count == 0 {
+                continue;
+            }
+            if let Some(p) = profile.as_deref_mut() {
+                p.draw_calls += 1;
+                p.total_instances += instance_count;
+                p.total_triangles += tri_count * instance_count;
+            }
+
+            let vertex_start = std::time::Instant::now();
+            let shaded_vert_count = instance_count * vertex_count;
+            let mut shaded_positions = vec![[0.0f32; 4]; shaded_vert_count];
+            let mut shaded_varyings = vec![0.0f32; shaded_vert_count * varying_slots];
 
             for inst_idx in 0..instance_count {
                 let inst_offset = inst_idx * total_instance_slots;
                 let inst_slice = &instances_data[inst_offset..inst_offset + total_instance_slots];
-                let mut debug_text_prints = 0usize;
-
-                let mut shaded_vertices = Vec::with_capacity(vertex_count);
+                let inst_base = inst_idx * vertex_count;
 
                 for vert_idx in 0..vertex_count {
                     let geom_offset = vert_idx * geom_slots;
                     let geom_slice = &vertices[geom_offset..geom_offset + geom_slots];
-
-                    let mut out_pos = [0.0f32; 4];
-                    let mut varying_out = vec![0.0f32; varying_slots];
+                    let shaded_idx = inst_base + vert_idx;
+                    let vary_offset = shaded_idx * varying_slots;
+                    let varying_out =
+                        &mut shaded_varyings[vary_offset..vary_offset.saturating_add(varying_slots)];
 
                     unsafe {
                         vertex_fn(
@@ -487,156 +776,160 @@ impl Cx {
                             uniform_lens,
                             uniform_count,
                             varying_out.as_mut_ptr(),
-                            varying_out.len() as u32,
-                            &mut out_pos,
+                            varying_slots as u32,
+                            &mut shaded_positions[shaded_idx],
                         );
                     }
-
-                    shaded_vertices.push(ShadedVertex {
-                        pos: out_pos,
-                        varyings: varying_out,
-                    });
                 }
+            }
+            if let Some(p) = profile.as_deref_mut() {
+                p.vertex_ms += vertex_start.elapsed().as_secs_f64() * 1000.0;
+            }
 
-                // Rasterize triangles
-                let tri_count = indices.len() / 3;
-                for tri_idx in 0..tri_count {
-                    let i0 = indices[tri_idx * 3] as usize;
-                    let i1 = indices[tri_idx * 3 + 1] as usize;
-                    let i2 = indices[tri_idx * 3 + 2] as usize;
-
-                    if i0 >= shaded_vertices.len()
-                        || i1 >= shaded_vertices.len()
-                        || i2 >= shaded_vertices.len()
-                    {
-                        continue;
-                    }
-
-                    let v0 = &shaded_vertices[i0];
-                    let v1 = &shaded_vertices[i1];
-                    let v2 = &shaded_vertices[i2];
-
-                    // Fragment closure: 3-pass dFdx/dFdy with quad buffers.
-                    // Pass 0: dx-shifted varyings, quad_mode=0 (record into quad_dx_buf)
-                    // Pass 1: dy-shifted varyings, quad_mode=1 (record into quad_dy_buf)
-                    // Pass 2: original varyings, quad_mode=2 (compute derivatives from buffers)
-                    let mut dx_varyings = vec![0.0f32; varying_slots];
-                    let mut dy_varyings = vec![0.0f32; varying_slots];
-                    // Packed varyings are [dyninst | rustinst | explicit varying].
-                    // Only the explicit varying tail should be shifted for derivative passes.
-                    let flat_slots = os_shader.flat_varying_slots.min(varying_slots);
-                    let shift_start = flat_slots;
-
-                    let mut frag_closure = |varyings: &[f32],
-                                            derivs: &TriangleDerivatives,
-                                            lane_x: u32,
-                                            lane_y: u32,
-                                            x: i32,
-                                            y: i32|
-                     -> Option<[f32; 4]> {
-                        let vary_bytes = varyings.len() * std::mem::size_of::<f32>();
-
-                        // Compute shifted varyings
-                        for i in 0..varyings.len() {
-                            if i < shift_start {
-                                dx_varyings[i] = varyings[i];
-                                dy_varyings[i] = varyings[i];
-                            } else {
-                                dx_varyings[i] = varyings[i] + derivs.dvary_dx[i];
-                                dy_varyings[i] = varyings[i] + derivs.dvary_dy[i];
-                            }
-                        }
-
-                        // Pass 0: record dx — run fragment with dx-shifted varyings
-                        clear_quad_buffers(&mut rcx_buf, rcx_quad_mode_offset, rcx_size);
-                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
-                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
-                        write_varyings(
-                            &mut rcx_buf,
-                            rcx_vary_offset,
-                            &dx_varyings,
-                            vary_bytes,
-                            rcx_size,
-                        );
-                        set_u32(&mut rcx_buf, rcx_quad_mode_offset, 0);
-                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0); // quad_slot = 0
-                        unsafe {
-                            fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
-                        }
-
-                        // Pass 1: record dy — run fragment with dy-shifted varyings
-                        write_varyings(
-                            &mut rcx_buf,
-                            rcx_vary_offset,
-                            &dy_varyings,
-                            vary_bytes,
-                            rcx_size,
-                        );
-                        set_u32(&mut rcx_buf, rcx_quad_mode_offset, 1);
-                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0); // quad_slot = 0
-                        unsafe {
-                            fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
-                        }
-
-                        // Pass 2: compute — run fragment with original varyings
-                        write_varyings(
-                            &mut rcx_buf,
-                            rcx_vary_offset,
-                            varyings,
-                            vary_bytes,
-                            rcx_size,
-                        );
-                        set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
-                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0); // quad_slot = 0
-                        let write_pixel = unsafe {
-                            fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32)
-                        };
-
-                        if write_pixel == 0 {
-                            return None; // discard
-                        }
-
-                        // Read frag_fb0 (Vec4f = 4 f32s at rcx_frag_offset)
-                        if rcx_frag_offset + 16 <= rcx_size {
-                            let color_ptr =
-                                unsafe { rcx_buf.as_ptr().add(rcx_frag_offset) as *const [f32; 4] };
-                            let color = unsafe { *color_ptr };
-                            if debug_text && is_draw_text_shader && debug_text_prints < 120 {
-                                // DrawText varyings are [pos.xy, t.xy, world.xyzw] in the varying tail.
-                                let text_t_slot = shift_start + 2;
-                                if text_t_slot + 1 < varyings.len() {
-                                    let a = color[3];
-                                    if a > 0.0 && a < 1.0 {
-                                        eprintln!(
-                                            "[headless][draw_text] px=({}, {}) lane=({}, {}) t=({:.6}, {:.6}) dFdx(t)=({:.6}, {:.6}) dFdy(t)=({:.6}, {:.6}) a={:.5}",
-                                            x,
-                                            y,
-                                            lane_x,
-                                            lane_y,
-                                            varyings[text_t_slot],
-                                            varyings[text_t_slot + 1],
-                                            derivs.dvary_dx[text_t_slot],
-                                            derivs.dvary_dx[text_t_slot + 1],
-                                            derivs.dvary_dy[text_t_slot],
-                                            derivs.dvary_dy[text_t_slot + 1],
-                                            a,
-                                        );
-                                        debug_text_prints += 1;
-                                    }
-                                }
-                            }
-                            Some(color)
-                        } else {
-                            Some([0.0, 0.0, 0.0, 0.0])
-                        }
-                    };
-
-                    rasterize_triangle(fb, v0, v1, v2, flat_slots, &mut frag_closure);
+            let flat_slots = os_shader.flat_varying_slots.min(varying_slots);
+            let row_chunks = compute_row_chunks(fb.height, render_threads);
+            let use_parallel = row_chunks.len() > 1
+                && tri_count.saturating_mul(instance_count) >= parallel_min_tris
+                && self.os.render_pool.is_some();
+            if let Some(p) = profile.as_deref_mut() {
+                if use_parallel {
+                    p.parallel_draw_calls += 1;
+                } else {
+                    p.serial_draw_calls += 1;
                 }
             }
 
-            // tex_rgba_bufs dropped here — pointers in rcx_buf are no longer valid
-            // but that's fine since we're done rendering this draw call
+            let raster_start = std::time::Instant::now();
+            if use_parallel {
+                let pool = self.os.render_pool.as_ref().unwrap();
+                let (done_tx, done_rx) = mpsc::channel::<()>();
+                let width = fb.width;
+                let height = fb.height;
+
+                let color_ptr = fb.color.as_mut_ptr() as usize;
+                let depth_ptr = fb.depth.as_mut_ptr() as usize;
+
+                let indices_ptr = indices.as_ptr() as usize;
+                let indices_len = indices.len();
+                let shaded_positions_ptr = shaded_positions.as_ptr() as usize;
+                let shaded_positions_len = shaded_positions.len();
+                let shaded_varyings_ptr = shaded_varyings.as_ptr() as usize;
+                let shaded_varyings_len = shaded_varyings.len();
+                let rcx_template_ptr = rcx_template.as_ptr() as usize;
+                let rcx_template_len = rcx_template.len();
+
+                for chunk in row_chunks.iter().copied() {
+                    let done_tx = done_tx.clone();
+                    pool.execute(move |_| {
+                        let row_count = chunk.end.saturating_sub(chunk.start);
+                        if row_count == 0 {
+                            let _ = done_tx.send(());
+                            return;
+                        }
+                        let pixel_offset = chunk.start * width;
+                        let pixel_count = row_count * width;
+
+                        let color_chunk = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                (color_ptr as *mut [f32; 4]).add(pixel_offset),
+                                pixel_count,
+                            )
+                        };
+                        let depth_chunk = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                (depth_ptr as *mut f32).add(pixel_offset),
+                                pixel_count,
+                            )
+                        };
+
+                        let indices = unsafe {
+                            std::slice::from_raw_parts(indices_ptr as *const u32, indices_len)
+                        };
+                        let shaded_positions = unsafe {
+                            std::slice::from_raw_parts(
+                                shaded_positions_ptr as *const [f32; 4],
+                                shaded_positions_len,
+                            )
+                        };
+                        let shaded_varyings = unsafe {
+                            std::slice::from_raw_parts(
+                                shaded_varyings_ptr as *const f32,
+                                shaded_varyings_len,
+                            )
+                        };
+                        let rcx_template = unsafe {
+                            std::slice::from_raw_parts(
+                                rcx_template_ptr as *const u8,
+                                rcx_template_len,
+                            )
+                        };
+
+                        rasterize_instances_rows(
+                            color_chunk,
+                            depth_chunk,
+                            width,
+                            height,
+                            chunk.start,
+                            chunk.end,
+                            indices,
+                            instance_count,
+                            vertex_count,
+                            varying_slots,
+                            shaded_positions,
+                            shaded_varyings,
+                            flat_slots,
+                            rcx_template,
+                            rcx_size,
+                            rcx_f32s,
+                            rcx_vary_offset,
+                            rcx_quad_mode_offset,
+                            rcx_frag_offset,
+                            fragment_fn,
+                            debug_text,
+                            is_draw_text_shader,
+                        );
+
+                        let _ = done_tx.send(());
+                    });
+                }
+
+                drop(done_tx);
+                for _ in 0..row_chunks.len() {
+                    if done_rx.recv().is_err() {
+                        break;
+                    }
+                }
+            } else {
+                rasterize_instances_rows(
+                    fb.color.as_mut_slice(),
+                    fb.depth.as_mut_slice(),
+                    fb.width,
+                    fb.height,
+                    0,
+                    fb.height,
+                    indices,
+                    instance_count,
+                    vertex_count,
+                    varying_slots,
+                    &shaded_positions,
+                    &shaded_varyings,
+                    flat_slots,
+                    &rcx_template,
+                    rcx_size,
+                    rcx_f32s,
+                    rcx_vary_offset,
+                    rcx_quad_mode_offset,
+                    rcx_frag_offset,
+                    fragment_fn,
+                    debug_text,
+                    is_draw_text_shader,
+                );
+            }
+            if let Some(p) = profile.as_deref_mut() {
+                p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
+            }
+
+            // Keep converted texture storage alive while fragment shader pointers are valid.
             let _ = &tex_rgba_bufs;
         }
     }

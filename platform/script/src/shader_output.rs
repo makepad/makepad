@@ -192,6 +192,8 @@ pub struct ShaderOutput {
     pub hlsl_needs_tex_size: bool,
     /// Set to true if any errors occurred during shader compilation
     pub has_errors: bool,
+    /// Monotonic temporary id source for Rust backend expression hoisting.
+    pub rust_tmp_counter: usize,
 }
 
 /// Mapping of uniform buffer type names to their assigned buffer indices
@@ -225,6 +227,12 @@ pub struct ShaderFn {
 }
 
 impl ShaderOutput {
+    pub fn next_rust_tmp_id(&mut self) -> usize {
+        let id = self.rust_tmp_counter;
+        self.rust_tmp_counter = self.rust_tmp_counter.wrapping_add(1);
+        id
+    }
+
     /// Pre-collect ALL Rust instance fields in the correct order for struct layout.
     /// Uses recursion to process from deepest prototype to io_self, collecting all rust type properties.
     /// Dyn instance fields are NOT pre-collected - they are added during compilation
