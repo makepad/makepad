@@ -385,11 +385,9 @@ impl Cx {
                         windows.push(Default::default());
                     }
 
-                    // Read the requested inner_size from the CxWindow (set by script)
-                    let inner_size = self.windows[window_id]
-                        .create_inner_size
-                        .unwrap_or(dvec2(1280.0, 720.0));
-                    let dpi_factor = self.windows[window_id].dpi_override.unwrap_or(1.0);
+                    // Headless: use 1920x1080 at 2x DPI for high-quality output
+                    let inner_size = dvec2(1920.0, 1080.0);
+                    let dpi_factor = 2.0;
 
                     let state = &mut windows[window_id.id()];
                     state.created = true;

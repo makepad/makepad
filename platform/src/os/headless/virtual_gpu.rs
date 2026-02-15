@@ -50,8 +50,9 @@ pub struct ShadedVertex {
     pub varyings: Vec<f32>, // interpolated data for fragment shader
 }
 
-/// Per-triangle derivative data computed from barycentric coordinate gradients.
-/// `dvary_dx[i]` = dVarying[i]/dScreenX, `dvary_dy[i]` = dVarying[i]/dScreenY.
+/// Per-fragment derivative deltas.
+/// `dvary_dx[i]` ~= varying(i) at (x+1,y) minus current varying(i),
+/// `dvary_dy[i]` ~= varying(i) at (x,y+1) minus current varying(i).
 pub struct TriangleDerivatives {
     pub dvary_dx: Vec<f32>,
     pub dvary_dy: Vec<f32>,
@@ -67,9 +68,10 @@ pub fn rasterize_triangle<F>(
     v0: &ShadedVertex,
     v1: &ShadedVertex,
     v2: &ShadedVertex,
+    flat_slots: usize,
     fragment_fn: &mut F,
 ) where
-    F: FnMut(&[f32], &TriangleDerivatives) -> Option<[f32; 4]>,
+    F: FnMut(&[f32], &TriangleDerivatives, u32, u32, i32, i32) -> Option<[f32; 4]>,
 {
     let w = fb.width as f32;
     let h = fb.height as f32;
@@ -90,60 +92,111 @@ pub fn rasterize_triangle<F>(
     let (sx1, sy1, sz1) = ndc_to_screen(&v1.pos);
     let (sx2, sy2, sz2) = ndc_to_screen(&v2.pos);
 
-    let area = edge(sx0, sy0, sx1, sy1, sx2, sy2);
+    let mut sx = [sx0, sx1, sx2];
+    let mut sy = [sy0, sy1, sy2];
+    let mut sz = [sz0, sz1, sz2];
+    let mut inv_clip_w = [
+        if v0.pos[3].abs() > f32::EPSILON {
+            1.0 / v0.pos[3]
+        } else {
+            0.0
+        },
+        if v1.pos[3].abs() > f32::EPSILON {
+            1.0 / v1.pos[3]
+        } else {
+            0.0
+        },
+        if v2.pos[3].abs() > f32::EPSILON {
+            1.0 / v2.pos[3]
+        } else {
+            0.0
+        },
+    ];
+    let mut vary_src = [&v0.varyings[..], &v1.varyings[..], &v2.varyings[..]];
+
+    // Ensure a positive area so a single top-left rule works for all triangles.
+    let mut area = edge(sx[0], sy[0], sx[1], sy[1], sx[2], sy[2]);
     if area.abs() <= f32::EPSILON {
         return;
     }
+    if area < 0.0 {
+        sx.swap(1, 2);
+        sy.swap(1, 2);
+        sz.swap(1, 2);
+        inv_clip_w.swap(1, 2);
+        vary_src.swap(1, 2);
+        area = -area;
+    }
 
-    let min_x = sx0.min(sx1).min(sx2).floor().max(0.0) as i32;
-    let min_y = sy0.min(sy1).min(sy2).floor().max(0.0) as i32;
-    let max_x = sx0.max(sx1).max(sx2).ceil().min(w - 1.0) as i32;
-    let max_y = sy0.max(sy1).max(sy2).ceil().min(h - 1.0) as i32;
+    let min_x = sx[0].min(sx[1]).min(sx[2]).floor().max(0.0) as i32;
+    let min_y = sy[0].min(sy[1]).min(sy[2]).floor().max(0.0) as i32;
+    let max_x = sx[0].max(sx[1]).max(sx[2]).ceil().min(w - 1.0) as i32;
+    let max_y = sy[0].max(sy[1]).max(sy[2]).ceil().min(h - 1.0) as i32;
 
     if max_x < min_x || max_y < min_y {
         return;
     }
 
-    let vary_len = v0.varyings.len();
+    let vary_len = vary_src[0].len();
+    let flat_slots = flat_slots.min(vary_len);
     let mut interp = vec![0.0f32; vary_len];
-
-    // Compute per-triangle varying derivatives from barycentric coordinate gradients.
-    // dw0/dx = (sy1 - sy2) / area, dw1/dx = (sy2 - sy0) / area, dw2/dx = (sy0 - sy1) / area
-    // dw0/dy = (sx2 - sx1) / area, dw1/dy = (sx0 - sx2) / area, dw2/dy = (sx1 - sx0) / area
-    // dvary[i]/dx = dw0/dx * v0[i] + dw1/dx * v1[i] + dw2/dx * v2[i]
-    let inv_area = 1.0 / area;
-    let dw0_dx = (sy1 - sy2) * inv_area;
-    let dw1_dx = (sy2 - sy0) * inv_area;
-    let dw2_dx = (sy0 - sy1) * inv_area;
-    let dw0_dy = (sx2 - sx1) * inv_area;
-    let dw1_dy = (sx0 - sx2) * inv_area;
-    let dw2_dy = (sx1 - sx0) * inv_area;
+    let mut interp_dx = vec![0.0f32; vary_len];
+    let mut interp_dy = vec![0.0f32; vary_len];
 
     let mut derivs = TriangleDerivatives {
         dvary_dx: vec![0.0f32; vary_len],
         dvary_dy: vec![0.0f32; vary_len],
     };
-    for i in 0..vary_len {
-        derivs.dvary_dx[i] =
-            dw0_dx * v0.varyings[i] + dw1_dx * v1.varyings[i] + dw2_dx * v2.varyings[i];
-        derivs.dvary_dy[i] =
-            dw0_dy * v0.varyings[i] + dw1_dy * v1.varyings[i] + dw2_dy * v2.varyings[i];
-    }
+
+    let inv_area = 1.0 / area;
+
+    // Edge increments for stepping one pixel in +x/+y.
+    let e0_dx = sy[2] - sy[1];
+    let e1_dx = sy[0] - sy[2];
+    let e2_dx = sy[1] - sy[0];
+    let e0_dy = sx[1] - sx[2];
+    let e1_dy = sx[2] - sx[0];
+    let e2_dy = sx[0] - sx[1];
+
+    let top_left_0 = is_top_left(sx[1], sy[1], sx[2], sy[2]);
+    let top_left_1 = is_top_left(sx[2], sy[2], sx[0], sy[0]);
+    let top_left_2 = is_top_left(sx[0], sy[0], sx[1], sy[1]);
+
+    let interpolate_perspective = |w0: f32, w1: f32, w2: f32, out: &mut [f32]| -> bool {
+            let a0 = w0 * inv_clip_w[0];
+            let a1 = w1 * inv_clip_w[1];
+            let a2 = w2 * inv_clip_w[2];
+            let denom = a0 + a1 + a2;
+            if denom.abs() <= f32::EPSILON {
+                return false;
+            }
+            let inv_denom = 1.0 / denom;
+            for i in 0..vary_len {
+                out[i] = (a0 * vary_src[0][i] + a1 * vary_src[1][i] + a2 * vary_src[2][i])
+                    * inv_denom;
+            }
+            true
+    };
 
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
 
-            let w0 = edge(sx1, sy1, sx2, sy2, px, py) / area;
-            let w1 = edge(sx2, sy2, sx0, sy0, px, py) / area;
-            let w2 = edge(sx0, sy0, sx1, sy1, px, py) / area;
+            let e0 = edge(sx[1], sy[1], sx[2], sy[2], px, py);
+            let e1 = edge(sx[2], sy[2], sx[0], sy[0], px, py);
+            let e2 = edge(sx[0], sy[0], sx[1], sy[1], px, py);
 
-            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+            // GPU-like top-left rule avoids shared-edge gaps and overlaps.
+            if !edge_pass(e0, top_left_0) || !edge_pass(e1, top_left_1) || !edge_pass(e2, top_left_2) {
                 continue;
             }
 
-            let depth = sz0 * w0 + sz1 * w1 + sz2 * w2;
+            let w0 = e0 * inv_area;
+            let w1 = e1 * inv_area;
+            let w2 = e2 * inv_area;
+
+            let depth = sz[0] * w0 + sz[1] * w1 + sz[2] * w2;
             let index = y as usize * fb.width + x as usize;
 
             // Depth test (less-or-equal for overlapping widgets with same zbias)
@@ -151,13 +204,47 @@ pub fn rasterize_triangle<F>(
                 continue;
             }
 
-            // Interpolate varyings
+            if !interpolate_perspective(w0, w1, w2, &mut interp) {
+                continue;
+            }
+
+            // Build dFdx/dFdy-style deltas by evaluating at neighboring pixel centers.
+            // GPU derivatives are pairwise across a 2x2 quad:
+            // dFdx for odd x lanes uses (current - left), even x uses (right - current).
+            // dFdy for odd y lanes uses (current - up), even y uses (down - current).
+            let lane_x = (x as u32) & 1;
+            let lane_y = (y as u32) & 1;
+
+            let dx_sign = if lane_x == 0 { 1.0 } else { -1.0 };
+            let dy_sign = if lane_y == 0 { 1.0 } else { -1.0 };
+
+            let wx0 = (e0 + dx_sign * e0_dx) * inv_area;
+            let wx1 = (e1 + dx_sign * e1_dx) * inv_area;
+            let wx2 = (e2 + dx_sign * e2_dx) * inv_area;
+            let wy0 = (e0 + dy_sign * e0_dy) * inv_area;
+            let wy1 = (e1 + dy_sign * e1_dy) * inv_area;
+            let wy2 = (e2 + dy_sign * e2_dy) * inv_area;
+
+            if !interpolate_perspective(wx0, wx1, wx2, &mut interp_dx)
+                || !interpolate_perspective(wy0, wy1, wy2, &mut interp_dy)
+            {
+                continue;
+            }
+
             for i in 0..vary_len {
-                interp[i] = v0.varyings[i] * w0 + v1.varyings[i] * w1 + v2.varyings[i] * w2;
+                derivs.dvary_dx[i] = interp_dx[i] - interp[i];
+                derivs.dvary_dy[i] = interp_dy[i] - interp[i];
+            }
+            // Dyn/rust instance slots are constant across the primitive.
+            // Keep them bit-stable (no interpolation drift) for shader equality tests.
+            for i in 0..flat_slots {
+                interp[i] = vary_src[0][i];
+                derivs.dvary_dx[i] = 0.0;
+                derivs.dvary_dy[i] = 0.0;
             }
 
             // Call fragment shader — returns None for discard
-            let frag_color = match fragment_fn(&interp, &derivs) {
+            let frag_color = match fragment_fn(&interp, &derivs, lane_x, lane_y, x, y) {
                 Some(c) => c,
                 None => continue,
             };
@@ -172,7 +259,11 @@ pub fn rasterize_triangle<F>(
                 frag_color[2] + dst[2] * inv_src_a,
                 frag_color[3] + dst[3] * inv_src_a,
             ];
-            fb.depth[index] = depth;
+            // Match common UI blending behavior: fully transparent pixels should
+            // not occlude subsequent geometry in depth.
+            if src_a > 0.02 {
+                fb.depth[index] = depth;
+            }
         }
     }
 }
@@ -180,4 +271,24 @@ pub fn rasterize_triangle<F>(
 #[inline]
 fn edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+}
+
+#[inline]
+fn is_top_left(ax: f32, ay: f32, bx: f32, by: f32) -> bool {
+    let dy = by - ay;
+    let dx = bx - ax;
+    // Screen-space Y grows downward, so top-left differs from Y-up convention.
+    dy > 0.0 || (dy == 0.0 && dx < 0.0)
+}
+
+#[inline]
+fn edge_pass(edge_value: f32, top_left: bool) -> bool {
+    const EDGE_EPS: f32 = 1.0e-6;
+    if edge_value < -EDGE_EPS {
+        false
+    } else if edge_value > 0.0 {
+        true
+    } else {
+        top_left
+    }
 }
