@@ -58,6 +58,8 @@ pub fn rasterize_triangle_rows<F>(
     height: usize,
     row_start: usize,
     row_end: usize,
+    col_start: usize,
+    col_end: usize,
     color: &mut [[f32; 4]],
     depth_buf: &mut [f32],
     p0: &[f32; 4],
@@ -76,7 +78,12 @@ pub fn rasterize_triangle_rows<F>(
     }
     let row_start = row_start.min(height);
     let row_end = row_end.min(height);
+    let col_start = col_start.min(width);
+    let col_end = col_end.min(width);
     if row_start >= row_end {
+        return;
+    }
+    if col_start >= col_end {
         return;
     }
     let expected_len = (row_end - row_start) * width;
@@ -142,13 +149,21 @@ pub fn rasterize_triangle_rows<F>(
         area = -area;
     }
 
-    let min_x = sx[0].min(sx[1]).min(sx[2]).floor().max(0.0) as i32;
+    let min_x = sx[0]
+        .min(sx[1])
+        .min(sx[2])
+        .floor()
+        .max(col_start as f32) as i32;
     let min_y = sy[0]
         .min(sy[1])
         .min(sy[2])
         .floor()
         .max(row_start as f32) as i32;
-    let max_x = sx[0].max(sx[1]).max(sx[2]).ceil().min(w - 1.0) as i32;
+    let max_x = sx[0]
+        .max(sx[1])
+        .max(sx[2])
+        .ceil()
+        .min(col_end as f32 - 1.0) as i32;
     let max_y = sy[0]
         .max(sy[1])
         .max(sy[2])
