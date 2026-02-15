@@ -1579,7 +1579,7 @@ impl CxOsDrawShader {
             #extension GL_OVR_multiview2 : require
             ",
             "",
-            "out vec4 fragColor;",
+            "",
             "
             vec4 depth_clip(vec4 w, vec4 c, float clip);
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
@@ -1593,7 +1593,7 @@ impl CxOsDrawShader {
             "",
             "",
             "",
-            "out vec4 fragColor;",
+            "",
             "
             vec4 depth_clip(vec4 w, vec4 c, float clip);
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
