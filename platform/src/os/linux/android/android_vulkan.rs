@@ -6,14 +6,56 @@ use crate::{
     geometry::GeometryId,
     makepad_live_id::*,
     os::linux::android::ndk_sys,
+    os::linux::vulkan_naga::compile_raw_wgsl_to_spirv,
 };
 use ash::vk;
 use std::ffi::CStr;
 use std::collections::HashMap;
+use std::os::raw::{c_char, c_void};
+
+const FORCE_DEBUG_TRIANGLE_PIPELINE: bool = true;
 
 #[link(name = "nativewindow")]
 extern "C" {
     fn ANativeWindow_acquire(window: *mut ndk_sys::ANativeWindow);
+}
+
+unsafe extern "system" fn vulkan_debug_callback(
+    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    message_types: vk::DebugUtilsMessageTypeFlagsEXT,
+    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    _p_user_data: *mut c_void,
+) -> vk::Bool32 {
+    let msg = if p_callback_data.is_null() {
+        "<null debug callback data>".into()
+    } else {
+        CStr::from_ptr((*p_callback_data).p_message)
+            .to_string_lossy()
+            .into_owned()
+    };
+    if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        crate::error!("Vulkan validation [{message_types:?}] {msg}");
+    } else if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
+        crate::warning!("Vulkan validation [{message_types:?}] {msg}");
+    } else {
+        crate::log!("Vulkan validation [{message_types:?}] {msg}");
+    }
+    vk::FALSE
+}
+
+fn vulkan_debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
+    vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+        )
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(vulkan_debug_callback))
 }
 
 #[derive(Clone, Copy)]
@@ -95,8 +137,12 @@ pub struct CxAndroidVulkan {
     requested_height: u32,
     present_count: u64,
     present_debug_remaining: u32,
+    readback_debug_remaining: u32,
     has_logged_present: bool,
     has_logged_draw_stats: bool,
+    debug_utils_enabled: bool,
+    debug_utils_loader: Option<ash::ext::debug_utils::Instance>,
+    debug_messenger: vk::DebugUtilsMessengerEXT,
 }
 
 impl CxAndroidVulkan {
@@ -112,14 +158,54 @@ impl CxAndroidVulkan {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| format!("Android Vulkan init failed: Entry::load: {e:?}"))?;
 
-        let instance_extensions = [vk::KHR_SURFACE_NAME.as_ptr(), vk::KHR_ANDROID_SURFACE_NAME.as_ptr()];
+        let available_layers = unsafe { entry.enumerate_instance_layer_properties() }
+            .map_err(|e| format!("Android Vulkan init failed: enumerate layers: {e:?}"))?;
+        let has_validation_layer = available_layers.iter().any(|layer| {
+            let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
+            name.to_bytes() == b"VK_LAYER_KHRONOS_validation"
+        });
+        if has_validation_layer {
+            crate::log!("Android Vulkan: VK_LAYER_KHRONOS_validation available");
+        } else {
+            crate::warning!("Android Vulkan: VK_LAYER_KHRONOS_validation not available");
+        }
+
+        let available_exts = unsafe { entry.enumerate_instance_extension_properties(None) }
+            .map_err(|e| format!("Android Vulkan init failed: enumerate extensions: {e:?}"))?;
+        let has_debug_utils_ext = available_exts.iter().any(|ext| {
+            let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
+            name.to_bytes() == vk::EXT_DEBUG_UTILS_NAME.to_bytes()
+        });
+        if has_debug_utils_ext {
+            crate::log!("Android Vulkan: VK_EXT_debug_utils available");
+        } else {
+            crate::warning!("Android Vulkan: VK_EXT_debug_utils not available");
+        }
+
+        let mut instance_extensions =
+            vec![vk::KHR_SURFACE_NAME.as_ptr(), vk::KHR_ANDROID_SURFACE_NAME.as_ptr()];
+        if has_debug_utils_ext {
+            instance_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
+        }
+        let validation_layer_name = b"VK_LAYER_KHRONOS_validation\0";
+        let enabled_layers: Vec<*const c_char> = if has_validation_layer {
+            vec![validation_layer_name.as_ptr() as *const c_char]
+        } else {
+            Vec::new()
+        };
+
         let app_info = vk::ApplicationInfo {
             api_version: vk::API_VERSION_1_1,
             ..Default::default()
         };
-        let instance_create_info = vk::InstanceCreateInfo::default()
+        let mut instance_create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
-            .enabled_extension_names(&instance_extensions);
+            .enabled_extension_names(&instance_extensions)
+            .enabled_layer_names(&enabled_layers);
+        let mut debug_create_info = vulkan_debug_messenger_create_info();
+        if has_debug_utils_ext {
+            instance_create_info = instance_create_info.push_next(&mut debug_create_info);
+        }
 
         let instance = unsafe { entry.create_instance(&instance_create_info, None) }
             .map_err(|e| format!("Android Vulkan init failed: create_instance: {e:?}"))?;
@@ -314,15 +400,39 @@ impl CxAndroidVulkan {
             requested_height: height.max(1),
             present_count: 0,
             present_debug_remaining: 120,
+            readback_debug_remaining: 8,
             has_logged_present: false,
             has_logged_draw_stats: false,
+            debug_utils_enabled: has_debug_utils_ext,
+            debug_utils_loader: None,
+            debug_messenger: vk::DebugUtilsMessengerEXT::null(),
         };
 
         if let Err(err) = vulkan.recreate_swapchain() {
             return Err(format!("Android Vulkan init failed: recreate_swapchain: {err}"));
         }
 
+        vulkan.try_enable_debug_messenger(&entry);
+
         Ok(vulkan)
+    }
+
+    fn try_enable_debug_messenger(&mut self, entry: &ash::Entry) {
+        if !self.debug_utils_enabled {
+            return;
+        }
+        let debug_loader = ash::ext::debug_utils::Instance::new(entry, &self.instance);
+        let create_info = vulkan_debug_messenger_create_info();
+        match unsafe { debug_loader.create_debug_utils_messenger(&create_info, None) } {
+            Ok(messenger) => {
+                self.debug_utils_loader = Some(debug_loader);
+                self.debug_messenger = messenger;
+                crate::log!("Android Vulkan: debug messenger enabled");
+            }
+            Err(err) => {
+                crate::warning!("Android Vulkan: failed to create debug messenger: {err:?}");
+            }
+        }
     }
 
     pub fn update_surface(
@@ -449,6 +559,10 @@ impl CxAndroidVulkan {
                 return Err(format!("acquire_next_image failed: {err:?}"));
             }
         };
+        let swapchain_image = *self
+            .swapchain_images
+            .get(image_index as usize)
+            .ok_or_else(|| format!("invalid swapchain image index {image_index}"))?;
 
         unsafe {
             self.device
@@ -467,6 +581,7 @@ impl CxAndroidVulkan {
         let mut zbias = 0.0f32;
         let zbias_step = cx.passes[draw_pass_id].zbias_step;
         let mut draw_stats = VulkanDrawStats::default();
+        let mut readback_buffer: Option<(VulkanBuffer, u32, u32)> = None;
         if FORCE_TRANSFER_CLEAR_DEBUG {
             static TRANSFER_CLEAR_LOG_ONCE: std::sync::Once = std::sync::Once::new();
             TRANSFER_CLEAR_LOG_ONCE.call_once(|| {
@@ -475,10 +590,7 @@ impl CxAndroidVulkan {
                 );
             });
 
-            let image = *self
-                .swapchain_images
-                .get(image_index as usize)
-                .ok_or_else(|| format!("invalid swapchain image index {image_index}"))?;
+            let image = swapchain_image;
 
             let range = vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -619,6 +731,94 @@ impl CxAndroidVulkan {
             unsafe {
                 self.device.cmd_end_render_pass(self.command_buffer);
             }
+
+            if self.readback_debug_remaining > 0 {
+                let readback_seed = [0u32; 1];
+                let rb = self.create_host_buffer_with_data(
+                    vk::BufferUsageFlags::TRANSFER_DST,
+                    &readback_seed,
+                )?;
+                self.frame_resources.buffers.push(rb);
+                let sample_x = self.swapchain_extent.width.saturating_sub(1) / 2;
+                let sample_y = self.swapchain_extent.height.saturating_sub(1) / 2;
+                let copy_region = vk::BufferImageCopy::default()
+                    .buffer_offset(0)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(0)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    )
+                    .image_offset(vk::Offset3D {
+                        x: sample_x as i32,
+                        y: sample_y as i32,
+                        z: 0,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    });
+                let to_copy_src = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .image(swapchain_image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    );
+                let back_to_present = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .dst_access_mask(vk::AccessFlags::MEMORY_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .image(swapchain_image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    );
+                unsafe {
+                    self.device.cmd_pipeline_barrier(
+                        self.command_buffer,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[to_copy_src],
+                    );
+                    self.device.cmd_copy_image_to_buffer(
+                        self.command_buffer,
+                        swapchain_image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        rb.buffer,
+                        &[copy_region],
+                    );
+                    self.device.cmd_pipeline_barrier(
+                        self.command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[back_to_present],
+                    );
+                }
+                readback_buffer = Some((rb, sample_x, sample_y));
+            }
         }
 
         unsafe {
@@ -686,6 +886,45 @@ impl CxAndroidVulkan {
             );
         }
 
+        if let Some((rb, sample_x, sample_y)) = readback_buffer {
+            if self.readback_debug_remaining > 0 {
+                self.readback_debug_remaining -= 1;
+                if let Err(err) = unsafe {
+                    self.device
+                        .wait_for_fences(&[self.in_flight_fence], true, 1_000_000_000)
+                } {
+                    crate::warning!("Android Vulkan readback: wait_for_fences failed: {err:?}");
+                } else {
+                    match unsafe {
+                        self.device
+                            .map_memory(rb.memory, 0, 4, vk::MemoryMapFlags::empty())
+                    } {
+                        Ok(mapped) => {
+                            let bytes =
+                                unsafe { std::slice::from_raw_parts(mapped as *const u8, 4) };
+                            crate::log!(
+                                "Android Vulkan readback: center({}, {}) rgba8=({}, {}, {}, {})",
+                                sample_x,
+                                sample_y,
+                                bytes[0],
+                                bytes[1],
+                                bytes[2],
+                                bytes[3]
+                            );
+                            unsafe {
+                                self.device.unmap_memory(rb.memory);
+                            }
+                        }
+                        Err(err) => {
+                            crate::warning!(
+                                "Android Vulkan readback: map_memory failed: {err:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         if acquire_suboptimal || present_suboptimal {
             self.recreate_swapchain()?;
         }
@@ -702,7 +941,7 @@ impl CxAndroidVulkan {
         zbias_step: f32,
         draw_stats: &mut VulkanDrawStats,
     ) -> Result<(), String> {
-        const MAX_DRAW_PACKETS_DEBUG: usize = 2;
+        const MAX_DRAW_PACKETS_DEBUG: usize = 1;
 
         let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
         for draw_item_id in 0..draw_items_len {
@@ -844,6 +1083,18 @@ impl CxAndroidVulkan {
             .get(&packet.shader_index)
             .ok_or_else(|| format!("missing Vulkan pipeline for shader {}", packet.shader_index))?;
 
+        if FORCE_DEBUG_TRIANGLE_PIPELINE {
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    self.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.pipeline,
+                );
+                self.device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
+            }
+            return Ok(());
+        }
+
         let sh = &cx.draw_shaders.shaders[packet.shader_index];
         let geometry_stride = (sh.mapping.geometries.total_slots * std::mem::size_of::<f32>()) as u64;
         let instance_stride = (sh.mapping.instances.total_slots * std::mem::size_of::<f32>()) as u64;
@@ -913,8 +1164,10 @@ impl CxAndroidVulkan {
             let list_preview: Vec<f32> = draw_list_uniforms.iter().take(16).copied().collect();
             let call_preview: Vec<f32> = packet.draw_call_uniforms.iter().take(16).copied().collect();
             let inst_preview: Vec<f32> = packet.instances.iter().take(24).copied().collect();
+            let geom_preview: Vec<f32> = geometry_vertices.iter().take(16).copied().collect();
+            let index_preview: Vec<u32> = geometry_indices.iter().take(12).copied().collect();
             crate::log!(
-                "Android Vulkan first packet: shader={}, geom_vertices_f32={}, geom_indices_u32={}, instances_f32={}, pass_uniforms_f32={}, draw_list_uniforms_f32={}, draw_call_uniforms_f32={}, dyn_uniforms_f32={}, scope_uniforms_f32={}, ub_bindings={:?}, pass_preview={:?}, draw_list_preview={:?}, draw_call_preview={:?}, instance_preview={:?}",
+                "Android Vulkan first packet: shader={}, geom_vertices_f32={}, geom_indices_u32={}, instances_f32={}, pass_uniforms_f32={}, draw_list_uniforms_f32={}, draw_call_uniforms_f32={}, dyn_uniforms_f32={}, scope_uniforms_f32={}, ub_bindings={:?}, pass_preview={:?}, draw_list_preview={:?}, draw_call_preview={:?}, instance_preview={:?}, geom_preview={:?}, index_preview={:?}",
                 packet.shader_index,
                 geometry_vertices.len(),
                 geometry_indices.len(),
@@ -928,11 +1181,20 @@ impl CxAndroidVulkan {
                 pass_preview,
                 list_preview,
                 call_preview,
-                inst_preview
+                inst_preview,
+                geom_preview,
+                index_preview
             );
         });
 
-        let descriptor_set = if pipeline.has_descriptors && !binding_payloads.is_empty() {
+        let descriptor_set = if pipeline.has_descriptors {
+            if binding_payloads.is_empty() {
+                return Err(format!(
+                    "shader {} expects descriptors but no uniform payloads were built",
+                    packet.shader_index
+                ));
+            }
+
             let descriptor_pool = {
                 let pool_sizes = [vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -982,24 +1244,18 @@ impl CxAndroidVulkan {
             None
         };
 
-        let instance_count = (packet.instances.len() / sh.mapping.instances.total_slots) as u32;
-        if instance_count == 0 {
+        let instance_count = (packet.instances.len() as u64 / (instance_stride / std::mem::size_of::<f32>() as u64))
+            as u32;
+        let index_count = geometry_indices.len() as u32;
+        if instance_count == 0 || index_count == 0 {
             return Ok(());
         }
+        let vertex_buffers = [vb_geometry.buffer, vb_instances.buffer];
+        let vertex_offsets = [0u64, 0u64];
 
         unsafe {
             self.device
                 .cmd_bind_pipeline(self.command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
-            let vbs = [vb_geometry.buffer, vb_instances.buffer];
-            let offsets = [0u64, 0u64];
-            self.device
-                .cmd_bind_vertex_buffers(self.command_buffer, 0, &vbs, &offsets);
-            self.device.cmd_bind_index_buffer(
-                self.command_buffer,
-                ib_indices.buffer,
-                0,
-                vk::IndexType::UINT32,
-            );
             if let Some(set) = descriptor_set {
                 self.device.cmd_bind_descriptor_sets(
                     self.command_buffer,
@@ -1010,14 +1266,20 @@ impl CxAndroidVulkan {
                     &[],
                 );
             }
-            self.device.cmd_draw_indexed(
+            self.device.cmd_bind_vertex_buffers(
                 self.command_buffer,
-                geometry_indices.len() as u32,
-                instance_count,
                 0,
-                0,
-                0,
+                &vertex_buffers,
+                &vertex_offsets,
             );
+            self.device.cmd_bind_index_buffer(
+                self.command_buffer,
+                ib_indices.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.device
+                .cmd_draw_indexed(self.command_buffer, index_count, instance_count, 0, 0, 0);
         }
 
         Ok(())
@@ -1025,6 +1287,132 @@ impl CxAndroidVulkan {
 
     fn ensure_pipeline(&mut self, cx: &Cx, shader_index: usize) -> Result<(), String> {
         if self.pipelines.contains_key(&shader_index) {
+            return Ok(());
+        }
+
+        if FORCE_DEBUG_TRIANGLE_PIPELINE {
+            const DEBUG_TRIANGLE_WGSL: &str = r#"
+@vertex
+fn vertex_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+    var pos = array<vec2f, 3>(
+        vec2f(-0.6, -0.6),
+        vec2f(0.6, -0.6),
+        vec2f(0.0, 0.6)
+    );
+    let p = pos[vi];
+    return vec4f(p, 0.0, 1.0);
+}
+
+@fragment
+fn fragment_main() -> @location(0) vec4f {
+    return vec4f(1.0, 0.0, 1.0, 1.0);
+}
+"#;
+
+            let (vs_opt, fs_opt) = compile_raw_wgsl_to_spirv(DEBUG_TRIANGLE_WGSL)?;
+            let vs_spv = vs_opt
+                .as_ref()
+                .ok_or_else(|| "debug triangle WGSL missing vertex SPIR-V".to_string())?;
+            let fs_spv = fs_opt
+                .as_ref()
+                .ok_or_else(|| "debug triangle WGSL missing fragment SPIR-V".to_string())?;
+
+            let descriptor_set_layout_info = vk::DescriptorSetLayoutCreateInfo::default();
+            let descriptor_set_layout = unsafe {
+                self.device
+                    .create_descriptor_set_layout(&descriptor_set_layout_info, None)
+            }
+            .map_err(|e| format!("create_descriptor_set_layout failed: {e:?}"))?;
+
+            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+            let pipeline_layout = unsafe { self.device.create_pipeline_layout(&pipeline_layout_info, None) }
+                .map_err(|e| format!("create_pipeline_layout failed: {e:?}"))?;
+
+            let vs_module_info = vk::ShaderModuleCreateInfo::default().code(vs_spv);
+            let fs_module_info = vk::ShaderModuleCreateInfo::default().code(fs_spv);
+            let vs_module = unsafe { self.device.create_shader_module(&vs_module_info, None) }
+                .map_err(|e| format!("create_shader_module(vertex) failed: {e:?}"))?;
+            let fs_module = unsafe { self.device.create_shader_module(&fs_module_info, None) }
+                .map_err(|e| format!("create_shader_module(fragment) failed: {e:?}"))?;
+
+            let main_name = std::ffi::CString::new("main").unwrap();
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX)
+                    .module(vs_module)
+                    .name(&main_name),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT)
+                    .module(fs_module)
+                    .name(&main_name),
+            ];
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+                .primitive_restart_enable(false);
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+                .viewport_count(1)
+                .scissor_count(1);
+            let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+                .depth_clamp_enable(false)
+                .rasterizer_discard_enable(false)
+                .polygon_mode(vk::PolygonMode::FILL)
+                .cull_mode(vk::CullModeFlags::NONE)
+                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                .line_width(1.0);
+            let multisample =
+                vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(false)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD)
+                .color_write_mask(vk::ColorComponentFlags::RGBA);
+            let color_blend_attachments = [color_blend_attachment];
+            let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
+                .attachments(&color_blend_attachments);
+            let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic =
+                vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+            let create_info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages)
+                .vertex_input_state(&vertex_input)
+                .input_assembly_state(&input_assembly)
+                .viewport_state(&viewport_state)
+                .rasterization_state(&rasterization)
+                .multisample_state(&multisample)
+                .color_blend_state(&color_blend)
+                .dynamic_state(&dynamic)
+                .layout(pipeline_layout)
+                .render_pass(self.render_pass)
+                .subpass(0);
+            let pipeline = unsafe {
+                self.device
+                    .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
+            }
+            .map_err(|e| format!("create_graphics_pipelines failed: {e:?}"))?[0];
+
+            unsafe {
+                self.device.destroy_shader_module(vs_module, None);
+                self.device.destroy_shader_module(fs_module, None);
+            }
+
+            self.pipelines.insert(
+                shader_index,
+                VulkanPipeline {
+                    pipeline,
+                    layout: pipeline_layout,
+                    descriptor_set_layout,
+                    has_descriptors: false,
+                },
+            );
+            crate::warning!(
+                "Android Vulkan debug: forcing hardcoded triangle pipeline for shader {}",
+                shader_index
+            );
             return Ok(());
         }
 
@@ -1194,7 +1582,7 @@ impl CxAndroidVulkan {
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(true)
+            .blend_enable(false)
             .src_color_blend_factor(vk::BlendFactor::ONE)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
@@ -1688,6 +2076,12 @@ impl Drop for CxAndroidVulkan {
         }
 
         self.destroy_surface();
+        if let Some(loader) = &self.debug_utils_loader {
+            if self.debug_messenger != vk::DebugUtilsMessengerEXT::null() {
+                unsafe { loader.destroy_debug_utils_messenger(self.debug_messenger, None) };
+                self.debug_messenger = vk::DebugUtilsMessengerEXT::null();
+            }
+        }
         unsafe { self.instance.destroy_instance(None) };
 
         if !self.window.is_null() {

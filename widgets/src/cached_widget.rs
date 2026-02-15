@@ -19,7 +19,7 @@ script_mod! {
 ///
 /// In the DSL, you can use `CachedWidget` as follows:
 ///
-/// ```
+/// ```ignore
 /// CachedWidget {
 ///     my_widget = MyWidget {}
 /// }

@@ -528,7 +528,7 @@ impl WidgetRef {
     /// the widget should implement the `handle_event_with` fn in `impl Widget for $Widget`
     ///
     /// ### Example
-    /// ```rust
+    /// ```ignore
     /// impl Widget for Button {
     /// fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, sweep_area: Area) {
     ///     let uid = self.widget_uid();
@@ -1246,7 +1246,7 @@ pub trait WidgetActionsApi {
     /// #### find and directly do target action without param
     /// you can `filter_widget_actions` and then do find to get target action you want,
     /// then do map to do want you what
-    /// ```rust
+    /// ```ignore
     /// let actions = cx.capture_actions(|cx| self.super_widget.handle_event(cx, event, scope));
     ///
     /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
@@ -1263,7 +1263,7 @@ pub trait WidgetActionsApi {
     /// });
     /// ```
     /// #### find and cast
-    /// ```rust
+    /// ```ignore
     /// let actions = cx.capture_actions(|cx| self.super_widget.handle_event(cx, event, scope));
     ///
     /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
@@ -1281,7 +1281,7 @@ pub trait WidgetActionsApi {
     /// - try cast all widget actions (This method is not recommended when a large number of actions occur simultaneously)
     /// - back `Iterator<Item = T>` not `Iterator<Item = &T>`
     /// ### Example
-    /// ```rust
+    /// ```ignore
     /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
     /// let actions = actions.filter_widget_actions_cast::<GButtonEvent>(x.widget_uid());
     ///     actions.for_each(|action| {

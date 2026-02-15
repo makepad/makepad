@@ -268,9 +268,7 @@ impl DrawVars {
                 let cx = vm.host.cx_mut();
                 for (shader_index, os_shader) in cx.draw_shaders.os_shaders.iter_mut().enumerate() {
                     if os_shader.in_vertex == vertex && os_shader.in_pixel == fragment {
-                        if os_shader.vulkan_shader.is_none() {
-                            os_shader.vulkan_shader = Some(vk_shader.clone());
-                        }
+                        os_shader.vulkan_shader = Some(vk_shader.clone());
                         os_shader_id = Some(shader_index);
                         break;
                     }

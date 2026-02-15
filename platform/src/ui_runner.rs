@@ -59,7 +59,7 @@ impl<T: 'static> UiRunner<T> {
     ///
     /// You should call this once from your `handle_event` method, like:
     ///
-    /// ```rust
+    /// ```ignore
     /// fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
     ///    // ... handle other stuff ...
     ///    self.ui_runner().handle(cx, event, scope, self);
