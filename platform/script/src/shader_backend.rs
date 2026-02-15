@@ -17,6 +17,7 @@ pub enum ShaderBackend {
     Wgsl,
     Hlsl,
     Glsl,
+    Rust,
 }
 
 #[derive(Debug, Clone)]
@@ -309,9 +310,10 @@ impl ShaderBackend {
                                 ShaderIoKind::RustInstance,
                                 ShaderIoPrefix::Prefix("_mp_iof.v."),
                             ),
-                            SHADER_IO_DYN_INSTANCE => {
-                                (ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_mp_iof.v."))
-                            }
+                            SHADER_IO_DYN_INSTANCE => (
+                                ShaderIoKind::DynInstance,
+                                ShaderIoPrefix::Prefix("_mp_iof.v."),
+                            ),
                             SHADER_IO_DYN_UNIFORM => {
                                 (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("u_"))
                             }
@@ -378,6 +380,95 @@ impl ShaderBackend {
                     _ => panic!(),
                 }
             }
+            Self::Rust => {
+                // Check for fragment output range first
+                if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0
+                    && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0
+                {
+                    let index = io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0;
+                    return (
+                        ShaderIoKind::FragmentOutput(index as u8),
+                        ShaderIoPrefix::FullOwned(format!("rcx.frag_fb{}", index)),
+                    );
+                }
+                match io_type {
+                    SHADER_IO_RUST_INSTANCE => (
+                        ShaderIoKind::RustInstance,
+                        ShaderIoPrefix::Prefix("rcx.rustinst_"),
+                    ),
+                    SHADER_IO_DYN_INSTANCE => (
+                        ShaderIoKind::DynInstance,
+                        ShaderIoPrefix::Prefix("rcx.dyninst_"),
+                    ),
+                    SHADER_IO_DYN_UNIFORM => {
+                        (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("rcx.uni_"))
+                    }
+                    SHADER_IO_UNIFORM_BUFFER => (
+                        ShaderIoKind::UniformBuffer,
+                        ShaderIoPrefix::Prefix("rcx.unibuf_"),
+                    ),
+                    SHADER_IO_VARYING => {
+                        (ShaderIoKind::Varying, ShaderIoPrefix::Prefix("rcx.var_"))
+                    }
+                    SHADER_IO_VERTEX_POSITION => (
+                        ShaderIoKind::VertexPosition,
+                        ShaderIoPrefix::Full("rcx.vtx_pos"),
+                    ),
+                    SHADER_IO_VERTEX_BUFFER => (
+                        ShaderIoKind::VertexBuffer,
+                        ShaderIoPrefix::Prefix("rcx.vb_"),
+                    ),
+                    SHADER_IO_TEXTURE_1D => (
+                        ShaderIoKind::Texture(TextureType::Texture1d),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_1D_ARRAY => (
+                        ShaderIoKind::Texture(TextureType::Texture1dArray),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_2D => (
+                        ShaderIoKind::Texture(TextureType::Texture2d),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_2D_ARRAY => (
+                        ShaderIoKind::Texture(TextureType::Texture2dArray),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_3D => (
+                        ShaderIoKind::Texture(TextureType::Texture3d),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_3D_ARRAY => (
+                        ShaderIoKind::Texture(TextureType::Texture3dArray),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_CUBE => (
+                        ShaderIoKind::Texture(TextureType::TextureCube),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_CUBE_ARRAY => (
+                        ShaderIoKind::Texture(TextureType::TextureCubeArray),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_DEPTH => (
+                        ShaderIoKind::Texture(TextureType::TextureDepth),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_DEPTH_ARRAY => (
+                        ShaderIoKind::Texture(TextureType::TextureDepthArray),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
+                    SHADER_IO_SAMPLER => (
+                        ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
+                        ShaderIoPrefix::Prefix("rcx.sampler_"),
+                    ),
+                    SHADER_IO_SCOPE_UNIFORM => (
+                        ShaderIoKind::ScopeUniform,
+                        ShaderIoPrefix::Prefix("rcx.su_"),
+                    ),
+                    _ => panic!(),
+                }
+            }
             Self::Glsl | Self::Wgsl => {
                 // Check for fragment output range first
                 if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0
@@ -410,10 +501,9 @@ impl ShaderBackend {
                         ShaderIoKind::VertexPosition,
                         ShaderIoPrefix::Full("vtx_pos"),
                     ),
-                    SHADER_IO_VERTEX_BUFFER => (
-                        ShaderIoKind::VertexBuffer,
-                        ShaderIoPrefix::Prefix("vb_"),
-                    ),
+                    SHADER_IO_VERTEX_BUFFER => {
+                        (ShaderIoKind::VertexBuffer, ShaderIoPrefix::Prefix("vb_"))
+                    }
                     SHADER_IO_TEXTURE_1D => (
                         ShaderIoKind::Texture(TextureType::Texture1d),
                         ShaderIoPrefix::Prefix("tex_"),
@@ -471,6 +561,7 @@ impl ShaderBackend {
         match self {
             Self::Metal => "_io",
             Self::Hlsl => "",
+            Self::Rust => "rcx",
             _ => "",
         }
     }
@@ -479,6 +570,7 @@ impl ShaderBackend {
         match self {
             Self::Metal => "thread Io &_io",
             Self::Hlsl => "",
+            Self::Rust => "rcx: &mut RenderCx",
             _ => "",
         }
     }
@@ -495,6 +587,7 @@ impl ShaderBackend {
                 ShaderMode::Fragment => "",
                 _ => "",
             },
+            Self::Rust => "",
             _ => "",
         }
     }
@@ -511,6 +604,7 @@ impl ShaderBackend {
                 ShaderMode::Fragment => "",
                 _ => "",
             },
+            Self::Rust => "",
             _ => "",
         }
     }
@@ -536,6 +630,47 @@ impl ShaderBackend {
                     format!("l_{}", base)
                 }
             }
+            Self::Rust => {
+                let base = if id == id!(self) {
+                    "_self".to_string()
+                } else if id == id!(type)
+                    || id == id!(match)
+                    || id == id!(fn)
+                    || id == id!(let)
+                    || id == id!(mut)
+                    || id == id!(ref)
+                    || id == id!(loop)
+                    || id == id!(move)
+                    || id == id!(pub)
+                    || id == id!(use)
+                    || id == id!(mod)
+                    || id == id!(impl)
+                    || id == id!(where)
+                    || id == id!(as)
+                    || id == id!(in)
+                    || id == id!(for)
+                    || id == id!(if)
+                    || id == id!(else)
+                    || id == id!(while)
+                    || id == id!(return)
+                    || id == id!(break)
+                    || id == id!(continue)
+                    || id == id!(struct)
+                    || id == id!(enum)
+                    || id == id!(trait)
+                    || id == id!(super)
+                    || id == id!(crate)
+                {
+                    format!("r#{}", id)
+                } else {
+                    format!("{}", id)
+                };
+                if shadow > 0 {
+                    format!("{}_{}", base, shadow)
+                } else {
+                    base
+                }
+            }
             _ => {
                 if shadow > 0 {
                     format!("_s{}{}", shadow, id)
@@ -550,6 +685,10 @@ impl ShaderBackend {
 
     pub fn map_param_name(&self, id: LiveId, shadow: usize) -> String {
         if id == id!(self) {
+            // In Rust backend, _self is *mut T, so dereference for field access
+            if matches!(self, Self::Rust) {
+                return "(*_self)".to_string();
+            }
             return "_self".to_string();
         }
         match self {
@@ -560,6 +699,7 @@ impl ShaderBackend {
                     format!("p_{}", id)
                 }
             }
+            Self::Rust => self.map_local_name(id, shadow),
             _ => self.map_local_name(id, shadow),
         }
     }
@@ -567,6 +707,7 @@ impl ShaderBackend {
     pub fn map_function_name(&self, name: &str) -> String {
         match self {
             Self::Hlsl => format!("f_{}", name),
+            Self::Rust => name.to_string(),
             _ => name.to_string(),
         }
     }
@@ -574,23 +715,66 @@ impl ShaderBackend {
     pub fn map_io_name(&self, id: LiveId) -> String {
         match self {
             Self::Hlsl => format!("io_{}", id),
+            Self::Rust => format!("{}", id),
             _ => format!("{}", id),
         }
     }
 
     pub fn map_field_name(&self, id: LiveId) -> String {
+        self.map_field_name_typed(id, true)
+    }
+
+    /// Map a field name, with `is_vec_type` indicating whether the parent type is a vec
+    /// (where swizzle transformations apply).
+    pub fn map_field_name_typed(&self, id: LiveId, is_vec_type: bool) -> String {
         match self {
             Self::Hlsl => {
                 let id_str = format!("{}", id);
                 let len = id_str.len();
                 let is_swizzle = (1..=4).contains(&len)
-                    && id_str
-                        .bytes()
-                        .all(|c| matches!(c, b'x' | b'y' | b'z' | b'w' | b'r' | b'g' | b'b' | b'a'));
+                    && id_str.bytes().all(|c| {
+                        matches!(c, b'x' | b'y' | b'z' | b'w' | b'r' | b'g' | b'b' | b'a')
+                    });
                 if is_swizzle {
                     id_str
                 } else {
                     format!("f_{}", id_str)
+                }
+            }
+            Self::Rust => {
+                let id_str = format!("{}", id);
+                if !is_vec_type {
+                    return id_str;
+                }
+                let len = id_str.len();
+                let is_swizzle_char =
+                    |c: u8| matches!(c, b'x' | b'y' | b'z' | b'w' | b'r' | b'g' | b'b' | b'a');
+                let all_swizzle = !id_str.is_empty() && id_str.bytes().all(is_swizzle_char);
+                if all_swizzle && len >= 2 {
+                    // Multi-component swizzles become method calls: .xy() not .xy
+                    // Map rgba to xyzw
+                    let mapped: String = id_str
+                        .chars()
+                        .map(|c| match c {
+                            'r' => 'x',
+                            'g' => 'y',
+                            'b' => 'z',
+                            'a' => 'w',
+                            other => other,
+                        })
+                        .collect();
+                    format!("{}()", mapped)
+                } else if all_swizzle && len == 1 {
+                    // Single-char field access: map rgba to xyzw
+                    match id_str.as_str() {
+                        "r" => "x".to_string(),
+                        "g" => "y".to_string(),
+                        "b" => "z".to_string(),
+                        "a" => "w".to_string(),
+                        other => other.to_string(),
+                    }
+                } else {
+                    id_str
                 }
             }
             _ => format!("{}", id),
@@ -607,6 +791,10 @@ impl ShaderBackend {
             }
             Self::Wgsl => {
                 write!(out, "var {}:{};\n", var_name, ty_name).ok();
+            }
+            Self::Rust => {
+                let zero = self.zero_literal(ty_name);
+                write!(out, "let mut {}: {} = {};\n", var_name, ty_name, zero).ok();
             }
         }
     }
@@ -628,6 +816,10 @@ impl ShaderBackend {
             Self::Wgsl => {
                 let zero = self.zero_literal(ty_name);
                 write!(out, "var {}:{} = {};\n", var_name, ty_name, zero).ok();
+            }
+            Self::Rust => {
+                let zero = self.zero_literal(ty_name);
+                write!(out, "let mut {}: {} = {};\n", var_name, ty_name, zero).ok();
             }
         }
     }
@@ -675,7 +867,10 @@ impl ShaderBackend {
             }
             Self::Hlsl => {
                 fn join_n(lit: &str, n: usize) -> String {
-                    std::iter::repeat(lit).take(n).collect::<Vec<_>>().join(", ")
+                    std::iter::repeat(lit)
+                        .take(n)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 }
                 match ty_name {
                     // Scalars
@@ -770,6 +965,24 @@ impl ShaderBackend {
                     | id!(mat4x4f) => format!("{}()", ty_name),
                     // Default: use empty constructor
                     _ => format!("{}()", ty_name),
+                }
+            }
+            Self::Rust => {
+                match ty_name {
+                    // Scalars
+                    id!(f32) => "0.0f32".to_string(),
+                    id!(f16) => "0.0f32".to_string(), // f16 maps to f32 in Rust runtime
+                    id!(u32) => "0u32".to_string(),
+                    id!(i32) => "0i32".to_string(),
+                    id!(bool) => "false".to_string(),
+                    // Vectors - use constructor functions
+                    id!(vec2f) => "vec2(0.0, 0.0)".to_string(),
+                    id!(vec3f) => "vec3(0.0, 0.0, 0.0)".to_string(),
+                    id!(vec4f) => "vec4(0.0, 0.0, 0.0, 0.0)".to_string(),
+                    // Matrices
+                    id!(mat4x4f) => "Mat4f::default()".to_string(),
+                    // Default: use Default trait
+                    _ => format!("{}::default()", ty_name),
                 }
             }
         }
@@ -874,6 +1087,12 @@ impl ShaderBackend {
                 id_lut!(dpdx);
                 id_lut!(dpdy);
             }
+            Self::Rust => {
+                // Rust uses canonical names from makepad_math - no remapping needed
+                // Register builtin function names used in Rust backend
+                id_lut!(inverseSqrt);
+                id_lut!(modf);
+            }
         }
     }
 
@@ -910,6 +1129,17 @@ impl ShaderBackend {
                     id!(dFdx) => id!(dpdx),
                     id!(dFdy) => id!(dpdy),
                     id!(inverseSqrt) => id!(inverseSqrt),
+                    x => x,
+                }
+            }
+            Self::Rust => {
+                match name_in {
+                    // Rust backend maps to makepad_math::shader_runtime functions
+                    id!(inverseSqrt) => id!(inverseSqrt), // maps to inverse_sqrt in codegen
+                    id!(modf) => id!(modf),               // maps to modf in shader_runtime
+                    id!(dFdx) => id!(dFdx),               // no-op in CPU (returns 0)
+                    id!(dFdy) => id!(dFdy),               // no-op in CPU (returns 0)
+                    id!(discard) => id!(discard),         // no-op in CPU
                     x => x,
                 }
             }
@@ -1021,7 +1251,7 @@ impl ShaderBackend {
                     x => x,
                 }
             }
-            Self::Wgsl => name_in,
+            Self::Wgsl | Self::Rust => name_in,
         }
     }
 
@@ -1092,6 +1322,10 @@ impl ShaderBackend {
     ) {
         let pod_type = heap.pod_type_ref(pod_ty);
         if let ScriptPodTy::Struct { fields, .. } = &pod_type.ty {
+            if matches!(self, Self::Rust) {
+                writeln!(out, "#[derive(Default, Clone, Copy)]").ok();
+                writeln!(out, "#[repr(C)]").ok();
+            }
             if let Some(name) = pod_type.name {
                 writeln!(out, "struct {} {{", self.map_pod_name(name)).ok();
             } else {
@@ -1114,6 +1348,11 @@ impl ShaderBackend {
                         self.pod_type_name_referenced(&field.ty, referenced, out);
                         writeln!(out, ",").ok();
                     }
+                    Self::Rust => {
+                        write!(out, "    pub {}: ", field.name).ok();
+                        self.pod_type_name_referenced(&field.ty, referenced, out);
+                        writeln!(out, ",").ok();
+                    }
                 }
             }
             match self {
@@ -1121,6 +1360,9 @@ impl ShaderBackend {
                     writeln!(out, "}};").ok();
                 }
                 Self::Wgsl => {
+                    writeln!(out, "}}").ok();
+                }
+                Self::Rust => {
                     writeln!(out, "}}").ok();
                 }
             }

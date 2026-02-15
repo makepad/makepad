@@ -149,7 +149,14 @@ impl ShaderFnCompiler {
                     }
 
                     let mut s = self.stack.new_string();
-                    let field_name = output.backend.map_field_name(field_id);
+                    let is_vec = vm.bx.heap.pod_types[pod_ty.index as usize]
+                        .ty
+                        .is_float_type()
+                        && !matches!(
+                            vm.bx.heap.pod_types[pod_ty.index as usize].ty,
+                            crate::pod::ScriptPodTy::Struct { .. }
+                        );
+                    let field_name = output.backend.map_field_name_typed(field_id, is_vec);
                     write!(s, "{}.{} = {}", instance_s, field_name, value_s).ok();
                     self.stack.push(
                         self.trap.pass(),
@@ -190,7 +197,14 @@ impl ShaderFnCompiler {
                     }
 
                     let mut s = self.stack.new_string();
-                    let field_name = output.backend.map_field_name(field_id);
+                    let is_vec = vm.bx.heap.pod_types[pod_ty.index as usize]
+                        .ty
+                        .is_float_type()
+                        && !matches!(
+                            vm.bx.heap.pod_types[pod_ty.index as usize].ty,
+                            crate::pod::ScriptPodTy::Struct { .. }
+                        );
+                    let field_name = output.backend.map_field_name_typed(field_id, is_vec);
                     write!(s, "{}->{} = {}", instance_s, field_name, value_s).ok();
                     self.stack.push(
                         self.trap.pass(),
@@ -578,7 +592,14 @@ impl ShaderFnCompiler {
                         .pod_field_type(pod_ty, field_id, &vm.bx.code.builtins.pod)
                 {
                     let mut s = self.stack.new_string();
-                    let field_name = output.backend.map_field_name(field_id);
+                    let is_vec = vm.bx.heap.pod_types[pod_ty.index as usize]
+                        .ty
+                        .is_float_type()
+                        && !matches!(
+                            vm.bx.heap.pod_types[pod_ty.index as usize].ty,
+                            crate::pod::ScriptPodTy::Struct { .. }
+                        );
+                    let field_name = output.backend.map_field_name_typed(field_id, is_vec);
                     write!(s, "{}.{}", instance_s, field_name).ok();
                     self.stack
                         .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
@@ -606,7 +627,14 @@ impl ShaderFnCompiler {
                         .pod_field_type(pod_ty, field_id, &vm.bx.code.builtins.pod)
                 {
                     let mut s = self.stack.new_string();
-                    let field_name = output.backend.map_field_name(field_id);
+                    let is_vec = vm.bx.heap.pod_types[pod_ty.index as usize]
+                        .ty
+                        .is_float_type()
+                        && !matches!(
+                            vm.bx.heap.pod_types[pod_ty.index as usize].ty,
+                            crate::pod::ScriptPodTy::Struct { .. }
+                        );
+                    let field_name = output.backend.map_field_name_typed(field_id, is_vec);
                     write!(s, "{}->{}", instance_s, field_name).ok();
                     self.stack
                         .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
@@ -683,7 +711,10 @@ impl ShaderFnCompiler {
                             self.trap.err.take(); // Clear any error
                             if let Some(f) = enum_value.as_f64() {
                                 let mut s = self.stack.new_string();
-                                write!(s, "{}u", f as u32).ok();
+                                match output.backend {
+                                    ShaderBackend::Rust => write!(s, "{}u32", f as u32).ok(),
+                                    _ => write!(s, "{}u", f as u32).ok(),
+                                };
                                 self.stack.push(
                                     self.trap.pass(),
                                     ShaderType::Pod(vm.bx.code.builtins.pod.pod_u32),
@@ -937,14 +968,24 @@ impl ShaderFnCompiler {
                     let mut resolved_prefix = prefix;
                     if let Some(existing) = output.io.iter().find(|io| io.name == field_id) {
                         resolved_prefix = match (&existing.kind, &kind) {
-                            (ShaderIoKind::RustInstance, ShaderIoKind::DynInstance) => output
-                                .backend
-                                .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE)
-                                .1,
-                            (ShaderIoKind::DynInstance, ShaderIoKind::RustInstance) => output
-                                .backend
-                                .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_DYN_INSTANCE)
-                                .1,
+                            (ShaderIoKind::RustInstance, ShaderIoKind::DynInstance) => {
+                                output
+                                    .backend
+                                    .get_shader_io_kind_and_prefix(
+                                        output.mode,
+                                        SHADER_IO_RUST_INSTANCE,
+                                    )
+                                    .1
+                            }
+                            (ShaderIoKind::DynInstance, ShaderIoKind::RustInstance) => {
+                                output
+                                    .backend
+                                    .get_shader_io_kind_and_prefix(
+                                        output.mode,
+                                        SHADER_IO_DYN_INSTANCE,
+                                    )
+                                    .1
+                            }
                             _ => resolved_prefix,
                         };
                     }
@@ -1099,6 +1140,20 @@ impl ShaderFnCompiler {
                             };
                             write!(self.out, "{} {} = {};\n", type_name, local_name, value).ok();
                         }
+                        ShaderBackend::Rust => {
+                            let type_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {
+                                output.backend.map_pod_name(name)
+                            } else {
+                                id!(unknown)
+                            };
+                            // All shader locals are potentially mutable in Rust backend
+                            write!(
+                                self.out,
+                                "let mut {}: {} = {};\n",
+                                local_name, type_name, value
+                            )
+                            .ok();
+                        }
                     }
                 } else {
                     script_err_shader!(self.trap, "cannot determine shader type for let");
@@ -1137,6 +1192,19 @@ impl ShaderFnCompiler {
                                 id!(unknown)
                             };
                             write!(self.out, "{} {} = {};\n", type_name, local_name, value).ok();
+                        }
+                        ShaderBackend::Rust => {
+                            let type_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {
+                                output.backend.map_pod_name(name)
+                            } else {
+                                id!(unknown)
+                            };
+                            write!(
+                                self.out,
+                                "let mut {}: {} = {};\n",
+                                local_name, type_name, value
+                            )
+                            .ok();
                         }
                     }
                 } else {

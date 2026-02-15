@@ -1,9 +1,15 @@
 use {
     crate::{
-        cx::Cx, draw_vars::DrawVars, geometry::GeometryId, makepad_live_id::*,
-        makepad_script::heap::ScriptHeap, makepad_script::shader::*,
+        cx::Cx,
+        draw_vars::DrawVars,
+        geometry::GeometryId,
+        makepad_live_id::*,
+        makepad_script::heap::ScriptHeap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
-        makepad_script::value::ScriptObject, makepad_script::ScriptObjectRef, os::CxOsDrawShader,
+        makepad_script::shader::*,
+        makepad_script::value::ScriptObject,
+        makepad_script::ScriptObjectRef,
+        os::CxOsDrawShader,
     },
     std::{
         collections::BTreeSet,
@@ -327,6 +333,9 @@ pub struct CxDrawShaderMapping {
     pub scope_uniform_sources: Vec<(ScriptObject, LiveId)>,
     pub scope_uniforms_buf: Vec<f32>,
     pub geometry_id: Option<GeometryId>,
+    /// Total f32 slots in the varying buffer (instances + explicit varyings).
+    /// Set by the headless backend during shader compilation.
+    pub varying_total_slots: usize,
 }
 
 impl CxDrawShaderMapping {
@@ -511,6 +520,7 @@ impl CxDrawShaderMapping {
             scope_uniform_sources,
             scope_uniforms_buf,
             geometry_id,
+            varying_total_slots: 0,
         }
     }
 

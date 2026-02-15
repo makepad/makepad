@@ -525,7 +525,9 @@ impl ShaderFnCompiler {
                         ShaderScopeItem::Let { .. } | ShaderScopeItem::Var { .. } => {
                             output.backend.map_local_name(id, shadow)
                         }
-                        ShaderScopeItem::PodType { .. } => output.backend.map_local_name(id, shadow),
+                        ShaderScopeItem::PodType { .. } => {
+                            output.backend.map_local_name(id, shadow)
+                        }
                         ShaderScopeItem::IoSelf(_) | ShaderScopeItem::ScopeObject(_) => {
                             String::new()
                         }
@@ -980,7 +982,10 @@ impl ShaderFnCompiler {
         if let Some(v) = value.as_f32() {
             let mut s = self.stack.new_string();
             write_shader_float(&mut s, v as f64);
-            s.push('f');
+            match backend {
+                ShaderBackend::Rust => s.push_str("f32"),
+                _ => s.push('f'),
+            }
             return self
                 .stack
                 .push(self.trap.pass(), ShaderType::Pod(builtins.pod_f32), s);
@@ -988,16 +993,29 @@ impl ShaderFnCompiler {
         if let Some(v) = value.as_f16() {
             let mut s = self.stack.new_string();
             write_shader_float(&mut s, v as f64);
-            s.push('h');
+            match backend {
+                ShaderBackend::Rust => s.push_str("f32"), // f16 maps to f32 in Rust
+                _ => s.push('h'),
+            }
             return self
                 .stack
                 .push(self.trap.pass(), ShaderType::Pod(builtins.pod_f16), s);
         }
         if let Some(v) = value.as_u32() {
-            return push_fmt!(self, ShaderType::Pod(builtins.pod_u32), "{}u", v);
+            match backend {
+                ShaderBackend::Rust => {
+                    return push_fmt!(self, ShaderType::Pod(builtins.pod_u32), "{}u32", v)
+                }
+                _ => return push_fmt!(self, ShaderType::Pod(builtins.pod_u32), "{}u", v),
+            }
         }
         if let Some(v) = value.as_i32() {
-            return push_fmt!(self, ShaderType::Pod(builtins.pod_i32), "{}i", v);
+            match backend {
+                ShaderBackend::Rust => {
+                    return push_fmt!(self, ShaderType::Pod(builtins.pod_i32), "{}i32", v)
+                }
+                _ => return push_fmt!(self, ShaderType::Pod(builtins.pod_i32), "{}i", v),
+            }
         }
         if let Some(v) = value.as_bool() {
             return push_fmt!(self, ShaderType::Pod(builtins.pod_bool), "{}", v);
@@ -1406,7 +1424,7 @@ impl ShaderFnCompiler {
             Opcode::PROTO_FIELD => self.handle_field(vm, output),
 
             Opcode::POP_TO_ME => {
-                self.pop_to_me(vm);
+                self.pop_to_me(vm, output);
             }
             // Array index
             Opcode::ARRAY_INDEX => self.handle_array_index(vm, output),
@@ -1501,10 +1519,10 @@ impl ShaderFnCompiler {
                 // unknown instruction
             }
         }
-        self.maybe_pop_to_me(vm, opargs);
+        self.maybe_pop_to_me(vm, output, opargs);
     }
 
-    pub(crate) fn pop_to_me(&mut self, vm: &ScriptVm) {
+    pub(crate) fn pop_to_me(&mut self, vm: &ScriptVm, output: &ShaderOutput) {
         // Skip if we just closed an if block that had a return without a value
         if self.skip_next_pop_to_me {
             self.skip_next_pop_to_me = false;
@@ -1595,7 +1613,24 @@ impl ShaderFnCompiler {
                     } else {
                         args.push(ty);
                     }
-                    out.push_str(&s);
+                    // Rust backend: if the argument is a nested function call that
+                    // borrows rcx, and the call already has rcx as an argument,
+                    // hoist the nested call into a let-binding to avoid double
+                    // mutable borrow in the same expression.
+                    if matches!(output.backend, ShaderBackend::Rust)
+                        && out.contains("rcx")
+                        && s.contains("(rcx")
+                    {
+                        static RUST_TMP_COUNTER: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
+                        let id =
+                            RUST_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let tmp = format!("_rcx_tmp{}", id);
+                        writeln!(self.out, "let {} = {};", tmp, s).ok();
+                        out.push_str(&tmp);
+                    } else {
+                        out.push_str(&s);
+                    }
                     self.stack.free_string(s);
                 }
                 ShaderMe::BuiltinCall { args, .. } | ShaderMe::PodBuiltinMethod { args, .. } => {
@@ -1623,9 +1658,14 @@ impl ShaderFnCompiler {
         }
     }
 
-    pub(crate) fn maybe_pop_to_me(&mut self, vm: &ScriptVm, opargs: OpcodeArgs) {
+    pub(crate) fn maybe_pop_to_me(
+        &mut self,
+        vm: &ScriptVm,
+        output: &ShaderOutput,
+        opargs: OpcodeArgs,
+    ) {
         if opargs.is_pop_to_me() {
-            self.pop_to_me(vm);
+            self.pop_to_me(vm, output);
         }
     }
 }

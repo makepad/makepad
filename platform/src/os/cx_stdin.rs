@@ -1070,6 +1070,14 @@ pub enum StdinToHost {
     SetClipboard(String),
     // the client is done drawing, and the texture is completely updated
     DrawCompleteAndFlip(PresentableDraw),
+    // headless backend emits PNG snapshots through this message.
+    PngFrame {
+        window_id: usize,
+        path: String,
+        width: u32,
+        height: u32,
+        frame_id: u64,
+    },
 }
 
 impl StdinToHost {
