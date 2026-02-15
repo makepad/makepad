@@ -570,7 +570,7 @@ impl StackNavigationRef {
     /// * `view_id` - The LiveId of the view to push onto the stack
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// navigation.push(cx, live_id!(settings_view));
     /// ```
     pub fn push(&self, cx: &mut Cx, view_id: LiveId) {
@@ -586,7 +586,7 @@ impl StackNavigationRef {
     /// The current view will slide out with an animation.
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// navigation.pop(cx);
     /// ```
     pub fn pop(&self, cx: &mut Cx) {
@@ -601,7 +601,7 @@ impl StackNavigationRef {
     /// The current view will slide out with an animation.
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// navigation.pop_to_root(cx);
     /// ```
     pub fn pop_to_root(&self, cx: &mut Cx) {

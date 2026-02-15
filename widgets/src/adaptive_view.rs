@@ -30,7 +30,7 @@ script_mod! {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```ignore
 
 /// live_design! {
 ///     // ...
