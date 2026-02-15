@@ -211,18 +211,14 @@ impl Widget for SlidesView {
         let current = self.current_slide.floor() as usize;
         if let Some(current_id) = self.draw_order.get(current) {
             if let Some(current) = self.slides.get(&current_id) {
-                cx.with_node(current.widget_uid(), *current_id, current.clone(), |cx| {
-                    current.handle_event(cx, event, scope);
-                });
+                current.handle_event(cx, event, scope);
             }
         }
         if self.current_slide.fract() > 0.0 {
             let next = current + 1;
             if let Some(next_id) = self.draw_order.get(next) {
                 if let Some(next) = self.slides.get(&next_id) {
-                    cx.with_node(next.widget_uid(), *next_id, next.clone(), |cx| {
-                        next.handle_event(cx, event, scope);
-                    });
+                    next.handle_event(cx, event, scope);
                 }
             }
         }
@@ -271,9 +267,7 @@ impl Widget for SlidesView {
             if let Some(first_id) = self.draw_order.get(first) {
                 if let Some(slide) = self.slides.get(&first_id) {
                     let walk = slide.walk(cx);
-                    cx.with_node(slide.widget_uid(), *first_id, slide.clone(), |cx| {
-                        slide.draw_walk(cx, scope, walk)
-                    })?;
+                    slide.draw_walk(cx, scope, walk)?;
                 }
             }
             cx.end_turtle();
@@ -299,9 +293,7 @@ impl Widget for SlidesView {
                 if let Some(second_id) = self.draw_order.get(second) {
                     if let Some(slide) = self.slides.get(&second_id) {
                         let walk = slide.walk(cx);
-                        cx.with_node(slide.widget_uid(), *second_id, slide.clone(), |cx| {
-                            slide.draw_walk(cx, scope, walk)
-                        })?;
+                        slide.draw_walk(cx, scope, walk)?;
                     }
                 }
             }

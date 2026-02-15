@@ -470,7 +470,7 @@ Here is the complete Splash scripting manual. Follow it exactly:
     }
 }
 
-#[derive(Script, ScriptHook)]
+#[derive(Script)]
 pub struct App {
     #[live]
     ui: WidgetRef,
@@ -486,6 +486,12 @@ pub struct App {
     active_backend: Option<BackendType>,
     #[rust]
     history_injected: bool,
+}
+
+impl ScriptHook for App {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.set_ui(&self.ui);
+    }
 }
 
 impl App {
@@ -758,64 +764,62 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        cx.with_widget_tree(|cx| {
-            self.match_event(cx, event);
-            self.ui.handle_event(cx, event, &mut Scope::empty());
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
 
-            if let Some(agent) = &mut self.agent {
-                for event in agent.handle_event(cx, event) {
-                    match event {
-                        AgentEvent::SessionReady { .. } => {
-                            self.update_status(cx);
-                        }
-                        AgentEvent::SessionError { error, .. } => {
-                            self.ui
-                                .label(cx, ids!(status_label))
-                                .set_text(cx, &format!("Error: {}", error));
-                        }
-                        AgentEvent::TextDelta { text, .. } => {
-                            let item_id = {
-                                let mut data = CHAT_DATA.write().unwrap();
-                                data.streaming_text.push_str(&text);
-                                data.messages.len()
-                            };
-                            let chat_list = self.ui.widget(cx, ids!(chat_list));
-                            let list = chat_list.portal_list(cx, ids!(list));
-                            if let Some((_, item)) = list.get_item(item_id) {
-                                item.widget(cx, ids!(splash_view)).redraw(cx);
-                            }
-                            cx.redraw_all();
-                        }
-                        AgentEvent::TurnComplete { .. } => {
-                            let mut data = CHAT_DATA.write().unwrap();
-                            let text = std::mem::take(&mut data.streaming_text);
-                            if !text.is_empty() {
-                                data.messages.push(ChatMessage {
-                                    role: ChatRole::Assistant,
-                                    text,
-                                });
-                            }
-                            data.is_streaming = false;
-                            data.save_to_disk();
-                            drop(data);
-
-                            self.current_prompt = None;
-                            self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
-                            cx.redraw_all();
-                        }
-                        AgentEvent::PromptError { error, .. } => {
-                            CHAT_DATA.write().unwrap().is_streaming = false;
-                            self.current_prompt = None;
-                            self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
-                            self.ui
-                                .label(cx, ids!(status_label))
-                                .set_text(cx, &format!("Error: {}", error));
-                            cx.redraw_all();
-                        }
-                        AgentEvent::ToolRequest { .. } => {}
+        if let Some(agent) = &mut self.agent {
+            for event in agent.handle_event(cx, event) {
+                match event {
+                    AgentEvent::SessionReady { .. } => {
+                        self.update_status(cx);
                     }
+                    AgentEvent::SessionError { error, .. } => {
+                        self.ui
+                            .label(cx, ids!(status_label))
+                            .set_text(cx, &format!("Error: {}", error));
+                    }
+                    AgentEvent::TextDelta { text, .. } => {
+                        let item_id = {
+                            let mut data = CHAT_DATA.write().unwrap();
+                            data.streaming_text.push_str(&text);
+                            data.messages.len()
+                        };
+                        let chat_list = self.ui.widget(cx, ids!(chat_list));
+                        let list = chat_list.portal_list(cx, ids!(list));
+                        if let Some((_, item)) = list.get_item(item_id) {
+                            item.widget(cx, ids!(splash_view)).redraw(cx);
+                        }
+                        cx.redraw_all();
+                    }
+                    AgentEvent::TurnComplete { .. } => {
+                        let mut data = CHAT_DATA.write().unwrap();
+                        let text = std::mem::take(&mut data.streaming_text);
+                        if !text.is_empty() {
+                            data.messages.push(ChatMessage {
+                                role: ChatRole::Assistant,
+                                text,
+                            });
+                        }
+                        data.is_streaming = false;
+                        data.save_to_disk();
+                        drop(data);
+
+                        self.current_prompt = None;
+                        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                        cx.redraw_all();
+                    }
+                    AgentEvent::PromptError { error, .. } => {
+                        CHAT_DATA.write().unwrap().is_streaming = false;
+                        self.current_prompt = None;
+                        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                        self.ui
+                            .label(cx, ids!(status_label))
+                            .set_text(cx, &format!("Error: {}", error));
+                        cx.redraw_all();
+                    }
+                    AgentEvent::ToolRequest { .. } => {}
                 }
             }
-        });
+        }
     }
 }

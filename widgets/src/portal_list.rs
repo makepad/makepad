@@ -1622,12 +1622,8 @@ impl Widget for PortalList {
                 for item_id in min_id..=max_id {
                     if let Some(item) = self.items.get_mut(&item_id) {
                         let item_uid = item.widget.widget_uid();
-                        let item_name = LiveId(item_id as u64);
-                        let item_widget = item.widget.clone();
-                        cx.with_node(item_uid, item_name, item_widget, |cx| {
-                            cx.group_widget_actions(uid, item_uid, |cx| {
-                                item.widget.handle_event(cx, event, scope);
-                            });
+                        cx.group_widget_actions(uid, item_uid, |cx| {
+                            item.widget.handle_event(cx, event, scope);
                         });
                     }
                 }

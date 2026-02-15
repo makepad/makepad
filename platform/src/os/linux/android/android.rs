@@ -3,6 +3,8 @@ use std::cell::Cell;
 use crate::event::LongPressEvent;
 #[allow(unused)]
 use makepad_jni_sys as jni_sys;
+#[cfg(use_vulkan)]
+use self::super::android_vulkan::CxAndroidVulkan;
 
 use {
     self::super::super::{
@@ -147,12 +149,52 @@ impl Cx {
                     handled: Cell::new(false),
                 });
             }
-            FromJavaMessage::SurfaceCreated { window } => unsafe {
-                self.os.display.as_mut().unwrap().update_surface(window);
-            },
-            FromJavaMessage::SurfaceDestroyed => unsafe {
-                self.os.display.as_mut().unwrap().destroy_surface();
-            },
+            FromJavaMessage::SurfaceCreated { window } => {
+                #[cfg(not(use_vulkan))]
+                unsafe {
+                    self.os.display.as_mut().unwrap().update_surface(window);
+                }
+
+                #[cfg(use_vulkan)]
+                {
+                    if let Some(display) = self.os.display.as_mut() {
+                        unsafe {
+                            if !display.window.is_null() {
+                                ndk_sys::ANativeWindow_release(display.window);
+                            }
+                        }
+                        display.window = window;
+                    }
+                    if let Some(vulkan) = self.os.vulkan.as_mut() {
+                        let width = self.os.display_size.x.max(1.0) as u32;
+                        let height = self.os.display_size.y.max(1.0) as u32;
+                        if let Err(err) = vulkan.update_surface(window, width, height) {
+                            crate::error!("Android Vulkan surface create/update failed: {err}");
+                        }
+                    }
+                }
+            }
+            FromJavaMessage::SurfaceDestroyed => {
+                #[cfg(not(use_vulkan))]
+                unsafe {
+                    self.os.display.as_mut().unwrap().destroy_surface();
+                }
+
+                #[cfg(use_vulkan)]
+                {
+                    if let Some(display) = self.os.display.as_mut() {
+                        unsafe {
+                            if !display.window.is_null() {
+                                ndk_sys::ANativeWindow_release(display.window);
+                                display.window = std::ptr::null_mut();
+                            }
+                        }
+                    }
+                    if let Some(vulkan) = self.os.vulkan.as_mut() {
+                        vulkan.suspend_surface();
+                    }
+                }
+            }
             FromJavaMessage::SurfaceChanged {
                 window,
                 width,
@@ -176,8 +218,44 @@ impl Cx {
                     }
                 }
 
+                #[cfg(not(use_vulkan))]
                 unsafe {
                     self.os.display.as_mut().unwrap().update_surface(window);
+                }
+
+                #[cfg(use_vulkan)]
+                {
+                    if let Some(display) = self.os.display.as_mut() {
+                        unsafe {
+                            if !display.window.is_null() && display.window != window {
+                                ndk_sys::ANativeWindow_release(display.window);
+                            }
+                        }
+                        display.window = window;
+                    }
+                }
+
+                #[cfg(use_vulkan)]
+                {
+                    let width_u32 = width.max(1) as u32;
+                    let height_u32 = height.max(1) as u32;
+                    if let Some(vulkan) = self.os.vulkan.as_mut() {
+                        if let Err(err) = vulkan.update_surface(window, width_u32, height_u32) {
+                            crate::error!("Android Vulkan surface update failed: {err}");
+                        }
+                    } else {
+                        match CxAndroidVulkan::new(window, width_u32, height_u32) {
+                            Ok(vulkan) => {
+                                crate::log!("Android Vulkan backend initialized");
+                                self.os.vulkan = Some(vulkan);
+                            }
+                            Err(err) => {
+                                crate::error!(
+                                    "Android Vulkan backend init failed, falling back to OpenGL: {err}"
+                                );
+                            }
+                        }
+                    }
                 }
 
                 self.os.display_size = dvec2(width as f64, height as f64);
@@ -653,8 +731,16 @@ impl Cx {
     fn draw_pass_to_window_for_active_backend(&mut self, draw_pass_id: DrawPassId) {
         #[cfg(use_vulkan)]
         {
-            // TODO: route draw list execution through the Vulkan renderer.
-            self.draw_pass_to_fullscreen(draw_pass_id);
+            if self.os.vulkan.is_some() {
+                let mut vulkan = self.os.vulkan.take().unwrap();
+                let result = vulkan.draw_pass_and_present(self, draw_pass_id);
+                self.os.vulkan = Some(vulkan);
+                if let Err(err) = result {
+                    crate::error!("Android Vulkan draw/present failed: {err}");
+                }
+            } else {
+                self.draw_pass_to_fullscreen(draw_pass_id);
+            }
             return;
         }
 
@@ -667,10 +753,13 @@ impl Cx {
     fn present_window_for_active_backend(&mut self) {
         #[cfg(use_vulkan)]
         {
-            // TODO: replace EGL swap with Vulkan queue present.
-            unsafe {
-                if let Some(display) = &mut self.os.display {
-                    (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+            // Vulkan path presents in draw_pass_to_window_for_active_backend.
+            // If Vulkan failed to initialize, keep the OpenGL fallback functional.
+            if self.os.vulkan.is_none() {
+                unsafe {
+                    if let Some(display) = &mut self.os.display {
+                        (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                    }
                 }
             }
             return;
@@ -772,9 +861,7 @@ impl Cx {
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
             #[cfg(use_vulkan)]
-            crate::log!(
-                "Android backend mode: OpenGL renderer + Vulkan WGSL/SPIR-V shader validation"
-            );
+            crate::log!("Android backend mode: Vulkan renderer + OpenGL shader compiler compatibility path");
             #[cfg(not(use_vulkan))]
             crate::log!("Android backend mode: OpenGL renderer");
 
@@ -835,15 +922,31 @@ impl Cx {
             })
             .expect("Cant load openGL functions");
 
-            // SAFETY: This creates an EGL surface. It's safe as long as we have valid EGL display, config, and window.
-            //libgl.enable_debugging();
-
+            // SAFETY: Create an EGL surface to keep GL APIs available on Android.
+            // In Vulkan mode this must not bind the native window, or Vulkan surface creation will fail.
+            #[cfg(not(use_vulkan))]
             let surface = unsafe {
                 (libegl.eglCreateWindowSurface.unwrap())(
                     egl_display,
                     egl_config,
                     window as _,
                     std::ptr::null_mut(),
+                )
+            };
+
+            #[cfg(use_vulkan)]
+            let surface = unsafe {
+                let pbuffer_attribs = [
+                    egl_sys::EGL_WIDTH as i32,
+                    1,
+                    egl_sys::EGL_HEIGHT as i32,
+                    1,
+                    egl_sys::EGL_NONE as i32,
+                ];
+                (libegl.eglCreatePbufferSurface.unwrap())(
+                    egl_display,
+                    egl_config,
+                    pbuffer_attribs.as_ptr(),
                 )
             };
 
@@ -868,13 +971,40 @@ impl Cx {
                 window,
             });
 
+            #[cfg(use_vulkan)]
+            {
+                match CxAndroidVulkan::new(
+                    window,
+                    cx.os.display_size.x.max(1.0) as u32,
+                    cx.os.display_size.y.max(1.0) as u32,
+                ) {
+                    Ok(vulkan) => {
+                        crate::log!("Android Vulkan backend initialized on startup");
+                        cx.os.vulkan = Some(vulkan);
+                    }
+                    Err(err) => {
+                        crate::error!(
+                            "Android Vulkan backend init failed on startup, continuing with OpenGL: {err}"
+                        );
+                    }
+                }
+            }
+
             cx.main_loop(from_java_rx);
             cx.stop_studio_websocket();
+
+            #[cfg(use_vulkan)]
+            {
+                let _ = cx.os.vulkan.take();
+            }
 
             let display = cx.os.display.take().unwrap();
 
             // SAFETY: These calls clean up EGL resources. They're safe as long as we have valid EGL objects.
             unsafe {
+                if !display.window.is_null() {
+                    ndk_sys::ANativeWindow_release(display.window);
+                }
                 (display.libegl.eglMakeCurrent.unwrap())(
                     display.egl_display,
                     std::ptr::null_mut(),
@@ -1364,6 +1494,8 @@ impl Default for CxOs {
             keyboard_closed: 0.0,
             media: CxAndroidMedia::default(),
             display: None,
+            #[cfg(use_vulkan)]
+            vulkan: None,
             quit: false,
             fullscreen: false,
             timers: Default::default(),
@@ -1400,6 +1532,8 @@ pub struct CxOs {
     pub(crate) start_time: Instant,
     pub(crate) timers: PollTimers,
     pub(crate) display: Option<CxAndroidDisplay>,
+    #[cfg(use_vulkan)]
+    pub(crate) vulkan: Option<CxAndroidVulkan>,
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
@@ -1417,6 +1551,7 @@ impl CxOs {
 }
 
 impl CxAndroidDisplay {
+    #[cfg(not(use_vulkan))]
     unsafe fn destroy_surface(&mut self) {
         (self.libegl.eglMakeCurrent.unwrap())(
             self.egl_display,
@@ -1428,6 +1563,7 @@ impl CxAndroidDisplay {
         self.surface = std::ptr::null_mut();
     }
 
+    #[cfg(not(use_vulkan))]
     unsafe fn update_surface(&mut self, window: *mut ndk_sys::ANativeWindow) {
         if !self.window.is_null() {
             ndk_sys::ANativeWindow_release(self.window);

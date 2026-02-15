@@ -179,14 +179,9 @@ fn uniform_packing() -> DrawShaderInputPacking {
         return DrawShaderInputPacking::UniformsGLSL140;
     }
 
-    #[cfg(all(any(target_os = "android", target_os = "linux"), use_gles_3))]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     {
         return DrawShaderInputPacking::UniformsGLSL140;
-    }
-
-    #[cfg(all(any(target_os = "android", target_os = "linux"), not(use_gles_3)))]
-    {
-        return DrawShaderInputPacking::UniformsGLSLTight;
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]

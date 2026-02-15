@@ -1,5 +1,6 @@
 use {
     crate::makepad_draw::{cx_2d::Cx2d, cx_3d::Cx3d, *},
+    crate::makepad_platform::script::vm::ScriptVmCx,
     crate::widget::{WidgetRef, WidgetUid},
     crate::widget_async::update_global_ui_handle,
     std::cell::RefCell,
@@ -1219,13 +1220,12 @@ impl WidgetTree {
 }
 
 // ============================================================================
-// WidgetTreeState: persistent tree + node cursor stack
+// WidgetTreeState
 // ============================================================================
 
 #[derive(Default)]
 pub struct WidgetTreeState {
     pub tree: WidgetTree,
-    pub cursor_stack: Vec<WidgetUid>,
 }
 
 impl WidgetTreeState {
@@ -1244,26 +1244,13 @@ impl WidgetTreeState {
 
 pub trait CxWidgetExt {
     fn widget_tree(&self) -> &WidgetTree;
-    fn with_node<F, R>(&mut self, uid: WidgetUid, name: LiveId, widget: WidgetRef, f: F) -> R
-    where
-        F: FnOnce(&mut Self) -> R;
-    fn with_widget_tree<F, R>(&mut self, f: F) -> R
-    where
-        F: FnOnce(&mut Self) -> R;
+    fn set_ui(&mut self, ui: &WidgetRef);
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
 }
 
-fn widget_tree_ptr(cx: &Cx) -> *mut () {
-    cx.widget_tree_ptr
-}
-
 fn get_or_init_state(cx: &mut Cx) -> &mut WidgetTreeState {
     WidgetTreeState::get_or_init(cx)
-}
-
-fn get_state_mut(ptr: *mut ()) -> &'static mut WidgetTreeState {
-    unsafe { &mut *(ptr as *mut WidgetTreeState) }
 }
 
 impl CxWidgetExt for Cx {
@@ -1276,40 +1263,9 @@ impl CxWidgetExt for Cx {
         &state.tree
     }
 
-    fn with_node<F, R>(&mut self, uid: WidgetUid, name: LiveId, widget: WidgetRef, f: F) -> R
-    where
-        F: FnOnce(&mut Cx) -> R,
-    {
-        let state = get_or_init_state(self);
-        let parent_uid = state.cursor_stack.last().copied();
-        state.tree.observe_node(uid, name, widget, parent_uid);
-        state.cursor_stack.push(uid);
-
-        let r = f(self);
-
-        let state = get_state_mut(self.widget_tree_ptr);
-        state.cursor_stack.pop();
-        r
-    }
-
-    fn with_widget_tree<F, R>(&mut self, f: F) -> R
-    where
-        F: FnOnce(&mut Cx) -> R,
-    {
-        {
-            let state = get_or_init_state(self);
-            state.cursor_stack.clear();
-        }
-
-        let r = f(self);
-
-        let root_uid = {
-            let state = get_state_mut(self.widget_tree_ptr);
-            state.cursor_stack.clear();
-            state.tree.root_uid()
-        };
+    fn set_ui(&mut self, ui: &WidgetRef) {
+        let root_uid = ui.widget_uid();
         update_global_ui_handle(self, root_uid);
-        r
     }
 
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid) {
@@ -1325,51 +1281,18 @@ impl CxWidgetExt for Cx {
 
 impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
     fn widget_tree(&self) -> &WidgetTree {
-        let ptr = widget_tree_ptr(self);
-        if ptr.is_null() {
+        let cx: &Cx = self;
+        if cx.widget_tree_ptr.is_null() {
             static EMPTY: std::sync::OnceLock<WidgetTree> = std::sync::OnceLock::new();
             return EMPTY.get_or_init(WidgetTree::default);
         }
-        let state = unsafe { &*(ptr as *const WidgetTreeState) };
+        let state = unsafe { &*(cx.widget_tree_ptr as *const WidgetTreeState) };
         &state.tree
     }
 
-    fn with_node<F, R>(&mut self, uid: WidgetUid, name: LiveId, widget: WidgetRef, f: F) -> R
-    where
-        F: FnOnce(&mut Cx2d<'a, 'b>) -> R,
-    {
-        let ptr = {
-            let cx: &mut Cx = self;
-            let state = get_or_init_state(cx);
-            let parent_uid = state.cursor_stack.last().copied();
-            state.tree.observe_node(uid, name, widget, parent_uid);
-            state.cursor_stack.push(uid);
-            cx.widget_tree_ptr
-        };
-
-        let r = f(self);
-
-        let state = get_state_mut(ptr);
-        state.cursor_stack.pop();
-        r
-    }
-
-    fn with_widget_tree<F, R>(&mut self, f: F) -> R
-    where
-        F: FnOnce(&mut Cx2d<'a, 'b>) -> R,
-    {
-        {
-            let cx: &mut Cx = self;
-            let state = get_or_init_state(cx);
-            state.cursor_stack.clear();
-        }
-        let r = f(self);
-        {
-            let cx: &mut Cx = self;
-            let state = get_state_mut(cx.widget_tree_ptr);
-            state.cursor_stack.clear();
-        }
-        r
+    fn set_ui(&mut self, ui: &WidgetRef) {
+        let cx: &mut Cx = self;
+        cx.set_ui(ui);
     }
 
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid) {
@@ -1385,53 +1308,33 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
     }
 }
 
+pub trait ScriptVmWidgetExt {
+    fn set_ui(&mut self, ui: &WidgetRef);
+}
+
+impl<'a> ScriptVmWidgetExt for ScriptVm<'a> {
+    fn set_ui(&mut self, ui: &WidgetRef) {
+        let root_uid = ui.widget_uid();
+        self.with_cx_mut(|cx| {
+            update_global_ui_handle(cx, root_uid);
+        });
+    }
+}
+
 impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
     fn widget_tree(&self) -> &WidgetTree {
-        let ptr = widget_tree_ptr(self);
-        if ptr.is_null() {
+        let cx: &Cx = self;
+        if cx.widget_tree_ptr.is_null() {
             static EMPTY: std::sync::OnceLock<WidgetTree> = std::sync::OnceLock::new();
             return EMPTY.get_or_init(WidgetTree::default);
         }
-        let state = unsafe { &*(ptr as *const WidgetTreeState) };
+        let state = unsafe { &*(cx.widget_tree_ptr as *const WidgetTreeState) };
         &state.tree
     }
 
-    fn with_node<F, R>(&mut self, uid: WidgetUid, name: LiveId, widget: WidgetRef, f: F) -> R
-    where
-        F: FnOnce(&mut Cx3d<'a, 'b>) -> R,
-    {
-        let ptr = {
-            let cx: &mut Cx = self;
-            let state = get_or_init_state(cx);
-            let parent_uid = state.cursor_stack.last().copied();
-            state.tree.observe_node(uid, name, widget, parent_uid);
-            state.cursor_stack.push(uid);
-            cx.widget_tree_ptr
-        };
-
-        let r = f(self);
-
-        let state = get_state_mut(ptr);
-        state.cursor_stack.pop();
-        r
-    }
-
-    fn with_widget_tree<F, R>(&mut self, f: F) -> R
-    where
-        F: FnOnce(&mut Cx3d<'a, 'b>) -> R,
-    {
-        {
-            let cx: &mut Cx = self;
-            let state = get_or_init_state(cx);
-            state.cursor_stack.clear();
-        }
-        let r = f(self);
-        {
-            let cx: &mut Cx = self;
-            let state = get_state_mut(cx.widget_tree_ptr);
-            state.cursor_stack.clear();
-        }
-        r
+    fn set_ui(&mut self, ui: &WidgetRef) {
+        let cx: &mut Cx = self;
+        cx.set_ui(ui);
     }
 
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid) {
