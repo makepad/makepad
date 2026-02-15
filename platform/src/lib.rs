@@ -1,6 +1,4 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
-#![cfg_attr(feature = "nightly_simd", feature(portable_simd))]
-
 pub mod os;
 
 #[macro_use]
