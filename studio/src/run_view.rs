@@ -58,7 +58,8 @@ script_mod! {
 
 #[derive(Script, Widget, Animator)]
 pub struct RunView {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]
@@ -80,8 +81,6 @@ pub struct RunView {
     pub window_id: usize,
     #[rust(WindowKindId::Main)]
     pub kind_id: WindowKindId,
-    #[rust(false)]
-    linux_dmabuf_fallback_logged: bool,
 }
 
 impl ScriptHook for RunView {
@@ -273,11 +272,13 @@ impl RunView {
                             {
                                 // Keep Linux swapchains exact-sized to prevent
                                 // alloc-vs-draw Y offsets in subprocess presentation.
-                                min_width != swapchain.alloc_width || min_height != swapchain.alloc_height
+                                min_width != swapchain.alloc_width
+                                    || min_height != swapchain.alloc_height
                             }
                             #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
                             {
-                                min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
+                                min_width > swapchain.alloc_width
+                                    || min_height > swapchain.alloc_height
                             }
                         })
                         .unwrap_or(true)
@@ -311,8 +312,10 @@ impl RunView {
                 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
                 let (alloc_width, alloc_height) = (min_width.max(1), min_height.max(1));
                 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-                let (alloc_width, alloc_height) =
-                    (min_width.max(64).next_power_of_two(), min_height.max(64).next_power_of_two());
+                let (alloc_width, alloc_height) = (
+                    min_width.max(64).next_power_of_two(),
+                    min_height.max(64).next_power_of_two(),
+                );
 
                 let swapchain = v.swapchain_mut(self.window_id).get_or_insert_with(|| {
                     cx_stdin::HostSwapchain::new(self.window_id, alloc_width, alloc_height, cx)
@@ -325,10 +328,7 @@ impl RunView {
                     cx,
                     &aux_chan_host_endpoint,
                 ) {
-                    Ok(shared_swapchain) => {
-                        self.linux_dmabuf_fallback_logged = false;
-                        shared_swapchain
-                    }
+                    Ok(shared_swapchain) => shared_swapchain,
                     Err(cx_stdin::SharedSwapchainCreateError::AuxChannelSend(err)) => {
                         crate::error!(
                             "Linux RunView aux channel send failed: {err:?}; disabling shared texture path"
@@ -337,18 +337,14 @@ impl RunView {
                         return;
                     }
                     Err(cx_stdin::SharedSwapchainCreateError::SoftwareFallback(err)) => {
-                        if !self.linux_dmabuf_fallback_logged {
-                            crate::error!(
-                                "Linux RunView software fallback setup failed: {err:?}"
-                            );
-                            self.linux_dmabuf_fallback_logged = true;
-                        }
+                        crate::error!("Linux RunView software fallback setup failed: {err:?}");
                         v.aux_chan_host_endpoint = None;
                         return;
                     }
                 };
                 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-                let shared_swapchain = cx_stdin::SharedSwapchain::from_host_swapchain(swapchain, cx);
+                let shared_swapchain =
+                    cx_stdin::SharedSwapchain::from_host_swapchain(swapchain, cx);
 
                 // Inform the client about the new swapchain it *should* use
                 manager.send_host_to_stdin(run_view_id, HostToStdin::Swapchain(shared_swapchain));
