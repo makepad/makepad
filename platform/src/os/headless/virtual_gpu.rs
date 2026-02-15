@@ -46,9 +46,40 @@ impl Framebuffer {
 /// Per-fragment derivative deltas.
 /// `dvary_dx[i]` ~= varying(i) at (x+1,y) minus current varying(i),
 /// `dvary_dy[i]` ~= varying(i) at (x,y+1) minus current varying(i).
+#[derive(Default)]
 pub struct TriangleDerivatives {
     pub dvary_dx: Vec<f32>,
     pub dvary_dy: Vec<f32>,
+}
+
+#[derive(Default)]
+pub struct RasterScratch {
+    pub interp: Vec<f32>,
+    pub interp_dx: Vec<f32>,
+    pub interp_dy: Vec<f32>,
+    pub derivs: TriangleDerivatives,
+}
+
+impl RasterScratch {
+    fn ensure_vary_len(&mut self, vary_len: usize, compute_derivatives: bool) {
+        if self.interp.len() < vary_len {
+            self.interp.resize(vary_len, 0.0);
+        }
+        if compute_derivatives {
+            if self.interp_dx.len() < vary_len {
+                self.interp_dx.resize(vary_len, 0.0);
+            }
+            if self.interp_dy.len() < vary_len {
+                self.interp_dy.resize(vary_len, 0.0);
+            }
+            if self.derivs.dvary_dx.len() < vary_len {
+                self.derivs.dvary_dx.resize(vary_len, 0.0);
+            }
+            if self.derivs.dvary_dy.len() < vary_len {
+                self.derivs.dvary_dy.resize(vary_len, 0.0);
+            }
+        }
+    }
 }
 
 /// Rasterize only a row range `[row_start, row_end)` of the framebuffer.
@@ -58,8 +89,6 @@ pub fn rasterize_triangle_rows<F>(
     height: usize,
     row_start: usize,
     row_end: usize,
-    col_start: usize,
-    col_end: usize,
     color: &mut [[f32; 4]],
     depth_buf: &mut [f32],
     p0: &[f32; 4],
@@ -69,6 +98,8 @@ pub fn rasterize_triangle_rows<F>(
     p2: &[f32; 4],
     vary2: &[f32],
     flat_slots: usize,
+    compute_derivatives: bool,
+    scratch: &mut RasterScratch,
     fragment_fn: &mut F,
 ) where
     F: FnMut(&[f32], &TriangleDerivatives, u32, u32, i32, i32) -> Option<[f32; 4]>,
@@ -78,12 +109,7 @@ pub fn rasterize_triangle_rows<F>(
     }
     let row_start = row_start.min(height);
     let row_end = row_end.min(height);
-    let col_start = col_start.min(width);
-    let col_end = col_end.min(width);
     if row_start >= row_end {
-        return;
-    }
-    if col_start >= col_end {
         return;
     }
     let expected_len = (row_end - row_start) * width;
@@ -153,7 +179,7 @@ pub fn rasterize_triangle_rows<F>(
         .min(sx[1])
         .min(sx[2])
         .floor()
-        .max(col_start as f32) as i32;
+        .max(0.0) as i32;
     let min_y = sy[0]
         .min(sy[1])
         .min(sy[2])
@@ -163,7 +189,7 @@ pub fn rasterize_triangle_rows<F>(
         .max(sx[1])
         .max(sx[2])
         .ceil()
-        .min(col_end as f32 - 1.0) as i32;
+        .min(w - 1.0) as i32;
     let max_y = sy[0]
         .max(sy[1])
         .max(sy[2])
@@ -176,14 +202,8 @@ pub fn rasterize_triangle_rows<F>(
 
     let vary_len = vary_src[0].len();
     let flat_slots = flat_slots.min(vary_len);
-    let mut interp = vec![0.0f32; vary_len];
-    let mut interp_dx = vec![0.0f32; vary_len];
-    let mut interp_dy = vec![0.0f32; vary_len];
-
-    let mut derivs = TriangleDerivatives {
-        dvary_dx: vec![0.0f32; vary_len],
-        dvary_dy: vec![0.0f32; vary_len],
-    };
+    scratch.ensure_vary_len(vary_len, compute_derivatives);
+    let empty_derivs = TriangleDerivatives::default();
 
     let inv_area = 1.0 / area;
 
@@ -242,49 +262,71 @@ pub fn rasterize_triangle_rows<F>(
                 continue;
             }
 
-            if !interpolate_perspective(w0, w1, w2, &mut interp) {
+            if !interpolate_perspective(w0, w1, w2, &mut scratch.interp[..vary_len]) {
                 continue;
             }
 
-            // Build dFdx/dFdy-style deltas by evaluating at neighboring pixel centers.
-            // GPU derivatives are pairwise across a 2x2 quad:
-            // dFdx for odd x lanes uses (current - left), even x uses (right - current).
-            // dFdy for odd y lanes uses (current - up), even y uses (down - current).
             let lane_x = (x as u32) & 1;
             let lane_y = (y as u32) & 1;
-
-            let dx_sign = if lane_x == 0 { 1.0 } else { -1.0 };
-            let dy_sign = if lane_y == 0 { 1.0 } else { -1.0 };
-
-            let wx0 = (e0 + dx_sign * e0_dx) * inv_area;
-            let wx1 = (e1 + dx_sign * e1_dx) * inv_area;
-            let wx2 = (e2 + dx_sign * e2_dx) * inv_area;
-            let wy0 = (e0 + dy_sign * e0_dy) * inv_area;
-            let wy1 = (e1 + dy_sign * e1_dy) * inv_area;
-            let wy2 = (e2 + dy_sign * e2_dy) * inv_area;
-
-            if !interpolate_perspective(wx0, wx1, wx2, &mut interp_dx)
-                || !interpolate_perspective(wy0, wy1, wy2, &mut interp_dy)
-            {
-                continue;
-            }
-
-            for i in 0..vary_len {
-                derivs.dvary_dx[i] = interp_dx[i] - interp[i];
-                derivs.dvary_dy[i] = interp_dy[i] - interp[i];
-            }
             // Dyn/rust instance slots are constant across the primitive.
             // Keep them bit-stable (no interpolation drift) for shader equality tests.
             for i in 0..flat_slots {
-                interp[i] = vary_src[0][i];
-                derivs.dvary_dx[i] = 0.0;
-                derivs.dvary_dy[i] = 0.0;
+                scratch.interp[i] = vary_src[0][i];
             }
 
-            // Call fragment shader — returns None for discard
-            let frag_color = match fragment_fn(&interp, &derivs, lane_x, lane_y, x, y) {
-                Some(c) => c,
-                None => continue,
+            let frag_color = if compute_derivatives {
+                // Build dFdx/dFdy-style deltas by evaluating at neighboring pixel centers.
+                // GPU derivatives are pairwise across a 2x2 quad:
+                // dFdx for odd x lanes uses (current - left), even x uses (right - current).
+                // dFdy for odd y lanes uses (current - up), even y uses (down - current).
+                let dx_sign = if lane_x == 0 { 1.0 } else { -1.0 };
+                let dy_sign = if lane_y == 0 { 1.0 } else { -1.0 };
+
+                let wx0 = (e0 + dx_sign * e0_dx) * inv_area;
+                let wx1 = (e1 + dx_sign * e1_dx) * inv_area;
+                let wx2 = (e2 + dx_sign * e2_dx) * inv_area;
+                let wy0 = (e0 + dy_sign * e0_dy) * inv_area;
+                let wy1 = (e1 + dy_sign * e1_dy) * inv_area;
+                let wy2 = (e2 + dy_sign * e2_dy) * inv_area;
+
+                if !interpolate_perspective(wx0, wx1, wx2, &mut scratch.interp_dx[..vary_len])
+                    || !interpolate_perspective(wy0, wy1, wy2, &mut scratch.interp_dy[..vary_len])
+                {
+                    continue;
+                }
+
+                for i in 0..vary_len {
+                    scratch.derivs.dvary_dx[i] = scratch.interp_dx[i] - scratch.interp[i];
+                    scratch.derivs.dvary_dy[i] = scratch.interp_dy[i] - scratch.interp[i];
+                }
+                for i in 0..flat_slots {
+                    scratch.derivs.dvary_dx[i] = 0.0;
+                    scratch.derivs.dvary_dy[i] = 0.0;
+                }
+
+                match fragment_fn(
+                    &scratch.interp[..vary_len],
+                    &scratch.derivs,
+                    lane_x,
+                    lane_y,
+                    x,
+                    y,
+                ) {
+                    Some(c) => c,
+                    None => continue,
+                }
+            } else {
+                match fragment_fn(
+                    &scratch.interp[..vary_len],
+                    &empty_derivs,
+                    lane_x,
+                    lane_y,
+                    x,
+                    y,
+                ) {
+                    Some(c) => c,
+                    None => continue,
+                }
             };
 
             // Premultiplied alpha blending (source-over)
