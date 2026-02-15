@@ -3,10 +3,15 @@
 //! Provides script validation and cross-platform build checking.
 
 mod cargo;
+mod diagnostic;
 mod error;
 mod parser;
 mod runtime;
 mod script;
+
+// Diagnostic utilities available for external use
+#[allow(unused_imports)]
+pub use diagnostic::{print_diagnostics, stderr_supports_color, Diagnostic};
 
 use crate::makepad_shell::*;
 use crate::utils::*;
@@ -29,9 +34,14 @@ pub fn handle_check_script(args: &[String]) -> Result<(), String> {
     match check_scripts(&config) {
         Ok(result) => {
             result.print_issues();
+            result.print_summary();
 
             if result.has_errors() {
-                Err(format!("{} script check error(s)", result.error_count))
+                Err(format!(
+                    "aborting due to {} previous error{}",
+                    result.error_count,
+                    if result.error_count == 1 { "" } else { "s" }
+                ))
             } else {
                 if result.warning_count > 0 {
                     println!("Script checks completed with {} warning(s)", result.warning_count);

@@ -13,6 +13,7 @@ use makepad_script::{
 };
 
 use super::cargo::{canonicalize_path, find_manifest_path, read_cargo_metadata, select_package};
+use super::diagnostic::{print_diagnostics, stderr_supports_color};
 use super::error::{CheckError, IssueKind, ScriptIssue};
 use super::parser::{
     discover_script_blocks, max_rust_value_index, normalize_rust_interpolations,
@@ -134,6 +135,8 @@ pub struct ScriptCheckResult {
     pub error_count: usize,
     /// Number of warnings.
     pub warning_count: usize,
+    /// Source files for diagnostic context.
+    pub sources: HashMap<String, String>,
 }
 
 impl ScriptCheckResult {
@@ -141,13 +144,31 @@ impl ScriptCheckResult {
         self.error_count > 0
     }
 
+    /// Print all issues with rich diagnostic output.
     pub fn print_issues(&self) {
-        for issue in &self.issues {
-            if issue.is_warning() {
-                eprintln!("warning: {}", issue.message);
-            } else {
-                eprintln!("{}", issue);
+        let use_color = stderr_supports_color();
+        print_diagnostics(&self.issues, &self.sources, use_color);
+    }
+
+    /// Print summary line.
+    pub fn print_summary(&self) {
+        if self.error_count > 0 || self.warning_count > 0 {
+            let mut parts = Vec::new();
+            if self.error_count > 0 {
+                parts.push(format!(
+                    "{} error{}",
+                    self.error_count,
+                    if self.error_count == 1 { "" } else { "s" }
+                ));
             }
+            if self.warning_count > 0 {
+                parts.push(format!(
+                    "{} warning{}",
+                    self.warning_count,
+                    if self.warning_count == 1 { "" } else { "s" }
+                ));
+            }
+            eprintln!("{} generated", parts.join("; "));
         }
     }
 }
@@ -160,6 +181,17 @@ pub fn check_scripts(config: &CheckConfig) -> std::result::Result<ScriptCheckRes
     let blocks = discover_script_blocks(cwd);
     if blocks.is_empty() {
         return Err(CheckError::NoScriptSources);
+    }
+
+    // Collect source files for diagnostic context
+    let mut sources = HashMap::<String, String>::new();
+    for block in &blocks {
+        let path_str = block.path.display().to_string();
+        if !sources.contains_key(&path_str) {
+            if let Ok(content) = std::fs::read_to_string(&block.path) {
+                sources.insert(path_str, content);
+            }
+        }
     }
 
     let mut issues = Vec::<ScriptIssue>::new();
@@ -219,6 +251,7 @@ pub fn check_scripts(config: &CheckConfig) -> std::result::Result<ScriptCheckRes
         issues,
         error_count,
         warning_count,
+        sources,
     })
 }
 
