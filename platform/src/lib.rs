@@ -129,7 +129,6 @@ pub use {
             NetworkResponsesEvent,
             NextFrame,
             NextFrameEvent,
-            TimerEvent,
             TextClipboardEvent,
             TextInputEvent,
             ImageInputEvent,
