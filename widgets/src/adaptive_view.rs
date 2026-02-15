@@ -226,14 +226,7 @@ impl Widget for AdaptiveView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.widget_match_event(cx, event, scope);
         if let Some(active_widget) = self.active_widget.as_mut() {
-            cx.with_node(
-                active_widget.widget_ref.widget_uid(),
-                active_widget.template_id,
-                active_widget.widget_ref.clone(),
-                |cx| {
-                    active_widget.widget_ref.handle_event(cx, event, scope);
-                },
-            );
+            active_widget.widget_ref.handle_event(cx, event, scope);
         }
     }
 
@@ -248,12 +241,7 @@ impl Widget for AdaptiveView {
         }
 
         if let Some(active_widget) = self.active_widget.as_mut() {
-            cx.with_node(
-                active_widget.widget_ref.widget_uid(),
-                active_widget.template_id,
-                active_widget.widget_ref.clone(),
-                |cx| active_widget.widget_ref.draw_walk(cx, scope, walk),
-            )?;
+            active_widget.widget_ref.draw_walk(cx, scope, walk)?;
         }
 
         DrawStep::done()

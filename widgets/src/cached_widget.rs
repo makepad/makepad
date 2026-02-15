@@ -174,25 +174,13 @@ impl WidgetNode for CachedWidget {
 impl Widget for CachedWidget {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(widget) = &self.widget {
-            cx.with_node(
-                widget.widget_uid(),
-                self.template_id,
-                widget.clone(),
-                |cx| {
-                    widget.handle_event(cx, event, scope);
-                },
-            );
+            widget.handle_event(cx, event, scope);
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(widget) = &self.widget {
-            cx.with_node(
-                widget.widget_uid(),
-                self.template_id,
-                widget.clone(),
-                |cx| widget.draw_walk(cx, scope, walk),
-            )
+            widget.draw_walk(cx, scope, walk)
         } else {
             DrawStep::done()
         }

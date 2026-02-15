@@ -36,6 +36,9 @@ use {
     },
 };
 
+#[cfg(use_vulkan)]
+use crate::os::linux::vulkan_naga::CxVulkanShaderBinary;
+
 impl DrawVars {
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         if let Some(io_self) = value.as_object() {
@@ -104,31 +107,83 @@ impl DrawVars {
                 return;
             }
 
-            #[cfg(all(target_os = "android", use_vulkan))]
+            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+
+            #[cfg(use_vulkan)]
+            let mut compiled_vulkan_shader: Option<CxVulkanShaderBinary> = None;
+
+            #[cfg(use_vulkan)]
             {
                 static LOG_ONCE: std::sync::Once = std::sync::Once::new();
                 LOG_ONCE.call_once(|| {
                     crate::log!(
-                        "MAKEPAD=vulkan active: running Android WGSL->SPIR-V shader compilation path"
+                        "MAKEPAD=vulkan active: running WGSL->SPIR-V shader compilation path"
                     );
                 });
+                static IO_LOG_ONCE: std::sync::Once = std::sync::Once::new();
+                let dyn_io = output
+                    .io
+                    .iter()
+                    .filter(|io| {
+                        matches!(
+                            io.kind,
+                            crate::makepad_script::shader::ShaderIoKind::DynInstance
+                        )
+                    })
+                    .count();
+                let rust_io = output
+                    .io
+                    .iter()
+                    .filter(|io| {
+                        matches!(
+                            io.kind,
+                            crate::makepad_script::shader::ShaderIoKind::RustInstance
+                        )
+                    })
+                    .count();
+                IO_LOG_ONCE.call_once(|| {
+                    crate::log!(
+                        "Vulkan source IO stats: dyn_io={}, rust_io={}, total_io={}",
+                        dyn_io,
+                        rust_io,
+                        output.io.len()
+                    );
+                });
+                static DYN_IO_LOG_ONCE: std::sync::Once = std::sync::Once::new();
+                if dyn_io > 0 {
+                    DYN_IO_LOG_ONCE.call_once(|| {
+                        crate::log!(
+                            "Vulkan source IO stats (dyn shader): dyn_io={}, rust_io={}, total_io={}",
+                            dyn_io,
+                            rust_io,
+                            output.io.len()
+                        );
+                    });
+                }
             }
 
-            #[cfg(all(target_os = "android", use_vulkan))]
-            if let Err(err) =
-                crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(vm, io_self)
+            #[cfg(use_vulkan)]
             {
-                use std::sync::atomic::{AtomicUsize, Ordering};
-                static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
-                const MAX_ERROR_LOGS: usize = 1;
-                let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
-                if index < MAX_ERROR_LOGS {
-                    crate::error!("Vulkan WGSL/SPIR-V compilation failed: {}", err);
-                } else if index == MAX_ERROR_LOGS {
-                    crate::warning!(
-                        "Suppressing further Vulkan WGSL/SPIR-V compilation logs after {} errors",
-                        MAX_ERROR_LOGS
-                    );
+                match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
+                    vm,
+                    io_self,
+                    &output,
+                ) {
+                    Ok(vk_shader) => compiled_vulkan_shader = Some(vk_shader),
+                    Err(err) => {
+                        use std::sync::atomic::{AtomicUsize, Ordering};
+                        static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
+                        const MAX_ERROR_LOGS: usize = 1;
+                        let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if index < MAX_ERROR_LOGS {
+                            crate::error!("Vulkan WGSL/SPIR-V compilation failed: {}", err);
+                        } else if index == MAX_ERROR_LOGS {
+                            crate::warning!(
+                                "Suppressing further Vulkan WGSL/SPIR-V compilation logs after {} errors",
+                                MAX_ERROR_LOGS
+                            );
+                        }
+                    }
                 }
             }
 
@@ -143,8 +198,6 @@ impl DrawVars {
                 }
             }
 
-            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-
             let mut shared_defs = String::new();
             output.create_struct_defs(vm, &mut shared_defs);
 
@@ -153,7 +206,10 @@ impl DrawVars {
             output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
             output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
 
-            let code = CxDrawShaderCode::Separate { vertex, fragment };
+            let code = CxDrawShaderCode::Separate {
+                vertex: vertex.clone(),
+                fragment: fragment.clone(),
+            };
 
             {
                 let cx = vm.host.cx();
@@ -205,11 +261,34 @@ impl DrawVars {
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
 
+            let mut os_shader_id = None;
+
+            #[cfg(use_vulkan)]
+            if let Some(vk_shader) = compiled_vulkan_shader.clone() {
+                let cx = vm.host.cx_mut();
+                for (shader_index, os_shader) in cx.draw_shaders.os_shaders.iter_mut().enumerate() {
+                    if os_shader.in_vertex == vertex && os_shader.in_pixel == fragment {
+                        if os_shader.vulkan_shader.is_none() {
+                            os_shader.vulkan_shader = Some(vk_shader.clone());
+                        }
+                        os_shader_id = Some(shader_index);
+                        break;
+                    }
+                }
+                if os_shader_id.is_none() {
+                    let mut os_shader =
+                        CxOsDrawShader::new(cx.os.gl(), &vertex, &fragment, &cx.os_type);
+                    os_shader.vulkan_shader = Some(vk_shader);
+                    os_shader_id = Some(cx.draw_shaders.os_shaders.len());
+                    cx.draw_shaders.os_shaders.push(os_shader);
+                }
+            }
+
             let cx = vm.host.cx_mut();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),
-                os_shader_id: None,
+                os_shader_id,
                 mapping,
             });
 
@@ -221,7 +300,9 @@ impl DrawVars {
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
             cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
-            cx.draw_shaders.compile_set.insert(index);
+            if os_shader_id.is_none() {
+                cx.draw_shaders.compile_set.insert(index);
+            }
 
             self.draw_shader_id = Some(shader_id);
             self.geometry_id = geometry_id;
@@ -242,14 +323,11 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
 
-        #[cfg(use_gles_3)]
-        {
-            let draw_list = &mut self.draw_lists[draw_list_id];
-            draw_list
-                .os
-                .draw_list_uniforms
-                .update_uniform_buffer(self.os.gl(), draw_list.draw_list_uniforms.as_slice());
-        }
+        let draw_list = &mut self.draw_lists[draw_list_id];
+        draw_list
+            .os
+            .draw_list_uniforms
+            .update_uniform_buffer(self.os.gl(), draw_list.draw_list_uniforms.as_slice());
 
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id]
@@ -305,7 +383,6 @@ impl Cx {
                 draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
 
-                #[cfg(use_gles_3)]
                 draw_item
                     .os
                     .draw_call_uniforms
@@ -338,17 +415,14 @@ impl Cx {
 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    #[cfg(use_gles_3)]
-                    {
-                        draw_item
-                            .os
-                            .draw_call_uniforms
-                            .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
-                        draw_item
-                            .os
-                            .user_uniforms
-                            .update_uniform_buffer(gl, draw_call.dyn_uniforms.as_slice());
-                    }
+                    draw_item
+                        .os
+                        .draw_call_uniforms
+                        .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
+                    draw_item
+                        .os
+                        .user_uniforms
+                        .update_uniform_buffer(gl, draw_call.dyn_uniforms.as_slice());
                 }
 
                 // update geometry?
@@ -486,7 +560,6 @@ impl Cx {
                         / sh.mapping.instances.total_slots)
                         as u64;
                     // bind all uniform buffers
-                    #[cfg(use_gles_3)]
                     {
                         shgl.uniforms
                             .pass_uniforms_binding
@@ -503,32 +576,6 @@ impl Cx {
                         shgl.uniforms
                             .live_uniforms_binding
                             .bind_buffer(gl, &shgl.uniforms.live_uniforms);
-                    }
-                    #[cfg(not(use_gles_3))]
-                    {
-                        let pass_uniforms = self.passes[draw_pass_id].pass_uniforms.as_slice();
-                        let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
-                        let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
-                        GlShader::set_uniform_array(
-                            gl,
-                            &shgl.uniforms.pass_uniforms,
-                            pass_uniforms,
-                        );
-                        GlShader::set_uniform_array(
-                            gl,
-                            &shgl.uniforms.draw_list_uniforms,
-                            draw_list_uniforms,
-                        );
-                        GlShader::set_uniform_array(
-                            gl,
-                            &shgl.uniforms.draw_call_uniforms,
-                            draw_call_uniforms,
-                        );
-                        GlShader::set_uniform_array(
-                            gl,
-                            &shgl.uniforms.user_uniforms,
-                            draw_call.dyn_uniforms.as_slice(),
-                        );
                     }
 
                     // give openXR a chance to set its depth texture
@@ -653,7 +700,6 @@ impl Cx {
         pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
         pass.set_dpi_factor(dpi_factor);
 
-        #[cfg(use_gles_3)]
         pass.os
             .pass_uniforms
             .update_uniform_buffer(self.os.gl(), pass.pass_uniforms.as_slice());
@@ -881,32 +927,10 @@ pub struct CxOsDrawShader {
     pub pixel: [String; NUM_SHADER_VARIANTS],
     //pub const_table_uniforms: OpenglBuffer,
     pub live_uniforms: OpenglBuffer,
+    #[cfg(use_vulkan)]
+    pub vulkan_shader: Option<CxVulkanShaderBinary>,
 }
 
-#[cfg(not(use_gles_3))]
-pub struct GlShaderUniforms {
-    pub pass_uniforms: OpenglUniform,
-    pub draw_list_uniforms: OpenglUniform,
-    pub draw_call_uniforms: OpenglUniform,
-    pub user_uniforms: OpenglUniform,
-    pub live_uniforms: OpenglUniform,
-    pub const_table_uniform: OpenglUniform,
-}
-#[cfg(not(use_gles_3))]
-impl GlShaderUniforms {
-    fn new(gl: &LibGl, program: u32, _mapping: &CxDrawShaderMapping) -> Self {
-        Self {
-            pass_uniforms: GlShader::opengl_get_uniform(gl, program, "pass_table"),
-            draw_list_uniforms: GlShader::opengl_get_uniform(gl, program, "draw_list_table"),
-            draw_call_uniforms: GlShader::opengl_get_uniform(gl, program, "draw_call_table"),
-            user_uniforms: GlShader::opengl_get_uniform(gl, program, "user_table"),
-            live_uniforms: GlShader::opengl_get_uniform(gl, program, "live_table"),
-            const_table_uniform: GlShader::opengl_get_uniform(gl, program, "const_table"),
-        }
-    }
-}
-
-#[cfg(use_gles_3)]
 pub struct GlShaderUniforms {
     pub pass_uniforms_binding: OpenglUniformBlockBinding,
     pub draw_list_uniforms_binding: OpenglUniformBlockBinding,
@@ -916,7 +940,6 @@ pub struct GlShaderUniforms {
     pub const_table_uniform: OpenglUniform,
     pub live_uniforms: OpenglBuffer,
 }
-#[cfg(use_gles_3)]
 impl GlShaderUniforms {
     fn new(gl: &LibGl, program: u32, mapping: &CxDrawShaderMapping) -> Self {
         let mut live_uniforms = OpenglBuffer::default();
@@ -1174,13 +1197,9 @@ impl GlShader {
 
             let uniforms = GlShaderUniforms::new(gl, program, mapping);
 
-            #[cfg(use_gles_3)]
             uniforms
                 .live_uniforms_binding
                 .bind_buffer(gl, &uniforms.live_uniforms);
-
-            #[cfg(not(use_gles_3))]
-            GlShader::set_uniform_array(gl, &uniforms.live_uniforms, &mapping.scope_uniforms_buf);
 
             if !mapping.dyn_uniforms.inputs.is_empty() {
                 let zeros = vec![0.0f32; mapping.dyn_uniforms.total_slots];
@@ -1579,14 +1598,9 @@ impl CxOsDrawShader {
                 return vec4(0.0,0.0,0.0,0.0);
             }
         ";
-        #[cfg(use_gles_3)]
         let nop_depth_clip = "
             vec4 depth_clip(vec4 w, vec4 c, float clip){return c;}
         ";
-        #[cfg(not(use_gles_3))]
-        let nop_depth_clip = "";
-
-        #[cfg(use_gles_3)]
         let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = if os_type
             .has_xr_mode()
         {
@@ -1627,21 +1641,6 @@ impl CxOsDrawShader {
             "
         )
         };
-
-        #[cfg(not(use_gles_3))]
-        let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = (
-            "#version 100",
-            "",
-            "",
-            "",
-            "",
-            "
-            vec4 depth_clip(vec4 w, vec4 c, float clip){return c;}
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
-            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0 - pos.y));}}
-            "
-        );
 
         /*
         let transpose_impl = "
@@ -1693,6 +1692,8 @@ impl CxOsDrawShader {
             gl_shader: [None, None],
             //const_table_uniforms: Default::default(),
             live_uniforms: Default::default(),
+            #[cfg(use_vulkan)]
+            vulkan_shader: None,
         }
     }
 
