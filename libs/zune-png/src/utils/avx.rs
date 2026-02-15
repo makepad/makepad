@@ -25,7 +25,7 @@ pub unsafe fn convert_be_to_ne_avx(out: &mut [u8]) {
         let data = _mm256_loadu_si256(chunk.as_ptr().cast());
         let mask = _mm256_set_epi8(
             14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1, 14, 15, 12, 13, 10, 11, 8, 9, 6,
-            7, 4, 5, 2, 3, 0, 1
+            7, 4, 5, 2, 3, 0, 1,
         );
         let converted = _mm256_shuffle_epi8(data, mask);
         _mm256_storeu_si256(chunk.as_mut_ptr().cast(), converted);

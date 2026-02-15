@@ -1,137 +1,96 @@
 use {
     crate::{
         decoration::{Decoration, DecorationType},
-        layout::{BlockElement, WrappedElement},
-        selection::Affinity,
-        session::{SelectionMode, CodeSession},
+        draw_selection::DrawSelection,
         history::NewGroup,
+        layout::{BlockElement, WrappedElement},
+        makepad_widgets::*,
+        selection::Affinity,
+        session::{CodeSession, SelectionMode},
         settings::Settings,
         str::StrExt,
         text::Position,
         token::TokenKind,
         Line, Selection, Token,
     },
-    makepad_widgets::*,
     std::fmt::Write,
     std::{mem, slice::Iter},
 };
 
-live_design! {
-    use link::shaders::*;
-    use link::theme::*;
-    use link::widgets::*;
-    
-    TokenColors = {{TokenColors}} {
-        whitespace: #6E6E6E,
-        delimiter: #a,
-        delimiter_highlight: #f,
-        error_decoration: #f00,
-        warning_decoration: #0f0,
-        
-        unknown: #C0C0C0,
-        branch_keyword: #C485BE,
-        constant: #CC917B,
-        identifier: #D4D4D4,
-        loop_keyword: #FF8C00,
-        number: #B6CEAA,
-        other_keyword: #5B9BD3,
-        punctuator: #D4D4D4,
-        string: #CC917B,
-        function: #fffcc9,
-        typename: #56C9B1,
-        comment: #638D54,
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
+
+    mod.widgets.TokenColorsBase = #(TokenColors::script_component(vm))
+    mod.widgets.TokenColors = set_type_default() do mod.widgets.TokenColorsBase {
+        whitespace: #6E6E6E
+        delimiter: #a
+        delimiter_highlight: #f
+        error_decoration: #f00
+        warning_decoration: #0f0
+
+        unknown: #C0C0C0
+        branch_keyword: #C485BE
+        constant: #CC917B
+        identifier: #D4D4D4
+        loop_keyword: #FF8C00
+        number: #B6CEAA
+        other_keyword: #5B9BD3
+        punctuator: #D4D4D4
+        string: #CC917B
+        function: #fffcc9
+        typename: #56C9B1
+        comment: #638D54
     }
 
-    DrawIndentGuide = {{DrawIndentGuide}} {
-        fn pixel(self) -> vec4 {
-            let thickness = 0.8 + self.dpi_dilate * 0.5;
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.move_to(1., -1.);
-            sdf.line_to(1., self.rect_size.y + 1.);
-            return sdf.stroke(self.color, thickness);
+    set_type_default() do #(DrawIndentGuide::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            let thickness = 0.8 + self.draw_pass.dpi_dilate * 0.5
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.move_to(1., -1.)
+            sdf.line_to(1., self.rect_size.y + 1.)
+            return sdf.stroke(self.color, thickness)
         }
     }
 
-    DrawDecoration = {{DrawDecoration}} {
-        fn pixel(self) -> vec4 {
-            let transformed_pos = vec2(self.pos.x, self.pos.y + 0.03 * sin(self.pos.x * self.rect_size.x));
-            let cx = Sdf2d::viewport(transformed_pos * self.rect_size);
-            cx.move_to(0.0, self.rect_size.y - 1.0);
-            cx.line_to(self.rect_size.x, self.rect_size.y - 1.0);
-            return cx.stroke(self.color, 0.8);
+    set_type_default() do #(DrawDecoration::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            let transformed_pos = vec2(self.pos.x, self.pos.y + 0.03 * sin(self.pos.x * self.rect_size.x))
+            let cx = Sdf2d.viewport(transformed_pos * self.rect_size)
+            cx.move_to(0.0, self.rect_size.y - 1.0)
+            cx.line_to(self.rect_size.x, self.rect_size.y - 1.0)
+            return cx.stroke(self.color, 0.8)
         }
     }
 
-    DrawSelection = {{DrawSelection}} {
-        uniform gloopiness: 8.0
-        uniform border_radius: 2.0
-        uniform focus: 1.0
-        fn vertex(self) -> vec4 {
-            let clipped: vec2 = clamp(
-                self.geom_pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos - vec2(8., 0.),
-                self.draw_clip.xy,
-                self.draw_clip.zw
-            );
-            self.pos = (clipped - self.rect_pos) / self.rect_size;
-            return self.camera_projection * (self.camera_view * (
-                self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
-            ));
-        }
+    set_type_default() do #(DrawCodeText::script_shader(vm)) {
+        ..mod.draw.DrawText
+    }
 
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.rect_pos + self.pos * self.rect_size);
-            sdf.box(
-                self.rect_pos.x,
-                self.rect_pos.y,
-                self.rect_size.x,
-                self.rect_size.y,
-                self.border_radius
-            );
-            if self.prev_w > 0.0 {
-                sdf.box(
-                    self.prev_x,
-                    self.rect_pos.y - self.rect_size.y,
-                    self.prev_w,
-                    self.rect_size.y,
-                    self.border_radius
-                );
-                sdf.gloop(self.gloopiness);
+    mod.widgets.CodeEditorBase = #(CodeEditor::script_component(vm))
+
+    mod.widgets.CodeEditor = set_type_default() do mod.widgets.CodeEditorBase {
+        height: Fill
+        width: Fill
+        margin: 0
+        pad_left_top: vec2(10.0, 10.0)
+        scroll_bars: mod.widgets.ScrollBars {}
+        draw_bg +: { color: theme.color_bg_container }
+        draw_gutter +: {
+            draw_depth: 1.0
+            text_style: theme.font_code
+            color: theme.color_label_outer
+        }
+        draw_text +: {
+            draw_depth: 1.0
+            text_style: theme.font_code
+            get_brightness: fn() {
+                return 1.1
             }
-            if self.next_w > 0.0 {
-                sdf.box(
-                    self.next_x,
-                    self.rect_pos.y + self.rect_size.y,
-                    self.next_w,
-                    self.rect_size.y,
-                    self.border_radius
-                );
-                sdf.gloop(self.gloopiness);
-            }
-            return sdf.fill(mix(THEME_COLOR_U_1 * 1.1, THEME_COLOR_U_3 * 0.8, self.focus));
-        }
-    }
 
-    DrawCodeText = {{DrawCodeText}} { }
-
-    pub CodeEditor = {{CodeEditor}} {
-        height: Fill, width: Fill,
-        margin: 0,
-        pad_left_top: vec2(10.0,10.0)
-        scroll_bars: <ScrollBars> {}
-        draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
-        draw_gutter: {
-            draw_depth: 1.0,
-            text_style: <THEME_FONT_CODE> {},
-            color: (THEME_COLOR_LABEL_OUTER),
-        }
-        draw_text: {
-            draw_depth: 1.0,
-            text_style: <THEME_FONT_CODE> {}
-            fn get_brightness(self)->float{
-                return 1.1    
-            }
-            
-            fn blend_color(self, incol: vec4) -> vec4 {
+            blend_color: fn(incol: vec4) -> vec4 {
                 if self.outline < 0.5 {
                     return incol
                 }
@@ -141,78 +100,72 @@ live_design! {
                 return incol
             }
         }
-        draw_indent_guide: {
-           // draw_depth: 1.0,
-            color: (THEME_COLOR_U_2)
+        draw_indent_guide +: {
+            color: theme.color_u_2
         }
-        draw_decoration: {
-          //  draw_depth: 2.0,
+        draw_decoration +: {
         }
-        draw_selection: {
-           // draw_depth: 3.0,
+        draw_selection +: {
         }
 
-        draw_cursor: {
-          //  draw_depth: 4.0,
-            instance focus: 0.0
-            instance blink: 1.0
-            fn pixel(self) -> vec4 {
-                let color = mix(THEME_COLOR_U_HIDDEN, mix(self.color, THEME_COLOR_U_HIDDEN, self.blink),self.focus);
-                return vec4(color.rgb*color.a, color.a);
+        draw_cursor +: {
+            focus: instance(0.0)
+            blink: instance(1.0)
+            pixel: fn() {
+                let color = theme.color_u_hidden.mix(self.color.mix(theme.color_u_hidden, self.blink), self.focus)
+                return vec4(color.rgb * color.a, color.a)
             }
-            color: (THEME_COLOR_WHITE),
+            color: theme.color_white
         }
 
-
-        draw_cursor_bg: {
-            instance focus: 0.0
-            fn pixel(self) -> vec4 {
-                let color = mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_1, self.focus);
-                return vec4(color.rgb * color.a, color.a);
+        draw_cursor_bg +: {
+            focus: instance(0.0)
+            pixel: fn() {
+                let color = theme.color_u_hidden.mix(theme.color_u_1, self.focus)
+                return vec4(color.rgb * color.a, color.a)
             }
         }
 
-        animator: {
-            blink = {
-                default: off
-                off = {
-                    from: {all: Forward {duration:0.05}}
-                    apply: {
-                        draw_cursor: {blink:0.0}
-                    }
-                }
-                on = {
+        animator: Animator {
+            blink: {
+                default: @off
+                off: AnimatorState {
                     from: {all: Forward {duration: 0.05}}
                     apply: {
-                        draw_cursor: {blink:1.0}
+                        draw_cursor: {blink: 0.0}
+                    }
+                }
+                on: AnimatorState {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink: 1.0}
                     }
                 }
             }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration:0.05}}
-                    apply: {
-                        draw_cursor: {focus:0.0}
-                        draw_cursor_bg: {focus:0.0}
-                        draw_selection: {focus:0.0}
-                    }
-                }
-                on = {
+            focus: {
+                default: @off
+                off: AnimatorState {
                     from: {all: Forward {duration: 0.05}}
                     apply: {
-                        draw_cursor: {focus:1.0}
-                        draw_cursor_bg: {focus:1.0}
-                        draw_selection: {focus:1.0}
+                        draw_cursor: {focus: 0.0}
+                        draw_cursor_bg: {focus: 0.0}
+                        draw_selection: {focus: 0.0}
+                    }
+                }
+                on: AnimatorState {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {focus: 1.0}
+                        draw_cursor_bg: {focus: 1.0}
+                        draw_selection: {focus: 1.0}
                     }
                 }
             }
         }
     }
-
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 struct DrawCodeText {
     #[deref]
@@ -221,43 +174,81 @@ struct DrawCodeText {
     outline: f32,
 }
 
-#[derive(Live, LiveRegister)]
+#[derive(Script, ScriptHook, Animator)]
 pub struct CodeEditor {
-    #[walk] walk: Walk,
-    #[live] scroll_bars: ScrollBars,
-    #[live] draw_gutter: DrawText,
-    #[live] draw_text: DrawCodeText,
-    #[live] token_colors: TokenColors,
-    #[live] draw_indent_guide: DrawIndentGuide,
-    #[live] draw_decoration: DrawDecoration,
-    #[live] draw_selection: DrawSelection,
-    #[live] draw_cursor: DrawColor,
-    #[live] draw_cursor_bg: DrawColor,
-    #[live] draw_bg: DrawColor,
-    #[rust(KeepCursorInView::Off)] pub keep_cursor_in_view: KeepCursorInView,
-    #[rust] last_cursor_screen_pos: Option<Vec2d>,
-    #[live] pad_left_top: Vec2d, 
-    #[rust] cell_size: Vec2d,
-    #[rust] cell_offset_y: f64,
-    #[rust] gutter_rect: Rect,
-    #[rust] gutter_chars: usize,
-    #[rust] viewport_rect: Rect,
-    #[rust] unscrolled_rect: Rect,
-    #[rust] line_start: usize,
-    #[rust] line_end: usize,
-    #[rust(1.0)] pub height_scale: f64,
-    #[live(true)] word_wrap: bool,
-    #[live(false)] read_only: bool,
-    #[live(true)] show_gutter: bool,
-    #[live(2usize)] gutter_pad: usize,
-    #[live(true)] empty_page_at_end: bool,
-        
-    
-    #[live(0.5)] blink_speed: f64,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[live]
+    scroll_bars: ScrollBars,
+    #[live]
+    draw_gutter: DrawText,
+    #[live]
+    draw_text: DrawCodeText,
+    #[live]
+    token_colors: TokenColors,
+    #[live]
+    draw_indent_guide: DrawIndentGuide,
+    #[live]
+    draw_decoration: DrawDecoration,
+    #[live]
+    draw_selection: DrawSelection,
+    #[live]
+    draw_cursor: DrawColor,
+    #[live]
+    draw_cursor_bg: DrawColor,
+    #[live]
+    draw_bg: DrawColor,
+    #[rust(KeepCursorInView::Off)]
+    pub keep_cursor_in_view: KeepCursorInView,
+    #[rust]
+    last_cursor_screen_pos: Option<Vec2d>,
+    #[live]
+    pad_left_top: Vec2d,
+    #[rust]
+    cell_size: Vec2d,
+    #[rust]
+    cell_offset_y: f64,
+    #[rust]
+    gutter_rect: Rect,
+    #[rust]
+    gutter_chars: usize,
+    #[rust]
+    viewport_rect: Rect,
+    #[rust]
+    unscrolled_rect: Rect,
+    #[rust]
+    line_start: usize,
+    #[rust]
+    line_end: usize,
+    #[rust(1.0)]
+    pub height_scale: f64,
+    #[live(true)]
+    word_wrap: bool,
+    #[live(false)]
+    read_only: bool,
+    #[live(true)]
+    show_gutter: bool,
+    #[live(2usize)]
+    gutter_pad: usize,
+    #[live(true)]
+    empty_page_at_end: bool,
 
-    #[animator] animator: Animator,
+    #[live(0.5)]
+    blink_speed: f64,
 
-    #[rust] blink_timer: Timer,
+    #[apply_default]
+    animator: Animator,
+
+    #[rust]
+    blink_timer: Timer,
+
+    /// When true, force selection to use "focus" color even without key focus.
+    /// Used for cross-child selection where PortalList has key focus but we still
+    /// want to show focused selection colors in child editors.
+    #[rust(false)]
+    external_selection_focus: bool,
 }
 
 pub enum KeepCursorInView {
@@ -285,92 +276,57 @@ impl KeepCursorInView {
         }
     }
 }
-impl LiveHook for CodeEditor {
-}
-/*
-impl LiveHook for CodeEditor {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, CodeEditor)
-    }
-}
-
-impl Widget for CodeEditor {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_bars.redraw(cx);
-    }
-
-    fn handle_event(
-        &mut self,
-        _cx: &mut Cx,
-        _event: &Event,
-        _scope:&mut WidgetScope,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionWrap),
-    )->WidgetAction{
-        
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
-        if self.draw_state.begin(cx, walk) {
-            return WidgetDraw::hook_above();
-        }
-        self.draw_state.end();
-        WidgetDraw::done()
-    }
-} 
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct CodeEditorRef(WidgetRef);
-*/
 
 impl CodeEditor {
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
     }
-    
-    pub fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){}
-    
-    pub fn visible(&self) -> bool {true}
-    
-    
-    pub fn area(&self)->Area{
+
+    pub fn set_visible(&mut self, _cx: &mut Cx, _visible: bool) {}
+
+    pub fn visible(&self) -> bool {
+        true
+    }
+
+    pub fn area(&self) -> Area {
         self.scroll_bars.area()
     }
-    
-    pub fn walk(&self, _cx:&mut Cx)->Walk{
+
+    pub fn viewport_rect(&self) -> Rect {
+        self.viewport_rect
+    }
+
+    pub fn walk(&self, _cx: &mut Cx) -> Walk {
         self.walk
     }
-    
-    pub fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef{
-        WidgetRef::empty()    
+
+    pub fn find_widgets_from_point(
+        &self,
+        _cx: &Cx,
+        _point: DVec2,
+        _found: &mut dyn FnMut(&WidgetRef),
+    ) {
     }
-    
-    pub fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet){
-    }
-    
-    pub fn draw_empty_editor(&mut self, cx: &mut Cx2d, walk:Walk) {
+
+    pub fn draw_empty_editor(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.scroll_bars.begin(cx, walk, Layout::default());
         self.draw_bg.draw_abs(cx, cx.turtle().rect_unscrolled());
         self.scroll_bars.end(cx);
     }
-        
-    pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut CodeSession, walk:Walk) {
+
+    pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut CodeSession, walk: Walk) {
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
 
-        let text = self.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), "!");
+        let text = self
+            .draw_text
+            .layout(cx, 0.0, 0.0, None, false, Align::default(), "!");
         let first_row = text.rows.first().unwrap();
         let first_glyph = first_row.glyphs.first().unwrap();
         let width_in_lpxs = first_glyph.advance_in_lpxs();
         let height_in_lpxs = first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs();
         let line_spacing_in_lpxs = height_in_lpxs * self.draw_text.text_style.line_spacing;
-        self.cell_size = dvec2(
-            width_in_lpxs as f64,
-            line_spacing_in_lpxs as f64
-        );
+        self.cell_size = dvec2(width_in_lpxs as f64, line_spacing_in_lpxs as f64);
         self.cell_offset_y = ((line_spacing_in_lpxs - height_in_lpxs) / 2.0) as f64;
 
         let last_added_selection =
@@ -455,28 +411,28 @@ impl CodeEditor {
             }
             KeepCursorInView::Off => {}
         }
-        
+
         // if height = Fit, we need to compute it based on layout
         let height_is_fit = walk.height.is_fit();
         //if height_is_fit{
         //    walk.height = Size::Fixed(100000.0);
-       // }
-        const MAX_HEIGHT:f64 = 100_0000.0;
+        // }
+        const MAX_HEIGHT: f64 = 100_0000.0;
         self.scroll_bars.begin(cx, walk, Layout::default());
-        
+
         let turtle_rect = cx.turtle().rect();
-        
-        let gutter_width = if self.show_gutter{
-            self.gutter_chars =  session
+
+        let gutter_width = if self.show_gutter {
+            self.gutter_chars = session
                 .document()
                 .as_text()
                 .as_lines()
                 .len()
                 .to_string()
-                .column_count()+1;
+                .column_count()
+                + 1;
             self.gutter_chars as f64 * self.cell_size.x + self.gutter_pad as f64 * self.cell_size.x
-        }
-        else{
+        } else {
             self.gutter_chars = 0;
             0.0
         };
@@ -484,7 +440,11 @@ impl CodeEditor {
             pos: turtle_rect.pos,
             size: Vec2d {
                 x: gutter_width,
-                y: if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
+                y: if height_is_fit {
+                    MAX_HEIGHT
+                } else {
+                    turtle_rect.size.y
+                },
             },
         };
         self.viewport_rect = Rect {
@@ -494,7 +454,11 @@ impl CodeEditor {
             },
             size: Vec2d {
                 x: turtle_rect.size.x - gutter_width,
-                y:if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
+                y: if height_is_fit {
+                    MAX_HEIGHT
+                } else {
+                    turtle_rect.size.y
+                },
             },
         };
 
@@ -524,13 +488,17 @@ impl CodeEditor {
             pos: self.unscrolled_rect.pos,
             size: Vec2d {
                 x: self.unscrolled_rect.size.x,
-                y:if height_is_fit{MAX_HEIGHT}else{self.unscrolled_rect.size.y},
+                y: if height_is_fit {
+                    MAX_HEIGHT
+                } else {
+                    self.unscrolled_rect.size.y
+                },
             },
         };
         self.draw_bg.draw_abs(cx, bg_rect);
         self.draw_cursor.begin_many_instances(cx);
-                
-        if self.show_gutter{
+
+        if self.show_gutter {
             self.draw_gutter(cx, session);
         }
         self.draw_selection_layer(cx, session);
@@ -541,18 +509,22 @@ impl CodeEditor {
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
-        
+
         cx.turtle_mut().set_used(
-            session.layout().width() * self.cell_size.x +self.pad_left_top.x,
-            self.height_scale * session.layout().height() * self.cell_size.y + 
-            if height_is_fit || !self.empty_page_at_end{0.0} else {self.viewport_rect.size.y}
-            +self.pad_left_top.y * self.height_scale
+            session.layout().width() * self.cell_size.x + self.pad_left_top.x,
+            self.height_scale * session.layout().height() * self.cell_size.y
+                + if height_is_fit || !self.empty_page_at_end {
+                    0.0
+                } else {
+                    self.viewport_rect.size.y
+                }
+                + self.pad_left_top.y * self.height_scale,
         );
-        
+
         self.draw_cursor.end_many_instances(cx);
-        
+
         self.scroll_bars.end(cx);
-        
+
         if session.update_folds() {
             cx.redraw_area_in_draw(self.scroll_bars.area());
         } else if self.keep_cursor_in_view.is_locked() {
@@ -564,17 +536,17 @@ impl CodeEditor {
         cx.set_key_focus(self.scroll_bars.area());
     }
 
-    pub fn set_cursor_and_scroll(
-        &mut self,
-        cx: &mut Cx,
-        pos: Position,
-        session: &mut CodeSession,
-    ) {
-        session.set_selection(session.clamp_position(pos), Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+    pub fn set_cursor_and_scroll(&mut self, cx: &mut Cx, pos: Position, session: &mut CodeSession) {
+        session.set_selection(
+            session.clamp_position(pos),
+            Affinity::Before,
+            SelectionMode::Simple,
+            NewGroup::Yes,
+        );
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
     }
-    
+
     pub fn set_selection_and_scroll(
         &mut self,
         cx: &mut Cx,
@@ -582,8 +554,12 @@ impl CodeEditor {
         end: Position,
         session: &mut CodeSession,
     ) {
-        
-        session.set_selection(session.clamp_position(start), Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+        session.set_selection(
+            session.clamp_position(start),
+            Affinity::Before,
+            SelectionMode::Simple,
+            NewGroup::Yes,
+        );
         session.move_to(session.clamp_position(end), Affinity::Before, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
@@ -618,14 +594,37 @@ impl CodeEditor {
     }
 
     pub fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
-        if self.read_only{
+        if self.read_only {
             self.animator_cut(cx, ids!(blink.off));
-        }
-        else{
+        } else {
             self.animator_cut(cx, ids!(blink.off));
             cx.stop_timer(self.blink_timer);
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
+    }
+
+    /// Set external selection focus. When true, the selection will use "focus" colors
+    /// even when this editor doesn't have key focus. Used for cross-child selection
+    /// in PortalList where the list has focus but editors should still show
+    /// focused selection highlights.
+    pub fn set_external_selection_focus(&mut self, cx: &mut Cx, focus: bool) {
+        self.set_external_selection_focus_no_redraw(focus);
+        self.redraw(cx);
+    }
+
+    /// Set external selection focus without triggering a redraw.
+    /// Use this when you know a redraw will happen anyway (e.g., during draw cycle).
+    pub fn set_external_selection_focus_no_redraw(&mut self, focus: bool) {
+        self.external_selection_focus = focus;
+        if focus {
+            // Force selection to use focus color
+            self.draw_selection.focus = 1.0;
+        }
+    }
+
+    /// Check if external selection focus is active
+    pub fn external_selection_focus(&self) -> bool {
+        self.external_selection_focus
     }
 
     pub fn handle_event(
@@ -636,15 +635,15 @@ impl CodeEditor {
         session: &mut CodeSession,
     ) -> Vec<CodeEditorAction> {
         let mut actions = Vec::new();
-        
+
         self.animator_handle_event(cx, event);
 
         session.handle_changes();
 
-        if self.scroll_bars.handle_event(cx, event, scope).len()>0{
+        if self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
             self.redraw(cx);
         };
-        
+
         if self.blink_timer.is_event(event).is_some() {
             if self.animator_in_state(cx, ids!(blink.off)) {
                 self.animator_play(cx, ids!(blink.on));
@@ -656,7 +655,11 @@ impl CodeEditor {
         let mut keyboard_moved_cursor = false;
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, ids!(focus.off));
+                // Don't dim selection if external_selection_focus is active
+                // (cross-child selection where PortalList has focus)
+                if !self.external_selection_focus {
+                    self.animator_play(cx, ids!(focus.off));
+                }
             }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -724,23 +727,18 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyA,
-                modifiers: KeyModifiers {control, logo, ..},
+                modifiers: KeyModifiers { control, logo, .. },
                 ..
             }) => {
                 if control || logo {
-                    let ((cursor, affinity), _is_in_gutter) = self.pick(session, dvec2(0.0,0.0));
-                    session.set_selection(
-                        cursor,
-                        affinity,
-                        SelectionMode::All,
-                        NewGroup::Yes
-                    );
+                    let ((cursor, affinity), _is_in_gutter) = self.pick(session, dvec2(0.0, 0.0));
+                    session.set_selection(cursor, affinity, SelectionMode::All, NewGroup::Yes);
                     self.reset_cursor_blinker(cx);
                     self.keep_cursor_in_view = KeepCursorInView::Off;
                     self.redraw(cx);
                 }
             }
-            
+
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers:
@@ -881,7 +879,7 @@ impl CodeEditor {
                 key_code: KeyCode::Tab,
                 modifiers: KeyModifiers { shift: true, .. },
                 ..
-            }) if !self.read_only=> {
+            }) if !self.read_only => {
                 session.outdent();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -890,7 +888,7 @@ impl CodeEditor {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..
-            }) if !self.read_only=> {
+            }) if !self.read_only => {
                 session.delete();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -899,7 +897,7 @@ impl CodeEditor {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
-            }) if !self.read_only=> {
+            }) if !self.read_only => {
                 session.backspace();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -909,17 +907,24 @@ impl CodeEditor {
                 *ce.response.borrow_mut() = Some(session.copy());
                 keyboard_moved_cursor = true;
             }
-            Hit::TextCut(ce) if !self.read_only=> {
+            Hit::TextCut(ce) if !self.read_only => {
                 *ce.response.borrow_mut() = Some(session.copy());
                 session.delete();
                 keyboard_moved_cursor = true;
                 self.redraw(cx);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: KeyModifiers{ control, logo, shift, .. },
+                modifiers:
+                    KeyModifiers {
+                        control,
+                        logo,
+                        shift,
+                        ..
+                    },
                 ..
-            }) if (control || logo) && !shift && !self.read_only =>{
+            }) if (control || logo) && !shift && !self.read_only => {
                 if session.undo() {
                     cx.redraw_all();
                     actions.push(CodeEditorAction::TextDidChange);
@@ -928,18 +933,22 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: KeyModifiers{ control, logo, shift, ..},
+                modifiers:
+                    KeyModifiers {
+                        control,
+                        logo,
+                        shift,
+                        ..
+                    },
                 ..
-            }) if (control || logo) && shift && !self.read_only =>{
+            }) if (control || logo) && shift && !self.read_only => {
                 if session.redo() {
                     self.redraw(cx);
                     actions.push(CodeEditorAction::TextDidChange);
                     keyboard_moved_cursor = true;
                 }
             }
-            Hit::KeyDown(ke)=>{
-                actions.push(CodeEditorAction::UnhandledKeyDown(ke))
-            }
+            Hit::KeyDown(ke) => actions.push(CodeEditorAction::UnhandledKeyDown(ke)),
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 tap_count,
@@ -967,7 +976,7 @@ impl CodeEditor {
                             //_ => SelectionMode::All,
                         }
                     },
-                    NewGroup::Yes
+                    NewGroup::Yes,
                 );
                 self.reset_cursor_blinker(cx);
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
@@ -1058,13 +1067,13 @@ impl CodeEditor {
                 BlockElement::Line { line, .. } => {
                     self.draw_gutter.font_scale = line.scale() as f32;
                     buf.clear();
-                    match self.gutter_chars{
-                        0|1=>write!(buf, "{: >0}", line_index + 1).unwrap(),
-                        2=>write!(buf, "{: >1}", line_index + 1).unwrap(),
-                        3=>write!(buf, "{: >2}", line_index + 1).unwrap(),
-                        4=>write!(buf, "{: >3}", line_index + 1).unwrap(),
-                        5=>write!(buf, "{: >4}", line_index + 1).unwrap(),
-                        _=>write!(buf, "{: >5}", line_index + 1).unwrap(),
+                    match self.gutter_chars {
+                        0 | 1 => write!(buf, "{: >0}", line_index + 1).unwrap(),
+                        2 => write!(buf, "{: >1}", line_index + 1).unwrap(),
+                        3 => write!(buf, "{: >2}", line_index + 1).unwrap(),
+                        4 => write!(buf, "{: >3}", line_index + 1).unwrap(),
+                        5 => write!(buf, "{: >4}", line_index + 1).unwrap(),
+                        _ => write!(buf, "{: >5}", line_index + 1).unwrap(),
                     }
                     self.draw_gutter.draw_abs(
                         cx,
@@ -1173,7 +1182,7 @@ impl CodeEditor {
                                             Vec2d { x, y: origin_y + y } * self.cell_size
                                                 + dvec2(
                                                     self.viewport_rect.pos.x,
-                                                    self.viewport_rect.pos.y + self.cell_offset_y
+                                                    self.viewport_rect.pos.y + self.cell_offset_y,
                                                 ),
                                             grapheme,
                                         );
@@ -1279,6 +1288,11 @@ impl CodeEditor {
     }
 
     fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
+        // If external_selection_focus is active, ensure selection uses focus color
+        if self.external_selection_focus {
+            self.draw_selection.focus = 1.0;
+        }
+
         let mut active_selection = None;
         let selections = session.selections();
         let mut selections = selections.iter();
@@ -1303,9 +1317,13 @@ impl CodeEditor {
         .draw_selection_layer(cx, session)
     }
 
-    fn pick(&self, session: &CodeSession, position: Vec2d) -> ((Position, Affinity), bool) {
+    pub(crate) fn pick(
+        &self,
+        session: &CodeSession,
+        position: Vec2d,
+    ) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
-        
+
         if position.y < 0.0 {
             return (
                 (
@@ -1343,6 +1361,7 @@ impl CodeEditor {
                     let mut byte_index = 0;
                     let mut row_index = 0;
                     let mut column_index = 0;
+                    let mut row_start_byte_index = 0; // Track where current row started
                     for element in line.wrapped_elements() {
                         match element {
                             WrappedElement::Text {
@@ -1442,9 +1461,9 @@ impl CodeEditor {
                                             (
                                                 Position {
                                                     line_index,
-                                                    byte_index,
+                                                    byte_index: row_start_byte_index,
                                                 },
-                                                Affinity::Before,
+                                                Affinity::After,
                                             ),
                                             false,
                                         )
@@ -1452,6 +1471,7 @@ impl CodeEditor {
                                 }
                                 column_index = line.wrap_indent_column_count();
                                 row_index += 1;
+                                row_start_byte_index = byte_index;
                             }
                         }
                     }
@@ -1459,6 +1479,11 @@ impl CodeEditor {
                     let start_y = origin_y + y;
                     let end_y = start_y + line.scale();
                     if (start_y..=end_y).contains(&position.y) {
+                        // Get x position where text starts on this row (after wrap indent)
+                        let (row_text_start_x, _) = line.grid_to_normalized_position(
+                            row_index,
+                            line.wrap_indent_column_count(),
+                        );
                         return if position.x < 0.0 {
                             (
                                 (
@@ -1470,7 +1495,20 @@ impl CodeEditor {
                                 ),
                                 true,
                             )
+                        } else if position.x < row_text_start_x {
+                            // Clicked before text starts on this row - go to start of row
+                            (
+                                (
+                                    Position {
+                                        line_index,
+                                        byte_index: row_start_byte_index,
+                                    },
+                                    Affinity::After,
+                                ),
+                                false,
+                            )
                         } else {
+                            // Clicked past end of text - go to end of line
                             (
                                 (
                                     Position {
@@ -1515,11 +1553,12 @@ impl CodeEditor {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, DefaultNone)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum CodeEditorAction {
     TextDidChange,
     UnhandledKeyDown(KeyEvent),
-    None
+    #[default]
+    None,
 }
 
 struct DrawDecorationLayer<'a> {
@@ -1966,7 +2005,7 @@ struct ActiveSelection {
     start_x: f64,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 struct TokenColors {
     #[live]
     unknown: Vec4f,
@@ -2004,7 +2043,7 @@ struct TokenColors {
     warning_decoration: Vec4f,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawIndentGuide {
     #[deref]
@@ -2013,67 +2052,11 @@ pub struct DrawIndentGuide {
     color: Vec4f,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
+#[repr(C)]
 struct DrawDecoration {
     #[deref]
     draw_super: DrawQuad,
     #[live]
     color: Vec4f,
-}
-
-#[derive(Live, LiveHook, LiveRegister)]
-#[repr(C)]
-struct DrawSelection {
-    #[deref]
-    draw_super: DrawQuad,
-    #[live]
-    prev_x: f32,
-    #[live]
-    prev_w: f32,
-    #[live]
-    next_x: f32,
-    #[live]
-    next_w: f32,
-    #[rust]
-    prev_prev_rect: Option<Rect>,
-    #[rust]
-    prev_rect: Option<Rect>,
-}
-
-impl DrawSelection {
-    fn begin(&mut self) {
-        debug_assert!(self.prev_rect.is_none());
-    }
-
-    fn end(&mut self, cx: &mut Cx2d) {
-        self.draw_rect_internal(cx, None);
-        self.prev_prev_rect = None;
-        self.prev_rect = None;
-    }
-
-    fn draw(&mut self, cx: &mut Cx2d, rect: Rect) {
-        self.draw_rect_internal(cx, Some(rect));
-        self.prev_prev_rect = self.prev_rect;
-        self.prev_rect = Some(rect);
-    }
-
-    fn draw_rect_internal(&mut self, cx: &mut Cx2d, rect: Option<Rect>) {
-        if let Some(prev_rect) = self.prev_rect {
-            if let Some(prev_prev_rect) = self.prev_prev_rect {
-                self.prev_x = prev_prev_rect.pos.x as f32;
-                self.prev_w = prev_prev_rect.size.x as f32;
-            } else {
-                self.prev_x = 0.0;
-                self.prev_w = 0.0;
-            }
-            if let Some(rect) = rect {
-                self.next_x = rect.pos.x as f32;
-                self.next_w = rect.size.x as f32;
-            } else {
-                self.next_x = 0.0;
-                self.next_w = 0.0;
-            }
-            self.draw_abs(cx, prev_rect);
-        }
-    }
 }

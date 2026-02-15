@@ -26,7 +26,7 @@ pub unsafe fn loadu(src: *const i32) -> VecType {
 #[derive(Clone, Copy)]
 pub struct YmmRegister {
     /// An AVX register
-    pub(crate) mm256: VecType
+    pub(crate) mm256: VecType,
 }
 
 impl YmmRegister {
@@ -41,7 +41,7 @@ impl YmmRegister {
         let m1 = f(self.mm256.1, other.mm256.1);
 
         YmmRegister {
-            mm256: int32x4x2_t(m0, m1)
+            mm256: int32x4x2_t(m0, m1),
         }
     }
 
@@ -62,7 +62,7 @@ impl YmmRegister {
             let m1 = vreinterpretq_s32_u32(vshlq_n_u32::<N>(vreinterpretq_u32_s32(self.mm256.1)));
 
             YmmRegister {
-                mm256: int32x4x2_t(m0, m1)
+                mm256: int32x4x2_t(m0, m1),
             }
         }
     }
@@ -74,7 +74,7 @@ impl YmmRegister {
             let i1 = vshrq_n_s32::<N>(self.mm256.1);
 
             YmmRegister {
-                mm256: int32x4x2_t(i0, i1)
+                mm256: int32x4x2_t(i0, i1),
             }
         }
     }
@@ -82,7 +82,7 @@ impl YmmRegister {
 
 impl<T> Add<T> for YmmRegister
 where
-    T: Into<Self>
+    T: Into<Self>,
 {
     type Output = YmmRegister;
 
@@ -95,7 +95,7 @@ where
 
 impl<T> Sub<T> for YmmRegister
 where
-    T: Into<Self>
+    T: Into<Self>,
 {
     type Output = YmmRegister;
 
@@ -108,7 +108,7 @@ where
 
 impl<T> AddAssign<T> for YmmRegister
 where
-    T: Into<Self>
+    T: Into<Self>,
 {
     #[inline]
     fn add_assign(&mut self, rhs: T) {
@@ -119,7 +119,7 @@ where
 
 impl<T> Mul<T> for YmmRegister
 where
-    T: Into<Self>
+    T: Into<Self>,
 {
     type Output = YmmRegister;
 
@@ -132,7 +132,7 @@ where
 
 impl<T> MulAssign<T> for YmmRegister
 where
-    T: Into<Self>
+    T: Into<Self>,
 {
     #[inline]
     fn mul_assign(&mut self, rhs: T) {
@@ -143,7 +143,7 @@ where
 
 impl<T> BitOr<T> for YmmRegister
 where
-    T: Into<Self>
+    T: Into<Self>,
 {
     type Output = YmmRegister;
 
@@ -156,7 +156,7 @@ where
 
 impl<T> BitOrAssign<T> for YmmRegister
 where
-    T: Into<Self>
+    T: Into<Self>,
 {
     #[inline]
     fn bitor_assign(&mut self, rhs: T) {
@@ -172,7 +172,7 @@ impl From<i32> for YmmRegister {
             let dup = vdupq_n_s32(val);
 
             YmmRegister {
-                mm256: int32x4x2_t(dup, dup)
+                mm256: int32x4x2_t(dup, dup),
             }
         }
     }
@@ -188,27 +188,30 @@ impl From<VecType> for YmmRegister {
 #[allow(clippy::too_many_arguments)]
 #[inline]
 unsafe fn transpose4(
-    v0: &mut int32x4_t, v1: &mut int32x4_t, v2: &mut int32x4_t, v3: &mut int32x4_t
+    v0: &mut int32x4_t,
+    v1: &mut int32x4_t,
+    v2: &mut int32x4_t,
+    v3: &mut int32x4_t,
 ) {
     let w0 = vtrnq_s32(
         vreinterpretq_s32_s64(vtrn1q_s64(
             vreinterpretq_s64_s32(*v0),
-            vreinterpretq_s64_s32(*v2)
+            vreinterpretq_s64_s32(*v2),
         )),
         vreinterpretq_s32_s64(vtrn1q_s64(
             vreinterpretq_s64_s32(*v1),
-            vreinterpretq_s64_s32(*v3)
-        ))
+            vreinterpretq_s64_s32(*v3),
+        )),
     );
     let w1 = vtrnq_s32(
         vreinterpretq_s32_s64(vtrn2q_s64(
             vreinterpretq_s64_s32(*v0),
-            vreinterpretq_s64_s32(*v2)
+            vreinterpretq_s64_s32(*v2),
         )),
         vreinterpretq_s32_s64(vtrn2q_s64(
             vreinterpretq_s64_s32(*v1),
-            vreinterpretq_s64_s32(*v3)
-        ))
+            vreinterpretq_s64_s32(*v3),
+        )),
     );
 
     *v0 = w0.0;
@@ -225,8 +228,14 @@ unsafe fn transpose4(
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub unsafe fn transpose(
-    v0: &mut YmmRegister, v1: &mut YmmRegister, v2: &mut YmmRegister, v3: &mut YmmRegister,
-    v4: &mut YmmRegister, v5: &mut YmmRegister, v6: &mut YmmRegister, v7: &mut YmmRegister
+    v0: &mut YmmRegister,
+    v1: &mut YmmRegister,
+    v2: &mut YmmRegister,
+    v3: &mut YmmRegister,
+    v4: &mut YmmRegister,
+    v5: &mut YmmRegister,
+    v6: &mut YmmRegister,
+    v7: &mut YmmRegister,
 ) {
     use core::mem::swap;
 
@@ -296,7 +305,7 @@ mod tests {
 
             transpose(
                 &mut reg0, &mut reg1, &mut reg2, &mut reg3, &mut reg4, &mut reg5, &mut reg6,
-                &mut reg7
+                &mut reg7,
             );
 
             regs[0] = reg0;

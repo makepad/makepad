@@ -25,6 +25,5 @@ repository = "https://github.com/LykenSol/sdfer"
 [package.metadata.docs.rs]
 all-features = true
 
-[dependencies.image]
-version = "0.24.7"
-optional = true
+[lints.rust.unexpected_cfgs]
+level = "allow"

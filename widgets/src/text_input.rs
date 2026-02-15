@@ -1,391 +1,299 @@
 use {
     crate::{
+        animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
         makepad_derive_widget::*,
         makepad_draw::{
+            event::finger::TouchState,
             text::{
                 geom::Point,
-                selection::{
-                    Cursor,
-                    CursorPosition,
-                    Selection
-                },
-                layouter::{
-                    LaidoutText,
-                    SelectionRect,
-                },
+                layouter::{LaidoutText, SelectionRect},
+                selection::{Cursor, CursorPosition, Selection},
             },
-            event::finger::TouchState,
-            *
+            *,
         },
+        makepad_script::{ScriptFnRef, ScriptRefOptionExt},
         widget::*,
+        widget_async::ScriptAsyncResult,
     },
     std::rc::Rc,
     unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
 };
 
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-live_design! {
-    link widgets;
+    mod.widgets.TextInputBase = #(TextInput::register_widget(vm))
 
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
-
-    pub TextInputBase = {{TextInput}} {}
-    
-    pub TextInputFlat = <TextInputBase> {
-        width: Fill, height: Fit,
-        padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
-        margin: <THEME_MSPACE_V_1> {}
-        flow: Right { wrap: true },
-        is_password: false,
-        is_read_only: false,
+    mod.widgets.TextInputFlat = set_type_default() do mod.widgets.TextInputBase{
+        width: Fill
+        height: Fit
+        padding: theme.mspace_1{left: theme.space_2, right: theme.space_2}
+        margin: theme.mspace_v_1
+        flow: Right {wrap: true}
+        is_password: false
+        is_read_only: false
         is_numeric_only: false
-        empty_text: "Your text here",
-        
-        draw_bg: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance disabled: 0.0
-            instance empty: 0.0
+        empty_text: "Your text here"
 
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform border_size: (THEME_BEVELING)
+        draw_bg +: {
+            hover: instance(0.0)
+            focus: instance(0.0)
+            down: instance(0.0)
+            disabled: instance(0.0)
+            empty: instance(0.0)
 
-            uniform gradient_border_horizontal: 0.0; 
-            uniform gradient_fill_horizontal: 0.0; 
+            border_radius: uniform(theme.corner_radius)
+            border_size: uniform(theme.beveling)
 
-            uniform color_dither: 1.0
+            gradient_border_horizontal: uniform(0.0)
+            gradient_fill_horizontal: uniform(0.0)
 
-            color: (THEME_COLOR_INSET)
-            uniform color_hover: (THEME_COLOR_INSET_HOVER)
-            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
-            uniform color_down: (THEME_COLOR_INSET_DOWN)
-            uniform color_empty: (THEME_COLOR_INSET_EMPTY)
-            uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
+            color_dither: uniform(1.0)
 
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            uniform color_2_down: (THEME_COLOR_INSET_2_DOWN)
-            uniform color_2_empty: (THEME_COLOR_INSET_2_EMPTY)
-            uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
+            color: theme.color_inset
+            color_hover: uniform(theme.color_inset_hover)
+            color_focus: uniform(theme.color_inset_focus)
+            color_down: uniform(theme.color_inset_down)
+            color_empty: uniform(theme.color_inset_empty)
+            color_disabled: uniform(theme.color_inset_disabled)
 
-            uniform border_color: (THEME_COLOR_BEVEL)
-            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
-            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
-            uniform border_color_down: (THEME_COLOR_BEVEL_DOWN)
-            uniform border_color_empty: (THEME_COLOR_BEVEL_EMPTY)
-            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_2_hover: uniform(theme.color_inset_2_hover)
+            color_2_focus: uniform(theme.color_inset_2_focus)
+            color_2_down: uniform(theme.color_inset_2_down)
+            color_2_empty: uniform(theme.color_inset_2_empty)
+            color_2_disabled: uniform(theme.color_inset_2_disabled)
 
-            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            uniform border_color_2_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            border_color: uniform(theme.color_bevel)
+            border_color_hover: uniform(theme.color_bevel_hover)
+            border_color_focus: uniform(theme.color_bevel_focus)
+            border_color_down: uniform(theme.color_bevel_down)
+            border_color_empty: uniform(theme.color_bevel_empty)
+            border_color_disabled: uniform(theme.color_bevel_disabled)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+            border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            border_color_2_hover: uniform(theme.color_bevel_inset_2_hover)
+            border_color_2_focus: uniform(theme.color_bevel_inset_2_focus)
+            border_color_2_down: uniform(theme.color_bevel_inset_2_down)
+            border_color_2_empty: uniform(theme.color_bevel_inset_2_empty)
+            border_color_2_disabled: uniform(theme.color_bevel_inset_2_disabled)
 
-                let color_2 = self.color;
-                let color_2_hover = self.color_hover;
-                let color_2_focus = self.color_focus;
-                let color_2_down = self.color_down;
-                let color_2_empty = self.color_empty;
-                let color_2_disabled = self.color_disabled;
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
-                let border_color_2 = self.border_color;
-                let border_color_2_hover = self.border_color_hover;
-                let border_color_2_focus = self.border_color_focus;
-                let border_color_2_down = self.border_color_down;
-                let border_color_2_empty = self.border_color_empty;
-                let border_color_2_disabled = self.border_color_disabled;
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2;
-                    color_2_hover = self.color_2_hover;
-                    color_2_focus = self.color_2_focus;
-                    color_2_down = self.color_2_down;
-                    color_2_empty = self.color_2_empty;
-                    color_2_disabled = self.color_2_disabled;
-                }
-
-                if (self.border_color_2.x > -0.5) {
-                    border_color_2 = self.border_color_2;
-                    border_color_2_hover = self.border_color_2_hover;
-                    border_color_2_focus = self.border_color_2_focus;
-                    border_color_2_down = self.border_color_2_down;
-                    border_color_2_empty = self.border_color_2_empty;
-                    border_color_2_disabled = self.border_color_2_disabled;
-                }
-                
                 let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
                 )
 
-                let scale_factor_border = vec2(
-                    self.rect_size.x / self.rect_size.x,
-                    self.rect_size.y / self.rect_size.y
-                );
-
-                let gradient_border = vec2(
-                    self.pos.x * scale_factor_border.x + dither,
-                    self.pos.y * scale_factor_border.y + dither
-                )
-
                 let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.x - self.border_size * 2.
                     self.rect_size.y - self.border_size * 2.
-                );
+                )
 
                 let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.x / sz_inner_px.x
                     self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
-                
-                let gradient_border_dir = gradient_border.y;
-                if (self.gradient_border_horizontal > 0.5) {
-                    gradient_border_dir = gradient_border.x;
-                }
-
-                let gradient_fill_dir = gradient_fill.y;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = gradient_fill.x;
-                }
 
                 sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
                     self.border_radius
                 )
 
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color, color_2, gradient_fill_dir),
-                                    mix(self.color_empty, color_2_empty, gradient_fill_dir),
-                                    self.empty
-                                ),
-                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
-                                mix(self.color_down, color_2_down, gradient_fill_dir),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
-                        self.disabled
-                    )
-                );
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_focus = self.color_focus
+                let mut color_fill_down = self.color_down
+                let mut color_fill_empty = self.color_empty
+                let mut color_fill_disabled = self.color_disabled
 
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.border_color, border_color_2, gradient_border_dir),
-                                    mix(self.border_color_empty, border_color_2_empty, gradient_border_dir),
-                                    self.empty
-                                ),
-                                mix(self.border_color_focus, border_color_2_focus, gradient_border_dir),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
-                                mix(self.border_color_down, border_color_2_down, gradient_border_dir),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir),
-                        self.disabled
-                    ),
-                    self.border_size
-                );
-                
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_fill = vec2(
+                        self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
+                        self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                    )
+                    let dir = if self.gradient_fill_horizontal > 0.5 gradient_fill.x else gradient_fill.y
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
+                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
+                    color_fill_empty = mix(self.color_empty, self.color_2_empty, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                }
+
+                let mut color_stroke = self.border_color
+                let mut color_stroke_hover = self.border_color_hover
+                let mut color_stroke_focus = self.border_color_focus
+                let mut color_stroke_down = self.border_color_down
+                let mut color_stroke_empty = self.border_color_empty
+                let mut color_stroke_disabled = self.border_color_disabled
+
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let gradient_border = vec2(
+                        self.pos.x + dither
+                        self.pos.y + dither
+                    )
+                    let dir = if self.gradient_border_horizontal > 0.5 gradient_border.x else gradient_border.y
+                    color_stroke = mix(self.border_color, self.border_color_2, dir)
+                    color_stroke_hover = mix(self.border_color_hover, self.border_color_2_hover, dir)
+                    color_stroke_focus = mix(self.border_color_focus, self.border_color_2_focus, dir)
+                    color_stroke_down = mix(self.border_color_down, self.border_color_2_down, dir)
+                    color_stroke_empty = mix(self.border_color_empty, self.border_color_2_empty, dir)
+                    color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
+                }
+
+                let fill = color_fill
+                    .mix(color_fill_empty, self.empty)
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover.mix(color_fill_down, self.down), self.hover)
+                    .mix(color_fill_disabled, self.disabled)
+
+                let stroke = color_stroke
+                    .mix(color_stroke_empty, self.empty)
+                    .mix(color_stroke_focus, self.focus)
+                    .mix(color_stroke_hover.mix(color_stroke_down, self.down), self.hover)
+                    .mix(color_stroke_disabled, self.disabled)
+
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
+
                 return sdf.result
             }
         }
 
-        draw_text: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance empty: 0.0
-            instance disabled: 0.0
+        draw_text +: {
+            hover: instance(0.0)
+            focus: instance(0.0)
+            down: instance(0.0)
+            empty: instance(0.0)
+            disabled: instance(0.0)
 
-            color: (THEME_COLOR_TEXT)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
-            uniform color_down: (THEME_COLOR_TEXT_DOWN)
-            uniform color_disabled: (THEME_COLOR_TEXT_DISABLED)
-            uniform color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
-            uniform color_empty_hover: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
-            uniform color_empty_focus: (THEME_COLOR_TEXT_FOCUS)
+            color: theme.color_text
+            color_hover: uniform(theme.color_text_hover)
+            color_focus: uniform(theme.color_text_focus)
+            color_down: uniform(theme.color_text_down)
+            color_disabled: uniform(theme.color_text_disabled)
+            color_empty: uniform(theme.color_text_placeholder)
+            color_empty_hover: uniform(theme.color_text_placeholder_hover)
+            color_empty_focus: uniform(theme.color_text_focus)
 
-            text_style: <THEME_FONT_REGULAR> {
-                line_spacing: (THEME_FONT_WDGT_LINE_SPACING),
-                font_size: (THEME_FONT_SIZE_P)
+            text_style: theme.font_regular{
+                line_spacing: theme.font_wdgt_line_spacing
+                font_size: theme.font_size_p
             }
 
-            fn get_color(self) -> vec4 {
-                return
-                    mix( 
-                        mix(
-                            mix(
-                                mix(
-                                    self.color,
-                                    mix(
-                                        self.color_hover,
-                                        self.color_down,
-                                        self.down
-                                    ),
-                                    self.hover
-                                ),
-                                self.color_empty,
-                                self.empty
-                            ),
-                            self.color_focus,
-                            self.focus
-                        ),
-                        self.color_disabled,
-                        self.disabled
-                    )
+            get_color: fn() {
+                return self.color
+                    .mix(self.color_hover.mix(self.color_down, self.down), self.hover)
+                    .mix(self.color_empty, self.empty)
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_disabled, self.disabled)
             }
         }
 
-        draw_selection: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance empty: 0.0
-            instance disabled: 0.0
+        draw_selection +: {
+            hover: instance(0.0)
+            focus: instance(0.0)
+            down: instance(0.0)
+            empty: instance(0.0)
+            disabled: instance(0.0)
 
-            uniform color_dither: 1.0
-            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
-            uniform gradient_fill_horizontal: 0.0
+            color_dither: uniform(1.0)
+            border_radius: uniform(theme.textselection_corner_radius)
+            gradient_fill_horizontal: uniform(0.0)
 
-            uniform color: (THEME_COLOR_SELECTION)
-            uniform color_hover: (THEME_COLOR_SELECTION_HOVER)
-            uniform color_focus: (THEME_COLOR_SELECTION_FOCUS)
-            uniform color_down: (THEME_COLOR_SELECTION_DOWN)
-            uniform color_empty: (THEME_COLOR_SELECTION_EMPTY)
-            uniform color_disabled: (THEME_COLOR_SELECTION_DISABLED)
+            color: uniform(theme.color_selection)
+            color_hover: uniform(theme.color_selection_hover)
+            color_focus: uniform(theme.color_selection_focus)
+            color_down: uniform(theme.color_selection_down)
+            color_empty: uniform(theme.color_selection_empty)
+            color_disabled: uniform(theme.color_selection_disabled)
 
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_2_hover: (THEME_COLOR_SELECTION_HOVER)
-            uniform color_2_focus: (THEME_COLOR_SELECTION_FOCUS)
-            uniform color_2_down: (THEME_COLOR_SELECTION_DOWN)
-            uniform color_2_empty: (THEME_COLOR_SELECTION_EMPTY)
-            uniform color_2_disabled: (THEME_COLOR_SELECTION_DISABLED)
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_2_hover: uniform(theme.color_selection_hover)
+            color_2_focus: uniform(theme.color_selection_focus)
+            color_2_down: uniform(theme.color_selection_down)
+            color_2_empty: uniform(theme.color_selection_empty)
+            color_2_disabled: uniform(theme.color_selection_disabled)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let color_2 = self.color;
-                let color_2_hover = self.color_hover;
-                let color_2_focus = self.color_focus;
-                let color_2_down = self.color_down;
-                let color_2_empty = self.color_empty;
-                let color_2_disabled = self.color_disabled;
-
-                if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2;
-                    color_2_hover = self.color_2_hover;
-                    color_2_focus = self.color_2_focus;
-                    color_2_down = self.color_2_down;
-                    color_2_empty = self.color_2_empty;
-                    color_2_disabled = self.color_2_disabled;
-                }
-
-                let gradient_fill_dir = self.pos.y + dither;
-                if (self.gradient_fill_horizontal > 0.5) {
-                    gradient_fill_dir = self.pos.x + dither;
-                }
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
                 sdf.box(
-                    0.0,
-                    0.0,
-                    self.rect_size.x,
-                    self.rect_size.y,
+                    0.0
+                    0.0
+                    self.rect_size.x
+                    self.rect_size.y
                     self.border_radius
                 )
 
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color, color_2, gradient_fill_dir),
-                                    mix(self.color_empty, color_2_empty, gradient_fill_dir),
-                                    self.empty
-                                ),
-                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
-                                mix(self.color_down, color_2_down, gradient_fill_dir),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
-                        self.disabled
-                    )
-                );
-                return sdf.result;
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_focus = self.color_focus
+                let mut color_fill_down = self.color_down
+                let mut color_fill_empty = self.color_empty
+                let mut color_fill_disabled = self.color_disabled
+
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x + dither else self.pos.y + dither
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
+                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
+                    color_fill_empty = mix(self.color_empty, self.color_2_empty, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                }
+
+                let fill = color_fill
+                    .mix(color_fill_empty, self.empty)
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover.mix(color_fill_down, self.down), self.hover)
+                    .mix(color_fill_disabled, self.disabled)
+
+                sdf.fill(fill)
+                return sdf.result
             }
         }
 
-        draw_cursor: {
-            instance focus: 0.0
-            instance down: 0.0
-            instance empty: 0.0
-            instance disabled: 0.0
-            instance blink: 0.0
-            
-            uniform border_radius: 0.5
+        draw_cursor +: {
+            focus: instance(0.0)
+            down: instance(0.0)
+            empty: instance(0.0)
+            disabled: instance(0.0)
+            blink: instance(0.0)
 
-            uniform color: (THEME_COLOR_TEXT_CURSOR)
+            border_radius: uniform(0.5)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            color: uniform(theme.color_text_cursor)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(
-                    0.0,
-                    0.0,
-                    self.rect_size.x,
-                    self.rect_size.y,
+                    0.0
+                    0.0
+                    self.rect_size.x
+                    self.rect_size.y
                     self.border_radius
-                );
+                )
                 sdf.fill(
-                    mix(THEME_COLOR_U_HIDDEN, self.color, (1.0-self.blink) * self.focus)
-                );
-                return sdf.result;
+                    mix(theme.color_u_hidden, self.color, (1.0 - self.blink) * self.focus)
+                )
+                return sdf.result
             }
         }
 
-        animator: {
-            empty = {
-                default: off,
-                off = {
+        animator: Animator{
+            empty: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
                         draw_bg: {empty: 0.0}
@@ -394,7 +302,7 @@ live_design! {
                         draw_cursor: {empty: 0.0}
                     }
                 }
-                on = {
+                on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {empty: 1.0}
@@ -404,53 +312,53 @@ live_design! {
                     }
                 }
             }
-            blink = {
-                default: off
-                off = {
-                    from: {all: Forward {duration:0.05}}
-                    apply: {
-                        draw_cursor: {blink:0.0}
-                    }
-                }
-                on = {
+            blink: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.05}}
                     apply: {
-                        draw_cursor: {blink:1.0}
+                        draw_cursor: {blink: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink: 1.0}
                     }
                 }
             }
-            hover = {
-                default: off,
-                off = {
+            hover: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {down: 0.0, hover: 0.0}
                         draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
-                
-                on = {
+
+                on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
                         down: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {down: 0.0, hover: snap(1.0)}
+                        draw_text: {down: 0.0, hover: snap(1.0)}
                     }
                 }
-                
-                down = {
+
+                down: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {down: snap(1.0), hover: 1.0}
+                        draw_text: {down: snap(1.0), hover: 1.0}
                     }
                 }
             }
-            disabled = {
-                default: off,
-                off = {
+            disabled: {
+                default: @off
+                off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
                         draw_bg: {disabled: 0.0}
@@ -459,7 +367,7 @@ live_design! {
                         draw_cursor: {disabled: 0.0}
                     }
                 }
-                on = {
+                on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {disabled: 1.0}
@@ -469,175 +377,192 @@ live_design! {
                     }
                 }
             }
-            hover = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.1}}
+            focus: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.25}}
                     apply: {
-                        draw_bg: {down: 0.0, hover: 0.0}
-                        draw_text: {down: 0.0, hover: 0.0}
+                        draw_bg: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                        draw_cursor: {focus: 0.0}
+                        draw_selection: {focus: 0.0}
                     }
                 }
-                
-                on = {
-                    from: {
-                        all: Forward {duration: 0.1}
-                        down: Forward {duration: 0.01}
-                    }
+                on: AnimatorState{
+                    from: {all: Snap}
                     apply: {
-                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                    }
-                }
-                
-                down = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                    }
-                }
-            }
-            focus = {
-                default: off
-                off = {
-                    from: {
-                        all: Forward { duration: 0.25 }
-                    }
-                    apply: {
-                        draw_bg: { focus: 0.0 }
-                        draw_text: { focus: 0.0 },
-                        draw_cursor: { focus: 0.0 },
-                        draw_selection: { focus: 0.0 }
-                    }
-                }
-                on = {
-                    from: { all: Snap }
-                    apply: {
-                        draw_bg: { focus: 1.0 }
-                        draw_text: { focus: 1.0 }
-                        draw_cursor: { focus: 1.0 },
-                        draw_selection: { focus: 1.0 }
+                        draw_bg: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                        draw_cursor: {focus: 1.0}
+                        draw_selection: {focus: 1.0}
                     }
                 }
             }
         }
     }
 
-    pub TextInput = <TextInputFlat> {
-        draw_bg: {
-            border_color: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            border_color_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
-            border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+    mod.widgets.TextInput = mod.widgets.TextInputFlat{
+        draw_bg +: {
+            border_color: theme.color_bevel_inset_1
+            border_color_hover: theme.color_bevel_inset_1_hover
+            border_color_focus: theme.color_bevel_inset_1_focus
+            border_color_down: theme.color_bevel_inset_1_down
+            border_color_empty: theme.color_bevel_inset_1_empty
+            border_color_disabled: theme.color_bevel_inset_1_disabled
 
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_2: theme.color_bevel_inset_1
         }
     }
 
-    pub TextInputGradientX = <TextInput> {
-        draw_bg: {
-            gradient_border_horizontal: 1.0; 
-            gradient_fill_horizontal: 1.0; 
+    mod.widgets.TextInputGradientX = mod.widgets.TextInput{
+        draw_bg +: {
+            gradient_border_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
 
-            color: (THEME_COLOR_INSET_1)
-            color_hover: (THEME_COLOR_INSET_1_HOVER)
-            color_focus: (THEME_COLOR_INSET_1_FOCUS)
-            color_down: (THEME_COLOR_INSET_1_DOWN)
-            color_empty: (THEME_COLOR_INSET_1_EMPTY)
-            color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            color: theme.color_inset_1
+            color_hover: theme.color_inset_1_hover
+            color_focus: theme.color_inset_1_focus
+            color_down: theme.color_inset_1_down
+            color_empty: theme.color_inset_1_empty
+            color_disabled: theme.color_inset_1_disabled
 
-            color_2: (THEME_COLOR_INSET_2)
+            color_2: theme.color_inset_2
         }
 
-        draw_selection: {
-            gradient_fill_horizontal: 1.0; 
+        draw_selection +: {
+            gradient_fill_horizontal: 1.0
 
-            color: (THEME_COLOR_SELECTION)
-            color_hover: (THEME_COLOR_SELECTION_HOVER)
-            color_focus: (THEME_COLOR_SELECTION_FOCUS)
-            color_down: (THEME_COLOR_SELECTION_DOWN)
-            color_empty: (THEME_COLOR_SELECTION_EMPTY)
-            color_disabled: (THEME_COLOR_SELECTION_DISABLED)
+            color: theme.color_selection
+            color_hover: theme.color_selection_hover
+            color_focus: theme.color_selection_focus
+            color_down: theme.color_selection_down
+            color_empty: theme.color_selection_empty
+            color_disabled: theme.color_selection_disabled
 
-            color_2: (THEME_COLOR_SELECTION)
-            color_2_hover: (THEME_COLOR_SELECTION_HOVER)
-            color_2_focus: (THEME_COLOR_SELECTION_FOCUS)
-            color_2_down: (THEME_COLOR_SELECTION_DOWN)
-            color_2_empty: (THEME_COLOR_SELECTION_EMPTY)
-            color_2_disabled: (THEME_COLOR_SELECTION_DISABLED)
+            color_2: theme.color_selection
+            color_2_hover: theme.color_selection_hover
+            color_2_focus: theme.color_selection_focus
+            color_2_down: theme.color_selection_down
+            color_2_empty: theme.color_selection_empty
+            color_2_disabled: theme.color_selection_disabled
         }
     }
-        
 
-    pub TextInputGradientY = <TextInputGradientX> {
-        draw_bg: {
-            gradient_border_horizontal: 0.0; 
-            gradient_fill_horizontal: 0.0; 
+
+    mod.widgets.TextInputGradientY = mod.widgets.TextInputGradientX{
+        draw_bg +: {
+            gradient_border_horizontal: 0.0
+            gradient_fill_horizontal: 0.0
         }
 
-        draw_selection: {
-            gradient_fill_horizontal: 0.0; 
+        draw_selection +: {
+            gradient_fill_horizontal: 0.0
         }
     }
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, Widget, Animator)]
 pub struct TextInput {
-    #[animator] animator: Animator,
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[apply_default]
+    animator: Animator,
 
-    #[redraw] #[live] draw_bg: DrawColor,
-    #[live] draw_text: DrawText,
-    #[live] draw_selection: DrawQuad,
-    #[live] draw_cursor: DrawQuad,
+    #[redraw]
+    #[live]
+    draw_bg: DrawColor,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_selection: DrawQuad,
+    #[live]
+    draw_cursor: DrawQuad,
 
-    #[layout] layout: Layout,
-    #[walk] walk: Walk,
-    #[live] label_align: Align,
+    #[layout]
+    layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[live]
+    label_align: Align,
 
-    #[live] is_password: bool,
-    #[live] is_read_only: bool,
-    #[live] is_numeric_only: bool,
-    #[live] scroll_y: f64,
-    #[live] empty_text: String,
-    #[rust] text: String,
-    #[live(0.5)] blink_speed: f64,
+    #[live]
+    is_password: bool,
+    #[live]
+    is_read_only: bool,
+    #[live]
+    is_numeric_only: bool,
+    #[live]
+    scroll_y: f64,
+    #[live]
+    empty_text: String,
+    #[rust]
+    text: String,
+    #[live(0.5)]
+    blink_speed: f64,
 
-    #[rust] password_text: String,
-    #[rust] laidout_text: Option<Rc<LaidoutText>>,
-    #[rust] text_area: Area,
-    #[rust] selection: Selection,
-    #[rust] history: History,
-    #[rust] blink_timer: Timer,
-    #[rust] preserved_selection_cursor: Option<Cursor>,
+    #[rust]
+    password_text: String,
+    #[rust]
+    laidout_text: Option<Rc<LaidoutText>>,
+    #[rust]
+    text_area: Area,
+    #[rust]
+    selection: Selection,
+    #[rust]
+    history: History,
+    #[rust]
+    blink_timer: Timer,
+    #[rust]
+    preserved_selection_cursor: Option<Cursor>,
     /// Skip finger move after long press to prevent selection changes
-    #[rust] ignore_next_move: bool,
+    #[rust]
+    ignore_next_move: bool,
     /// IME composition tracking - byte index where composition starts
-    #[rust] composition_start: usize,
+    #[rust]
+    composition_start: usize,
     /// IME composition tracking - byte length of current composition
-    #[rust] composition_length: usize,
+    #[rust]
+    composition_length: usize,
+
+    #[live]
+    on_change: Option<ScriptFnRef>,
+    #[live]
+    on_return: Option<ScriptFnRef>,
 }
 
- impl LiveHook for TextInput{
-     fn apply_value_unknown(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        if nodes[index].id == live_id!(text){
-            if !apply.from.is_update_from_doc(){
-                return self.text.apply(cx, apply, index, nodes)
-            }
-        }
-        else{
-            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-        }
-        nodes.skip_node(index)
-     }
-     fn after_new_from_doc(&mut self, cx:&mut Cx){
-         self.check_text_is_empty(cx);
-     }
- }
+impl ScriptHook for TextInput {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.with_cx_mut(|cx| {
+            self.check_text_is_empty(cx);
+        });
+    }
+}
 
 impl TextInput {
+    fn emit_change(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        cx.widget_action(uid, TextInputAction::Changed(self.text.clone()));
+        if let Some(handler) = self.on_change.as_object() {
+            let text = self.text.clone();
+            cx.with_vm(|vm| {
+                let str_val = vm.bx.heap.new_string_from_str(&text);
+                vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+            });
+        }
+    }
+
+    fn emit_return(&mut self, cx: &mut Cx, uid: WidgetUid, mods: KeyModifiers) {
+        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
+        if let Some(handler) = self.on_return.as_object() {
+            let text = self.text.clone();
+            cx.with_vm(|vm| {
+                let str_val = vm.bx.heap.new_string_from_str(&text);
+                vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+            });
+        }
+    }
+
     pub fn is_password(&self) -> bool {
         self.is_password
     }
@@ -714,11 +639,11 @@ impl TextInput {
                 } else {
                     cursor
                 },
-                cursor
-            }
+                cursor,
+            },
         );
     }
-    
+
     pub fn selected_text(&self) -> &str {
         &self.text[self.selection.start().index..self.selection.end().index]
     }
@@ -746,7 +671,8 @@ impl TextInput {
         let Some(laidout_text) = self.laidout_text.as_ref() else {
             return Err(());
         };
-        let cursor = laidout_text.point_in_lpxs_to_cursor(point_in_lpxs / self.draw_text.font_scale);
+        let cursor =
+            laidout_text.point_in_lpxs_to_cursor(point_in_lpxs / self.draw_text.font_scale);
         Ok(self.password_cursor_to_cursor(cursor))
     }
 
@@ -789,7 +715,8 @@ impl TextInput {
         let grapheme_index = self.text[..index].graphemes(true).count();
         self.password_text
             .grapheme_indices(true)
-            .nth(grapheme_index).map_or(self.password_text.len(), |(index, _)| index)
+            .nth(grapheme_index)
+            .map_or(self.password_text.len(), |(index, _)| index)
     }
 
     fn password_index_to_index(&self, password_index: usize) -> usize {
@@ -799,7 +726,8 @@ impl TextInput {
         let grapheme_index = self.password_text[..password_index].graphemes(true).count();
         self.text
             .grapheme_indices(true)
-            .nth(grapheme_index).map_or(self.text.len(), |(index, _)| index)
+            .nth(grapheme_index)
+            .map_or(self.text.len(), |(index, _)| index)
     }
 
     fn inner_walk(&self) -> Walk {
@@ -817,11 +745,8 @@ impl TextInput {
         let text = if self.is_password {
             self.password_text.clear();
             for grapheme in self.text.graphemes(true) {
-                self.password_text.push(if grapheme == "\n" {
-                    '\n'
-                } else {
-                    '•'
-                });
+                self.password_text
+                    .push(if grapheme == "\n" { '\n' } else { '•' });
             }
             &self.password_text
         } else {
@@ -840,27 +765,20 @@ impl TextInput {
             0.0,
             max_width_in_lpxs,
             wrap,
-            self.label_align, 
-            text
+            self.label_align,
+            text,
         ));
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
         let inner_walk = self.inner_walk();
         let text_rect = if self.text.is_empty() {
-            self.draw_text.draw_walk(
-                cx,
-                inner_walk,
-                self.label_align,
-                &self.empty_text
-            )
+            self.draw_text
+                .draw_walk(cx, inner_walk, self.label_align, &self.empty_text)
         } else {
             let laidout_text = self.laidout_text.as_ref().unwrap();
-            self.draw_text.draw_walk_laidout(
-                cx,
-                inner_walk,
-                laidout_text,
-            )
+            self.draw_text
+                .draw_walk_laidout(cx, inner_walk, laidout_text)
         };
         cx.add_aligned_rect_area(&mut self.text_area, text_rect);
         text_rect
@@ -886,7 +804,8 @@ impl TextInput {
             (2.0 * self.draw_text.font_scale) as f64,
             ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64,
         );
-        self.draw_cursor.draw_abs(cx, cursor_rect.translate(text_rect.pos));
+        self.draw_cursor
+            .draw_abs(cx, cursor_rect.translate(text_rect.pos));
         cursor_rect
     }
 
@@ -897,9 +816,9 @@ impl TextInput {
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
 
         self.draw_selection.begin_many_instances(cx);
-        for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(
-            self.selection_to_password_selection(self.selection)
-        ) {
+        for SelectionRect { rect_in_lpxs, .. } in
+            laidout_text.selection_rects(self.selection_to_password_selection(self.selection))
+        {
             self.draw_selection.draw_abs(
                 cx,
                 rect(
@@ -907,7 +826,7 @@ impl TextInput {
                     text_rect.pos.y + (rect_in_lpxs.origin.y * self.draw_text.font_scale) as f64,
                     (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64,
                     (rect_in_lpxs.size.height * self.draw_text.font_scale) as f64,
-                )
+                ),
             );
         }
         self.draw_selection.end_many_instances(cx);
@@ -920,17 +839,26 @@ impl TextInput {
 
         // If no layout yet, return a small rect below the widget
         let Some(laidout_text) = self.laidout_text.as_ref() else {
-            return rect(widget_rect.pos.x, widget_rect.pos.y + widget_rect.size.y, 10.0, 20.0);
+            return rect(
+                widget_rect.pos.x,
+                widget_rect.pos.y + widget_rect.size.y,
+                10.0,
+                20.0,
+            );
         };
 
         // Get all selection rectangles
-        let selection_rects = laidout_text.selection_rects(
-            self.selection_to_password_selection(self.selection)
-        );
+        let selection_rects =
+            laidout_text.selection_rects(self.selection_to_password_selection(self.selection));
 
         if selection_rects.is_empty() {
             // No selection, return position below the widget
-            return rect(widget_rect.pos.x, widget_rect.pos.y + widget_rect.size.y, 10.0, 20.0);
+            return rect(
+                widget_rect.pos.x,
+                widget_rect.pos.y + widget_rect.size.y,
+                10.0,
+                20.0,
+            );
         }
 
         // Calculate bounding box of all selection rects
@@ -956,12 +884,7 @@ impl TextInput {
         let sel_width = ((max_x - min_x) * self.draw_text.font_scale) as f64;
         let sel_height = ((max_y - min_y) * self.draw_text.font_scale) as f64;
 
-        rect(
-            sel_x,
-            sel_y,
-            sel_width.max(10.0),
-            sel_height.max(20.0),
-        )
+        rect(sel_x, sel_y, sel_width.max(10.0), sel_height.max(20.0))
     }
 
     fn scroll_to_cursor(&mut self, cx: &mut Cx2d) {
@@ -996,10 +919,13 @@ impl TextInput {
         // Shift the align range of the turtle with the scroll position, but do not include the
         // begin entry, since that would also scroll the background.
         let align_range: TurtleAlignRange = cx.get_turtle_align_range();
-        cx.shift_align_range(&TurtleAlignRange {
-            start: align_range.start + 1,
-            end: align_range.end,
-        }, dvec2(0.0, -self.scroll_y));
+        cx.shift_align_range(
+            &TurtleAlignRange {
+                start: align_range.start + 1,
+                end: align_range.end,
+            },
+            dvec2(0.0, -self.scroll_y),
+        );
     }
 
     /// Moves the cursor one column to the left.
@@ -1013,7 +939,7 @@ impl TextInput {
                 index: prev_grapheme_boundary(&self.text, self.selection.cursor.index),
                 prefer_next_row: true,
             },
-            keep_selection
+            keep_selection,
         );
         !initial.index_eq(self.selection)
     }
@@ -1053,7 +979,7 @@ impl TextInput {
                 },
                 x_in_lpxs: position.x_in_lpxs,
             })?,
-            keep_selection
+            keep_selection,
         );
         Ok(!initial.index_eq(self.selection))
     }
@@ -1074,11 +1000,11 @@ impl TextInput {
                 row_index: if position.row_index == laidout_text.rows.len() - 1 {
                     laidout_text.rows.len() - 1
                 } else {
-                    position.row_index + 1 
+                    position.row_index + 1
                 },
                 x_in_lpxs: position.x_in_lpxs,
             })?,
-            keep_selection
+            keep_selection,
         );
         Ok(!initial.index_eq(self.selection))
     }
@@ -1087,16 +1013,22 @@ impl TextInput {
         self.set_selection(
             cx,
             Selection {
-                anchor: Cursor { index: 0, prefer_next_row: false },
-                cursor: Cursor { index: self.text.len(), prefer_next_row: false },
-            }
+                anchor: Cursor {
+                    index: 0,
+                    prefer_next_row: false,
+                },
+                cursor: Cursor {
+                    index: self.text.len(),
+                    prefer_next_row: false,
+                },
+            },
         );
     }
 
     pub fn select_word(&mut self, cx: &mut Cx) {
-        if self.selection.cursor.index < self.selection.anchor.index { 
+        if self.selection.cursor.index < self.selection.anchor.index {
             self.set_cursor(
-                cx, 
+                cx,
                 Cursor {
                     index: self.ceil_word_boundary(self.selection.cursor.index),
                     prefer_next_row: true,
@@ -1123,7 +1055,7 @@ impl TextInput {
                     cursor: Cursor {
                         index: self.floor_word_boundary(self.selection.cursor.index),
                         prefer_next_row: false,
-                    }
+                    },
                 },
             );
         }
@@ -1133,7 +1065,7 @@ impl TextInput {
         self.history.force_new_edit_group();
     }
 
-    fn handle_focus_lost(&mut self, cx: &mut Cx, scope_path: &HeapLiveIdPath, uid: WidgetUid) {
+    fn handle_focus_lost(&mut self, cx: &mut Cx, uid: WidgetUid) {
         self.animator_play(cx, ids!(focus.off));
         self.animator_play(cx, ids!(blink.on));
         cx.stop_timer(self.blink_timer);
@@ -1145,7 +1077,7 @@ impl TextInput {
             }
             _ => {}
         }
-        cx.widget_action(uid, scope_path, TextInputAction::KeyFocusLost);
+        cx.widget_action(uid, TextInputAction::KeyFocusLost);
     }
 
     fn ceil_word_boundary(&self, index: usize) -> usize {
@@ -1172,33 +1104,35 @@ impl TextInput {
 
     fn filter_input(&self, input: &str, is_set_text: bool) -> String {
         // strip out escape sequences and tabs sometimes sent from the IME
-        if input.len() == 1 && input.chars().next().unwrap() <= '\u{1d}'{
+        if input.len() == 1 && input.chars().next().unwrap() <= '\u{1d}' {
             return String::new();
         }
         if self.is_numeric_only {
             let mut contains_dot = if is_set_text {
-                false   
+                false
             } else {
                 let before_selection = self.text[..self.selection.start().index].to_string();
                 let after_selection = self.text[self.selection.end().index..].to_string();
                 before_selection.contains('.') || after_selection.contains('.')
             };
-            input.chars().filter(|char| {
-                match char {
+            input
+                .chars()
+                .filter(|char| match char {
                     '.' | ',' if !contains_dot => {
                         contains_dot = true;
                         true
-                    },
+                    }
                     char => char.is_ascii_digit(),
-                }
-            }).collect()
+                })
+                .collect()
         } else {
             input.to_string()
         }
     }
 
     fn create_or_extend_edit_group(&mut self, edit_kind: EditKind) {
-        self.history.create_or_extend_edit_group(edit_kind, self.selection);
+        self.history
+            .create_or_extend_edit_group(edit_kind, self.selection);
     }
 
     fn apply_edit(&mut self, cx: &mut Cx, edit: Edit) {
@@ -1238,15 +1172,42 @@ impl TextInput {
             self.animator_play(cx, ids!(empty.off));
         }
     }
-    
 }
 
 impl Widget for TextInput {
-        
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(&self.text);
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let str_val = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let new_text = vm
+                    .bx
+                    .heap
+                    .string_mut_self_with(str_val, |_, s| s.to_string());
+                if let Some(new_text) = new_text {
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn text(&self) -> String {
         self.text.clone()
     }
-    
+
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
         self.text = self.filter_input(text, true);
         self.set_selection(
@@ -1259,15 +1220,15 @@ impl Widget for TextInput {
                 cursor: Cursor {
                     index: self.selection.cursor.index.min(self.text.len()),
                     prefer_next_row: self.selection.cursor.prefer_next_row,
-                }
-            }
+                },
+            },
         );
         self.history.clear();
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
         self.check_text_is_empty(cx);
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_selection.append_to_draw_call(cx);
@@ -1281,24 +1242,31 @@ impl Widget for TextInput {
             let cursor_bottom_pos = cursor_rect.pos + cursor_rect.size;
             cx.show_text_ime(
                 self.draw_bg.area(),
-                dvec2(cursor_bottom_pos.x, cursor_bottom_pos.y - self.scroll_y)
+                dvec2(cursor_bottom_pos.x, cursor_bottom_pos.y - self.scroll_y),
             );
         }
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
     }
 
-    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.animator_toggle(
+            cx,
+            disabled,
+            Animate::Yes,
+            ids!(disabled.on),
+            ids!(disabled.off),
+        );
     }
-                
-    fn disabled(&self, cx:&Cx) -> bool {
+
+    fn disabled(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
+            self.draw_cursor.redraw(cx);
         }
 
         if self.blink_timer.is_event(event).is_some() {
@@ -1307,19 +1275,21 @@ impl Widget for TextInput {
             } else {
                 self.animator_play(cx, ids!(blink.off));
             }
+            self.draw_cursor.redraw(cx);
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
 
         let uid = self.widget_uid();
 
         // Self-detect focus loss from taps outside our area
-        if cx.has_key_focus(self.draw_bg.area()) {
+        // But NOT if we've captured the finger (e.g., during a selection drag that ends outside)
+        if cx.has_key_focus(self.draw_bg.area())
+            && !cx.fingers.is_area_captured(self.draw_bg.area())
+        {
             let rect = self.draw_bg.area().rect(cx);
             let should_lose_focus = match event {
                 // Handle desktop mouse clicks
-                Event::MouseUp(mu) => {
-                    !rect.contains(mu.abs)
-                }
+                Event::MouseUp(mu) => !rect.contains(mu.abs),
                 // Handle mobile touch events
                 Event::TouchUpdate(tu) => {
                     // Check if any touch ended outside our area
@@ -1327,19 +1297,20 @@ impl Widget for TextInput {
                         matches!(touch.state, TouchState::Stop) && !rect.contains(touch.abs)
                     })
                 }
-                _ => false
+                _ => false,
             };
 
             if should_lose_focus {
                 // Update focus state in cx
                 cx.set_key_focus(Area::Empty);
                 // Handle focus loss locally
-                self.handle_focus_lost(cx, &scope.path, uid);
+                self.handle_focus_lost(cx, uid);
             }
         }
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Text);
                 self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
@@ -1348,77 +1319,91 @@ impl Widget for TextInput {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
-                // Sync text to iOS for autocorrect context
-                cx.set_ime_text(&self.text, self.selection.cursor.index);
-                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
-            },
-            Hit::KeyFocusLost(_) => {
-                self.handle_focus_lost(cx, &scope.path, uid);
+                cx.widget_action(uid, TextInputAction::KeyFocus);
             }
-            Hit::KeyDown(kev @ KeyEvent {
-                key_code: KeyCode::ArrowLeft,
-                modifiers: KeyModifiers {
-                    shift: keep_selection,
-                    logo: false,
-                    alt: false,
-                    control: false
+            Hit::KeyFocusLost(_) => {
+                self.handle_focus_lost(cx, uid);
+            }
+            Hit::KeyDown(
+                kev @ KeyEvent {
+                    key_code: KeyCode::ArrowLeft,
+                    modifiers:
+                        KeyModifiers {
+                            shift: keep_selection,
+                            logo: false,
+                            alt: false,
+                            control: false,
+                        },
+                    ..
                 },
-                ..
-            }) => {
+            ) => {
                 self.reset_blink_timer(cx);
                 let did_move = self.move_cursor_left(cx, keep_selection);
                 if !did_move {
-                    cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev));
+                    cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev));
                 }
             }
-            Hit::KeyDown(kev @ KeyEvent {
-                key_code: KeyCode::ArrowRight,
-                modifiers: KeyModifiers {
-                    shift: keep_selection,
-                    logo: false,
-                    alt: false,
-                    control: false
+            Hit::KeyDown(
+                kev @ KeyEvent {
+                    key_code: KeyCode::ArrowRight,
+                    modifiers:
+                        KeyModifiers {
+                            shift: keep_selection,
+                            logo: false,
+                            alt: false,
+                            control: false,
+                        },
+                    ..
                 },
-                ..
-            }) => {
+            ) => {
                 self.reset_blink_timer(cx);
                 let did_move = self.move_cursor_right(cx, keep_selection);
                 if !did_move {
-                    cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev));
+                    cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev));
                 }
             }
-            Hit::KeyDown(kev @ KeyEvent {
-                key_code: KeyCode::ArrowUp,
-                modifiers: KeyModifiers {
-                    shift: keep_selection,
-                    logo: false,
-                    alt: false,
-                    control: false
+            Hit::KeyDown(
+                kev @ KeyEvent {
+                    key_code: KeyCode::ArrowUp,
+                    modifiers:
+                        KeyModifiers {
+                            shift: keep_selection,
+                            logo: false,
+                            alt: false,
+                            control: false,
+                        },
+                    ..
                 },
-                ..
-            }) => {
+            ) => {
                 self.reset_blink_timer(cx);
                 match self.move_cursor_up(cx, keep_selection) {
-                    Ok(true) => { }
-                    Ok(false) => cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev)),
-                    Err(_) => warning!("can't move cursor up because layout was invalidated by earlier event"),
+                    Ok(true) => {}
+                    Ok(false) => cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev)),
+                    Err(_) => warning!(
+                        "can't move cursor up because layout was invalidated by earlier event"
+                    ),
                 }
-            },
-            Hit::KeyDown(kev @ KeyEvent {
-                key_code: KeyCode::ArrowDown,
-                modifiers: KeyModifiers {
-                    shift: keep_selection,
-                    logo: false,
-                    alt: false,
-                    control: false
+            }
+            Hit::KeyDown(
+                kev @ KeyEvent {
+                    key_code: KeyCode::ArrowDown,
+                    modifiers:
+                        KeyModifiers {
+                            shift: keep_selection,
+                            logo: false,
+                            alt: false,
+                            control: false,
+                        },
+                    ..
                 },
-                ..
-            }) => {
+            ) => {
                 self.reset_blink_timer(cx);
                 match self.move_cursor_down(cx, keep_selection) {
-                    Ok(true) => { }
-                    Ok(false) => cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev)),
-                    Err(_) => warning!("can't move cursor down because layout was invalidated by earlier event"),
+                    Ok(true) => {}
+                    Ok(false) => cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev)),
+                    Err(_) => warning!(
+                        "can't move cursor down because layout was invalidated by earlier event"
+                    ),
                 }
             }
             Hit::KeyDown(KeyEvent {
@@ -1445,9 +1430,9 @@ impl Widget for TextInput {
                 self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
-                let Ok(cursor) = self.point_in_lpxs_to_cursor(
-                    Point::new(rel.x as f32, rel.y as f32)
-                ) else {
+                let Ok(cursor) =
+                    self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
+                else {
                     warning!("can't move cursor because layout was invalidated by earlier event");
                     return;
                 };
@@ -1475,7 +1460,11 @@ impl Widget for TextInput {
                         if device.is_touch() {
                             let has_selection = !self.selected_text().is_empty();
                             let selection_rect = self.get_selection_rect(cx);
-                            cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
+                            cx.show_clipboard_actions(
+                                has_selection,
+                                selection_rect,
+                                cx.keyboard_shift,
+                            );
                         }
                     }
                     3 => {
@@ -1483,7 +1472,11 @@ impl Widget for TextInput {
                         if device.is_touch() {
                             let has_selection = !self.selected_text().is_empty();
                             let selection_rect = self.get_selection_rect(cx);
-                            cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
+                            cx.show_clipboard_actions(
+                                has_selection,
+                                selection_rect,
+                                cx.keyboard_shift,
+                            );
                         }
                     }
                     _ => {}
@@ -1517,9 +1510,9 @@ impl Widget for TextInput {
 
                 // Select word at long press position
                 let rel = lp.abs - self.text_area.rect(cx).pos;
-                if let Ok(cursor) = self.point_in_lpxs_to_cursor(
-                    Point::new(rel.x as f32, rel.y as f32)
-                ) {
+                if let Ok(cursor) =
+                    self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
+                {
                     // Check if cursor is over actual text
                     if cursor.index < self.text.len() {
                         self.set_cursor(cx, cursor, false);
@@ -1557,17 +1550,13 @@ impl Widget for TextInput {
                 self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
-                let Ok(cursor) = self.point_in_lpxs_to_cursor(
-                    Point::new(rel.x as f32, rel.y as f32)
-                ) else {
+                let Ok(cursor) =
+                    self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
+                else {
                     warning!("can't move cursor because layout was invalidated by earlier event");
                     return;
                 };
-                self.set_cursor(
-                    cx,
-                    cursor,
-                    true
-                );
+                self.set_cursor(cx, cursor, true);
                 match tap_count {
                     2 => self.select_word(cx),
                     3 => self.select_all(cx),
@@ -1576,35 +1565,22 @@ impl Widget for TextInput {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
-                modifiers: mods @ KeyModifiers {
-                    shift: false,
-                    ..
-                },
+                modifiers: mods @ KeyModifiers { shift: false, .. },
                 ..
             }) => {
                 cx.hide_text_ime();
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Returned(
-                        self.text.clone(),
-                        mods,
-                    ),
-                );
-            },
+                self.emit_return(cx, uid, mods);
+            }
 
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
-                cx.widget_action(uid, &scope.path, TextInputAction::Escaped);
+                cx.widget_action(uid, TextInputAction::Escaped);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
-                modifiers: KeyModifiers {
-                    shift: true,
-                    ..
-                },
+                modifiers: KeyModifiers { shift: true, .. },
                 ..
             }) if !self.is_read_only => {
                 self.reset_blink_timer(cx);
@@ -1615,10 +1591,10 @@ impl Widget for TextInput {
                         start: self.selection.start().index,
                         end: self.selection.end().index,
                         replace_with: "\n".to_string(),
-                    }
+                    },
                 );
                 self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                self.emit_change(cx, uid);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -1637,10 +1613,10 @@ impl Widget for TextInput {
                         start,
                         end,
                         replace_with: String::new(),
-                    }
+                    },
                 );
                 self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                self.emit_change(cx, uid);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
@@ -1659,38 +1635,32 @@ impl Widget for TextInput {
                         start,
                         end,
                         replace_with: String::new(),
-                    }
+                    },
                 );
                 self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                self.emit_change(cx, uid);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: modifiers @ KeyModifiers {
-                    shift: false,
-                    ..
-                },
+                modifiers: modifiers @ KeyModifiers { shift: false, .. },
                 ..
             }) if modifiers.is_primary() && !self.is_read_only => {
                 if !self.undo(cx) {
                     return;
                 }
                 self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                self.emit_change(cx, uid);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: modifiers @ KeyModifiers {
-                    shift: true,
-                    ..
-                },
+                modifiers: modifiers @ KeyModifiers { shift: true, .. },
                 ..
             }) if modifiers.is_primary() && !self.is_read_only => {
                 if !self.redo(cx) {
                     return;
                 }
                 self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                self.emit_change(cx, uid);
             }
             Hit::TextInput(TextInputEvent {
                 input,
@@ -1709,12 +1679,12 @@ impl Widget for TextInput {
                             Edit {
                                 start: self.composition_start,
                                 end: self.composition_start + self.composition_length,
-                                replace_with: String::new()
-                            }
+                                replace_with: String::new(),
+                            },
                         );
                         self.composition_length = 0;
                         self.draw_bg.redraw(cx);
-                        cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                        self.emit_change(cx, uid);
                     }
                     return;
                 }
@@ -1729,8 +1699,8 @@ impl Widget for TextInput {
                             Edit {
                                 start: self.composition_start,
                                 end: self.composition_start + self.composition_length,
-                                replace_with: input.clone()
-                            }
+                                replace_with: input.clone(),
+                            },
                         );
                         self.composition_length = input.len();
                     } else {
@@ -1743,8 +1713,8 @@ impl Widget for TextInput {
                             Edit {
                                 start: self.selection.start().index,
                                 end: self.selection.end().index,
-                                replace_with: input
-                            }
+                                replace_with: input,
+                            },
                         );
                     }
                 } else {
@@ -1757,41 +1727,43 @@ impl Widget for TextInput {
                             Edit {
                                 start: self.composition_start,
                                 end: self.composition_start + self.composition_length,
-                                replace_with: input
-                            }
+                                replace_with: input,
+                            },
                         );
                         self.composition_length = 0;
                     } else {
                         // Normal text input (no active composition)
-                        self.create_or_extend_edit_group(
-                            if was_paste {
-                                EditKind::Other
-                            } else {
-                                EditKind::Insert
-                            }
-                        );
+                        self.create_or_extend_edit_group(if was_paste {
+                            EditKind::Other
+                        } else {
+                            EditKind::Insert
+                        });
                         self.apply_edit(
                             cx,
                             Edit {
                                 start: self.selection.start().index,
                                 end: self.selection.end().index,
-                                replace_with: input
-                            }
+                                replace_with: input,
+                            },
                         );
                     }
                 }
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                self.emit_change(cx, uid);
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
                 // iOS autocorrect sends range replacement events
                 // Convert character indices to byte indices
-                let byte_start = self.text.char_indices()
+                let byte_start = self
+                    .text
+                    .char_indices()
                     .nth(event.start)
                     .map(|(i, _)| i)
                     .unwrap_or(self.text.len());
-                let byte_end = self.text.char_indices()
+                let byte_end = self
+                    .text
+                    .char_indices()
                     .nth(event.end)
                     .map(|(i, _)| i)
                     .unwrap_or(self.text.len());
@@ -1806,13 +1778,13 @@ impl Widget for TextInput {
                     Edit {
                         start: byte_start,
                         end: byte_end,
-                        replace_with: event.text.clone()
-                    }
+                        replace_with: event.text.clone(),
+                    },
                 );
 
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                self.emit_change(cx, uid);
             }
             Hit::TextCopy(event) => {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());
@@ -1820,21 +1792,22 @@ impl Widget for TextInput {
             Hit::TextCut(event) => {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());
                 if !self.selected_text().is_empty() {
-                    self.history.create_or_extend_edit_group(EditKind::Other, self.selection);
+                    self.history
+                        .create_or_extend_edit_group(EditKind::Other, self.selection);
                     self.apply_edit(
                         cx,
                         Edit {
                             start: self.selection.start().index,
                             end: self.selection.end().index,
                             replace_with: String::new(),
-                        }
+                        },
                     );
                     self.draw_bg.redraw(cx);
-                    cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                    self.emit_change(cx, uid);
                 }
             }
             Hit::KeyDown(event) => {
-                cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(event));
+                cx.widget_action(uid, TextInputAction::KeyDownUnhandled(event));
             }
             _ => {}
         }
@@ -1843,133 +1816,126 @@ impl Widget for TextInput {
 
 impl TextInputRef {
     pub fn is_password(&self) -> bool {
-        if let Some(inner) = self.borrow(){
+        if let Some(inner) = self.borrow() {
             inner.is_password()
-        }
-        else{
+        } else {
             false
         }
     }
- 
+
     pub fn set_is_password(&self, cx: &mut Cx, is_password: bool) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.set_is_password(cx, is_password);
         }
     }
- 
+
     pub fn toggle_is_password(&self, cx: &mut Cx) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.toggle_is_password(cx);
         }
     }
 
     pub fn is_read_only(&self) -> bool {
-        if let Some(inner) = self.borrow(){
+        if let Some(inner) = self.borrow() {
             inner.is_read_only()
-        }
-        else{
+        } else {
             false
         }
     }
 
     pub fn set_is_read_only(&self, cx: &mut Cx, is_read_only: bool) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.set_is_read_only(cx, is_read_only);
         }
     }
 
     pub fn toggle_is_read_only(&self, cx: &mut Cx) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.toggle_is_read_only(cx);
         }
     }
 
     pub fn is_numeric_only(&self) -> bool {
-        if let Some(inner) = self.borrow(){
+        if let Some(inner) = self.borrow() {
             inner.is_numeric_only()
-        }
-        else{
+        } else {
             false
         }
     }
 
     pub fn set_is_numeric_only(&self, cx: &mut Cx, is_numeric_only: bool) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.set_is_numeric_only(cx, is_numeric_only);
         }
     }
 
     pub fn toggle_is_numeric_only(&self, cx: &mut Cx) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.toggle_is_numeric_only(cx);
         }
     }
 
     pub fn empty_text(&self) -> String {
-        if let Some(inner) = self.borrow(){
+        if let Some(inner) = self.borrow() {
             inner.empty_text().to_string()
-        }
-        else{
+        } else {
             String::new()
         }
     }
 
     pub fn set_empty_text(&self, cx: &mut Cx, empty_text: String) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.set_empty_text(cx, empty_text);
         }
     }
 
     pub fn selection(&self) -> Selection {
-        if let Some(inner) = self.borrow(){
+        if let Some(inner) = self.borrow() {
             inner.selection()
-        }
-        else{
+        } else {
             Default::default()
         }
     }
 
     pub fn set_selection(&self, cx: &mut Cx, selection: Selection) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.set_selection(cx, selection);
         }
     }
 
     pub fn cursor(&self) -> Cursor {
-        if let Some(inner) = self.borrow(){
+        if let Some(inner) = self.borrow() {
             inner.cursor()
-        }
-        else{
+        } else {
             Default::default()
         }
     }
 
     pub fn set_cursor(&self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.set_cursor(cx, cursor, keep_selection);
         }
     }
 
     pub fn selected_text(&self) -> String {
-        if let Some(inner) = self.borrow(){
+        if let Some(inner) = self.borrow() {
             inner.selected_text().to_string()
-        }
-        else{
+        } else {
             String::new()
         }
     }
 
     pub fn returned(&self, actions: &Actions) -> Option<(String, KeyModifiers)> {
-        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()){
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
             if let TextInputAction::Returned(text, modifiers) = action {
                 return Some((text, modifiers));
             }
         }
         None
     }
-    
+
     pub fn escaped(&self, actions: &Actions) -> bool {
-        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()){
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
             if let TextInputAction::Escaped = action {
                 return true;
             }
@@ -1978,8 +1944,8 @@ impl TextInputRef {
     }
 
     pub fn changed(&self, actions: &Actions) -> Option<String> {
-        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()){
-            if let TextInputAction::Changed(text) = action{
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
+            if let TextInputAction::Changed(text) = action {
                 return Some(text);
             }
         }
@@ -1987,8 +1953,8 @@ impl TextInputRef {
     }
 
     pub fn key_down_unhandled(&self, actions: &Actions) -> Option<KeyEvent> {
-        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()){
-            if let TextInputAction::KeyDownUnhandled(event) = action{
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
+            if let TextInputAction::KeyDownUnhandled(event) = action {
                 return Some(event);
             }
         }
@@ -2032,8 +1998,9 @@ pub struct TextInputState {
     history: History,
 }
 
-#[derive(Clone, Debug, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum TextInputAction {
+    #[default]
     None,
     KeyFocus,
     KeyFocusLost,
@@ -2057,7 +2024,9 @@ impl History {
     }
 
     fn create_or_extend_edit_group(&mut self, edit_kind: EditKind, selection: Selection) {
-        if !self.current_edit_kind.map_or(false, |current_edit_kind| current_edit_kind.can_merge_with(edit_kind)) {
+        if !self.current_edit_kind.map_or(false, |current_edit_kind| {
+            current_edit_kind.can_merge_with(edit_kind)
+        }) {
             self.undo_stack.push_edit_group(selection);
             self.current_edit_kind = Some(edit_kind);
         }
@@ -2070,11 +2039,7 @@ impl History {
         self.redo_stack.clear();
     }
 
-    fn undo(
-        &mut self,
-        selection: Selection,
-        text: &mut String,
-    ) -> Option<Selection> {
+    fn undo(&mut self, selection: Selection, text: &mut String) -> Option<Selection> {
         if let Some((new_selection, edits)) = self.undo_stack.pop_edit_group() {
             self.redo_stack.push_edit_group(selection);
             for edit in &edits {
@@ -2089,11 +2054,7 @@ impl History {
         }
     }
 
-    fn redo(
-        &mut self,
-        selection: Selection,
-        text: &mut String,
-    ) -> Option<Selection> {
+    fn redo(&mut self, selection: Selection, text: &mut String) -> Option<Selection> {
         if let Some((new_selection, edits)) = self.redo_stack.pop_edit_group() {
             self.undo_stack.push_edit_group(selection);
             for edit in &edits {
@@ -2148,21 +2109,21 @@ impl EditStack {
             edit_start: self.edits.len(),
         });
     }
-    
+
     fn push_edit(&mut self, edit: Edit) {
         self.edits.push(edit);
     }
-    
+
     fn pop_edit_group(&mut self) -> Option<(Selection, Vec<Edit>)> {
         match self.edit_groups.pop() {
             Some(edit_group) => Some((
                 edit_group.selection,
-                self.edits.drain(edit_group.edit_start..).rev().collect()
+                self.edits.drain(edit_group.edit_start..).rev().collect(),
             )),
             None => None,
         }
     }
-    
+
     fn clear(&mut self) {
         self.edit_groups.clear();
         self.edits.clear();
@@ -2173,7 +2134,7 @@ impl EditStack {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct EditGroup {
     selection: Selection,
-    edit_start: usize
+    edit_start: usize,
 }
 
 #[derive(Clone, Debug)]

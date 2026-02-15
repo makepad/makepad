@@ -54,7 +54,7 @@ pub enum ColorSpace {
     ///
     /// For operations, multi-band images are assumed to be n-channel images with no alpha
     /// to allow for generic processing, without necessarily caring for the underlying interpretation
-    MultiBand(core::num::NonZeroU32)
+    MultiBand(core::num::NonZeroU32),
 }
 
 impl ColorSpace {
@@ -68,7 +68,7 @@ impl ColorSpace {
             Self::Luma => 1,
             Self::LumaA => 2,
             Self::Unknown => 0,
-            Self::MultiBand(n) => n.get() as usize
+            Self::MultiBand(n) => n.get() as usize,
         }
     }
 
@@ -96,7 +96,7 @@ impl ColorSpace {
             ColorSpace::LumaA => Some(1),
             ColorSpace::BGRA => Some(3),
             ColorSpace::ARGB => Some(0),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -117,7 +117,7 @@ pub static ALL_COLORSPACES: [ColorSpace; 12] = [
     ColorSpace::YCbCr,
     ColorSpace::ARGB,
     ColorSpace::HSL,
-    ColorSpace::HSV
+    ColorSpace::HSV,
 ];
 
 /// Color characteristics
@@ -148,7 +148,7 @@ pub enum ColorCharacteristics {
     /// IEC 61966 Transfer function
     Iec61966,
     /// Linear transfer function
-    Linear
+    Linear,
 }
 /// Represents a single channel color primary.
 ///
@@ -158,18 +158,18 @@ pub enum ColorCharacteristics {
 pub struct SingleColorPrimary {
     pub x: f64,
     pub y: f64,
-    pub z: f64
+    pub z: f64,
 }
 /// A collection of red,green and blue color primaries placed
 /// in one struct for easy manipulation
 #[derive(Default, Debug, Copy, Clone)]
 pub struct ColorPrimaries {
     /// Red color primaries
-    pub red:   SingleColorPrimary,
+    pub red: SingleColorPrimary,
     /// Green color primaries
     pub green: SingleColorPrimary,
     /// Blue color primaries
-    pub blue:  SingleColorPrimary
+    pub blue: SingleColorPrimary,
 }
 
 /// Rendering intents indicate what one may want to do with colors outside of it's gamut
@@ -183,5 +183,5 @@ pub enum RenderingIntent {
     AbsoluteColorimetric,
     Saturation,
     RelativeColorimetric,
-    Perceptual
+    Perceptual,
 }

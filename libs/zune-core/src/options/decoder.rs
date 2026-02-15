@@ -24,22 +24,22 @@ fn decoder_error_tolerance_mode() -> DecoderFlags {
 /// Disables png adler and crc checking.
 fn fast_options() -> DecoderFlags {
     DecoderFlags {
-        inflate_confirm_adler:        false,
-        png_confirm_crc:              false,
+        inflate_confirm_adler: false,
+        png_confirm_crc: false,
         jpg_error_on_non_conformance: false,
 
         zune_use_unsafe: true,
-        zune_use_neon:   true,
-        zune_use_avx:    true,
-        zune_use_avx2:   true,
-        zune_use_sse2:   true,
-        zune_use_sse3:   true,
-        zune_use_sse41:  true,
+        zune_use_neon: true,
+        zune_use_avx: true,
+        zune_use_avx2: true,
+        zune_use_sse2: true,
+        zune_use_sse3: true,
+        zune_use_sse41: true,
 
-        png_add_alpha_channel:     false,
+        png_add_alpha_channel: false,
         png_strip_16_bit_to_8_bit: false,
-        png_decode_animated:       true,
-        jxl_decode_animated:       true
+        png_decode_animated: true,
+        jxl_decode_animated: true,
     }
 }
 
@@ -51,23 +51,23 @@ fn fast_options() -> DecoderFlags {
 /// - Use unsafe paths
 fn cmd_options() -> DecoderFlags {
     DecoderFlags {
-        inflate_confirm_adler:        false,
-        png_confirm_crc:              false,
+        inflate_confirm_adler: false,
+        png_confirm_crc: false,
         jpg_error_on_non_conformance: false,
 
         zune_use_unsafe: true,
-        zune_use_neon:   true,
-        zune_use_avx:    true,
-        zune_use_avx2:   true,
-        zune_use_sse2:   true,
-        zune_use_sse3:   true,
-        zune_use_sse41:  true,
+        zune_use_neon: true,
+        zune_use_avx: true,
+        zune_use_avx2: true,
+        zune_use_sse2: true,
+        zune_use_sse3: true,
+        zune_use_sse41: true,
 
-        png_add_alpha_channel:     false,
+        png_add_alpha_channel: false,
         png_strip_16_bit_to_8_bit: false,
 
         png_decode_animated: true,
-        jxl_decode_animated: true
+        jxl_decode_animated: true,
     }
 }
 
@@ -78,37 +78,37 @@ fn cmd_options() -> DecoderFlags {
 #[derive(Copy, Debug, Clone, Default)]
 pub struct DecoderFlags {
     /// Whether the decoder should confirm and report adler mismatch
-    inflate_confirm_adler:        bool,
+    inflate_confirm_adler: bool,
     /// Whether the PNG decoder should confirm crc
-    png_confirm_crc:              bool,
+    png_confirm_crc: bool,
     /// Whether the png decoder should error out on image non-conformance
     jpg_error_on_non_conformance: bool,
     /// Whether the decoder should use unsafe  platform specific intrinsics
     ///
     /// This will also shut down platform specific intrinsics `(ZUNE_USE_{EXT})` value
-    zune_use_unsafe:              bool,
+    zune_use_unsafe: bool,
     /// Whether we should use SSE2.
     ///
     /// This should be enabled for all x64 platforms but can be turned off if
     /// `ZUNE_USE_UNSAFE` is false
-    zune_use_sse2:                bool,
+    zune_use_sse2: bool,
     /// Whether we should use SSE3 instructions where possible.
-    zune_use_sse3:                bool,
+    zune_use_sse3: bool,
     /// Whether we should use sse4.1 instructions where possible.
-    zune_use_sse41:               bool,
+    zune_use_sse41: bool,
     /// Whether we should use avx instructions where possible.
-    zune_use_avx:                 bool,
+    zune_use_avx: bool,
     /// Whether we should use avx2 instructions where possible.
-    zune_use_avx2:                bool,
+    zune_use_avx2: bool,
     /// Whether the png decoder should add alpha channel where possible.
-    png_add_alpha_channel:        bool,
+    png_add_alpha_channel: bool,
     /// Whether we should use neon instructions where possible.
-    zune_use_neon:                bool,
+    zune_use_neon: bool,
     /// Whether the png decoder should strip 16 bit to 8 bit
-    png_strip_16_bit_to_8_bit:    bool,
+    png_strip_16_bit_to_8_bit: bool,
     /// Decode all frames for an animated images
-    png_decode_animated:          bool,
-    jxl_decode_animated:          bool
+    png_decode_animated: bool,
+    jxl_decode_animated: bool,
 }
 
 /// Decoder options
@@ -122,14 +122,14 @@ pub struct DecoderOptions {
     ///
     /// - Default value: 16384
     /// - Respected by: `all decoders`
-    max_width:      usize,
+    max_width: usize,
     /// Maximum height for which decoders will not
     /// try to decode images larger than the
     /// specified height
     ///
     /// - Default value: 16384
     /// - Respected by: `all decoders`
-    max_height:     usize,
+    max_height: usize,
     /// Output colorspace
     ///
     /// The jpeg decoder allows conversion to a separate colorspace
@@ -149,15 +149,15 @@ pub struct DecoderOptions {
     ///
     /// - Default value:100
     /// - Respected by: `jpeg`
-    max_scans:     usize,
+    max_scans: usize,
     /// Maximum size for deflate.
     /// Respected by all decoders that use inflate/deflate
     deflate_limit: usize,
     /// Boolean flags that influence decoding
-    flags:         DecoderFlags,
+    flags: DecoderFlags,
     /// The byte endian of the returned bytes will be stored in
     /// in case a single pixel spans more than a byte
-    endianness:    ByteEndian
+    endianness: ByteEndian,
 }
 
 /// Initializers
@@ -655,12 +655,12 @@ impl Default for DecoderOptions {
     fn default() -> Self {
         Self {
             out_colorspace: ColorSpace::RGB,
-            max_width:      1 << 14,
-            max_height:     1 << 14,
-            max_scans:      100,
-            deflate_limit:  1 << 30,
-            flags:          decoder_error_tolerance_mode(),
-            endianness:     ByteEndian::BE
+            max_width: 1 << 14,
+            max_height: 1 << 14,
+            max_scans: 100,
+            deflate_limit: 1 << 30,
+            flags: decoder_error_tolerance_mode(),
+            endianness: ByteEndian::BE,
         }
     }
 }

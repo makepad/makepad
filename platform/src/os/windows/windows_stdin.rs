@@ -1,42 +1,48 @@
 use {
-    std::{
-        io,
-        io::prelude::*,
-        io::BufReader,
-    },
     crate::{
+        cx::Cx,
+        cx_api::CxOsOp,
+        draw_pass::CxDrawPassParent,
+        event::Event,
+        event::{TextClipboardEvent, WindowGeom},
         makepad_live_id::*,
         makepad_math::*,
         makepad_micro_serde::*,
-        event::Event,
-        window::CxWindowPool,
-        event::WindowGeom,
-        CxOsApi,
-        texture::{Texture,  TextureFormat},
-        thread::SignalToUI,
         os::{
-            win32_app::{Win32Time},
+            cx_stdin::{
+                HostToStdin, PresentableDraw, PresentableImageId, StdinToHost,
+                SWAPCHAIN_IMAGE_COUNT,
+            },
             d3d11::D3d11Cx,
-            cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
+            win32_app::Win32Time,
         },
-        pass::{CxPassParent},
-        cx_api::CxOsOp,
-        cx::Cx,
+        texture::{Texture, TextureFormat},
+        thread::SignalToUI,
+        window::CxWindowPool,
         windows::Win32::Foundation::HANDLE,
-    }
+        CxOsApi,
+    },
+    std::{cell::RefCell, ffi::c_void, io, io::prelude::*, io::BufReader, rc::Rc},
 };
 
-#[derive(Default)]
-pub(crate) struct StdinWindow{
-    swapchain: Option<Swapchain<Texture>>,
-    present_index: usize,
-    new_frame_being_rendered: Option<PresentableDraw>
+struct LocalPresentableImage {
+    id: PresentableImageId,
+    image: Texture,
 }
 
+struct LocalSwapchain {
+    presentable_images: [LocalPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[derive(Default)]
+pub(crate) struct StdinWindow {
+    swapchain: Option<LocalSwapchain>,
+    present_index: usize,
+    new_frame_being_rendered: Option<PresentableDraw>,
+}
 
 impl Cx {
-    
-    pub (crate) fn stdin_handle_repaint(
+    pub(crate) fn stdin_handle_repaint(
         &mut self,
         d3d11_cx: &mut D3d11Cx,
         windows: &mut Vec<StdinWindow>,
@@ -46,54 +52,57 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         let time_now = time.time_now();
-        for &pass_id in &passes_todo {
-            self.passes[pass_id].set_time(time_now as f32);
-            match self.passes[pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+        for &draw_pass_id in &passes_todo {
+            self.passes[draw_pass_id].set_time(time_now as f32);
+            match self.passes[draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
                     let window = &mut windows[window_id.id()];
                     if let Some(swapchain) = &window.swapchain {
-                        
                         // and if GPU is not already rendering something else
                         if window.new_frame_being_rendered.is_none() {
                             let current_image = &swapchain.presentable_images[window.present_index];
-                            
-                            window.present_index = (window.present_index + 1) % swapchain.presentable_images.len();
-                            
-                            // render to swapchain
-                            self.draw_pass_to_texture(pass_id, d3d11_cx, Some(current_image.image.texture_id()));
 
-                            let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-                            let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                            window.present_index =
+                                (window.present_index + 1) % swapchain.presentable_images.len();
+
+                            // render to swapchain
+                            self.draw_pass_to_texture(
+                                draw_pass_id,
+                                d3d11_cx,
+                                Some(current_image.image.texture_id()),
+                            );
+
+                            let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+                            let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
                             let future_presentable_draw = PresentableDraw {
                                 window_id: window_id.id(),
                                 target_id: current_image.id,
                                 width: (pass_rect.size.x * dpi_factor) as u32,
                                 height: (pass_rect.size.y * dpi_factor) as u32,
                             };
-                            
+
                             // start GPU event query
                             d3d11_cx.start_querying();
-                            
+
                             // and inform event_loop to go poll GPU readiness
                             window.new_frame_being_rendered = Some(future_presentable_draw);
                         }
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(pass_id, d3d11_cx, None);
-                },
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(pass_id, d3d11_cx, None);
+                    self.draw_pass_to_texture(draw_pass_id, d3d11_cx, None);
+                }
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(draw_pass_id, d3d11_cx, None);
                 }
             }
         }
     }
-    
-    pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
 
+    pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
         let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
         {
             std::thread::spawn(move || {
@@ -104,7 +113,7 @@ impl Cx {
                     if let Ok(0) | Err(_) = reader.read_line(&mut line) {
                         break;
                     }
-                    
+
                     // alright lets put the line in a json parser
                     match HostToStdin::deserialize_json(&line) {
                         Ok(msg) => {
@@ -120,20 +129,19 @@ impl Cx {
                 }
             });
         }
-        
+
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
-        
-        let mut stdin_windows:Vec<StdinWindow> = Vec::new();
+
+        let mut stdin_windows: Vec<StdinWindow> = Vec::new();
         let time = Win32Time::new();
-         
+
         self.call_event_handler(&Event::Startup);
 
         //let mut previous_tick_time_s: Option<f64> = None;
         //let mut previous_elapsed_s = 0f64;
         //let mut allow_rendering = true;
-        
-        while let Ok(msg) = json_msg_rx.recv() {
 
+        while let Ok(msg) = json_msg_rx.recv() {
             match msg {
                 HostToStdin::KeyDown(e) => {
                     self.call_event_handler(&Event::KeyDown(e));
@@ -144,34 +152,55 @@ impl Cx {
                 HostToStdin::TextInput(e) => {
                     self.call_event_handler(&Event::TextInput(e));
                 }
+                HostToStdin::TextCopy => {
+                    let response = Rc::new(RefCell::new(None));
+                    self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
+                        response: response.clone(),
+                    }));
+                    let text = response.borrow().clone();
+                    if let Some(text) = text {
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
+                        let _ = io::stdout().flush();
+                    }
+                }
+                HostToStdin::TextCut => {
+                    let response = Rc::new(RefCell::new(None));
+                    self.call_event_handler(&Event::TextCut(TextClipboardEvent {
+                        response: response.clone(),
+                    }));
+                    let text = response.borrow().clone();
+                    if let Some(text) = text {
+                        let _ = io::stdout()
+                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
+                        let _ = io::stdout().flush();
+                    }
+                }
                 HostToStdin::MouseDown(e) => {
-                    self.fingers.process_tap_count(
-                        dvec2(e.x, e.y),
-                        e.time
-                    );
+                    self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
                     let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                     let mouse_down_event = e.into_event(window_id, pos);
                     self.fingers.mouse_down(mouse_down_event.button, window_id);
                     self.call_event_handler(&Event::MouseDown(mouse_down_event));
                 }
                 HostToStdin::MouseMove(e) => {
-                    let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button{
-                        (window_id, self.windows[window_id].window_geom.position)
-                    }
-                    else{
-                        self.windows.window_id_contains(dvec2(e.x, e.y))
-                    };
+                    let (window_id, pos) =
+                        if let Some((_, window_id)) = self.fingers.first_mouse_button {
+                            (window_id, self.windows[window_id].window_geom.position)
+                        } else {
+                            self.windows.window_id_contains(dvec2(e.x, e.y))
+                        };
                     self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                     self.fingers.switch_captures();
                 }
                 HostToStdin::MouseUp(e) => {
-                    let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button{
-                        (window_id, self.windows[window_id].window_geom.position)
-                    }
-                    else{
-                        self.windows.window_id_contains(dvec2(e.x, e.y))
-                    };
+                    let (window_id, pos) =
+                        if let Some((_, window_id)) = self.fingers.first_mouse_button {
+                            (window_id, self.windows[window_id].window_geom.position)
+                        } else {
+                            self.windows.window_id_contains(dvec2(e.x, e.y))
+                        };
                     let mouse_up_event = e.into_event(window_id, pos);
                     let button = mouse_up_event.button;
                     self.call_event_handler(&Event::MouseUp(mouse_up_event));
@@ -179,10 +208,17 @@ impl Cx {
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                 }
                 HostToStdin::Scroll(e) => {
-                    let  (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                     self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
                 }
-                HostToStdin::WindowGeomChange { dpi_factor, left, top, width, height, window_id } => {
+                HostToStdin::WindowGeomChange {
+                    dpi_factor,
+                    left,
+                    top,
+                    width,
+                    height,
+                    window_id,
+                } => {
                     self.windows[CxWindowPool::from_usize(window_id)].window_geom = WindowGeom {
                         dpi_factor,
                         position: dvec2(left, top),
@@ -192,29 +228,33 @@ impl Cx {
                     self.redraw_all();
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
-                    let new_swapchain = new_swapchain.images_map(|pi| {
-                        let handle = HANDLE(pi.image as isize);
-                        
-                        let format = TextureFormat::SharedBGRAu8 {
-                            id: pi.id,
-                            width: new_swapchain.alloc_width as usize,
-                            height: new_swapchain.alloc_height as usize,
-                            initial: true,
-                        };
-                        let texture = Texture::new_with_format(self, format);
-                        self.textures[texture.texture_id()].update_from_shared_handle(d3d11_cx, handle);
-                        texture
-                    });
                     let window_id = new_swapchain.window_id;
+                    let local_swapchain = LocalSwapchain {
+                        presentable_images: new_swapchain.presentable_images.map(|pi| {
+                            let handle = HANDLE(pi.handle as usize as *mut c_void);
+                            let format = TextureFormat::SharedBGRAu8 {
+                                id: pi.id,
+                                width: new_swapchain.alloc_width as usize,
+                                height: new_swapchain.alloc_height as usize,
+                                initial: true,
+                            };
+                            let texture = Texture::new_with_format(self, format);
+                            self.textures[texture.texture_id()]
+                                .update_from_shared_handle(d3d11_cx, handle);
+                            LocalPresentableImage {
+                                id: pi.id,
+                                image: texture,
+                            }
+                        }),
+                    };
                     let stdin_window = &mut stdin_windows[window_id];
-                    stdin_window.swapchain = Some(new_swapchain);
+                    stdin_window.swapchain = Some(local_swapchain);
                     stdin_window.present_index = 0;
-                    
+
                     self.redraw_all();
                     self.stdin_handle_platform_ops(&mut stdin_windows);
                 }
-                HostToStdin::Tick =>  {
-                    
+                HostToStdin::Tick => {
                     // probe current time
                     //let start_time = ::std::time::SystemTime::now();
 
@@ -222,28 +262,30 @@ impl Cx {
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
+                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if SignalToUI::check_and_clear_action_signal() {
                         self.handle_action_receiver();
                     }
-                                        
-                    if self.handle_live_edit() {
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }
+
+                    //if self.handle_live_edit() {
+                    //    self.call_event_handler(&Event::LiveEdit);
+                    //    self.redraw_all();
+                    //}
                     self.handle_networking_events();
                     // we should poll our runloop
                     self.stdin_handle_platform_ops(&mut stdin_windows);
 
                     // alright a tick.
                     // we should now run all the stuff.
+                    let time_now = self.seconds_since_app_start();
                     if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(self.seconds_since_app_start());
+                        self.call_next_frame_event(time_now);
                     }
 
                     if self.need_redrawing() {
-                        self.call_draw_event();
+                        self.call_draw_event(time_now);
                         self.hlsl_compile_shaders(d3d11_cx);
                     }
 
@@ -253,17 +295,23 @@ impl Cx {
                     // only allow rendering if it didn't take too much time last time
                     //if allow_rendering {
 
-                        // check if GPU is ready to flip frames
-                        for window in &mut stdin_windows{
-                            if let Some(presentable_draw) = window.new_frame_being_rendered {
-                                while !d3d11_cx.is_gpu_done() {
-                                    std::thread::sleep(std::time::Duration::from_millis(3));
-                                }
-                                let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
-                                window.new_frame_being_rendered = None;
+                    // check if GPU is ready to flip frames
+                    let has_pending_draws = stdin_windows
+                        .iter()
+                        .any(|window| window.new_frame_being_rendered.is_some());
+                    if has_pending_draws && d3d11_cx.is_gpu_done() {
+                        for window in &mut stdin_windows {
+                            if let Some(presentable_draw) = window.new_frame_being_rendered.take() {
+                                let _ = io::stdout().write_all(
+                                    StdinToHost::DrawCompleteAndFlip(presentable_draw)
+                                        .to_json()
+                                        .as_bytes(),
+                                );
                             }
                         }
-                        //}
+                        let _ = io::stdout().flush();
+                    }
+                    //}
 
                     // probe how long this took
                     /*
@@ -285,55 +333,63 @@ impl Cx {
             }
         }
     }
-    
-    fn stdin_handle_platform_ops(
-        &mut self,
-        stdin_windows:&mut Vec<StdinWindow>,
-    ) {
+
+    fn stdin_handle_platform_ops(&mut self, stdin_windows: &mut Vec<StdinWindow>) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
-                    while window_id.id() >= stdin_windows.len(){
+                    while window_id.id() >= stdin_windows.len() {
                         stdin_windows.push(StdinWindow::default());
                     }
                     //let stdin_window = &mut stdin_windows[window_id.id()];
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
-                    let _ = io::stdout().write_all(StdinToHost::CreateWindow{window_id:window_id.id(),kind_id:window.kind_id}.to_json().as_bytes());
-                     
+                    let _ = io::stdout().write_all(
+                        StdinToHost::CreateWindow {
+                            window_id: window_id.id(),
+                            kind_id: window.kind_id,
+                        }
+                        .to_json()
+                        .as_bytes(),
+                    );
+
                     // lets set up our render pass target
-                   /* let pass = &mut self.passes[window.main_pass_id.unwrap()];
+                    /* let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     if let Some(swapchain) = swapchain {
-                        pass.color_textures = vec![CxPassColorTexture {
-                            clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                            //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        pass.color_textures = vec![CxDrawPassColorTexture {
+                            clear_color: DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
+                            //clear_color: DrawPassClearColor::ClearWith(pass.clear_color),
                             texture: swapchain.presentable_images[present_index].image.clone(),
                         }];
                     }*/
-                },
+                }
                 CxOsOp::SetCursor(cursor) => {
-                    let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
-                },
-                _ => ()
-                /*
-                CxOsOp::CloseWindow(_window_id) => {},
-                CxOsOp::MinimizeWindow(_window_id) => {},
-                CxOsOp::MaximizeWindow(_window_id) => {},
-                CxOsOp::RestoreWindow(_window_id) => {},
-                CxOsOp::FullscreenWindow(_window_id) => {},
-                CxOsOp::NormalizeWindow(_window_id) => {}
-                CxOsOp::SetTopmost(_window_id, _is_topmost) => {}
-                CxOsOp::XrStartPresenting(_) => {},
-                CxOsOp::XrStopPresenting(_) => {},
-                CxOsOp::ShowTextIME(_area, _pos) => {},
-                CxOsOp::HideTextIME => {},
-                CxOsOp::SetCursor(_cursor) => {},
-                CxOsOp::StartTimer {timer_id, interval, repeats} => {},
-                CxOsOp::StopTimer(timer_id) => {},
-                CxOsOp::StartDragging(dragged_item) => {}
-                CxOsOp::UpdateMenu(menu) => {}*/
+                    let _ =
+                        io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
+                }
+                CxOsOp::CopyToClipboard(content) => {
+                    let _ = io::stdout()
+                        .write_all(StdinToHost::SetClipboard(content).to_json().as_bytes());
+                    let _ = io::stdout().flush();
+                }
+                _ => (), /*
+                         CxOsOp::CloseWindow(_window_id) => {},
+                         CxOsOp::MinimizeWindow(_window_id) => {},
+                         CxOsOp::MaximizeWindow(_window_id) => {},
+                         CxOsOp::RestoreWindow(_window_id) => {},
+                         CxOsOp::FullscreenWindow(_window_id) => {},
+                         CxOsOp::NormalizeWindow(_window_id) => {}
+                         CxOsOp::SetTopmost(_window_id, _is_topmost) => {}
+                         CxOsOp::XrStartPresenting(_) => {},
+                         CxOsOp::XrStopPresenting(_) => {},
+                         CxOsOp::ShowTextIME(_area, _pos) => {},
+                         CxOsOp::HideTextIME => {},
+                         CxOsOp::SetCursor(_cursor) => {},
+                         CxOsOp::StartTimer {timer_id, interval, repeats} => {},
+                         CxOsOp::StopTimer(timer_id) => {},
+                         CxOsOp::StartDragging(dragged_item) => {}
+                         CxOsOp::UpdateMenu(menu) => {}*/
             }
         }
     }
-    
 }

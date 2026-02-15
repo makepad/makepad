@@ -1,0 +1,16 @@
+[package]
+name = "makepad-csg-boolean"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[features]
+default = ["threads"]
+nightly = ["makepad-csg-math/nightly"]
+threads = ["makepad-csg-math/threads"]
+
+[dependencies]
+makepad-csg-math = { path = "../csg_math" }
+makepad-csg-mesh = { path = "../csg_mesh" }
+makepad-csg-exact = { path = "../csg_exact" }

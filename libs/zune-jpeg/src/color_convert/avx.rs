@@ -50,7 +50,7 @@ pub union YmmRegister {
     // both are 32 when using std::mem::size_of
     mm256: __m256i,
     // for avx color conversion
-    array: [i16; 16]
+    array: [i16; 16],
 }
 
 const R_AVX_COEF: i32 = i32::from_ne_bytes([CR_CF.to_ne_bytes()[0], CR_CF.to_ne_bytes()[1], 0, 0]);
@@ -59,7 +59,7 @@ const G_COEF_AVX_COEF: i32 = i32::from_ne_bytes([
     C_G_CR_COEF_1.to_ne_bytes()[0],
     C_G_CR_COEF_1.to_ne_bytes()[1],
     C_G_CB_COEF_2.to_ne_bytes()[0],
-    C_G_CB_COEF_2.to_ne_bytes()[1]
+    C_G_CB_COEF_2.to_ne_bytes()[1],
 ]);
 
 //--------------------------------------------------------------------------------------------------
@@ -84,7 +84,11 @@ const G_COEF_AVX_COEF: i32 = i32::from_ne_bytes([
 /// - `offset`: The position from 0 where we write these RGB values
 #[inline(always)]
 pub fn ycbcr_to_rgb_avx2(
-    y: &[i16; 16], cb: &[i16; 16], cr: &[i16; 16], out: &mut [u8], offset: &mut usize
+    y: &[i16; 16],
+    cb: &[i16; 16],
+    cr: &[i16; 16],
+    out: &mut [u8],
+    offset: &mut usize,
 ) {
     // call this in another function to tell RUST to vectorize this
     // storing
@@ -96,7 +100,11 @@ pub fn ycbcr_to_rgb_avx2(
 #[inline]
 #[target_feature(enable = "avx2")]
 unsafe fn ycbcr_to_rgb_avx2_1(
-    y: &[i16; 16], cb: &[i16; 16], cr: &[i16; 16], out: &mut [u8], offset: &mut usize
+    y: &[i16; 16],
+    cb: &[i16; 16],
+    cr: &[i16; 16],
+    out: &mut [u8],
+    offset: &mut usize,
 ) {
     let (mut r, mut g, mut b) = ycbcr_to_rgb_baseline_no_clamp(y, cb, cr);
 
@@ -110,15 +118,15 @@ unsafe fn ycbcr_to_rgb_avx2_1(
 
     let sh_r = _mm256_setr_epi8(
         0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4, 15, 10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14,
-        9, 4, 15, 10, 5
+        9, 4, 15, 10, 5,
     );
     let sh_g = _mm256_setr_epi8(
         5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4, 15, 10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3,
-        14, 9, 4, 15, 10
+        14, 9, 4, 15, 10,
     );
     let sh_b = _mm256_setr_epi8(
         10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4, 15, 10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8,
-        3, 14, 9, 4, 15
+        3, 14, 9, 4, 15,
     );
 
     let r0 = _mm256_shuffle_epi8(r, sh_r);
@@ -127,11 +135,11 @@ unsafe fn ycbcr_to_rgb_avx2_1(
 
     let m0 = _mm256_setr_epi8(
         0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1,
-        0, 0, -1, 0, 0
+        0, 0, -1, 0, 0,
     );
     let m1 = _mm256_setr_epi8(
         0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0,
-        -1, 0, 0, -1, 0
+        -1, 0, 0, -1, 0,
     );
 
     let p0 = _mm256_blendv_epi8(_mm256_blendv_epi8(r0, g0, m0), b0, m1);
@@ -156,7 +164,9 @@ unsafe fn ycbcr_to_rgb_avx2_1(
 /// This is used by the `ycbcr_to_rgba_avx` and `ycbcr_to_rgbx` conversion
 /// routines
 unsafe fn ycbcr_to_rgb_baseline_no_clamp(
-    y: &[i16; 16], cb: &[i16; 16], cr: &[i16; 16]
+    y: &[i16; 16],
+    cb: &[i16; 16],
+    cr: &[i16; 16],
 ) -> (__m256i, __m256i, __m256i) {
     // Load values into a register
     //
@@ -234,7 +244,11 @@ unsafe fn ycbcr_to_rgb_baseline_no_clamp(
 
 #[inline(always)]
 pub fn ycbcr_to_rgba_avx2(
-    y: &[i16; 16], cb: &[i16; 16], cr: &[i16; 16], out: &mut [u8], offset: &mut usize
+    y: &[i16; 16],
+    cb: &[i16; 16],
+    cr: &[i16; 16],
+    out: &mut [u8],
+    offset: &mut usize,
 ) {
     unsafe {
         ycbcr_to_rgba_unsafe(y, cb, cr, out, offset);

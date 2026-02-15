@@ -1,5 +1,5 @@
 use {
-    makepad_rustybuzz as rustybuzz,
+    rustybuzz,
     rustybuzz::ttf_parser,
     std::{fmt, marker::PhantomPinned, mem, pin::Pin, rc::Rc},
 };
@@ -32,6 +32,10 @@ impl FontFace {
 
     pub fn as_rustybuzz_face(&self) -> &rustybuzz::Face<'_> {
         self.0.rustybuzz_face.as_ref().unwrap()
+    }
+
+    pub fn data(&self) -> &Rc<Vec<u8>> {
+        &self.0.data
     }
 }
 

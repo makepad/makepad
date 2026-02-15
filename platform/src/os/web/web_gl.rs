@@ -1,122 +1,136 @@
-use {
-    crate::{
-        makepad_shader_compiler::{
-            generate_glsl,
-        },
-        makepad_wasm_bridge::*,
-        makepad_math::*,
-        os::{
-            web::{
-                from_wasm::*
-            }
-        },
-        draw_vars::DRAW_CALL_TEXTURE_SLOTS,
-        cx::Cx,
-        draw_list::DrawListId,
-        texture::TextureFormat,
-        pass::{PassId, PassClearColor, PassClearDepth},
-    },
+use crate::{
+    cx::Cx,
+    draw_shader::CxDrawShaderCode,
+    draw_list::DrawListId,
+    draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
+    draw_vars::DRAW_CALL_TEXTURE_SLOTS,
+    makepad_math::*,
+    makepad_wasm_bridge::*,
+    os::web::from_wasm::*,
+    texture::TextureFormat,
 };
 
 impl Cx {
-
     pub fn render_view(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
         zbias: &mut f32,
-        zbias_step: f32
+        zbias_step: f32,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4f::identity();
+        self.draw_lists[draw_list_id]
+            .draw_list_uniforms
+            .view_transform = Mat4f::identity();
 
         for draw_item_id in 0..draw_items_len {
-            if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
-                self.render_view(
-                    pass_id,
-                    sub_list_id,
-                    zbias,
-                    zbias_step,
-                );
-            }
-            else {
+            if let Some(sub_list_id) =
+                self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
+            {
+                self.render_view(draw_pass_id, sub_list_id, zbias, zbias_step);
+            } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
-                let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut(){
+                let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
                     draw_call
-                }else{
+                } else {
                     continue;
                 };
-                
-                let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if sh.os_shader_id.is_none() { // shader didnt compile somehow
+
+                let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
+                if sh.os_shader_id.is_none() {
+                    // shader didnt compile somehow
                     continue;
                 }
-                
+
                 if sh.mapping.uses_time {
                     self.demo_time_repaint = true;
                 }
-                
+
                 if draw_call.instance_dirty || draw_item.os.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
                     if draw_item.os.inst_vb_id.is_none() {
                         draw_item.os.inst_vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
                     }
-                    
+
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: draw_item.os.inst_vb_id.unwrap(),
-                        data: WasmPtrF32::new(draw_item.instances.as_ref().unwrap())
+                        data: WasmPtrF32::new(draw_item.instances.as_ref().unwrap()),
                     });
                     draw_call.instance_dirty = false;
                 }
                 draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
-                
+
                 // update/alloc textures?
                 for i in 0..sh.mapping.textures.len() {
                     let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
                         texture.texture_id()
-                    }else {
-                        continue
+                    } else {
+                        continue;
                     };
-                    
+
                     let cxtexture = &mut self.textures[texture_id];
-                    if cxtexture.format.is_vec(){
-                        if cxtexture.alloc_vec(){}
+                    if cxtexture.format.is_vec() {
+                        if cxtexture.alloc_vec() {}
                         if !cxtexture.take_updated().is_empty() {
-                            match &cxtexture.format{
-                                TextureFormat::VecBGRAu8_32{width, height, data, .. }=>{
+                            match &cxtexture.format {
+                                TextureFormat::VecBGRAu8_32 {
+                                    width,
+                                    height,
+                                    data,
+                                    ..
+                                } => {
                                     self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new((*data).as_ref().unwrap())
+                                        data: WasmPtrU32::new((*data).as_ref().unwrap()),
                                     });
                                 }
-                                TextureFormat::VecRu8{width, height, data, ..}=>{
+                                TextureFormat::VecRu8 {
+                                    width,
+                                    height,
+                                    data,
+                                    ..
+                                } => {
                                     self.os.from_wasm(FromWasmAllocTextureImage2D_Ru8 {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU8::new((*data).as_ref().unwrap())
+                                        data: WasmPtrU8::new((*data).as_ref().unwrap()),
                                     });
                                 }
-                                x=>panic!("Texture format not implemented for webGL {:?}", x)
+                                TextureFormat::VecRGBAf32 {
+                                    width,
+                                    height,
+                                    data,
+                                    ..
+                                } => {
+                                    self.os.from_wasm(FromWasmAllocTextureImage2D_RGBAf32 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        data: WasmPtrF32::new((*data).as_ref().unwrap()),
+                                    });
+                                }
+                                x => panic!("Texture format not implemented for webGL {:?}", x),
                             }
                         }
                     }
                 }
-                
-                let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {geometry_id}
-                else {
+
+                let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
+                    geometry_id
+                } else {
                     continue;
                 };
-                
+
                 let geometry = &mut self.geometries[geometry_id];
-                
+
                 if geometry.dirty || geometry.os.vb_id.is_none() || geometry.os.ib_id.is_none() {
                     if geometry.os.vb_id.is_none() {
                         geometry.os.vb_id = Some(self.os.vertex_buffers);
@@ -128,17 +142,17 @@ impl Cx {
                     }
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: geometry.os.vb_id.unwrap(),
-                        data: WasmPtrF32::new(&geometry.vertices)
+                        data: WasmPtrF32::new(&geometry.vertices),
                     });
-                    
+
                     self.os.from_wasm(FromWasmAllocIndexBuffer {
                         buffer_id: geometry.os.ib_id.unwrap(),
-                        data: WasmPtrU32::new(&geometry.indices)
+                        data: WasmPtrU32::new(&geometry.indices),
                     });
-                    
+
                     geometry.dirty = false;
                 }
-                
+
                 // lets check if our vao is still valid
                 if draw_item.os.vao.is_none() {
                     draw_item.os.vao = Some(CxOsDrawCallVao {
@@ -150,47 +164,47 @@ impl Cx {
                     });
                     self.os.vaos += 1;
                 }
-                
+
                 let vao = draw_item.os.vao.as_mut().unwrap();
-                
+
                 if vao.inst_vb_id != draw_item.os.inst_vb_id
                     || vao.geom_vb_id != geometry.os.vb_id
                     || vao.geom_ib_id != geometry.os.ib_id
-                    || vao.shader_id != sh.os_shader_id {
-                    
+                    || vao.shader_id != sh.os_shader_id
+                {
                     vao.shader_id = sh.os_shader_id.clone();
                     vao.inst_vb_id = draw_item.os.inst_vb_id;
                     vao.geom_vb_id = geometry.os.vb_id;
                     vao.geom_ib_id = geometry.os.ib_id;
-                    
+
                     self.os.from_wasm(FromWasmAllocVao {
                         vao_id: vao.vao_id,
                         shader_id: vao.shader_id.unwrap(),
                         geom_ib_id: vao.geom_ib_id.unwrap(),
                         geom_vb_id: vao.geom_vb_id.unwrap(),
-                        inst_vb_id: draw_item.os.inst_vb_id.unwrap()
+                        inst_vb_id: draw_item.os.inst_vb_id.unwrap(),
                     });
                 }
-                
-                let pass_uniforms = &self.passes[pass_id].pass_uniforms;
-                
-                let mut textures = [None;DRAW_CALL_TEXTURE_SLOTS];
-                for (index, texture_slot) in draw_call.texture_slots.iter().enumerate(){
-                    if let Some(texture) = texture_slot{
+
+                let pass_uniforms = &self.passes[draw_pass_id].pass_uniforms;
+
+                let mut textures = [None; DRAW_CALL_TEXTURE_SLOTS];
+                for (index, texture_slot) in draw_call.texture_slots.iter().enumerate() {
+                    if let Some(texture) = texture_slot {
                         textures[index] = Some(texture.texture_id().0)
                     }
                 }
-                
+
                 self.os.from_wasm(FromWasmDrawCall {
                     shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
-                    user_uniforms: WasmPtrF32::new(draw_call.user_uniforms.as_slice()),
-                    live_uniforms: WasmPtrF32::new(&sh.mapping.live_uniforms_buf),
-                    const_table: WasmPtrF32::new(&sh.mapping.const_table.table),
-                    textures
+                    user_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
+                    live_uniforms: WasmPtrF32::new(&sh.mapping.scope_uniforms_buf),
+                    const_table: WasmPtrF32::new(&[]),
+                    textures,
                 });
             }
         }
@@ -201,237 +215,228 @@ impl Cx {
             console_log(&s);
         }*/
     }
-    
-    pub fn setup_render_pass(&mut self, pass_id: PassId)->Vec2d{
-        self.passes[pass_id].paint_dirty = false;
-        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
-        self.passes[pass_id].set_dpi_factor(dpi_factor);
-        self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
-        pass_rect.size 
+
+    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId) -> Vec2d {
+        self.passes[draw_pass_id].paint_dirty = false;
+        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+        let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
+        self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        pass_rect.size
     }
-    
-    pub fn draw_pass_to_canvas(
-        &mut self,
-        pass_id: PassId,
-    ) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-        
+
+    pub fn draw_pass_to_canvas(&mut self, draw_pass_id: DrawPassId) {
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
+
         // get the color and depth
-        let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            self.passes[pass_id].clear_color
-        }
-        else {
-            match self.passes[pass_id].color_textures[0].clear_color {
-                PassClearColor::InitWith(color) => color,
-                PassClearColor::ClearWith(color) => color
+        let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
+            self.passes[draw_pass_id].clear_color
+        } else {
+            match self.passes[draw_pass_id].color_textures[0].clear_color {
+                DrawPassClearColor::InitWith(color) => color,
+                DrawPassClearColor::ClearWith(color) => color,
             }
         };
-        let clear_depth = match self.passes[pass_id].clear_depth {
-            PassClearDepth::InitWith(depth) => depth,
-            PassClearDepth::ClearWith(depth) => depth
+        let clear_depth = match self.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) => depth,
+            DrawPassClearDepth::ClearWith(depth) => depth,
         };
-        
+
         self.os.from_wasm(FromWasmBeginRenderCanvas {
             clear_color: clear_color.into(),
             clear_depth,
         });
-        
-        self.setup_render_pass(pass_id);
-        
-        self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
-        
-        let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
 
-        self.render_view(
-            pass_id,
-            draw_list_id,
-            &mut zbias,
-            zbias_step
-        );
+        self.setup_render_pass(draw_pass_id);
+
+        self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
+
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
+
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
     }
-    
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-        
-        let pass_size = self.setup_render_pass(pass_id);
-        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+
+    pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
+
+        let pass_size = self.setup_render_pass(draw_pass_id);
+        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         /*
         self.platform.from_wasm(FromWasmBeginRenderTargets {
-            pass_id,
+            draw_pass_id,
             width: (pass_size.x * dpi_factor) as usize,
             height: (pass_size.y * dpi_factor) as usize
         });*/
-        
+
         let mut color_targets = [WColorTarget::default()];
         let mut depth_target = WDepthTarget::default();
-        
-        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+
+        for (index, color_texture) in self.passes[draw_pass_id].color_textures.iter().enumerate() {
             let size = pass_size * dpi_factor;
-            self.textures[color_texture.texture.texture_id()].alloc_render(size.x as usize, size.y as usize);
+            self.textures[color_texture.texture.texture_id()]
+                .alloc_render(size.x as usize, size.y as usize);
             match color_texture.clear_color {
-                PassClearColor::InitWith(clear_color) => {
-                    color_targets[index] = WColorTarget{
+                DrawPassClearColor::InitWith(clear_color) => {
+                    color_targets[index] = WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: true,
-                        clear_color: clear_color.into()
+                        clear_color: clear_color.into(),
                     };
-                },
-                PassClearColor::ClearWith(clear_color) => {
-                    color_targets[index] = WColorTarget{
+                }
+                DrawPassClearColor::ClearWith(clear_color) => {
+                    color_targets[index] = WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: false,
-                        clear_color: clear_color.into()
+                        clear_color: clear_color.into(),
                     };
                 }
             }
         }
-        
+
         // attach/clear depth buffers, if any
-        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
+        if let Some(depth_texture) = &self.passes[draw_pass_id].depth_texture {
             let size = pass_size * dpi_factor;
             self.textures[depth_texture.texture_id()].alloc_depth(size.x as usize, size.y as usize);
-            match self.passes[pass_id].clear_depth {
-                PassClearDepth::InitWith(clear_depth) => {
-                    depth_target = WDepthTarget{
+            match self.passes[draw_pass_id].clear_depth {
+                DrawPassClearDepth::InitWith(clear_depth) => {
+                    depth_target = WDepthTarget {
                         texture_id: depth_texture.texture_id().0,
                         init_only: true,
-                        clear_depth
+                        clear_depth,
                     };
-                },
-                PassClearDepth::ClearWith(clear_depth) => {
-                    depth_target = WDepthTarget{
+                }
+                DrawPassClearDepth::ClearWith(clear_depth) => {
+                    depth_target = WDepthTarget {
                         texture_id: depth_texture.texture_id().0,
                         init_only: false,
-                        clear_depth
+                        clear_depth,
                     };
                 }
             }
         }
-        
+
         self.os.from_wasm(FromWasmBeginRenderTexture {
-            pass_id: pass_id.0,
+            pass_id: draw_pass_id.0,
             width: (pass_size.x * dpi_factor) as usize,
             height: (pass_size.y * dpi_factor) as usize,
             color_targets,
-            depth_target
+            depth_target,
         });
-        
+
         // set the default depth and blendmode
         self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
-        
-        self.render_view(
-            pass_id,
-            draw_list_id,
-            &mut zbias,
-            zbias_step
-        );
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
+
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
     }
-    
+
     pub fn webgl_compile_shaders(&mut self) {
-        for draw_shader_ptr in &self.draw_shaders.compile_set {
-            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
-                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
-                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
-                
-                let glsl_options = generate_glsl::GlslOptions{
-                    use_ovr_multiview: false,
-                    use_uniform_buffers: false,
-                    use_inout: false,
+        let compile_set: Vec<usize> = self.draw_shaders.compile_set.iter().copied().collect();
+        for draw_shader_id in compile_set {
+            let (vertex, pixel, geometry_slots, instance_slots, textures, debug) = {
+                let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
+                let (vertex, pixel) = match &cx_shader.mapping.code {
+                    CxDrawShaderCode::Separate { vertex, fragment } => {
+                        (vertex.clone(), fragment.clone())
+                    }
+                    CxDrawShaderCode::Combined { .. } => {
+                        crate::error!("Combined shader code is not supported on wasm webgl");
+                        continue;
+                    }
                 };
-                
-                let vertex = generate_glsl::generate_vertex_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry,
-                    glsl_options
-                );
-                let pixel = generate_glsl::generate_pixel_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry,
-                    glsl_options
-                );
-                 
-                if cx_shader.mapping.flags.debug {
-                   crate::log!("{}\n{}", vertex,pixel);
-                }
-                // lets see if we have the shader already
+                let textures: Vec<WTextureInput> = cx_shader
+                    .mapping
+                    .textures
+                    .iter()
+                    .map(|v| v.to_from_wasm_texture_input())
+                    .collect();
+                (
+                    vertex,
+                    pixel,
+                    cx_shader.mapping.geometries.total_slots,
+                    cx_shader.mapping.instances.total_slots,
+                    textures,
+                    cx_shader.mapping.flags.debug,
+                )
+            };
+
+            if debug {
+                crate::log!("{}\n{}", vertex, pixel);
+            }
+
+            let mut os_shader_id = self.draw_shaders.shaders[draw_shader_id].os_shader_id;
+            if os_shader_id.is_none() {
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    
                     if ds.in_vertex == vertex && ds.in_pixel == pixel {
-                        cx_shader.os_shader_id = Some(index);
+                        os_shader_id = Some(index);
                         break;
                     }
                 }
-                if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(vertex.clone(), pixel.clone());
-                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                    self.os.from_wasm(FromWasmCompileWebGLShader{
-                        shader_id:  cx_shader.os_shader_id.unwrap(),
-                        vertex: shp.vertex.clone(), 
-                        pixel: shp.pixel.clone(),
-                        geometry_slots: cx_shader.mapping.geometries.total_slots,
-                        instance_slots: cx_shader.mapping.instances.total_slots,
-                        textures:cx_shader.mapping.textures.iter().map(|v| v.to_from_wasm_texture_input()).collect()
-                    });
-                    
-                    self.draw_shaders.os_shaders.push(shp);
-                }
             }
+
+            if os_shader_id.is_none() {
+                let shp = CxOsDrawShader::new(vertex, pixel);
+                let shader_id = self.draw_shaders.os_shaders.len();
+                self.os.from_wasm(FromWasmCompileWebGLShader {
+                    shader_id,
+                    vertex: shp.vertex.clone(),
+                    pixel: shp.pixel.clone(),
+                    geometry_slots,
+                    instance_slots,
+                    textures,
+                });
+                self.draw_shaders.os_shaders.push(shp);
+                os_shader_id = Some(shader_id);
+            }
+
+            self.draw_shaders.shaders[draw_shader_id].os_shader_id = os_shader_id;
         }
         self.draw_shaders.compile_set.clear();
     }
 }
 
-impl CxOsDrawShader{
-    pub fn new(
-        in_vertex: String,
-        in_pixel: String,
-    ) -> Self {
-        
-        let vertex = format!("
-            precision highp float;
-            precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0 - pos.y));}}             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}", in_vertex);
-            
-        let pixel = format!("
-            #extension GL_OES_standard_derivatives : enable
-            precision highp float;
-            precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0 - pos.y));}}
-            vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
-            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}", in_pixel);
-        
-        
-        Self{
+impl CxOsDrawShader {
+    pub fn new(in_vertex: String, in_pixel: String) -> Self {
+        let vertex = format!(
+            "#version 300 es
+precision highp float;
+precision highp int;
+vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
+vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
+vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
+vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
+{}",
+            in_vertex
+        );
+
+        let pixel = format!(
+            "#version 300 es
+precision highp float;
+precision highp int;
+vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
+vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
+vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
+vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
+{}",
+            in_pixel
+        );
+
+        Self {
             in_vertex,
             in_pixel,
             vertex,
             pixel,
         }
     }
-    
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct CxOsPass {
-}
+pub struct CxOsPass {}
 
 #[derive(Clone, Default)]
-pub struct CxOsDrawList {
-}
+pub struct CxOsDrawList {}
 
 #[derive(Default, Clone)]
 pub struct CxOsDrawCallVao {
@@ -457,19 +462,21 @@ pub struct CxOsDrawShader {
 }
 
 #[derive(Clone, Default)]
-pub struct CxOsTexture {
-}
+pub struct CxOsTexture {}
 
 #[derive(Clone, Default)]
 pub struct CxOsGeometry {
     pub vb_id: Option<usize>,
-    pub ib_id: Option<usize>
+    pub ib_id: Option<usize>,
 }
 
-impl CxOsDrawCall {
-}
+impl CxOsDrawCall {}
 
-use std::process::{Child};
-pub fn spawn_process_command(_cmd: &str, _args: &[&str], _current_dir: &str) -> Result<Child, std::io::Error> {
+use std::process::Child;
+pub fn spawn_process_command(
+    _cmd: &str,
+    _args: &[&str],
+    _current_dir: &str,
+) -> Result<Child, std::io::Error> {
     Err(std::io::Error::new(std::io::ErrorKind::NotFound, ""))
 }

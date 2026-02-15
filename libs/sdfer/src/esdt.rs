@@ -46,8 +46,6 @@ pub fn glyph_to_sdf(
     params: Params,
     reuse_bufs: Option<ReusableBuffers>,
 ) -> (Image2d<Unorm8>, ReusableBuffers) {
-    
-    
     if params.solidify {
         solidify_alpha(glyph.reborrow_mut());
     }

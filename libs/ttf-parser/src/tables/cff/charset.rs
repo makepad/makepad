@@ -1,6 +1,7 @@
 use super::StringId;
 use crate::parser::{FromData, LazyArray16, Stream};
 use crate::GlyphId;
+use core::num::NonZeroU16;
 
 /// The Expert Encoding conversion as defined in the Adobe Technical Note #5176 Appendix C.
 #[rustfmt::skip]
@@ -189,16 +190,15 @@ impl Charset<'_> {
     }
 }
 
-pub(crate) fn parse_charset<'a>(number_of_glyphs: u16, s: &mut Stream<'a>) -> Option<Charset<'a>> {
-    if number_of_glyphs < 2 {
-        return None;
-    }
-
+pub(crate) fn parse_charset<'a>(
+    number_of_glyphs: NonZeroU16,
+    s: &mut Stream<'a>,
+) -> Option<Charset<'a>> {
     // -1 everywhere, since `.notdef` is omitted.
     let format = s.read::<u8>()?;
     match format {
         0 => Some(Charset::Format0(
-            s.read_array16::<StringId>(number_of_glyphs - 1)?,
+            s.read_array16::<StringId>(number_of_glyphs.get() - 1)?,
         )),
         1 => {
             // The number of ranges is not defined, so we have to
@@ -206,7 +206,7 @@ pub(crate) fn parse_charset<'a>(number_of_glyphs: u16, s: &mut Stream<'a>) -> Op
             let mut count = 0;
             {
                 let mut s = s.clone();
-                let mut total_left = number_of_glyphs - 1;
+                let mut total_left = number_of_glyphs.get() - 1;
                 while total_left > 0 {
                     s.skip::<StringId>(); // first
                     let left = s.read::<u8>()?;
@@ -222,7 +222,7 @@ pub(crate) fn parse_charset<'a>(number_of_glyphs: u16, s: &mut Stream<'a>) -> Op
             let mut count = 0;
             {
                 let mut s = s.clone();
-                let mut total_left = number_of_glyphs - 1;
+                let mut total_left = number_of_glyphs.get() - 1;
                 while total_left > 0 {
                     s.skip::<StringId>(); // first
                     let left = s.read::<u16>()?.checked_add(1)?;

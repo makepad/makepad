@@ -7,15 +7,15 @@ use crate::bytestream::{ZByteIoError, ZByteReaderTrait, ZSeekFrom};
 /// `std::io::Cursor` is available in std environments, but we also need support
 /// for `no_std` environments so this serves as a drop in replacement
 pub struct ZCursor<T> {
-    pub(crate) stream:   T,
-    pub(crate) position: usize
+    pub(crate) stream: T,
+    pub(crate) position: usize,
 }
 
 impl<T: AsRef<[u8]>> ZCursor<T> {
     pub fn new(buffer: T) -> ZCursor<T> {
         ZCursor {
-            stream:   buffer,
-            position: 0
+            stream: buffer,
+            position: 0,
         }
     }
 }
@@ -49,15 +49,15 @@ impl<T: AsRef<[u8]>> ZCursor<T> {
     }
 }
 
-impl<T: AsRef<[u8]>>  ZCursor<T> {
+impl<T: AsRef<[u8]>> ZCursor<T> {
     #[inline(always)]
-    pub (crate) fn read_byte_no_error_impl(&mut self) -> u8 {
+    pub(crate) fn read_byte_no_error_impl(&mut self) -> u8 {
         let byte = self.stream.as_ref().get(self.position).unwrap_or(&0);
         self.position += 1;
         *byte
     }
     #[inline(always)]
-    pub (crate) fn read_exact_bytes_impl(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
+    pub(crate) fn read_exact_bytes_impl(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
         let bytes_read = self.read_bytes(buf)?;
         if bytes_read != buf.len() {
             // restore read to initial position it was in.
@@ -68,7 +68,10 @@ impl<T: AsRef<[u8]>>  ZCursor<T> {
         Ok(())
     }
 
-    pub (crate) fn read_const_bytes_impl<const N: usize>(&mut self, buf: &mut [u8; N]) -> Result<(), ZByteIoError> {
+    pub(crate) fn read_const_bytes_impl<const N: usize>(
+        &mut self,
+        buf: &mut [u8; N],
+    ) -> Result<(), ZByteIoError> {
         if self.position + N <= self.stream.as_ref().len() {
             // we are in bounds
             let reference = self.stream.as_ref();
@@ -82,7 +85,7 @@ impl<T: AsRef<[u8]>>  ZCursor<T> {
         Err(ZByteIoError::Generic("Cannot satisfy read"))
     }
 
-    pub (crate) fn read_const_bytes_no_error_impl<const N: usize>(&mut self, buf: &mut [u8; N]) {
+    pub(crate) fn read_const_bytes_no_error_impl<const N: usize>(&mut self, buf: &mut [u8; N]) {
         if self.position + N <= self.stream.as_ref().len() {
             // we are in bounds
             let reference = self.stream.as_ref();
@@ -95,14 +98,14 @@ impl<T: AsRef<[u8]>>  ZCursor<T> {
     }
 
     #[inline(always)]
-  pub (crate) fn read_bytes_impl(&mut self, buf: &mut [u8]) -> Result<usize, ZByteIoError> {
+    pub(crate) fn read_bytes_impl(&mut self, buf: &mut [u8]) -> Result<usize, ZByteIoError> {
         let len = self.peek_bytes_impl(buf)?;
         self.skip(len);
         Ok(len)
     }
 
     #[inline(always)]
-    pub (crate) fn peek_bytes_impl(&mut self, buf: &mut [u8]) -> Result<usize, ZByteIoError> {
+    pub(crate) fn peek_bytes_impl(&mut self, buf: &mut [u8]) -> Result<usize, ZByteIoError> {
         let stream_end = self.stream.as_ref().len();
 
         let start = core::cmp::min(self.position, stream_end);
@@ -116,47 +119,50 @@ impl<T: AsRef<[u8]>>  ZCursor<T> {
     }
 
     #[inline(always)]
-    pub (crate) fn peek_exact_bytes_impl(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
+    pub(crate) fn peek_exact_bytes_impl(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
         self.read_exact_bytes_impl(buf)?;
         self.rewind(buf.len());
         Ok(())
     }
 
     #[inline(always)]
-    pub (crate) fn z_seek_impl(&mut self, from: ZSeekFrom) -> Result<u64, ZByteIoError> {
+    pub(crate) fn z_seek_impl(&mut self, from: ZSeekFrom) -> Result<u64, ZByteIoError> {
         let (base_pos, offset) = match from {
             ZSeekFrom::Start(n) => {
                 self.position = n as usize;
                 return Ok(n);
             }
             ZSeekFrom::End(n) => (self.stream.as_ref().len(), n as isize),
-            ZSeekFrom::Current(n) => (self.position, n as isize)
+            ZSeekFrom::Current(n) => (self.position, n as isize),
         };
         match base_pos.checked_add_signed(offset) {
             Some(n) => {
                 self.position = n;
                 Ok(self.position as u64)
             }
-            None => Err(ZByteIoError::SeekError("Negative seek"))
+            None => Err(ZByteIoError::SeekError("Negative seek")),
         }
     }
 
     #[inline(always)]
-    pub (crate) fn is_eof_impl(&mut self) -> Result<bool, ZByteIoError> {
+    pub(crate) fn is_eof_impl(&mut self) -> Result<bool, ZByteIoError> {
         Ok(self.position >= self.stream.as_ref().len())
     }
     #[inline(always)]
-    pub (crate) fn z_position_impl(&mut self) -> Result<u64, ZByteIoError> {
+    pub(crate) fn z_position_impl(&mut self) -> Result<u64, ZByteIoError> {
         Ok(self.position as u64)
     }
 
-    pub (crate) fn read_remaining_impl(&mut self, sink: &mut alloc::vec::Vec<u8>) -> Result<usize, ZByteIoError> {
+    pub(crate) fn read_remaining_impl(
+        &mut self,
+        sink: &mut alloc::vec::Vec<u8>,
+    ) -> Result<usize, ZByteIoError> {
         let start = self.position;
         let end = self.stream.as_ref().len();
         match self.stream.as_ref().get(start..end) {
             None => {
                 return Err(ZByteIoError::Generic(
-                    "Somehow read remaining couldn't satisfy it's invariants"
+                    "Somehow read remaining couldn't satisfy it's invariants",
                 ))
             }
             Some(e) => {

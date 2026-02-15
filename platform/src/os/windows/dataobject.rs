@@ -2,50 +2,28 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 use {
-    std::cell::RefCell,
     crate::{
+        event::DragItem,
+        os::windows::{dropfiles::*, enumformatetc::*},
         windows::{
-            core,
-            core::implement,
+            core::{self as wcore, BOOL},
             Win32::{
-                System::{
-                    Ole::{
-                        CF_HDROP,
-                    },
-                    Com::{
-                        IDataObject_Impl,
-                        IEnumFORMATETC,
-                        IDataObject,
-                        FORMATETC,
-                        STGMEDIUM,
-                        STGMEDIUM_0,
-                        IAdviseSink,
-                        IEnumSTATDATA,
-                        DATADIR_GET,
-                        TYMED_HGLOBAL,
-                        DVASPECT_CONTENT,
-                    },
-                },
                 Foundation::{
-                    BOOL,
-                    S_OK,
-                    E_NOTIMPL,
-                    OLE_E_ADVISENOTSUPPORTED,
-                    DATA_S_SAMEFORMATETC,
-                    DV_E_FORMATETC,
-                    DV_E_DVASPECT,
-                    DV_E_LINDEX,
-                    DV_E_TYMED,
-                    E_UNEXPECTED,
+                    DATA_S_SAMEFORMATETC, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_LINDEX,
+                    DV_E_TYMED, E_NOTIMPL, E_UNEXPECTED, OLE_E_ADVISENOTSUPPORTED, S_OK,
+                },
+                System::{
+                    Com::{
+                        IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA,
+                        DATADIR_GET, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0,
+                        TYMED_HGLOBAL,
+                    },
+                    Ole::CF_HDROP,
                 },
             },
         },
-        os::windows::{
-            enumformatetc::*,
-            dropfiles::*,
-        },
-        event::DragItem,
     },
+    std::cell::RefCell,
 };
 /*
 // This is a reimplementation of windows-rs IDataObject that refers to the reimplemented IEnumFORMATETC from enumformatetc.rs
@@ -243,107 +221,98 @@ implement_com!{
     }
 }
 */
-#[implement(IDataObject)]
-pub struct DragItemWindows(pub DragItem);
+pub(crate) struct DragItemWindows(pub DragItem);
+crate::implement_com! {
+    for_struct: DragItemWindows,
+    identity: IDataObject,
+    wrapper_struct: DragItemWindows_Impl,
+    interface_count: 1,
+    interfaces: {
+        0: IDataObject
+    }
+}
 // IDataObject implementation for DragItem
 
 #[allow(non_snake_case)]
-impl IDataObject_Impl for DragItemWindows {
-
-    fn GetData(&self, pformatetc: *const FORMATETC) -> core::Result<STGMEDIUM> {
-
+impl IDataObject_Impl for DragItemWindows_Impl {
+    fn GetData(&self, pformatetc: *const FORMATETC) -> wcore::Result<STGMEDIUM> {
         // if no format was supplied, return DV_E_FORMATETC
         if pformatetc == std::ptr::null_mut() {
             Err(DV_E_FORMATETC.into())
-        }
-
-        else {
-
+        } else {
             // if the format is not a CF_HDROP, deny
             if unsafe { (*pformatetc).cfFormat } != CF_HDROP.0 as u16 {
                 Err(DV_E_FORMATETC.into())
             }
-
             // if the format's aspect is not DVASPECT_CONTENT, deny
             else if unsafe { (*pformatetc).dwAspect } != DVASPECT_CONTENT.0 as u32 {
                 Err(DV_E_DVASPECT.into())
             }
-
             // if the index is not -1, deny
             else if unsafe { (*pformatetc).lindex } != -1 {
                 Err(DV_E_LINDEX.into())
             }
-
             // if the medium is not a HGLOBAL, deny
             else if unsafe { (*pformatetc).tymed } != TYMED_HGLOBAL.0 as u32 {
                 Err(DV_E_TYMED.into())
-            }
-
-            else {
+            } else {
                 let hglobal_opt = create_hglobal_for_dragitem(&self.0);
 
                 if let Some(hglobal) = hglobal_opt {
                     Ok(STGMEDIUM {
                         tymed: TYMED_HGLOBAL.0 as u32,
-                        u: STGMEDIUM_0 { hGlobal: hglobal, },
+                        u: STGMEDIUM_0 { hGlobal: hglobal },
                         pUnkForRelease: std::mem::ManuallyDrop::new(None),
                     })
-                }
-                else {
+                } else {
                     Err(E_UNEXPECTED.into())
                 }
             }
         }
     }
 
-    fn GetDataHere(&self, _: *const FORMATETC, _: *mut STGMEDIUM) -> core::Result<()> {
+    fn GetDataHere(&self, _: *const FORMATETC, _: *mut STGMEDIUM) -> wcore::Result<()> {
         Err(E_NOTIMPL.into())
     }
 
-    fn QueryGetData(&self, pformatetc: *const FORMATETC) -> core::HRESULT {
-
+    fn QueryGetData(&self, pformatetc: *const FORMATETC) -> wcore::HRESULT {
         // if no format was supplied, return DV_E_FORMATETC
         if pformatetc == std::ptr::null_mut() {
             DV_E_FORMATETC
-        }
-
-        else {
-
+        } else {
             // if the format is not a CF_HDROP, deny
             if unsafe { (*pformatetc).cfFormat } != CF_HDROP.0 as u16 {
                 DV_E_FORMATETC
             }
-
             // if the format's aspect is not DVASPECT_CONTENT, deny
             else if unsafe { (*pformatetc).dwAspect } != DVASPECT_CONTENT.0 as u32 {
                 DV_E_DVASPECT
             }
-
             // if the index is not -1, deny
             else if unsafe { (*pformatetc).lindex } != -1 {
                 DV_E_LINDEX
             }
-
             // if the medium is not a HGLOBAL, deny
             else if unsafe { (*pformatetc).tymed } != TYMED_HGLOBAL.0 as u32 {
                 DV_E_TYMED
-            }
-
-            else {
+            } else {
                 S_OK
             }
         }
     }
 
-    fn GetCanonicalFormatEtc(&self, pformatetcin: *const FORMATETC, pformatetcout: *mut FORMATETC) -> core::HRESULT {
-
+    fn GetCanonicalFormatEtc(
+        &self,
+        pformatetcin: *const FORMATETC,
+        pformatetcout: *mut FORMATETC,
+    ) -> wcore::HRESULT {
         // if no format was supplied, return DV_E_FORMATETC
         if pformatetcin == std::ptr::null_mut() {
-            return DV_E_FORMATETC
+            return DV_E_FORMATETC;
         }
 
         // just copy the format and zero the device pointer
-        unsafe { 
+        unsafe {
             *pformatetcout = *pformatetcin;
             (*pformatetcout).ptd = std::ptr::null_mut();
         }
@@ -351,38 +320,44 @@ impl IDataObject_Impl for DragItemWindows {
         DATA_S_SAMEFORMATETC
     }
 
-    fn SetData(&self, _: *const FORMATETC, _: *const STGMEDIUM, _: BOOL) -> core::Result<()> {
+    fn SetData(&self, _: *const FORMATETC, _: *const STGMEDIUM, _: BOOL) -> wcore::Result<()> {
         Err(E_NOTIMPL.into())
     }
 
-    fn EnumFormatEtc(&self, dwdirection: u32) -> core::Result<IEnumFORMATETC> {
+    fn EnumFormatEtc(&self, dwdirection: u32) -> wcore::Result<IEnumFORMATETC> {
         if dwdirection != DATADIR_GET.0 as u32 {
             Err(E_NOTIMPL.into())
-        }
-        else {
-            let formats = vec![
-                FORMATETC {
-                    cfFormat: CF_HDROP.0,
-                    ptd: std::ptr::null_mut(),
-                    dwAspect: DVASPECT_CONTENT.0,
-                    lindex: -1,
-                    tymed: TYMED_HGLOBAL.0 as u32,
-                },
-            ];
-            let enum_format_etc: IEnumFORMATETC = EnumFormatEtc { formats,index: RefCell::new(0), }.into();
+        } else {
+            let formats = vec![FORMATETC {
+                cfFormat: CF_HDROP.0,
+                ptd: std::ptr::null_mut(),
+                dwAspect: DVASPECT_CONTENT.0,
+                lindex: -1,
+                tymed: TYMED_HGLOBAL.0 as u32,
+            }];
+            let enum_format_etc: IEnumFORMATETC = EnumFormatEtc {
+                formats,
+                index: RefCell::new(0),
+            }
+            .into();
             Ok(enum_format_etc)
         }
     }
 
-    fn DAdvise(&self, _: *const FORMATETC, _: u32, _: ::core::option::Option<&IAdviseSink>) -> core::Result<u32> {
+    fn DAdvise(
+        &self,
+        _: *const FORMATETC,
+        _: u32,
+        _: wcore::Ref<'_, IAdviseSink>,
+    ) -> wcore::Result<u32> {
         Err(OLE_E_ADVISENOTSUPPORTED.into())
     }
 
-    fn DUnadvise(&self, _: u32) -> core::Result<()> {
+    fn DUnadvise(&self, _: u32) -> wcore::Result<()> {
         Err(OLE_E_ADVISENOTSUPPORTED.into())
     }
 
-    fn EnumDAdvise(&self) -> core::Result<IEnumSTATDATA> {
+    fn EnumDAdvise(&self) -> wcore::Result<IEnumSTATDATA> {
         Err(OLE_E_ADVISENOTSUPPORTED.into())
     }
 }

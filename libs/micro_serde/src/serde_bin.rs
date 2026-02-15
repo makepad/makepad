@@ -1,41 +1,41 @@
-use std::{
-    collections::HashMap,
-    hash::Hash,
-    str,
-};
 use makepad_live_id::LiveId;
+use std::{collections::HashMap, hash::Hash, str};
 
 #[allow(unused_imports)]
-#[cfg(any(target_os = "android", target_os = "linux", target_os="macos", target_os="ios"))]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios"
+))]
 use std::{
     ffi::{OsStr, OsString},
-    path::{PathBuf, Path},
+    path::{Path, PathBuf},
 };
 
 pub trait SerBin {
-    fn serialize_bin(&self)->Vec<u8>{
+    fn serialize_bin(&self) -> Vec<u8> {
         let mut s = Vec::new();
         self.ser_bin(&mut s);
         s
     }
-    
+
     fn ser_bin(&self, s: &mut Vec<u8>);
 }
 
-pub trait DeBin:Sized {
-    fn deserialize_bin(d:&[u8])->Result<Self, DeBinErr>{
+pub trait DeBin: Sized {
+    fn deserialize_bin(d: &[u8]) -> Result<Self, DeBinErr> {
         DeBin::de_bin(&mut 0, d)
     }
 
-    fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self, DeBinErr>;
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr>;
 }
 
-
-pub struct DeBinErr{
+pub struct DeBinErr {
     pub msg: String,
     pub o: usize,
     pub l: usize,
-    pub s: usize
+    pub s: usize,
 }
 
 impl std::fmt::Display for DeBinErr {
@@ -61,14 +61,19 @@ macro_rules! impl_ser_de_bin_for {
                 s.extend_from_slice(&self.to_le_bytes());
             }
         }
-        
+
         impl DeBin for $ty {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Result<$ty, DeBinErr> {
+            fn de_bin(o: &mut usize, d: &[u8]) -> Result<$ty, DeBinErr> {
                 let l = std::mem::size_of::<$ty>();
-                if *o + l > d.len(){
-                    return Err(DeBinErr{o:*o, l, s:d.len(), msg:format!("{}", stringify!($ty))})
+                if *o + l > d.len() {
+                    return Err(DeBinErr {
+                        o: *o,
+                        l,
+                        s: d.len(),
+                        msg: format!("{}", stringify!($ty)),
+                    });
                 }
-                let ret = $ty::from_le_bytes(d[*o..*o+l].try_into().unwrap());
+                let ret = $ty::from_le_bytes(d[*o..*o + l].try_into().unwrap());
                 *o += l;
                 Ok(ret)
             }
@@ -92,12 +97,17 @@ impl SerBin for usize {
 }
 
 impl DeBin for usize {
-    fn de_bin(o:&mut usize, d:&[u8]) -> Result<usize, DeBinErr> {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<usize, DeBinErr> {
         let l = std::mem::size_of::<u64>();
-        if *o + l > d.len(){
-            return Err(DeBinErr{o:*o, l, s:d.len(), msg:"usize".to_string()})
+        if *o + l > d.len() {
+            return Err(DeBinErr {
+                o: *o,
+                l,
+                s: d.len(),
+                msg: "usize".to_string(),
+            });
         }
-        let ret = u64::from_le_bytes(d[*o..*o+l].try_into().unwrap()) as usize;
+        let ret = u64::from_le_bytes(d[*o..*o + l].try_into().unwrap()) as usize;
         *o += l;
         Ok(ret)
     }
@@ -110,16 +120,21 @@ impl SerBin for LiveId {
 }
 
 impl DeBin for LiveId {
-    fn de_bin(o:&mut usize, d:&[u8]) -> Result<LiveId, DeBinErr> {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<LiveId, DeBinErr> {
         Ok(LiveId(u64::de_bin(o, d)?))
     }
 }
 
 impl DeBin for u8 {
-    fn de_bin(o:&mut usize, d:&[u8]) -> Result<u8,DeBinErr> {
-        if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"u8".to_string()})
-        } 
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<u8, DeBinErr> {
+        if *o + 1 > d.len() {
+            return Err(DeBinErr {
+                o: *o,
+                l: 1,
+                s: d.len(),
+                msg: "u8".to_string(),
+            });
+        }
         let m = d[*o];
         *o += 1;
         Ok(m)
@@ -133,10 +148,15 @@ impl SerBin for u8 {
 }
 
 impl DeBin for i8 {
-    fn de_bin(o:&mut usize, d:&[u8]) -> Result<i8,DeBinErr> {
-        if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"u8".to_string()})
-        } 
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<i8, DeBinErr> {
+        if *o + 1 > d.len() {
+            return Err(DeBinErr {
+                o: *o,
+                l: 1,
+                s: d.len(),
+                msg: "u8".to_string(),
+            });
+        }
         let m = d[*o];
         *o += 1;
         Ok(m as i8)
@@ -151,18 +171,27 @@ impl SerBin for i8 {
 
 impl SerBin for bool {
     fn ser_bin(&self, s: &mut Vec<u8>) {
-        s.push(if *self {1} else {0});
+        s.push(if *self { 1 } else { 0 });
     }
 }
 
 impl DeBin for bool {
-    fn de_bin(o:&mut usize, d:&[u8]) -> Result<bool, DeBinErr> {
-        if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"bool".to_string()})
-        } 
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<bool, DeBinErr> {
+        if *o + 1 > d.len() {
+            return Err(DeBinErr {
+                o: *o,
+                l: 1,
+                s: d.len(),
+                msg: "bool".to_string(),
+            });
+        }
         let m = d[*o];
         *o += 1;
-        if m == 0{Ok(false)} else {Ok(true)}
+        if m == 0 {
+            Ok(false)
+        } else {
+            Ok(true)
+        }
     }
 }
 
@@ -175,18 +204,28 @@ impl SerBin for String {
 }
 
 impl DeBin for String {
-    fn de_bin(o:&mut usize, d:&[u8])->Result<String, DeBinErr> {
-        let len:u64 = DeBin::de_bin(o,d)?;
-        if *o + (len as usize) > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"String".to_string()})
-        } 
-        let r = std::str::from_utf8(&d[*o..(*o+(len as usize))]).unwrap().to_string();
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<String, DeBinErr> {
+        let len: u64 = DeBin::de_bin(o, d)?;
+        if *o + (len as usize) > d.len() {
+            return Err(DeBinErr {
+                o: *o,
+                l: 1,
+                s: d.len(),
+                msg: "String".to_string(),
+            });
+        }
+        let r = std::str::from_utf8(&d[*o..(*o + (len as usize))])
+            .unwrap()
+            .to_string();
         *o += len as usize;
         Ok(r)
     }
 }
 
-impl<T> SerBin for Vec<T> where T: SerBin {
+impl<T> SerBin for Vec<T>
+where
+    T: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         let len = self.len() as u64;
         len.ser_bin(s);
@@ -196,18 +235,24 @@ impl<T> SerBin for Vec<T> where T: SerBin {
     }
 }
 
-impl<T> DeBin for Vec<T> where T:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->Result<Vec<T>, DeBinErr> {
-        let len:u64 = DeBin::de_bin(o,d)?;
+impl<T> DeBin for Vec<T>
+where
+    T: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Vec<T>, DeBinErr> {
+        let len: u64 = DeBin::de_bin(o, d)?;
         let mut out = Vec::new();
-        for _ in 0..len{
-            out.push(DeBin::de_bin(o,d)?)
+        for _ in 0..len {
+            out.push(DeBin::de_bin(o, d)?)
         }
         Ok(out)
     }
 }
 
-impl<T> SerBin for Option<T> where T: SerBin {
+impl<T> SerBin for Option<T>
+where
+    T: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         match self {
             None => s.push(0),
@@ -219,22 +264,41 @@ impl<T> SerBin for Option<T> where T: SerBin {
     }
 }
 
-impl<T> DeBin for Option<T> where T:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->Result<Option<T>, DeBinErr> {
-        if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"Option<T>".to_string()})
-        } 
+impl<T> DeBin for Option<T>
+where
+    T: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Option<T>, DeBinErr> {
+        if *o + 1 > d.len() {
+            return Err(DeBinErr {
+                o: *o,
+                l: 1,
+                s: d.len(),
+                msg: "Option<T>".to_string(),
+            });
+        }
         let m = d[*o];
         *o += 1;
         Ok(match m {
             0 => None,
-            1 => Some(DeBin::de_bin(o,d)?),
-            _ => return Err(DeBinErr{o:*o, l:0, s:d.len(), msg:"Option<T>".to_string()}),
+            1 => Some(DeBin::de_bin(o, d)?),
+            _ => {
+                return Err(DeBinErr {
+                    o: *o,
+                    l: 0,
+                    s: d.len(),
+                    msg: "Option<T>".to_string(),
+                })
+            }
         })
     }
 }
 
-impl<T, E> SerBin for Result<T, E> where T: SerBin, E: SerBin {
+impl<T, E> SerBin for Result<T, E>
+where
+    T: SerBin,
+    E: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         match self {
             Ok(v) => {
@@ -249,22 +313,41 @@ impl<T, E> SerBin for Result<T, E> where T: SerBin, E: SerBin {
     }
 }
 
-impl<T, E> DeBin for Result<T, E> where T: DeBin, E: DeBin {
+impl<T, E> DeBin for Result<T, E>
+where
+    T: DeBin,
+    E: DeBin,
+{
     fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
         if *o + 1 > d.len() {
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"Result<T, E>".to_string()});
+            return Err(DeBinErr {
+                o: *o,
+                l: 1,
+                s: d.len(),
+                msg: "Result<T, E>".to_string(),
+            });
         }
         let m = d[*o];
         *o += 1;
         Ok(match m {
             0 => Ok(T::de_bin(o, d)?),
             1 => Err(E::de_bin(o, d)?),
-            _ => return Err(DeBinErr{o:*o, l:0, s:d.len(), msg:"Result<T, E>".to_string()}),
+            _ => {
+                return Err(DeBinErr {
+                    o: *o,
+                    l: 0,
+                    s: d.len(),
+                    msg: "Result<T, E>".to_string(),
+                })
+            }
         })
     }
 }
 
-impl<T> SerBin for [T] where T: SerBin {
+impl<T> SerBin for [T]
+where
+    T: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         for item in self {
             item.ser_bin(s);
@@ -272,18 +355,27 @@ impl<T> SerBin for [T] where T: SerBin {
     }
 }
 
-
-unsafe fn de_bin_array_impl_inner<T>(top: *mut T, count: usize, o:&mut usize, d:&[u8]) -> Result<(), DeBinErr> where T:DeBin{
+unsafe fn de_bin_array_impl_inner<T>(
+    top: *mut T,
+    count: usize,
+    o: &mut usize,
+    d: &[u8],
+) -> Result<(), DeBinErr>
+where
+    T: DeBin,
+{
     for c in 0..count {
-        top.add(c).write(DeBin::de_bin(o, d) ?);
+        top.add(c).write(DeBin::de_bin(o, d)?);
     }
     Ok(())
 }
 
-impl<T, const N: usize> DeBin for [T; N] where T: DeBin {
-    fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self,
-    DeBinErr> {
-        unsafe{
+impl<T, const N: usize> DeBin for [T; N]
+where
+    T: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        unsafe {
             let mut to = std::mem::MaybeUninit::<[T; N]>::uninit();
             let top: *mut T = &mut to as *mut _ as *mut T;
             de_bin_array_impl_inner(top, N, o, d)?;
@@ -292,30 +384,62 @@ impl<T, const N: usize> DeBin for [T; N] where T: DeBin {
     }
 }
 
-impl<A,B> SerBin for (A,B) where A: SerBin, B:SerBin {
+impl<A, B> SerBin for (A, B)
+where
+    A: SerBin,
+    B: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.0.ser_bin(s);
         self.1.ser_bin(s);
     }
 }
 
-impl<A,B> DeBin for (A,B) where A:DeBin, B:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
+impl<A, B> DeBin for (A, B)
+where
+    A: DeBin,
+    B: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<(A, B), DeBinErr> {
+        Ok((DeBin::de_bin(o, d)?, DeBin::de_bin(o, d)?))
+    }
 }
 
-impl<A,B,C> SerBin for (A,B,C) where A: SerBin, B:SerBin, C:SerBin {
+impl<A, B, C> SerBin for (A, B, C)
+where
+    A: SerBin,
+    B: SerBin,
+    C: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.0.ser_bin(s);
         self.1.ser_bin(s);
         self.2.ser_bin(s);
-    } 
+    }
 }
 
-impl<A,B,C> DeBin for (A,B,C) where A:DeBin, B:DeBin, C:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B,C), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
+impl<A, B, C> DeBin for (A, B, C)
+where
+    A: DeBin,
+    B: DeBin,
+    C: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<(A, B, C), DeBinErr> {
+        Ok((
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+        ))
+    }
 }
 
-impl<A,B,C,D> SerBin for (A,B,C,D) where A: SerBin, B:SerBin, C:SerBin, D:SerBin {
+impl<A, B, C, D> SerBin for (A, B, C, D)
+where
+    A: SerBin,
+    B: SerBin,
+    C: SerBin,
+    D: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.0.ser_bin(s);
         self.1.ser_bin(s);
@@ -324,11 +448,31 @@ impl<A,B,C,D> SerBin for (A,B,C,D) where A: SerBin, B:SerBin, C:SerBin, D:SerBin
     }
 }
 
-impl<A,B,C,D> DeBin for (A,B,C,D) where A:DeBin, B:DeBin, C:DeBin, D:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B,C,D), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
+impl<A, B, C, D> DeBin for (A, B, C, D)
+where
+    A: DeBin,
+    B: DeBin,
+    C: DeBin,
+    D: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<(A, B, C, D), DeBinErr> {
+        Ok((
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+        ))
+    }
 }
 
-impl<A,B,C,D,E> SerBin for (A,B,C,D,E) where A: SerBin, B:SerBin, C:SerBin, D:SerBin, E:SerBin {
+impl<A, B, C, D, E> SerBin for (A, B, C, D, E)
+where
+    A: SerBin,
+    B: SerBin,
+    C: SerBin,
+    D: SerBin,
+    E: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.0.ser_bin(s);
         self.1.ser_bin(s);
@@ -338,12 +482,30 @@ impl<A,B,C,D,E> SerBin for (A,B,C,D,E) where A: SerBin, B:SerBin, C:SerBin, D:Se
     }
 }
 
-impl<A,B,C,D,E> DeBin for (A,B,C,D,E) where A:DeBin, B:DeBin, C:DeBin, D:DeBin, E:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B,C,D,E), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
+impl<A, B, C, D, E> DeBin for (A, B, C, D, E)
+where
+    A: DeBin,
+    B: DeBin,
+    C: DeBin,
+    D: DeBin,
+    E: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<(A, B, C, D, E), DeBinErr> {
+        Ok((
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+            DeBin::de_bin(o, d)?,
+        ))
+    }
 }
 
-impl<K, V> SerBin for HashMap<K, V> where K: SerBin,
-V: SerBin {
+impl<K, V> SerBin for HashMap<K, V>
+where
+    K: SerBin,
+    V: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         let len = self.len() as u64;
         len.ser_bin(s);
@@ -354,62 +516,70 @@ V: SerBin {
     }
 }
 
-impl<K, V> DeBin for HashMap<K, V> where K: DeBin + Eq + Hash,
-V: DeBin {
-    fn de_bin(o:&mut usize, d:&[u8])->Result<Self, DeBinErr>{
-        let len:u64 = DeBin::de_bin(o,d)?;
+impl<K, V> DeBin for HashMap<K, V>
+where
+    K: DeBin + Eq + Hash,
+    V: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        let len: u64 = DeBin::de_bin(o, d)?;
         let mut h = HashMap::new();
-        for _ in 0..len{
-            let k = DeBin::de_bin(o,d)?;
-            let v = DeBin::de_bin(o,d)?;
+        for _ in 0..len {
+            let k = DeBin::de_bin(o, d)?;
+            let v = DeBin::de_bin(o, d)?;
             h.insert(k, v);
         }
         Ok(h)
     }
 }
 
-
-impl<T> SerBin for Box<T> where T: SerBin {
+impl<T> SerBin for Box<T>
+where
+    T: SerBin,
+{
     fn ser_bin(&self, s: &mut Vec<u8>) {
         (**self).ser_bin(s)
     }
 }
 
-impl<T> DeBin for Box<T> where T: DeBin {
-    fn de_bin(o:&mut usize, d:&[u8])->Result<Box<T>, DeBinErr> {
-        Ok(Box::new(DeBin::de_bin(o,d)?))
+impl<T> DeBin for Box<T>
+where
+    T: DeBin,
+{
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Box<T>, DeBinErr> {
+        Ok(Box::new(DeBin::de_bin(o, d)?))
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "linux", target_os="macos"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 impl SerBin for PathBuf {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.as_os_str().ser_bin(s)
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "linux", target_os="macos"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 impl SerBin for Path {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.as_os_str().ser_bin(s)
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "linux", target_os="macos"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 impl SerBin for OsString {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.as_os_str().ser_bin(s)
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "linux", target_os="macos"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 impl SerBin for OsStr {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         use std::os::unix::ffi::OsStrExt;
 
         self.as_bytes().ser_bin(s)
     }
-} 
+}
 
 impl SerBin for char {
     fn ser_bin(&self, s: &mut Vec<u8>) {
@@ -454,20 +624,20 @@ impl DeBin for char {
 #[inline]
 pub fn utf8_char_width(b: u8) -> usize {
     static UTF8_CHAR_WIDTH: [u8; 256] = [
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, // 0x1F
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, // 0x3F
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, // 0x5F
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, // 0x7F
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, // 0x9F
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, // 0xBF
-        0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-        2, // 0xDF
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, // 0x1F
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, // 0x3F
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, // 0x5F
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, // 0x7F
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, // 0x9F
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, // 0xBF
+        0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, // 0xDF
         3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, // 0xEF
         4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0xFF
     ];

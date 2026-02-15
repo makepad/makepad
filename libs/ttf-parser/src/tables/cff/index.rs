@@ -24,7 +24,7 @@ pub fn parse_index<'a, T: IndexSize>(s: &mut Stream<'a>) -> Option<Index<'a>> {
 
 #[inline(never)]
 fn parse_index_impl<'a>(count: u32, s: &mut Stream<'a>) -> Option<Index<'a>> {
-    if count == 0 || count == core::u32::MAX {
+    if count == 0 || count == u32::MAX {
         return Some(Index::default());
     }
 
@@ -53,7 +53,7 @@ pub fn skip_index<T: IndexSize>(s: &mut Stream) -> Option<()> {
 
 #[inline(never)]
 fn skip_index_impl(count: u32, s: &mut Stream) -> Option<()> {
-    if count == 0 || count == core::u32::MAX {
+    if count == 0 || count == u32::MAX {
         return Some(());
     }
 

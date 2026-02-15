@@ -184,7 +184,6 @@ pub unsafe fn upsample_hv_avx2(
     assert!(input.len() * 2 <= scratch_space.len());
     let scratch_space = &mut scratch_space[..input.len() * 2];
 
-
     upsample_vertical_avx2(input, in_near, in_far, &mut [], scratch_space);
 
     let scratch_half = scratch_space.len() / 2;

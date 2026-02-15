@@ -68,6 +68,15 @@ impl Loader {
         self.font_family_definitions.insert(id, definition);
     }
 
+    pub fn set_font_family_definition(
+        &mut self,
+        id: FontFamilyId,
+        definition: FontFamilyDefinition,
+    ) {
+        self.font_family_cache.remove(&id);
+        self.font_family_definitions.insert(id, definition);
+    }
+
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
         debug_assert!(
             !self.is_font_known(id),
@@ -82,6 +91,10 @@ impl Loader {
             self.font_family_cache.insert(id, Rc::new(font_family));
         }
         self.font_family_cache.get(&id).unwrap()
+    }
+
+    pub fn get_or_load_font_family_rc(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
+        self.get_or_load_font_family(id).clone()
     }
 
     fn load_font_family(&mut self, id: FontFamilyId) -> FontFamily {

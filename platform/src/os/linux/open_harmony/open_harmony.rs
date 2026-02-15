@@ -1,11 +1,21 @@
 use {
     self::super::{
-        super::gl_sys::LibGl,
-        super::gl_sys, arkts_obj_ref::ArkTsObjRef, oh_callbacks::*, oh_media::CxOpenHarmonyMedia,
-        raw_file::RawFileMgr,
+        super::gl_sys, super::gl_sys::LibGl, arkts_obj_ref::ArkTsObjRef, oh_callbacks::*,
+        oh_media::CxOpenHarmonyMedia, raw_file::RawFileMgr,
     },
     crate::{
-        cx::{Cx, OpenHarmonyParams, OsType}, cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace}, cx_stdin::{PollTimer, PollTimers}, egl_sys::{self, LibEgl, EGL_NONE}, event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom}, gpu_info::GpuPerformance, makepad_math::*, os::cx_native::EventFlow, pass::{CxPassParent, PassClearColor, PassClearDepth, PassId}, thread::SignalToUI, window::CxWindowPool, WindowGeomChangeEvent
+        cx::{Cx, OpenHarmonyParams, OsType},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_stdin::{PollTimer, PollTimers},
+        draw_pass::{CxDrawPassParent, DrawPassClearColor, DrawPassClearDepth, DrawPassId},
+        egl_sys::{self, LibEgl, EGL_NONE},
+        event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom},
+        gpu_info::GpuPerformance,
+        makepad_math::*,
+        os::cx_native::EventFlow,
+        thread::SignalToUI,
+        window::CxWindowPool,
+        WindowGeomChangeEvent,
     },
     napi_derive_ohos::napi,
     napi_ohos::{sys::*, Env, JsObject, NapiRaw},
@@ -86,13 +96,15 @@ impl Cx {
     fn handle_other_events(&mut self) {
         // Timers
         let events = self.os.timers.get_dispatch();
-        for event in events{
+        for event in events {
+            self.handle_script_timer(&event);
             self.call_event_handler(&Event::Timer(event));
         }
 
         // Signals
         if SignalToUI::check_and_clear_ui_signal() {
             self.handle_media_signals();
+            self.handle_script_signals();
             self.call_event_handler(&Event::Signal);
         }
 
@@ -119,11 +131,12 @@ impl Cx {
 
     fn handle_drawing(&mut self) {
         if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
+            let time_now = self.os.timers.time_now();
             if !self.new_next_frames.is_empty() {
-                self.call_next_frame_event(self.os.timers.time_now());
+                self.call_next_frame_event(time_now);
             }
             if self.need_redrawing() {
-                self.call_draw_event();
+                self.call_draw_event(time_now);
                 self.opengl_compile_shaders();
             }
 
@@ -198,16 +211,18 @@ impl Cx {
                     touch.abs /= dpi_factor;
                 }
                 self.fingers.process_touch_update_start(time, &touches);
-                let e = Event::TouchUpdate(
-                    TouchUpdateEvent {
-                        time,
-                        window_id: CxWindowPool::id_zero(),
-                        touches,
-                        modifiers: Default::default()
-                    }
-                );
+                let e = Event::TouchUpdate(TouchUpdateEvent {
+                    time,
+                    window_id: CxWindowPool::id_zero(),
+                    touches,
+                    modifiers: Default::default(),
+                });
                 self.call_event_handler(&e);
-                let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
+                let e = if let Event::TouchUpdate(e) = e {
+                    e
+                } else {
+                    panic!()
+                };
                 self.fingers.process_touch_update_end(&e.touches);
             }
             FromOhosMessage::TextInput(e) => {
@@ -346,17 +361,18 @@ impl Cx {
             let (egl_context, egl_config, egl_display) = unsafe {
                 egl_sys::create_egl_context(&mut libegl).expect("Can't create EGL context")
             };
-            let libgl = LibGl::try_load(| s | {
-                for s in s{
+            let libgl = LibGl::try_load(|s| {
+                for s in s {
                     let s = CString::new(*s).unwrap();
-                    let p = unsafe{libegl.eglGetProcAddress.unwrap()(s.as_ptr())};
-                    if !p.is_null(){
-                        return p
+                    let p = unsafe { libegl.eglGetProcAddress.unwrap()(s.as_ptr()) };
+                    if !p.is_null() {
+                        return p;
                     }
                 }
                 0 as _
-            }).expect("Cant load openGL functions");
-            
+            })
+            .expect("Cant load openGL functions");
+
             let win_attr = vec![EGL_NONE];
             let surface = unsafe {
                 (libegl.eglCreateWindowSurface.unwrap())(
@@ -418,13 +434,13 @@ impl Cx {
         }
     }
 
-    pub fn draw_pass_to_fullscreen(&mut self, pass_id: PassId) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+    pub fn draw_pass_to_fullscreen(&mut self, draw_pass_id: DrawPassId) {
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        self.setup_render_pass(pass_id);
+        self.setup_render_pass(draw_pass_id);
 
         // keep repainting in a loop
-        //self.passes[pass_id].paint_dirty = false;
+        //self.passes[draw_pass_id].paint_dirty = false;
         let gl = self.os.gl();
         unsafe {
             //direct_app.egl.make_current();
@@ -436,20 +452,20 @@ impl Cx {
             );
         }
 
-        let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            self.passes[pass_id].clear_color
+        let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
+            self.passes[draw_pass_id].clear_color
         } else {
-            match self.passes[pass_id].color_textures[0].clear_color {
-                PassClearColor::InitWith(color) => color,
-                PassClearColor::ClearWith(color) => color,
+            match self.passes[draw_pass_id].color_textures[0].clear_color {
+                DrawPassClearColor::InitWith(color) => color,
+                DrawPassClearColor::ClearWith(color) => color,
             }
         };
-        let clear_depth = match self.passes[pass_id].clear_depth {
-            PassClearDepth::InitWith(depth) => depth,
-            PassClearDepth::ClearWith(depth) => depth,
+        let clear_depth = match self.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) => depth,
+            DrawPassClearDepth::ClearWith(depth) => depth,
         };
 
-        if !self.passes[pass_id].dont_clear {
+        if !self.passes[draw_pass_id].dont_clear {
             unsafe {
                 (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
                 (gl.glClearDepthf)(clear_depth as f32);
@@ -460,9 +476,9 @@ impl Cx {
         Self::set_default_depth_and_blend_mode(self.os.gl());
 
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
 
-        self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step);
+        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
 
         unsafe { self.os.display.as_mut().unwrap().swap_buffers() };
 
@@ -475,18 +491,18 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(_window_id) => {
-                    self.draw_pass_to_fullscreen(*pass_id);
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(_window_id) => {
+                    self.draw_pass_to_fullscreen(*draw_pass_id);
                 }
-                CxPassParent::Pass(_) => {
-                    self.draw_pass_to_texture(*pass_id, None);
+                CxDrawPassParent::DrawPass(_) => {
+                    self.draw_pass_to_texture(*draw_pass_id, None);
                 }
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, None);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
         }
@@ -543,7 +559,7 @@ impl Cx {
                     //self.os.keyboard_visible = false;
                     //unsafe {android_jni::to_java_show_keyboard(false);}
                 }
-                e=>{
+                e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
             }
@@ -600,8 +616,8 @@ pub struct CxOs {
     pub(crate) display: Option<CxOhosDisplay>,
 }
 
-impl CxOs{
-    pub (crate) fn gl(&self)->&LibGl{
+impl CxOs {
+    pub(crate) fn gl(&self) -> &LibGl {
         &self.display.as_ref().unwrap().libgl
     }
 }

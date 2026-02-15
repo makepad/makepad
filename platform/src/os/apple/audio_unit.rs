@@ -1,369 +1,19 @@
 use {
+    crate::{
+        audio::*, makepad_live_id::*, makepad_objc_sys::objc_block,
+        makepad_objc_sys::objc_block_invoke, midi::*, os::apple::apple_classes::*,
+        os::apple::apple_sys::*, os::apple::apple_util::*, thread::*,
+    },
     std::collections::HashSet,
     std::sync::{Arc, Mutex},
-    crate::{
-        makepad_live_id::*,
-        thread::*,
-        audio::*,
-        midi::*,
-        os::apple::apple_sys::*,
-        os::apple::apple_classes::*,
-        os::apple::apple_util::*,
-        makepad_objc_sys::objc_block,
-        makepad_objc_sys::objc_block_invoke,
-    },
 };
 
-// ===================================================================================
-// macOS VoiceProcessingIO using C Audio Unit API
-//
-// IMPORTANT: For AEC to work, BOTH input AND output must go through the same VPIO unit.
-// The output provides the echo reference that VPIO uses to cancel echo from the input.
-// ===================================================================================
-
 #[cfg(target_os = "macos")]
-struct VpioCallbackContext {
-    audio_unit: CAudioUnit,
-    sample_rate: f64,
-    input_device_id: AudioDeviceId,
-    output_device_id: AudioDeviceId,
-    input_callback: Arc<Mutex<Option<AudioInputFn>>>,
-    output_callback: Arc<Mutex<Option<AudioOutputFn>>>,
-}
-
-#[cfg(target_os = "macos")]
-pub struct MacosVpioUnit {
-    audio_unit: CAudioUnit,
-    // Box the context so it has a stable address for the C callbacks
-    _context: Box<VpioCallbackContext>,
-    pub sample_rate: f64,
-    pub input_device_id: AudioDeviceId,
-    pub output_device_id: AudioDeviceId,
-}
-
-#[cfg(target_os = "macos")]
-unsafe impl Send for MacosVpioUnit {}
-#[cfg(target_os = "macos")]
-unsafe impl Sync for MacosVpioUnit {}
-
-#[cfg(target_os = "macos")]
-impl Drop for MacosVpioUnit {
-    fn drop(&mut self) {
-        unsafe {
-            AudioOutputUnitStop(self.audio_unit);
-            AudioUnitUninitialize(self.audio_unit);
-            AudioComponentInstanceDispose(self.audio_unit);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl MacosVpioUnit {
-    /// Create a new VPIO unit that handles BOTH input AND output.
-    /// This is required for AEC to work, the output provides the echo reference.
-    pub fn new(
-        input_device_id: AudioDeviceId,
-        output_device_id: AudioDeviceId,
-        input_callback: Arc<Mutex<Option<AudioInputFn>>>,
-        output_callback: Arc<Mutex<Option<AudioOutputFn>>>,
-    ) -> Result<Self, AudioError> {
-        unsafe {
-            // Find VoiceProcessingIO component
-            let desc = AudioComponentDescription::new_apple(
-                AudioUnitType::IO,
-                AudioUnitSubType::VoiceProcessingIO,
-            );
-
-            let component = AudioComponentFindNext(std::ptr::null_mut(), &desc);
-            if component.is_null() {
-                return Err(AudioError::System("VoiceProcessingIO component not found".into()));
-            }
-
-            // Create instance
-            let mut audio_unit: CAudioUnit = std::ptr::null_mut();
-            let status = AudioComponentInstanceNew(component, &mut audio_unit);
-            if status != 0 {
-                return Err(AudioError::System(format!("AudioComponentInstanceNew failed: {}", status)));
-            }
-
-            // Note: On macOS, VPIO has both I/O enabled by default and can't be modified.
-            // We still try to set them for completeness.
-
-            // Enable input on the input bus (bus 1)
-            let enable_input: u32 = 1;
-            let _ = AudioUnitSetProperty(
-                audio_unit,
-                kAudioOutputUnitProperty_EnableIO,
-                kAudioUnitScope_Input,
-                kInputBus,
-                &enable_input as *const u32 as *const c_void,
-                std::mem::size_of::<u32>() as u32,
-            );
-
-            // Enable output on the output bus (bus 0)
-            let enable_output: u32 = 1;
-            let _ = AudioUnitSetProperty(
-                audio_unit,
-                kAudioOutputUnitProperty_EnableIO,
-                kAudioUnitScope_Output,
-                kOutputBus,
-                &enable_output as *const u32 as *const c_void,
-                std::mem::size_of::<u32>() as u32,
-            );
-
-            // Use 48000 Hz sample rate for VPIO to match HAL output and give integer
-            // ratios with OpenAI's 24000 Hz audio (48000/24000 = 2)
-            let sample_rate = 48000.0;
-
-            // Set mono float format for input (bus 1, output scope = what we receive)
-            let stream_format = CAudioStreamBasicDescription {
-                mSampleRate: sample_rate,
-                mFormatID: AudioFormatId::LinearPCM,
-                mFormatFlags: LinearPcmFlags::IS_FLOAT as u32
-                    | LinearPcmFlags::IS_NON_INTERLEAVED as u32
-                    | LinearPcmFlags::IS_PACKED as u32,
-                mBytesPerPacket: 4,
-                mFramesPerPacket: 1,
-                mBytesPerFrame: 4,
-                mChannelsPerFrame: 1, // VPIO is mono
-                mBitsPerChannel: 32,
-                mReserved: 0,
-            };
-
-            let status = AudioUnitSetProperty(
-                audio_unit,
-                kAudioUnitProperty_StreamFormat,
-                kAudioUnitScope_Output,
-                kInputBus,
-                &stream_format as *const _ as *const c_void,
-                std::mem::size_of::<CAudioStreamBasicDescription>() as u32,
-            );
-            if status != 0 {
-                crate::log!("Warning: Set input stream format failed: {}", status);
-            }
-
-            // Set mono float format for output (bus 0, input scope = what we provide)
-            let status = AudioUnitSetProperty(
-                audio_unit,
-                kAudioUnitProperty_StreamFormat,
-                kAudioUnitScope_Input,
-                kOutputBus,
-                &stream_format as *const _ as *const c_void,
-                std::mem::size_of::<CAudioStreamBasicDescription>() as u32,
-            );
-            if status != 0 {
-                crate::log!("Warning: Set output stream format failed: {}", status);
-            }
-
-            // Initialize the audio unit FIRST to lock in the format
-            let status = AudioUnitInitialize(audio_unit);
-            if status != 0 {
-                AudioComponentInstanceDispose(audio_unit);
-                return Err(AudioError::System(format!("AudioUnitInitialize failed: {}", status)));
-            }
-
-            // Query the actual stream format after initialization to get the real sample rate
-            let mut actual_format = CAudioStreamBasicDescription {
-                mSampleRate: 0.0,
-                mFormatID: AudioFormatId::LinearPCM,
-                mFormatFlags: 0,
-                mBytesPerPacket: 0,
-                mFramesPerPacket: 0,
-                mBytesPerFrame: 0,
-                mChannelsPerFrame: 0,
-                mBitsPerChannel: 0,
-                mReserved: 0,
-            };
-            let mut actual_format_size = std::mem::size_of::<CAudioStreamBasicDescription>() as u32;
-            let status = AudioUnitGetProperty(
-                audio_unit,
-                kAudioUnitProperty_StreamFormat,
-                kAudioUnitScope_Output,
-                kInputBus,
-                &mut actual_format as *mut _ as *mut c_void,
-                &mut actual_format_size,
-            );
-            let actual_sample_rate = if status == 0 && actual_format.mSampleRate > 0.0 {
-                actual_format.mSampleRate
-            } else {
-                sample_rate
-            };
-
-            // Create the callback context with the actual sample rate
-            let context = Box::new(VpioCallbackContext {
-                audio_unit,
-                sample_rate: actual_sample_rate,
-                input_device_id,
-                output_device_id,
-                input_callback,
-                output_callback,
-            });
-
-            // Set up the input callback (receives mic audio from bus 1)
-            let input_callback_struct = AURenderCallbackStruct {
-                inputProc: vpio_input_callback,
-                inputProcRefCon: &*context as *const VpioCallbackContext as *mut c_void,
-            };
-
-            let status = AudioUnitSetProperty(
-                audio_unit,
-                kAudioOutputUnitProperty_SetInputCallback,
-                kAudioUnitScope_Global,
-                0,
-                &input_callback_struct as *const _ as *const c_void,
-                std::mem::size_of::<AURenderCallbackStruct>() as u32,
-            );
-            if status != 0 {
-                AudioUnitUninitialize(audio_unit);
-                AudioComponentInstanceDispose(audio_unit);
-                return Err(AudioError::System(format!("Set input callback failed: {}", status)));
-            }
-
-            // Set up the output render callback (provides audio to bus 0 for speaker AND AEC reference)
-            let output_callback_struct = AURenderCallbackStruct {
-                inputProc: vpio_output_callback,
-                inputProcRefCon: &*context as *const VpioCallbackContext as *mut c_void,
-            };
-
-            let status = AudioUnitSetProperty(
-                audio_unit,
-                kAudioUnitProperty_SetRenderCallback,
-                kAudioUnitScope_Input,
-                kOutputBus,
-                &output_callback_struct as *const _ as *const c_void,
-                std::mem::size_of::<AURenderCallbackStruct>() as u32,
-            );
-            if status != 0 {
-                AudioUnitUninitialize(audio_unit);
-                AudioComponentInstanceDispose(audio_unit);
-                return Err(AudioError::System(format!("Set output render callback failed: {}", status)));
-            }
-
-            // Start the audio unit
-            let status = AudioOutputUnitStart(audio_unit);
-            if status != 0 {
-                AudioUnitUninitialize(audio_unit);
-                AudioComponentInstanceDispose(audio_unit);
-                return Err(AudioError::System(format!("AudioOutputUnitStart failed: {}", status)));
-            }
-
-            Ok(Self {
-                audio_unit,
-                _context: context,
-                sample_rate: actual_sample_rate,
-                input_device_id,
-                output_device_id,
-            })
-        }
-    }
-}
-
-/// Input callback - receives mic audio with AEC applied
-#[cfg(target_os = "macos")]
-unsafe extern "C" fn vpio_input_callback(
-    in_ref_con: *mut c_void,
-    io_action_flags: *mut u32,
-    in_time_stamp: *const AudioTimeStamp,
-    in_bus_number: u32,
-    in_number_frames: u32,
-    _io_data: *mut AudioBufferList,
-) -> OSStatus {
-    let context = &*(in_ref_con as *const VpioCallbackContext);
-
-    // Create buffer for the audio data
-    let mut buffer = crate::audio::AudioBuffer::new_with_size(in_number_frames as usize, 1);
-    let mut buffer_list = buffer.to_audio_buffer_list();
-
-    // Render the input audio from bus 1
-    let status = AudioUnitRender(
-        context.audio_unit,
-        io_action_flags,
-        in_time_stamp,
-        in_bus_number,
-        in_number_frames,
-        &mut buffer_list,
-    );
-
-    if status != 0 {
-        return status;
-    }
-
-    // Call the makepad audio input callback
-    if let Ok(mut callback_guard) = context.input_callback.try_lock() {
-        if let Some(ref mut callback) = *callback_guard {
-            let time = AudioTime {
-                sample_time: (*in_time_stamp).mSampleTime,
-                host_time: (*in_time_stamp).mHostTime,
-                rate_scalar: (*in_time_stamp).mRateScalar,
-            };
-            callback(
-                AudioInfo {
-                    device_id: context.input_device_id,
-                    time: Some(time),
-                    sample_rate: context.sample_rate,
-                },
-                &buffer,
-            );
-        }
-    }
-
-    0
-}
-
-/// Output render callback, provides audio to speaker AND serves as AEC reference
-#[cfg(target_os = "macos")]
-unsafe extern "C" fn vpio_output_callback(
-    in_ref_con: *mut c_void,
-    _io_action_flags: *mut u32,
-    in_time_stamp: *const AudioTimeStamp,
-    _in_bus_number: u32,
-    in_number_frames: u32,
-    io_data: *mut AudioBufferList,
-) -> OSStatus {
-    let context = &*(in_ref_con as *const VpioCallbackContext);
-
-    // Wrap the CoreAudio buffer list in our AudioBuffer type
-    let buffer_list = &mut *io_data;
-
-    // Create a mutable AudioBuffer that wraps the CoreAudio buffers
-    let num_buffers = buffer_list.mNumberBuffers as usize;
-    let mut buffer = crate::audio::AudioBuffer::new_with_size(in_number_frames as usize, num_buffers);
-
-    // Call the app's output callback to fill the buffer
-    if let Ok(mut callback_guard) = context.output_callback.try_lock() {
-        if let Some(ref mut callback) = *callback_guard {
-            let time = AudioTime {
-                sample_time: (*in_time_stamp).mSampleTime,
-                host_time: (*in_time_stamp).mHostTime,
-                rate_scalar: (*in_time_stamp).mRateScalar,
-            };
-            callback(
-                AudioInfo {
-                    device_id: context.output_device_id,
-                    time: Some(time),
-                    sample_rate: context.sample_rate,
-                },
-                &mut buffer,
-            );
-        }
-    }
-
-    // Copy our buffer data to the CoreAudio buffer list
-    for i in 0..num_buffers {
-        let ca_buffer = &mut buffer_list.mBuffers[i];
-        let data_ptr = ca_buffer.mData as *mut f32;
-        let channel_data = buffer.channel(i);
-        let frames_to_copy = (ca_buffer.mDataByteSize as usize / 4).min(channel_data.len());
-        std::ptr::copy_nonoverlapping(channel_data.as_ptr(), data_ptr, frames_to_copy);
-    }
-
-    0
-}
-
+use crate::os::apple::audio_tap::AudioTapAccess;
 
 pub struct KeyValueObserver {
-    _callback: Box<Box<dyn Fn() >>,
-    observer: RcObjcId
+    _callback: Box<Box<dyn Fn()>>,
+    observer: RcObjcId,
 }
 unsafe impl Send for KeyValueObserver {}
 unsafe impl Sync for KeyValueObserver {}
@@ -381,10 +31,13 @@ impl KeyValueObserver {
         unsafe {
             let double_box = Box::new(callback);
             //let cocoa_app = get_macos_app_global();
-            let observer = RcObjcId::from_owned(msg_send![get_apple_class_global().key_value_observing_delegate, alloc]);
-            
+            let observer = RcObjcId::from_owned(msg_send![
+                get_apple_class_global().key_value_observing_delegate,
+                alloc
+            ]);
+
             (*observer.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
-            
+
             let () = msg_send![
                 target,
                 addObserver: observer.as_id()
@@ -394,85 +47,94 @@ impl KeyValueObserver {
             ];
             Self {
                 _callback: double_box,
-                observer
+                observer,
             }
         }
-        
     }
 }
 
 pub fn define_key_value_observing_delegate() -> *const Class {
-    
     extern "C" fn observe_value_for_key_path(
         this: &Object,
         _: Sel,
         _key_path: ObjcId,
         _of_object: ObjcId,
         _change: ObjcId,
-        _data: *mut std::ffi::c_void
+        _data: *mut std::ffi::c_void,
     ) {
         unsafe {
             let ptr: *const c_void = *this.get_ivar("key_value_observer_callback");
-            if ptr == 0 as *const c_void { // owner gone
-                return
+            if ptr == 0 as *const c_void {
+                // owner gone
+                return;
             }
             (*(ptr as *const Box<dyn Fn()>))();
         }
     }
-    
+
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("KeyValueObservingDelegate", superclass).unwrap();
-    
+
     // Add callback methods
     unsafe {
         decl.add_method(
             sel!(observeValueForKeyPath: ofObject: change: context:),
-            observe_value_for_key_path as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId, *mut std::ffi::c_void)
+            observe_value_for_key_path
+                as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId, *mut std::ffi::c_void),
         );
     }
     // Store internal state as user data
     decl.add_ivar::<*mut c_void>("key_value_observer_callback");
-    
+
     return decl.register();
 }
-
 
 pub struct AudioUnitAccess {
     pub change_signal: SignalToUI,
     pub device_descs: Vec<CoreAudioDeviceDesc>,
-    pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >;MAX_AUDIO_DEVICE_INDEX],
-    pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >;MAX_AUDIO_DEVICE_INDEX],
-    pub audio_inputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
-    pub audio_outputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
+    pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn>>>; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn>>>; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_inputs: Arc<Mutex<Vec<RunningAudioUnit>>>,
+    pub audio_outputs: Arc<Mutex<Vec<RunningAudioUnit>>>,
     failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
-    // macOS: Shared VPIO unit for AEC when both input AND output use default devices
     #[cfg(target_os = "macos")]
-    shared_vpio: Arc<Mutex<Option<MacosVpioUnit>>>,
-    // Track requested devices to coordinate VPIO creation
-    #[cfg(target_os = "macos")]
-    requested_input_device: Arc<Mutex<Option<AudioDeviceId>>>,
-    #[cfg(target_os = "macos")]
-    requested_output_device: Arc<Mutex<Option<AudioDeviceId>>>,
+    audio_tap: Option<Arc<Mutex<AudioTapAccess>>>,
+}
+
+impl Default for AudioUnitAccess {
+    fn default() -> Self {
+        Self {
+            change_signal: Default::default(),
+            device_descs: Default::default(),
+            audio_input_cb: Default::default(),
+            audio_output_cb: Default::default(),
+            audio_inputs: Default::default(),
+            audio_outputs: Default::default(),
+            failed_devices: Default::default(),
+            #[cfg(target_os = "macos")]
+            audio_tap: None,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum AudioError {
     System(String),
-    NoDevice
+    NoDevice,
 }
 
 pub struct CoreAudioDeviceDesc {
     pub core_device_id: AudioDeviceID,
-    pub desc: AudioDeviceDesc
+    pub desc: AudioDeviceDesc,
 }
 
 pub struct RunningAudioUnit {
     device_id: AudioDeviceId,
-    audio_unit: Option<AudioUnit>
+    audio_unit: Option<AudioUnit>,
 }
 
 impl AudioUnitAccess {
-    pub fn new(change_signal:SignalToUI) -> Arc<Mutex<Self>> {
+    pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self>> {
         Self::observe_route_changes(change_signal.clone());
 
         #[cfg(target_os = "ios")]
@@ -481,7 +143,10 @@ impl AudioUnitAccess {
         #[cfg(target_os = "tvos")]
         Self::init_tvos_access();
 
-        Arc::new(Mutex::new(Self{
+        #[cfg(target_os = "macos")]
+        let audio_tap = Some(AudioTapAccess::new(change_signal.clone()));
+
+        Arc::new(Mutex::new(Self {
             failed_devices: Default::default(),
             change_signal,
             device_descs: Default::default(),
@@ -490,23 +155,24 @@ impl AudioUnitAccess {
             audio_inputs: Default::default(),
             audio_outputs: Default::default(),
             #[cfg(target_os = "macos")]
-            shared_vpio: Default::default(),
-            #[cfg(target_os = "macos")]
-            requested_input_device: Default::default(),
-            #[cfg(target_os = "macos")]
-            requested_output_device: Default::default(),
+            audio_tap,
         }))
     }
-    
+
     pub fn get_updated_descs(&mut self) -> Vec<AudioDeviceDesc> {
         let _ = self.update_device_list();
         let mut out = Vec::new();
         for dev in &self.device_descs {
             out.push(dev.desc.clone());
         }
+        // Add loopback device on macOS
+        #[cfg(target_os = "macos")]
+        {
+            out.push(AudioTapAccess::get_loopback_desc());
+        }
         out
     }
-    
+
     #[cfg(target_os = "ios")]
     fn update_ios_audio_route() {
         unsafe {
@@ -528,7 +194,8 @@ impl AudioUnitAccess {
                     || port_type_str == "BluetoothLE"
                     || port_type_str == "HeadsetMic"
                     || port_type_str == "Headphones"
-                    || port_type_str == "AirPlay" {
+                    || port_type_str == "AirPlay"
+                {
                     has_external_audio = true;
                     break;
                 }
@@ -537,17 +204,20 @@ impl AudioUnitAccess {
             let mut error: ObjcId = nil;
             if has_external_audio {
                 // External audio connected - use default routing (no override)
-                let () = msg_send![session, overrideOutputAudioPort: 0u32 error: &mut error]; // AVAudioSessionPortOverrideNone
+                let () = msg_send![session, overrideOutputAudioPort: 0u32 error: &mut error];
+            // AVAudioSessionPortOverrideNone
             } else {
                 // No external audio - force speaker instead of earpiece
-                let () = msg_send![session, overrideOutputAudioPort: 1936747378u32 error: &mut error]; // AVAudioSessionPortOverrideSpeaker
+                let () =
+                    msg_send![session, overrideOutputAudioPort: 1936747378u32 error: &mut error];
+                // AVAudioSessionPortOverrideSpeaker
             }
         }
     }
 
     #[cfg(target_os = "ios")]
-    pub fn init_ios_access(){
-        unsafe{
+    pub fn init_ios_access() {
+        unsafe {
             let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
             let mut error: ObjcId = nil;
             let _success: bool = msg_send![
@@ -569,239 +239,90 @@ impl AudioUnitAccess {
             Self::update_ios_audio_route();
         }
     }
-        
+
     #[cfg(target_os = "tvos")]
-    pub fn init_tvos_access(){
+    pub fn init_tvos_access() {
         /*unsafe{
             /*let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
             let mut error: ObjcId = nil;
             let _success: bool = msg_send![
-                session, 
+                session,
                 setCategory:AVAudioSessionCategoryPlay
                 withOptions:AVAudioSessionCategoryOption::DefaultToSpeaker as usize// | AVAudioSessionCategoryOption::AllowBluetooth as usize
                 error:&mut error
             ];*/
         }*/
     }
-            
-    // macOS: AEC with coordinated input/output through shared VPIO
-    // When BOTH input AND output are default devices, use shared VPIO for proper AEC.
-    // Otherwise fall back to HalOutput (no AEC, but device selection works).
-    #[cfg(target_os = "macos")]
+
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
-        // For simplicity, we only handle the first device for now
-        let input_device_id = devices.first().cloned();
-
-        // Store the requested input device
-        *self.requested_input_device.lock().unwrap() = input_device_id;
-
-        // Check if input device is default
-        let input_is_default = input_device_id.map(|id| {
-            self.device_descs.iter()
-                .find(|d| d.desc.device_id == id && d.desc.device_type == AudioDeviceType::Input)
-                .map(|d| d.desc.is_default)
-                .unwrap_or(false)
-        }).unwrap_or(false);
-
-        // Check if output device is default
-        let output_device_id = *self.requested_output_device.lock().unwrap();
-        let output_is_default = output_device_id.map(|id| {
-            self.device_descs.iter()
-                .find(|d| d.desc.device_id == id && d.desc.device_type == AudioDeviceType::Output)
-                .map(|d| d.desc.is_default)
-                .unwrap_or(false)
-        }).unwrap_or(false);
-
-        // Decide whether to use shared VPIO (AEC) or fallback to HalOutput
-        let use_vpio = input_is_default && output_is_default && input_device_id.is_some() && output_device_id.is_some();
-
-        // Clean up any existing HAL input units if we're switching to VPIO
-        if use_vpio {
-            let mut audio_inputs = self.audio_inputs.lock().unwrap();
-            audio_inputs.retain_mut(|v| {
-                if let Some(audio_unit) = &mut v.audio_unit {
-                    audio_unit.stop_hardware();
-                    audio_unit.clear_input_handler();
-                    audio_unit.release_audio_unit();
-                }
-                false
-            });
-        }
-
-        // Try to create/update the shared VPIO if conditions are met
-        self.maybe_create_shared_vpio();
-
-        // If we're not using VPIO, fall back to HalOutput for input
-        if !use_vpio {
-            // Clear shared VPIO since we're not using it
-            *self.shared_vpio.lock().unwrap() = None;
-
-            if let Some(device_id) = input_device_id {
-                // Check if we already have this device
-                let already_exists = self.audio_inputs.lock().unwrap()
-                    .iter().any(|v| v.device_id == device_id);
-
-                if !already_exists {
-                    self.audio_inputs.lock().unwrap().push(RunningAudioUnit {
-                        device_id,
-                        audio_unit: None,
-                    });
-
-                    let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Input)[0];
-                    let audio_inputs = self.audio_inputs.clone();
-                    let audio_input_cb = self.audio_input_cb[0].clone();
-                    let failed_devices = self.failed_devices.clone();
-                    let change_signal = self.change_signal.clone();
-
-                    self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move |result| {
-                        let mut audio_inputs = audio_inputs.lock().unwrap();
-                        match result {
-                            Ok(audio_unit) => {
-                                if let Some(running) = audio_inputs.iter_mut().find(|v| v.device_id == device_id) {
-                                    let audio_input_cb = audio_input_cb.clone();
-                                    let sample_rate = audio_unit.sample_rate;
-                                    audio_unit.set_input_handler(move |time, output| {
-                                        if let Some(ref mut cb) = *audio_input_cb.lock().unwrap() {
-                                            return cb(AudioInfo {
-                                                device_id,
-                                                time: Some(time),
-                                                sample_rate,
-                                            }, output)
-                                        }
-                                    });
-                                    running.audio_unit = Some(audio_unit);
-                                }
+        // Handle loopback device separately on macOS
+        #[cfg(target_os = "macos")]
+        {
+            let has_loopback = devices
+                .iter()
+                .any(|d| AudioTapAccess::is_loopback_device(*d));
+            if let Some(ref audio_tap) = self.audio_tap {
+                let mut tap = audio_tap.lock().unwrap();
+                if has_loopback && !tap.is_running() {
+                    // Find the index for loopback in the devices array
+                    if let Some((index, _)) = devices
+                        .iter()
+                        .enumerate()
+                        .find(|(_, d)| AudioTapAccess::is_loopback_device(**d))
+                    {
+                        let audio_input_cb = self.audio_input_cb[index].clone();
+                        tap.start_capture(Box::new(move |info, buffer| {
+                            if let Some(cb) = &mut *audio_input_cb.lock().unwrap() {
+                                cb(info, buffer);
                             }
-                            Err(err) => {
-                                failed_devices.lock().unwrap().insert(device_id);
-                                change_signal.set();
-                                audio_inputs.retain(|v| v.device_id != device_id);
-                                crate::error!("macOS HAL audio input error: {:?}", err);
-                            }
-                        }
-                    });
-                }
-            }
-        }
-    }
-
-    /// Helper to create shared VPIO when both input and output are default devices
-    #[cfg(target_os = "macos")]
-    fn maybe_create_shared_vpio(&mut self) {
-        let input_device_id = *self.requested_input_device.lock().unwrap();
-        let output_device_id = *self.requested_output_device.lock().unwrap();
-
-        // Check if both are default
-        let input_is_default = input_device_id.map(|id| {
-            self.device_descs.iter()
-                .find(|d| d.desc.device_id == id && d.desc.device_type == AudioDeviceType::Input)
-                .map(|d| d.desc.is_default)
-                .unwrap_or(false)
-        }).unwrap_or(false);
-
-        let output_is_default = output_device_id.map(|id| {
-            self.device_descs.iter()
-                .find(|d| d.desc.device_id == id && d.desc.device_type == AudioDeviceType::Output)
-                .map(|d| d.desc.is_default)
-                .unwrap_or(false)
-        }).unwrap_or(false);
-
-        if !input_is_default || !output_is_default {
-            return;
-        }
-
-        let input_id = match input_device_id {
-            Some(id) => id,
-            None => return,
-        };
-        let output_id = match output_device_id {
-            Some(id) => id,
-            None => return,
-        };
-
-        // Check if we already have a shared VPIO for these devices
-        {
-            let vpio = self.shared_vpio.lock().unwrap();
-            if let Some(ref unit) = *vpio {
-                if unit.input_device_id == input_id && unit.output_device_id == output_id {
-                    return; // Already have correct VPIO
+                        }));
+                    }
+                } else if !has_loopback && tap.is_running() {
+                    tap.stop_capture();
                 }
             }
         }
 
-        // Clean up any existing HAL inputs before creating VPIO
-        {
-            let mut audio_inputs = self.audio_inputs.lock().unwrap();
-            audio_inputs.retain_mut(|v| {
-                if let Some(audio_unit) = &mut v.audio_unit {
-                    audio_unit.stop_hardware();
-                    audio_unit.clear_input_handler();
-                    audio_unit.release_audio_unit();
-                }
-                false
-            });
-        }
+        // Filter out loopback device for regular audio unit handling
+        #[cfg(target_os = "macos")]
+        let devices: Vec<AudioDeviceId> = devices
+            .iter()
+            .filter(|d| !AudioTapAccess::is_loopback_device(**d))
+            .copied()
+            .collect();
+        #[cfg(not(target_os = "macos"))]
+        let devices = devices;
 
-        // Clean up any existing HAL outputs before creating VPIO
-        {
-            let mut audio_outputs = self.audio_outputs.lock().unwrap();
-            audio_outputs.retain_mut(|v| {
-                if let Some(audio_unit) = &mut v.audio_unit {
-                    audio_unit.stop_hardware();
-                    audio_unit.clear_output_provider();
-                    audio_unit.release_audio_unit();
-                }
-                false
-            });
-        }
-
-        // Create new shared VPIO
-        let input_cb = self.audio_input_cb[0].clone();
-        let output_cb = self.audio_output_cb[0].clone();
-
-        match MacosVpioUnit::new(input_id, output_id, input_cb, output_cb) {
-            Ok(vpio_unit) => {
-                *self.shared_vpio.lock().unwrap() = Some(vpio_unit);
-            }
-            Err(err) => {
-                crate::error!("Failed to create shared VPIO: {:?}", err);
-                self.failed_devices.lock().unwrap().insert(input_id);
-                self.change_signal.set();
-            }
-        }
-    }
-
-    // iOS/tvOS: Use ObjC AUAudioUnit API (works correctly there)
-    #[cfg(any(target_os = "ios", target_os = "tvos"))]
-    pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
             // lets shut down the ones we dont use
-            audio_inputs.retain_mut( | v | {
+            audio_inputs.retain_mut(|v| {
                 if devices.contains(&v.device_id) {
                     true
-                }
-                else if let Some(audio_unit) = &mut v.audio_unit {
+                } else if let Some(audio_unit) = &mut v.audio_unit {
                     audio_unit.stop_hardware();
                     audio_unit.clear_input_handler();
                     audio_unit.release_audio_unit();
                     false
-                }
-                else {
+                } else {
                     false
                 }
             });
             // create the new ones
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
-                if audio_inputs.iter().find( | v | v.device_id == *device_id).is_none() {
-                    new.push((index,*device_id))
+                if audio_inputs
+                    .iter()
+                    .find(|v| v.device_id == *device_id)
+                    .is_none()
+                {
+                    new.push((index, *device_id))
                 }
             }
-            for (_,device_id) in &new {
+            for (_, device_id) in &new {
                 audio_inputs.push(RunningAudioUnit {
                     device_id: *device_id,
-                    audio_unit: None
+                    audio_unit: None,
                 });
             }
             new
@@ -813,170 +334,80 @@ impl AudioUnitAccess {
             let audio_input_cb = self.audio_input_cb[index].clone();
             let failed_devices = self.failed_devices.clone();
             let change_signal = self.change_signal.clone();
-            self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move | result | {
-                let mut audio_inputs = audio_inputs.lock().unwrap();
-                match result {
-                    Ok(audio_unit) => {
-
-                        let running = audio_inputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
-                        let audio_input_cb = audio_input_cb.clone();
-                        let sample_rate = audio_unit.sample_rate;
-                        audio_unit.set_input_handler(move | time, output | {
-                            if let Some(audio_input_cb) = &mut *audio_input_cb.lock().unwrap() {
-                                return audio_input_cb(AudioInfo{
-                                    device_id,
-                                    time: Some(time),
-                                    sample_rate,
-                                }, output)
-                            }
-                        });
-                        running.audio_unit = Some(audio_unit);
-                    }
-                    Err(err) => {
-                        failed_devices.lock().unwrap().insert(device_id);
-                        change_signal.set();
-                        audio_inputs.retain( | v | v.device_id != device_id);
-                        crate::error!("spawn_audio_output Error {:?}", err)
-                    }
-                }
-            })
-        }
-    }
-    
-    // macOS: Coordinate output with shared VPIO for AEC
-    #[cfg(target_os = "macos")]
-    pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
-        // For simplicity, we only handle the first device for now
-        let output_device_id = devices.first().cloned();
-
-        // Store the requested output device
-        *self.requested_output_device.lock().unwrap() = output_device_id;
-
-        // Check if output device is default
-        let output_is_default = output_device_id.map(|id| {
-            self.device_descs.iter()
-                .find(|d| d.desc.device_id == id && d.desc.device_type == AudioDeviceType::Output)
-                .map(|d| d.desc.is_default)
-                .unwrap_or(false)
-        }).unwrap_or(false);
-
-        // Check if input device is default
-        let input_device_id = *self.requested_input_device.lock().unwrap();
-        let input_is_default = input_device_id.map(|id| {
-            self.device_descs.iter()
-                .find(|d| d.desc.device_id == id && d.desc.device_type == AudioDeviceType::Input)
-                .map(|d| d.desc.is_default)
-                .unwrap_or(false)
-        }).unwrap_or(false);
-
-        // Decide whether to use shared VPIO (AEC) or fallback to HalOutput
-        let use_vpio = input_is_default && output_is_default && input_device_id.is_some() && output_device_id.is_some();
-
-        // Clean up any existing HAL output units if we're switching to VPIO
-        if use_vpio {
-            let mut audio_outputs = self.audio_outputs.lock().unwrap();
-            audio_outputs.retain_mut(|v| {
-                if let Some(audio_unit) = &mut v.audio_unit {
-                    audio_unit.stop_hardware();
-                    audio_unit.clear_output_provider();
-                    audio_unit.release_audio_unit();
-                }
-                false
-            });
-        }
-
-        // Try to create/update the shared VPIO if conditions are met
-        self.maybe_create_shared_vpio();
-
-        // If we're not using VPIO, fall back to HalOutput for output
-        if !use_vpio {
-            // Clear shared VPIO since we're not using it
-            *self.shared_vpio.lock().unwrap() = None;
-
-            if let Some(device_id) = output_device_id {
-                // Check if we already have this device
-                let already_exists = self.audio_outputs.lock().unwrap()
-                    .iter().any(|v| v.device_id == device_id);
-
-                if !already_exists {
-                    self.audio_outputs.lock().unwrap().push(RunningAudioUnit {
-                        device_id,
-                        audio_unit: None,
-                    });
-
-                    let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Output)[0];
-                    let audio_outputs = self.audio_outputs.clone();
-                    let audio_output_cb = self.audio_output_cb[0].clone();
-                    let failed_devices = self.failed_devices.clone();
-                    let change_signal = self.change_signal.clone();
-
-                    self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move |result| {
-                        let mut audio_outputs = audio_outputs.lock().unwrap();
-                        match result {
-                            Ok(audio_unit) => {
-                                if let Some(running) = audio_outputs.iter_mut().find(|v| v.device_id == device_id) {
-                                    let audio_output_cb = audio_output_cb.clone();
-                                    let sample_rate = audio_unit.sample_rate;
-                                    audio_unit.set_output_provider(move |time, output| {
-                                        if let Some(ref mut cb) = *audio_output_cb.lock().unwrap() {
-                                            cb(AudioInfo {
-                                                device_id,
-                                                time: Some(time),
-                                                sample_rate,
-                                            }, output)
-                                        }
-                                    });
-                                    running.audio_unit = Some(audio_unit);
+            self.new_audio_io(
+                self.change_signal.clone(),
+                unit_info,
+                device_id,
+                move |result| {
+                    let mut audio_inputs = audio_inputs.lock().unwrap();
+                    match result {
+                        Ok(audio_unit) => {
+                            let running = audio_inputs
+                                .iter_mut()
+                                .find(|v| v.device_id == device_id)
+                                .unwrap();
+                            let audio_input_cb = audio_input_cb.clone();
+                            let sample_rate = audio_unit.sample_rate;
+                            audio_unit.set_input_handler(move |time, output| {
+                                if let Some(audio_input_cb) = &mut *audio_input_cb.lock().unwrap() {
+                                    return audio_input_cb(
+                                        AudioInfo {
+                                            device_id,
+                                            time: Some(time),
+                                            sample_rate,
+                                        },
+                                        output,
+                                    );
                                 }
-                            }
-                            Err(err) => {
-                                failed_devices.lock().unwrap().insert(device_id);
-                                change_signal.set();
-                                audio_outputs.retain(|v| v.device_id != device_id);
-                                crate::error!("macOS HAL audio output error: {:?}", err);
-                            }
+                            });
+                            running.audio_unit = Some(audio_unit);
                         }
-                    });
-                }
-            }
+                        Err(err) => {
+                            failed_devices.lock().unwrap().insert(device_id);
+                            change_signal.set();
+                            audio_inputs.retain(|v| v.device_id != device_id);
+                            crate::error!("spawn_audio_output Error {:?}", err)
+                        }
+                    }
+                },
+            )
         }
     }
 
-    // iOS/tvOS: Use ObjC AUAudioUnit API (works correctly there)
-    #[cfg(any(target_os = "ios", target_os = "tvos"))]
     pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
             let mut audio_outputs = self.audio_outputs.lock().unwrap();
             // lets shut down the ones we dont use
-            audio_outputs.retain_mut( | v | {
+            audio_outputs.retain_mut(|v| {
                 if devices.contains(&v.device_id) {
                     true
-                }
-                else if let Some(audio_unit) = &mut v.audio_unit {
+                } else if let Some(audio_unit) = &mut v.audio_unit {
                     audio_unit.stop_hardware();
                     audio_unit.clear_output_provider();
                     audio_unit.release_audio_unit();
                     false
-                }
-                else {
+                } else {
                     false
                 }
             });
             // create the new ones
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
-                if audio_outputs.iter().find( | v | v.device_id == *device_id).is_none() {
-                    new.push((index,*device_id))
+                if audio_outputs
+                    .iter()
+                    .find(|v| v.device_id == *device_id)
+                    .is_none()
+                {
+                    new.push((index, *device_id))
                 }
             }
-            for (_,device_id) in &new {
+            for (_, device_id) in &new {
                 audio_outputs.push(RunningAudioUnit {
                     device_id: *device_id,
-                    audio_unit: None
+                    audio_unit: None,
                 });
             }
             new
-
         };
         for (index, device_id) in new {
             let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Output)[0];
@@ -984,187 +415,224 @@ impl AudioUnitAccess {
             let audio_output_cb = self.audio_output_cb[index].clone();
             let failed_devices = self.failed_devices.clone();
             let change_signal = self.change_signal.clone();
-            self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move | result | {
-                let mut audio_outputs = audio_outputs.lock().unwrap();
-                match result {
-                    Ok(audio_unit) => {
-
-                        let running = audio_outputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
-                        let audio_output_cb = audio_output_cb.clone();
-                        let sample_rate = audio_unit.sample_rate;
-                        audio_unit.set_output_provider(move | time, output | {
-                            if let Some(audio_output_cb) = &mut *audio_output_cb.lock().unwrap() {
-                                audio_output_cb(AudioInfo{
-                                    device_id,
-                                    time:Some(time),
-                                    sample_rate,
-                                }, output)
-                            }
-                        });
-                        running.audio_unit = Some(audio_unit);
+            self.new_audio_io(
+                self.change_signal.clone(),
+                unit_info,
+                device_id,
+                move |result| {
+                    let mut audio_outputs = audio_outputs.lock().unwrap();
+                    match result {
+                        Ok(audio_unit) => {
+                            let running = audio_outputs
+                                .iter_mut()
+                                .find(|v| v.device_id == device_id)
+                                .unwrap();
+                            let audio_output_cb = audio_output_cb.clone();
+                            let sample_rate = audio_unit.sample_rate;
+                            audio_unit.set_output_provider(move |time, output| {
+                                if let Some(audio_output_cb) = &mut *audio_output_cb.lock().unwrap()
+                                {
+                                    audio_output_cb(
+                                        AudioInfo {
+                                            device_id,
+                                            time: Some(time),
+                                            sample_rate,
+                                        },
+                                        output,
+                                    )
+                                }
+                            });
+                            running.audio_unit = Some(audio_unit);
+                        }
+                        Err(_err) => {
+                            failed_devices.lock().unwrap().insert(device_id);
+                            change_signal.set();
+                            audio_outputs.retain(|v| v.device_id != device_id);
+                            //crate::error!("spawn_audio_output Error {:?}", err)
+                        }
                     }
-                    Err(_err) => {
-                        failed_devices.lock().unwrap().insert(device_id);
-                        change_signal.set();
-                        audio_outputs.retain( | v | v.device_id != device_id);
-                        //crate::error!("spawn_audio_output Error {:?}", err)
-                    }
-                }
-            })
+                },
+            )
         }
     }
-    
-    
-    pub fn observe_route_changes(device_change:SignalToUI) {
-        let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
+
+    pub fn observe_route_changes(device_change: SignalToUI) {
+        let center: ObjcId = unsafe { msg_send![class!(NSNotificationCenter), defaultCenter] };
         unsafe {
             let mut err: ObjcId = nil;
             let audio_session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
             // Do not force MultiRoute; keep the app's configured category/mode active
             let () = msg_send![audio_session, setActive: true error: &mut err];
         }
-        let block = objc_block!(move | _note: ObjcId | {
+        let block = objc_block!(move |_note: ObjcId| {
             #[cfg(target_os = "ios")]
             AudioUnitAccess::update_ios_audio_route();
             device_change.set();
         });
-        let () = unsafe {msg_send![
-            center,
-            addObserverForName: AVAudioSessionRouteChangeNotification
-            object: nil
-            queue: nil
-            usingBlock: &block
-        ]};
+        let () = unsafe {
+            msg_send![
+                center,
+                addObserverForName: AVAudioSessionRouteChangeNotification
+                object: nil
+                queue: nil
+                usingBlock: &block
+            ]
+        };
     }
-    
-    pub fn observe_audio_unit_termination(change_signal:SignalToUI, core_device_id: AudioDeviceID) {
-        
+
+    pub fn observe_audio_unit_termination(
+        change_signal: SignalToUI,
+        core_device_id: AudioDeviceID,
+    ) {
         #[allow(non_snake_case)]
         unsafe extern "system" fn listener_fn(
             _inObjectID: AudioObjectID,
             _inNumberAddresses: u32,
             _inAddresses: *const AudioObjectPropertyAddress,
-            inClientData: *mut ()
+            inClientData: *mut (),
         ) -> OSStatus {
             let x: *const SignalToUI = inClientData as *const _;
             (*x).set();
             0
         }
-        
+
         let prop_addr = AudioObjectPropertyAddress {
             mSelector: AudioObjectPropertySelector::DeviceIsAlive,
             mScope: AudioObjectPropertyScope::Global,
             mElement: AudioObjectPropertyElement::Master,
         };
-        
-        let result = unsafe {AudioObjectAddPropertyListener(
-            core_device_id,
-            &prop_addr,
-            Some(listener_fn),
-            Box::into_raw(Box::new(change_signal)) as *mut _,
-        )};
-        
+
+        let result = unsafe {
+            AudioObjectAddPropertyListener(
+                core_device_id,
+                &prop_addr,
+                Some(listener_fn),
+                Box::into_raw(Box::new(change_signal)) as *mut _,
+            )
+        };
+
         if result != 0 {
             println!("Error in adding DeviceIsAlive listener");
         }
     }
-    
+
     #[cfg(target_os = "macos")]
     pub fn update_device_list(&mut self) -> Result<(), OSError> {
         self.device_descs.clear();
-        
-        fn get_value<T: Sized>(device_id: AudioDeviceID, selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope, default: T) -> Result<T, OSError> {
+
+        fn get_value<T: Sized>(
+            device_id: AudioDeviceID,
+            selector: AudioObjectPropertySelector,
+            scope: AudioObjectPropertyScope,
+            default: T,
+        ) -> Result<T, OSError> {
             let prop_addr = AudioObjectPropertyAddress {
                 mSelector: selector,
                 mScope: scope,
-                mElement: AudioObjectPropertyElement::Master
+                mElement: AudioObjectPropertyElement::Master,
             };
-            
+
             let value = default;
             let data_size = std::mem::size_of::<T>();
-            OSError::from(unsafe {AudioObjectGetPropertyData(
-                device_id,
-                &prop_addr,
-                0,
-                std::ptr::null(),
-                &data_size as *const _ as *mut _,
-                &value as *const _ as *mut _,
-            )}) ?;
+            OSError::from(unsafe {
+                AudioObjectGetPropertyData(
+                    device_id,
+                    &prop_addr,
+                    0,
+                    std::ptr::null(),
+                    &data_size as *const _ as *mut _,
+                    &value as *const _ as *mut _,
+                )
+            })?;
             Ok(value)
         }
-        
-        fn get_array<T: Sized>(device_id: AudioDeviceID, selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope) -> Result<Vec<T>, OSError> {
+
+        fn get_array<T: Sized>(
+            device_id: AudioDeviceID,
+            selector: AudioObjectPropertySelector,
+            scope: AudioObjectPropertyScope,
+        ) -> Result<Vec<T>, OSError> {
             let prop_addr = AudioObjectPropertyAddress {
                 mSelector: selector,
                 mScope: scope,
                 mElement: AudioObjectPropertyElement::Master,
             };
             let data_size = 0u32;
-            OSError::from(unsafe {AudioObjectGetPropertyDataSize(
-                device_id,
-                &prop_addr as *const _,
-                0,
-                std::ptr::null(),
-                &data_size as *const _ as *mut _,
-            )}) ?;
-            
+            OSError::from(unsafe {
+                AudioObjectGetPropertyDataSize(
+                    device_id,
+                    &prop_addr as *const _,
+                    0,
+                    std::ptr::null(),
+                    &data_size as *const _ as *mut _,
+                )
+            })?;
+
             let mut buf: Vec<T> = vec![];
             let elements = data_size as usize / std::mem::size_of::<T>();
             buf.reserve_exact(elements);
-            OSError::from(unsafe {AudioObjectGetPropertyData(
-                device_id,
-                &prop_addr as *const _,
-                0,
-                std::ptr::null(),
-                &data_size as *const _ as *mut _,
-                buf.as_mut_ptr() as *mut _,
-            )}) ?;
-            unsafe {buf.set_len(elements)};
+            OSError::from(unsafe {
+                AudioObjectGetPropertyData(
+                    device_id,
+                    &prop_addr as *const _,
+                    0,
+                    std::ptr::null(),
+                    &data_size as *const _ as *mut _,
+                    buf.as_mut_ptr() as *mut _,
+                )
+            })?;
+            unsafe { buf.set_len(elements) };
             Ok(buf)
         }
-        
+
         let default_input_id: AudioDeviceID = get_value(
             kAudioObjectSystemObject,
             AudioObjectPropertySelector::DefaultInputDevice,
             AudioObjectPropertyScope::Global,
-            0
-        ) .unwrap();
+            0,
+        )
+        .unwrap();
         let default_output_id: AudioDeviceID = get_value(
             kAudioObjectSystemObject,
             AudioObjectPropertySelector::DefaultOutputDevice,
             AudioObjectPropertyScope::Global,
-            0
-        ) .unwrap();
-        
+            0,
+        )
+        .unwrap();
+
         let core_device_ids: Vec<AudioDeviceID> = get_array(
             kAudioObjectSystemObject,
             AudioObjectPropertySelector::Devices,
             AudioObjectPropertyScope::Global,
-        ) ?;
-        
+        )?;
+
         for core_device_id in core_device_ids {
             let device_name: Result<CFStringRef, OSError> = get_value(
                 core_device_id,
                 AudioObjectPropertySelector::DeviceNameCFString,
                 AudioObjectPropertyScope::Output,
-                std::ptr::null()
+                std::ptr::null(),
             );
             if device_name.is_err() {
                 println!("Error getting name for device {}", core_device_id);
                 continue;
             }
-            
+
             let device_name = device_name.unwrap();
-            let device_name = unsafe {cfstring_ref_to_string(device_name)};
-            
+            let device_name = unsafe { cfstring_ref_to_string(device_name) };
+
             // lets probe input/outputness
-            fn probe_channels(device_id: AudioDeviceID, scope: AudioObjectPropertyScope) -> Result<usize, OSError> {
+            fn probe_channels(
+                device_id: AudioDeviceID,
+                scope: AudioObjectPropertyScope,
+            ) -> Result<usize, OSError> {
                 let buffer_data: Vec<u8> = get_array(
                     device_id,
                     AudioObjectPropertySelector::StreamConfiguration,
-                    scope
-                ) ?;
-                let audio_buffer_list = unsafe {&*(buffer_data.as_ptr() as *const AudioBufferList)};
+                    scope,
+                )?;
+                let audio_buffer_list =
+                    unsafe { &*(buffer_data.as_ptr() as *const AudioBufferList) };
                 if audio_buffer_list.mNumberBuffers == 0 {
                     return Ok(0);
                 }
@@ -1174,12 +642,13 @@ impl AudioUnitAccess {
                 }
                 Ok(channels)
             }
-            
-            let input_channels = probe_channels(core_device_id, AudioObjectPropertyScope::Input) ?;
-            let output_channels = probe_channels(core_device_id, AudioObjectPropertyScope::Output) ?;
-            
-            if input_channels>0 {
-                let device_id = LiveId::from_str(&format!("{} {} input", device_name, core_device_id)).into();
+
+            let input_channels = probe_channels(core_device_id, AudioObjectPropertyScope::Input)?;
+            let output_channels = probe_channels(core_device_id, AudioObjectPropertyScope::Output)?;
+
+            if input_channels > 0 {
+                let device_id =
+                    LiveId::from_str(&format!("{} {} input", device_name, core_device_id)).into();
                 self.device_descs.push(CoreAudioDeviceDesc {
                     core_device_id,
                     desc: AudioDeviceDesc {
@@ -1189,11 +658,12 @@ impl AudioUnitAccess {
                         channel_count: input_channels,
                         is_default: core_device_id == default_input_id,
                         name: device_name.clone(),
-                    }
+                    },
                 })
             }
-            if output_channels>0 {
-                let device_id = LiveId::from_str(&format!("{} {} output", device_name, core_device_id)).into();
+            if output_channels > 0 {
+                let device_id =
+                    LiveId::from_str(&format!("{} {} output", device_name, core_device_id)).into();
                 self.device_descs.push(CoreAudioDeviceDesc {
                     core_device_id,
                     desc: AudioDeviceDesc {
@@ -1203,31 +673,31 @@ impl AudioUnitAccess {
                         channel_count: input_channels,
                         is_default: core_device_id == default_output_id,
                         name: device_name.clone(),
-                    }
+                    },
                 })
             }
         }
         Ok(())
     }
-    
+
     #[cfg(any(target_os = "ios", target_os = "tvos"))]
     pub fn update_device_list(&mut self) -> Result<(), OSError> {
         self.device_descs.clear();
 
         self.device_descs.push(CoreAudioDeviceDesc {
-            core_device_id:0,
+            core_device_id: 0,
             desc: AudioDeviceDesc {
-                has_failed:false,
-                device_id:AudioDeviceId(live_id!(default_input)),
+                has_failed: false,
+                device_id: AudioDeviceId(live_id!(default_input)),
                 device_type: AudioDeviceType::Input,
                 channel_count: 1, // iOS/tvOS microphone is mono by default
                 is_default: true,
                 name: "Default Input".to_string(),
-            }
+            },
         });
-         
+
         self.device_descs.push(CoreAudioDeviceDesc {
-            core_device_id:0,
+            core_device_id: 0,
             desc: AudioDeviceDesc {
                 has_failed: false,
                 device_id: AudioDeviceId(live_id!(default_output)),
@@ -1235,78 +705,71 @@ impl AudioUnitAccess {
                 channel_count: 2,
                 is_default: true,
                 name: "Default Output".to_string(),
-            }
+            },
         });
         Ok(())
     }
-    
-    
+
     pub fn query_audio_units(unit_query: AudioUnitQuery) -> Vec<AudioUnitInfo> {
         let desc = match unit_query {
-            AudioUnitQuery::MusicDevice => {
-                AudioComponentDescription::new_all_manufacturers(
-                    AudioUnitType::MusicDevice,
-                    AudioUnitSubType::Undefined,
-                )
-            }
+            AudioUnitQuery::MusicDevice => AudioComponentDescription::new_all_manufacturers(
+                AudioUnitType::MusicDevice,
+                AudioUnitSubType::Undefined,
+            ),
             #[cfg(target_os = "macos")]
-            AudioUnitQuery::Output => {
-                AudioComponentDescription::new_all_manufacturers(
-                    AudioUnitType::IO,
-                    AudioUnitSubType::HalOutput,
-                )
-            }
+            AudioUnitQuery::Output => AudioComponentDescription::new_all_manufacturers(
+                AudioUnitType::IO,
+                AudioUnitSubType::HalOutput,
+            ),
             #[cfg(target_os = "ios")]
-            AudioUnitQuery::Output => {
-                AudioComponentDescription::new_all_manufacturers(
-                    AudioUnitType::IO,
-                    AudioUnitSubType::VoiceProcessingIO,
-                )
-            }
+            AudioUnitQuery::Output => AudioComponentDescription::new_all_manufacturers(
+                AudioUnitType::IO,
+                AudioUnitSubType::VoiceProcessingIO,
+            ),
             #[cfg(target_os = "tvos")]
-            AudioUnitQuery::Output => {
-                AudioComponentDescription::new_all_manufacturers(
-                    AudioUnitType::IO,
-                    AudioUnitSubType::RemoteIO, 
-                )
-            }
+            AudioUnitQuery::Output => AudioComponentDescription::new_all_manufacturers(
+                AudioUnitType::IO,
+                AudioUnitSubType::RemoteIO,
+            ),
             #[cfg(target_os = "macos")]
-            AudioUnitQuery::Input => {
-                AudioComponentDescription::new_all_manufacturers(
-                    AudioUnitType::IO,
-                    AudioUnitSubType::HalOutput,
-                )
-            }
+            AudioUnitQuery::Input => AudioComponentDescription::new_all_manufacturers(
+                AudioUnitType::IO,
+                AudioUnitSubType::HalOutput,
+            ),
             #[cfg(any(target_os = "ios", target_os = "tvos"))]
-            AudioUnitQuery::Input => {
-                AudioComponentDescription::new_all_manufacturers(
-                    AudioUnitType::IO,
-                    AudioUnitSubType::VoiceProcessingIO,
-                )
-            }
-            AudioUnitQuery::Effect => {
-                AudioComponentDescription::new_all_manufacturers(
-                    AudioUnitType::Effect,
-                    AudioUnitSubType::Undefined,
-                )
-            }
+            AudioUnitQuery::Input => AudioComponentDescription::new_all_manufacturers(
+                AudioUnitType::IO,
+                AudioUnitSubType::VoiceProcessingIO,
+            ),
+            AudioUnitQuery::Effect => AudioComponentDescription::new_all_manufacturers(
+                AudioUnitType::Effect,
+                AudioUnitSubType::Undefined,
+            ),
         };
         unsafe {
-            let manager: ObjcId = msg_send![class!(AVAudioUnitComponentManager), sharedAudioUnitComponentManager];
+            let manager: ObjcId = msg_send![
+                class!(AVAudioUnitComponentManager),
+                sharedAudioUnitComponentManager
+            ];
             let components: ObjcId = msg_send![manager, componentsMatchingDescription: desc];
             let count: usize = msg_send![components, count];
             let mut out = Vec::new();
-            
+
             for i in 0..count {
                 let component: ObjcId = msg_send![components, objectAtIndex: i];
                 let name = nsstring_to_string(msg_send![component, name]);
-                let desc: AudioComponentDescription = msg_send!(component, audioComponentDescription);
-                out.push(AudioUnitInfo {unit_query, name, desc});
+                let desc: AudioComponentDescription =
+                    msg_send!(component, audioComponentDescription);
+                out.push(AudioUnitInfo {
+                    unit_query,
+                    name,
+                    desc,
+                });
             }
             out
         }
     }
-    
+
     pub fn new_audio_io<F: Fn(Result<AudioUnit, AudioError>) + Send + 'static>(
         &self,
         change_signal: SignalToUI,
@@ -1315,21 +778,32 @@ impl AudioUnitAccess {
         unit_callback: F,
     ) {
         let unit_query = unit_info.unit_query;
-        
-        let core_device_id = self.device_descs.iter().find( | v | v.desc.device_id == device_id).unwrap().core_device_id;
-        
-        let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
-            let () = unsafe {msg_send![av_audio_unit, retain]};
-            unsafe fn inner(_change_signal: SignalToUI, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
-                #[cfg(not(target_os="macos"))]
+
+        let core_device_id = self
+            .device_descs
+            .iter()
+            .find(|v| v.desc.device_id == device_id)
+            .unwrap()
+            .core_device_id;
+
+        let instantiation_handler = objc_block!(move |av_audio_unit: ObjcId, error: ObjcId| {
+            let () = unsafe { msg_send![av_audio_unit, retain] };
+            unsafe fn inner(
+                _change_signal: SignalToUI,
+                core_device_id: AudioDeviceID,
+                av_audio_unit: ObjcId,
+                error: ObjcId,
+                unit_query: AudioUnitQuery,
+            ) -> Result<AudioUnit, OSError> {
+                #[cfg(not(target_os = "macos"))]
                 let _ = core_device_id; // silence unused on iOS/tvOS
-                OSError::from_nserror(error) ?;
+                OSError::from_nserror(error)?;
                 let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
                 let () = msg_send![av_audio_unit, retain];
-                
+
                 // Configure stream format before allocating resources
                 let mut render_block = None;
-                
+
                 // Default stream desc; on iOS we'll pull the AVAudioSession sample rate
                 #[allow(unused_mut)] // mut needed on iOS/tvOS but not macOS
                 let mut stream_desc = CAudioStreamBasicDescription {
@@ -1343,16 +817,18 @@ impl AudioUnitAccess {
                     mBytesPerFrame: 4,
                     mChannelsPerFrame: 2,
                     mBitsPerChannel: 32,
-                    mReserved: 0
+                    mReserved: 0,
                 };
-                
+
                 // If on iOS/tvOS, fetch AVAudioSession sample rate
-                #[cfg(any(target_os="ios", target_os="tvos"))]
+                #[cfg(any(target_os = "ios", target_os = "tvos"))]
                 {
                     let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
                     // After setting preferred sample rate, query actual rate
                     let sr: f64 = msg_send![session, sampleRate];
-                    if sr > 0.0 { stream_desc.mSampleRate = sr; }
+                    if sr > 0.0 {
+                        stream_desc.mSampleRate = sr;
+                    }
                 }
 
                 // If on macOS, query the device's nominal sample rate
@@ -1365,14 +841,16 @@ impl AudioUnitAccess {
                     };
                     let mut sample_rate: f64 = 48000.0;
                     let data_size = std::mem::size_of::<f64>();
-                    let result = unsafe {AudioObjectGetPropertyData(
-                        core_device_id,
-                        &prop_addr,
-                        0,
-                        std::ptr::null(),
-                        &data_size as *const _ as *mut _,
-                        &mut sample_rate as *mut f64 as *mut _,
-                    )};
+                    let result = unsafe {
+                        AudioObjectGetPropertyData(
+                            core_device_id,
+                            &prop_addr,
+                            0,
+                            std::ptr::null(),
+                            &data_size as *const _ as *mut _,
+                            &mut sample_rate as *mut f64 as *mut _,
+                        )
+                    };
                     if result == 0 && sample_rate > 0.0 {
                         stream_desc.mSampleRate = sample_rate;
                     }
@@ -1380,100 +858,102 @@ impl AudioUnitAccess {
 
                 let av_audio_format: ObjcId = msg_send![class!(AVAudioFormat), alloc];
                 let () = msg_send![av_audio_format, initWithStreamDescription: &stream_desc];
-                
+
                 match unit_query {
                     AudioUnitQuery::Output => {
                         let mut err: ObjcId = nil;
                         let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
-                        OSError::from_nserror(err) ?;
+                        OSError::from_nserror(err)?;
                         let busses: ObjcId = msg_send![au_audio_unit, inputBusses];
                         let count: usize = msg_send![busses, count];
                         if count > 0 {
                             let bus: ObjcId = msg_send![busses, objectAtIndexedSubscript: 0];
                             let mut err: ObjcId = nil;
                             let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
-                            OSError::from_nserror(err) ?;
+                            OSError::from_nserror(err)?;
                             let () = msg_send![bus, setEnabled: true];
                         }
-                        
+
                         let () = msg_send![au_audio_unit, setOutputEnabled: false];
                         let () = msg_send![au_audio_unit, setInputEnabled: true];
-                        
+
                         #[cfg(target_os = "macos")]
                         {
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
-                            OSError::from_nserror(err) ?;
+                            OSError::from_nserror(err)?;
                         }
-                        
+
                         let () = msg_send![au_audio_unit, setOutputEnabled: true];
                         let () = msg_send![au_audio_unit, setInputEnabled: false];
-                        
-                        #[cfg(target_os="macos")]
+
+                        #[cfg(target_os = "macos")]
                         {
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
-                            OSError::from_nserror(err) ?;
+                            OSError::from_nserror(err)?;
                         }
                         // Ensure final state for output units before allocation
                         let () = msg_send![au_audio_unit, setOutputEnabled: true];
                         let () = msg_send![au_audio_unit, setInputEnabled: false];
-                        
-                        #[cfg(target_os="macos")]
+
+                        #[cfg(target_os = "macos")]
                         {
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
-                            OSError::from_nserror(err) ?;
+                            OSError::from_nserror(err)?;
                         }
                         let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
-                        OSError::from_nserror(err) ?;
+                        OSError::from_nserror(err)?;
                     }
                     AudioUnitQuery::Input => {
                         // On iOS/tvOS, mic is commonly mono. Prefer 1 channel there.
-                        #[cfg(any(target_os="ios", target_os="tvos"))]
+                        #[cfg(any(target_os = "ios", target_os = "tvos"))]
                         {
                             stream_desc.mChannelsPerFrame = 1;
                         }
                         // Recreate AVAudioFormat with possibly adjusted channel count
                         let av_audio_format: ObjcId = msg_send![class!(AVAudioFormat), alloc];
-                        let () = msg_send![av_audio_format, initWithStreamDescription: &stream_desc];
+                        let () =
+                            msg_send![av_audio_format, initWithStreamDescription: &stream_desc];
 
                         let busses: ObjcId = msg_send![au_audio_unit, outputBusses];
                         let count: usize = msg_send![busses, count];
                         if count > 0 {
                             // RemoteIO/VoiceProcessingIO uses bus 1 for input on iOS/tvOS
-                            #[cfg(any(target_os="ios", target_os="tvos", target_os="macos"))]
+                            #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
                             let bus_index = 1;
-                            if count > bus_index{
-                                let bus: ObjcId = msg_send![busses, objectAtIndexedSubscript: bus_index];
+                            if count > bus_index {
+                                let bus: ObjcId =
+                                    msg_send![busses, objectAtIndexedSubscript: bus_index];
                                 let mut err: ObjcId = nil;
                                 let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
-                                OSError::from_nserror(err) ?;
+                                OSError::from_nserror(err)?;
                                 let () = msg_send![bus, setEnabled: true];
                             }
                         }
                         let () = msg_send![au_audio_unit, setOutputEnabled: false];
                         let () = msg_send![au_audio_unit, setInputEnabled: true];
 
-                        #[cfg(target_os="macos")]
+                        #[cfg(target_os = "macos")]
                         {
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
-                            OSError::from_nserror(err) ?;
+                            OSError::from_nserror(err)?;
                         }
 
                         // Allocate after configuration
                         let mut err: ObjcId = nil;
                         let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
-                        OSError::from_nserror(err) ?;
+                        OSError::from_nserror(err)?;
                         let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
-                        OSError::from_nserror(err) ?;
-                        
+                        OSError::from_nserror(err)?;
+
                         let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
                         let () = msg_send![block_ptr, retain];
                         render_block = Some(block_ptr);
                     }
-                    _ => ()
+                    _ => (),
                 }
                 #[cfg(target_os = "macos")]
                 AudioUnitAccess::observe_audio_unit_termination(_change_signal, core_device_id);
@@ -1488,40 +968,53 @@ impl AudioUnitAccess {
                 })
             }
             let change_signal = change_signal.clone();
-            match unsafe {inner(change_signal, core_device_id, av_audio_unit, error, unit_query)} {
+            match unsafe {
+                inner(
+                    change_signal,
+                    core_device_id,
+                    av_audio_unit,
+                    error,
+                    unit_query,
+                )
+            } {
                 Err(err) => unit_callback(Err(AudioError::System(format!("{:?}", err)))),
-                Ok(device) => unit_callback(Ok(device))
+                Ok(device) => unit_callback(Ok(device)),
             }
         });
-        
+
         // Instantiate output audio unit
-        let () = unsafe {msg_send![
-            class!(AVAudioUnit),
-            instantiateWithComponentDescription: unit_info.desc
-            options: kAudioComponentInstantiation_LoadOutOfProcess
-            completionHandler: &instantiation_handler
-        ]};
+        let () = unsafe {
+            msg_send![
+                class!(AVAudioUnit),
+                instantiateWithComponentDescription: unit_info.desc
+                options: kAudioComponentInstantiation_LoadOutOfProcess
+                completionHandler: &instantiation_handler
+            ]
+        };
     }
-    
+
     pub fn new_audio_plugin<F: Fn(Result<AudioUnit, AudioError>) + Send + 'static>(
         unit_info: &AudioUnitInfo,
         unit_callback: F,
     ) {
         let unit_query = unit_info.unit_query;
-        
-        let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
-            let () = unsafe {msg_send![av_audio_unit, retain]};
-            unsafe fn inner(av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
-                
-                OSError::from_nserror(error) ?;
+
+        let instantiation_handler = objc_block!(move |av_audio_unit: ObjcId, error: ObjcId| {
+            let () = unsafe { msg_send![av_audio_unit, retain] };
+            unsafe fn inner(
+                av_audio_unit: ObjcId,
+                error: ObjcId,
+                unit_query: AudioUnitQuery,
+            ) -> Result<AudioUnit, OSError> {
+                OSError::from_nserror(error)?;
                 let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
-                
+
                 let mut err: ObjcId = nil;
                 let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
-                OSError::from_nserror(err) ?;
-                
+                OSError::from_nserror(err)?;
+
                 let mut render_block = None;
-                
+
                 match unit_query {
                     AudioUnitQuery::MusicDevice => {
                         let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
@@ -1540,9 +1033,9 @@ impl AudioUnitAccess {
                         let () = msg_send![block_ptr, retain];
                         render_block = Some(block_ptr);
                     }
-                    _ => ()
+                    _ => (),
                 }
-                
+
                 Ok(AudioUnit {
                     view_controller: Arc::new(Mutex::new(None)),
                     param_tree_observer: None,
@@ -1554,29 +1047,30 @@ impl AudioUnitAccess {
                 })
             }
 
-            match unsafe {inner(av_audio_unit, error, unit_query)} {
+            match unsafe { inner(av_audio_unit, error, unit_query) } {
                 Err(err) => unit_callback(Err(AudioError::System(format!("{:?}", err)))),
-                Ok(device) => unit_callback(Ok(device))
+                Ok(device) => unit_callback(Ok(device)),
             }
         });
-        
+
         // Instantiate output audio unit
-        let () = unsafe {msg_send![
-            class!(AVAudioUnit),
-            instantiateWithComponentDescription: unit_info.desc
-            options: kAudioComponentInstantiation_LoadOutOfProcess
-            completionHandler: &instantiation_handler
-        ]};
+        let () = unsafe {
+            msg_send![
+                class!(AVAudioUnit),
+                instantiateWithComponentDescription: unit_info.desc
+                options: kAudioComponentInstantiation_LoadOutOfProcess
+                completionHandler: &instantiation_handler
+            ]
+        };
     }
 }
-
 
 #[derive(Copy, Clone, Debug)]
 pub enum AudioUnitQuery {
     Output,
     Input,
     MusicDevice,
-    Effect
+    Effect,
 }
 unsafe impl Send for AudioUnitQuery {}
 unsafe impl Sync for AudioUnitQuery {}
@@ -1585,7 +1079,7 @@ unsafe impl Sync for AudioUnitQuery {}
 pub struct AudioUnitInfo {
     pub name: String,
     pub unit_query: AudioUnitQuery,
-    desc: AudioComponentDescription
+    desc: AudioComponentDescription,
 }
 
 unsafe impl Send for AudioUnit {}
@@ -1595,7 +1089,7 @@ pub struct AudioUnit {
     av_audio_unit: ObjcId,
     au_audio_unit: ObjcId,
     render_block: Option<ObjcId>,
-    view_controller: Arc<Mutex<Option<ObjcId >> >,
+    view_controller: Arc<Mutex<Option<ObjcId>>>,
     unit_query: AudioUnitQuery,
     sample_rate: f64,
 }
@@ -1605,7 +1099,7 @@ pub struct AudioUnitClone {
     av_audio_unit: ObjcId,
     _au_audio_unit: ObjcId,
     render_block: Option<ObjcId>,
-    unit_query: AudioUnitQuery
+    unit_query: AudioUnitQuery,
 }
 
 impl AudioTime {
@@ -1617,7 +1111,7 @@ impl AudioTime {
             mWordClockTime: 0,
             mSMPTETime: SMPTETime::default(),
             mFlags: 7,
-            mReserved: 0
+            mReserved: 0,
         }
     }
 }
@@ -1626,14 +1120,11 @@ impl AudioBuffer {
     unsafe fn to_audio_buffer_list(&mut self) -> AudioBufferList {
         let mut ab = AudioBufferList {
             mNumberBuffers: self.channel_count.min(MAX_AUDIO_BUFFERS) as u32,
-            mBuffers: [
-                _AudioBuffer {
-                    mNumberChannels: 0,
-                    mDataByteSize: 0,
-                    mData: 0 as *mut ::std::os::raw::c_void
-                };
-                MAX_AUDIO_BUFFERS
-            ]
+            mBuffers: [_AudioBuffer {
+                mNumberChannels: 0,
+                mDataByteSize: 0,
+                mData: 0 as *mut ::std::os::raw::c_void,
+            }; MAX_AUDIO_BUFFERS],
         };
         for i in 0..self.channel_count.min(MAX_AUDIO_BUFFERS) {
             ab.mBuffers[i] = _AudioBuffer {
@@ -1678,17 +1169,20 @@ pub struct AudioInstrumentState {
     subtype: u64,
     version: u64,
     ty: u64,
-    name: String
+    name: String,
 }
 
-
 impl AudioUnitClone {
-    
-    pub fn render_to_audio_buffer(&self, info: AudioInfo, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]) {
+    pub fn render_to_audio_buffer(
+        &self,
+        info: AudioInfo,
+        outputs: &mut [&mut AudioBuffer],
+        inputs: &[&AudioBuffer],
+    ) {
         match self.unit_query {
             AudioUnitQuery::MusicDevice => (),
             AudioUnitQuery::Effect => (),
-            _ => panic!("render_to_audio_buffer not supported on this device")
+            _ => panic!("render_to_audio_buffer not supported on this device"),
         }
         if let Some(render_block) = self.render_block {
             let inputs_ptr = inputs.as_ptr() as *const *const AudioBuffer as u64;
@@ -1753,11 +1247,11 @@ impl AudioUnitClone {
             }
         };
     }
-    
+
     pub fn handle_midi_data(&self, event: MidiData) {
         match self.unit_query {
             AudioUnitQuery::MusicDevice => (),
-            _ => panic!("send_midi_1_event not supported on this device")
+            _ => panic!("send_midi_1_event not supported on this device"),
         }
         unsafe {
             let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.data[0] data1: event.data[1] data2: event.data[2]];
@@ -1766,7 +1260,6 @@ impl AudioUnitClone {
 }
 
 impl AudioUnit {
-    
     pub fn clone(&self) -> AudioUnitClone {
         AudioUnitClone {
             av_audio_unit: self.av_audio_unit,
@@ -1775,20 +1268,24 @@ impl AudioUnit {
             unit_query: self.unit_query,
         }
     }
-    
+
     pub fn parameter_tree_changed(&mut self, callback: Box<dyn Fn() + Send>) {
         if self.param_tree_observer.is_some() {
             panic!();
         }
-        let observer = KeyValueObserver::new(self.au_audio_unit, str_to_nsstring("deviceIsAlive"), callback);
+        let observer = KeyValueObserver::new(
+            self.au_audio_unit,
+            str_to_nsstring("deviceIsAlive"),
+            callback,
+        );
         self.param_tree_observer = Some(observer);
     }
-    
+
     pub fn dump_parameter_tree(&self) {
         match self.unit_query {
             AudioUnitQuery::MusicDevice => (),
             AudioUnitQuery::Effect => (),
-            _ => panic!("dump_parameter_tree on this device")
+            _ => panic!("dump_parameter_tree on this device"),
         }
         unsafe {
             let root: ObjcId = msg_send![self.au_audio_unit, parameterTree];
@@ -1805,23 +1302,28 @@ impl AudioUnit {
                     }
                     if class == param_group {
                         recur_walk_tree(node, depth + 1);
-                    }
-                    else {
+                    } else {
                         let min: f32 = msg_send![node, minValue];
                         let max: f32 = msg_send![node, maxValue];
                         let value: f32 = msg_send![node, value];
-                        crate::log!("{} : min:{} max:{} value:{}", nsstring_to_string(display), min, max, value);
+                        crate::log!(
+                            "{} : min:{} max:{} value:{}",
+                            nsstring_to_string(display),
+                            min,
+                            max,
+                            value
+                        );
                     }
                 }
             }
             recur_walk_tree(root, 0);
         }
     }
-    
+
     pub fn get_instrument_state(&self) -> AudioInstrumentState {
         match self.unit_query {
             AudioUnitQuery::MusicDevice => (),
-            _ => panic!("start_audio_output_with_fn on this device")
+            _ => panic!("start_audio_output_with_fn on this device"),
         }
         unsafe {
             let dict: ObjcId = msg_send![self.au_audio_unit, fullState];
@@ -1834,7 +1336,9 @@ impl AudioUnit {
                 //let class: ObjcId = msg_send![obj, class]; nsstring_to_string(NSStringFromClass(class)),
                 let name = nsstring_to_string(key);
                 match name.as_ref() {
-                    "manufacturer" => out_state.manufacturer = msg_send![obj, unsignedLongLongValue],
+                    "manufacturer" => {
+                        out_state.manufacturer = msg_send![obj, unsignedLongLongValue]
+                    }
                     "subtype" => out_state.subtype = msg_send![obj, unsignedLongLongValue],
                     "version" => out_state.version = msg_send![obj, unsignedLongLongValue],
                     "type" => out_state.ty = msg_send![obj, unsignedLongLongValue],
@@ -1843,14 +1347,18 @@ impl AudioUnit {
                         let len: usize = msg_send![obj, length];
                         if len > 0 {
                             let bytes: *const u8 = msg_send![obj, bytes];
-                            out_state.data.extend_from_slice(std::slice::from_raw_parts(bytes, len));
+                            out_state
+                                .data
+                                .extend_from_slice(std::slice::from_raw_parts(bytes, len));
                         }
                     }
                     "vstdata" => {
                         let len: usize = msg_send![obj, length];
                         if len > 0 {
                             let bytes: *const u8 = msg_send![obj, bytes];
-                            out_state.vstdata.extend_from_slice(std::slice::from_raw_parts(bytes, len));
+                            out_state
+                                .vstdata
+                                .extend_from_slice(std::slice::from_raw_parts(bytes, len));
                             crate::log!("{}", out_state.vstdata.len());
                         }
                     }
@@ -1862,16 +1370,16 @@ impl AudioUnit {
             out_state
         }
     }
-    
+
     pub fn set_instrument_state(&self, in_state: &AudioInstrumentState) {
         match self.unit_query {
             AudioUnitQuery::MusicDevice => (),
-            _ => panic!("start_audio_output_with_fn on this device")
+            _ => panic!("start_audio_output_with_fn on this device"),
         }
         unsafe {
             let dict: ObjcId = msg_send![class!(NSMutableDictionary), dictionary];
             let () = msg_send![dict, init];
-            
+
             unsafe fn set_number(dict: ObjcId, name: &str, value: u64) {
                 let id: ObjcId = str_to_nsstring(name);
                 let num: ObjcId = msg_send![class!(NSNumber), numberWithLongLong: value];
@@ -1884,7 +1392,8 @@ impl AudioUnit {
             }
             unsafe fn set_data(dict: ObjcId, name: &str, data: &[u8]) {
                 let id: ObjcId = str_to_nsstring(name);
-                let nsdata: ObjcId = msg_send![class!(NSData), dataWithBytes: data.as_ptr() length: data.len()];
+                let nsdata: ObjcId =
+                    msg_send![class!(NSData), dataWithBytes: data.as_ptr() length: data.len()];
                 let () = msg_send![dict, setObject: nsdata forKey: id];
             }
             set_number(dict, "manufacturer", in_state.manufacturer);
@@ -1894,18 +1403,21 @@ impl AudioUnit {
             set_string(dict, "name", &in_state.name);
             set_data(dict, "data", &in_state.data);
             set_data(dict, "vstdata", &in_state.vstdata);
-            
+
             let () = msg_send![self.au_audio_unit, setFullState: dict];
         }
     }
-    
-    pub fn set_output_provider<F: Fn(AudioTime, &mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
+
+    pub fn set_output_provider<F: Fn(AudioTime, &mut AudioBuffer) + Send + 'static>(
+        &self,
+        audio_callback: F,
+    ) {
         match self.unit_query {
             AudioUnitQuery::Output => (),
             AudioUnitQuery::Effect => (),
-            x => panic!("cannot call set_output_provider on this device {:?}", x)
+            x => panic!("cannot call set_output_provider on this device {:?}", x),
         }
-        
+
         let buffer = Arc::new(Mutex::new(AudioBuffer::default()));
         let output_provider = objc_block!(
             move | _flags: *mut u32,
@@ -1930,39 +1442,42 @@ impl AudioUnit {
                     let out = unsafe {std::slice::from_raw_parts_mut(buffers_ref.mBuffers[i].mData as *mut f32, frame_count)};
                     out.copy_from_slice(buffer.channel(i));
                 }
-                
+
                 0
             }
         );
-        let () = unsafe {msg_send![self.au_audio_unit, setOutputProvider: &output_provider]};
+        let () = unsafe { msg_send![self.au_audio_unit, setOutputProvider: &output_provider] };
     }
-    
+
     pub fn clear_output_provider(&mut self) {
         unsafe {
             let () = msg_send![self.au_audio_unit, setOutputProvider: nil];
         }
     }
-    
-    pub fn set_input_handler<F: Fn(AudioTime, &AudioBuffer) + Send + Sync + 'static>(&self, audio_callback: F) {
+
+    pub fn set_input_handler<F: Fn(AudioTime, &AudioBuffer) + Send + Sync + 'static>(
+        &self,
+        audio_callback: F,
+    ) {
         match self.unit_query {
             AudioUnitQuery::Input => (),
-            x => panic!("cannot call set_input_handler on this device {:?}", x)
+            x => panic!("cannot call set_input_handler on this device {:?}", x),
         }
         if let Some(render_block) = self.render_block {
             unsafe {
-                let input_handler = objc_block!(
-                    move | _flags: *mut u32,
-                    time_stamp: *const AudioTimeStamp,
-                    frame_count: u32,
-                    _input_bus_number: u64 | {
+                let input_handler =
+                    objc_block!(move |_flags: *mut u32,
+                                      time_stamp: *const AudioTimeStamp,
+                                      frame_count: u32,
+                                      _input_bus_number: u64| {
                         // iOS/tvOS input is mono when using VoiceProcessingIO
-                        #[cfg(any(target_os="ios", target_os="tvos"))]
+                        #[cfg(any(target_os = "ios", target_os = "tvos"))]
                         let mut buffer = AudioBuffer::new_with_size(frame_count as usize, 1);
-                        #[cfg(not(any(target_os="ios", target_os="tvos")))]
+                        #[cfg(not(any(target_os = "ios", target_os = "tvos")))]
                         let mut buffer = AudioBuffer::new_with_size(frame_count as usize, 2);
                         let mut flags = 0u32;
                         let mut buffer_list = buffer.to_audio_buffer_list();
-                        
+
                         // For RemoteIO/VoiceProcessingIO input, use bus 1
                         let bus_index = 1u64;
 
@@ -1975,30 +1490,32 @@ impl AudioUnit {
                             (nil): ObjcId
                         ) -> i32);
                         // lets sleep
-                        audio_callback(AudioTime {
-                            sample_time: (*time_stamp).mSampleTime,
-                            host_time: (*time_stamp).mHostTime,
-                            rate_scalar: (*time_stamp).mRateScalar
-                        }, &buffer);
-                    }
-                );
+                        audio_callback(
+                            AudioTime {
+                                sample_time: (*time_stamp).mSampleTime,
+                                host_time: (*time_stamp).mHostTime,
+                                rate_scalar: (*time_stamp).mRateScalar,
+                            },
+                            &buffer,
+                        );
+                    });
                 let () = msg_send![self.au_audio_unit, setInputHandler: &input_handler];
             }
         }
     }
-    
+
     pub fn clear_input_handler(&mut self) {
         unsafe {
             let () = msg_send![self.au_audio_unit, setInputHandler: nil];
         }
     }
-    
+
     pub fn stop_hardware(&mut self) {
         unsafe {
             let () = msg_send![self.au_audio_unit, stopHardware];
         }
     }
-    
+
     pub fn release_audio_unit(&mut self) {
         unsafe {
             let () = msg_send![self.av_audio_unit, release];
@@ -2007,24 +1524,26 @@ impl AudioUnit {
             self.au_audio_unit = nil;
         }
     }
-    
+
     pub fn request_ui<F: Fn() + Send + 'static>(&self, view_loaded: F) {
         match self.unit_query {
             AudioUnitQuery::MusicDevice => (),
             AudioUnitQuery::Effect => (),
-            _ => panic!("request_ui not supported on this device")
+            _ => panic!("request_ui not supported on this device"),
         }
-        
+
         let view_controller_arc = self.view_controller.clone();
-        
-        let view_controller_complete = objc_block!(move | view_controller: ObjcId | {
+
+        let view_controller_complete = objc_block!(move |view_controller: ObjcId| {
             *view_controller_arc.lock().unwrap() = Some(view_controller);
             view_loaded();
         });
-        
-        let () = unsafe {msg_send![self.au_audio_unit, requestViewControllerWithCompletionHandler: &view_controller_complete]};
+
+        let () = unsafe {
+            msg_send![self.au_audio_unit, requestViewControllerWithCompletionHandler: &view_controller_complete]
+        };
     }
-    
+
     pub fn open_ui(&self) {
         if let Some(_view_controller) = self.view_controller.lock().unwrap().as_ref() {
             /*let audio_view: ObjcId = unsafe {msg_send![*view_controller, view]};
@@ -2033,7 +1552,7 @@ impl AudioUnit {
             let () = unsafe {msg_send![win_view, addSubview: audio_view]};*/
         }
     }
-    
+
     pub fn send_mouse_down(&self) {
         if let Some(_view_controller) = self.view_controller.lock().unwrap().as_ref() {
             unsafe {
@@ -2077,9 +1596,9 @@ impl AudioUnit {
             let handler: ObjcId = msg_send![handler, initWithCGImage: cg_image options: nil];
             let start_time = std::time::Instant::now();
             let completion = objc_block!(move | request: ObjcId, error: ObjcId | {
-                
+
                 log!("Profile time {}", (start_time.elapsed().as_nanos() as f64) / 1000000f64);
-                
+
                 if error != nil {
                     error!("text recognition failed")
                 }
@@ -2093,7 +1612,7 @@ impl AudioUnit {
                     //println!("Found text in UI: {}", nsstring_to_string(value));
                 }
             });
-            
+
             let request: ObjcId = msg_send![class!(VNRecognizeTextRequest), alloc];
             let request: ObjcId = msg_send![request, initWithCompletionHandler: &completion];
             let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: request];
@@ -2104,5 +1623,4 @@ impl AudioUnit {
             }
         };
     }*/
-    
 }

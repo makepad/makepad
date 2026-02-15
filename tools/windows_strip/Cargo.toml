@@ -10,10 +10,11 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
 
 [dependencies]
-makepad-rust-tokenizer = {path = "../../libs/rust_tokenizer", version = "0.3.0"}
-# windows-implement = {path = "./implement", version = "0.43.0"}
+makepad-rust-tokenizer = {path = "../../libs/rust_tokenizer", version = "1.0.0"}
+windows-upstream = { package = "windows", version = "=0.62.2", optional = true }
 
 [features]
 nightly=[]
+fetch-windows-upstream = ["dep:windows-upstream"]
 
-#[workspace]
+[workspace]

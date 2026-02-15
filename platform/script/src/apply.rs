@@ -1,0 +1,199 @@
+use std::any::Any;
+
+// ============================================================================
+// ScopeDataRef / ScopeDataMut - Type-erased data containers for scope
+// ============================================================================
+
+#[derive(Default)]
+pub struct ScopeDataRef<'a>(Option<&'a dyn Any>);
+
+#[derive(Default)]
+pub struct ScopeDataMut<'a>(Option<&'a mut dyn Any>);
+
+impl<'a> ScopeDataRef<'a> {
+    pub fn get<T: Any>(&self) -> Option<&T> {
+        self.0.as_ref().and_then(|r| r.downcast_ref())
+    }
+}
+
+impl<'a> ScopeDataMut<'a> {
+    pub fn get<T: Any>(&mut self) -> Option<&T> {
+        self.0.as_ref().and_then(|r| r.downcast_ref())
+    }
+
+    pub fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.0.as_mut().and_then(|r| r.downcast_mut())
+    }
+}
+
+// ============================================================================
+// Scope - Context passed during apply operations
+// ============================================================================
+
+#[derive(Default)]
+pub struct Scope<'a, 'b> {
+    pub data: ScopeDataMut<'a>,
+    pub props: ScopeDataRef<'b>,
+    pub index: usize,
+}
+
+impl<'a, 'b> Scope<'a, 'b> {
+    pub fn with_data<T: Any>(v: &'a mut T) -> Self {
+        Self {
+            data: ScopeDataMut(Some(v)),
+            props: ScopeDataRef(None),
+            index: 0,
+        }
+    }
+
+    pub fn with_data_props<T: Any + Sized, U: Any + Sized>(v: &'a mut T, w: &'b U) -> Self {
+        Self {
+            data: ScopeDataMut(Some(v)),
+            props: ScopeDataRef(Some(w)),
+            index: 0,
+        }
+    }
+
+    pub fn with_props<T: Any>(w: &'b T) -> Self {
+        Self {
+            data: ScopeDataMut(None),
+            props: ScopeDataRef(Some(w)),
+            index: 0,
+        }
+    }
+
+    pub fn with_data_index<T: Any>(v: &'a mut T, index: usize) -> Self {
+        Self {
+            data: ScopeDataMut(Some(v)),
+            props: ScopeDataRef(None),
+            index,
+        }
+    }
+
+    pub fn with_data_props_index<T: Any>(v: &'a mut T, w: &'b T, index: usize) -> Self {
+        Self {
+            data: ScopeDataMut(Some(v)),
+            props: ScopeDataRef(Some(w)),
+            index,
+        }
+    }
+
+    pub fn with_props_index<T: Any>(w: &'b T, index: usize) -> Self {
+        Self {
+            data: ScopeDataMut(None),
+            props: ScopeDataRef(Some(w)),
+            index,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            data: ScopeDataMut(None),
+            props: ScopeDataRef(None),
+            index: 0,
+        }
+    }
+
+    pub fn override_props<T: Any, F, R>(&mut self, props: &'b T, f: F) -> R
+    where
+        F: FnOnce(&mut Scope) -> R,
+    {
+        let mut props = ScopeDataRef(Some(props));
+        std::mem::swap(&mut self.props, &mut props);
+        let r = f(self);
+        std::mem::swap(&mut self.props, &mut props);
+        r
+    }
+
+    pub fn override_props_index<T: Any, F, R>(&mut self, props: &'b T, index: usize, f: F) -> R
+    where
+        F: FnOnce(&mut Scope) -> R,
+    {
+        let mut props = ScopeDataRef(Some(props));
+        let old_index = self.index;
+        self.index = index;
+        std::mem::swap(&mut self.props, &mut props);
+        let r = f(self);
+        std::mem::swap(&mut self.props, &mut props);
+        self.index = old_index;
+        r
+    }
+}
+
+// ============================================================================
+// Apply - Source of apply operation
+// ============================================================================
+
+#[derive(Debug, Clone, Default)]
+pub enum Apply {
+    #[default]
+    New,
+    Reload,
+    Animate,
+    Eval,
+    Default(usize),
+}
+
+impl Apply {
+    pub fn is_from_script(&self) -> bool {
+        match self {
+            Self::New => true,
+            Self::Reload => true,
+            Self::Eval => true,
+            _ => false,
+        }
+    }
+
+    /// Returns true if this is a template apply (New or Reload) where
+    /// the #[source] field should be updated. Excludes Eval since eval
+    /// creates temporary objects that would become dangling after GC.
+    pub fn is_template_apply(&self) -> bool {
+        match self {
+            Self::New => true,
+            Self::Reload => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_new(&self) -> bool {
+        match self {
+            Self::New => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_reload(&self) -> bool {
+        match self {
+            Self::Reload => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_animate(&self) -> bool {
+        match self {
+            Self::Animate => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_eval(&self) -> bool {
+        match self {
+            Self::Eval => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_default(&self) -> Option<usize> {
+        match self {
+            Self::Default(u) => Some(*u),
+            _ => None,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::Default(_) => true,
+            _ => false,
+        }
+    }
+}

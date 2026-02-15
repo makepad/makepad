@@ -1,157 +1,97 @@
-use {
-    crate::{
-        makepad_live_compiler::{
-            LiveRegistry,
-            TokenSpan,
-            LivePtr,
-            LiveValue,
-            LiveTypeInfo,
-            LiveFieldKind,
-            LiveModuleId,
-            LiveType,
-            LiveNode,
-            LiveNodeSliceApi
-        },
-        makepad_error_log::*,
-        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
-        makepad_shader_compiler::*,
-        makepad_live_id::*,
-        makepad_math::*,
-        cx::Cx,
-        texture::{Texture},
-        geometry::GeometryId,
-        area::Area,
-        geometry::{GeometryFields},
-        live_traits::*,
-        draw_shader::*
-    },
+use crate::{
+    area::Area,
+    cx::Cx,
+    draw_shader::*,
+    geometry::GeometryId,
+    makepad_math::*,
+    makepad_script::mod_shader::ShaderIoType,
+    makepad_script::mod_shader::SHADER_IO_DYN_INSTANCE,
+    makepad_script::mod_shader::SHADER_IO_DYN_UNIFORM,
+    makepad_script::pod::{ScriptPodTy, ScriptPodVec},
+    makepad_script::pod_heap,
+    makepad_script::ScriptFnPtr,
+    makepad_script::*,
+    script::vm::*,
+    texture::Texture,
 };
 
-/*
-pub enum ShaderCompileResult {
-    Nop,
-    Ok
-}*/
-
-
-#[cfg(any(target_arch = "wasm32", target_os="android", target_os="linux"))]
-pub const fn shader_enum(i: u32) -> u32 {
-    match i {
-        1 => 0x3f800000,
-        2 => 0x40000000,
-        3 => 0x40400000,
-        4 => 0x40800000,
-        5 => 0x40a00000,
-        6 => 0x40c00000,
-        7 => 0x40e00000,
-        8 => 0x41000000,
-        9 => 0x41100000,
-        10 => 0x41200000,
-        11 => 0x41300000,
-        12 => 0x41400000,
-        13 => 0x41500000,
-        14 => 0x41600000,
-        15 => 0x41700000,
-        16 => 0x41800000,
-        17 => 0x41880000,
-        18 => 0x41900000,
-        19 => 0x41980000,
-        20 => 0x41a00000,
-        21 => 0x41a80000,
-        22 => 0x41b00000,
-        23 => 0x41b80000,
-        24 => 0x41c00000,
-        25 => 0x41c80000,
-        26 => 0x41d00000,
-        27 => 0x41d80000,
-        28 => 0x41e00000,
-        29 => 0x41e80000,
-        30 => 0x41f00000,
-        31 => 0x41f80000,
-        _ => panic!()
-    }
-}
-
-#[cfg(not(any(target_arch = "wasm32", target_os="android", target_os="linux")))]
-pub const fn shader_enum(i: u32) -> u32 {
-    if i<1 || i > 31 {
-        panic!();
-    }
-    i
-}
-
-pub const DRAW_CALL_USER_UNIFORMS: usize = 256;
+pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
-pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
+pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
 
-#[derive(Clone)]
+#[derive(Clone, Script, Debug)]
 #[repr(C)]
 pub struct DrawVars {
+    #[rust]
     pub area: Area,
-    pub (crate) var_instance_start: usize,
-    pub (crate) var_instance_slots: usize,
-    pub (crate) options: CxDrawShaderOptions,
-    pub draw_shader: Option<DrawShader>,
-    pub (crate) geometry_id: Option<GeometryId>,
-    pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
+    #[rust]
+    pub dyn_instance_start: usize,
+    #[rust]
+    pub dyn_instance_slots: usize,
+    #[rust]
+    pub options: CxDrawShaderOptions,
+    #[rust]
+    pub draw_shader_id: Option<DrawShaderId>,
+    #[rust]
+    pub geometry_id: Option<GeometryId>,
+    #[rust([0f32; DRAW_CALL_DYN_UNIFORMS])]
+    pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS],
+    #[rust]
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
-    pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
+    #[rust([0f32; DRAW_CALL_DYN_INSTANCES])]
+    pub dyn_instances: [f32; DRAW_CALL_DYN_INSTANCES],
 }
 
-impl Default for DrawVars{
-    fn default()->Self{
-        Self{
-            area: Default::default(),
-            var_instance_start: Default::default(),
-            var_instance_slots: Default::default(),
-            options: Default::default(),
-            draw_shader: Default::default(),
-            geometry_id: Default::default(),
-            user_uniforms: [0f32; DRAW_CALL_USER_UNIFORMS],
-            texture_slots: Default::default(),
-            var_instances: [0f32; DRAW_CALL_VAR_INSTANCES]
+impl ScriptHook for DrawVars {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        if !apply.is_default() && !apply.is_animate() {
+            self.compile_shader(vm, apply, value);
+        }
+        // Read draw_call_group from the shader object
+        if let Some(io_self) = value.as_object() {
+            let group_value = vm
+                .bx
+                .heap
+                .value(io_self, id!(draw_call_group).into(), NoTrap);
+            if let Some(id) = group_value.as_id() {
+                self.options.draw_call_group = id;
+            } else if let Some(v) = group_value.as_f64() {
+                self.options.draw_call_group = LiveId(v as u64);
+            }
+        }
+        // lets fill our values
+        if self.draw_shader_id.is_some() {
+            if let Some(io_self) = value.as_object() {
+                let cx = vm.host.cx_mut();
+                // For eval applies, only update values that exist at the top level (shallow)
+                // This avoids re-reading all values from the prototype chain
+                let shallow = apply.is_eval();
+                self.fill_dyn_instances(cx, &vm.bx.heap, io_self, shallow);
+                self.fill_dyn_uniforms(cx, &vm.bx.heap, io_self, shallow);
+            }
+        }
+        // Update areas for animated properties only
+        if apply.is_animate() || apply.is_eval() {
+            if let Some(io_self) = value.as_object() {
+                let cx = vm.host.cx_mut();
+                self.update_instance_areas_when_in_object(cx, &vm.bx.heap, io_self);
+                self.update_uniform_areas_when_in_object(cx, &vm.bx.heap, io_self);
+            }
         }
     }
 }
-
-impl LiveHookDeref for DrawVars{}
-
-impl LiveNew for DrawVars {
-    fn new(_cx: &mut Cx) -> Self {
-        Self::default()
-    }
-    
-    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: std::any::TypeId::of::<Self>(),
-            live_ignore: true,
-            fields: Vec::new(),
-            type_name: id_lut!(DrawVars)
-        }
-    }
-}
-
-impl LiveApply for DrawVars {
-    fn apply(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) -> usize {
-        panic!()
-    }
-}
-
-impl LiveApplyReset for DrawVars {
-    fn apply_reset(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        // do nothing
-    }
-}
-
-impl LiveHook for DrawVars {}
 
 impl DrawVars {
-    
     pub fn set_texture(&mut self, slot: usize, texture: &Texture) {
         self.texture_slots[slot] = Some(texture.clone());
     }
-    
+
     pub fn empty_texture(&mut self, slot: usize) {
         self.texture_slots[slot] = None;
     }
@@ -159,289 +99,123 @@ impl DrawVars {
     pub fn redraw(&self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
-    
+
     pub fn area(&self) -> Area {
         self.area
     }
-    
+
     pub fn can_instance(&self) -> bool {
-        self.draw_shader.is_some()
+        self.draw_shader_id.is_some()
     }
-    
+
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
-            std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots)
+            std::slice::from_raw_parts(
+                (&self.dyn_instances[self.dyn_instance_start - 1] as *const _ as *const f32)
+                    .offset(1),
+                self.dyn_instance_slots,
+            )
         }
     }
-    
-    pub fn init_shader(&mut self, cx: &mut Cx, apply: &mut Apply, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
-        self.draw_shader = None;
-        
-        if cx.draw_shaders.error_set.contains(&draw_shader_ptr) {
-            return
-        }
-        
-        if let Some(item) = cx.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
-            self.draw_shader = Some(DrawShader {
-                draw_shader_generation: cx.draw_shaders.generation,
-                draw_shader_ptr,
-                draw_shader_id: item.draw_shader_id
-            });
-            self.options = item.options.clone();
-        }
-        else {
-            // create a fingerprint from all the dsl nodes only
-            let fingerprint = DrawShaderFingerprint::from_ptr(cx, draw_shader_ptr);
-            
-            // see if we have it already
-            if let Some(fp) = cx.draw_shaders.fingerprints.iter().find( | fp | fp.fingerprint == fingerprint) {
-                self.options = CxDrawShaderOptions::from_ptr(cx, draw_shader_ptr);
-                cx.draw_shaders.ptr_to_item.insert(draw_shader_ptr, CxDrawShaderItem {
-                    draw_shader_id: fp.draw_shader_id,
-                    options: self.options.clone()
-                });
-                self.draw_shader = Some(DrawShader {
-                    draw_shader_generation: cx.draw_shaders.generation,
-                    draw_shader_ptr,
-                    draw_shader_id: fp.draw_shader_id
-                });
-                return;
-            }
-            
-            // see if another variant errored
-            if cx.draw_shaders.error_fingerprints.iter().find( | fp | **fp == fingerprint).is_some() {
-                return;
-            }
 
-            fn live_type_to_shader_ty(live_type: LiveType) -> Option<ShaderTy> {
-                if live_type == LiveType::of::<f32>() {Some(ShaderTy::Float)}
-                else if live_type == LiveType::of::<Vec2f>() {Some(ShaderTy::Vec2f)}
-                else if live_type == LiveType::of::<Vec3f>() {Some(ShaderTy::Vec3f)}
-                else if live_type == LiveType::of::<Vec4f>() {Some(ShaderTy::Vec4f)}
-                else if live_type == LiveType::of::<Mat4f>() {Some(ShaderTy::Mat4f)}
-                else {None}
-            }
-            // ok ! we have to compile it
-            //let live_factories = &cx.live_factories;
-            let live_registry_cp = cx.live_registry.clone();
-            let live_registry = live_registry_cp.borrow();
-            
-            let result = cx.shader_registry.analyse_draw_shader(&live_registry, draw_shader_ptr, | live_registry, shader_registry, span, draw_shader_query, live_type, draw_shader_def | {
-                match draw_shader_query {
-                    DrawShaderQuery::DrawShader => {
-                        fn recur_expand(
-                            live_registry: &LiveRegistry,
-                            shader_registry: &ShaderRegistry,
-                            level: usize,
-                            after_draw_vars: &mut bool,
-                            live_type: LiveType,
-                            draw_shader_def: &mut DrawShaderDef,
-                            span: TokenSpan
-                        ) {
-                            if let Some(lf) = live_registry.live_type_infos.get(&live_type) {
-                                
-                                let mut slots = 0;
-                                for field in &lf.fields {
-                                    if let LiveFieldKind::Deref = field.live_field_kind {
-                                        if field.live_type_info.live_type != LiveType::of::<DrawVars>() {
-                                            recur_expand(live_registry, shader_registry, level + 1, after_draw_vars, field.live_type_info.live_type, draw_shader_def, span);
-                                            continue
-                                        }
-                                        else{
-                                            *after_draw_vars = true;
-                                            continue
-                                        }
-                                    }
-                                    if *after_draw_vars {
-                                        // lets count sizes
-                                        //
-                                        let live_type = field.live_type_info.live_type;
-                                        if shader_registry.enums.get(&live_type).is_some() {
-                                            slots += 1;
-                                            //draw_shader_def.enums
-                                            
-                                            draw_shader_def.add_instance(field.id, ShaderTy::Enum(live_type), span, field.live_field_kind);
-                                        }
-                                        else {
-                                            let ty = live_type_to_shader_ty(live_type).expect("Please only put shader-understandable instance fields after draw_vars");
-                                            slots += ty.slots();
-                                            draw_shader_def.add_instance(field.id, ty, span, field.live_field_kind);
-                                        }
-                                    }
-                                }
-                                // insert padding
-                                if level >0 && slots % 2 == 1 {
-                                    draw_shader_def.add_instance(LiveId(0), ShaderTy::Float, span, LiveFieldKind::Calc);
-                                }
-                            }
-                        }
-                        recur_expand(live_registry, shader_registry, 0, &mut false, live_type, draw_shader_def, span);
-                    }
-                    DrawShaderQuery::Geometry => {
-                        if live_type == geometry_fields.live_type_check() {
-                            let mut fields = Vec::new();
-                            geometry_fields.geometry_fields(&mut fields);
-                            for field in fields {
-                                draw_shader_def.add_geometry(field.id, field.ty, span);
-                            }
-                        }
-                        else {
-                            eprintln!("lf.get_type() != geometry_fields.live_type_check()");
-                        }
-                    }
-                }
-            });
-            // ok lets print an error
-            match result {
-                Err(e) => {
-                    cx.draw_shaders.error_set.insert(draw_shader_ptr);
-                    cx.draw_shaders.error_fingerprints.push(fingerprint);
-                    // ok so. lets get the source for this file id
-                    let err = live_registry.live_error_to_live_file_error(e);
-                    if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                        crate::log::log_with_level(
-                            &err.file,
-                            err.span.start.line,
-                            err.span.start.column,
-                            err.span.end.line,
-                            err.span.end.column,
-                            err.message,
-                            crate::log::LogLevel::Error
-                        );
-                    }
-                    else{
-                        log!("Error {}", err);
-                    }
-                }
-                Ok(()) => {
-                    // OK! SO the shader parsed
-                    let draw_shader_id = cx.draw_shaders.shaders.len();
-                    
-                    //let const_table = DrawShaderConstTable::default();
-                    let const_table = cx.shader_registry.compute_const_table(draw_shader_ptr);
-                    
-                    let mut mapping = CxDrawShaderMapping::from_draw_shader_def(
-                        cx.shader_registry.draw_shader_defs.get(&draw_shader_ptr).unwrap(),
-                        const_table,
-                        DRAW_SHADER_INPUT_PACKING
-                    );
-                    
-                    mapping.update_live_and_user_uniforms(cx, apply);
-                    
-                    let live_registry_rc = cx.live_registry.clone();
-                    let live_registry = live_registry_rc.borrow();
-                    let class_node = live_registry.ptr_to_node(draw_shader_ptr.0);
-                    
-                    let shader_type_name = match &class_node.value {
-                        LiveValue::Class {live_type, ..} => {
-                            // lets get the type name
-                            let lti = live_registry.live_type_infos.get(live_type).unwrap();
-                            lti.type_name
-                        }
-                        _ => LiveId(0)
-                    };
-                    cx.draw_shaders.fingerprints.push(DrawShaderFingerprint {
-                        draw_shader_id,
-                        fingerprint
-                    });
-                    cx.draw_shaders.shaders.push(CxDrawShader {
-                        class_prop: class_node.id,
-                        type_name: shader_type_name,
-                        os_shader_id: None,
-                        mapping: mapping
-                    });
-                    // ok so. maybe we should fill the live_uniforms buffer?
-                    self.options = CxDrawShaderOptions::from_ptr(cx, draw_shader_ptr);
-                    cx.draw_shaders.ptr_to_item.insert(draw_shader_ptr, CxDrawShaderItem {
-                        draw_shader_id,
-                        options: self.options.clone()
-                    });
-                    cx.draw_shaders.compile_set.insert(draw_shader_ptr);
-                    // now we simply queue it somewhere somehow to compile.
-                    self.draw_shader = Some(DrawShader {
-                        draw_shader_generation: cx.draw_shaders.generation,
-                        draw_shader_id,
-                        draw_shader_ptr
-                    });
-                    
-                    // self.geometry_id = geometry_fields.get_geometry_id();
-                    //println!("{:?}", self.geometry_id);
-                    // also we should allocate it a Shader object
-                }
-            }
-        }
-    }
-    
-    pub fn update_area_with_self(&mut self, cx: &mut Cx, index: usize, nodes: &[LiveNode]) {
-        if let Some(draw_shader) = self.draw_shader {
+    /// Update instance areas only for inputs that exist on the given script object.
+    /// Used during animation to only update animated properties.
+    fn update_instance_areas_when_in_object(
+        &mut self,
+        cx: &mut Cx,
+        heap: &ScriptHeap,
+        io_self: ScriptObject,
+    ) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
-                    return;
-                }
-                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                 let draw_call = draw_item.kind.draw_call_mut().unwrap();
-                
                 let repeat = inst.instance_count;
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
                 let inst_slice = self.as_slice();
-                let mut uniform_updated = false;
-                let mut node_iter = nodes.first_child(index);
-                while let Some(node_index) = node_iter {
-                    let id = nodes[node_index].id;
-                    
-                    // lets iterate the /*
-                    for input in &sh.mapping.live_instances.inputs {
-                        if input.id == id {
-                            for j in 0..repeat {
-                                for i in 0..input.slots {
-                                    instances[input.offset + i + j * stride] = inst_slice[input.offset + i]
-                                }
-                            }
-                            draw_call.instance_dirty = true;
+                let obj_map = heap.map_ref(io_self);
+                let mut any_updated = false;
+
+                for input in &sh.mapping.instances.inputs {
+                    let key: ScriptValue = input.id.into();
+                    if obj_map.contains_key(&key) {
+                        // Debug trace for 'active' instance
+                        if cx.debug_trace_active && input.id == live_id!(active) {
+                            crate::log!(
+                                "DEBUG update_instance_areas: active = {} (from inst_slice)",
+                                inst_slice[input.offset]
+                            );
                         }
-                    }
-                    for input in &sh.mapping.user_uniforms.inputs {
-                        if input.id == id {
-                            // if we are updating a uniform, make sure we redraw
-                            uniform_updated = true;
+                        for j in 0..repeat {
                             for i in 0..input.slots {
-                                draw_call.user_uniforms[input.offset + i] = self.user_uniforms[input.offset + i]
+                                instances[input.offset + i + j * stride] =
+                                    inst_slice[input.offset + i]
                             }
                         }
-                        draw_call.uniforms_dirty = true;
+                        any_updated = true;
                     }
-                    node_iter = nodes.next_child(node_index);
                 }
-                // DONE!
-                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
-                if uniform_updated{
-                    
-                    // not calling redraw when uniforms change might cause
-                    // incorrect drawcall splitting, so we have to. Unfortunately.
+
+                if any_updated {
+                    draw_call.instance_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Update uniform areas only for inputs that exist on the given script object.
+    /// Used during animation to only update animated properties.
+    fn update_uniform_areas_when_in_object(
+        &mut self,
+        cx: &mut Cx,
+        heap: &ScriptHeap,
+        io_self: ScriptObject,
+    ) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            if let Some(inst) = self.area.valid_instance(cx) {
+                let sh = &cx.draw_shaders[draw_shader_id.index];
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                let obj_map = heap.map_ref(io_self);
+                let mut any_updated = false;
+
+                for input in &sh.mapping.dyn_uniforms.inputs {
+                    let key: ScriptValue = input.id.into();
+                    if obj_map.contains_key(&key) {
+                        for i in 0..input.slots {
+                            draw_call.dyn_uniforms[input.offset + i] =
+                                self.dyn_uniforms[input.offset + i]
+                        }
+                        any_updated = true;
+                    }
+                }
+
+                if any_updated {
+                    draw_call.uniforms_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     self.area.redraw(cx);
                 }
             }
         }
     }
-    
+
     pub fn update_rect(&mut self, cx: &mut Cx, rect: Rect) {
-        if let Some(draw_shader) = self.draw_shader {
+        if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
-                    return;
-                }
-                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                 let draw_call = draw_item.kind.draw_call_mut().unwrap();
-                
+
                 let repeat = inst.instance_count;
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
-                
+
                 for input in &sh.mapping.instances.inputs {
                     if input.id == live_id!(rect_pos) {
                         for j in 0..repeat {
@@ -457,22 +231,19 @@ impl DrawVars {
                     }
                 }
                 draw_call.instance_dirty = true;
-                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
             }
         }
     }
-    
-    pub fn update_instance_area_value(&mut self, cx: &mut Cx,  id: &[LiveId]) {
-        if let Some(draw_shader) = self.draw_shader {
+
+    pub fn update_instance_area_value(&mut self, cx: &mut Cx, id: &[LiveId]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
-                    return;
-                }
-                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                 let draw_call = draw_item.kind.draw_call_mut().unwrap();
-                                
+
                 let repeat = inst.instance_count;
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
@@ -480,68 +251,26 @@ impl DrawVars {
                 for input in &sh.mapping.instances.inputs {
                     if input.id == id[0] {
                         for j in 0..repeat {
-                            for k in 0..input.slots{
+                            for k in 0..input.slots {
                                 instances[input.offset + k + j * stride] = slice[input.offset + k];
                             }
                         }
                     }
                 }
                 draw_call.instance_dirty = true;
-                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
             }
         }
     }
-        
-    /*
-    pub fn update_area_with_value(&mut self, cx: &mut Cx, id: LiveId, v: &[f32], start: usize, count: usize) {
-        if let Some(draw_shader) = self.draw_shader {
-            if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
-                    return;
-                }
-                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.kind.draw_call_mut().unwrap();
-                
-                let repeat = inst.instance_count.min(count);
-                let stride = sh.mapping.instances.total_slots;
-                let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
-                
-                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
-                
-                for input in &sh.mapping.live_instances.inputs {
-                    if input.id == id {
-                        for j in start..(start + repeat) {
-                            for i in 0..input.slots {
-                                instances[input.offset + i + j * stride] = v[i]
-                            }
-                        }
-                        draw_call.instance_dirty = true;
-                    }
-                    return
-                }
-                for input in &sh.mapping.user_uniforms.inputs {
-                    if input.id == id {
-                        for i in 0..input.slots {
-                            draw_call.user_uniforms[input.offset + i] = v[i]
-                        }
-                        draw_call.uniforms_dirty = true;
-                        return
-                    }
-                }
-            }
-        }
-    }*/
-    
-    pub fn get_instance(&self, cx: &mut Cx, inst: &[LiveId], value: &mut [f32]){
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+
+    pub fn get_instance(&self, cx: &mut Cx, inst: LiveId, value: &mut [f32]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
             let self_slice = self.as_slice();
             for input in &sh.mapping.instances.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
-                if input.id == inst[0] {
+                if input.id == inst {
                     for i in 0..value.len().min(slots) {
                         value[i] = self_slice[offset + i]
                     }
@@ -549,170 +278,741 @@ impl DrawVars {
             }
         }
     }
-    
-    pub fn set_var_instance(&mut self, cx:&Cx, instance: &[LiveId], value: &[f32]) {
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            for input in &sh.mapping.var_instances.inputs {
-                let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
+
+    pub fn set_dyn_instance(&mut self, cx: &Cx, instance: LiveId, value: &[f32]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
+            for input in &sh.mapping.dyn_instances.inputs {
+                let offset = (self.dyn_instances.len() - sh.mapping.dyn_instances.total_slots)
+                    + input.offset;
                 let slots = input.slots;
-                if input.id == instance[0] {
+                if input.id == instance {
                     for i in 0..value.len().min(slots) {
-                        self.var_instances[offset + i] = value[i];
+                        self.dyn_instances[offset + i] = value[i];
                     }
                 }
             }
         }
     }
-    
-    pub fn get_uniform(&self, cx: &mut Cx, uniform: &[LiveId], value: &mut [f32]){
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            for input in &sh.mapping.user_uniforms.inputs {
+
+    pub fn get_uniform(&self, cx: &mut Cx, uniform: LiveId, value: &mut [f32]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
+            for input in &sh.mapping.dyn_uniforms.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
-                if input.id == uniform[0] {
+                if input.id == uniform {
                     for i in 0..value.len().min(slots) {
-                        value[i] = self.user_uniforms[offset + i];
+                        value[i] = self.dyn_uniforms[offset + i];
                     }
                 }
             }
         }
     }
-    
-    pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
-        if let Some(draw_shader) = self.draw_shader { 
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            for input in &sh.mapping.user_uniforms.inputs {
+
+    pub fn set_uniform(&mut self, cx: &Cx, uniform: LiveId, value: &[f32]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
+            for input in &sh.mapping.dyn_uniforms.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
-                if input.id == uniform[0] {
+                if input.id == uniform {
                     for i in 0..value.len().min(slots) {
-                        self.user_uniforms[offset + i] = value[i]
+                        self.dyn_uniforms[offset + i] = value[i]
                     }
                 }
             }
         }
     }
-    
-        
-    pub fn init_slicer(
+
+    /// Sets a uniform value and also updates the draw call on the area if valid.
+    /// This is used to update uniforms after drawing has completed.
+    pub fn set_uniform_on_area(&mut self, cx: &mut Cx, id: LiveId, value: &[f32]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
+
+            // Find the uniform input
+            if let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) {
+                let slots = input.slots.min(value.len());
+
+                // Update local dyn_uniforms
+                for i in 0..slots {
+                    self.dyn_uniforms[input.offset + i] = value[i];
+                }
+
+                // Update the draw call if we have a valid area
+                if let Some(inst) = self.area.valid_instance(cx) {
+                    let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                    let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                    let draw_call = draw_item.kind.draw_call_mut().unwrap();
+
+                    for i in 0..slots {
+                        draw_call.dyn_uniforms[input.offset + i] = value[i];
+                    }
+                    draw_call.uniforms_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Sets an instance value on all instances in the area.
+    /// This is used to update instance data after drawing has completed.
+    pub fn set_instance_on_area(&mut self, cx: &mut Cx, id: LiveId, value: &[f32]) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            if let Some(inst) = self.area.valid_instance(cx) {
+                let sh = &cx.draw_shaders[draw_shader_id.index];
+
+                // Find the instance input
+                if let Some(input) = sh.mapping.instances.inputs.iter().find(|i| i.id == id) {
+                    let slots = input.slots.min(value.len());
+                    let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                    let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                    let draw_call = draw_item.kind.draw_call_mut().unwrap();
+
+                    let stride = sh.mapping.instances.total_slots;
+                    let all_instances = draw_item.instances.as_mut().unwrap();
+
+                    // Validate area bounds
+                    let available = all_instances.len().saturating_sub(inst.instance_offset);
+                    let max_count = available / stride;
+                    if inst.instance_count > max_count {
+                        crate::log!(
+                            "stale: cnt={} max={} redraw={} list_redraw={}",
+                            inst.instance_count,
+                            max_count,
+                            inst.redraw_id,
+                            draw_list.redraw_id
+                        );
+                        return; // Area is stale, skip update
+                    }
+
+                    let instances = &mut all_instances[inst.instance_offset..];
+
+                    // Update all instances in this area
+                    for j in 0..inst.instance_count {
+                        for i in 0..slots {
+                            instances[input.offset + i + j * stride] = value[i];
+                        }
+                    }
+
+                    draw_call.instance_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                }
+            }
+        }
+    }
+
+    fn fill_dyn_instances(
         &mut self,
-        cx: &mut Cx,
+        cx: &Cx,
+        heap: &ScriptHeap,
+        io_self: ScriptObject,
+        shallow: bool,
     ) {
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            self.var_instance_start = self.var_instances.len() - sh.mapping.var_instances.total_slots;
-            self.var_instance_slots = sh.mapping.instances.total_slots;
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let mapping = &cx.draw_shaders.shaders[draw_shader_id.index].mapping;
+            let base_offset = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
+
+            for input in &mapping.dyn_instances.inputs {
+                let value = Self::extract_shader_io_value(
+                    heap,
+                    io_self,
+                    input.id,
+                    SHADER_IO_DYN_INSTANCE,
+                    shallow,
+                );
+                if !value.is_nil() && !value.is_err() {
+                    // Debug trace for 'active' instance
+                    if cx.debug_trace_active && input.id == live_id!(active) {
+                        if let Some(v) = value.as_f64() {
+                            // Print all keys in the object's direct map
+                            let map = heap.map_ref(io_self);
+                            let keys: Vec<_> =
+                                map.iter().map(|(k, _)| format!("{:?}", k)).collect();
+                            crate::log!(
+                                "DEBUG fill_dyn_instances: active = {} (shallow={}) obj_keys={:?}",
+                                v,
+                                shallow,
+                                keys
+                            );
+                        }
+                    }
+                    Self::write_value_to_f32_slots(
+                        heap,
+                        value,
+                        &mut self.dyn_instances,
+                        base_offset + input.offset,
+                        input.slots,
+                        input.attr_format,
+                    );
+                }
+            }
         }
     }
-    
-    pub fn before_apply_init_shader(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
-        
-        let draw_shader_ptr = if let Some(file_id) = apply.from.file_id() {
-            let generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;
-            DrawShaderPtr(LivePtr::from_index(file_id, index, generation))
+
+    fn fill_dyn_uniforms(
+        &mut self,
+        cx: &Cx,
+        heap: &ScriptHeap,
+        io_self: ScriptObject,
+        shallow: bool,
+    ) {
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let mapping = &cx.draw_shaders.shaders[draw_shader_id.index].mapping;
+
+            for input in &mapping.dyn_uniforms.inputs {
+                let value = Self::extract_shader_io_value(
+                    heap,
+                    io_self,
+                    input.id,
+                    SHADER_IO_DYN_UNIFORM,
+                    shallow,
+                );
+                if !value.is_nil() && !value.is_err() {
+                    Self::write_value_to_f32_slots(
+                        heap,
+                        value,
+                        &mut self.dyn_uniforms,
+                        input.offset,
+                        input.slots,
+                        DrawShaderAttrFormat::Float,
+                    );
+                }
+            }
         }
-        else {
-            return
+    }
+
+    fn extract_shader_io_value(
+        heap: &ScriptHeap,
+        io_self: ScriptObject,
+        id: LiveId,
+        expected_io_type: ShaderIoType,
+        shallow: bool,
+    ) -> ScriptValue {
+        // For shallow lookups, only check the object's own map (no prototype chain)
+        let value = if shallow {
+            heap.map_ref(io_self)
+                .get(&id.into())
+                .map(|v| v.value)
+                .unwrap_or(NIL)
+        } else {
+            heap.value(io_self, id.into(), NoTrap)
         };
-        self.init_shader(cx, apply, draw_shader_ptr, geometry_fields)
+
+        // Check if it's a shader IO object with the expected type
+        if let Some(value_obj) = value.as_object() {
+            if let Some(io_type) = heap.as_shader_io(value_obj) {
+                if io_type == expected_io_type {
+                    // The value is stored as the prototype
+                    return heap.proto(value_obj);
+                }
+            }
+        }
+
+        // Return the value directly
+        value
     }
-    
-    pub fn apply_slots(cx: &mut Cx, slots: usize, output: &mut [f32], offset: usize, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        match slots {
-            1 => {
-                let mut v: f32 = 0.0;
-                let index = v.apply(cx, apply, index, nodes);
-                output[offset + 0] = v;
-                return index;
+
+    /// Write a ScriptValue to f32 slots in an output array at the given offset.
+    pub fn write_value_to_f32_slots(
+        heap: &ScriptHeap,
+        value: ScriptValue,
+        output: &mut [f32],
+        offset: usize,
+        slots: usize,
+        attr_format: DrawShaderAttrFormat,
+    ) {
+        // Try f64 first (most common for abstract numbers)
+        if let Some(v) = value.as_f64() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v as f32,
+                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            };
+            for i in 0..slots {
+                output[offset + i] = v;
             }
-            2 => {
-                let mut v: Vec2f = Vec2f::default();
-                let index = v.apply(cx, apply, index, nodes);
-                output[offset + 0] = v.x;
-                output[offset + 1] = v.y;
-                return index;
+            return;
+        }
+
+        // Try u40 (common integer format in script)
+        if let Some(v) = value.as_u40() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v as f32,
+                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            };
+            for i in 0..slots {
+                output[offset + i] = v;
             }
-            3 => {
-                let mut v: Vec3f = Vec3f::default();
-                let index = v.apply(cx, apply, index, nodes);
+            return;
+        }
+
+        // Try f32
+        if let Some(v) = value.as_f32() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v,
+                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            };
+            for i in 0..slots {
+                output[offset + i] = v;
+            }
+            return;
+        }
+
+        // Try f16
+        if let Some(v) = value.as_f16() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v,
+                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            };
+            for i in 0..slots {
+                output[offset + i] = v;
+            }
+            return;
+        }
+
+        // Try u32/i32
+        if let Some(v) = value.as_u32() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v as f32,
+                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => f32::from_bits(v),
+            };
+            for i in 0..slots {
+                output[offset + i] = v;
+            }
+            return;
+        }
+        if let Some(v) = value.as_i32() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => v as f32,
+                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                    f32::from_bits(v as u32)
+                }
+            };
+            for i in 0..slots {
+                output[offset + i] = v;
+            }
+            return;
+        }
+
+        // Try bool
+        if let Some(v) = value.as_bool() {
+            let v = match attr_format {
+                DrawShaderAttrFormat::Float => {
+                    if v {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                    f32::from_bits(if v { 1 } else { 0 })
+                }
+            };
+            for i in 0..slots {
+                output[offset + i] = v;
+            }
+            return;
+        }
+
+        // Try color (u32 RGBA)
+        if let Some(c) = value.as_color() {
+            let v = Vec4f::from_u32(c);
+            if slots >= 1 {
                 output[offset + 0] = v.x;
+            }
+            if slots >= 2 {
                 output[offset + 1] = v.y;
+            }
+            if slots >= 3 {
                 output[offset + 2] = v.z;
-                return index;
             }
-            4 => {
-                let mut v: Vec4f = Vec4f::default();
-                let index = v.apply(cx, apply, index, nodes);
-                output[offset + 0] = v.x;
-                output[offset + 1] = v.y;
-                output[offset + 2] = v.z;
+            if slots >= 4 {
                 output[offset + 3] = v.w;
-                return index;
             }
-            _ => {
-                return nodes.skip_node(index)
+            return;
+        }
+
+        // Try repr(u32) enum variant objects used by script APIs.
+        // These carry the numeric payload in `_repr_u32_enum_value`.
+        if let Some(obj) = value.as_object() {
+            let enum_value = heap.value(obj, live_id!(_repr_u32_enum_value).into(), NoTrap);
+            if let Some(v) = enum_value.as_f64() {
+                let v = match attr_format {
+                    DrawShaderAttrFormat::Float => v as f32,
+                    DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                    DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+                };
+                for i in 0..slots {
+                    output[offset + i] = v;
+                }
+                return;
+            }
+            if let Some(v) = enum_value.as_u32() {
+                let v = match attr_format {
+                    DrawShaderAttrFormat::Float => v as f32,
+                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => f32::from_bits(v),
+                };
+                for i in 0..slots {
+                    output[offset + i] = v;
+                }
+                return;
             }
         }
-    }
-    
-    pub fn apply_value(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        
-        if nodes[index].origin.node_has_prefix() && nodes[index].value.is_id() {
-            return nodes.skip_node(index)
-        }
-        
-        if let Some(draw_shader) = self.draw_shader {
-            let id = nodes[index].id;
-            if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
-                return nodes.skip_node(index);
-            }
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            for input in &sh.mapping.user_uniforms.inputs {
-                let offset = input.offset;
-                let slots = input.slots;
-                if input.id == id {
-                    return Self::apply_slots(cx, slots, &mut self.user_uniforms, offset, apply, index, nodes);
+
+        // Try pod (Vec2f, Vec3f, Vec4f, etc.)
+        if let Some(pod) = value.as_pod() {
+            let (pod_type, data) = heap.pod_data(pod);
+
+            match &pod_type.ty {
+                ScriptPodTy::F32 => {
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => f32::from_bits(data[0]),
+                        DrawShaderAttrFormat::UInt => f32::from_bits(f32::from_bits(data[0]) as u32),
+                        DrawShaderAttrFormat::SInt => {
+                            f32::from_bits(f32::from_bits(data[0]) as i32 as u32)
+                        }
+                    };
+                    for i in 0..slots {
+                        output[offset + i] = v;
+                    }
+                }
+                ScriptPodTy::F16 => {
+                    let v = pod_heap::f16_to_f32(data[0] as u16);
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => v,
+                        DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
+                        DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+                    };
+                    for i in 0..slots {
+                        output[offset + i] = v;
+                    }
+                }
+                ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => {
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => data[0] as f32,
+                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                            f32::from_bits(data[0])
+                        }
+                    };
+                    for i in 0..slots {
+                        output[offset + i] = v;
+                    }
+                }
+                ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => {
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => data[0] as i32 as f32,
+                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                            f32::from_bits(data[0])
+                        }
+                    };
+                    for i in 0..slots {
+                        output[offset + i] = v;
+                    }
+                }
+                ScriptPodTy::Bool => {
+                    let v = match attr_format {
+                        DrawShaderAttrFormat::Float => {
+                            if data[0] != 0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                            f32::from_bits(if data[0] != 0 { 1 } else { 0 })
+                        }
+                    };
+                    for i in 0..slots {
+                        output[offset + i] = v;
+                    }
+                }
+                ScriptPodTy::Vec(vec_ty) => {
+                    let dims = vec_ty.dims();
+                    match vec_ty {
+                        ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f => {
+                            for i in 0..dims.min(slots) {
+                                output[offset + i] = f32::from_bits(data[i]);
+                            }
+                        }
+                        ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h => {
+                            for i in 0..dims.min(slots) {
+                                if i & 1 == 1 {
+                                    output[offset + i] =
+                                        pod_heap::f16_to_f32((data[i >> 1] >> 16) as u16);
+                                } else {
+                                    output[offset + i] = pod_heap::f16_to_f32(data[i >> 1] as u16);
+                                }
+                            }
+                        }
+                        ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u => {
+                            for i in 0..dims.min(slots) {
+                                output[offset + i] = match attr_format {
+                                    DrawShaderAttrFormat::Float => data[i] as f32,
+                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                        f32::from_bits(data[i])
+                                    }
+                                };
+                            }
+                        }
+                        ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i => {
+                            for i in 0..dims.min(slots) {
+                                output[offset + i] = match attr_format {
+                                    DrawShaderAttrFormat::Float => data[i] as i32 as f32,
+                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                        f32::from_bits(data[i])
+                                    }
+                                };
+                            }
+                        }
+                        ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b => {
+                            for i in 0..dims.min(slots) {
+                                output[offset + i] = match attr_format {
+                                    DrawShaderAttrFormat::Float => {
+                                        if data[i] != 0 {
+                                            1.0
+                                        } else {
+                                            0.0
+                                        }
+                                    }
+                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                        f32::from_bits(if data[i] != 0 { 1 } else { 0 })
+                                    }
+                                };
+                            }
+                        }
+                    }
+                }
+                ScriptPodTy::Mat(mat_ty) => {
+                    // Matrices are stored as f32 arrays (column-major order)
+                    let dim = mat_ty.dim();
+                    for i in 0..dim.min(slots) {
+                        output[offset + i] = f32::from_bits(data[i]);
+                    }
+                }
+                _ => {
+                    // For other pod types, default to 0
+                    for i in 0..slots {
+                        output[offset + i] = 0.0;
+                    }
                 }
             }
-            for input in &sh.mapping.var_instances.inputs {
-                
-                let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
-                let slots = input.slots;
-                if input.id == id {
-                    return Self::apply_slots(cx, slots, &mut self.var_instances, offset, apply, index, nodes);
+            return;
+        }
+
+        // Default: fill with zeros
+        for i in 0..slots {
+            output[offset + i] = 0.0;
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
+        if let Some(io_self) = value.as_object() {
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
                 }
             }
+
+            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            let mut output = ShaderOutput::default();
+            output.backend = ShaderBackend::Glsl;
+            output.pre_collect_rust_instance_io(vm, io_self);
+            output.pre_collect_shader_io(vm, io_self);
+
+            if let Some(fnobj) = vm
+                .bx
+                .heap
+                .object_method(io_self, id!(vertex).into(), vm.thread().trap.pass())
+                .as_object()
+            {
+                output.mode = ShaderMode::Vertex;
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    NoTrap,
+                    id!(vertex),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+            if let Some(fnobj) = vm
+                .bx
+                .heap
+                .object_method(io_self, id!(fragment).into(), vm.thread().trap.pass())
+                .as_object()
+            {
+                output.mode = ShaderMode::Fragment;
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    NoTrap,
+                    id!(fragment),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+
+            if output.has_errors {
+                return;
+            }
+
+            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+
+            let mut shared_defs = String::new();
+            output.create_struct_defs(vm, &mut shared_defs);
+
+            let mut vertex = String::new();
+            let mut fragment = String::new();
+            output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
+            output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
+
+            let code = CxDrawShaderCode::Separate { vertex, fragment };
+
+            {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    cx.draw_shaders
+                        .cache_functions_to_shader
+                        .insert(fnhash, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
+                    return;
+                }
+            }
+
+            let geometry_id = if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
+                let buffer_value =
+                    vm.bx
+                        .heap
+                        .value(vb_obj, id!(buffer).into(), vm.thread().trap.pass());
+                if let Some(handle) = buffer_value.as_handle() {
+                    vm.bx
+                        .heap
+                        .handle_ref::<crate::geometry::Geometry>(handle)
+                        .map(|g: &crate::geometry::Geometry| g.geometry_id())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let source = vm.bx.heap.new_object_ref(io_self);
+            let mut mapping = CxDrawShaderMapping::from_shader_output(
+                source,
+                code.clone(),
+                &vm.bx.heap,
+                &output,
+                geometry_id,
+            );
+            mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
+
+            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
+            if let Some(true) = debug_value.as_bool() {
+                mapping.flags.debug = true;
+            }
+
+            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
+            self.dyn_instance_slots = mapping.instances.total_slots;
+
+            let cx = vm.host.cx_mut();
+            let index = cx.draw_shaders.shaders.len();
+            cx.draw_shaders.shaders.push(CxDrawShader {
+                debug_id: LiveId(0),
+                os_shader_id: None,
+                mapping,
+            });
+
+            let shader_id = DrawShaderId { index };
+            cx.draw_shaders
+                .cache_object_id_to_shader
+                .insert(io_self, shader_id);
+            cx.draw_shaders
+                .cache_functions_to_shader
+                .insert(fnhash, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+            cx.draw_shaders.compile_set.insert(index);
+
+            self.draw_shader_id = Some(shader_id);
+            self.geometry_id = geometry_id;
         }
-        else { // our shader simply didnt compile
-            return nodes.skip_node(index);
-        }
-        
-        if nodes[index].origin.node_has_prefix() {
-            return nodes.skip_node(index)
-        }
-        
-        let unknown_shader_props = match nodes[index].id {
-            live_id!(debug) => false,
-            live_id!(debug_id) => false,
-            live_id!(draw_call_group) => false,
-            _ => true
-        };
-        
-        if unknown_shader_props && nodes[index].value.is_value_type() {
-            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-        }
-        nodes.skip_node(index)
     }
-    
-    pub fn after_apply_update_self(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
-        // alright. so.if we are ApplyFrom::
-        if apply.from.is_from_doc() {
-            self.init_slicer(cx);
+
+    /// Compute a hash of all function IDs on an object by iterating through
+    /// the prototype chain and hashing each function's ScriptIp.
+    pub fn compute_shader_functions_hash(heap: &ScriptHeap, obj: ScriptObject) -> LiveId {
+        let mut hash = LiveId(LiveId::SEED);
+
+        // Walk the prototype chain to collect all functions
+        let mut current = Some(obj);
+        while let Some(cur_obj) = current {
+            // Iterate through the object's map entries
+            for (key, value) in heap.map_ref(cur_obj).iter() {
+                // Check if the value is a function object
+                if let Some(fn_obj) = value.value.as_object() {
+                    if let Some(fn_ptr) = heap.as_fn(fn_obj) {
+                        // Hash the key (method name)
+                        if let Some(key_id) = key.as_id() {
+                            hash = hash.id_append(key_id);
+                        }
+                        // Hash the function pointer
+                        match fn_ptr {
+                            ScriptFnPtr::Script(ip) => {
+                                // Hash the ScriptIp as bytes
+                                let ip_bytes = ip.to_u40().to_be_bytes();
+                                hash = hash.bytes_append(&ip_bytes);
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+            }
+            // Move to prototype
+            current = heap.proto(cur_obj).as_object();
         }
-        self.geometry_id = geometry_fields.get_geometry_id();
-        self.update_area_with_self(cx, index, nodes);
+
+        hash
     }
-    
+
+    /// Helper to finalize shader setup after finding a cached shader ID.
+    /// Uses the geometry_id stored on the mapping instead of re-running pre_collect_shader_io.
+    pub fn finalize_cached_shader(&mut self, vm: &mut ScriptVm, shader_id: DrawShaderId) {
+        let cx = vm.host.cx();
+        let mapping = &cx.draw_shaders.shaders[shader_id.index].mapping;
+
+        // Set dyn_instance_start and dyn_instance_slots based on mapping
+        self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
+        self.dyn_instance_slots = mapping.instances.total_slots;
+
+        // Set draw_shader on self
+        self.draw_shader_id = Some(shader_id);
+
+        // Use the geometry_id stored on the mapping
+        self.geometry_id = mapping.geometry_id;
+    }
 }

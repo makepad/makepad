@@ -132,6 +132,7 @@ pub enum ClassDefinition<'a> {
     Format2 {
         records: LazyArray16<'a, RangeRecord>,
     },
+    Empty,
 }
 
 impl<'a> ClassDefinition<'a> {
@@ -162,6 +163,7 @@ impl<'a> ClassDefinition<'a> {
                 .checked_sub(start.0)
                 .and_then(|index| classes.get(index)),
             Self::Format2 { records } => records.range(glyph).map(|record| record.value),
+            Self::Empty => Some(0),
         }
         .unwrap_or(0)
     }

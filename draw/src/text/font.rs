@@ -8,7 +8,7 @@ use {
         intern::Intern,
         rasterizer::{RasterizedGlyph, Rasterizer},
     },
-    makepad_rustybuzz as rustybuzz,
+    rustybuzz,
     rustybuzz::ttf_parser,
     std::{
         cell::RefCell,
@@ -63,6 +63,10 @@ impl Font {
 
     pub fn id(&self) -> FontId {
         self.id
+    }
+
+    pub fn data(&self) -> &Rc<Vec<u8>> {
+        self.face.data()
     }
 
     pub(super) fn ttf_parser_face(&self) -> &ttf_parser::Face<'_> {

@@ -177,7 +177,7 @@ impl BitStream {
     #[inline(always)] // to many call sites? ( perf improvement by 4%)
     pub fn refill<T>(&mut self, reader: &mut ZReader<T>) -> Result<bool, DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         /// Macro version of a single byte refill.
         /// Arguments
@@ -218,8 +218,10 @@ impl BitStream {
                             let marker = Marker::from_u8(next_byte as u8);
                             self.marker = marker;
 
-                            if let Some(Marker::UNKNOWN(_)) = marker{
-                                return Err(DecodeErrors::Format("Unknown marker in bit stream".to_string()));
+                            if let Some(Marker::UNKNOWN(_)) = marker {
+                                return Err(DecodeErrors::Format(
+                                    "Unknown marker in bit stream".to_string(),
+                                ));
                             }
                             if next_byte == 0xD9 {
                                 // special handling for eoi, fill some bytes,even if its zero,
@@ -298,10 +300,13 @@ impl BitStream {
     )]
     #[inline(always)]
     fn decode_dc<T>(
-        &mut self, reader: &mut ZReader<T>, dc_table: &HuffmanTable, dc_prediction: &mut i32
+        &mut self,
+        reader: &mut ZReader<T>,
+        dc_table: &HuffmanTable,
+        dc_prediction: &mut i32,
     ) -> Result<bool, DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         let (mut symbol, r);
 
@@ -327,10 +332,12 @@ impl BitStream {
     /// Like `decode_dc` but we do not need the result of the component, we only want to remove it
     /// from the bitstream of the MCU.
     fn discard_dc<T>(
-        &mut self, reader: &mut ZReader<T>, dc_table: &HuffmanTable
+        &mut self,
+        reader: &mut ZReader<T>,
+        dc_table: &HuffmanTable,
     ) -> Result<bool, DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         let mut symbol;
 
@@ -366,11 +373,16 @@ impl BitStream {
     )]
     #[inline(never)]
     pub fn decode_mcu_block<T>(
-        &mut self, reader: &mut ZReader<T>, dc_table: &HuffmanTable, ac_table: &HuffmanTable,
-        qt_table: &[i32; DCT_BLOCK], block: &mut [i32; 64], dc_prediction: &mut i32
+        &mut self,
+        reader: &mut ZReader<T>,
+        dc_table: &HuffmanTable,
+        ac_table: &HuffmanTable,
+        qt_table: &[i32; DCT_BLOCK],
+        block: &mut [i32; 64],
+        dc_prediction: &mut i32,
     ) -> Result<u16, DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         // Get fast AC table as a reference before we enter the hot path
         let ac_lookup = ac_table.ac_lookup.as_ref().unwrap();
@@ -378,9 +390,9 @@ impl BitStream {
         let (mut symbol, mut r, mut fast_ac);
         // Decode AC coefficients
         let mut pos: usize = 1;
-        if  self.bits_left < 1 && self.marker.is_some() {
+        if self.bits_left < 1 && self.marker.is_some() {
             return Err(DecodeErrors::Format(
-                "No more bytes left in stream before marker".to_string()
+                "No more bytes left in stream before marker".to_string(),
             ));
         }
         // decode DC, dc prediction will contain the value
@@ -434,10 +446,13 @@ impl BitStream {
     /// This updates DC prediction but we never dequantize and we never do any Zig-Zag translation
     /// either. Still returns the index of the last component read.
     pub fn discard_mcu_block<T>(
-        &mut self, reader: &mut ZReader<T>, dc_table: &HuffmanTable, ac_table: &HuffmanTable
+        &mut self,
+        reader: &mut ZReader<T>,
+        dc_table: &HuffmanTable,
+        ac_table: &HuffmanTable,
     ) -> Result<u16, DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         // Get fast AC table as a reference before we enter the hot path
         let ac_lookup = ac_table.ac_lookup.as_ref().unwrap();
@@ -517,11 +532,14 @@ impl BitStream {
     #[allow(clippy::cast_possible_truncation)]
     #[inline]
     pub(crate) fn decode_prog_dc_first<T>(
-        &mut self, reader: &mut ZReader<T>, dc_table: &HuffmanTable, block: &mut i16,
-        dc_prediction: &mut i32
+        &mut self,
+        reader: &mut ZReader<T>,
+        dc_table: &HuffmanTable,
+        block: &mut i16,
+        dc_prediction: &mut i32,
     ) -> Result<(), DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         self.decode_dc(reader, dc_table, dc_prediction)?;
         *block = (*dc_prediction as i16).wrapping_mul(self.successive_low_mask);
@@ -529,10 +547,12 @@ impl BitStream {
     }
     #[inline]
     pub(crate) fn decode_prog_dc_refine<T>(
-        &mut self, reader: &mut ZReader<T>, block: &mut i16
+        &mut self,
+        reader: &mut ZReader<T>,
+        block: &mut i16,
     ) -> Result<(), DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         // refinement scan
         if self.bits_left < 1 {
@@ -541,7 +561,7 @@ impl BitStream {
             // So let's confirm again that refill worked
             if self.bits_left < 1 {
                 return Err(DecodeErrors::Format(
-                    "Marker found where not expected in refine bit".to_string()
+                    "Marker found where not expected in refine bit".to_string(),
                 ));
             }
         }
@@ -561,10 +581,13 @@ impl BitStream {
         return k;
     }
     pub(crate) fn decode_mcu_ac_first<T>(
-        &mut self, reader: &mut ZReader<T>, ac_table: &HuffmanTable, block: &mut [i16; 64]
+        &mut self,
+        reader: &mut ZReader<T>,
+        ac_table: &HuffmanTable,
+        block: &mut [i16; 64],
     ) -> Result<bool, DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         let fast_ac = ac_table.ac_lookup.as_ref().unwrap();
         let bit = self.successive_low_mask;
@@ -619,10 +642,13 @@ impl BitStream {
     }
     #[allow(clippy::too_many_lines, clippy::op_ref)]
     pub(crate) fn decode_mcu_ac_refine<T>(
-        &mut self, reader: &mut ZReader<T>, table: &HuffmanTable, block: &mut [i16; 64]
+        &mut self,
+        reader: &mut ZReader<T>,
+        table: &HuffmanTable,
+        block: &mut [i16; 64],
     ) -> Result<bool, DecodeErrors>
     where
-        T: ZByteReaderTrait
+        T: ZByteReaderTrait,
     {
         let bit = self.successive_low_mask;
 
@@ -653,7 +679,7 @@ impl BitStream {
                 } else {
                     if symbol != 1 {
                         return Err(DecodeErrors::HuffmanDecode(
-                            "Bad Huffman code, corrupt JPEG?".to_string()
+                            "Bad Huffman code, corrupt JPEG?".to_string(),
                         ));
                     }
                     // get sign bit
@@ -679,7 +705,7 @@ impl BitStream {
                                 self.refill(reader)?;
                                 if self.bits_left < 1 && self.marker.is_some() {
                                     return Err(DecodeErrors::Format(
-                                        "Marker found where not expected in refine bit".to_string()
+                                        "Marker found where not expected in refine bit".to_string(),
                                     ));
                                 }
                             }

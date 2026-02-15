@@ -1,5 +1,4 @@
 #[derive(Clone, Copy, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Selection {
     pub cursor: Cursor,
     pub anchor: Cursor,
@@ -17,20 +16,17 @@ impl Selection {
     /// Returns `true` if this `Selection` and the `other` Selection
     /// have the same `index`` values for both their `cursor` and `anchor`.
     pub fn index_eq(self, other: Selection) -> bool {
-        self.cursor.index == other.cursor.index
-            && self.anchor.index == other.anchor.index
+        self.cursor.index == other.cursor.index && self.anchor.index == other.anchor.index
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cursor {
     pub index: usize,
     pub prefer_next_row: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CursorPosition {
     pub row_index: usize,
     pub x_in_lpxs: f32,

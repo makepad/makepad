@@ -1,23 +1,30 @@
-use std::{option, os::fd::{AsFd, AsRawFd}};
+#![allow(dead_code, unused_imports)]
+use std::{
+    option,
+    os::fd::{AsFd, AsRawFd},
+};
 
 use wayland_client::{Connection, EventQueue};
 
-use crate::{cx_native::EventFlow, wayland::wayland_state::WaylandState, x11::xlib_event::XlibEvent, TimerEvent};
+use crate::{
+    cx_native::EventFlow, wayland::wayland_state::WaylandState, x11::xlib_event::XlibEvent,
+    TimerEvent,
+};
 
 pub(crate) struct WaylandApp {
     connection: Connection,
     pub event_queue: EventQueue<WaylandState>,
     pub state: WaylandState,
-    event_callback: Option<Box<dyn FnMut(&mut WaylandApp, XlibEvent)->EventFlow>>
+    event_callback: Option<Box<dyn FnMut(&mut WaylandApp, XlibEvent) -> EventFlow>>,
 }
 impl WaylandApp {
     pub fn new(
         connection: Connection,
         event_queue: EventQueue<WaylandState>,
         state: WaylandState,
-        event_callback: Box<dyn FnMut(&mut WaylandApp, XlibEvent)->EventFlow>
+        event_callback: Box<dyn FnMut(&mut WaylandApp, XlibEvent) -> EventFlow>,
     ) -> Self {
-        Self{
+        Self {
             connection,
             event_queue,
             state: state,
@@ -35,13 +42,11 @@ impl WaylandApp {
                 EventFlow::Wait => {
                     let time = self.time_now();
                     self.state.timers.update_timers(&mut timer_ids);
-                    for timer_id in &timer_ids{
-                        self.do_callback(
-                            XlibEvent::Timer(TimerEvent {
-                                timer_id:*timer_id,
-                                time: Some(time)
-                            })
-                        );
+                    for timer_id in &timer_ids {
+                        self.do_callback(XlibEvent::Timer(TimerEvent {
+                            timer_id: *timer_id,
+                            time: Some(time),
+                        }));
                     }
                     if let Some(guard) = self.event_queue.prepare_read() {
                         self.state.timers.select(guard.connection_fd().as_raw_fd());
@@ -51,13 +56,11 @@ impl WaylandApp {
                 EventFlow::Poll => {
                     let time = self.time_now();
                     self.state.timers.update_timers(&mut timer_ids);
-                    for timer_id in &timer_ids{
-                        self.do_callback(
-                            XlibEvent::Timer(TimerEvent {
-                                timer_id:*timer_id,
-                                time: Some(time)
-                            })
-                        );
+                    for timer_id in &timer_ids {
+                        self.do_callback(XlibEvent::Timer(TimerEvent {
+                            timer_id: *timer_id,
+                            time: Some(time),
+                        }));
                     }
                     self.event_loop_poll();
                 }
@@ -65,13 +68,26 @@ impl WaylandApp {
         }
     }
     fn event_loop_poll(&mut self) {
-        self.event_queue.flush().unwrap();
+        if let Err(err) = self.event_queue.flush() {
+            crate::warning!("Wayland flush failed: {}", err);
+            self.terminate_event_loop();
+            return;
+        }
         if let Some(guard) = self.event_queue.prepare_read() {
-            if guard.read().is_ok() {
-                self.event_queue.dispatch_pending(&mut self.state).unwrap();
+            if let Err(err) = guard.read() {
+                crate::warning!("Wayland read failed: {}", err);
+                self.terminate_event_loop();
+                return;
             }
-        } else {
-            self.event_queue.dispatch_pending(&mut self.state).unwrap();
+            if let Err(err) = self.event_queue.dispatch_pending(&mut self.state) {
+                crate::warning!("Wayland dispatch failed: {}", err);
+                self.terminate_event_loop();
+                return;
+            }
+        } else if let Err(err) = self.event_queue.dispatch_pending(&mut self.state) {
+            crate::warning!("Wayland dispatch failed: {}", err);
+            self.terminate_event_loop();
+            return;
         }
 
         self.do_callback(XlibEvent::Paint);

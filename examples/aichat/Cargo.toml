@@ -1,0 +1,12 @@
+[package]
+name = "makepad-example-aichat"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "AI Chat example demonstrating makepad-ai library"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", features = ["maps", "pdf"] }
+makepad-code-editor = { path = "../../code_editor" }
+makepad-ai = { path = "../../studio/ai" }

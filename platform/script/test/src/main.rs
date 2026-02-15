@@ -1,0 +1,2707 @@
+use makepad_script::apply::*;
+use makepad_script::heap::*;
+use makepad_script::makepad_live_id::*;
+use makepad_script::makepad_math::*;
+use makepad_script::traits::*;
+use makepad_script::*;
+use std::collections::BTreeMap;
+
+pub fn main() {
+    let vm = &mut ScriptVm {
+        host: &mut 0,
+        bx: Box::new(ScriptVmBase::new()),
+    };
+
+    #[derive(Script)]
+    pub struct StructTest {
+        #[live(1.0)]
+        field: f64,
+        #[live(EnumTest::Bare)]
+        enm: EnumTest,
+        #[live]
+        opt: Option<f64>,
+        #[live]
+        vec: Vec<u8>,
+    }
+
+    #[derive(Script, ScriptHook)]
+    pub enum EnumTest {
+        #[pick]
+        Bare,
+        #[live(1.0)]
+        Tuple(f64),
+        #[live{named_field:1.0}]
+        Named { named_field: f64 },
+    }
+
+    const fn make_val(x: u32) -> u32 {
+        x * 10
+    }
+
+    #[derive(Script, ScriptHook)]
+    #[repr(u32)]
+    pub enum ShaderEnum {
+        #[pick]
+        Test1 = 1,
+        Test2 = 2,
+        Test3 = make_val(3),
+    }
+
+    // Test enum with Vec<LiveId> field - reproducing the MenuItem issue
+    #[derive(Clone, Debug, Script, ScriptHook)]
+    pub enum MenuTest {
+        #[live { items: Vec::new() }]
+        Main { items: Vec<LiveId> },
+
+        #[live { name: String::new(), items: Vec::new() }]
+        Sub { name: String, items: Vec<LiveId> },
+
+        #[pick]
+        Line,
+    }
+
+    #[derive(Script, ScriptHook)]
+    #[repr(C)]
+    pub struct ShaderTest {
+        #[live]
+        parent_field: f32,
+        #[live]
+        unused_field1: f32,
+    }
+
+    #[derive(Script, ScriptHook)]
+    #[repr(C)]
+    pub struct ShaderTest2 {
+        #[deref]
+        parent: ShaderTest,
+        #[live]
+        color: Vec4f,
+        #[live]
+        child_field: f32,
+        #[live]
+        unused_field2: f32,
+        #[live]
+        enum_test: ShaderEnum,
+    }
+
+    // Test struct for script_apply_eval stress test
+    // Mimics the draw_bg pattern used in widgets
+    #[derive(Script, ScriptHook, Default)]
+    pub struct DrawBgTest {
+        #[source]
+        source: ScriptObjectRef,
+        #[live]
+        is_even: f32,
+        #[live]
+        color: Vec4f,
+    }
+
+    use crate::value::*;
+    use crate::vm::*;
+
+    impl ScriptHook for StructTest {
+        fn on_proto_methods(vm: &mut ScriptVm, obj: ScriptObject) {
+            let ht = vm.new_handle_type(id!(myhandle));
+
+            vm.add_handle_method(
+                ht,
+                id_lut!(return_three),
+                script_args_def!(o = 1.0),
+                |_vm, _args| return 3.into(),
+            );
+
+            vm.add_method(
+                obj,
+                id_lut!(return_two),
+                script_args_def!(o = 1.0),
+                |_vm, _args| return 2.into(),
+            );
+
+            vm.add_method(
+                obj,
+                id_lut!(return_handle),
+                script_args_def!(o = 1.0),
+                move |vm, _args| {
+                    struct DummyHandle;
+                    impl ScriptHandleGc for DummyHandle {
+                        fn gc(&mut self) {}
+                    }
+                    vm.bx.heap.new_handle(ht, Box::new(DummyHandle)).into()
+                },
+            );
+
+            // Returns a BTreeMap<String, Vec<String>> like HTTP headers
+            vm.add_method(
+                obj,
+                id_lut!(return_headers),
+                script_args_def!(),
+                |vm, _args| {
+                    let mut headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                    headers.insert("Content-Type".to_string(), vec!["text/html".to_string()]);
+                    headers.insert(
+                        "Set-Cookie".to_string(),
+                        vec!["session=abc123".to_string(), "lang=en".to_string()],
+                    );
+                    headers.insert("X-Custom".to_string(), vec!["hello".to_string()]);
+                    headers.script_to_value(vm)
+                },
+            );
+        }
+    }
+
+    // lets define a handle type with some methods on it
+    // Our unit tests :)
+    let code = script! {
+        use mod.std.assert
+        use mod.std.println
+        use mod.pod
+
+        // arithmetic operations
+        let x = 1+2 assert(x == 3)
+        assert(10 - 3 == 7)
+        assert(10 / 2 == 5)
+        assert(10 % 3 == 1)
+        assert((!true) == false)
+        assert((!false) == true)
+        assert((3 << 2) == 12)
+        assert((12 >> 2) == 3)
+        assert((5 & 3) == 1)
+        assert((5 | 3) == 7)
+        assert((5 ^ 3) == 6)
+        let x = -5 assert(x == 0-5)
+        assert(-5 == 0-5) assert(-5 != 0) assert(-(-5) == 5)
+
+        // operator precedence tests
+        assert(-5 + 3 == -2)
+        assert(2 + 3 * 4 == 14) assert((2 + 3) * 4 == 20)
+        assert(10 - 2 - 3 == 5) assert(10 - (2 - 3) == 11)
+        assert(8 / 2 / 2 == 2) assert(8 / (2 / 2) == 8)
+        assert(1 + 2 < 4) assert(!(1 + 2 < 2))
+        assert(1 < 2 && 3 < 4) assert(!(1 > 2 && 3 < 4))
+        assert(1 > 2 || 3 < 4) assert(!(1 > 2 || 3 > 4))
+        assert((1 & 3) == 1) assert((1 | 2) == 3) assert((3 ^ 1) == 2)
+        assert(1 << 2 == 4) assert(8 >> 2 == 2)
+
+        // is type checks
+        assert(5 is number) assert(5.0 is number) assert(!(5 is string))
+        assert("hi" is string) assert(!("hi" is number))
+        assert(true is bool) assert(false is bool) assert(!(true is number))
+        assert(nil is nil) assert(!(5 is nil))
+        assert({x:1} is object) assert(#f00 is color) assert([1 2] is array)
+
+        // comparison operations
+        assert(3 < 5) assert(!(5 < 3))
+        assert(5 > 3) assert(!(3 > 5))
+        assert(3 <= 3) assert(3 <= 5)
+        assert(5 >= 5) assert(5 >= 3)
+        assert(true && true) assert(!(true && false))
+        assert(true || false) assert(!(false || false))
+        // Short-circuit evaluation tests for ||, &&, |?
+        let x = nil let y = x |? 5 assert(y == 5)
+        let x = 3 let y = x |? 5 assert(y == 3)
+
+        // Short-circuit tests using side effects
+        // || should not evaluate second operand if first is truthy
+        let counter = {v:0}
+        let inc = || { counter.v += 1; false }
+        let result = true || inc()
+        assert(result == true)
+        assert(counter.v == 0) // inc() should NOT have been called
+
+        let result = false || inc()
+        assert(result == false)
+        assert(counter.v == 1) // inc() SHOULD have been called
+
+        // && should not evaluate second operand if first is falsy
+        counter.v = 0
+        let result = false && inc()
+        assert(result == false)
+        assert(counter.v == 0) // inc() should NOT have been called
+
+        let result = true && inc()
+        assert(result == false)
+        assert(counter.v == 1) // inc() SHOULD have been called
+
+        // |? should not evaluate second operand if first is not nil
+        counter.v = 0
+        let inc_ret = || { counter.v += 1; 99 }
+        let x = 5
+        let result = x |? inc_ret()
+        assert(result == 5)
+        assert(counter.v == 0) // inc_ret() should NOT have been called
+
+        let x = nil
+        let result = x |? inc_ret()
+        assert(result == 99)
+        assert(counter.v == 1) // inc_ret() SHOULD have been called
+
+        // array operations
+        let iv = [1 2 3 4] let ov = []
+
+        for v in iv { ov.push(v) } assert(iv == ov)
+        assert(ov.pop() == 4) assert(iv != ov)
+        assert(ov[2] == 3);
+
+
+
+
+        // functions
+        let f = |x| x+1
+        assert(f(1) == 2)
+
+        // operator precedence
+        let x = 2*3 + 4*5
+        assert(x == 26)
+        let x = 2*(3+4)*5
+        assert(x == 70)
+        let t = {x:2, y:3, z:4, w:5}
+        let x = t.x*t.y + t.z*t.w
+        assert(x == 26)
+        let x = t.x*(t.y+t.z)*t.w
+        assert(x == 70)
+
+        // shallow and deep compare
+        let oa = {y:1 z:2}
+        let ob = {z:3 y:1}
+        assert(oa != ob)
+        ob.z = 2 assert(oa == ob)
+        assert(oa !== ob)
+
+        // string comparison
+        assert("123" == "123")
+        assert("123" != "223")
+        assert("123456" == "123456")
+        assert("123456" != "123")
+
+        // compound assignment ops
+        let x = 1 x += 2 assert(x == 3)
+        let x = 5 x -= 2 assert(x == 3)
+        let x = 3 x *= 4 assert(x == 12)
+        let x = 12 x /= 3 assert(x == 4)
+        let x = 10 x %= 3 assert(x == 1)
+        let x = 7 x &= 3 assert(x == 3)
+        let x = 5 x |= 2 assert(x == 7)
+        let x = 7 x ^= 3 assert(x == 4)
+        let x = 3 x <<= 2 assert(x == 12)
+        let x = 12 x >>= 2 assert(x == 3)
+        let t = 3 t ?= 2 assert(t == 3)
+        let t t ?= 2 assert(t == 2)
+        let t = 0 t = 2 t += 1 assert(t==3)
+        // field compound assignments
+        let x = {f:2} x.f+=2 assert(x.f == 4)
+        let x = {f:5} x.f-=2 assert(x.f == 3)
+        let x = {f:3} x.f*=4 assert(x.f == 12)
+        let x = {f:12} x.f/=3 assert(x.f == 4)
+        let x = {f:10} x.f%=3 assert(x.f == 1)
+        let x = {f:7} x.f&=3 assert(x.f == 3)
+        let x = {f:5} x.f|=2 assert(x.f == 7)
+        let x = {f:7} x.f^=3 assert(x.f == 4)
+        let x = {f:3} x.f<<=2 assert(x.f == 12)
+        let x = {f:12} x.f>>=2 assert(x.f == 3)
+        let x = {f:3} x.f?=5 assert(x.f == 3)
+        let x = {f:nil} x.f?=5 assert(x.f == 5)
+        // index compound assignments
+        let x = [1,2] x[1]+=2 assert(x == [1 4])
+        let x = [1,5] x[1]-=2 assert(x[1] == 3)
+        let x = [1,3] x[1]*=4 assert(x[1] == 12)
+        let x = [1,12] x[1]/=3 assert(x[1] == 4)
+        let x = [1,10] x[1]%=3 assert(x[1] == 1)
+        let x = [1,7] x[1]&=3 assert(x[1] == 3)
+        let x = [1,5] x[1]|=2 assert(x[1] == 7)
+        let x = [1,7] x[1]^=3 assert(x[1] == 4)
+        let x = [1,3] x[1]<<=2 assert(x[1] == 12)
+        let x = [1,12] x[1]>>=2 assert(x[1] == 3)
+        let x = [1,3] x[1]?=5 assert(x[1] == 3)
+        let x = [1,nil] x[1]?=5 assert(x[1] == 5)
+        // test loops
+        let c = 0 for x in 4{ if c == 3 break; c += 1} assert(c==3)
+        let c = 0 for x in 5{ if c == 4{break;}c += 1} assert(c==4);
+        let c = 0 for x in 7{ if x == 3 ||  x == 5 continue;c += 1} assert(c==5);
+        let c = 0 loop{ c+=1; if c>5 break} assert(c==6)
+        let c = 0 while c < 9 c+=1 assert(c==9);
+        let c = 0 while c < 3{c+=1}assert(c==3);
+
+        // test && and || in if with braces
+        // IMPORTANT: if the { is parsed as object literal, result would NOT be modified
+        let x = 1 let y = 2
+        var result = 0
+        if x < y && y > 0 {
+            result = 1
+        }
+        assert(result == 1) // This would fail if { was parsed as object literal
+        result = 0
+        if x > y || y > 0 {
+            result = 2
+        }
+        assert(result == 2) // This would fail if { was parsed as object literal
+
+        // freezing
+        let x = {x:1 y:2}.freeze_api();
+        // property value unknown
+        try {x{z:3}} assert(true) ok assert(false)
+        // property value known
+        let x2 = x{x:3} assert(x2.x == 3)
+        let x2 = x{x:2}
+        // property frozen
+        try x.x = 2 assert(true) ok assert(false)
+
+        // modules can be extended but not overwritten
+        let x = {p:1}.freeze_module();
+        try x.p = 2 assert(true) ok assert(false)
+        try x.z = 2 assert(false) ok assert(true)
+        // but we cant add items to its vec
+        try {x{1}} assert(true) ok assert(false)
+
+        let x = {p:1}.freeze_component();
+        // cant write to it at all
+        try x.x = 1 assert(true) ok assert(false)
+        try x.p = 1 assert(true) ok assert(false)
+        // can write with same type on derived
+        try {x{p:1}} assert(false) ok assert(true)
+        // cant change value type
+        try {x{p:true}} assert(true) ok assert(false)
+        // can append to vec
+        try {x{1}} assert(false) ok assert(true)
+
+        // scope shadowing
+        let x = 1
+        let f = || x
+        let x = 2
+        let g =|| x
+        assert(f() == 1)
+        assert(g() == 2)
+
+        // try undefined
+        try{undef = 1} assert(true) ok assert(false)
+        let t = 0 try{t = 1} assert(false) ok assert(true)
+
+        // struct tests
+        let s = #(StructTest::script_api(vm));
+        try{s{field:5}} assert(false) ok assert(true)
+
+        try{s{field:"HI"}} assert(true) ok assert(false)
+        assert(s.return_two() == 2)
+
+        // check handle features
+        let h = s.return_handle();
+        assert(h.return_three() == 3)
+
+        // BTreeMap<String, Vec<String>> test (like HTTP headers)
+        let headers = s.return_headers()
+        // Access by string key with bracket notation
+        let ct = headers["Content-Type"]
+        assert(ct[0] == "text/html")
+        let sc = headers["Set-Cookie"]
+        assert(sc[0] == "session=abc123")
+        assert(sc[1] == "lang=en")
+        let xc = headers["X-Custom"]
+        assert(xc[0] == "hello")
+        // Verify that headers work as a proper string-keyed map
+        // This should NOT crash or error
+        println(headers)
+
+        // check enum
+        let EnumTest = #(EnumTest::script_api(vm));
+        let x = EnumTest.Bare
+        // test tuple typechecking
+        try{EnumTest.Tuple(1.0)} assert(false) ok assert(true)
+        try{EnumTest.Tuple("false")} assert(true) ok assert(false)
+        try{EnumTest.Tuple()} assert(true) ok assert(false)
+        try{EnumTest.Tuple(1,2)} assert(true) ok assert(false)
+        try{EnumTest.Named{named_field:1.0}} assert(false) ok assert(true)
+        try{EnumTest.Named{named_field:"true"}} assert(true) ok assert(false)
+
+        //assert(s.enm == EnumTest.Bare)
+
+        // Test MenuTest enum with Vec<LiveId> field
+        let MenuTest = #(MenuTest::script_api(vm));
+        let m = MenuTest.Main{items: []}
+        let m2 = MenuTest.Sub{name: "File", items: []}
+        let m3 = MenuTest.Line
+        try{s{enm: EnumTest.Bare}} assert(false) ok assert(true)
+        try{s{enm: 1.0}} assert(true) ok assert(false)
+        try{s{enm: EnumTest.Named{named_field:1.0}}} assert(false) ok assert(true)
+        try{s{enm: EnumTest.Tuple(1.0)}} assert(false) ok assert(true)
+
+        // check the option
+        try{s{opt:nil}} assert(false) ok assert(true)
+        try{s{opt:1.0}} assert(false) ok assert(true)
+        try{s{opt:"false"}} assert(true) ok assert(false)
+
+        // check the vec
+        let x = s{vec:[1 2 3 4]}
+        assert(x.vec == [1 2 3 4])
+        // check typechecking in a vec
+        try{s{vec:[false]}} assert(true) ok assert(false)
+        try{s{vec:[1,2]}} assert(false) ok assert(true)
+
+        // string to array
+        assert("hi".to_bytes().to_string() == "hi")
+        let a = "12345".to_bytes();
+        a.pop();
+        assert(a.to_string() == "1234")
+        assert("hi".to_chars().to_string() == "hi")
+
+        // test json
+        let x = {x:1 y:[1 2 3]};
+        let y = x.to_json();
+        let z = y.parse_json();
+
+        // test string-like property acceseses
+        assert(z == x)
+        assert(z["x"] == z.x)
+        assert(x["y"] == [1 2 3])
+        z.x = 2
+        assert(z["x"] == 2)
+        let x = {"key":3, x:2.0}
+        assert(x.key == 3)
+
+        // test callbacks and do chaining
+        let f = |x, cb| cb(x)
+        assert(2 == f(1) do |x| x+1)
+
+        // using ok to ignore errors
+        let x = {t:3}
+        assert( ok{x.y.z} == nil)
+        assert( ok{x.t} == 3)
+
+        // nil-safe field access with .?
+        let x = {a:{b:5}, c:nil}
+        assert(x.a.?b == 5)
+        assert(x.c.?d == nil)
+
+        // string concats
+        let x = {t:"a"}
+        x.t  += "b" + "c" + 2
+        assert(x.t == "abc2")
+        let x = ["c"]
+        x[0] += "b" + "a" + 3
+        assert(x == ["cba3"])
+        let x = "aaaaaaa"
+        x = x + "b"
+        assert(x == "aaaaaaab")
+
+        let x = |a| a + 1
+        assert(x(1) == 2)
+        let x = fn{2}
+        assert(x() == 2)
+        fn x{3}
+        assert(x() == 3)
+        fn x(a = 2){a + 2}
+        assert(x(3) == 5)
+        assert(x() == 4)
+        fn test(a,b){a+b}
+        assert(test(2 3) == 5)
+
+        // return-in-if escape analysis tests (interpreter)
+        // Pattern 1: if-return, no else, code after
+        fn ret_if_no_else(x) {
+            if x > 0 { return 1 }
+            return 0
+        }
+        assert(ret_if_no_else(5) == 1)
+        assert(ret_if_no_else(-5) == 0)
+
+        // Pattern 2: if-return, else-return (both branches return)
+        fn ret_if_else(x) {
+            if x > 0 { return 1 } else { return -1 }
+        }
+        assert(ret_if_else(5) == 1)
+        assert(ret_if_else(-5) == -1)
+
+        // Pattern 3: if-return, else no return, code after
+        fn ret_if_else_fall(x) {
+            if x > 0 { return 1 } else { let y = x }
+            return 0
+        }
+        assert(ret_if_else_fall(5) == 1)
+        assert(ret_if_else_fall(-5) == 0)
+
+        // Pattern 4: if no return, else-return, code after
+        fn ret_else_only(x) {
+            if x > 0 { let y = x } else { return -1 }
+            return 1
+        }
+        assert(ret_else_only(5) == 1)
+        assert(ret_else_only(-5) == -1)
+
+        // Pattern 5: if-else if-else chain with returns
+        fn ret_chain(x) {
+            if x > 10 { return 3 }
+            else if x > 0 { return 2 }
+            else if x == 0 { return 0 }
+            else { return -1 }
+        }
+        assert(ret_chain(15) == 3)
+        assert(ret_chain(5) == 2)
+        assert(ret_chain(0) == 0)
+        assert(ret_chain(-5) == -1)
+
+        // Pattern 6: if-else if (no final else), code after
+        fn ret_chain_fallthrough(x) {
+            if x > 10 { return 3 }
+            else if x > 0 { return 2 }
+            return 0
+        }
+        assert(ret_chain_fallthrough(15) == 3)
+        assert(ret_chain_fallthrough(5) == 2)
+        assert(ret_chain_fallthrough(-5) == 0)
+
+        // Pattern 7: nested if with returns
+        fn ret_nested(x, y) {
+            if x > 0 {
+                if y > 0 { return 1 }
+                else { return 2 }
+            } else {
+                if y > 0 { return 3 }
+                return 4
+            }
+        }
+        assert(ret_nested(1, 1) == 1)
+        assert(ret_nested(1, -1) == 2)
+        assert(ret_nested(-1, 1) == 3)
+        assert(ret_nested(-1, -1) == 4)
+
+        // Pattern 8: deeply nested returns
+        fn ret_deep(a, b, c) {
+            if a > 0 {
+                if b > 0 {
+                    if c > 0 { return 1 }
+                    return 2
+                }
+                return 3
+            }
+            return 4
+        }
+        assert(ret_deep(1, 1, 1) == 1)
+        assert(ret_deep(1, 1, -1) == 2)
+        assert(ret_deep(1, -1, 0) == 3)
+        assert(ret_deep(-1, 0, 0) == 4)
+
+        // Pattern 9: return in only one branch of nested if
+        fn ret_partial_nest(x, y) {
+            if x > 0 {
+                if y > 0 { return 1 }
+                // y <= 0 falls through
+            }
+            return 0
+        }
+        assert(ret_partial_nest(1, 1) == 1)
+        assert(ret_partial_nest(1, -1) == 0)
+        assert(ret_partial_nest(-1, 1) == 0)
+
+        // Pattern 10: early return vs expression result
+        fn ret_vs_expr(x) {
+            if x < 0 { return -1 }
+            let result = if x == 0 { 0 } else { 1 }
+            return result
+        }
+        assert(ret_vs_expr(-5) == -1)
+        assert(ret_vs_expr(0) == 0)
+        assert(ret_vs_expr(5) == 1)
+
+        // for loop destructuring tests (interpreter)
+        // Semantics:
+        //   for v in set        - value only (array, object, range)
+        //   for k v in set      - key/index + value (object: key,value; array: index,value; range: index,value)
+        //   for i k v in set    - index + key + value (object only, errors on array)
+        // Object iteration works on both "vec" (keys using :=) and "map" (keys using :) parts.
+        fn test_for_destructuring() {
+            let arr = [10, 20, 30]
+            let obj = {a := 1, b := 2, c := 3}  // Use := to put in vec (iterable), not map
+
+            // for v in array (value only)
+            let values1 = []
+            for v in arr { values1.push(v) }
+            assert(values1 == [10 20 30])
+
+            // for v in object (value only)
+            let values2 = []
+            for v in obj { values2.push(v) }
+            assert(values2 == [1 2 3])
+
+            // for k v in object (key, value)
+            let keys3 = []
+            let values3 = []
+            for k v in obj {
+                keys3.push(k)
+                values3.push(v)
+            }
+            assert(keys3.len() == 3)
+            assert(values3 == [1 2 3])
+
+            // for i v in array (index, value)
+            let indices4 = []
+            let values4 = []
+            for i v in arr {
+                indices4.push(i)
+                values4.push(v)
+            }
+            assert(indices4 == [0 1 2])
+            assert(values4 == [10 20 30])
+
+            // for i k v in object (index, key, value) - objects only
+            let indices5 = []
+            let keys5 = []
+            let values5 = []
+            for i k v in obj {
+                indices5.push(i)
+                keys5.push(k)
+                values5.push(v)
+            }
+            assert(indices5 == [0 1 2])
+            assert(keys5.len() == 3)
+            assert(values5 == [1 2 3])
+
+            // for i in range (basic range iteration)
+            let sum6 = 0
+            for i in 0..5 { sum6 += 1 }
+            assert(sum6 == 5)
+
+            // for i v in range (index, value)
+            let indices7 = []
+            let values7 = []
+            for i v in 0..3 {
+                indices7.push(i)
+                values7.push(v)
+            }
+            assert(indices7 == [0 1 2])
+            assert(values7 == [0 1 2])
+        }
+        test_for_destructuring()
+
+        // for (v, i) in — parenthesized style (identical to for v, i in)
+        fn test_for_paren_style() {
+            let arr = [10, 20, 30]
+            let obj = {a := 1, b := 2, c := 3}
+
+            // for (v) in array — single binding with parens
+            let values1 = []
+            for (v) in arr { values1.push(v) }
+            assert(values1 == [10 20 30])
+
+            // for (i, v) in array — two bindings with parens
+            let indices2 = []
+            let values2 = []
+            for (i, v) in arr {
+                indices2.push(i)
+                values2.push(v)
+            }
+            assert(indices2 == [0 1 2])
+            assert(values2 == [10 20 30])
+
+            // for (k, v) in object — two bindings with parens
+            let keys3 = []
+            let values3 = []
+            for (k, v) in obj {
+                keys3.push(k)
+                values3.push(v)
+            }
+            assert(keys3.len() == 3)
+            assert(values3 == [1 2 3])
+
+            // for (i, k, v) in object — three bindings with parens
+            let indices4 = []
+            let keys4 = []
+            let values4 = []
+            for (i, k, v) in obj {
+                indices4.push(i)
+                keys4.push(k)
+                values4.push(v)
+            }
+            assert(indices4 == [0 1 2])
+            assert(keys4.len() == 3)
+            assert(values4 == [1 2 3])
+
+            // for (i) in range — single binding with parens
+            let sum5 = 0
+            for (i) in 0..5 { sum5 += 1 }
+            assert(sum5 == 5)
+
+            // for (i, v) in range — two bindings with parens
+            let indices6 = []
+            let values6 = []
+            for (i, v) in 0..3 {
+                indices6.push(i)
+                values6.push(v)
+            }
+            assert(indices6 == [0 1 2])
+            assert(values6 == [0 1 2])
+        }
+        test_for_paren_style()
+
+        // for k v in on map-based objects (inline {"key": val} syntax)
+        fn test_for_map_objects() {
+            let map_obj = {"alpha": 1, "beta": 2, "gamma": 3}
+            let count = 0
+            let vals = []
+            for k v in map_obj {
+                count += 1
+                vals.push(v)
+            }
+            assert(count == 3)
+            assert(vals.len() == 3)
+
+            // for v in map object (value only)
+            let vals2 = []
+            for v in map_obj { vals2.push(v) }
+            assert(vals2.len() == 3)
+
+            // mixed vec + map object
+            let mixed = {a := 10, "b": 20}
+            let mixed_vals = []
+            for k v in mixed {
+                mixed_vals.push(v)
+            }
+            assert(mixed_vals.len() == 2)
+        }
+        test_for_map_objects()
+
+        // obj[variable] = val — bracket assign with variable key must resolve the variable
+        fn test_bracket_assign_variable_key() {
+            // string variable as key
+            let obj = {}
+            let key = "hello"
+            obj[key] = 42
+            assert(obj["hello"] == 42)
+
+            // variable key in a for loop over map entries
+            let target = {}
+            let src = {"a": 1, "b": 2, "c": 3}
+            for k v in src {
+                target[k] = v
+            }
+            assert(target["a"] == 1)
+            assert(target["b"] == 2)
+            assert(target["c"] == 3)
+
+            // array index assign
+            let arr = [0, 0, 0]
+            arr[1] = 99
+            assert(arr[1] == 99)
+
+            // array index assign with variable
+            let arr2 = [10, 20, 30]
+            let idx = 2
+            arr2[idx] = 777
+            assert(arr2[2] == 777)
+
+            // variable holding a LiveId key
+            let obj2 = {x := 10, y := 20}
+            let k2 = @x
+            obj2[k2] = 99
+            assert(obj2.x == 99)
+        }
+        test_bracket_assign_variable_key()
+
+        // for loop return tests
+
+        fn test_for_return(x) {
+            let arr = [1, 2, 3, 4, 5]
+            for v in arr {
+                if v == x { return "found" }
+            }
+            return "not found"
+        }
+        assert(test_for_return(3) == "found")
+        assert(test_for_return(10) == "not found")
+
+        fn test_range_return(x) {
+            for i in 0..10 {
+                if i == x { return i }
+            }
+            return -1
+        }
+        assert(test_range_return(5) == 5)
+        assert(test_range_return(15) == -1)
+
+        fn test_nested_for_return(x, y) {
+            for i in 0..3 {
+                for j in 0..3 {
+                    if i == x && j == y { return [i j] }
+                }
+            }
+            return nil
+        }
+        assert(test_nested_for_return(1, 2) == [1 2])
+        assert(test_nested_for_return(5, 5) == nil)
+
+        // POD testing
+        let struct_3 = pod.struct{ // extendable pods
+            a: pod.f32
+            b: pod.f32
+            c: pod.f32
+            d: pod.array{pod.f32 2}
+            method: || self.c
+        }
+        let x = struct_3(1,2,3,pod.array(4f 5f));
+        assert(x.c == 3f);
+        assert(x.d[1] == 5f)
+
+        assert(x.method() == 3f)
+
+        let x = pod.vec3f(1,2,3);
+        assert(x.z == 3f);
+        let x = pod.vec4f(pod.vec2f(1,2), pod.vec2f(3,4));
+        assert(x.w == 4f);
+
+        // swizzle
+        let x = pod.vec3f(1,2,3);
+        assert(x.zyzx.x == 3f)
+        // nested construction and read access to substructures (with copy)
+        let s1 = pod.struct{a:pod.f16, b:pod.f16}
+        let s2 = pod.struct{x:pod.f16, y:s1}
+        let v = s2(3,s1(1,2))
+        assert(v.y.b == 2h)
+
+        // math module tests
+        use mod.math
+        // constants
+        assert(math.PI > 3.14 && math.PI < 3.15)
+        assert(math.E > 2.71 && math.E < 2.72)
+
+        // 1-arg scalar functions
+        assert(math.abs(-5.0) == 5.0) assert(math.abs(5.0) == 5.0)
+        assert(math.floor(3.7) == 3.0) assert(math.ceil(3.2) == 4.0)
+        assert(math.round(3.5) == 4.0) assert(math.round(3.4) == 3.0)
+        assert(math.sign(-5.0) == -1.0) assert(math.sign(5.0) == 1.0)
+        assert(math.sqrt(4.0) == 2.0) assert(math.sqrt(9.0) == 3.0)
+        assert(math.fract(3.75) == 0.75)
+        assert(math.trunc(3.9) == 3.0) assert(math.trunc(-3.9) == -3.0)
+
+        // 2-arg scalar functions
+        assert(math.min(3.0, 5.0) == 3.0) assert(math.max(3.0, 5.0) == 5.0)
+        assert(math.pow(2.0, 3.0) == 8.0)
+        assert(math.modf(10.0, 3.0) == 1.0)
+        assert(math.step(0.5, 0.3) == 0.0) assert(math.step(0.5, 0.7) == 1.0)
+
+        // 3-arg scalar functions
+        assert(math.clamp(5.0, 0.0, 3.0) == 3.0)
+        assert(math.clamp(-1.0, 0.0, 3.0) == 0.0)
+        assert(math.clamp(1.5, 0.0, 3.0) == 1.5)
+        assert(math.mix(0.0, 10.0, 0.5) == 5.0)
+        assert(math.smoothstep(0.0, 1.0, 0.5) == 0.5)
+
+        // vector operations
+        let v1 = pod.vec2f(3, 4)
+        assert(math.length(v1) == 5.0) // 3-4-5 triangle
+
+        let v2 = pod.vec2f(1, 0)
+        let v3 = pod.vec2f(0, 1)
+        assert(math.dot(v2, v3) == 0.0) // perpendicular
+        assert(math.dot(v2, v2) == 1.0) // unit vec dot itself
+
+        // vector math functions
+        let v = pod.vec3f(-1, 2, -3)
+        let va = math.abs(v)
+        assert(va.x == 1f && va.y == 2f && va.z == 3f)
+
+        // mix with vectors
+        let a = pod.vec2f(0, 0)
+        let b = pod.vec2f(10, 20)
+        let m = math.mix(a, b, 0.5)
+        assert(m.x == 5f && m.y == 10f)
+
+        // trig functions (basic sanity checks)
+        assert(math.sin(0.0) == 0.0)
+        assert(math.cos(0.0) == 1.0)
+        let sinpi2 = math.sin(math.PI / 2.0)
+        assert(sinpi2 > 0.99 && sinpi2 < 1.01)
+
+        // exp/log
+        assert(math.exp(0.0) == 1.0)
+        assert(math.log(1.0) == 0.0)
+        assert(math.exp2(3.0) == 8.0)
+        assert(math.log2(8.0) == 3.0)
+
+        // distance
+        let p1 = pod.vec2f(0, 0)
+        let p2 = pod.vec2f(3, 4)
+        assert(math.distance(p1, p2) == 5.0)
+
+        // clamp/min/max with vectors
+        let v = pod.vec3f(5, -2, 10)
+        let vmin = math.min(v, pod.vec3f(3, 3, 3))
+        assert(vmin.x == 3f && vmin.y == -2f && vmin.z == 3f)
+        let vmax = math.max(v, pod.vec3f(0, 0, 0))
+        assert(vmax.x == 5f && vmax.y == 0f && vmax.z == 10f)
+
+        // atan2 - computes atan(y/x) with correct quadrant
+        let at = math.atan2(1.0, 1.0)
+        assert(at > 0.78 && at < 0.79) // should be ~PI/4 = 0.785
+        let at2 = math.atan2(-1.0, -1.0)
+        assert(at2 < -2.35 && at2 > -2.36) // should be ~-3*PI/4
+
+        // normalize - returns unit vector
+        let v = pod.vec3f(3, 0, 4)
+        let n = math.normalize(v)
+        assert(n.x > 0.59 && n.x < 0.61) // 3/5 = 0.6
+        assert(n.y == 0f)
+        assert(n.z > 0.79 && n.z < 0.81) // 4/5 = 0.8
+        let len_n = math.length(n)
+        assert(len_n > 0.99 && len_n < 1.01) // normalized vector has length 1
+
+        // cross product - only for vec3
+        let x_axis = pod.vec3f(1, 0, 0)
+        let y_axis = pod.vec3f(0, 1, 0)
+        let z = math.cross(x_axis, y_axis)
+        assert(z.x == 0f && z.y == 0f && z.z == 1f) // x cross y = z
+        let neg_z = math.cross(y_axis, x_axis)
+        assert(neg_z.x == 0f && neg_z.y == 0f && neg_z.z == -1f) // y cross x = -z
+
+        // test wildcard use
+        let m = {a_wild:1, b_wild:2}
+        use m.*
+        assert(a_wild == 1)
+        assert(b_wild == 2)
+
+        // test protoinheriting operators
+        let x = {obj:{prop:1}}
+        let y = x{obj +: {prop:2}}
+        assert(x.obj.prop == 1)
+        assert(y.obj.prop == 2)
+
+        let x = {prop:1, x:1}
+        x += {prop:2}
+        assert(x.prop == 2 && x.x == 1)
+
+        let x = {sub:{prop:1, x:1}}
+        x.sub += {prop:2}
+        assert(x.sub.prop == 2 && x.sub.x == 1)
+
+        let x = {sub:[{prop:1, x:1}]}
+        x.sub[0] += {prop:2}
+        assert(x.sub[0].prop == 2 && x.sub[0].x == 1)
+
+        // ============================================================
+        // := (ASSIGN_ME_VEC) TESTS
+        // := stores key-value pairs in the object's vec (ordered storage)
+        // : stores in the map (hash storage)
+        // ============================================================
+
+        // Basic := stores in vec, not map
+        let obj = {a := 1, b := 2}
+        // Iteration works on vec items
+        let vals = []
+        for v in obj { vals.push(v) }
+        assert(vals == [1 2])
+
+        // := and : coexist — map props and vec props are separate
+        let obj = {map_prop: 10, vec_prop := 20}
+        assert(obj.map_prop == 10)
+        // vec_prop is in the vec, accessible via deep lookup
+        assert(obj.vec_prop == 20)
+
+        // Modifying a := property via dot access
+        let obj = {prop := {val: 1}}
+        obj.prop.val = 2
+        assert(obj.prop.val == 2)
+
+        // +: merge on a := defined property
+        let base = {child := {x: 1, y: 2}}
+        let derived = base{child +: {x: 10}}
+        assert(derived.child.x == 10)
+        assert(derived.child.y == 2)
+        // original unchanged
+        assert(base.child.x == 1)
+
+        // +: merge on nested := property
+        let base = {inner := {sub: {a: 1, b: 2}}}
+        let derived = base{inner +: {sub +: {a: 99}}}
+        assert(derived.inner.sub.a == 99)
+        assert(derived.inner.sub.b == 2)
+
+        // := in a type-checked object (+: merge)
+        // Simulates the Window/body pattern: type has body := View{},
+        // then derived object does body +: {extra: stuff}
+        let Widget = {flow: 1}.freeze_component()
+        let Window = Widget{body := Widget{flow: 2}}
+        let app = Window{body +: {flow: 3}}
+        assert(app.body.flow == 3)
+
+        // Multiple := props, then +: on one of them
+        let Base = {
+            a := {x: 1}
+            b := {x: 2}
+            c := {x: 3}
+        }
+        let derived = Base{b +: {x: 20}}
+        assert(derived.a.x == 1)
+        assert(derived.b.x == 20)
+        assert(derived.c.x == 3)
+
+        // body +: adding children inside the merged object
+        let View = {flow: 0, width: 100}.freeze_component()
+        let Window2 = View{body := View{flow: 1}}
+        let app2 = Window2{body +: {
+            flow: 2
+            width: 200
+        }}
+        assert(app2.body.flow == 2)
+        assert(app2.body.width == 200)
+
+        // Verify body +: creates a new object (doesn't mutate prototype)
+        let Base2 = {x: 1}.freeze_component()
+        let Mid = Base2{child := Base2{x: 2}}
+        let D1 = Mid{child +: {x: 10}}
+        let D2 = Mid{child +: {x: 20}}
+        assert(D1.child.x == 10)
+        assert(D2.child.x == 20)
+        assert(Mid.child.x == 2) // original untouched
+
+        // := property with nested := children, then +: on outer
+        let Inner = {val: 0}.freeze_component()
+        let Outer = Inner{
+            panel := Inner{val: 1}
+            sidebar := Inner{val: 2}
+        }
+        let page = Outer{panel +: {val: 10}}
+        assert(page.panel.val == 10)
+        assert(page.sidebar.val == 2)
+
+        // Reading a := property that only exists on prototype (not overridden)
+        let Proto = {m: 1}.freeze_component()
+        let Parent = Proto{child := Proto{m: 5}}
+        let Child = Parent{}
+        assert(Child.child.m == 5)
+
+        // dot access write through to a := property
+        let Base3 = {v: 0}.freeze_component()
+        let Obj = Base3{sub := Base3{v: 1}}
+        let inst = Obj{}
+        inst.sub.v = 99
+        assert(inst.sub.v == 99)
+
+        // ============================================================
+        // := vec/map storage introspection tests
+        // These verify the key bits that widget on_after_apply relies on
+        // ============================================================
+
+        // := puts items in vec, : puts items in map
+        let obj = {map_a: 1, vec_b := 2, vec_c := 3}
+        assert(obj.vec_len() == 2)
+        assert(obj.map_len() == 1)
+
+        // vec_key returns an escaped id for the key at given vec index
+        ~@vec_b
+        ~@vec_c
+        assert(@vec_b !== @vec_c)
+        ~obj.vec_key(0)
+        ~obj.vec_key(1)
+        assert(obj.vec_key(0) !== obj.vec_key(1))
+        assert(obj.vec_key(0) == @vec_b)
+        assert(obj.vec_key(1) == @vec_c)
+
+        // After proto-inherit (+:), vec keys should be preserved
+        let Widget2 = {flow: 0}.freeze_component()
+        let Win2 = Widget2{body := Widget2{flow: 1}}
+        assert(Win2.vec_len() == 1)
+        assert(Win2.vec_key(0) == @body)
+        let app2 = Win2{body +: {flow: 2}}
+        assert(app2.vec_len() == 1)
+        assert(app2.vec_key(0) == @body)
+        assert(app2.body.flow == 2)
+
+        // prefix use of .. splat operator
+        let x = {a:1 b:2}
+        let y = {b:3, ..x}
+        assert(y.a == 1 && y.b == 3)
+
+        // test the NORMAL version
+        let x = 2
+        let result = if x == 1{5}
+        else if x == 2{6}
+        else{7}
+        assert(result == 6)
+
+        let x = 1
+        // We need to parse this syntax:
+        let result = match x{
+             1 => 5
+             2 => {6}
+             _=> {7}
+        }
+        assert(result == 5)
+
+        // Test match with second arm
+        let y = 2
+        let result2 = match y{
+            1 => true
+            2 => {false}
+        }
+        assert(result2 == false)
+
+        // Test match with wildcard default case
+        let z = 99
+        let result3 = match z{
+            1 => "one"
+            2 => "two"
+            _ => "other"
+        }
+        assert(result3 == "other")
+
+        // repr(u32) test
+        let p = #(ShaderEnum::script_api(vm))
+        assert(p.Test1._repr_u32_enum_value == 1)
+        assert(p.Test2._repr_u32_enum_value == 2)
+        assert(p.Test3._repr_u32_enum_value == 30)  // make_val(3) = 3 * 10 = 30
+
+        // ============================================================
+        // DESTRUCTURING TESTS
+        // ============================================================
+
+        // lazy ?= - should NOT run RHS when value exists
+        fn destruct_dont_call(){assert(false)}
+        let destruct_a = 1
+        destruct_a ?= destruct_dont_call()
+        assert(destruct_a == 1)
+
+        // lazy ?= - SHOULD run RHS when value is nil
+        let destruct_counter = {v:0}
+        fn destruct_do_call(){destruct_counter.v = 1; 42}
+        let destruct_b = nil
+        destruct_b ?= destruct_do_call()
+        assert(destruct_counter.v == 1)
+        assert(destruct_b == 42)
+
+        // Basic array destructuring
+        let [destruct_c, destruct_d] = [1, 2]
+        assert(destruct_c == 1 && destruct_d == 2)
+
+        // Basic object destructuring
+        let {destruct_e, destruct_f} = {destruct_e:3, destruct_f:4}
+        assert(destruct_e == 3 && destruct_f == 4)
+
+        // Object with lazy default - property exists, skip default
+        let destruct_counter2 = {v:0}
+        fn destruct_skip_default(){destruct_counter2.v = 1; 999}
+        let {destruct_g, destruct_h=destruct_skip_default()} = {destruct_g:1, destruct_h:2}
+        assert(destruct_g == 1 && destruct_h == 2)
+        assert(destruct_counter2.v == 0)
+
+        // Object with lazy default - property missing, use default
+        let destruct_counter3 = {v:0}
+        fn destruct_use_default(){destruct_counter3.v = 1; 100}
+        let {destruct_i, destruct_j=destruct_use_default()} = {destruct_i:1}
+        assert(destruct_i == 1 && destruct_j == 100)
+        assert(destruct_counter3.v == 1)
+
+        // Object with all defaults - values exist
+        let {destruct_k=999, destruct_l=888} = {destruct_k:10, destruct_l:20}
+        assert(destruct_k == 10 && destruct_l == 20)
+
+        // Object with default, missing value
+        let {destruct_m, destruct_n=42} = {destruct_m:1}
+        assert(destruct_m == 1 && destruct_n == 42)
+
+        // Array with lazy default - value missing
+        let destruct_counter4 = {v:0}
+        fn destruct_arr_use_def(){destruct_counter4.v = 1; 50}
+        let [destruct_o, destruct_p=destruct_arr_use_def()] = [100]
+        assert(destruct_o == 100 && destruct_p == 50)
+        assert(destruct_counter4.v == 1)
+
+        // Array with lazy default - value exists
+        let destruct_counter5 = {v:0}
+        fn destruct_arr_skip_def(){destruct_counter5.v = 1; 999}
+        let [destruct_q, destruct_r=destruct_arr_skip_def()] = [100, 200]
+        assert(destruct_q == 100 && destruct_r == 200)
+        assert(destruct_counter5.v == 0)
+
+        // Nested object inside array
+        let [{destruct_x}] = [{destruct_x:1}]
+        assert(destruct_x == 1)
+
+        // Nested object inside array with multiple bindings
+        let [{destruct_aa, destruct_ab}] = [{destruct_aa:10, destruct_ab:20}]
+        assert(destruct_aa == 10 && destruct_ab == 20)
+
+        // Multiple elements with nested pattern
+        let [destruct_s, {destruct_t}] = [100, {destruct_t:200}]
+        assert(destruct_s == 100 && destruct_t == 200)
+
+        // Nested array inside array
+        let [[destruct_u, destruct_v]] = [[1, 2]]
+        assert(destruct_u == 1 && destruct_v == 2)
+
+        // Multiple nested patterns
+        let [{destruct_w}, [destruct_y, destruct_z]] = [{destruct_w:5}, [6, 7]]
+        assert(destruct_w == 5 && destruct_y == 6 && destruct_z == 7)
+
+        // ============================================================
+        // FOR-LOOP CLOSURE CAPTURE TESTS
+        // Each iteration should capture its own copy of the loop variable
+        // ============================================================
+
+        // Closure capturing loop index from for-in-range
+        let fns = []
+        for i in 0..3 {
+            fns.push(|| i)
+        }
+        assert(fns[0]() == 0)
+        assert(fns[1]() == 1)
+        assert(fns[2]() == 2)
+
+        // Closure capturing loop index from for-in-array
+        let fns2 = []
+        let arr = [10, 20, 30]
+        for i, v in arr {
+            fns2.push(|| [i, v])
+        }
+        assert(fns2[0]() == [0, 10])
+        assert(fns2[1]() == [1, 20])
+        assert(fns2[2]() == [2, 30])
+
+        // Closure capturing loop variable with mutation after capture
+        let fns3 = []
+        for i in 0..3 {
+            fns3.push(|x| i + x)
+        }
+        assert(fns3[0](100) == 100)
+        assert(fns3[1](100) == 101)
+        assert(fns3[2](100) == 102)
+
+        // ============================================================
+        // SHADER COMPILER TESTS
+        // Comprehensive test of all shader compiler features
+        // ============================================================
+        use mod.shader
+        use mod.pod.*
+        use mod.math.*
+
+        let ShaderEnum = #(ShaderEnum::script_api(vm))
+
+        // Pod structs for testing
+        let test_struct = struct{
+            f: f32,
+            v2: vec2f,
+            v3: vec3f,
+            v4: vec4f,
+            i: i32,
+            u: u32,
+            arr: array{f32 4},
+        }
+
+        let vertex_data = struct{
+            pos: vec4f,
+            uv: vec2f,
+            normal: vec3f,
+        }
+
+        let uniforms_data = struct{
+            mvp: f32,
+            time: f32,
+            scale: vec2f,
+        }
+
+        // Scope uniforms for testing
+        let scope_time = 1.5
+        let scope_color = #0ff
+        let scope_vec = vec2f(2.0, 3.0)
+        let scope_uniforms = struct{time:f32, scale:f32}
+        let scope_buf = shader.uniform_buffer(scope_uniforms)
+        let scope_tex = shader.texture_2d(float)
+        let test_color = #f00
+
+        // TestSdf - minimal Sdf2d-like struct to test struct methods in shaders
+        let TestSdf = struct {
+            pos: vec2f
+            result: vec4f
+            dist: f32
+
+            // Constructor
+            new: fn(p: vec2) -> Self {
+                return self(pos: p, result: vec4(0f), dist: 0f)
+            }
+            // Method mutating self, returning value
+            translate: fn(x: f32, y: f32) -> vec2 {
+                self.pos -= vec2(x, y)
+                return self.pos
+            }
+            // Method mutating self, no return
+            clear: fn(color: vec4) {
+                self.result = color
+            }
+            // Method calling another method
+            helper: fn(v: f32) -> f32 { return v * 2f }
+            use_helper: fn() -> f32 {
+                return self.helper(self.dist)
+            }
+            // Method with unary neg on self field
+            negate_dist: fn() -> f32 {
+                return -self.dist
+            }
+        }
+
+        // Comprehensive shader test
+        let shader_all_features = #(ShaderTest2::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            // Vertex buffer
+            vtx: shader.vertex_buffer(vertex_data)
+            // Instance data
+            inst_pos: shader.instance(vec2f)
+            inst_scale: shader.instance(1.0)
+            inst_color: shader.instance(vec4f)
+            inst_id: shader.instance(0u)
+            // Uniforms
+            u_time: shader.uniform(0.0)
+            u_scale: shader.uniform(vec2f)
+            u_color: shader.uniform(#fff)
+            u_enabled: shader.uniform(true)
+            u_count: shader.uniform(0i)
+            u_flags: shader.uniform(0u)
+            uniforms: shader.uniform_buffer(uniforms_data)
+            // Textures
+            tex_diffuse: shader.texture_2d(float)
+            tex_normal: shader.texture_2d(float)
+            // Varyings
+            v_uv: shader.varying(vec2f)
+            v_color: shader.varying(vec4f)
+            v_intensity: shader.varying(1.0)
+            v_normal: shader.varying(vec3f)
+            v_world_pos: shader.varying(vec3f)
+            // Helper functions
+            helper: |x| x * 2f
+            helper2: |a, b| a + b
+            helper_vec: |v| v * 2f
+            get_val: || { return 1f }
+            get_val_cond: |x| { if x > 0f { return 1f } return 0f }
+
+            // ---- Return-in-if escape analysis tests ----
+            // Pattern 1: if-return, no else, code after
+            ret_if_no_else: fn(x: f32) -> f32 {
+                if x > 0f { return 1f }
+                return 0f
+            }
+            // Pattern 2: if-return, else-return (both branches return)
+            ret_if_else: fn(x: f32) -> f32 {
+                if x > 0f { return 1f } else { return -1f }
+            }
+            // Pattern 3: if-return, else no return, code after
+            ret_if_else_fall: fn(x: f32) -> f32 {
+                if x > 0f { return 1f } else { let y = x }
+                return 0f
+            }
+            // Pattern 4: if no return, else-return, code after
+            ret_else_only: fn(x: f32) -> f32 {
+                if x > 0f { let y = x } else { return -1f }
+                return 1f
+            }
+            // Pattern 5: if-else if-else chain with returns
+            ret_chain: fn(x: f32) -> f32 {
+                if x > 10f { return 3f }
+                else if x > 0f { return 2f }
+                else if x == 0f { return 0f }
+                else { return -1f }
+            }
+            // Pattern 6: if-else if (no final else), code after
+            ret_chain_fall: fn(x: f32) -> f32 {
+                if x > 10f { return 3f }
+                else if x > 0f { return 2f }
+                return 0f
+            }
+            // Pattern 7: nested if with returns
+            ret_nested: fn(x: f32, y: f32) -> f32 {
+                if x > 0f {
+                    if y > 0f { return 1f }
+                    else { return 2f }
+                } else {
+                    if y > 0f { return 3f }
+                    return 4f
+                }
+            }
+            // Pattern 8: deeply nested returns
+            ret_deep: fn(a: f32, b: f32, c: f32) -> f32 {
+                if a > 0f {
+                    if b > 0f {
+                        if c > 0f { return 1f }
+                        return 2f
+                    }
+                    return 3f
+                }
+                return 4f
+            }
+            // Pattern 9: return in only one branch of nested if
+            ret_partial: fn(x: f32, y: f32) -> f32 {
+                if x > 0f {
+                    if y > 0f { return 1f }
+                }
+                return 0f
+            }
+            // Pattern 10: early return vs expression result
+            ret_vs_expr: fn(x: f32) -> f32 {
+                if x < 0f { return -1f }
+                let result = if x == 0f { 0f } else { 1f }
+                return result
+            }
+            // Pattern 11: return with computation after if
+            ret_with_comp: fn(x: f32) -> f32 {
+                if x < 0f { return x * -1f }
+                let y = x * 2f
+                let z = y + 1f
+                return z
+            }
+            // Pattern 12: multiple early returns
+            ret_multi_early: fn(x: f32) -> f32 {
+                if x < -10f { return -2f }
+                if x < 0f { return -1f }
+                if x == 0f { return 0f }
+                return 1f
+            }
+            // Pattern 13: return from for loop
+            ret_from_for: fn(x: f32) -> f32 {
+                for i in 0..10 {
+                    if f32(i) == x { return f32(i) }
+                }
+                return -1f
+            }
+            // Pattern 14: return from nested for loop
+            ret_from_nested_for: fn(x: f32, y: f32) -> f32 {
+                for i in 0..5 {
+                    for j in 0..5 {
+                        if f32(i) == x && f32(j) == y { return f32(i) + f32(j) }
+                    }
+                }
+                return -1f
+            }
+            // Pattern 15: return from for loop with computation
+            ret_from_for_comp: fn(x: f32) -> f32 {
+                var sum = 0f
+                for i in 0..10 {
+                    sum += f32(i)
+                    if sum > x { return sum }
+                }
+                return sum
+            }
+            // Pattern 16: return from loop
+            ret_from_loop: fn(x: f32) -> f32 {
+                var i = 0f
+                loop {
+                    i += 1f
+                    if i == x { return i }
+                    if i > 100f { break }
+                }
+                return -1f
+            }
+            // Pattern 17: return from while
+            ret_from_while: fn(x: f32) -> f32 {
+                var i = 0f
+                while i < 100f {
+                    i += 1f
+                    if i == x { return i }
+                }
+                return -1f
+            }
+            // Pattern 18: loop with continue and accumulation
+            loop_continue_sum: fn(n: f32) -> f32 {
+                var sum = 0f
+                var i = 0f
+                loop {
+                    i += 1f
+                    if i > n { break }
+                    if i == 3f { continue }
+                    sum += i
+                }
+                return sum
+            }
+
+            // ---- Void return tests (fn() with return inside if) ----
+            // Pattern 19: void fn with early return in if (no else)
+            void_ret_if: fn(x: f32) {
+                if x > 0f { return }
+                self.v_intensity = x
+            }
+            // Pattern 20: void fn with return in if/else
+            void_ret_if_else: fn(x: f32) {
+                if x > 0f {
+                    self.v_intensity = 1f
+                    return
+                } else {
+                    self.v_intensity = 0f
+                    return
+                }
+            }
+            // Pattern 21: void fn with multiple early returns
+            void_ret_multi: fn(x: f32) {
+                if x < -10f { return }
+                if x < 0f { return }
+                self.v_intensity = x
+            }
+            // Pattern 22: void fn with || condition and return
+            void_ret_or_cond: fn(x: f32, y: f32) {
+                if x > 0f || y > 0f {
+                    return
+                }
+                self.v_intensity = x + y
+            }
+            // Pattern 23: helper fn returning float, called from void context with ||
+            check_outside: fn(center: vec2, radius: f32, clip: vec4) -> f32 {
+                if radius < 0.5f { return 0f }
+                if center.x + radius < clip.x { return 1f }
+                if center.y + radius < clip.y { return 1f }
+                if center.x - radius > clip.z { return 1f }
+                if center.y - radius > clip.w { return 1f }
+                return 0f
+            }
+
+            vertex: fn(){
+                // Vertex buffer access
+                let pos = self.vtx.pos
+                let uv = self.vtx.uv
+                let normal = self.vtx.normal
+                // Instance data
+                let offset = self.inst_pos
+                let scale = self.inst_scale
+                // Uniform access
+                let t = self.u_time
+                let s = self.u_scale
+                let mvp = self.uniforms.mvp
+                // Set varyings
+                self.v_uv = uv
+                self.v_color = vec4(1f, 0f, 0f, 1f)
+                self.v_intensity = 0.8f
+                self.v_normal = normal
+                let world_pos = pos.xyz + vec3(offset.x, offset.y, 0f)
+                self.v_world_pos = world_pos
+
+                // ---- Void return test: simplest case ----
+                if scale > 0.5f {
+                    self.vertex_pos = vec4(0f, 0f, 0f, 0f)
+                    return
+                }
+
+                self.vertex_pos = vec4(world_pos * mvp, 1f)
+            }
+
+            fragment: fn(){
+                // ---- Arithmetic ops (f32) ----
+                let a = 1f let b = 2f
+                let c = a + b
+                let c = a - b
+                let c = a * b
+                let c = a / b
+                let c = -a
+
+                // ---- Arithmetic ops (i32/u32 + bitwise) ----
+                let ai = 10i let bi = 3i
+                let ci = ai + bi
+                let ci = ai - bi
+                let ci = ai * bi
+                let ci = ai / bi
+                let ci = ai % bi
+                let ci = ai << 2i
+                let ci = ai >> 1i
+                let ci = ai & bi
+                let ci = ai | bi
+                let ci = ai ^ bi
+                let xu = 10u let yu = 3u
+                let zu = xu + yu
+                let zu = xu - yu
+                let zu = xu * yu
+                let zu = xu / yu
+                let zu = xu % yu
+                let zu = xu << 2u
+                let zu = xu >> 1u
+                let zu = xu & yu
+                let zu = xu | yu
+                let zu = xu ^ yu
+
+                // ---- f16 (half precision) ----
+                let ah = 1h let bh = 2h
+                let ch = ah + bh
+                let ch = ah - bh
+                let ch = ah * bh
+                let ch = ah / bh
+                let ch = -ah
+                var dh = 1h
+                dh += 1h
+                dh -= 1h
+                dh *= 2h
+                dh /= 2h
+
+                // ---- Vector arithmetic ----
+                let v2a = vec2(1f, 2f) let v2b = vec2(3f, 4f)
+                let v2c = v2a + v2b
+                let v2c = v2a - v2b
+                let v2c = v2a * v2b
+                let v2c = v2a / v2b
+                let v2c = -v2a
+                let v3a = vec3(1f, 2f, 3f) let v3b = vec3(4f, 5f, 6f)
+                let v3c = v3a + v3b
+                let v3c = v3a - v3b
+                let v3c = v3a * v3b
+                let v3c = v3a / v3b
+                let v3c = -v3a
+                let v4a = vec4(1f, 2f, 3f, 4f) let v4b = vec4(5f, 6f, 7f, 8f)
+                let v4c = v4a + v4b
+                let v4c = v4a - v4b
+                let v4c = v4a * v4b
+                let v4c = v4a / v4b
+                let v4c = -v4a
+                let v4c = v4a * 2f
+                let v4c = 2f * v4a
+
+                // ---- Comparisons ----
+                var result = 0f
+                if a == b { result = 1f }
+                if a != b { result = 2f }
+                if a < b { result = 3f }
+                if a > b { result = 4f }
+                if a <= b { result = 5f }
+                if a >= b { result = 6f }
+                let xi = 1i let yi = 2i
+                if xi == yi { result = 7f }
+                if xi != yi { result = 8f }
+                if xi < yi { result = 9f }
+                if xi > yi { result = 10f }
+                let pu = 1u let qu = 2u
+                if pu == qu { result = 11f }
+                if pu != qu { result = 12f }
+                if pu < qu { result = 13f }
+                if pu > qu { result = 14f }
+
+                // ---- Logic ops ----
+                let x = 1f let y = 2f
+                if x < y && y > 0f { result = 1f }
+                if x > y || y > 0f { result = 2f }
+                let la = true let lb = false
+                let lc = la && lb
+                let ld = la || lb
+                let le = x < y && y > 0f
+
+                // ---- Var assignments with compound ops ----
+                var va = 1f
+                va = 2f
+                va += 1f
+                va -= 1f
+                va *= 2f
+                va /= 2f
+                var vb = 10i
+                vb += 1i
+                vb -= 1i
+                vb *= 2i
+                vb /= 2i
+                vb %= 3i
+                vb &= 7i
+                vb |= 1i
+                vb ^= 2i
+                vb <<= 1i
+                vb >>= 1i
+                var vc = 10u
+                vc += 1u
+                vc -= 1u
+                vc *= 2u
+                vc /= 2u
+                vc %= 3u
+                vc &= 7u
+                vc |= 1u
+                vc ^= 2u
+                vc <<= 1u
+                vc >>= 1u
+
+                // ---- Field assignments ----
+                var s = test_struct(1f, vec2(0f), vec3(0f), vec4(0f), 0i, 0u, array(0f,0f,0f,0f))
+                s.f = 2f
+                s.f += 1f
+                s.f -= 1f
+                s.f *= 2f
+                s.f /= 2f
+                s.i = 5i
+                s.i += 1i
+                s.i -= 1i
+                s.i *= 2i
+                s.i /= 2i
+                s.i %= 3i
+                s.i &= 7i
+                s.i |= 1i
+                s.i ^= 2i
+                s.i <<= 1i
+                s.i >>= 1i
+                s.v2.x = 1f
+                s.v3.y = 2f
+                s.v4.z = 3f
+
+                // ---- Array indexing ----
+                var arr = array(1f, 2f, 3f, 4f)
+                let ax = arr[0]
+                let ay = arr[1]
+                arr[0] = 5f
+                arr[1] = 6f
+                arr[0] += 1f
+                arr[1] -= 1f
+                arr[2] *= 2f
+                arr[3] /= 2f
+                var idx = 0i
+                let az = arr[idx]
+                arr[idx] = 10f
+                var v = vec4(1f, 2f, 3f, 4f)
+                let vx = v[0]
+                let vy = v[1]
+                v[2] = 10f
+                v[3] += 5f
+                var v3 = vec3(1f, 2f, 3f)
+                let v3z = v3[2]
+                v3[0] = 5f
+
+                // ---- If/else ----
+                let xif = 1f
+                var result_if = 0f
+                if xif > 0f { result_if = 1f }
+                let yif = if xif > 0f { 1f } else { 0f }
+                let zif = if xif < 0f { -1f } else if xif == 0f { 0f } else { 1f }
+                var vif = 0f
+                if xif > 0f { if xif < 2f { vif = 1f } }
+
+                // ---- Match ----
+                let xm = self.enum_test
+                let result_m = match xm {
+                    ShaderEnum.Test1 => 1f
+                    ShaderEnum.Test2 => 2f
+                    _ => 0f
+                }
+
+                // ---- For loops ----
+                var sum = 0f
+                for i in 0..4 { sum += 1f }
+                var sum2 = 0f
+                for i in 0..2 { for j in 0..3 { sum2 += 1f } }
+
+                // ---- Loop / while / break / continue ----
+                // Basic loop with break
+                var loop_count = 0f
+                loop {
+                    loop_count += 1f
+                    if loop_count >= 5f { break }
+                }
+
+                // While loop (uses LOOP + BREAKIFNOT)
+                var while_count = 0f
+                while while_count < 10f {
+                    while_count += 1f
+                }
+
+                // Loop with continue
+                var cont_sum = 0f
+                var cont_i = 0f
+                loop {
+                    cont_i += 1f
+                    if cont_i > 6f { break }
+                    if cont_i == 3f { continue }
+                    cont_sum += cont_i
+                }
+
+                // Nested loops with break
+                var outer_count = 0f
+                var inner_total = 0f
+                loop {
+                    outer_count += 1f
+                    if outer_count > 3f { break }
+                    var inner_count = 0f
+                    loop {
+                        inner_count += 1f
+                        if inner_count > 2f { break }
+                        inner_total += 1f
+                    }
+                }
+
+                // While with early break
+                var wb = 0f
+                while wb < 100f {
+                    wb += 1f
+                    if wb == 5f { break }
+                }
+
+                // Loop inside for
+                var lif = 0f
+                for i in 0..3 {
+                    var j = 0f
+                    loop {
+                        j += 1f
+                        if j > 2f { break }
+                        lif += 1f
+                    }
+                }
+
+                // For inside loop
+                var fil = 0f
+                var fil_iter = 0f
+                loop {
+                    fil_iter += 1f
+                    if fil_iter > 2f { break }
+                    for i in 0..3 {
+                        fil += 1f
+                    }
+                }
+
+                // ---- Builtin functions ----
+                let ba = 0.5f let bb = 1.0f let bt = 0.5f
+                let br = abs(ba)
+                let br = floor(ba)
+                let br = ceil(ba)
+                let br = round(ba)
+                let br = fract(ba)
+                let br = sqrt(ba)
+                let br = sin(ba)
+                let br = cos(ba)
+                let br = tan(ba)
+                let br = asin(ba)
+                let br = acos(ba)
+                let br = atan(ba)
+                let br = exp(ba)
+                let br = log(ba)
+                let br = exp2(ba)
+                let br = log2(ba)
+                let br = min(ba, bb)
+                let br = max(ba, bb)
+                let br = pow(ba, bb)
+                let br = step(ba, bb)
+                let br = atan2(ba, bb)
+                let br = clamp(ba, 0f, bb)
+                let br = mix(ba, bb, bt)
+                let br = smoothstep(0f, bb, ba)
+                let bv = vec3(1f, 2f, 3f)
+                let blen = length(bv)
+                let bn = normalize(bv)
+                let bd = dot(bv, bv)
+                let bc = cross(bv, vec3(0f, 1f, 0f))
+                let bdist = distance(bv, vec3(0f))
+                let bva = vec3(-1f, 0.5f, 2f)
+                let bvr = abs(bva)
+                let bvr = floor(bva)
+                let bvr = ceil(bva)
+                let bvr = sin(bva)
+                let bvr = cos(bva)
+                let bvr = mix(bva, vec3(1f), 0.5f)
+
+                // ---- Function calls ----
+                let fa = self.helper(1f)
+                let fb = self.helper2(1f, 2f)
+                let fv = self.helper_vec(vec3(1f, 2f, 3f))
+                let fra = self.get_val()
+                let frb = self.get_val_cond(1f)
+
+                // ---- Declarations ----
+                let df = 1f
+                let dh = 1h
+                let di = 1i
+                let du = 1u
+                let db = true
+                let dv2 = vec2(1f, 2f)
+                let dv3 = vec3(1f, 2f, 3f)
+                let dv4 = vec4(1f, 2f, 3f, 4f)
+                let dv2i = vec2i(1i, 2i)
+                let dv3i = vec3i(1i, 2i, 3i)
+                let dv4i = vec4i(1i, 2i, 3i, 4i)
+                let dv2u = vec2u(1u, 2u)
+                let dv3u = vec3u(1u, 2u, 3u)
+                let dv4u = vec4u(1u, 2u, 3u, 4u)
+                let dcol = #f00
+                var dvf = 1f
+                var dvi = 1i
+                var dvu = 1u
+                var dvv4 = vec4(1f)
+                dvf = 2f
+                dvi = 2i
+                dvu = 2u
+                dvv4 = vec4(2f)
+                let ds = test_struct(1f, vec2(0f), vec3(0f), vec4(0f), 0i, 0u, array(0f,0f,0f,0f))
+
+                // ---- Swizzles ----
+                let sv4 = vec4(1f, 2f, 3f, 4f)
+                let swa = sv4.x
+                let swb = sv4.xy
+                let swc = sv4.xyz
+                let swd = sv4.xyzw
+                let swe = sv4.wzyx
+                let swf = sv4.xxxx
+                let swg = sv4.rg
+                let swh = sv4.rgb
+                let sv3 = vec3(1f, 2f, 3f)
+                let swi = sv3.xy
+                let swj = sv3.zyx
+
+                // ---- Colors ----
+                let c1 = #ff0000
+                let c2 = #00ff00
+                let c3 = #0000ff
+                let c4 = test_color
+                let mixed = mix(c1, c2, 0.5f)
+
+                // ---- Varying access ----
+                let uv = self.v_uv
+                let col = self.v_color
+                let intensity = self.v_intensity
+                let normal = self.v_normal
+                let world_pos = self.v_world_pos
+
+                // ---- Uniform access ----
+                let ucol = self.u_color
+                let uenabled = self.u_enabled
+                let ucount = self.u_count
+                let uflags = self.u_flags
+                let utime = self.uniforms.time
+
+                // ---- Texture sampling ----
+                let diffuse = self.tex_diffuse.sample(uv)
+                let norm_tex = self.tex_normal.sample(uv)
+
+                // ---- Scope uniforms ----
+                let st = scope_time
+                let sc = scope_color
+                let sv = scope_vec
+                let sbt = scope_buf.time
+                let sbs = scope_buf.scale
+                let stex = scope_tex.sample(vec2(0.5f, 0.5f))
+
+                // ---- Lighting calc ----
+                let light = dot(normal, vec3(0f, 1f, 0f))
+                let final_col = diffuse * self.inst_color
+
+                // ---- TestSdf (struct with methods) ----
+                var sdf = TestSdf.new(uv)
+                let translated = sdf.translate(0.5f, 0.5f)
+                sdf.clear(vec4(1f, 0f, 0f, 1f))
+                let h = sdf.use_helper()
+                let neg = sdf.negate_dist()
+                let sdf_result = sdf.result
+
+                // ---- Return-in-if escape analysis ----
+                let r1 = self.ret_if_no_else(1f)
+                let r2 = self.ret_if_else(1f)
+                let r3 = self.ret_if_else_fall(1f)
+                let r4 = self.ret_else_only(1f)
+                let r5 = self.ret_chain(15f)
+                let r6 = self.ret_chain_fall(5f)
+                let r7 = self.ret_nested(1f, 1f)
+                let r8 = self.ret_deep(1f, 1f, 1f)
+                let r9 = self.ret_partial(1f, 1f)
+                let r10 = self.ret_vs_expr(1f)
+                let r11 = self.ret_with_comp(5f)
+                let r12 = self.ret_multi_early(5f)
+                let r13 = self.ret_from_for(5f)
+                let r14 = self.ret_from_nested_for(2f, 3f)
+                let r15 = self.ret_from_for_comp(10f)
+                let r16 = self.ret_from_loop(5f)
+                let r17 = self.ret_from_while(5f)
+                let r18 = self.loop_continue_sum(5f)
+
+                self.pixel = final_col
+            }
+        }
+        shader.test_compile_draw(shader_all_features)
+
+    };
+
+    vm.eval(code);
+
+    // ========================================
+    // Regex tests
+    // ========================================
+    let regex_test = script! {
+        use mod.std.assert
+        use mod.std.regex
+
+        // ============================================================
+        // REGEX CONSTRUCTOR & TYPE CHECKS
+        // ============================================================
+
+        // Basic construction
+        let re = regex("hello", "")
+        assert(re.is_regex())
+        assert(!re.is_string())
+        assert(!re.is_number())
+
+        // Construction with flags
+        let re_g = regex("abc", "g")
+        assert(re_g.is_regex())
+        assert(re_g.global == true)
+        let re_no_g = regex("abc", "")
+        assert(re_no_g.global == false)
+
+        // Source property returns the pattern
+        let re = regex("foo.*bar", "gi")
+        assert(re.source == "foo.*bar")
+
+        // Interning: same pattern + flags returns same object
+        let r1 = regex("test", "g")
+        let r2 = regex("test", "g")
+        assert(r1 === r2)
+
+        // Different flags = different object
+        let r3 = regex("test", "")
+        assert(r1 !== r3)
+
+        // Different pattern = different object
+        let r4 = regex("other", "g")
+        assert(r1 !== r4)
+
+        // ============================================================
+        // REGEX.TEST()
+        // ============================================================
+
+        let re = regex("hello", "")
+        assert(re.test("hello world") == true)
+        assert(re.test("goodbye world") == false)
+
+        // Case insensitive flag
+        let re_i = regex("hello", "i")
+        assert(re_i.test("HELLO WORLD") == true)
+        assert(re_i.test("Hello") == true)
+
+        // Pattern with special regex chars
+        let re_digits = regex("[0-9]+", "")
+        assert(re_digits.test("abc123") == true)
+        assert(re_digits.test("abcdef") == false)
+
+        // Anchored patterns
+        let re_start = regex("^hello", "")
+        assert(re_start.test("hello world") == true)
+        assert(re_start.test("say hello") == false)
+
+        let re_end = regex("world$", "")
+        assert(re_end.test("hello world") == true)
+        assert(re_end.test("world hello") == false)
+
+        // Dot matches any non-newline by default
+        let re_dot = regex("a.b", "")
+        assert(re_dot.test("axb") == true)
+        assert(re_dot.test("a\nb") == false)
+
+        // With 's' flag, dot matches newlines too
+        let re_dot_s = regex("a.b", "s")
+        assert(re_dot_s.test("a\nb") == true)
+
+        // ============================================================
+        // REGEX.EXEC()
+        // ============================================================
+
+        let re = regex("(\\w+)@(\\w+)", "")
+        let result = re.exec("user@host")
+        assert(result != nil)
+        assert(result.value == "user@host")
+        assert(result.index == 0)
+        assert(result.captures[0] == "user@host")
+        assert(result.captures[1] == "user")
+        assert(result.captures[2] == "host")
+
+        // No match returns nil
+        let re2 = regex("xyz", "")
+        assert(re2.exec("abc") == nil)
+
+        // Exec with match not at start
+        let re3 = regex("(\\d+)", "")
+        let r3 = re3.exec("abc123def")
+        assert(r3 != nil)
+        assert(r3.value == "123")
+        assert(r3.index == 3)
+
+        // ============================================================
+        // STRING.SEARCH()
+        // ============================================================
+
+        // Search with regex
+        let re = regex("\\d+", "")
+        assert("abc123def".search(re) == 3)
+        assert("abcdef".search(re) == -1)
+
+        // Search with string
+        assert("hello world".search("world") == 6)
+        assert("hello world".search("xyz") == -1)
+
+        // Search finds first occurrence
+        let re = regex("o", "")
+        assert("fooboo".search(re) == 1)
+
+        // ============================================================
+        // STRING.MATCH_STR() - non-global regex
+        // ============================================================
+
+        // Non-global regex returns detail object
+        let re = regex("(\\d{2})-(\\d{2})", "")
+        let m = "date: 12-25 end".match_str(re)
+        assert(m != nil)
+        assert(m.value == "12-25")
+        assert(m.index == 6)
+        assert(m.captures[0] == "12-25")
+        assert(m.captures[1] == "12")
+        assert(m.captures[2] == "25")
+
+        // No match returns nil
+        assert("no numbers".match_str(re) == nil)
+
+        // ============================================================
+        // STRING.MATCH_STR() - global regex
+        // ============================================================
+
+        // Global regex returns array of matched strings
+        let re_g = regex("\\d+", "g")
+        let matches = "a1b22c333".match_str(re_g)
+        assert(matches[0] == "1")
+        assert(matches[1] == "22")
+        assert(matches[2] == "333")
+
+        // Global with no matches returns empty-ish (array with no elements)
+        let re_g2 = regex("xyz", "g")
+        let matches2 = "hello world".match_str(re_g2)
+
+        // ============================================================
+        // STRING.MATCH_STR() - string pattern
+        // ============================================================
+
+        let m = "hello world hello".match_str("world")
+        assert(m != nil)
+        assert(m.value == "world")
+        assert(m.index == 6)
+
+        assert("hello".match_str("xyz") == nil)
+
+        // ============================================================
+        // STRING.MATCH_ALL()
+        // ============================================================
+
+        let re = regex("(\\w+)=(\\w+)", "g")
+        let results = "a=1 b=2 c=3".match_all(re)
+        assert(results[0].value == "a=1")
+        assert(results[0].index == 0)
+        assert(results[0].captures[1] == "a")
+        assert(results[0].captures[2] == "1")
+        assert(results[1].value == "b=2")
+        assert(results[1].index == 4)
+        assert(results[2].value == "c=3")
+        assert(results[2].index == 8)
+        assert(results[2].captures[1] == "c")
+        assert(results[2].captures[2] == "3")
+
+        // match_all with no captures
+        let re2 = regex("\\d+", "g")
+        let r2 = "x10y20z30".match_all(re2)
+        assert(r2[0].value == "10")
+        assert(r2[1].value == "20")
+        assert(r2[2].value == "30")
+
+        // ============================================================
+        // STRING.SPLIT() with regex
+        // ============================================================
+
+        // Simple split
+        let re = regex("[,;]", "")
+        let parts = "a,b;c,d".split(re)
+        assert(parts[0] == "a")
+        assert(parts[1] == "b")
+        assert(parts[2] == "c")
+        assert(parts[3] == "d")
+
+        // Split by whitespace
+        let re_ws = regex("\\s+", "")
+        let words = "hello   world\tfoo".split(re_ws)
+        assert(words[0] == "hello")
+        assert(words[1] == "world")
+        assert(words[2] == "foo")
+
+        // Split with capture groups (captured text included in result)
+        let re_cap = regex("([-])", "")
+        let parts = "a-b-c".split(re_cap)
+        assert(parts[0] == "a")
+        assert(parts[1] == "-")
+        assert(parts[2] == "b")
+        assert(parts[3] == "-")
+        assert(parts[4] == "c")
+
+        // Split with string (existing behavior still works)
+        let parts = "a,b,c".split(",")
+        assert(parts[0] == "a")
+        assert(parts[1] == "b")
+        assert(parts[2] == "c")
+
+        // ============================================================
+        // STRING.REPLACE() with regex
+        // ============================================================
+
+        // Simple replacement (non-global = first only)
+        let re = regex("\\d+", "")
+        let result = "abc123def456".replace(re, "NUM")
+        assert(result == "abcNUMdef456")
+
+        // Global replacement
+        let re_g = regex("\\d+", "g")
+        let result = "abc123def456".replace(re_g, "NUM")
+        assert(result == "abcNUMdefNUM")
+
+        // $& in replacement = whole match
+        let re = regex("\\w+", "g")
+        let result = "hello world".replace(re, "[$&]")
+        assert(result == "[hello] [world]")
+
+        // $1, $2 capture group references
+        let re = regex("(\\w+)@(\\w+)", "g")
+        let result = "user@host admin@server".replace(re, "$1 at $2")
+        assert(result == "user at host admin at server")
+
+        // $$ = literal $
+        let re = regex("price", "")
+        let result = "the price is".replace(re, "$$5")
+        assert(result == "the $5 is")
+
+        // Replace with string (existing behavior)
+        let result = "hello world".replace("world", "earth")
+        assert(result == "hello earth")
+
+        // String replace only replaces first occurrence
+        let result = "aaa".replace("a", "b")
+        assert(result == "baa")
+
+        // ============================================================
+        // EDGE CASES
+        // ============================================================
+
+        // Empty pattern regex
+        let re_empty = regex("", "g")
+        let result = "abc".split(re_empty)
+        // Empty regex matches between every char
+
+        // Regex with alternation
+        let re_alt = regex("cat|dog", "g")
+        assert(re_alt.test("I have a cat") == true)
+        assert(re_alt.test("I have a dog") == true)
+        assert(re_alt.test("I have a bird") == false)
+        let result = "my cat and dog".replace(re_alt, "pet")
+        assert(result == "my pet and pet")
+
+        // Regex with quantifiers
+        let re = regex("a{2,4}", "")
+        assert(re.test("aa") == true)
+        assert(re.test("aaaa") == true)
+        assert(re.test("a") == false)
+
+        // Regex with character classes
+        let re = regex("[a-z]+", "")
+        assert(re.test("hello") == true)
+        assert(re.test("123") == false)
+
+        // Nested groups
+        let re = regex("((\\d+)-(\\d+))", "")
+        let m = re.exec("test 42-99 end")
+        assert(m != nil)
+        assert(m.value == "42-99")
+        assert(m.captures[1] == "42-99")
+        assert(m.captures[2] == "42")
+        assert(m.captures[3] == "99")
+
+        // Replace with no matches = original string
+        let re = regex("xyz", "g")
+        let result = "hello world".replace(re, "!")
+        assert(result == "hello world")
+
+        // Search/match on empty string
+        let re = regex(".*", "")
+        assert("".search(re) == 0)
+
+        // Multiple regex operations on same string
+        let text = "The quick brown fox jumps over the lazy dog"
+        let re_word = regex("\\w+", "g")
+        let words = text.match_str(re_word)
+
+        let re_o = regex("o", "g")
+        let o_matches = text.match_all(re_o)
+        assert(o_matches[0].value == "o")
+
+        let idx = text.search(regex("fox", ""))
+        assert(idx == 16)
+
+        // ============================================================
+        // GC INTERACTION
+        // ============================================================
+        // Create regex objects in a loop, ensure GC doesn't break things
+        for i in 0..100 {
+            let re = regex("test" + i, "")
+            let result = re.test("test50")
+        }
+
+        // Interned regex survives GC
+        let re_before = regex("survivor", "g")
+        // Create garbage
+        for i in 0..200 {
+            let garbage = {x: i, y: [1 2 3]}
+        }
+        // Regex should still work
+        assert(re_before.test("find the survivor here") == true)
+        assert(re_before.source == "survivor")
+    };
+
+    vm.eval(regex_test);
+    println!("Regex tests passed");
+
+    // ========================================
+    // HTML parse + query tests
+    // ========================================
+    let html_test = script! {
+        use mod.std.assert
+        let html = "<div class='container' id='main'><p>Hello</p><p class='bold'>World</p><span>!</span></div>"
+        let doc = html.parse_html()
+        assert(doc.length == 1)
+        let ps = doc.query("p")
+        assert(ps.length == 2)
+        let first_p = doc.query("p[0]")
+        assert(first_p.text == "Hello")
+        let second_p = doc.query("p[1]")
+        assert(second_p.text == "World")
+        assert(doc.query("span").text == "!")
+        assert(doc.query("div@class") == "container")
+        assert(doc.query("div@id") == "main")
+        assert(doc.query("p.bold").length == 1)
+        assert(doc.query("p.bold").text == "World")
+        let texts = doc.query("p.text")
+        assert(texts.len() == 2)
+        assert(texts[0] == "Hello")
+        assert(texts[1] == "World")
+        let attrs = doc.query("p@class")
+        assert(attrs.len() == 2)
+        let items = doc.query("p").array()
+        assert(items.len() == 2)
+        assert(items[0].text == "Hello")
+        assert(items[1].text == "World")
+        let chained = doc.query("div").query("p")
+        assert(chained.length == 2)
+        let child = doc.query("div > p")
+        assert(child.length == 2)
+        let nested = "<ul><li><a href='http://x'>Link1</a></li><li><a href='http://y'>Link2</a></li></ul>"
+        let ndoc = nested.parse_html()
+        assert(ndoc.query("a").length == 2)
+        assert(ndoc.query("a@href").len() == 2)
+        assert(ndoc.query("a@href")[0] == "http://x")
+        assert(ndoc.query("a[0]").text == "Link1")
+        assert(ndoc.query("li > a").length == 2)
+        assert(ndoc.query("ul a").length == 2)
+        let deep = "<div><div><p>Deep</p></div></div>"
+        let ddoc = deep.parse_html()
+        assert(ddoc.query("div p").length == 1)
+        assert(ddoc.query("div p").text == "Deep")
+        assert(ddoc.query("div > p").length == 1)
+        assert(ddoc.query("div > div > p").length == 1)
+        let empty = "<div></div>".parse_html()
+        assert(empty.query("p").length == 0)
+        assert(empty.query("p").text == "")
+        let multi = "<p>A</p><p>B</p><p>C</p>".parse_html()
+        assert(multi.length == 3)
+        assert(multi.query("p").length == 3)
+        assert(multi.query("p[2]").text == "C")
+        let wild = "<div><p>X</p><span>Y</span></div>".parse_html()
+        assert(wild.query("div > *").length == 2)
+        let by_id = "<div><p id='target'>Found</p><p>Other</p></div>".parse_html()
+        assert(by_id.query("#target").length == 1)
+        assert(by_id.query("#target").text == "Found")
+        assert(by_id.query("p#target").text == "Found")
+        let with_attr = doc.attr("class")
+        assert(with_attr == "container")
+    };
+
+    vm.eval(html_test);
+    println!("HTML tests passed");
+
+    // ========================================
+    // GC stress test - separate code block
+    // ========================================
+    let gc_test = script! {
+        use mod.std.assert
+        use mod.gc
+
+        // Test 1: Create garbage in a simple loop
+        for i in 0..1000 {
+            let obj = {x: i, y: i * 2, data: [1, 2, 3, 4, 5]}
+        }
+        gc.run()
+
+        // Test 2: Nested object creation
+        for i in 0..500 {
+            let nested = {
+                a: {b: {c: {d: i}}}
+                arr: [[1, 2], [3, 4], [5, 6]]
+            }
+        }
+        gc.run()
+
+        // Test 3: Function that creates and returns garbage
+        fn make_garbage(n) {
+            let result = []
+            for j in 0..n {
+                result.push({id: j, name: "item"})
+            }
+            return result
+        }
+
+        for i in 0..100 {
+            let garbage = make_garbage(50)
+        }
+        gc.run()
+
+        // Test 4: Recursive function creating objects
+        fn recursive_create(depth) {
+            if depth <= 0 {
+                return {leaf: true}
+            }
+            return {
+                value: depth
+                left: recursive_create(depth - 1)
+                right: recursive_create(depth - 1)
+            }
+        }
+
+        for i in 0..20 {
+            let tree = recursive_create(6)
+        }
+        gc.run()
+
+        // Test 5: String concatenation creating garbage
+        for i in 0..500 {
+            let s = "hello_world"
+            let parts = s.to_bytes()
+        }
+        gc.run()
+
+        // Test 6: Array operations creating garbage
+        for i in 0..200 {
+            let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            arr.push(i)
+            arr.push(i)
+            let popped = arr.pop()
+        }
+        gc.run()
+
+        // Test 7: Mixed operations - objects, arrays, strings
+        fn create_record(id) {
+            return {
+                id: id
+                name: "record"
+                tags: ["tag1", "tag2", "tag3"]
+                metadata: {
+                    created: id * 100
+                    modified: id * 200
+                }
+            }
+        }
+
+        for i in 0..300 {
+            let record = create_record(i)
+            let json = record.to_json()
+            let parsed = json.parse_json()
+        }
+        gc.run()
+
+        // Test 8: Closures capturing values
+        for i in 0..200 {
+            let captured = {value: i}
+            let closure = || captured.value * 2
+            let result = closure()
+        }
+        gc.run()
+
+        // Test 9: Object with prototype chain
+        let base = {
+            method: |s| s.x * 2
+        }
+        for i in 0..500 {
+            let derived = base{x: i, y: i + 1}
+        }
+        gc.run()
+
+        // Test 10: Verify live objects survive GC
+        let live_obj = {important: 42, data: [1, 2, 3]}
+        let live_arr = [10, 20, 30, 40, 50]
+
+        // Create lots of garbage
+        for i in 0..1000 {
+            let a = i + 1
+            let b = i + 2
+            let garbage = {temp: i, arr: [i, a, b]}
+        }
+
+        gc.run()
+
+        // Verify live objects are still valid
+        assert(live_obj.important == 42)
+        assert(live_obj.data == [1, 2, 3])
+        assert(live_arr == [10, 20, 30, 40, 50])
+    };
+
+    vm.eval(gc_test);
+
+    // ========================================
+    // script_apply_eval stress test
+    // This tests the pattern used in PortalList/FlatList
+    // where script_apply_eval is called repeatedly in a loop
+    // ========================================
+
+    // Create items with source objects so script_apply_eval works
+    let mut items: Vec<DrawBgTest> = Vec::new();
+    for _ in 0..10 {
+        let mut item = DrawBgTest::default();
+        // Initialize the source object for the item
+        let obj = vm.heap_mut().new_object();
+        item.source = vm.heap_mut().new_object_ref(obj);
+        items.push(item);
+    }
+
+    // Simulate the draw loop pattern from PortalList
+    for iteration in 0..1000 {
+        for (idx, item) in items.iter_mut().enumerate() {
+            let is_even_f = if idx % 2 == 0 { 1.0f32 } else { 0.0f32 };
+
+            // This is the pattern that causes garbage accumulation
+            script_apply_eval!(vm, item, {
+                is_even: #(is_even_f)
+            });
+        }
+
+        // Run GC periodically to stress test
+        if iteration % 100 == 0 {
+            vm.gc();
+        }
+    }
+
+    // Final GC to verify no issues
+    vm.gc();
+    let code = script! {
+        let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
+        ~fib(20);
+    };
+    let dt = std::time::Instant::now();
+
+    vm.eval(code);
+    println!("Duration {}", dt.elapsed().as_secs_f64());
+
+    println!("Test done");
+
+    // ========================================
+    // Streaming (incremental) parser test
+    // Mimics what Splash widget does: feeds a growing
+    // string to tokenizer+parser incrementally, compares
+    // opcodes against a full non-incremental parse of the
+    // same final string at each step.
+    // ========================================
+    println!("Running streaming parser test...");
+    {
+        use makepad_script::parser::ScriptParser;
+        use makepad_script::tokenizer::ScriptTokenizer;
+
+        let prefix = "use mod.prelude.widgets.*View{height:Fit, ";
+        // A splash-like body that gets streamed in
+        let body = r#"flow: Down height: Fit spacing: 10 padding: 20
+View{
+    flow: Right height: Fit spacing: 10
+    SolidView{width: 50 height: 50 draw_bg.color: #f00}
+    SolidView{width: 50 height: 50 draw_bg.color: #0f0}
+    SolidView{width: 50 height: 50 draw_bg.color: #00f}
+}
+View{
+    flow: Right height: Fit spacing: 10
+    Button{text: "Buttoqwkehrqlkwjerhqwjkerhqlkwjehrlqkjwehrqlkjwehrqklwjehrlqkwjehrqlkwjehrkqjlwehrlqkwjehrlkqwejhrlkqjwehrlkjwqehn 1"}
+    Button{text: "Button 2"}
+    Button{text: "Button 3"}
+    Button{text: "Button 4"}
+}"#;
+
+        let full_code = format!("{}{}", prefix, body);
+
+        // --- Part 1: Opcode comparison (manual tokenizer/parser) ---
+        {
+            let mut inc_tokenizer = ScriptTokenizer::default();
+            let mut inc_parser = ScriptParser::default();
+            let mut prev_len = 0usize;
+            let mut checkpoint: Option<makepad_script::parser::ParserCheckpoint> = None;
+
+            for end in 1..=full_code.len() {
+                let code_so_far = &full_code[..end];
+
+                if let Some(cp) = checkpoint.take() {
+                    inc_parser.restore_checkpoint(cp);
+                }
+
+                let new_chars = &code_so_far[prev_len..];
+                if !new_chars.is_empty() {
+                    inc_tokenizer.tokenize(new_chars, &mut vm.heap_mut());
+                }
+                prev_len = end;
+
+                let unfinished = inc_tokenizer.intern_unfinished_string(&mut vm.heap_mut());
+                let cp = inc_parser.parse_streaming(&inc_tokenizer, "", (0, 0), &[], unfinished);
+
+                let mut ref_tokenizer = ScriptTokenizer::default();
+                let mut ref_parser = ScriptParser::default();
+                ref_tokenizer.tokenize(code_so_far, &mut vm.heap_mut());
+                let ref_unfinished = ref_tokenizer.intern_unfinished_string(&mut vm.heap_mut());
+                ref_parser.parse_streaming(&ref_tokenizer, "", (0, 0), &[], ref_unfinished);
+
+                let tok_match = ref_tokenizer.tokens.len() == inc_tokenizer.tokens.len();
+                let op_match = ref_parser.opcodes == inc_parser.opcodes;
+                if !tok_match || !op_match {
+                    let mut msg = format!(
+                        "STREAM MISMATCH at byte {}/{}\n  code so far: {:?}\n  tokens: ref={} inc={}\n  opcodes: ref={} inc={}",
+                        end, full_code.len(), code_so_far,
+                        ref_tokenizer.tokens.len(), inc_tokenizer.tokens.len(),
+                        ref_parser.opcodes.len(), inc_parser.opcodes.len(),
+                    );
+                    for i in 0..ref_parser.opcodes.len().max(inc_parser.opcodes.len()) {
+                        let r = ref_parser.opcodes.get(i);
+                        let s = inc_parser.opcodes.get(i);
+                        let marker = if r != s { " <<< DIFF" } else { "" };
+                        msg.push_str(&format!(
+                            "\n  opcode[{}]: ref={:?} inc={:?}{}",
+                            i, r, s, marker
+                        ));
+                    }
+                    panic!("{}", msg);
+                }
+                checkpoint = Some(cp);
+            }
+            println!("  Opcode comparison passed ({} steps)", full_code.len());
+        }
+
+        // --- Part 2: Actual execution via eval_with_append_source (byte at a time) ---
+        {
+            for end in 1..=full_code.len() {
+                let code_so_far = &full_code[..end];
+                let script_mod = ScriptMod {
+                    cargo_manifest_path: String::new(),
+                    module_path: String::new(),
+                    file: "streaming_test".to_string(),
+                    line: 0,
+                    column: 0,
+                    code: String::new(),
+                    values: vec![],
+                };
+                // Execute incrementally — errors are expected for incomplete code,
+                // but panics/crashes would indicate bad opcode generation.
+                let _value = vm.eval_with_append_source(script_mod, code_so_far, NIL.into());
+            }
+            println!("  Execution passed ({} steps)", full_code.len());
+        }
+
+        // --- Part 3: 20-char chunks like aichat fake streaming ---
+        {
+            let mut pos = 0usize;
+            let mut steps = 0;
+            while pos < full_code.len() {
+                let mut end = (pos + 20).min(full_code.len());
+                // Align to char boundary
+                while end < full_code.len() && !full_code.is_char_boundary(end) {
+                    end += 1;
+                }
+                let code_so_far = &full_code[..end];
+                let script_mod = ScriptMod {
+                    cargo_manifest_path: String::new(),
+                    module_path: String::new(),
+                    file: "streaming_20char".to_string(),
+                    line: 0,
+                    column: 0,
+                    code: String::new(),
+                    values: vec![],
+                };
+                let _value = vm.eval_with_append_source(script_mod, code_so_far, NIL.into());
+                pos = end;
+                steps += 1;
+            }
+            println!("  20-char chunk execution passed ({} steps)", steps);
+        }
+    }
+}

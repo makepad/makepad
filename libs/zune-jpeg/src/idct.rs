@@ -56,7 +56,7 @@ pub fn choose_idct_func(options: &DecoderOptions) -> IDCTPtr {
             debug!("Using vector integer IDCT");
             return |a: &mut [i32; 64], b: &mut [i16], c: usize| {
                 // SAFETY: `options.use_avx2()` only returns true if avx2 is supported.
-                unsafe { avx2::idct_avx2(a,b,c) }
+                unsafe { avx2::idct_avx2(a, b, c) }
             };
         }
     }
@@ -67,7 +67,7 @@ pub fn choose_idct_func(options: &DecoderOptions) -> IDCTPtr {
             debug!("Using vector integer IDCT");
             return |a: &mut [i32; 64], b: &mut [i16], c: usize| {
                 // SAFETY: `options.use_neon()` only returns true if neon is supported.
-                unsafe { neon::idct_neon(a,b,c) }
+                unsafe { neon::idct_neon(a, b, c) }
             };
         }
     }
@@ -90,7 +90,7 @@ pub fn choose_idct_4x4_func(_options: &DecoderOptions) -> IDCTPtr {
             debug!("Using vector integer IDCT");
             return |a: &mut [i32; 64], b: &mut [i16], c: usize| {
                 // SAFETY: `options.use_avx2()` only returns true if avx2 is supported.
-                unsafe { avx2::idct_avx2_4x4(a,b,c) }
+                unsafe { avx2::idct_avx2_4x4(a, b, c) }
             };
         }
     }
@@ -179,12 +179,7 @@ mod tests {
             choose_idct_func(&DecoderOptions::new_fast()),
             choose_idct_4x4_func(&DecoderOptions::new_fast()),
         ];
-        let dct_names = vec![
-            "safe idct",
-            "safe idct 4x4",
-            "fast idct",
-            "fast idct 4x4",
-        ];
+        let dct_names = vec!["safe idct", "safe idct 4x4", "fast idct", "fast idct 4x4"];
 
         let mut color = vec![];
 

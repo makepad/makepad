@@ -1,0 +1,232 @@
+#![allow(unstable_name_collisions)]
+
+use {
+    makepad_micro_proc_macro::{TokenBuilder, TokenParser},
+    proc_macro::{Delimiter, Span, TokenStream},
+    std::fmt::Write,
+};
+
+pub fn script_mod_impl(input: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new();
+    let ts = script_impl(input);
+    tb.add("pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{");
+    tb.add("    let sb=").stream(Some(ts)).add(";");
+    tb.add("    vm.eval(sb)");
+    tb.add("}");
+    tb.end()
+}
+
+pub fn script_apply_eval_impl(input: TokenStream) -> TokenStream {
+    let mut parser = TokenParser::new(input);
+    let mut tb = TokenBuilder::new();
+
+    // Parse: cx, target, { script code }
+    // First get the cx expression
+    let cx_expr = parser.eat_any_ident().expect("Expected cx identifier");
+    parser.eat_punct_alone(',');
+
+    // Get the target expression (could be self.draw_bg or similar)
+    let mut target_tb = TokenBuilder::new();
+    while !parser.eat_punct_alone(',') {
+        if let Some(tt) = parser.current.clone() {
+            target_tb.extend(tt);
+            parser.advance();
+        } else {
+            break;
+        }
+    }
+    let target_stream = target_tb.end();
+
+    // The rest is the script code (already includes braces from eat_level)
+    // Prepend __script_source__ to make it __script_source__{...}
+    let script_code: TokenStream = {
+        let mut tb = TokenBuilder::new();
+        tb.add("__script_source__");
+        tb.stream(Some(parser.eat_level()));
+        tb.end()
+    };
+
+    // Generate the script_impl output (the ScriptMod struct)
+    // Use script_impl_expr to NOT add semicolon - we want to return the expression value
+    let script_mod = script_impl(script_code);
+
+    // Build: cx.with_vm(|vm| { let script = ScriptMod{...}; target.script_apply_eval(vm, script) })
+    tb.ident(&cx_expr).add(".with_vm(|vm|{");
+    tb.add("let script =").stream(Some(script_mod)).add(";");
+    tb.stream(Some(target_stream));
+    tb.add(".script_apply_eval(vm, script)");
+    tb.add("})");
+
+    tb.end()
+}
+
+pub fn script_impl(input: TokenStream) -> TokenStream {
+    let mut parser = TokenParser::new(input);
+    let mut tb = TokenBuilder::new();
+
+    if let Some(span) = parser.span() {
+        let (s, values) = token_parser_to_whitespace_matching_string(&mut parser, span);
+
+        tb.add("ScriptMod {");
+        tb.add("    cargo_manifest_path: env!(")
+            .string("CARGO_MANIFEST_DIR")
+            .add(").trim_start_matches(")
+            .string("\\\\?\\")
+            .add(").to_string(),");
+        tb.add("    module_path :")
+            .ident_with_span("module_path", span)
+            .add("!().to_string(),");
+        tb.add("    file:")
+            .ident_with_span("file", span)
+            .add("!().to_string().replace(")
+            .string("\\")
+            .add(",")
+            .string("/")
+            .add("),");
+        tb.add("    line:line!() as usize,");
+        tb.add("    column:column!() as usize,");
+
+        tb.add("    code:").string(&s).add(".to_string(),");
+        tb.add("    values:{");
+        tb.add("        let mut v = Vec::new();");
+        for value in &values {
+            tb.add("v.push( {")
+                .stream(Some(value.clone()))
+                .add("}.script_to_value(vm) );");
+        }
+        tb.add("    v}");
+        tb.add("}");
+    } else {
+        tb.add("ScriptMod::default()");
+    }
+    tb.end()
+}
+
+// sself function parses tokens into a source-equal whitespaced output string
+fn token_parser_to_whitespace_matching_string(
+    parser: &mut TokenParser,
+    span: Span,
+) -> (String, Vec<TokenStream>) {
+    let mut s = String::new();
+    let mut values = Vec::new();
+
+    tp_to_str(parser, span, &mut s, &mut values, &mut None);
+    s.push(';');
+    return (s, values);
+
+    #[derive(Clone, Copy)]
+    struct Lc {
+        line: usize,
+        column: usize,
+    }
+
+    impl Lc {
+        fn _next_char(self) -> Self {
+            Self {
+                line: self.line,
+                column: self.column + 1,
+            }
+        }
+    }
+
+    fn delim_to_pair(delim: Delimiter) -> (char, char) {
+        match delim {
+            Delimiter::Brace => ('{', '}'),
+            Delimiter::Parenthesis => ('(', ')'),
+            Delimiter::Bracket => ('[', ']'),
+            Delimiter::None => (' ', ' '),
+        }
+    }
+
+    fn tp_to_str(
+        parser: &mut TokenParser,
+        span: Span,
+        out: &mut String,
+        values: &mut Vec<TokenStream>,
+        last_end: &mut Option<Lc>,
+    ) {
+        fn lc_from_start(span: Span) -> Lc {
+            Lc {
+                line: span.start().line(),
+                column: span.start().column(),
+            }
+        }
+
+        fn lc_from_end(span: Span) -> Lc {
+            Lc {
+                line: span.end().line(),
+                column: span.end().column(),
+            }
+        }
+
+        fn delta_whitespace(now: Lc, needed: Lc, out: &mut String) {
+            if now.line == needed.line {
+                for _ in now.column..needed.column {
+                    out.push(' ');
+                }
+            } else {
+                for _ in now.line..needed.line {
+                    out.push('\n');
+                }
+                for _ in 1..needed.column {
+                    out.push(' ');
+                }
+            }
+        }
+
+        if last_end.is_none() {
+            *last_end = Some(lc_from_start(span));
+        }
+
+        let mut last_tt = None;
+
+        while !parser.eat_eot() {
+            let span = parser.span().unwrap();
+            if let Some(delim) = parser.open_group() {
+                if let Some(TokenTree::Punct(last_punct)) = &last_tt {
+                    if last_punct.as_char() == '#' {
+                        last_tt = None;
+                        out.pop();
+                        let index = values.len();
+                        write!(out, "#({index})").unwrap();
+                        values.push(parser.eat_level());
+                        continue;
+                    }
+                }
+
+                let (gs, ge) = delim_to_pair(delim);
+                let start = lc_from_start(span);
+                let end = lc_from_end(span);
+                delta_whitespace(last_end.unwrap(), start, out);
+                out.push(gs);
+                *last_end = Some(start._next_char());
+                tp_to_str(parser, span, out, values, last_end);
+                delta_whitespace(
+                    last_end.unwrap(),
+                    Lc {
+                        line: end.line,
+                        column: end.column - 1,
+                    },
+                    out,
+                );
+                *last_end = Some(end);
+                out.push(ge);
+            } else {
+                if let Some(tt) = &parser.current {
+                    {
+                        last_tt = Some(tt.clone());
+                        let start = lc_from_start(span);
+                        delta_whitespace(last_end.unwrap(), start, out);
+                    }
+
+                    out.push_str(&tt.to_string());
+
+                    *last_end = Some(lc_from_end(span));
+                }
+                parser.advance();
+            }
+        }
+    }
+}
+
+use proc_macro::TokenTree;

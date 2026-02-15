@@ -1,52 +1,45 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
-
 pub mod os;
 
 #[macro_use]
 pub mod log;
 
 #[macro_use]
-mod live_prims;
-
-#[macro_use]
 mod cx;
+mod arc_string_mut;
 mod cx_api;
 
 pub mod action;
+pub mod game_input;
 
-pub mod live_traits;
-pub mod live_cx;
-pub mod live_atomic;
-
-pub mod thread;
 pub mod audio;
 pub mod midi;
+pub mod script;
+pub mod thread;
 pub mod video;
-pub mod scope;
-//pub mod script;
 
-mod draw_matrix;
-mod draw_shader; 
 mod draw_list;
+mod draw_matrix;
+mod draw_pass;
+mod draw_shader;
 mod draw_vars;
 
-mod id_pool;
-pub mod event;
-pub mod permission;
 mod area;
-mod window;
-mod pass;
-mod texture;
-mod cursor;
-mod macos_menu;
-mod animator;
-mod gpu_info;
-mod geometry;
-mod debug;
-mod component_map;
+pub mod component;
 mod component_list;
+mod component_map;
+mod cursor;
+mod debug;
+pub mod event;
+mod geometry;
+mod gpu_info;
+mod id_pool;
+mod macos_menu;
 mod performance_stats;
+pub mod permission;
 pub mod studio;
+mod texture;
+mod window;
 
 pub mod web_socket;
 
@@ -66,236 +59,133 @@ mod app_main;
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
-pub use ::windows as windows;
+pub use ::windows;
 
 pub use makepad_futures;
- 
+
+// Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
+pub use makepad_script::trap;
+
 pub use {
-    makepad_error_log,
-    makepad_shader_compiler,
-    makepad_shader_compiler::makepad_derive_live,
-    makepad_shader_compiler::makepad_math,
-    makepad_shader_compiler::makepad_live_tokenizer,
-    makepad_shader_compiler::makepad_micro_serde,
-    makepad_shader_compiler::makepad_live_compiler,
-    makepad_shader_compiler::makepad_live_id,
-    makepad_http,
-    smallvec,
-    smallvec::SmallVec,
-    //makepad_image_formats::image,
-    makepad_derive_live::*,
-    
-    //makepad_script::vm::*,
-    //makepad_script::traits::*,
-    //makepad_script::script,
-    log::*,
-    makepad_math::*,
-    makepad_live_id::*,
-    app_main::*,
-    //makepad_script::vm,
-    makepad_live_compiler::{
-        vec4_ext::*,
-        live_error_origin,
-        LiveErrorOrigin,
-        LiveNodeOrigin,
-        LiveRegistry,
-        LiveId,
-        LiveIdMap,
-        LiveFileId,
-        LivePtr,
-        LiveRef,
-        LiveNode,
-        LiveType,
-        LiveTypeInfo,
-        LiveTypeField,
-        LiveFieldKind,
-        LiveComponentInfo,
-        LiveComponentRegistry,
-        LivePropType,
-        LiveProp,
-        LiveIdAsProp,
-        LiveValue,
-        InlineString,
-        LiveBinding,
-        LiveIdPath,
-        LiveNodeSliceToCbor,
-        LiveNodeVecFromCbor,
-        LiveModuleId,
-        LiveNodeSlice,
-        LiveNodeVec,
-        LiveNodeSliceApi,
-        LiveNodeVecApi,
-    },
-    component_map::ComponentMap,
-    component_list::ComponentList,
-    makepad_shader_compiler::{
-        ShaderRegistry,
-        ShaderEnum,
-        DrawShaderPtr,
-        ShaderTy,
-    },
     crate::{
-        os::*,
-        cx_api::{CxOsApi,OpenUrlInPlace, CxOsOp},
-        media_api::CxMediaApi,
-        scope::*,
-        draw_list::{
-            CxDrawItem,
-            CxRectArea,
-            CxDrawCall,
-            DrawList,
-            DrawListId,
-            CxDrawListPool
+        action::{
+            Action, ActionCast, ActionCastRef, ActionDefaultRef, ActionTrait, Actions, ActionsBuf,
         },
-        cx::{
-            Cx,
-            CxRef,
-            OsType
-        },
-        area::{
-            Area,
-            RectArea,
-            InstanceArea
-        },
-        midi::*,
+        area::{Area, InstanceArea, RectArea},
         audio::*,
-        thread::*,
-        video::*,
-        web_socket::{WebSocket,WebSocketMessage},
+        component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
+        cursor::MouseCursor,
+        cx::{Cx, CxRef, OsType},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
+        draw_matrix::DrawMatrix,
+        draw_pass::{
+            CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,
+            DrawPassId, ScriptDrawPass,
+        },
+        draw_vars::DrawVars,
         event::{
-            VirtualKeyboardEvent,
-            HttpRequest,
-            HttpResponse,
+            DesignerPickEvent,
+            DigitDevice,
+            DragEvent,
+            DragHit,
+            DragHitEvent,
+            DragItem,
+            DragResponse,
+            DragState,
+            DrawEvent,
+            DropEvent,
+            DropHitEvent,
+            Event,
+            FingerDownEvent,
+            FingerHoverEvent,
+            FingerMoveEvent,
+            FingerScrollEvent,
+            FingerUpEvent,
+            GameInputState,
+            Hit,
+            HitDesigner,
+            HitOptions,
+            HoverState,
+            HttpError,
             HttpMethod,
             HttpProgress,
-            HttpError,
-            NetworkResponse,
-            NetworkResponsesEvent,
-            Margin,
+            HttpRequest,
+            HttpResponse,
+            Inset,
             KeyCode,
-            Event,
-            Hit,
-            DragHit,
-            Trigger,
-            //MidiInputListEvent,
-            Timer,
-            NextFrame,
+            KeyEvent,
+            KeyFocusEvent,
             KeyModifiers,
-            DrawEvent,
-            DigitDevice,
             MouseButton,
             MouseDownEvent,
             MouseMoveEvent,
             MouseUpEvent,
-            FingerDownEvent,
-            FingerMoveEvent,
-            FingerUpEvent,
-            HoverState,
-            FingerHoverEvent,
-            FingerScrollEvent,
-            WindowGeomChangeEvent,
-            WindowMovedEvent,
+            NetworkResponse,
+            NetworkResponsesEvent,
+            NextFrame,
             NextFrameEvent,
             TimerEvent,
-            KeyEvent,
-            KeyFocusEvent,
+            TextClipboardEvent,
             TextInputEvent,
             ImageInputEvent,
-            TextClipboardEvent,
+            //MidiInputListEvent,
+            Timer,
+            TimerEvent,
+            Trigger,
+            VirtualKeyboardEvent,
             WindowCloseRequestedEvent,
             WindowClosedEvent,
-            WindowDragQueryResponse,
             WindowDragQueryEvent,
+            WindowDragQueryResponse,
+            WindowGeomChangeEvent,
+            WindowMovedEvent,
+            XrAnchor,
             XrController,
             XrHand,
-            XrAnchor,
+            XrLocalEvent,
             XrState,
             XrUpdateEvent,
-            XrLocalEvent,
-            DragEvent,
-            DropEvent,
-            DragState,
-            DragItem,
-            DragResponse,
-            HitOptions,
-            DragHitEvent,
-            DropHitEvent,
-            DesignerPickEvent,
-            HitDesigner,
         },
-        action::{
-            Action,
-            Actions,
-            ActionsBuf, 
-            ActionCast,
-            ActionCastRef,
-            ActionTrait,
-            ActionDefaultRef
-        },
-        cursor::MouseCursor,
+        game_input::*,
+        geometry::{Geometry, GeometryId},
+        gpu_info::GpuPerformance,
         macos_menu::MacosMenu,
-        draw_matrix::DrawMatrix,
-        window::{WindowHandle,CxWindowPool, WindowId},
-        pass::{
-            PassId,
-            CxPassParent,
-            CxPassRect,
-            Pass,
-            PassClearColor,
-            PassClearDepth
-        },
+        media_api::CxMediaApi,
+        midi::*,
+        os::*,
+        script::vm::*,
         texture::{
-            Texture,
-            TextureId,
-            TextureFormat,
-            TextureSize,
-            TextureUpdated,
-            TextureAnimation,
+            Texture, TextureAnimation, TextureFormat, TextureId, TextureSize, TextureUpdated,
         },
-        live_prims::{
-            LiveDependency,
-            ArcStringMut,
-        },
-        live_traits::{
-            LiveHookDeref,
-            LiveBody,
-            LiveRegister,
-            LiveNew,
-            LiveApply,
-            LiveHook,
-            LiveApplyValue,
-            LiveApplyReset,
-            LiveRead,
-            ToLiveValue,
-            Apply,
-            ApplyFrom,
-        },
-        animator::{
-            Ease,
-            Play,
-            Animate,
-            Animator,
-            AnimatorImpl,
-            AnimatorAction,
-        },
-        draw_vars::{
-            shader_enum,
-            DrawVars
-        },
-        geometry::{
-            GeometryFingerprint,
-            GeometryField,
-            GeometryFields,
-            GeometryId,
-            GeometryRef,
-            Geometry,
-        },
-        gpu_info::GpuPerformance,     
-        ui_runner::*,  
+        thread::*,
+        ui_runner::*,
+        video::*,
+        web_socket::{WebSocket, WebSocketMessage},
+        window::{CxWindowPool, ScriptWindowHandle, WindowHandle, WindowId},
     },
+    app_main::*,
+    arc_string_mut::ArcStringMut,
+    component_list::ComponentList,
+    component_map::ComponentMap,
+    //makepad_image_formats::image,
+    log::*,
+    makepad_http,
+    makepad_math::makepad_micro_serde,
+    makepad_math::*,
+    makepad_script,
+    makepad_script::{
+        apply::*, handle::*, heap::*, makepad_error_log, makepad_live_id, makepad_live_id::*,
+        makepad_math, makepad_script_derive, makepad_script_derive::*, native::*, object::*,
+        script_args, script_args_def, script_array_index, script_has_proto, script_is_fn,
+        script_value, script_value_bool, script_value_f64, set_script_value,
+        set_script_value_to_api, set_script_value_to_pod, string::*, traits::*, trap::*, value::*,
+        vm::*,
+    },
+    smallvec,
+    smallvec::SmallVec,
 };
-

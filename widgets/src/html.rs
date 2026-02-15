@@ -1,242 +1,182 @@
 use crate::{
+    animator::{Animator, AnimatorAction, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_html::*,
     text_flow::TextFlow,
     widget::*,
+    WidgetMatchEvent,
 };
 
 const BULLET: &str = "•";
 
-live_design!{
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
-     
-    pub HtmlLinkBase = {{HtmlLink}} {
-        /*link = {
-            draw_text:{
-                // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
-                color: #1a0dab
-            }
-        }*/
-    }
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
 
-    pub HtmlBase = {{Html}} {
-        // ok so we can use one drawtext
-        // change to italic, change bold (SDF), strikethrough
-        ul_markers: ["•", "-"],
-        ol_markers: [Numbers, LowerAlpha, LowerRoman],
-        ol_separator: ".",
-    }
-    
-    pub HtmlLink = <HtmlLinkBase> {
-        width: Fit, height: Fit,
-        align: {x: 0., y: 0.}
-        
-        color: #x0000EE,
-        hover_color: #x00EE00,
-        pressed_color: #xEE0000,
-                
-        // instance hovered: 0.0
-        // instance pressed: 0.0
-        
-        animator: {
-            hover = {
-                default: off,
-                off = {
-                    redraw: true,
+    mod.widgets.HtmlLinkBase = #(HtmlLink::register_widget(vm))
+
+    mod.widgets.HtmlBase = #(Html::register_widget(vm))
+
+    mod.widgets.HtmlLink = set_type_default() do mod.widgets.HtmlLinkBase{
+        width: Fit height: Fit
+        align: Align{x: 0. y: 0.}
+
+        color: #x0000EE
+        hover_color: #x00EE00
+        pressed_color: #xEE0000
+
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    redraw: true
                     from: {all: Forward {duration: 0.01}}
                     apply: {
-                        hovered: 0.0,
-                        pressed: 0.0,
+                        hovered: 0.0
+                        pressed: 0.0
                     }
                 }
-                
-                on = {
-                    redraw: true,
+
+                on: AnimatorState{
+                    redraw: true
                     from: {
                         all: Forward {duration: 0.1}
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        hovered: [{time: 0.0, value: 1.0}],
-                        pressed: [{time: 0.0, value: 1.0}],
+                        hovered: snap(1.0)
+                        pressed: snap(1.0)
                     }
                 }
-                
-                pressed = {
-                    redraw: true,
+
+                pressed: AnimatorState{
+                    redraw: true
                     from: {all: Forward {duration: 0.01}}
                     apply: {
-                        hovered: [{time: 0.0, value: 1.0}],
-                        pressed: [{time: 0.0, value: 1.0}],
+                        hovered: snap(1.0)
+                        pressed: snap(1.0)
                     }
                 }
             }
         }
     }
-    
-    pub Html = <HtmlBase> {
-        width: Fill, height: Fit,
-        flow: Right { wrap: true },
-        width:Fill,
-        height:Fit,
-        padding: <THEME_MSPACE_1> {}
-        heading_margin: {top:1.0, bottom:0.1}
-        paragraph_margin: {top: 0.33, bottom:0.33}
 
-        font_size: (THEME_FONT_SIZE_P),
-        font_color: (THEME_COLOR_LABEL_OUTER),
-        
-        draw_normal: {
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_OUTER)
+    mod.widgets.Html = set_type_default() do mod.widgets.HtmlBase{
+        width: Fill height: Fit
+        flow: Flow.Right{wrap: true}
+        padding: theme.mspace_1
+
+        ul_markers: ["•", "-"]
+        ol_separator: "."
+
+        heading_margin: Inset{top: 1.0, bottom: 0.1}
+        paragraph_margin: Inset{top: 0.33, bottom: 0.33}
+
+        font_size: theme.font_size_p
+        font_color: theme.color_label_inner
+
+        draw_text +: {
+            color: theme.color_label_inner
         }
-        
-        draw_italic: {
-            text_style: <THEME_FONT_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_OUTER)
+
+        text_style_normal: theme.font_regular{
+            font_size: theme.font_size_p
         }
-        
-        draw_bold: {
-            text_style: <THEME_FONT_BOLD> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_OUTER)
+
+        text_style_italic: theme.font_italic{
+            font_size: theme.font_size_p
         }
-        
-        draw_bold_italic: {
-            text_style: <THEME_FONT_BOLD_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_OUTER)
+
+        text_style_bold: theme.font_bold{
+            font_size: theme.font_size_p
         }
-        
-        draw_fixed: {
-            temp_y_shift: 0.24
-            text_style: <THEME_FONT_CODE> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_LABEL_OUTER)
+
+        text_style_bold_italic: theme.font_bold_italic{
+            font_size: theme.font_size_p
         }
-        
-        code_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_2> {left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+
+        text_style_fixed: theme.font_code{
+            font_size: theme.font_size_p
         }
-        code_walk: { width: Fill, height: Fit }
-        
-        quote_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+
+        code_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
-        quote_walk: { width: Fill, height: Fit, }
-        
-        list_item_layout: {
-            flow: Right { wrap: true },
-            padding: <THEME_MSPACE_1> {}
+        code_walk: Walk{width: Fill height: Fit}
+
+        quote_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
         }
-        list_item_walk: {
-            height: Fit, width: Fill,
+        quote_walk: Walk{width: Fill height: Fit}
+
+        list_item_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: theme.mspace_1
         }
-        
-        inline_code_padding: <THEME_MSPACE_1> {},
-        inline_code_margin: <THEME_MSPACE_1> {},
-        
-        sep_walk: {
-            width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_1> {}
+        list_item_walk: Walk{
+            height: Fit width: Fill
         }
-        
-        a = <HtmlLink> {}
-        
-        draw_block:{
-            line_color: (THEME_COLOR_LABEL_OUTER)
-            sep_color: (THEME_COLOR_SHADOW)
-            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_LABEL_OUTER)
-            code_color: (THEME_COLOR_BG_HIGHLIGHT)
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+        inline_code_padding: theme.mspace_1
+        inline_code_margin: theme.mspace_1
+
+        sep_walk: Walk{
+            width: Fill height: 4.
+            margin: theme.mspace_v_1
+        }
+
+        a := mod.widgets.HtmlLink{}
+
+        draw_block +: {
+            line_color: theme.color_label_inner
+            sep_color: theme.color_shadow
+            quote_bg_color: theme.color_bg_highlight
+            quote_fg_color: theme.color_label_inner
+            code_color: theme.color_bg_highlight
+            selection_color: theme.color_selection_focus
+            space_1: uniform(theme.space_1)
+            space_2: uniform(theme.space_2)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 match self.block_type {
-                    FlowBlockType::Quote => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
+                    FlowBlockType.Quote => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
                         sdf.fill(self.quote_bg_color)
-                        sdf.box(
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            self.rect_size.y - THEME_SPACE_2,
-                            1.5
-                        );
-                        sdf.fill(self.quote_fg_color);
-                        return sdf.result;
+                        sdf.box(self.space_1 self.space_1 self.space_1 self.rect_size.y-self.space_2 1.5)
+                        sdf.fill(self.quote_fg_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Sep => {
-                        sdf.box(
-                            0.,
-                            1.,
-                            self.rect_size.x-1,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.sep_color);
-                        return sdf.result;
+                    FlowBlockType.Sep => {
+                        sdf.box(0. 1. self.rect_size.x-1. self.rect_size.y-2. 2.)
+                        sdf.fill(self.sep_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Code => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
+                    FlowBlockType.Code => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
-                    FlowBlockType::InlineCode => {
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
+                    FlowBlockType.InlineCode => {
+                        sdf.box(1. 1. self.rect_size.x-2. self.rect_size.y-2. 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Underline => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y-2,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
+                    FlowBlockType.Underline => {
+                        sdf.box(0. self.rect_size.y-2. self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
                     }
-                    FlowBlockType::Strikethrough => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y * 0.45,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
+                    FlowBlockType.Strikethrough => {
+                        sdf.box(0. self.rect_size.y * 0.45 self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
+                    }
+                    FlowBlockType.Selection => {
+                        return vec4(self.selection_color.rgb * self.selection_color.a, self.selection_color.a)
                     }
                 }
                 return #f00
@@ -259,34 +199,57 @@ pub enum TrimWhitespaceInText {
     Trim,
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, Widget)]
 pub struct Html {
-    #[deref] pub text_flow: TextFlow,
-    #[live] pub body: ArcStringMut,
-    #[rust] pub doc: HtmlDoc,
-    
+    #[deref]
+    pub text_flow: TextFlow,
+    #[live]
+    pub body: ArcStringMut,
+    #[rust]
+    pub doc: HtmlDoc,
+
     /// Markers used for unordered lists, indexed by the list's nesting level.
     /// The marker can be an arbitrary string, such as a bullet point or a custom icon.
-    #[live] ul_markers: Vec<String>,
+    #[live]
+    ul_markers: Vec<String>,
     /// Markers used for ordered lists, indexed by the list's nesting level.
-    #[live] ol_markers: Vec<OrderedListType>,
+    #[rust]
+    ol_markers: Vec<OrderedListType>,
     /// The character used to separate an ordered list's item number from the content.
-    #[live] ol_separator: String,
+    #[live]
+    ol_separator: String,
 
     /// The stack of list levels encountered so far, used to track nested lists.
-    #[rust] list_stack: Vec<ListLevel>,
+    #[rust]
+    list_stack: Vec<ListLevel>,
 }
 
-// alright lets parse the HTML
-impl LiveHook for Html {
-    fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
+impl ScriptHook for Html {
+    fn on_after_new(&mut self, _vm: &mut ScriptVm) {
+        // Initialize ol_markers with default values
+        if self.ol_markers.is_empty() {
+            self.ol_markers = vec![
+                OrderedListType::Numbers,
+                OrderedListType::LowerAlpha,
+                OrderedListType::LowerRoman,
+            ];
+        }
+    }
+
+    fn on_after_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         let mut errors = Some(Vec::new());
         let new_doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
-        if new_doc != self.doc{
+        if new_doc != self.doc {
             self.doc = new_doc;
             self.text_flow.clear_items();
         }
-        if errors.as_ref().unwrap().len()>0{
+        if errors.as_ref().unwrap().len() > 0 {
             log!("HTML parser returned errors {:?}", errors)
         }
     }
@@ -302,10 +265,14 @@ impl Html {
         ol_markers: &Vec<OrderedListType>,
         ol_separator: &str,
     ) -> (Option<LiveId>, TrimWhitespaceInText) {
-
         let mut trim_whitespace_in_text = TrimWhitespaceInText::default();
 
-        fn open_header_tag(cx: &mut Cx2d, tf: &mut TextFlow, scale: f64, trim: &mut TrimWhitespaceInText) {
+        fn open_header_tag(
+            cx: &mut Cx2d,
+            tf: &mut TextFlow,
+            scale: f64,
+            trim: &mut TrimWhitespaceInText,
+        ) {
             *trim = TrimWhitespaceInText::Trim;
             tf.bold.push();
             tf.push_size_abs_scale(scale);
@@ -322,17 +289,13 @@ impl Html {
             some_id!(h6) => open_header_tag(cx, tf, 0.67, &mut trim_whitespace_in_text),
 
             some_id!(p) => {
-                // there's probably a better way to do this by setting margins...
                 let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
-                
                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.top);
-                //tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(code) => {
                 const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
                 tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
-                //tf.top_drop.push(1.2/FIXED_FONT_SIZE_SCALE); // to achieve a top_drop of 1.2
                 tf.combine_spaces.push(false);
                 tf.fixed.push();
                 tf.inline_code.push();
@@ -355,31 +318,19 @@ impl Html {
                 tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
-            some_id!(hr)
-            | some_id!(sep) => {
+            some_id!(hr) | some_id!(sep) => {
                 tf.new_line_collapsed(cx);
                 tf.sep(cx);
                 tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(u) => tf.underline.push(),
-            some_id!(del)
-            | some_id!(s)
-            | some_id!(strike) => tf.strikethrough.push(),
+            some_id!(del) | some_id!(s) | some_id!(strike) => tf.strikethrough.push(),
 
-            some_id!(b)
-            | some_id!(strong) => tf.bold.push(),
-            some_id!(i)
-            | some_id!(em) => tf.italic.push(),
+            some_id!(b) | some_id!(strong) => tf.bold.push(),
+            some_id!(i) | some_id!(em) => tf.italic.push(),
 
             some_id!(sub) => {
-                // Adjust the top drop to move the text slightly downwards.
-                //let curr_top_drop = tf.top_drop.last()
-                 //   .unwrap_or(&1.2);
-                // A 55% increase in top_drop seems to look good for subscripts,
-                // which should be slightly below the halfway point in the line
-                //let new_top_drop = curr_top_drop * 1.55;
-                //tf.top_drop.push(new_top_drop);
                 tf.push_size_rel_scale(0.7);
             }
             some_id!(sup) => {
@@ -394,21 +345,17 @@ impl Html {
                     padding: 2.5,
                 });
             }
-            some_id!(ol) => { 
+            some_id!(ol) => {
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
-                // Handle the "start" attribute
                 let start_attr = node.find_attr_lc(live_id!(start));
-                let start: i32 = start_attr
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
+                let start: i32 = start_attr.and_then(|s| s.parse().ok()).unwrap_or(1);
 
-                // Handle the "type" attribute
                 let type_attr = node.find_attr_lc(live_id!(type));
                 let numbering_type = type_attr.and_then(OrderedListType::from_type_attribute);
 
                 list_stack.push(ListLevel {
                     list_kind: ListKind::Ordered,
-                    numbering_type, 
+                    numbering_type,
                     li_count: start,
                     padding: 2.5,
                 });
@@ -417,30 +364,24 @@ impl Html {
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 let indent_level = list_stack.len();
                 let index = indent_level.saturating_sub(1);
-                // log!("indent_level: {indent_level}, index: {index}, list_stack: {list_stack:?}");
                 let marker_and_pad = list_stack.last_mut().map(|ll| {
                     let marker = match ll.list_kind {
-                        ListKind::Unordered => {
-                            ul_markers.get(index).cloned()
-                                .unwrap_or_else(|| BULLET.into()) // default to bullet point
-                        }
+                        ListKind::Unordered => ul_markers
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| BULLET.into()),
                         ListKind::Ordered => {
-                            // Handle the "value" attribute, only relevant to <ol>.
                             let value_attr = node.find_attr_lc(live_id!(value));
                             let value: i32 = value_attr
                                 .and_then(|s| s.parse().ok())
                                 .unwrap_or(ll.li_count);
 
-                            // Handle the "type" attribute, only relevant to <ol>.
                             let type_attr = node.find_attr_lc(live_id!(type));
-                            let numbering_type = type_attr.and_then(OrderedListType::from_type_attribute);
+                            let numbering_type =
+                                type_attr.and_then(OrderedListType::from_type_attribute);
 
-                            // Generate this <li> marker string using either:
-                            // * the <li> element's numbering type, otherwise,
-                            // * the outer <ol>'s numbering type, otherwise,
-                            // * the DSL-specified numbering type for the current nesting level,
-                            // * otherwise a literal "#" character, which indicates malformed HTML.
-                            numbering_type.as_ref()
+                            numbering_type
+                                .as_ref()
                                 .or_else(|| ll.numbering_type.as_ref())
                                 .or_else(|| ol_markers.get(index))
                                 .map(|ol_type| ol_type.marker(value, ol_separator))
@@ -450,22 +391,20 @@ impl Html {
                     ll.li_count += 1;
                     (marker, ll.padding)
                 });
-                let (marker, pad) = marker_and_pad.as_ref()
+                let (marker, pad) = marker_and_pad
+                    .as_ref()
                     .map(|(m, p)| (m.as_str(), *p))
                     .unwrap_or((BULLET, 2.5));
-                
-                // Now, actually emit the list item.
-                // log!("marker: {marker}, pad: {pad}");
-                // ok so what if we only have drawn whitespace here
+
                 tf.new_line_collapsed(cx);
                 tf.begin_list_item(cx, marker, pad);
             }
             Some(x) => return (Some(x), trim_whitespace_in_text),
-            _ => ()
+            _ => (),
         }
         (None, trim_whitespace_in_text)
     }
-    
+
     fn handle_close_tag(
         cx: &mut Cx2d,
         tf: &mut TextFlow,
@@ -481,18 +420,16 @@ impl Html {
             | some_id!(h6) => {
                 let size = tf.font_sizes.pop();
                 tf.bold.pop();
-                tf.new_line_collapsed_with_spacing(cx, size.unwrap_or(0.0) as f64 * tf.heading_margin.bottom);
-                // we wanna add extra spacing here
-                
+                tf.new_line_collapsed_with_spacing(
+                    cx,
+                    size.unwrap_or(0.0) as f64 * tf.heading_margin.bottom,
+                );
             }
-            some_id!(b)
-            | some_id!(strong) => tf.bold.pop(),
-            some_id!(i)
-            | some_id!(em) => tf.italic.pop(),
+            some_id!(b) | some_id!(strong) => tf.bold.pop(),
+            some_id!(i) | some_id!(em) => tf.italic.pop(),
             some_id!(p) => {
                 let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
-                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.bottom);
-                //tf.new_line_collapsed(cx);
+                tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.bottom);
             }
             some_id!(blockquote) => {
                 tf.ignore_newlines.pop();
@@ -500,45 +437,39 @@ impl Html {
                 tf.end_quote(cx);
             }
             some_id!(code) => {
-                
                 tf.inline_code.pop();
-                //tf.top_drop.pop();
                 tf.font_sizes.pop();
                 tf.combine_spaces.pop();
-                tf.fixed.pop(); 
+                tf.fixed.pop();
             }
             some_id!(pre) => {
                 tf.fixed.pop();
                 tf.ignore_newlines.pop();
                 tf.combine_spaces.pop();
-                tf.end_code(cx);     
+                tf.end_code(cx);
             }
-            some_id!(sub)=>{
-                //tf.top_drop.pop();
+            some_id!(sub) => {
                 tf.font_sizes.pop();
             }
             some_id!(sup) => {
                 tf.font_sizes.pop();
             }
-            some_id!(ul)
-            | some_id!(ol) => {
+            some_id!(ul) | some_id!(ol) => {
                 list_stack.pop();
             }
             some_id!(li) => tf.end_list_item(cx),
             some_id!(u) => tf.underline.pop(),
-            some_id!(del)
-            | some_id!(s)
-            | some_id!(strike) => tf.strikethrough.pop(),
-            _ => ()
+            some_id!(del) | some_id!(s) | some_id!(strike) => tf.strikethrough.pop(),
+            _ => (),
         }
         None
     }
-    
+
     pub fn handle_text_node(
         cx: &mut Cx2d,
         tf: &mut TextFlow,
         node: &mut HtmlWalker,
-        trim: TrimWhitespaceInText,    
+        trim: TrimWhitespaceInText,
     ) -> bool {
         if let Some(text) = node.text() {
             let text = if trim == TrimWhitespaceInText::Trim {
@@ -548,8 +479,7 @@ impl Html {
             };
             tf.draw_text(cx, text);
             true
-        }
-        else {
+        } else {
             false
         }
     }
@@ -559,48 +489,54 @@ impl Widget for Html {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let tf = &mut self.text_flow;
         tf.begin(cx, walk);
-        // alright lets iterate the html doc and draw it
         let mut node = self.doc.new_walker();
         let mut auto_id = 0;
         while !node.done() {
             let mut trim = TrimWhitespaceInText::default();
-            match Self::handle_open_tag(cx, tf, &mut node, &mut self.list_stack, &self.ul_markers, &self.ol_markers, &self.ol_separator) {
+            match Self::handle_open_tag(
+                cx,
+                tf,
+                &mut node,
+                &mut self.list_stack,
+                &self.ul_markers,
+                &self.ol_markers,
+                &self.ol_separator,
+            ) {
                 (Some(_), _tws) => {
-                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id); 
+                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id);
                 }
                 (None, tws) => {
                     trim = tws;
                 }
             }
             match Self::handle_close_tag(cx, tf, &mut node, &mut self.list_stack) {
-                _ => ()
+                _ => (),
             }
             Self::handle_text_node(cx, tf, &mut node, trim);
             node.walk();
         }
         tf.end(cx);
         DrawStep::done()
-    }  
-     
+    }
+
     fn text(&self) -> String {
         self.body.as_ref().to_string()
     }
-    
-    fn set_text(&mut self, cx:&mut Cx, v:&str){
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.body.set(v);
         let mut errors = Some(Vec::new());
         self.doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
-        if errors.as_ref().unwrap().len()>0{
+        if errors.as_ref().unwrap().len() > 0 {
             log!("HTML parser returned errors {:?}", errors)
         }
         self.redraw(cx);
     }
-} 
-
+}
 
 fn handle_custom_widget(
     cx: &mut Cx2d,
@@ -618,9 +554,7 @@ fn handle_custom_widget(
     };
 
     let template = node.open_tag_nc().unwrap();
-    // lets grab the nodes+index from the walker
     let mut scope_with_attrs = Scope::with_props_index(doc, node.index);
-    // log!("FOUND CUSTOM WIDGET! template: {template:?}, id: {id:?}, attrs: {attrs:?}");
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
         item.set_text(cx, node.find_text().unwrap_or(""));
@@ -631,9 +565,10 @@ fn handle_custom_widget(
     node.jump_to_close();
 }
 
-
-#[derive(Debug, Clone, DefaultNone)]
+#[derive(Clone, Debug, Default)]
 pub enum HtmlLinkAction {
+    #[default]
+    None,
     Clicked {
         url: String,
         key_modifiers: KeyModifiers,
@@ -642,77 +577,86 @@ pub enum HtmlLinkAction {
         url: String,
         key_modifiers: KeyModifiers,
     },
-    None,
 }
 
-#[derive(Live, Widget)]
+#[derive(Script, Widget, Animator)]
 pub struct HtmlLink {
-    #[animator] animator: Animator,
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[apply_default]
+    animator: Animator,
 
-    // TODO: this is unusued; just here to invalidly satisfy the area provider.
-    //       I'm not sure how to implement `fn area()` given that it has multiple area rects.
-    #[redraw] #[area] area: Area,
+    #[redraw]
+    #[area]
+    area: Area,
 
-    // TODO: remove these if they're unneeded
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
 
-    #[rust] drawn_areas: SmallVec<[Area; 2]>,
-    #[live(true)] grab_key_focus: bool,
+    #[rust]
+    drawn_areas: SmallVec<[Area; 2]>,
+    #[live(true)]
+    grab_key_focus: bool,
 
-    #[live] hovered: f32,
-    #[live] pressed: f32,
+    #[live]
+    hovered: f32,
+    #[live]
+    pressed: f32,
 
     /// The default font color for the link when not hovered on or pressed.
-    #[live] color: Option<Vec4f>,
+    #[live]
+    color: Option<Vec4f>,
     /// The font color used when the link is hovered on.
-    #[live] hover_color: Option<Vec4f>,
+    #[live]
+    hover_color: Option<Vec4f>,
     /// The font color used when the link is pressed.
-    #[live] pressed_color: Option<Vec4f>,
+    #[live]
+    pressed_color: Option<Vec4f>,
 
-    #[live] pub text: ArcStringMut,
-    #[live] pub url: String,
+    #[live]
+    pub text: ArcStringMut,
+    #[live]
+    pub url: String,
 }
 
-impl LiveHook for HtmlLink {
-    // After an HtmlLink instance has been instantiated ("applied"),
-    // populate its struct fields from the `<a>` tag's attributes.
-    fn after_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        //log!("HtmlLink::after_apply(): apply.from: {:?}, apply.scope exists: {:?}", apply.from, apply.scope.is_some());
-        match apply.from {
-            ApplyFrom::NewFromDoc {..} => {
-                let scope = apply.scope.as_ref().unwrap();
-                let doc = scope.props.get::<HtmlDoc>().unwrap();
-                let mut walker = doc.new_walker_with_index(scope.index + 1);
-                
-                if let Some((lc, attr)) = walker.while_attr_lc() {
-                    match lc {
-                        live_id!(href)=> {
-                            self.url = attr.into()
-                        }
-                        _=>()
-                    }
+impl ScriptHook for HtmlLink {
+    fn on_after_new_scoped(&mut self, _vm: &mut ScriptVm, scope: &mut Scope) {
+        // After an HtmlLink instance has been instantiated,
+        // populate its struct fields from the `<a>` tag's attributes.
+        if let Some(doc) = scope.props.get::<HtmlDoc>() {
+            let mut walker = doc.new_walker_with_index(scope.index + 1);
+
+            if let Some((lc, attr)) = walker.while_attr_lc() {
+                match lc {
+                    live_id!(href) => self.url = attr.into(),
+                    _ => (),
                 }
             }
-            _ => ()
         }
+    }
+}
+
+impl WidgetMatchEvent for HtmlLink {
+    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions, _scope: &mut Scope) {
+        // No actions needed for now
     }
 }
 
 impl Widget for HtmlLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
-            // Currently, this conditional will never be true because the `scope`
-            // isn't yet populated with the Html's TextFlow.
             if let Some(tf) = scope.data.get_mut::<TextFlow>() {
                 tf.redraw(cx);
             } else {
                 self.drawn_areas.iter().for_each(|area| area.redraw(cx));
             }
-
-            // This won't work, as this widget owns no views, so redrawing it does nothing.
-            // self.redraw(cx);
         }
+
+        self.widget_match_event(cx, event, scope);
 
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
@@ -722,12 +666,9 @@ impl Widget for HtmlLink {
                             cx.set_key_focus(self.area());
                         }
                         self.animator_play(cx, ids!(hover.pressed));
-                    }
-                    // Fire a secondary click action on a right-click *down* event.
-                    else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
+                    } else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
                         cx.widget_action(
                             self.widget_uid(),
-                            &scope.path,
                             HtmlLinkAction::SecondaryClicked {
                                 url: self.url.clone(),
                                 key_modifiers: fe.modifiers,
@@ -745,7 +686,6 @@ impl Widget for HtmlLink {
                 Hit::FingerLongPress(_) => {
                     cx.widget_action(
                         self.widget_uid(),
-                        &scope.path,
                         HtmlLinkAction::SecondaryClicked {
                             url: self.url.clone(),
                             key_modifiers: Default::default(),
@@ -760,13 +700,9 @@ impl Widget for HtmlLink {
                         self.animator_play(cx, ids!(hover.off));
                     }
 
-                    if fu.is_over
-                        && fu.is_primary_hit()
-                        && fu.was_tap()
-                    {
+                    if fu.is_over && fu.is_primary_hit() && fu.was_tap() {
                         cx.widget_action(
                             self.widget_uid(),
-                            &scope.path,
                             HtmlLinkAction::Clicked {
                                 url: self.url.clone(),
                                 key_modifiers: fu.modifiers,
@@ -778,13 +714,12 @@ impl Widget for HtmlLink {
             }
         }
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         let Some(tf) = scope.data.get_mut::<TextFlow>() else {
             return DrawStep::done();
         };
 
-        // Here: the text flow has already began drawing, so we just need to draw the text.
         tf.underline.push();
         tf.areas_tracker.push_tracker();
         let mut pushed_color = false;
@@ -805,36 +740,42 @@ impl Widget for HtmlLink {
             }
         }
         tf.draw_text(cx, self.text.as_ref());
-        
+
         if pushed_color {
             tf.font_colors.pop();
         }
         tf.underline.pop();
 
         let (start, end) = tf.areas_tracker.pop_tracker();
-        
-        if self.drawn_areas.len() == end-start{
-            for i in 0..end-start{
-                self.drawn_areas[i] = cx.update_area_refs( self.drawn_areas[i], 
-                tf.areas_tracker.areas[i+start]);
+
+        if self.drawn_areas.len() == end - start {
+            for i in 0..end - start {
+                self.drawn_areas[i] =
+                    cx.update_area_refs(self.drawn_areas[i], tf.areas_tracker.areas[i + start]);
             }
-        }
-        else{
-            self.drawn_areas = SmallVec::from(
-                &tf.areas_tracker.areas[start..end]
-            );
+        } else {
+            self.drawn_areas = SmallVec::from(&tf.areas_tracker.areas[start..end]);
         }
 
         DrawStep::done()
     }
-    
+
     fn text(&self) -> String {
         self.text.as_ref().to_string()
     }
 
-    fn set_text(&mut self, cx:&mut Cx, v: &str) {
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
+    }
+}
+
+impl HtmlRef {
+    pub fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.set_text(cx, v)
     }
 }
 
@@ -882,10 +823,9 @@ enum ListKind {
 ///
 /// See the ["type" attribute docs](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/ol#attributes)
 /// for more info.
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[live_ignore]
+#[derive(Copy, Clone, Debug, Default)]
 pub enum OrderedListType {
-    #[pick] // must be the top-most attribute
+    #[default]
     /// Decimal integers: 1, 2, 3, 4, ...
     ///
     /// This *does* support negative integer values, e.g., -2, -1, 0, 1, 2 ...
@@ -899,11 +839,7 @@ pub enum OrderedListType {
     /// Lowercase roman numerals: i, ii, iii, iv, ...
     LowerRoman,
 }
-impl Default for OrderedListType {
-    fn default() -> Self {
-        OrderedListType::Numbers
-    }
-}
+
 impl OrderedListType {
     /// Returns the marker for the given count and separator character.
     ///
@@ -913,13 +849,18 @@ impl OrderedListType {
     /// * Roman numerals >= 4000 will return an integer number marker.
     pub fn marker(&self, count: i32, separator: &str) -> String {
         let to_number = || format!("{count}{separator}");
-        if count <= 0 { return to_number(); }
+        if count <= 0 {
+            return to_number();
+        }
 
         match self {
             OrderedListType::Numbers => to_number(),
-            // TODO: fix alpha implementations
-            OrderedListType::UpperAlpha => format!("{}{separator}", ('A' as u8 + count as u8 - 1) as char),
-            OrderedListType::LowerAlpha => format!("{}{separator}", ('a' as u8 + count as u8 - 1) as char),
+            OrderedListType::UpperAlpha => {
+                format!("{}{separator}", ('A' as u8 + count as u8 - 1) as char)
+            }
+            OrderedListType::LowerAlpha => {
+                format!("{}{separator}", ('a' as u8 + count as u8 - 1) as char)
+            }
             OrderedListType::UpperRoman => to_roman_numeral(count)
                 .map(|m| format!("{}{separator}", m))
                 .unwrap_or_else(to_number),
@@ -952,13 +893,24 @@ impl OrderedListType {
 pub fn to_roman_numeral(mut count: i32) -> Option<String> {
     const MAX: i32 = 3999;
     static NUMERALS: &[(i32, &str)] = &[
-        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
-        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
-        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"),
-        (1, "I")
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
     ];
 
-    if count <= 0 || count > MAX { return None; }
+    if count <= 0 || count > MAX {
+        return None;
+    }
     let mut output = String::new();
     for &(value, s) in NUMERALS.iter() {
         while count >= value {

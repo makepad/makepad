@@ -30,7 +30,7 @@ impl<'a> Table<'a> {
         // The number of ranges is `maxp.numGlyphs + 1`.
         //
         // Check for overflow first.
-        let mut total = if number_of_glyphs.get() == core::u16::MAX {
+        let mut total = if number_of_glyphs.get() == u16::MAX {
             number_of_glyphs.get()
         } else {
             number_of_glyphs.get() + 1
@@ -75,7 +75,7 @@ impl<'a> Table<'a> {
     #[inline]
     pub fn glyph_range(&self, glyph_id: GlyphId) -> Option<Range<usize>> {
         let glyph_id = glyph_id.0;
-        if glyph_id == core::u16::MAX {
+        if glyph_id == u16::MAX {
             return None;
         }
 
