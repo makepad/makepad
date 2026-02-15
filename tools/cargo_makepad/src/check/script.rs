@@ -19,6 +19,7 @@ use super::parser::{
     discover_script_blocks, max_rust_value_index, normalize_rust_interpolations,
     ScriptBlock, ScriptMacroKind,
 };
+use super::analyzer::analyze_opcodes;
 use super::runtime::{build_harness_plan, run_harness};
 
 thread_local! {
@@ -49,8 +50,34 @@ fn capture_parse_errors(
     }
 }
 
-/// Run tokenize + parse on script code, capturing any parse errors.
-fn parse_script(code: &str, file_name: &str) -> Vec<ScriptIssue> {
+/// Result from parsing script code with full opcode information.
+pub struct ParseResult {
+    /// Parse errors/warnings.
+    pub issues: Vec<ScriptIssue>,
+    /// Opcode stream from parser.
+    pub opcodes: Vec<ScriptValue>,
+    /// Source map: opcode index -> token index.
+    pub source_map: Vec<Option<u32>>,
+    /// File name for diagnostics.
+    pub file: String,
+    /// Tokenizer positions: token index -> (row, col).
+    tokenizer_positions: Vec<(u32, u32)>,
+}
+
+impl ParseResult {
+    /// Get source location (line, column) for an opcode index.
+    pub fn get_location(&self, opcode_idx: usize) -> (u32, u32) {
+        if let Some(Some(tok_idx)) = self.source_map.get(opcode_idx) {
+            if let Some(&(row, col)) = self.tokenizer_positions.get(*tok_idx as usize) {
+                return (row + 1, col + 1);
+            }
+        }
+        (1, 1)
+    }
+}
+
+/// Parse script code, returning full parse result including opcodes.
+pub fn parse_script_full(code: &str, file_name: &str) -> ParseResult {
     // Clear previous errors
     PARSE_ERRORS.with(|cell| cell.borrow_mut().clear());
 
@@ -73,14 +100,32 @@ fn parse_script(code: &str, file_name: &str) -> Vec<ScriptIssue> {
     let values: Vec<ScriptValue> = (0..=max_idx).map(|_| ScriptValue::default()).collect();
     parser.parse(&tokenizer, file_name, (0, 0), &values);
 
+    // Extract token positions before restoring logger
+    let tokenizer_positions: Vec<(u32, u32)> = (0..tokenizer.tokens.len())
+        .filter_map(|i| tokenizer.token_index_to_row_col(i as u32))
+        .collect();
+
     // Restore old logger
     {
         let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
         *guard = old_logger;
     }
 
-    // Return captured errors
-    PARSE_ERRORS.with(|cell| cell.take())
+    let issues = PARSE_ERRORS.with(|cell| cell.take());
+
+    ParseResult {
+        issues,
+        opcodes: parser.opcodes.clone(),
+        source_map: parser.source_map.clone(),
+        file: file_name.to_string(),
+        tokenizer_positions,
+    }
+}
+
+/// Run tokenize + parse on script code, capturing any parse errors.
+#[allow(dead_code)]
+fn parse_script(code: &str, file_name: &str) -> Vec<ScriptIssue> {
+    parse_script_full(code, file_name).issues
 }
 
 /// Count script_mod blocks per file.
@@ -96,19 +141,23 @@ fn count_script_mod_blocks(blocks: &[ScriptBlock]) -> HashMap<PathBuf, usize> {
 }
 
 
-/// Run parse-only checks for script blocks.
+/// Run parse and semantic analysis checks for script blocks.
 fn run_parse_checks(blocks: &[ScriptBlock]) -> Vec<ScriptIssue> {
     let mut issues = Vec::new();
 
     for block in blocks {
-        let mut block_issues = parse_script(&block.code, &block.path.display().to_string());
+        let file_name = block.path.display().to_string();
+        let result = parse_script_full(&block.code, &file_name);
 
-        // Adjust line numbers by block offset
-        for issue in &mut block_issues {
+        // Run semantic analysis on the opcodes first (before consuming result.issues)
+        let mut analysis_issues = analyze_opcodes(&result, block.line_offset);
+        issues.append(&mut analysis_issues);
+
+        // Add parse errors (adjusted for block offset)
+        for mut issue in result.issues {
             issue.line += block.line_offset;
+            issues.push(issue);
         }
-
-        issues.extend(block_issues);
     }
 
     issues
@@ -301,5 +350,25 @@ mod tests {
         let issues = parse_script(code, "test.splash");
         // Should have no parse errors for valid script
         assert!(issues.is_empty() || issues.iter().all(|i| i.is_warning()));
+    }
+
+    #[test]
+    fn test_parse_script_full_returns_opcodes() {
+        let code = "x = 1";
+        let result = parse_script_full(code, "test.splash");
+        // Should have opcodes for the assignment
+        assert!(!result.opcodes.is_empty(), "Expected opcodes to be generated");
+        // Should have no parse errors
+        assert!(result.issues.is_empty(), "Expected no parse errors");
+    }
+
+    #[test]
+    fn test_parse_result_get_location() {
+        let code = "x = 1\ny = 2";
+        let result = parse_script_full(code, "test.splash");
+        // Should be able to get location for first opcode
+        let (line, col) = result.get_location(0);
+        assert!(line >= 1, "Line should be at least 1");
+        assert!(col >= 1, "Column should be at least 1");
     }
 }

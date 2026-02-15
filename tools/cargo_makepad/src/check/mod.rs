@@ -2,6 +2,7 @@
 //!
 //! Provides script validation and cross-platform build checking.
 
+mod analyzer;
 mod cargo;
 mod diagnostic;
 mod error;
