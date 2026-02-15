@@ -14,7 +14,7 @@ use makepad_zune_png::{
     makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
     PngEncoder,
 };
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JIT shader function pointer types
@@ -75,6 +75,13 @@ struct RowChunk {
     end: usize,
 }
 
+#[derive(Clone, Copy)]
+struct ShadedTriangle {
+    v0_idx: usize,
+    v1_idx: usize,
+    v2_idx: usize,
+}
+
 fn configured_render_threads(default_threads: usize) -> usize {
     // Efficiency-first default: avoid blasting all cores unless explicitly requested.
     let auto_threads = default_threads.min(4).max(1);
@@ -92,40 +99,155 @@ fn configured_parallel_min_tris(default_min: usize) -> usize {
         .unwrap_or(default_min)
 }
 
-fn compute_row_chunks(height: usize, desired_threads: usize) -> Vec<RowChunk> {
-    const MIN_ROWS_PER_CHUNK: usize = 32;
-    if height == 0 {
+fn configured_tile_size(default_size: usize) -> usize {
+    std::env::var("MAKEPAD_HEADLESS_TILE_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 8)
+        .unwrap_or(default_size)
+}
+
+fn compute_index_chunks(total: usize, desired_chunks: usize, min_items_per_chunk: usize) -> Vec<RowChunk> {
+    if total == 0 {
         return Vec::new();
     }
-    let max_chunks = (height / MIN_ROWS_PER_CHUNK).max(1);
-    let chunk_count = desired_threads.max(1).min(max_chunks);
+    let max_chunks = (total / min_items_per_chunk.max(1)).max(1);
+    let chunk_count = desired_chunks.max(1).min(max_chunks);
     if chunk_count <= 1 {
         return vec![RowChunk {
             start: 0,
-            end: height,
+            end: total,
         }];
     }
 
     let mut chunks = Vec::with_capacity(chunk_count);
-    let base = height / chunk_count;
-    let rem = height % chunk_count;
-    let mut y = 0usize;
+    let base = total / chunk_count;
+    let rem = total % chunk_count;
+    let mut start = 0usize;
     for i in 0..chunk_count {
-        let rows = base + usize::from(i < rem);
-        let start = y;
-        let end = (y + rows).min(height);
+        let items = base + usize::from(i < rem);
+        let end = (start + items).min(total);
         if end > start {
             chunks.push(RowChunk { start, end });
         }
-        y = end;
+        start = end;
     }
     if chunks.is_empty() {
         chunks.push(RowChunk {
             start: 0,
-            end: height,
+            end: total,
         });
     }
     chunks
+}
+
+fn compute_row_chunks(height: usize, desired_threads: usize) -> Vec<RowChunk> {
+    compute_index_chunks(height, desired_threads, 32)
+}
+
+fn build_triangle_tile_bins(
+    width: usize,
+    height: usize,
+    tile_size: usize,
+    indices: &[u32],
+    instance_count: usize,
+    vertex_count: usize,
+    shaded_positions: &[[f32; 4]],
+) -> (Vec<ShadedTriangle>, Vec<Vec<usize>>, usize, usize) {
+    if width == 0 || height == 0 || tile_size == 0 {
+        return (Vec::new(), Vec::new(), 0, 0);
+    }
+    let tiles_x = width.div_ceil(tile_size);
+    let tiles_y = height.div_ceil(tile_size);
+    let mut bins = vec![Vec::<usize>::new(); tiles_x * tiles_y];
+    let mut tris = Vec::<ShadedTriangle>::new();
+    let tri_count = indices.len() / 3;
+    let w = width as f32;
+    let h = height as f32;
+
+    let ndc_to_screen = |pos: &[f32; 4]| -> (f32, f32) {
+        let inv_w = if pos[3].abs() > f32::EPSILON {
+            1.0 / pos[3]
+        } else {
+            0.0
+        };
+        let ndc_x = pos[0] * inv_w;
+        let ndc_y = pos[1] * inv_w;
+        let sx = (ndc_x * 0.5 + 0.5) * w;
+        let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * h;
+        (sx, sy)
+    };
+
+    for inst_idx in 0..instance_count {
+        let inst_base = inst_idx * vertex_count;
+        for tri_idx in 0..tri_count {
+            let i0 = indices[tri_idx * 3] as usize;
+            let i1 = indices[tri_idx * 3 + 1] as usize;
+            let i2 = indices[tri_idx * 3 + 2] as usize;
+            if i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count {
+                continue;
+            }
+
+            let v0_idx = inst_base + i0;
+            let v1_idx = inst_base + i1;
+            let v2_idx = inst_base + i2;
+            if v0_idx >= shaded_positions.len()
+                || v1_idx >= shaded_positions.len()
+                || v2_idx >= shaded_positions.len()
+            {
+                continue;
+            }
+
+            let p0 = &shaded_positions[v0_idx];
+            let p1 = &shaded_positions[v1_idx];
+            let p2 = &shaded_positions[v2_idx];
+            let (sx0, sy0) = ndc_to_screen(p0);
+            let (sx1, sy1) = ndc_to_screen(p1);
+            let (sx2, sy2) = ndc_to_screen(p2);
+
+            let area = (sx2 - sx0) * (sy1 - sy0) - (sy2 - sy0) * (sx1 - sx0);
+            if area.abs() <= f32::EPSILON {
+                continue;
+            }
+
+            let tri_min_x = sx0.min(sx1).min(sx2).floor();
+            let tri_min_y = sy0.min(sy1).min(sy2).floor();
+            let tri_max_x = sx0.max(sx1).max(sx2).ceil();
+            let tri_max_y = sy0.max(sy1).max(sy2).ceil();
+
+            if tri_max_x < 0.0 || tri_max_y < 0.0 || tri_min_x > (w - 1.0) || tri_min_y > (h - 1.0) {
+                continue;
+            }
+
+            let min_x = tri_min_x.max(0.0).min(w - 1.0) as usize;
+            let min_y = tri_min_y.max(0.0).min(h - 1.0) as usize;
+            let max_x = tri_max_x.max(0.0).min(w - 1.0) as usize;
+            let max_y = tri_max_y.max(0.0).min(h - 1.0) as usize;
+            if max_x < min_x || max_y < min_y {
+                continue;
+            }
+
+            let tri_index = tris.len();
+            tris.push(ShadedTriangle {
+                v0_idx,
+                v1_idx,
+                v2_idx,
+            });
+
+            let tx0 = min_x / tile_size;
+            let ty0 = min_y / tile_size;
+            let tx1 = max_x / tile_size;
+            let ty1 = max_y / tile_size;
+            for ty in ty0..=ty1 {
+                let row_base = ty * tiles_x;
+                for tx in tx0..=tx1 {
+                    bins[row_base + tx].push(tri_index);
+                }
+            }
+        }
+    }
+
+    (tris, bins, tiles_x, tiles_y)
 }
 
 #[derive(Default)]
@@ -315,6 +437,8 @@ fn rasterize_instances_rows(
                     height,
                     row_start,
                     row_end,
+                    0,
+                    width,
                     color_chunk,
                     depth_chunk,
                     p0,
@@ -358,6 +482,8 @@ fn rasterize_instances_rows(
                     height,
                     row_start,
                     row_end,
+                    0,
+                    width,
                     color_chunk,
                     depth_chunk,
                     p0,
@@ -369,6 +495,259 @@ fn rasterize_instances_rows(
                     flat_slots,
                     &mut frag_closure,
                 );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_tiled_rows(
+    color_chunk: &mut [[f32; 4]],
+    depth_chunk: &mut [f32],
+    width: usize,
+    height: usize,
+    chunk_row_start: usize,
+    chunk_row_end: usize,
+    tile_size: usize,
+    tiles_x: usize,
+    tile_row_start: usize,
+    tile_row_end: usize,
+    tile_bins: &[Vec<usize>],
+    shaded_triangles: &[ShadedTriangle],
+    varying_slots: usize,
+    shaded_positions: &[[f32; 4]],
+    shaded_varyings: &[f32],
+    flat_slots: usize,
+    rcx_template: &[u8],
+    rcx_size: usize,
+    rcx_f32s: usize,
+    rcx_vary_offset: usize,
+    rcx_quad_mode_offset: usize,
+    rcx_frag_offset: usize,
+    uses_derivatives: bool,
+    fragment_fn: FragmentFn,
+    debug_text: bool,
+    is_draw_text_shader: bool,
+) {
+    let mut rcx_buf = rcx_template.to_vec();
+    let mut dx_varyings = if uses_derivatives {
+        vec![0.0f32; varying_slots]
+    } else {
+        Vec::new()
+    };
+    let mut dy_varyings = if uses_derivatives {
+        vec![0.0f32; varying_slots]
+    } else {
+        Vec::new()
+    };
+    let shift_start = flat_slots.min(varying_slots);
+    let vary_bytes = varying_slots * std::mem::size_of::<f32>();
+    let mut debug_text_prints = 0usize;
+
+    for tile_y in tile_row_start..tile_row_end {
+        let y0 = tile_y * tile_size;
+        let y1 = ((tile_y + 1) * tile_size).min(height);
+        let row_start = y0.max(chunk_row_start);
+        let row_end = y1.min(chunk_row_end);
+        if row_end <= row_start {
+            continue;
+        }
+        let local_row_offset = (row_start - chunk_row_start) * width;
+        let local_row_len = (row_end - row_start) * width;
+        let color_rows = &mut color_chunk[local_row_offset..local_row_offset + local_row_len];
+        let depth_rows = &mut depth_chunk[local_row_offset..local_row_offset + local_row_len];
+
+        let row_base = tile_y * tiles_x;
+        for tile_x in 0..tiles_x {
+            let x0 = tile_x * tile_size;
+            let x1 = ((tile_x + 1) * tile_size).min(width);
+            let tri_ids = &tile_bins[row_base + tile_x];
+            if tri_ids.is_empty() {
+                continue;
+            }
+
+            for &tri_idx in tri_ids {
+                if tri_idx >= shaded_triangles.len() {
+                    continue;
+                }
+                let tri = shaded_triangles[tri_idx];
+                if tri.v0_idx >= shaded_positions.len()
+                    || tri.v1_idx >= shaded_positions.len()
+                    || tri.v2_idx >= shaded_positions.len()
+                {
+                    continue;
+                }
+
+                let v0_off = tri.v0_idx * varying_slots;
+                let v1_off = tri.v1_idx * varying_slots;
+                let v2_off = tri.v2_idx * varying_slots;
+                if v0_off + varying_slots > shaded_varyings.len()
+                    || v1_off + varying_slots > shaded_varyings.len()
+                    || v2_off + varying_slots > shaded_varyings.len()
+                {
+                    continue;
+                }
+
+                let p0 = &shaded_positions[tri.v0_idx];
+                let p1 = &shaded_positions[tri.v1_idx];
+                let p2 = &shaded_positions[tri.v2_idx];
+                let vary0 = &shaded_varyings[v0_off..v0_off + varying_slots];
+                let vary1 = &shaded_varyings[v1_off..v1_off + varying_slots];
+                let vary2 = &shaded_varyings[v2_off..v2_off + varying_slots];
+
+                if uses_derivatives {
+                    let mut frag_closure = |varyings: &[f32],
+                                            derivs: &TriangleDerivatives,
+                                            lane_x: u32,
+                                            lane_y: u32,
+                                            x: i32,
+                                            y: i32|
+                     -> Option<[f32; 4]> {
+                        for i in 0..varyings.len() {
+                            if i < shift_start {
+                                dx_varyings[i] = varyings[i];
+                                dy_varyings[i] = varyings[i];
+                            } else {
+                                dx_varyings[i] = varyings[i] + derivs.dvary_dx[i];
+                                dy_varyings[i] = varyings[i] + derivs.dvary_dy[i];
+                            }
+                        }
+
+                        clear_quad_buffers(&mut rcx_buf, rcx_quad_mode_offset, rcx_size);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
+                        write_varyings(
+                            &mut rcx_buf,
+                            rcx_vary_offset,
+                            &dx_varyings,
+                            vary_bytes,
+                            rcx_size,
+                        );
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset, 0);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                        unsafe {
+                            fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                        }
+
+                        write_varyings(
+                            &mut rcx_buf,
+                            rcx_vary_offset,
+                            &dy_varyings,
+                            vary_bytes,
+                            rcx_size,
+                        );
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset, 1);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                        unsafe {
+                            fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                        }
+
+                        write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                        let write_pixel =
+                            unsafe { fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32) };
+                        if write_pixel == 0 {
+                            return None;
+                        }
+
+                        if rcx_frag_offset + 16 <= rcx_size {
+                            let color_ptr =
+                                unsafe { rcx_buf.as_ptr().add(rcx_frag_offset) as *const [f32; 4] };
+                            let color = unsafe { *color_ptr };
+                            if debug_text && is_draw_text_shader && debug_text_prints < 120 {
+                                let text_t_slot = shift_start + 2;
+                                if text_t_slot + 1 < varyings.len() {
+                                    let a = color[3];
+                                    if a > 0.0 && a < 1.0 {
+                                        eprintln!(
+                                            "[headless][draw_text] px=({}, {}) lane=({}, {}) t=({:.6}, {:.6}) dFdx(t)=({:.6}, {:.6}) dFdy(t)=({:.6}, {:.6}) a={:.5}",
+                                            x,
+                                            y,
+                                            lane_x,
+                                            lane_y,
+                                            varyings[text_t_slot],
+                                            varyings[text_t_slot + 1],
+                                            derivs.dvary_dx[text_t_slot],
+                                            derivs.dvary_dx[text_t_slot + 1],
+                                            derivs.dvary_dy[text_t_slot],
+                                            derivs.dvary_dy[text_t_slot + 1],
+                                            a,
+                                        );
+                                        debug_text_prints += 1;
+                                    }
+                                }
+                            }
+                            Some(color)
+                        } else {
+                            Some([0.0, 0.0, 0.0, 0.0])
+                        }
+                    };
+
+                    rasterize_triangle_rows(
+                        width,
+                        height,
+                        row_start,
+                        row_end,
+                        x0,
+                        x1,
+                        color_rows,
+                        depth_rows,
+                        p0,
+                        vary0,
+                        p1,
+                        vary1,
+                        p2,
+                        vary2,
+                        flat_slots,
+                        &mut frag_closure,
+                    );
+                } else {
+                    let mut frag_closure = |varyings: &[f32],
+                                            _derivs: &TriangleDerivatives,
+                                            lane_x: u32,
+                                            lane_y: u32,
+                                            _x: i32,
+                                            _y: i32|
+                     -> Option<[f32; 4]> {
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
+                        write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
+                        set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                        let write_pixel =
+                            unsafe { fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32) };
+                        if write_pixel == 0 {
+                            return None;
+                        }
+                        if rcx_frag_offset + 16 <= rcx_size {
+                            let color_ptr =
+                                unsafe { rcx_buf.as_ptr().add(rcx_frag_offset) as *const [f32; 4] };
+                            Some(unsafe { *color_ptr })
+                        } else {
+                            Some([0.0, 0.0, 0.0, 0.0])
+                        }
+                    };
+
+                    rasterize_triangle_rows(
+                        width,
+                        height,
+                        row_start,
+                        row_end,
+                        x0,
+                        x1,
+                        color_rows,
+                        depth_rows,
+                        p0,
+                        vary0,
+                        p1,
+                        vary1,
+                        p2,
+                        vary2,
+                        flat_slots,
+                        &mut frag_closure,
+                    );
+                }
             }
         }
     }
@@ -844,6 +1223,7 @@ impl Cx {
 
             let flat_slots = os_shader.flat_varying_slots.min(varying_slots);
             let uses_derivatives = os_shader.uses_derivatives;
+            let tile_size = configured_tile_size(64).min(fb.width.max(fb.height)).max(8);
             let row_chunks = compute_row_chunks(fb.height, render_threads);
             let use_parallel = row_chunks.len() > 1
                 && tri_count.saturating_mul(instance_count) >= parallel_min_tris
@@ -858,104 +1238,144 @@ impl Cx {
 
             let raster_start = std::time::Instant::now();
             if use_parallel {
-                let pool = self.os.render_pool.as_ref().unwrap();
-                let (done_tx, done_rx) = mpsc::channel::<()>();
-                let width = fb.width;
-                let height = fb.height;
+                let (shaded_triangles, tile_bins, tiles_x, tiles_y) = build_triangle_tile_bins(
+                    fb.width,
+                    fb.height,
+                    tile_size,
+                    indices,
+                    instance_count,
+                    vertex_count,
+                    &shaded_positions,
+                );
+                let tile_row_chunks = compute_index_chunks(tiles_y, render_threads, 1);
 
-                let color_ptr = fb.color.as_mut_ptr() as usize;
-                let depth_ptr = fb.depth.as_mut_ptr() as usize;
+                if !shaded_triangles.is_empty() && tiles_x > 0 && !tile_row_chunks.is_empty() {
+                    let shaded_triangles = Arc::new(shaded_triangles);
+                    let tile_bins = Arc::new(tile_bins);
+                    let pool = self.os.render_pool.as_ref().unwrap();
+                    let (done_tx, done_rx) = mpsc::channel::<()>();
+                    let width = fb.width;
+                    let height = fb.height;
+                    let color_ptr = fb.color.as_mut_ptr() as usize;
+                    let depth_ptr = fb.depth.as_mut_ptr() as usize;
+                    let shaded_positions_ptr = shaded_positions.as_ptr() as usize;
+                    let shaded_positions_len = shaded_positions.len();
+                    let shaded_varyings_ptr = shaded_varyings.as_ptr() as usize;
+                    let shaded_varyings_len = shaded_varyings.len();
+                    let rcx_template_ptr = rcx_template.as_ptr() as usize;
+                    let rcx_template_len = rcx_template.len();
 
-                let indices_ptr = indices.as_ptr() as usize;
-                let indices_len = indices.len();
-                let shaded_positions_ptr = shaded_positions.as_ptr() as usize;
-                let shaded_positions_len = shaded_positions.len();
-                let shaded_varyings_ptr = shaded_varyings.as_ptr() as usize;
-                let shaded_varyings_len = shaded_varyings.len();
-                let rcx_template_ptr = rcx_template.as_ptr() as usize;
-                let rcx_template_len = rcx_template.len();
+                    for chunk in tile_row_chunks.iter().copied() {
+                        let done_tx = done_tx.clone();
+                        let shaded_triangles = shaded_triangles.clone();
+                        let tile_bins = tile_bins.clone();
+                        pool.execute(move |_| {
+                            let row_start = chunk.start * tile_size;
+                            let row_end = (chunk.end * tile_size).min(height);
+                            let row_count = row_end.saturating_sub(row_start);
+                            if row_count == 0 {
+                                let _ = done_tx.send(());
+                                return;
+                            }
 
-                for chunk in row_chunks.iter().copied() {
-                    let done_tx = done_tx.clone();
-                    pool.execute(move |_| {
-                        let row_count = chunk.end.saturating_sub(chunk.start);
-                        if row_count == 0 {
+                            let pixel_offset = row_start * width;
+                            let pixel_count = row_count * width;
+                            let color_chunk = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    (color_ptr as *mut [f32; 4]).add(pixel_offset),
+                                    pixel_count,
+                                )
+                            };
+                            let depth_chunk = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    (depth_ptr as *mut f32).add(pixel_offset),
+                                    pixel_count,
+                                )
+                            };
+                            let shaded_positions = unsafe {
+                                std::slice::from_raw_parts(
+                                    shaded_positions_ptr as *const [f32; 4],
+                                    shaded_positions_len,
+                                )
+                            };
+                            let shaded_varyings = unsafe {
+                                std::slice::from_raw_parts(
+                                    shaded_varyings_ptr as *const f32,
+                                    shaded_varyings_len,
+                                )
+                            };
+                            let rcx_template = unsafe {
+                                std::slice::from_raw_parts(
+                                    rcx_template_ptr as *const u8,
+                                    rcx_template_len,
+                                )
+                            };
+
+                            rasterize_tiled_rows(
+                                color_chunk,
+                                depth_chunk,
+                                width,
+                                height,
+                                row_start,
+                                row_end,
+                                tile_size,
+                                tiles_x,
+                                chunk.start,
+                                chunk.end,
+                                tile_bins.as_slice(),
+                                shaded_triangles.as_slice(),
+                                varying_slots,
+                                shaded_positions,
+                                shaded_varyings,
+                                flat_slots,
+                                rcx_template,
+                                rcx_size,
+                                rcx_f32s,
+                                rcx_vary_offset,
+                                rcx_quad_mode_offset,
+                                rcx_frag_offset,
+                                uses_derivatives,
+                                fragment_fn,
+                                debug_text,
+                                is_draw_text_shader,
+                            );
+
                             let _ = done_tx.send(());
-                            return;
-                        }
-                        let pixel_offset = chunk.start * width;
-                        let pixel_count = row_count * width;
-
-                        let color_chunk = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                (color_ptr as *mut [f32; 4]).add(pixel_offset),
-                                pixel_count,
-                            )
-                        };
-                        let depth_chunk = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                (depth_ptr as *mut f32).add(pixel_offset),
-                                pixel_count,
-                            )
-                        };
-
-                        let indices = unsafe {
-                            std::slice::from_raw_parts(indices_ptr as *const u32, indices_len)
-                        };
-                        let shaded_positions = unsafe {
-                            std::slice::from_raw_parts(
-                                shaded_positions_ptr as *const [f32; 4],
-                                shaded_positions_len,
-                            )
-                        };
-                        let shaded_varyings = unsafe {
-                            std::slice::from_raw_parts(
-                                shaded_varyings_ptr as *const f32,
-                                shaded_varyings_len,
-                            )
-                        };
-                        let rcx_template = unsafe {
-                            std::slice::from_raw_parts(
-                                rcx_template_ptr as *const u8,
-                                rcx_template_len,
-                            )
-                        };
-
-                        rasterize_instances_rows(
-                            color_chunk,
-                            depth_chunk,
-                            width,
-                            height,
-                            chunk.start,
-                            chunk.end,
-                            indices,
-                            instance_count,
-                            vertex_count,
-                            varying_slots,
-                            shaded_positions,
-                            shaded_varyings,
-                            flat_slots,
-                            rcx_template,
-                            rcx_size,
-                            rcx_f32s,
-                            rcx_vary_offset,
-                            rcx_quad_mode_offset,
-                            rcx_frag_offset,
-                            uses_derivatives,
-                            fragment_fn,
-                            debug_text,
-                            is_draw_text_shader,
-                        );
-
-                        let _ = done_tx.send(());
-                    });
-                }
-
-                drop(done_tx);
-                for _ in 0..row_chunks.len() {
-                    if done_rx.recv().is_err() {
-                        break;
+                        });
                     }
+
+                    drop(done_tx);
+                    for _ in 0..tile_row_chunks.len() {
+                        if done_rx.recv().is_err() {
+                            break;
+                        }
+                    }
+                } else {
+                    rasterize_instances_rows(
+                        fb.color.as_mut_slice(),
+                        fb.depth.as_mut_slice(),
+                        fb.width,
+                        fb.height,
+                        0,
+                        fb.height,
+                        indices,
+                        instance_count,
+                        vertex_count,
+                        varying_slots,
+                        &shaded_positions,
+                        &shaded_varyings,
+                        flat_slots,
+                        &rcx_template,
+                        rcx_size,
+                        rcx_f32s,
+                        rcx_vary_offset,
+                        rcx_quad_mode_offset,
+                        rcx_frag_offset,
+                        uses_derivatives,
+                        fragment_fn,
+                        debug_text,
+                        is_draw_text_shader,
+                    );
                 }
             } else {
                 rasterize_instances_rows(
