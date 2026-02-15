@@ -623,7 +623,7 @@ impl Cx {
             }
             if self.need_redrawing() {
                 self.call_draw_event(time_now);
-                self.opengl_compile_shaders();
+                self.compile_shaders_for_active_backend();
             }
 
             if self.os.first_after_resize {
@@ -632,6 +632,55 @@ impl Cx {
             }
 
             self.handle_repaint();
+        }
+    }
+
+    fn compile_shaders_for_active_backend(&mut self) {
+        #[cfg(use_vulkan)]
+        {
+            // Vulkan mode is currently a staged path:
+            // run WGSL->SPIR-V compilation via the OpenGL shader compile entry point.
+            self.opengl_compile_shaders();
+            return;
+        }
+
+        #[cfg(not(use_vulkan))]
+        {
+            self.opengl_compile_shaders();
+        }
+    }
+
+    fn draw_pass_to_window_for_active_backend(&mut self, draw_pass_id: DrawPassId) {
+        #[cfg(use_vulkan)]
+        {
+            // TODO: route draw list execution through the Vulkan renderer.
+            self.draw_pass_to_fullscreen(draw_pass_id);
+            return;
+        }
+
+        #[cfg(not(use_vulkan))]
+        {
+            self.draw_pass_to_fullscreen(draw_pass_id);
+        }
+    }
+
+    fn present_window_for_active_backend(&mut self) {
+        #[cfg(use_vulkan)]
+        {
+            // TODO: replace EGL swap with Vulkan queue present.
+            unsafe {
+                if let Some(display) = &mut self.os.display {
+                    (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                }
+            }
+            return;
+        }
+
+        #[cfg(not(use_vulkan))]
+        unsafe {
+            if let Some(display) = &mut self.os.display {
+                (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+            }
         }
     }
 
@@ -721,6 +770,13 @@ impl Cx {
             unsafe { attach_jni_env() };
             let mut cx = startup();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
+
+            #[cfg(use_vulkan)]
+            crate::log!(
+                "Android backend mode: OpenGL renderer + Vulkan WGSL/SPIR-V shader validation"
+            );
+            #[cfg(not(use_vulkan))]
+            crate::log!("Android backend mode: OpenGL renderer");
 
             cx.os.activity_thread_id = Some(activity_thread_id);
             cx.os.render_thread_id =
@@ -975,17 +1031,10 @@ impl Cx {
                 CxDrawPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
                     let start = self.seconds_since_app_start();
-                    self.draw_pass_to_fullscreen(*draw_pass_id);
+                    self.draw_pass_to_window_for_active_backend(*draw_pass_id);
                     let end = self.seconds_since_app_start();
                     Cx::send_studio_message(AppToStudio::GPUSample(GPUSample { start, end }));
-                    unsafe {
-                        if let Some(display) = &mut self.os.display {
-                            (display.libegl.eglSwapBuffers.unwrap())(
-                                display.egl_display,
-                                display.surface,
-                            );
-                        }
-                    }
+                    self.present_window_for_active_backend();
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);

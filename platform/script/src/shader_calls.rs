@@ -624,12 +624,11 @@ impl ShaderFnCompiler {
                     if fn_args.len() > 0 {
                         write!(fn_args, ", ").ok();
                     }
-                    write!(fn_args, "_self:ptr<function, ").ok();
+                    write!(fn_args, "_self:").ok();
                     if let Some(name) = vm.bx.heap.pod_type_name(ty) {
                         let name = output.backend.map_pod_name(name);
-                        write!(fn_args, "{}", name).ok();
+                        write!(fn_args, "ptr<function, {}>", name).ok();
                     }
-                    write!(fn_args, ">").ok();
                 }
                 ShaderBackend::Metal => {
                     if let Some(name) = vm.bx.heap.pod_type_name(ty) {
@@ -1120,6 +1119,18 @@ impl ShaderFnCompiler {
             output.uses_derivatives = true;
         }
 
+        if matches!(output.backend, ShaderBackend::Wgsl)
+            && name == id!(modf)
+            && formatted_args.len() == 2
+        {
+            // Script `modf(x, y)` means float modulo (fmod), while WGSL's `modf`
+            // builtin is fractional decomposition. Emit remainder expression directly.
+            write!(out, "(({}) % ({}))", formatted_args[0], formatted_args[1]).ok();
+            let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
+            self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
+            return;
+        }
+
         // For Rust backend, dFdx/dFdy are emitted as inline record/compute blocks
         // using the 3-pass quad approach. In recording passes (quad_mode 0=dx, 1=dy),
         // the value is stored into quad_dx_buf/quad_dy_buf. In compute pass (mode 2),
@@ -1449,8 +1460,9 @@ impl ShaderFnCompiler {
                     // Method call on a Pod instance
                     if let Some(pod_ty) = pod_ty_opt {
                         let self_s_slice = if self_id == id!(self) {
-                            // In Rust backend, _self is *mut T (raw pointer)
-                            if matches!(output.backend, ShaderBackend::Rust) {
+                            // Rust and WGSL pass self as a pointer.
+                            if matches!(output.backend, ShaderBackend::Rust | ShaderBackend::Wgsl)
+                            {
                                 "(*_self)"
                             } else {
                                 "_self"

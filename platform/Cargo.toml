@@ -59,6 +59,7 @@ wayland-egl = { path = "../libs/linux/wayland-egl" }
 ## in order to guarantee that only one instance of each crate exists in the app binary.
 makepad-jni-sys = {version = "0.4.0"}
 makepad-android-state = {version = "0.1.0"}
+naga = {version = "27.0", features = ["wgsl-in", "spv-out"]}
 
 [target.'cfg(target_env = "ohos")'.dependencies]
 hilog-sys = "0.1.1"

@@ -102,7 +102,10 @@ impl LinuxSharedSoftwareBuffer {
         let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) };
 
         let len_i64 = i64::try_from(len).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "software buffer too large")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "software buffer too large",
+            )
         })?;
         if unsafe { ftruncate(fd.as_raw_fd(), len_i64) } != 0 {
             return Err(std::io::Error::last_os_error());
@@ -574,12 +577,12 @@ impl SharedSwapchain {
         alloc_width: u32,
         alloc_height: u32,
     ) -> Result<LinuxOwnedImage, SharedSwapchainCreateError> {
-        let stride = alloc_width
-            .checked_mul(4)
-            .ok_or_else(|| SharedSwapchainCreateError::SoftwareFallback(std::io::Error::new(
+        let stride = alloc_width.checked_mul(4).ok_or_else(|| {
+            SharedSwapchainCreateError::SoftwareFallback(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "software fallback stride overflow",
-            )))?;
+            ))
+        })?;
         let len = usize::try_from(stride)
             .ok()
             .and_then(|stride| {
@@ -599,10 +602,10 @@ impl SharedSwapchain {
             None => true,
         };
         if needs_new_buffer {
-            host_image.software_buffer =
-                Some(LinuxSharedSoftwareBuffer::create(len, stride).map_err(
-                    SharedSwapchainCreateError::SoftwareFallback,
-                )?);
+            host_image.software_buffer = Some(
+                LinuxSharedSoftwareBuffer::create(len, stride)
+                    .map_err(SharedSwapchainCreateError::SoftwareFallback)?,
+            );
         }
 
         let send_fd = host_image
@@ -712,6 +715,18 @@ pub struct SharedSwapchain {
     target_os = "windows"
 )))]
 impl SharedSwapchain {
+    pub fn from_host_swapchain(host: &HostSwapchain, _cx: &mut crate::cx::Cx) -> Self {
+        Self {
+            window_id: host.window_id,
+            alloc_width: host.alloc_width,
+            alloc_height: host.alloc_height,
+            presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+                id: host.presentable_images[i].id,
+                _dummy: None,
+            }),
+        }
+    }
+
     pub fn new(window_id: usize, alloc_width: u32, alloc_height: u32) -> Self {
         Self {
             window_id,
@@ -1063,7 +1078,10 @@ impl WindowKindId {
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost {
-    CreateWindow { window_id: usize, kind_id: usize },
+    CreateWindow {
+        window_id: usize,
+        kind_id: usize,
+    },
     ReadyToStart,
     RequestAnimationFrame,
     SetCursor(MouseCursor),

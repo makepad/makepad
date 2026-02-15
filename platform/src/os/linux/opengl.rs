@@ -5,8 +5,8 @@ use {
         draw_list::DrawListId,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         draw_shader::{
-            CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId,
-            DrawShaderAttrFormat, DrawShaderTextureInput,
+            CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat,
+            DrawShaderId, DrawShaderTextureInput,
         },
         draw_vars::DrawVars,
         event::{Event, TextureHandleReadyEvent},
@@ -104,6 +104,34 @@ impl DrawVars {
                 return;
             }
 
+            #[cfg(all(target_os = "android", use_vulkan))]
+            {
+                static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+                LOG_ONCE.call_once(|| {
+                    crate::log!(
+                        "MAKEPAD=vulkan active: running Android WGSL->SPIR-V shader compilation path"
+                    );
+                });
+            }
+
+            #[cfg(all(target_os = "android", use_vulkan))]
+            if let Err(err) =
+                crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(vm, io_self)
+            {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
+                const MAX_ERROR_LOGS: usize = 1;
+                let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                if index < MAX_ERROR_LOGS {
+                    crate::error!("Vulkan WGSL/SPIR-V compilation failed: {}", err);
+                } else if index == MAX_ERROR_LOGS {
+                    crate::warning!(
+                        "Suppressing further Vulkan WGSL/SPIR-V compilation logs after {} errors",
+                        MAX_ERROR_LOGS
+                    );
+                }
+            }
+
             if std::env::var_os("MAKEPAD_DUMP_GLSL_IR").is_some() {
                 crate::log!("---- Linux GLSL IR io list ----");
                 for io in &output.io {
@@ -125,10 +153,7 @@ impl DrawVars {
             output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
             output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
 
-            let code = CxDrawShaderCode::Separate {
-                vertex,
-                fragment,
-            };
+            let code = CxDrawShaderCode::Separate { vertex, fragment };
 
             {
                 let cx = vm.host.cx();

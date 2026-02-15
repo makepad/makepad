@@ -685,8 +685,8 @@ impl ShaderBackend {
 
     pub fn map_param_name(&self, id: LiveId, shadow: usize) -> String {
         if id == id!(self) {
-            // In Rust backend, _self is *mut T, so dereference for field access
-            if matches!(self, Self::Rust) {
+            // Rust and WGSL self params are pointers, so dereference for field access.
+            if matches!(self, Self::Rust | Self::Wgsl) {
                 return "(*_self)".to_string();
             }
             return "_self".to_string();
