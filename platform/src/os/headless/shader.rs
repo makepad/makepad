@@ -226,13 +226,14 @@ impl Cx {
                         {
                             os_shader.rcx_vary_offset = f() as usize;
                         }
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_rcx_dfdx_offset")
+                        if let Ok(f) =
+                            module.symbol::<LayoutFn>("makepad_headless_rcx_quad_mode_offset")
                         {
-                            os_shader.rcx_dfdx_offset = f() as usize;
+                            os_shader.rcx_quad_mode_offset = f() as usize;
                         }
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_rcx_dfdy_offset")
+                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_flat_varying_slots")
                         {
-                            os_shader.rcx_dfdy_offset = f() as usize;
+                            os_shader.flat_varying_slots = f() as usize;
                         }
                         if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_rcx_frag_offset")
                         {
@@ -250,6 +251,15 @@ impl Cx {
                     os_shader.load_error = Some(err.clone());
                     crate::error!("{err}");
                 }
+            }
+            // Back-compat fallback: if an older JIT module is loaded without the
+            // flat-varying export, keep previous behavior.
+            if os_shader.flat_varying_slots == 0 {
+                os_shader.flat_varying_slots = cx_shader
+                    .mapping
+                    .instances
+                    .total_slots
+                    .min(cx_shader.mapping.varying_total_slots);
             }
 
             let os_shader_id = self.draw_shaders.os_shaders.len();
@@ -310,6 +320,8 @@ fn generate_headless_rust_shader_module(
 
     // Compute total varying slots (needed for RenderCx derivative arrays)
     let varying_total_slots = count_varying_slots(output, vm);
+    // Flat varying prefix: dyn/rust instance slots in the packed varying stream.
+    let flat_varying_slots = count_flat_varying_slots(output, vm);
 
     // ── Pod struct definitions from shader output (uniform buffer structs etc.) ──
     write_filtered_struct_defs(output, vm, &mut out);
@@ -319,8 +331,8 @@ fn generate_headless_rust_shader_module(
     write_render_cx_struct(output, vm, &mut out);
     writeln!(out).ok();
 
-    // ── Per-shader dFdx/dFdy functions ──
-    write_dfdx_dfdy_functions(&mut out, varying_total_slots);
+    // ── Per-shader dFdx/dFdy fallback functions ──
+    write_dfdx_dfdy_fallbacks(&mut out);
     writeln!(out).ok();
 
     // ── Compiled shader functions (safe Rust, take rcx: &mut RenderCx) ──
@@ -332,6 +344,13 @@ fn generate_headless_rust_shader_module(
     writeln!(
         out,
         "pub extern \"C\" fn makepad_headless_shader_version() -> u32 {{ 3 }}"
+    )
+    .ok();
+    writeln!(out, "#[no_mangle]").ok();
+    writeln!(
+        out,
+        "pub extern \"C\" fn makepad_headless_flat_varying_slots() -> u32 {{ {}u32 }}",
+        flat_varying_slots
     )
     .ok();
     writeln!(out).ok();
@@ -354,6 +373,36 @@ fn generate_headless_rust_shader_module(
     }
 }
 
+/// Write the varying fields (DynInstance, RustInstance, Varying) with an optional prefix.
+/// Called 3 times: once for the main varyings (""), once for dx-shifted ("dx_"), once for dy-shifted ("dy_").
+fn write_varying_fields(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, prefix: &str) {
+    use crate::makepad_script::shader::ShaderIoKind;
+    for io in &output.io {
+        if !matches!(io.kind, ShaderIoKind::DynInstance) {
+            continue;
+        }
+        let io_name = output.backend.map_io_name(io.name);
+        let ty = type_name(output, vm, io.ty);
+        writeln!(out, "    {prefix}dyninst_{io_name}: {ty},").ok();
+    }
+    for io in &output.io {
+        if !matches!(io.kind, ShaderIoKind::RustInstance) {
+            continue;
+        }
+        let io_name = output.backend.map_io_name(io.name);
+        let ty = type_name(output, vm, io.ty);
+        writeln!(out, "    {prefix}rustinst_{io_name}: {ty},").ok();
+    }
+    for io in &output.io {
+        if !matches!(io.kind, ShaderIoKind::Varying) {
+            continue;
+        }
+        let io_name = output.backend.map_io_name(io.name);
+        let ty = type_name(output, vm, io.ty);
+        writeln!(out, "    {prefix}var_{io_name}: {ty},").ok();
+    }
+}
+
 /// Generate the per-shader `RenderCx` struct — `#[repr(C)]` pure POD.
 ///
 /// Field ordering is chosen so the host can fill contiguous regions:
@@ -371,42 +420,24 @@ fn generate_headless_rust_shader_module(
 fn write_render_cx_struct(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) {
     use crate::makepad_script::shader::ShaderIoKind;
 
-    let vary_slots = count_varying_slots(output, vm);
-    let deriv_arr_len = vary_slots.max(1);
-
     writeln!(out, "#[repr(C)]").ok();
     writeln!(out, "struct RenderCx {{").ok();
 
     // Group 1: Varyings — order MUST match vertex entry vary[] packing:
     // DynInstance first, then RustInstance, then Varying
-    for io in &output.io {
-        if !matches!(io.kind, ShaderIoKind::DynInstance) {
-            continue;
-        }
-        let io_name = output.backend.map_io_name(io.name);
-        let ty = type_name(output, vm, io.ty);
-        writeln!(out, "    dyninst_{io_name}: {ty},").ok();
-    }
-    for io in &output.io {
-        if !matches!(io.kind, ShaderIoKind::RustInstance) {
-            continue;
-        }
-        let io_name = output.backend.map_io_name(io.name);
-        let ty = type_name(output, vm, io.ty);
-        writeln!(out, "    rustinst_{io_name}: {ty},").ok();
-    }
-    for io in &output.io {
-        if !matches!(io.kind, ShaderIoKind::Varying) {
-            continue;
-        }
-        let io_name = output.backend.map_io_name(io.name);
-        let ty = type_name(output, vm, io.ty);
-        writeln!(out, "    var_{io_name}: {ty},").ok();
-    }
+    write_varying_fields(output, vm, out, "");
 
-    // Group 2: Derivative arrays (fixed-size, per varying slot)
-    writeln!(out, "    dfdx: [f32; {deriv_arr_len}],").ok();
-    writeln!(out, "    dfdy: [f32; {deriv_arr_len}],").ok();
+    // Group 1b: Quad derivative buffers for 3-pass dFdx/dFdy
+    // quad_mode: 0=record_dx, 1=record_dy, 2=compute
+    // quad_slot: auto-incrementing slot index per dFdx/dFdy call
+    // quad_lane_x/quad_lane_y: 0 or 1 lane parity in the 2x2 pixel quad
+    // quad_dx_buf/quad_dy_buf: stored intermediate values from neighbor pixels
+    writeln!(out, "    quad_mode: u32,").ok();
+    writeln!(out, "    quad_slot: u32,").ok();
+    writeln!(out, "    quad_lane_x: u32,").ok();
+    writeln!(out, "    quad_lane_y: u32,").ok();
+    writeln!(out, "    quad_dx_buf: [f32; 32],").ok();
+    writeln!(out, "    quad_dy_buf: [f32; 32],").ok();
 
     // Group 3: Uniforms
     for io in &output.io {
@@ -476,7 +507,7 @@ fn write_render_cx_struct(output: &ShaderOutput, vm: &ScriptVm, out: &mut String
 /// Export `extern "C"` functions that tell the host the byte layout of RenderCx.
 /// The host uses these to fill varyings, derivatives, uniforms, textures at the
 /// correct byte offsets in its pre-allocated f32 buffer.
-fn write_render_cx_layout_exports(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) {
+fn write_render_cx_layout_exports(output: &ShaderOutput, _vm: &ScriptVm, out: &mut String) {
     use crate::makepad_script::shader::ShaderIoKind;
 
     // Helper: generate an offset_of function using pointer arithmetic
@@ -537,9 +568,8 @@ fn write_render_cx_layout_exports(output: &ShaderOutput, vm: &ScriptVm, out: &mu
         .ok();
     }
 
-    // Derivative arrays byte offset
-    offset_of(out, "makepad_headless_rcx_dfdx_offset", "dfdx");
-    offset_of(out, "makepad_headless_rcx_dfdy_offset", "dfdy");
+    // Quad mode field byte offset (for 3-pass dFdx/dFdy)
+    offset_of(out, "makepad_headless_rcx_quad_mode_offset", "quad_mode");
 
     // Fragment output byte offset (frag_fb0)
     if output
@@ -569,48 +599,47 @@ fn count_varying_slots(output: &ShaderOutput, vm: &ScriptVm) -> usize {
     slots
 }
 
-/// Generate per-shader dFdx/dFdy functions that read from rcx.dfdx/dfdy
-/// fixed-size arrays. These approximate screen-space derivatives using
-/// precomputed per-triangle varying derivatives stored in RenderCx.
-fn write_dfdx_dfdy_functions(out: &mut String, vary_slots: usize) {
-    let n = vary_slots.max(1); // array is at least [f32; 1]
-
-    // Scalar: return first element
-    writeln!(
-        out,
-        "fn dFdx(rcx: &mut RenderCx, _x: f32) -> f32 {{ rcx.dfdx[0] }}"
-    )
-    .ok();
-    writeln!(
-        out,
-        "fn dFdy(rcx: &mut RenderCx, _x: f32) -> f32 {{ rcx.dfdy[0] }}"
-    )
-    .ok();
-
-    // Vec2f: return first two slots
-    if n >= 2 {
-        writeln!(
-            out,
-            "fn dFdx_2f(rcx: &mut RenderCx, _v: Vec2f) -> Vec2f {{ vec2(rcx.dfdx[0], rcx.dfdx[1]) }}"
-        )
-        .ok();
-        writeln!(
-            out,
-            "fn dFdy_2f(rcx: &mut RenderCx, _v: Vec2f) -> Vec2f {{ vec2(rcx.dfdy[0], rcx.dfdy[1]) }}"
-        )
-        .ok();
-    } else {
-        writeln!(
-            out,
-            "fn dFdx_2f(rcx: &mut RenderCx, _v: Vec2f) -> Vec2f {{ vec2(rcx.dfdx[0], 0.0) }}"
-        )
-        .ok();
-        writeln!(
-            out,
-            "fn dFdy_2f(rcx: &mut RenderCx, _v: Vec2f) -> Vec2f {{ vec2(rcx.dfdy[0], 0.0) }}"
-        )
-        .ok();
+/// Count packed varying slots that correspond to dyn/rust instances.
+fn count_flat_varying_slots(output: &ShaderOutput, vm: &ScriptVm) -> usize {
+    use crate::makepad_script::shader::ShaderIoKind;
+    let mut slots = 0usize;
+    for io in &output.io {
+        match io.kind {
+            ShaderIoKind::DynInstance | ShaderIoKind::RustInstance => {
+                slots += vm.bx.heap.pod_type_ref(io.ty).ty.slots();
+            }
+            _ => {}
+        }
     }
+    slots
+}
+
+/// Generate per-shader dFdx/dFdy fallback functions.
+/// The real derivative logic is emitted inline by the shader compiler as
+/// record/compute blocks that use rcx.quad_mode, quad_slot, quad_dx_buf, quad_dy_buf.
+fn write_dfdx_dfdy_fallbacks(out: &mut String) {
+    // Fallback dFdx/dFdy functions — should not be called since the compiler
+    // emits inline quad-buffer blocks, but keeps compilation working.
+    writeln!(
+        out,
+        "fn dFdx(_rcx: &mut RenderCx, _x: f32) -> f32 {{ 0.0 }}"
+    )
+    .ok();
+    writeln!(
+        out,
+        "fn dFdy(_rcx: &mut RenderCx, _x: f32) -> f32 {{ 0.0 }}"
+    )
+    .ok();
+    writeln!(
+        out,
+        "fn dFdx_2f(_rcx: &mut RenderCx, _v: Vec2f) -> Vec2f {{ vec2(0.0, 0.0) }}"
+    )
+    .ok();
+    writeln!(
+        out,
+        "fn dFdy_2f(_rcx: &mut RenderCx, _v: Vec2f) -> Vec2f {{ vec2(0.0, 0.0) }}"
+    )
+    .ok();
 }
 
 /// Emit shader functions. Functions with `*mut` parameters (e.g. Sdf2d methods)
