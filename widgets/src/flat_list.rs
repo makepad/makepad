@@ -1,7 +1,4 @@
-use crate::{
-    makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*,
-    widget_tree::CxWidgetExt,
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*};
 use std::collections::HashMap;
 
 script_mod! {
@@ -178,12 +175,10 @@ impl Widget for FlatList {
         let uid = self.widget_uid();
         self.scroll_bars.handle_event(cx, event, scope);
 
-        for (item_id, item) in self.items.iter_mut() {
+        for (_item_id, item) in self.items.iter_mut() {
             let item_uid = item.widget.widget_uid();
-            cx.with_node(item_uid, *item_id, item.widget.clone(), |cx| {
-                cx.group_widget_actions(uid, item_uid, |cx| {
-                    item.widget.handle_event(cx, event, scope)
-                });
+            cx.group_widget_actions(uid, item_uid, |cx| {
+                item.widget.handle_event(cx, event, scope)
             });
         }
     }

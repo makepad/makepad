@@ -28,7 +28,7 @@ pub mod gl_sys;
 pub mod libc_sys;
 pub mod module_loader;
 pub mod opengl;
-#[cfg(all(target_os = "android", use_vulkan))]
+#[cfg(use_vulkan)]
 pub mod vulkan_naga;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]

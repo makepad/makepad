@@ -97,11 +97,9 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        cx.with_widget_tree(|cx| {
-            if let Event::GameInputConnected(ev) = event {
-                println!("{:?}", ev);
-            }
-            let _ = self.match_event_with_draw_2d(cx, event);
-        });
+        if let Event::GameInputConnected(ev) = event {
+            println!("{:?}", ev);
+        }
+        let _ = self.match_event_with_draw_2d(cx, event);
     }
 }

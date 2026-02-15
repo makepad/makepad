@@ -147,20 +147,12 @@ impl Widget for PageFlip {
             let active_page = self.active_page;
             if let Some(page) = self.pages.get_mut(&active_page) {
                 let item_uid = page.widget_uid();
-                cx.with_node(item_uid, active_page, page.clone(), |cx| {
-                    cx.group_widget_actions(uid, item_uid, |cx| {
-                        page.handle_event(cx, event, scope)
-                    });
-                });
+                cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
             }
         } else {
-            for (page_id, page) in self.pages.iter() {
+            for (_page_id, page) in self.pages.iter() {
                 let item_uid = page.widget_uid();
-                cx.with_node(item_uid, *page_id, page.clone(), |cx| {
-                    cx.group_widget_actions(uid, item_uid, |cx| {
-                        page.handle_event(cx, event, scope)
-                    });
-                });
+                cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
             }
         }
     }
@@ -172,9 +164,7 @@ impl Widget for PageFlip {
                 self.begin(cx, walk);
             }
             if let Some(walk) = self.draw_state.get() {
-                cx.with_node(page.widget_uid(), active_page, page.clone(), |cx| {
-                    page.draw_walk(cx, scope, walk)
-                })?;
+                page.draw_walk(cx, scope, walk)?;
             }
             self.end(cx);
         } else {

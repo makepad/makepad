@@ -346,8 +346,6 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        cx.with_widget_tree(|cx| {
-            let _ = self.match_event_with_draw_2d(cx, event);
-        });
+        let _ = self.match_event_with_draw_2d(cx, event);
     }
 }

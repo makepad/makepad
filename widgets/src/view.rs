@@ -731,25 +731,19 @@ impl Widget for View {
 
         match &self.event_order {
             EventOrder::Up => {
-                for (id, child) in self.children.iter_mut().rev() {
-                    cx.with_node(child.widget_uid(), *id, child.clone(), |cx| {
-                        child.handle_event(cx, event, scope);
-                    });
+                for (_id, child) in self.children.iter_mut().rev() {
+                    child.handle_event(cx, event, scope);
                 }
             }
             EventOrder::Down => {
-                for (id, child) in self.children.iter_mut() {
-                    cx.with_node(child.widget_uid(), *id, child.clone(), |cx| {
-                        child.handle_event(cx, event, scope);
-                    });
+                for (_id, child) in self.children.iter_mut() {
+                    child.handle_event(cx, event, scope);
                 }
             }
             EventOrder::List(list) => {
                 for id in list {
                     if let Some((_, child)) = self.children.iter_mut().find(|(id2, _)| id2 == id) {
-                        cx.with_node(child.widget_uid(), *id, child.clone(), |cx| {
-                            child.handle_event(cx, event, scope);
-                        });
+                        child.handle_event(cx, event, scope);
                     }
                 }
             }
@@ -916,16 +910,12 @@ impl Widget for View {
                     if child.visible() {
                         let walk = child.walk(cx);
                         if resume {
-                            cx.with_node(child.widget_uid(), *id, child.clone(), |cx| {
-                                child.draw_walk(cx, scope, walk)
-                            })?;
+                            child.draw_walk(cx, scope, walk)?;
                         } else if let Some(fw) = cx.defer_walk_turtle(walk) {
                             self.defer_walks.push((*id, fw));
                         } else {
                             self.draw_state.set(DrawState::Drawing(step, true));
-                            cx.with_node(child.widget_uid(), *id, child.clone(), |cx| {
-                                child.draw_walk(cx, scope, walk)
-                            })?;
+                            child.draw_walk(cx, scope, walk)?;
                         }
                     }
                 }
@@ -938,11 +928,9 @@ impl Widget for View {
         while let Some(DrawState::DeferWalk(step)) = self.draw_state.get() {
             if step < self.defer_walks.len() {
                 let (id, dw) = &mut self.defer_walks[step];
-                if let Some((id, child)) = self.children.iter_mut().find(|(id2, _)| id2 == id) {
+                if let Some((_id, child)) = self.children.iter_mut().find(|(id2, _)| id2 == id) {
                     let walk = dw.resolve(cx);
-                    cx.with_node(child.widget_uid(), *id, child.clone(), |cx| {
-                        child.draw_walk(cx, scope, walk)
-                    })?;
+                    child.draw_walk(cx, scope, walk)?;
                 }
                 self.draw_state.set(DrawState::DeferWalk(step + 1));
             } else {

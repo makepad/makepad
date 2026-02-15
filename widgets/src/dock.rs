@@ -1273,16 +1273,12 @@ impl Widget for Dock {
             }
         }
         if event.requires_visibility() {
-            for (id, item) in self.visible_items() {
-                cx.with_node(item.widget_uid(), id, item.clone(), |cx| {
-                    item.handle_event(cx, event, scope);
-                });
+            for (_id, item) in self.visible_items() {
+                item.handle_event(cx, event, scope);
             }
         } else {
-            for (id, (_templ_id, item)) in self.items.iter_mut() {
-                cx.with_node(item.widget_uid(), *id, item.clone(), |cx| {
-                    item.handle_event(cx, event, scope);
-                });
+            for (_id, (_templ_id, item)) in self.items.iter_mut() {
+                item.handle_event(cx, event, scope);
             }
         }
 
@@ -1429,9 +1425,7 @@ impl Widget for Dock {
                                     (kind_copy, WidgetRef::script_from_value(vm, template_value))
                                 })
                             });
-                            cx.with_node(entry.widget_uid(), id, entry.clone(), |cx| {
-                                entry.draw(cx, scope)
-                            })?;
+                            entry.draw(cx, scope)?;
                         }
                     }
                     stack.pop();

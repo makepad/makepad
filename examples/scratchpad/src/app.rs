@@ -110,10 +110,16 @@ impl App {
     }
 }
 
-#[derive(Script, ScriptHook)]
+#[derive(Script)]
 pub struct App {
     #[live]
     ui: WidgetRef,
+}
+
+impl ScriptHook for App {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.set_ui(&self.ui);
+    }
 }
 
 impl MatchEvent for App {
@@ -122,9 +128,7 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        cx.with_widget_tree(|cx| {
-            self.match_event(cx, event);
-            self.ui.handle_event(cx, event, &mut Scope::empty());
-        });
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

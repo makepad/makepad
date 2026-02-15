@@ -83,10 +83,7 @@ impl OpenglCx {
             // egl_sys::EGL_STENCIL_SIZE,
             // 8,
             egl_sys::EGL_RENDERABLE_TYPE,
-            #[cfg(use_gles_3)]
             egl_sys::EGL_OPENGL_ES3_BIT_KHR,
-            #[cfg(not(use_gles_3))]
-            egl_sys::EGL_OPENGL_ES2_BIT,
             egl_sys::EGL_NONE,
         ];
 
@@ -107,10 +104,7 @@ impl OpenglCx {
         // Create EGL context.
         let ctx_attribs = [
             egl_sys::EGL_CONTEXT_MAJOR_VERSION,
-            #[cfg(use_gles_3)]
             3,
-            #[cfg(not(use_gles_3))]
-            2,
             egl_sys::EGL_NONE,
         ];
 
