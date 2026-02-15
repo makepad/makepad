@@ -72,9 +72,7 @@ script_mod! {
                 (col + 0.5) / tex_size.x,
                 (row + 0.5) / tex_size.y
             )
-            // Web backend normalizes most textures through sample(...).zyxw.
-            // Curve/band lookup textures are logical RGBA floats, so swap back.
-            return self.curve_texture.sample(uv).zyxw
+            return self.curve_texture.sample(uv)
         }
 
         fetch_band_texel: fn(texel_idx: float) -> vec4 {
@@ -85,9 +83,7 @@ script_mod! {
                 (col + 0.5) / tex_size.x,
                 (row + 0.5) / tex_size.y
             )
-            // Web backend normalizes most textures through sample(...).zyxw.
-            // Curve/band lookup textures are logical RGBA floats, so swap back.
-            return self.band_texture.sample(uv).zyxw
+            return self.band_texture.sample(uv)
         }
 
         pick_channel: fn(v: vec4, channel: float) -> float {

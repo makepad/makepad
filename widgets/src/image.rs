@@ -22,7 +22,7 @@ script_mod! {
         async_load: 0.0
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
-            return self.image_texture.sample(self.pos * scale + pan)
+            return self.image_texture.sample_as_bgra(self.pos * scale + pan)
         }
 
         get_color: fn() {

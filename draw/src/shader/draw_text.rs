@@ -90,7 +90,7 @@ script_mod! {
         }
 
         sdf: fn(scale, p, color) {
-            let sampled = self.grayscale_texture.sample(p);
+            let sampled = self.grayscale_texture.sample_as_bgra(p);
             let s = if self.atlas_plane < 0.5 {
                 sampled.r
             } else if self.atlas_plane < 1.5 {
@@ -117,7 +117,7 @@ script_mod! {
         }
 
         msdf: fn(scale, p, color) {
-            let s = self.msdf_texture.sample(p);
+            let s = self.msdf_texture.sample_as_bgra(p);
             // Use alpha as the coverage source to keep parity with SDF while RGB stores MSDF.
             let dist = s.a;
             let safe_scale = max(scale, 0.0001);
@@ -158,7 +158,7 @@ script_mod! {
                 let tex_size = self.color_texture.size()
                 let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
                 let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
-                let c = self.color_texture.sample(p)
+                let c = self.color_texture.sample_as_bgra(p)
                 return vec4(c.rgb * c.a, c.a)
             } else {
                 let c = self.get_color()

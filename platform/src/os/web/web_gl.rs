@@ -403,7 +403,8 @@ impl CxOsDrawShader {
             "#version 300 es
 precision highp float;
 precision highp int;
-vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
+vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
+vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
 vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
@@ -414,7 +415,8 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
             "#version 300 es
 precision highp float;
 precision highp int;
-vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
+vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
+vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
 vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",

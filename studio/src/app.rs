@@ -702,6 +702,9 @@ impl MatchEvent for App {
                             }
                         }
                     }
+                    StdinToHost::PngFrame { path, .. } => {
+                        crate::log!("headless frame written: {}", path);
+                    }
                 }
             }
             BuildManagerAction::None => (),
