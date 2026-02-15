@@ -757,11 +757,7 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
         writeln!(out, "    {}();", vertex_fn_name).ok();
     }
     writeln!(out, "    var out_data: VertexMainOut;").ok();
-    writeln!(
-        out,
-        "    out_data.position = vec4f((in.packed_geometry_0.x * 2.0) - 1.0, (in.packed_geometry_0.y * 2.0) - 1.0, 0.0, 1.0);"
-    )
-    .ok();
+    writeln!(out, "    out_data.position = vtx_pos;").ok();
     for field in &varying_fields {
         let mut scalars = Vec::new();
         wgsl_flatten_exprs(output, vm, field.ty, &field.name, &mut scalars);
@@ -855,8 +851,23 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
         }
         writeln!(out, "    {}();", fragment_fn_name).ok();
         writeln!(out, "    var out_data: FragmentMainOut;").ok();
-        for (index, _) in &fragment_outputs {
-            writeln!(out, "    out_data.fb{} = vec4f(1.0, 0.0, 1.0, 1.0);", index).ok();
+        for (index, ty_name) in &fragment_outputs {
+            let expr = match ty_name.as_str() {
+                "f32" => "f32(0.0)".to_string(),
+                "i32" => "i32(0)".to_string(),
+                "u32" => "u32(0)".to_string(),
+                "vec2f" => "vec2f(0.0)".to_string(),
+                "vec3f" => "vec3f(0.0)".to_string(),
+                "vec4f" => "frag_fb0".to_string(),
+                "vec2i" => "vec2i(0)".to_string(),
+                "vec3i" => "vec3i(0)".to_string(),
+                "vec4i" => "vec4i(0)".to_string(),
+                "vec2u" => "vec2u(0u)".to_string(),
+                "vec3u" => "vec3u(0u)".to_string(),
+                "vec4u" => "vec4u(0u)".to_string(),
+                _ => format!("{}(0.0)", ty_name),
+            };
+            writeln!(out, "    out_data.fb{} = {};", index, expr).ok();
         }
         writeln!(out, "    return out_data;").ok();
         writeln!(out, "}}").ok();
@@ -966,6 +977,12 @@ fn compile_wgsl_to_spirv(wgsl: &str) -> Result<(Option<Vec<u32>>, Option<Vec<u32
     };
 
     Ok((vertex_spirv, fragment_spirv))
+}
+
+pub(crate) fn compile_raw_wgsl_to_spirv(
+    wgsl: &str,
+) -> Result<(Option<Vec<u32>>, Option<Vec<u32>>), String> {
+    compile_wgsl_to_spirv(wgsl)
 }
 
 pub(crate) fn compile_draw_shader_wgsl_to_spirv(
