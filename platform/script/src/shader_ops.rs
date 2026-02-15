@@ -50,9 +50,8 @@ impl ShaderFnCompiler {
                     .chars()
                     .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
         };
-        let is_simple_uint_literal = |value: &str| {
-            value.ends_with('u') && is_simple_int_literal(&value[..value.len() - 1])
-        };
+        let is_simple_uint_literal =
+            |value: &str| value.ends_with('u') && is_simple_int_literal(&value[..value.len() - 1]);
         let to_float_literal = |value: &str| {
             if is_simple_int_literal(value) {
                 Some(format!("{}.0", value))
@@ -78,26 +77,26 @@ impl ShaderFnCompiler {
             _ => false,
         };
 
-        let lhs = if matches!(output.backend, ShaderBackend::Glsl)
+        let lhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
             && is_int_like(&t1)
             && is_float_like(&t2)
         {
             if let Some(v) = to_float_literal(&s1) {
                 v
             } else {
-                format!("float({})", s1)
+                format!("({} as f32)", s1)
             }
         } else {
             s1.to_string()
         };
-        let rhs = if matches!(output.backend, ShaderBackend::Glsl)
+        let rhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
             && is_int_like(&t2)
             && is_float_like(&t1)
         {
             if let Some(v) = to_float_literal(&s2) {
                 v
             } else {
-                format!("float({})", s2)
+                format!("({} as f32)", s2)
             }
         } else {
             s2.to_string()
@@ -209,7 +208,7 @@ impl ShaderFnCompiler {
             _ => false,
         };
 
-        let lhs = if matches!(output.backend, ShaderBackend::Glsl)
+        let lhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
             && !is_int
             && matches!(t1, ShaderType::AbstractInt)
             && is_float_like(&t2)
@@ -219,7 +218,7 @@ impl ShaderFnCompiler {
         } else {
             s1.to_string()
         };
-        let rhs = if matches!(output.backend, ShaderBackend::Glsl)
+        let rhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
             && !is_int
             && matches!(t2, ShaderType::AbstractInt)
             && is_float_like(&t1)

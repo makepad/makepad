@@ -531,6 +531,14 @@ impl ShaderFnCompiler {
                         )
                         .ok();
                     }
+                    ShaderBackend::Rust => {
+                        write!(
+                            self.out,
+                            "for {0} in {1}..{2} {{\n",
+                            loop_var_name, start, end
+                        )
+                        .ok();
+                    }
                     _ => {
                         write!(
                             self.out,

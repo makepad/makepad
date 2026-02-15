@@ -31,7 +31,7 @@ impl ShaderFnCompiler {
                 args: Vec::new(),
                 elem_ty: None,
             });
-            self.maybe_pop_to_me(vm, opargs);
+            self.maybe_pop_to_me(vm, output, opargs);
             return;
         }
 
@@ -43,7 +43,7 @@ impl ShaderFnCompiler {
             args: Vec::new(),
         });
 
-        self.maybe_pop_to_me(vm, opargs);
+        self.maybe_pop_to_me(vm, output, opargs);
     }
 
     pub(crate) fn handle_call_args(
@@ -94,12 +94,12 @@ impl ShaderFnCompiler {
                                 fnptr,
                                 args: Default::default(),
                             });
-                            self.maybe_pop_to_me(vm, opargs);
+                            self.maybe_pop_to_me(vm, output, opargs);
                             return;
                         }
                     }
 
-                    self.maybe_pop_to_me(vm, opargs);
+                    self.maybe_pop_to_me(vm, output, opargs);
                     return;
                 }
             }
@@ -160,7 +160,7 @@ impl ShaderFnCompiler {
                 ShaderBackend::Metal | ShaderBackend::Hlsl => {
                     write!(out, "{{").ok();
                 }
-                ShaderBackend::Glsl => {
+                ShaderBackend::Glsl | ShaderBackend::Rust => {
                     let name = output.backend.map_pod_name(name);
                     write!(out, "{}[{}]", name, count).ok(); // array constructor
                     write!(out, "(").ok();
@@ -175,7 +175,7 @@ impl ShaderFnCompiler {
                 ShaderBackend::Metal | ShaderBackend::Hlsl => {
                     write!(out, "{{").ok();
                 }
-                ShaderBackend::Glsl => {
+                ShaderBackend::Glsl | ShaderBackend::Rust => {
                     write!(out, "(").ok(); // Should not happen if type not found
                 }
             }
@@ -189,7 +189,7 @@ impl ShaderFnCompiler {
         }
 
         match output.backend {
-            ShaderBackend::Wgsl | ShaderBackend::Glsl => {
+            ShaderBackend::Wgsl | ShaderBackend::Glsl | ShaderBackend::Rust => {
                 out.push_str(")");
             }
             ShaderBackend::Metal | ShaderBackend::Hlsl => {
@@ -238,6 +238,35 @@ impl ShaderFnCompiler {
                 }
                 ShaderBackend::Glsl => {
                     write!(out, "{}(", name).ok();
+                }
+                ShaderBackend::Rust => {
+                    if let ScriptPodTy::Struct { .. } = &pod_ty_data.ty {
+                        write!(out, "{} {{ ", name).ok();
+                    } else {
+                        // For vec types, we need to expand heterogeneous constructors
+                        // like vec4f(vec3, f32) → vec4(v.x, v.y, v.z, s)
+                        // This is handled by rust_expand_pod_construct below
+                        let total_slots = pod_ty_data.ty.slots();
+                        if args.len() != total_slots && total_slots > 1 {
+                            // Expand heterogeneous constructor
+                            let base_name = match total_slots {
+                                2 => "vec2",
+                                3 => "vec3",
+                                4 => "vec4",
+                                _ => "vec4",
+                            };
+                            let expanded = self.rust_expand_pod_construct(vm, &args, total_slots);
+                            write!(out, "{}({})", base_name, expanded).ok();
+
+                            for arg in args {
+                                self.stack.free_string(arg.s);
+                            }
+                            self.stack
+                                .push(self.trap.pass(), ShaderType::Pod(pod_ty), out);
+                            return;
+                        }
+                        write!(out, "{}(", name).ok();
+                    }
                 }
             }
         } else {
@@ -302,6 +331,9 @@ impl ShaderFnCompiler {
                                 }
                                 _ => {}
                             }
+                            if matches!(output.backend, ShaderBackend::Rust) {
+                                write!(out, "{}: ", field.name).ok();
+                            }
                             out.push_str(&arg.s);
                         } else {
                             script_err_type_mismatch!(
@@ -330,29 +362,32 @@ impl ShaderFnCompiler {
                     .heap
                     .pod_type_name(pod_ty)
                     .map(|name| output.backend.map_pod_name(name));
-                let hlsl_splat_len = if matches!(output.backend, ShaderBackend::Hlsl) && args.len() == 1
-                {
-                    match pod_name {
-                        Some(id!(float2))
-                        | Some(id!(half2))
-                        | Some(id!(uint2))
-                        | Some(id!(int2))
-                        | Some(id!(bool2)) => Some(2usize),
-                        Some(id!(float3))
-                        | Some(id!(half3))
-                        | Some(id!(uint3))
-                        | Some(id!(int3))
-                        | Some(id!(bool3)) => Some(3usize),
-                        Some(id!(float4))
-                        | Some(id!(half4))
-                        | Some(id!(uint4))
-                        | Some(id!(int4))
-                        | Some(id!(bool4)) => Some(4usize),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
+                let hlsl_splat_len =
+                    if matches!(output.backend, ShaderBackend::Hlsl) && args.len() == 1 {
+                        match pod_name {
+                            Some(id!(float2)) | Some(id!(half2)) | Some(id!(uint2))
+                            | Some(id!(int2)) | Some(id!(bool2)) => Some(2usize),
+                            Some(id!(float3)) | Some(id!(half3)) | Some(id!(uint3))
+                            | Some(id!(int3)) | Some(id!(bool3)) => Some(3usize),
+                            Some(id!(float4)) | Some(id!(half4)) | Some(id!(uint4))
+                            | Some(id!(int4)) | Some(id!(bool4)) => Some(4usize),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                // For Rust struct types, get field names for positional args
+                let rust_struct_fields: Option<Vec<LiveId>> =
+                    if matches!(output.backend, ShaderBackend::Rust) {
+                        if let ScriptPodTy::Struct { fields, .. } = &pod_ty_data.ty {
+                            Some(fields.iter().map(|f| f.name).collect())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
 
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -413,6 +448,12 @@ impl ShaderFnCompiler {
                             break;
                         }
                     }
+                    // For Rust struct types, prefix with field name
+                    if let Some(ref fields) = rust_struct_fields {
+                        if i < fields.len() {
+                            write!(out, "{}: ", fields[i]).ok();
+                        }
+                    }
                     out.push_str(&arg.s);
                 }
                 vm.bx
@@ -441,6 +482,13 @@ impl ShaderFnCompiler {
             }
             ShaderBackend::Glsl => {
                 out.push_str(")");
+            }
+            ShaderBackend::Rust => {
+                if let ScriptPodTy::Struct { .. } = &pod_ty_data.ty {
+                    out.push_str(" }");
+                } else {
+                    out.push_str(")");
+                }
             }
         }
 
@@ -538,7 +586,12 @@ impl ShaderFnCompiler {
         {
             let mut fn_name_base = String::new();
             if fun.overload != 0 {
-                write!(fn_name_base, "_f{}{}{}", fun.overload, method_name_prefix, name).ok();
+                write!(
+                    fn_name_base,
+                    "_f{}{}{}",
+                    fun.overload, method_name_prefix, name
+                )
+                .ok();
             } else {
                 write!(fn_name_base, "{}{}", method_name_prefix, name).ok();
             }
@@ -605,15 +658,27 @@ impl ShaderFnCompiler {
                         write!(fn_args, "inout {} _self", name).ok();
                     }
                 }
+                ShaderBackend::Rust => {
+                    if let Some(name) = vm.bx.heap.pod_type_name(ty) {
+                        let name = output.backend.map_pod_name(name);
+                        if fn_args.len() > 0 {
+                            write!(fn_args, ", ").ok();
+                        }
+                        write!(fn_args, "_self: *mut {}", name).ok();
+                    }
+                }
             }
             compiler.shader_scope.define_param(id!(self), ty);
         } else if let ShaderType::PodType(ty) = sself {
             compiler.shader_scope.define_pod_type(id!(self), ty);
         } else if let ShaderType::IoSelf(obj) = sself {
-            if fn_args.len() > 0 {
-                write!(fn_args, ", ").ok();
+            let io_self_decl = output.backend.get_io_self_decl(output.mode);
+            if !io_self_decl.is_empty() {
+                if fn_args.len() > 0 {
+                    write!(fn_args, ", ").ok();
+                }
+                write!(fn_args, "{}", io_self_decl).ok();
             }
-            write!(fn_args, "{}", output.backend.get_io_self_decl(output.mode)).ok();
             compiler.shader_scope.define_io_self(obj);
         } else if let ShaderType::ScopeObject(obj) = sself {
             // ScopeObject methods don't have a _self parameter - `self` references
@@ -665,6 +730,14 @@ impl ShaderFnCompiler {
                             // todo!()
                         }
                     }
+                    ShaderBackend::Rust => {
+                        if let Some(name) = vm.bx.heap.pod_type_name(arg_ty) {
+                            let name = output.backend.map_pod_name(name);
+                            write!(fn_args, "{}: {}", param_name, name).ok();
+                        } else {
+                            // todo!()
+                        }
+                    }
                 }
             }
             argi += 1;
@@ -708,6 +781,19 @@ impl ShaderFnCompiler {
                             };
                             write!(call_sig, "{} {}({})", ret_name, fn_name, fn_args).ok();
                         }
+                        ShaderBackend::Rust => {
+                            let ret_name = if let Some(name) = vm.bx.heap.pod_type_name(ret) {
+                                output.backend.map_pod_name(name)
+                            } else {
+                                id!(void)
+                            };
+                            if ret_name == id!(void) {
+                                write!(call_sig, "fn {}({})", fn_name, fn_args).ok();
+                            } else {
+                                write!(call_sig, "fn {}({}) -> {}", fn_name, fn_args, ret_name)
+                                    .ok();
+                            }
+                        }
                     }
 
                     output.functions.push(ShaderFn {
@@ -743,15 +829,11 @@ impl ShaderFnCompiler {
         // we should compare number of arguments (needs to be exact)
         // Note: fn_name already includes "(" at the end from compile_shader_def
         let arg_types = args.clone();
-        let resolved_arg_types = Self::resolve_script_call_arg_types(
-            vm,
-            fnobj,
-            &arg_types,
-            self.trap.pass(),
-        );
+        let resolved_arg_types =
+            Self::resolve_script_call_arg_types(vm, fnobj, &arg_types, self.trap.pass());
         let (ret, fn_name) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
-        if matches!(output.backend, ShaderBackend::Glsl) {
+        if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust) {
             out = Self::glsl_rewrite_call_args(vm, &out, &arg_types, &resolved_arg_types);
         }
         out.insert_str(0, &fn_name);
@@ -963,6 +1045,7 @@ impl ShaderFnCompiler {
                 ShaderBackend::Glsl | ShaderBackend::Wgsl | ShaderBackend::Hlsl => {
                     write!(out, "discard").ok()
                 }
+                ShaderBackend::Rust => write!(out, "{{ rcx.discard = 1.0; return }}").ok(),
             };
             self.stack
                 .push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), out);
@@ -980,36 +1063,23 @@ impl ShaderFnCompiler {
         let mut concrete_args = Vec::new();
         let mut out = self.stack.new_string();
         let mapped_name = output.backend.map_builtin_name(name);
-        let hlsl_ctor_splat_len = if matches!(output.backend, ShaderBackend::Hlsl) && args.len() == 1
-        {
-            match mapped_name {
-                id!(float2)
-                | id!(half2)
-                | id!(uint2)
-                | id!(int2)
-                | id!(bool2) => Some(2usize),
-                id!(float3)
-                | id!(half3)
-                | id!(uint3)
-                | id!(int3)
-                | id!(bool3) => Some(3usize),
-                id!(float4)
-                | id!(half4)
-                | id!(uint4)
-                | id!(int4)
-                | id!(bool4) => Some(4usize),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        write!(out, "{}(", mapped_name).ok();
+        let hlsl_ctor_splat_len =
+            if matches!(output.backend, ShaderBackend::Hlsl) && args.len() == 1 {
+                match mapped_name {
+                    id!(float2) | id!(half2) | id!(uint2) | id!(int2) | id!(bool2) => Some(2usize),
+                    id!(float3) | id!(half3) | id!(uint3) | id!(int3) | id!(bool3) => Some(3usize),
+                    id!(float4) | id!(half4) | id!(uint4) | id!(int4) | id!(bool4) => Some(4usize),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+        // For Rust backend, collect formatted args first so we can suffix the
+        // function name with the first-argument type (e.g. clamp_2f, max_2f)
+        let mut formatted_args = Vec::new();
 
         for (i, (ty, s)) in args.into_iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-
             let mut formatted = s.clone();
             match &ty {
                 ShaderType::AbstractInt | ShaderType::AbstractFloat => {
@@ -1035,17 +1105,78 @@ impl ShaderFnCompiler {
             if i == 0 {
                 if let Some(n) = hlsl_ctor_splat_len {
                     for j in 0..n {
-                        if j > 0 {
-                            out.push_str(", ");
-                        }
-                        out.push_str(&formatted);
+                        formatted_args.push(formatted.clone());
                     }
                     self.stack.free_string(s);
                     break;
                 }
             }
-            out.push_str(&formatted);
+            formatted_args.push(formatted);
             self.stack.free_string(s);
+        }
+
+        // For Rust backend, append a type suffix for overloaded builtins
+        if matches!(output.backend, ShaderBackend::Rust) {
+            let needs_suffix = matches!(
+                name,
+                id if id == id!(clamp)
+                    || id == id!(max)
+                    || id == id!(min)
+                    || id == id!(abs)
+                    || id == id!(length)
+                    || id == id!(dot)
+                    || id == id!(normalize)
+                    || id == id!(distance)
+                    || id == id!(dFdx)
+                    || id == id!(dFdy)
+                    || id == id!(floor)
+                    || id == id!(ceil)
+                    || id == id!(fract)
+                    || id == id!(round)
+                    || id == id!(sign)
+                    || id == id!(sqrt)
+                    || id == id!(sin)
+                    || id == id!(cos)
+                    || id == id!(step)
+                    || id == id!(smoothstep)
+            );
+            if needs_suffix && !concrete_args.is_empty() {
+                let first_ty = concrete_args[0];
+                let suffix = if first_ty == builtins.pod_vec2f {
+                    "_2f"
+                } else if first_ty == builtins.pod_vec3f {
+                    "_3f"
+                } else if first_ty == builtins.pod_vec4f {
+                    "_4f"
+                } else {
+                    ""
+                };
+                write!(out, "{}{}(", mapped_name, suffix).ok();
+            } else {
+                write!(out, "{}(", mapped_name).ok();
+            }
+        } else {
+            write!(out, "{}(", mapped_name).ok();
+        }
+
+        // For Rust backend, dFdx/dFdy need rcx as the first argument
+        let mut needs_rcx_prefix = false;
+        if matches!(output.backend, ShaderBackend::Rust) {
+            if name == id!(dFdx) || name == id!(dFdy) {
+                needs_rcx_prefix = true;
+            }
+        }
+
+        for (i, formatted) in formatted_args.iter().enumerate() {
+            if i == 0 && needs_rcx_prefix {
+                out.push_str("rcx, ");
+            } else if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(formatted);
+        }
+        if formatted_args.is_empty() && needs_rcx_prefix {
+            out.push_str("rcx");
         }
 
         out.push_str(")");
@@ -1089,6 +1220,15 @@ impl ShaderFnCompiler {
                         // GLSL: textureSize(texture, 0) returns ivec2, cast to vec2
                         write!(s, "vec2(textureSize({}, 0))", texture_expr).ok();
                     }
+                    ShaderBackend::Rust => {
+                        // Rust: texture.size() returns Vec2f
+                        write!(
+                            s,
+                            "vec2({}.width as f32, {}.height as f32)",
+                            texture_expr, texture_expr
+                        )
+                        .ok();
+                    }
                 }
                 self.stack.push(
                     self.trap.pass(),
@@ -1096,11 +1236,17 @@ impl ShaderFnCompiler {
                     s,
                 );
             }
-            id!(sample) => {
-                // sample(coord) samples the texture at normalized coordinates
-                // Returns vec4f
+            id!(sample) | id!(sample_as_bgra) => {
+                // sample(coord) samples the texture at normalized coordinates.
+                // sample_as_bgra(coord) is identical except on WebGL GLSL, where it
+                // applies a BGRA->RGBA swizzle in the sampler helper.
+                let method_name = if method_id == id!(sample_as_bgra) {
+                    "sample_as_bgra"
+                } else {
+                    "sample"
+                };
                 if args.len() != 1 {
-                    script_err_invalid_args!(self.trap, "texture.sample requires 1 arg");
+                    script_err_invalid_args!(self.trap, "texture.{} requires 1 arg", method_name);
                     let empty = self.stack.new_string();
                     self.stack.push(
                         self.trap.pass(),
@@ -1143,7 +1289,16 @@ impl ShaderFnCompiler {
                             // so we sample via helper functions and track texture->sampler
                             // bindings separately in ShaderOutput.
                             output.bind_texture_sampler(&texture_expr, sampler_idx);
-                            write!(s, "sample2d({}, {})", texture_expr, coord).ok();
+                            if method_id == id!(sample_as_bgra) {
+                                write!(s, "sample2d_bgra({}, {})", texture_expr, coord).ok();
+                            } else {
+                                write!(s, "sample2d({}, {})", texture_expr, coord).ok();
+                            }
+                        }
+                        ShaderBackend::Rust => {
+                            // Rust headless backend keeps texture data in logical RGBA,
+                            // so sample_as_bgra is a no-op alias of sample.
+                            write!(s, "{}.sample({})", texture_expr, coord).ok();
                         }
                     }
                     self.stack.push(
@@ -1158,7 +1313,10 @@ impl ShaderFnCompiler {
                     self.trap,
                     "unknown texture method {:?}{}",
                     method_id,
-                    suggest_from_live_ids(method_id, &[id!(sample), id!(size)])
+                    suggest_from_live_ids(
+                        method_id,
+                        &[id!(sample), id!(sample_as_bgra), id!(size)]
+                    )
                 );
             }
         }
@@ -1219,7 +1377,12 @@ impl ShaderFnCompiler {
                     // Method call on a Pod instance
                     if let Some(pod_ty) = pod_ty_opt {
                         let self_s_slice = if self_id == id!(self) {
-                            "_self"
+                            // In Rust backend, _self is *mut T (raw pointer)
+                            if matches!(output.backend, ShaderBackend::Rust) {
+                                "(*_self)"
+                            } else {
+                                "_self"
+                            }
                         } else {
                             &self_s
                         };
@@ -1355,10 +1518,13 @@ impl ShaderFnCompiler {
                     ScriptFnPtr::Script(_fnptr) => {
                         let mut out = self.stack.new_string();
                         write!(out, "{}", output.backend.get_io_all(output.mode)).ok();
-                        if out.len() > 0 {
-                            write!(out, ", ").ok();
+                        let io_self = output.backend.get_io_self(output.mode);
+                        if !io_self.is_empty() {
+                            if out.len() > 0 {
+                                write!(out, ", ").ok();
+                            }
+                            write!(out, "{}", io_self).ok();
                         }
-                        write!(out, "{}", output.backend.get_io_self(output.mode)).ok();
                         self.mes.push(ShaderMe::ScriptCall {
                             name: method_id,
                             out,
@@ -1371,7 +1537,7 @@ impl ShaderFnCompiler {
                         todo!()
                     }
                 }
-                self.maybe_pop_to_me(vm, opargs);
+                self.maybe_pop_to_me(vm, output, opargs);
                 return true;
             }
         }
@@ -1414,7 +1580,7 @@ impl ShaderFnCompiler {
                         return false;
                     }
                 }
-                self.maybe_pop_to_me(vm, opargs);
+                self.maybe_pop_to_me(vm, output, opargs);
                 return true;
             }
         }
@@ -1584,7 +1750,7 @@ impl ShaderFnCompiler {
                 args: vec![(ShaderType::Pod(pod_ty), self_arg)],
             });
             self.stack.free_string(self_s.clone());
-            self.maybe_pop_to_me(vm, opargs);
+            self.maybe_pop_to_me(vm, output, opargs);
             return true;
         }
 
@@ -1622,6 +1788,17 @@ impl ShaderFnCompiler {
                                 }
                                 write!(out, "{}", self_s_slice).ok();
                             }
+                            ShaderBackend::Rust => {
+                                if out.len() > 0 {
+                                    write!(out, ", ").ok();
+                                }
+                                // If self_s_slice is "(*_self)", _self is already *mut T
+                                if self_s_slice == "(*_self)" {
+                                    write!(out, "_self").ok();
+                                } else {
+                                    write!(out, "&mut {} as *mut _", self_s_slice).ok();
+                                }
+                            }
                         }
                         self.mes.push(ShaderMe::ScriptCall {
                             name: method_id,
@@ -1643,7 +1820,7 @@ impl ShaderFnCompiler {
                     }
                 }
                 self.stack.free_string(self_s.clone());
-                self.maybe_pop_to_me(vm, opargs);
+                self.maybe_pop_to_me(vm, output, opargs);
                 return true;
             }
         }
@@ -1706,7 +1883,7 @@ impl ShaderFnCompiler {
                         }
                     }
                     self.stack.free_string(self_s.clone());
-                    self.maybe_pop_to_me(vm, opargs);
+                    self.maybe_pop_to_me(vm, output, opargs);
                     return true;
                 }
             }
@@ -1730,5 +1907,70 @@ impl ShaderFnCompiler {
             texture_expr,
             args: vec![],
         });
+    }
+
+    /// Expand a heterogeneous pod constructor to individual float components for Rust backend.
+    /// E.g., `vec4(vec3_expr, f32_expr)` → `vec3_expr.x, vec3_expr.y, vec3_expr.z, f32_expr`
+    /// and `vec2(f32_expr)` → `f32_expr, f32_expr` (splat)
+    fn rust_expand_pod_construct(
+        &self,
+        vm: &ScriptVm,
+        args: &[ShaderPodArg],
+        total_slots: usize,
+    ) -> String {
+        let builtins = &vm.bx.code.builtins.pod;
+        let mut components = Vec::new();
+
+        for arg in args {
+            let arg_slots = match &arg.ty {
+                ShaderType::Pod(pt) | ShaderType::PodPtr(pt) => {
+                    vm.bx.heap.pod_types[pt.index as usize].ty.slots()
+                }
+                ShaderType::AbstractInt | ShaderType::AbstractFloat => 1,
+                _ => 1,
+            };
+
+            match arg_slots {
+                1 => {
+                    // Scalar: might need .0 suffix for abstract ints
+                    let mut s = arg.s.clone();
+                    if matches!(arg.ty, ShaderType::AbstractInt) {
+                        if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                            s.push_str(".0");
+                        }
+                    }
+                    components.push(s);
+                }
+                2 => {
+                    components.push(format!("{}.x", arg.s));
+                    components.push(format!("{}.y", arg.s));
+                }
+                3 => {
+                    components.push(format!("{}.x", arg.s));
+                    components.push(format!("{}.y", arg.s));
+                    components.push(format!("{}.z", arg.s));
+                }
+                4 => {
+                    components.push(format!("{}.x", arg.s));
+                    components.push(format!("{}.y", arg.s));
+                    components.push(format!("{}.z", arg.s));
+                    components.push(format!("{}.w", arg.s));
+                }
+                _ => {
+                    components.push(arg.s.clone());
+                }
+            }
+        }
+
+        // Handle splat: if we have fewer components than needed, repeat the last one
+        while components.len() < total_slots {
+            if let Some(last) = components.last().cloned() {
+                components.push(last);
+            } else {
+                components.push("0.0".to_string());
+            }
+        }
+
+        components.join(", ")
     }
 }

@@ -150,7 +150,7 @@ script_mod! {
                 let half_v = 0.5 / tex_size.y;
                 let u = clamp(t, 0.0, 1.0) * (1.0 - 2.0 * half_u) + half_u;
                 let v = clamp(row_v, half_v, 1.0 - half_v);
-                return self.gradient_texture.sample(vec2(u, v))
+                return self.gradient_texture.sample_as_bgra(vec2(u, v))
             }
             // No gradient texture row — return solid vertex color
             return self.v_color

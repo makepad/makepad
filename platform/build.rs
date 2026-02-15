@@ -19,7 +19,7 @@ fn main() {
         .unwrap();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target = env::var("TARGET").unwrap();
-    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines, use_gles_3, linux_direct,quest,no_android_choreographer,ohos_sim,use_unstable_unix_socket_ancillary_data_2021)");
+    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,linux_direct,quest,no_android_choreographer,ohos_sim,headless,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
 
@@ -35,6 +35,7 @@ fn main() {
                 }
                 "apple_bundle" => println!("cargo:rustc-cfg=apple_bundle"),
                 "ohos_sim" => println!("cargo:rustc-cfg=ohos_sim"),
+                "headless" => println!("cargo:rustc-cfg=headless"),
                 "use_gles_3" => println!("cargo:rustc-cfg=use_gles_3"),
                 _ => {}
             }
