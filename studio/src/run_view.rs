@@ -58,7 +58,8 @@ script_mod! {
 
 #[derive(Script, Widget, Animator)]
 pub struct RunView {
-    #[uid] uid: WidgetUid,
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]
@@ -122,6 +123,16 @@ impl RunView {
                 let swapchain = swapchain.as_ref()?;
                 let drawn = swapchain.get_image(presentable_draw.target_id)?;
 
+                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                if let Some(buffer) = drawn.software_buffer.as_ref() {
+                    cx.upload_presentable_image_software_buffer(
+                        &drawn.texture,
+                        swapchain.alloc_width,
+                        swapchain.alloc_height,
+                        buffer.as_bytes(),
+                    );
+                }
+
                 self.draw_app.set_texture(0, &drawn.texture);
                 self.draw_app.draw_vars.set_dyn_instance(
                     cx,
@@ -149,11 +160,31 @@ impl RunView {
                 Some(())
             };
 
+            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+            let current_uses_software_fallback = v
+                .swapchain_mut(window_id)
+                .as_ref()
+                .map(|swapchain| {
+                    swapchain
+                        .presentable_images
+                        .iter()
+                        .any(|image| image.software_buffer.is_some())
+                })
+                .unwrap_or(false);
+            #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+            let current_uses_software_fallback = false;
+
             if try_present_through(&v.swapchain_mut(window_id)).is_some() {
                 // The client is now drawing to the current swapchain,
                 // we can discard any previous one we were stashing.
                 *v.last_swapchain_with_completed_draws_mut(window_id) = None;
             } else {
+                if current_uses_software_fallback {
+                    // During software fallback resize churn, showing stale frames from
+                    // previous swapchains causes visible partial/garbled regions.
+                    // Prefer waiting for current-swapchain frames.
+                    return;
+                }
                 // New draws to a previous swapchain are fine, just means
                 // the client hasn't yet drawn on the current swapchain,
                 // what lets us accept draws is their target `Texture`s.
@@ -237,12 +268,29 @@ impl RunView {
                 .filter(|v| {
                     v.swapchain(self.window_id)
                         .map(|swapchain| {
-                            min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
+                            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                            {
+                                // Keep Linux swapchains exact-sized to prevent
+                                // alloc-vs-draw Y offsets in subprocess presentation.
+                                min_width != swapchain.alloc_width
+                                    || min_height != swapchain.alloc_height
+                            }
+                            #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+                            {
+                                min_width > swapchain.alloc_width
+                                    || min_height > swapchain.alloc_height
+                            }
                         })
                         .unwrap_or(true)
                 });
 
             if let Some(v) = active_build_needs_new_swapchain {
+                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                let aux_chan_host_endpoint = v
+                    .aux_chan_host_endpoint
+                    .clone()
+                    .expect("missing Linux aux channel host endpoint");
+
                 // HACK(eddyb) there is no check that there were any draws on
                 // the current swapchain, but the absence of an older swapchain
                 // (i.e. `last_swapchain_with_completed_draws`) implies either
@@ -261,16 +309,40 @@ impl RunView {
                     swapchain.regenerate_ids();
                 }
 
-                // Update the swapchain allocated size, rounding it up to
-                // reduce the need for further swapchain recreation.
-                let alloc_width = min_width.max(64).next_power_of_two();
-                let alloc_height = min_height.max(64).next_power_of_two();
+                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                let (alloc_width, alloc_height) = (min_width.max(1), min_height.max(1));
+                #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+                let (alloc_width, alloc_height) = (
+                    min_width.max(64).next_power_of_two(),
+                    min_height.max(64).next_power_of_two(),
+                );
 
                 let swapchain = v.swapchain_mut(self.window_id).get_or_insert_with(|| {
                     cx_stdin::HostSwapchain::new(self.window_id, alloc_width, alloc_height, cx)
                 });
 
                 // Create shared swapchain for cross-process serialization
+                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                let shared_swapchain = match cx_stdin::SharedSwapchain::from_host_swapchain(
+                    swapchain,
+                    cx,
+                    &aux_chan_host_endpoint,
+                ) {
+                    Ok(shared_swapchain) => shared_swapchain,
+                    Err(cx_stdin::SharedSwapchainCreateError::AuxChannelSend(err)) => {
+                        crate::error!(
+                            "Linux RunView aux channel send failed: {err:?}; disabling shared texture path"
+                        );
+                        v.aux_chan_host_endpoint = None;
+                        return;
+                    }
+                    Err(cx_stdin::SharedSwapchainCreateError::SoftwareFallback(err)) => {
+                        crate::error!("Linux RunView software fallback setup failed: {err:?}");
+                        v.aux_chan_host_endpoint = None;
+                        return;
+                    }
+                };
+                #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
                 let shared_swapchain =
                     cx_stdin::SharedSwapchain::from_host_swapchain(swapchain, cx);
 

@@ -235,6 +235,25 @@ impl Cx {
                 };
             }
         }
+
+        #[cfg(target_os = "android")]
+        {
+            if let Some(data) = unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) } {
+                return Ok(Rc::new(data));
+            }
+            if let Some(package_root) = self.package_root.as_deref() {
+                let root_prefix = format!("{}/", package_root);
+                if !path.starts_with(&root_prefix) {
+                    let prefixed_path = format!("{}/{}", package_root, path);
+                    if let Some(data) = unsafe {
+                        crate::os::linux::android::android_jni::to_java_load_asset(&prefixed_path)
+                    } {
+                        return Ok(Rc::new(data));
+                    }
+                }
+            }
+        }
+
         Err(format!("Dependency not loaded {}", path))
     }
 
@@ -247,12 +266,49 @@ impl Cx {
                 };
             }
         }
+
+        #[cfg(target_os = "android")]
+        {
+            if let Some(data) = unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) } {
+                return Ok(Rc::new(data));
+            }
+            if let Some(package_root) = self.package_root.as_deref() {
+                let root_prefix = format!("{}/", package_root);
+                if !path.starts_with(&root_prefix) {
+                    let prefixed_path = format!("{}/{}", package_root, path);
+                    if let Some(data) = unsafe {
+                        crate::os::linux::android::android_jni::to_java_load_asset(&prefixed_path)
+                    } {
+                        return Ok(Rc::new(data));
+                    }
+                }
+            }
+        }
+
         Err(format!("Dependency not loaded {}", path))
     }
 
     /// Get loaded resource data by ScriptHandle
     pub fn get_resource(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
-        self.script_data.resources.get_data(handle)
+        if let Some(data) = self.script_data.resources.get_data(handle) {
+            return Some(data);
+        }
+
+        // On web, resources are also available through the dependency table that
+        // arrives during ToWasmInit. If a script resource hasn't been promoted to
+        // Loaded yet, allow direct dependency lookup as a synchronous fallback.
+        if self.os_type().is_web() {
+            let resources = self.script_data.resources.resources.borrow();
+            if let Some(res) = resources.iter().find(|res| res.handle == handle) {
+                if let Some(dep_path) = res.dependency_path.as_deref() {
+                    if let Ok(data) = self.get_dependency(dep_path) {
+                        return Some(data);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     pub fn null_texture(&self) -> Texture {

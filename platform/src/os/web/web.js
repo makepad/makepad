@@ -41,7 +41,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     async load_deps() {
-        
         this.to_wasm = this.new_to_wasm();
         
         await this.query_xr_capabilities();
@@ -200,7 +199,6 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
-            //console.log("drawing")
             if (this.wasm == null) {
                 return
             }
@@ -216,7 +214,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmSetDocumentTitle(args) {
-        // document.title = args.title
+        document.title = args.title
     }
     
     FromWasmSetMouseCursor(args) {
@@ -530,6 +528,13 @@ export class WasmWebBrowser extends WasmBridge {
 
         req.addEventListener("load", event => {
             let responseEvent = event.target;
+            if (responseEvent.status < 200 || responseEvent.status >= 300) {
+                report_browser_issue("xhr.http_error", {
+                    method: args.method,
+                    url: args.url,
+                    status: responseEvent.status,
+                });
+            }
 
             this.to_wasm.ToWasmHTTPResponse({
                 request_id_lo: args.request_id_lo,
@@ -548,6 +553,11 @@ export class WasmWebBrowser extends WasmBridge {
             if (!navigator.onLine) {
                 errorMessage = "The browser is offline.";
             }
+            report_browser_issue("xhr.error", {
+                method: args.method,
+                url: args.url,
+                message: errorMessage,
+            });
 
             this.to_wasm.ToWasmHttpRequestError({
                 request_id_lo: args.request_id_lo,
@@ -558,6 +568,10 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("timeout", event => {
+            report_browser_issue("xhr.timeout", {
+                method: args.method,
+                url: args.url,
+            });
             this.to_wasm.ToWasmHttpRequestError({
                 request_id_lo: args.request_id_lo,
                 request_id_hi: args.request_id_hi,
@@ -567,6 +581,10 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("abort", event => {
+            report_browser_issue("xhr.abort", {
+                method: args.method,
+                url: args.url,
+            });
             this.to_wasm.ToWasmHttpRequestError({
                 request_id_lo: args.request_id_lo,
                 request_id_hi: args.request_id_hi,
@@ -576,7 +594,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("progress", event => {
-            console.log("progress", event);
             if (event.lengthComputable) {
                 this.to_wasm.ToWasmHttpResponseProgress({
                     request_id_lo: args.request_id_lo,
@@ -762,7 +779,6 @@ export class WasmWebBrowser extends WasmBridge {
 
     wasm_process_msg(to_wasm) {
         if(this.debug_sum_ptr !== undefined){
-            console.log("CECKING IN PROCESS MSG");
             let ptr = this.debug_sum_ptr;
             this.debug_sum_ptr = undefined;
             var u8_out = new Uint8Array(this.memory.buffer, ptr.ptr, ptr.len);
@@ -770,7 +786,6 @@ export class WasmWebBrowser extends WasmBridge {
             for(let i = 0; i<ptr.len;i++){
                 sum += u8_out[i];
             }
-            console.log("Got sum"+sum);
         }
         
         
@@ -1410,17 +1425,44 @@ function is_fullscreen() {
     return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)? true: false
 }
 
+function report_browser_issue(kind, data) {
+    try {
+        if (typeof window.makepad_report_browser_issue === "function") {
+            window.makepad_report_browser_issue(kind, data);
+            return;
+        }
+        const payload = JSON.stringify({
+            kind,
+            href: location.href,
+            user_agent: navigator.userAgent,
+            data
+        });
+        const encoded = encodeURIComponent(payload.slice(0, 8192));
+        fetch('/$report_error?data=' + encoded, {cache: 'no-store'});
+    } catch (_error) {
+    }
+}
+
 function fetch_path(base, path) {
     
     
     return new Promise(function(resolve, reject) {
         var req = new XMLHttpRequest()
         req.addEventListener("error", function() {
-            reject(resource)
+            report_browser_issue("deps.fetch.error", {
+                url: base + path,
+                path: path
+            });
+            reject(path)
         })
         req.responseType = 'arraybuffer'
         req.addEventListener("load", function() {
             if (req.status !== 200) {
+                report_browser_issue("deps.fetch.http_error", {
+                    url: base + path,
+                    path: path,
+                    status: req.status
+                });
                 return reject(req.status)
             }
             resolve({

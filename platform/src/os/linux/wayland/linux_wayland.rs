@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables)]
 //! Main Wayland backend implementation
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -15,8 +16,11 @@ use crate::wayland::xkb_sys;
 use crate::x11::xlib_event::XlibEvent;
 use crate::WindowId;
 use crate::{
-    egl_sys, Area, Cx, CxDrawPassParent, CxOsOp, Event, KeyModifiers, MouseMoveEvent, SignalToUI,
-    WindowClosedEvent, WindowGeomChangeEvent,
+    cx::{LinuxWindowParams, OsType},
+    egl_sys,
+    gpu_info::GpuPerformance,
+    Area, Cx, CxDrawPassParent, CxOsOp, CxWindowPool, Event, KeyModifiers, MouseButton,
+    MouseMoveEvent, MouseUpEvent, SignalToUI, WindowClosedEvent, WindowGeomChangeEvent,
 };
 use wayland_client::protocol::{wl_keyboard, wl_pointer};
 use wayland_client::{Connection, Proxy};
@@ -33,6 +37,12 @@ pub(crate) struct WaylandCx {
 
 impl WaylandCx {
     pub fn event_loop_impl(cx: Rc<RefCell<Cx>>) {
+        cx.borrow_mut().self_ref = Some(cx.clone());
+        cx.borrow_mut().os_type = OsType::LinuxWindow(LinuxWindowParams {
+            custom_window_chrome: true,
+        });
+        cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
+
         let wayland_cx = Rc::new(RefCell::new(WaylandCx {
             cx: cx.clone(),
             qhandle: None,
@@ -84,6 +94,15 @@ impl WaylandCx {
     }
 
     fn state_event_callback(&mut self, state: &mut WaylandState, event: XlibEvent) -> EventFlow {
+        state.pump_pending_clipboard_read();
+        if let Some(input) = state.take_pending_paste_text_input() {
+            let mut cx = self.cx.borrow_mut();
+            cx.call_event_handler(&Event::TextInput(crate::TextInputEvent {
+                input,
+                replace_last: false,
+                was_paste: true,
+            }));
+        }
         if let EventFlow::Exit = self.handle_platform_ops(state) {
             state.event_loop_running = false;
             return EventFlow::Exit;
@@ -213,15 +232,28 @@ impl WaylandCx {
             }
             XlibEvent::Drag(e) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::Drag(e))
+                cx.call_event_handler(&Event::Drag(e));
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::Drop(e) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::Drop(e))
+                cx.call_event_handler(&Event::Drop(e));
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::DragEnd => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::DragEnd)
+                cx.call_event_handler(&Event::MouseUp(MouseUpEvent {
+                    abs: dvec2(-100000.0, -100000.0),
+                    button: MouseButton::PRIMARY,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0,
+                }));
+                cx.fingers.mouse_up(MouseButton::PRIMARY);
+                cx.fingers.cycle_hover_area(live_id!(mouse).into());
+
+                cx.call_event_handler(&Event::DragEnd);
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::KeyDown(e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -246,10 +278,15 @@ impl WaylandCx {
                 if e.timer_id == 0 {
                     if SignalToUI::check_and_clear_ui_signal() {
                         cx.handle_media_signals();
+                        cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
                     }
-                    cx.handle_action_receiver();
+                    if SignalToUI::check_and_clear_action_signal() {
+                        cx.handle_action_receiver();
+                    }
+                    cx.handle_networking_events();
                 } else {
+                    cx.handle_script_timer(&e);
                     cx.call_event_handler(&Event::Timer(e))
                 }
 
@@ -289,17 +326,14 @@ impl WaylandCx {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
                     let compositor = state.compositor.as_ref().unwrap();
                     let wm_base = state.wm_base.as_ref().unwrap();
-                    let decoration_manager = state.decoration_manager.as_ref().unwrap();
-                    let scale_manager = state.scale_manager.as_ref().unwrap();
-                    let viewporter = state.viewporter.as_ref().unwrap();
                     let window = &cx.windows[window_id];
                     let window = WaylandWindow::new(
                         window_id,
                         compositor,
                         wm_base,
-                        decoration_manager,
-                        scale_manager,
-                        viewporter,
+                        state.decoration_manager.as_ref(),
+                        state.scale_manager.as_ref(),
+                        state.viewporter.as_ref(),
                         self.qhandle.as_ref().unwrap(),
                         gl_cx,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
@@ -317,21 +351,49 @@ impl WaylandCx {
                         windows[index].close_window();
                         windows.remove(index);
                         if windows.len() == 0 {
-                            println!("exit");
                             ret = EventFlow::Exit
                         }
                     }
                 }
                 CxOsOp::Quit => ret = EventFlow::Exit,
-                CxOsOp::MinimizeWindow(window_id) => {}
+                CxOsOp::MinimizeWindow(window_id) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_minimized();
+                    }
+                }
                 CxOsOp::Deminiaturize(_window_id) => todo!(),
                 CxOsOp::HideWindow(_window_id) => todo!(),
-                CxOsOp::MaximizeWindow(window_id) => {}
-                CxOsOp::RestoreWindow(window_id) => {}
+                CxOsOp::MaximizeWindow(window_id) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_maximized();
+                    }
+                }
+                CxOsOp::FullscreenWindow(window_id) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_fullscreen(None);
+                    }
+                }
+                CxOsOp::RestoreWindow(window_id) | CxOsOp::NormalizeWindow(window_id) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.unset_maximized();
+                        window.toplevel.unset_fullscreen();
+                    }
+                }
                 CxOsOp::ResizeWindow(window_id, size) => {}
                 CxOsOp::RepositionWindow(window_id, size) => {}
                 CxOsOp::ShowClipboardActions { .. } => {}
-                CxOsOp::CopyToClipboard(content) => {}
+                CxOsOp::CopyToClipboard(content) => {
+                    if let Some(serial) = state.keyboard_serial.or(state.pointer_serial) {
+                        if let Some(qhandle) = self.qhandle.as_ref() {
+                            state.set_clipboard_text(qhandle, serial, content);
+                        }
+                    } else {
+                        state.clipboard_text = content;
+                    }
+                }
+                CxOsOp::StartDragging(items) => {
+                    state.start_internal_drag(items);
+                }
                 CxOsOp::SetCursor(cursor) => {
                     if let Some(cursor_shape) = state.cursor_shape.as_ref() {
                         if let Some(serial) = state.pointer_serial.as_ref() {
@@ -348,6 +410,17 @@ impl WaylandCx {
                 }
                 CxOsOp::StopTimer(timer_id) => {
                     state.stop_timer(timer_id);
+                }
+                CxOsOp::HttpRequest {
+                    request_id,
+                    request,
+                } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::open(request_id, request, cx.os.network_response.sender.clone());
+                }
+                CxOsOp::CancelHttpRequest { request_id } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::cancel(request_id);
                 }
                 CxOsOp::ShowTextIME(area, pos) => {
                     if let Some(window) = state.current_window {
@@ -394,7 +467,28 @@ impl WaylandCx {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
                     if let Some(window) = windows.iter_mut().find(|w| w.window_id == window_id) {
+                        if !window.configured {
+                            continue;
+                        }
                         window.resize_buffers();
+                        if std::env::var_os("MAKEPAD_WAYLAND_TRACE").is_some() {
+                            crate::log!(
+                                "Wayland paint window={:?} inner=({}, {}) dpi={} pix=({}, {})",
+                                window.window_id,
+                                window.window_geom.inner_size.x,
+                                window.window_geom.inner_size.y,
+                                window.window_geom.dpi_factor,
+                                window.window_geom.inner_size.x * window.window_geom.dpi_factor,
+                                window.window_geom.inner_size.y * window.window_geom.dpi_factor
+                            );
+                        }
+                        if let Some(viewport) = window.viewport.as_ref() {
+                            viewport.set_source(-1., -1., -1., -1.);
+                            viewport.set_destination(
+                                window.window_geom.inner_size.x as i32,
+                                window.window_geom.inner_size.y as i32,
+                            );
+                        }
                         let pix_width =
                             window.window_geom.inner_size.x * window.window_geom.dpi_factor;
                         let pix_height =
@@ -405,14 +499,6 @@ impl WaylandCx {
                             window.egl_surface,
                             pix_width,
                             pix_height,
-                        );
-                        window
-                            .wl_egl_surface
-                            .resize(pix_width as i32, pix_height as i32, 0, 0);
-                        window.viewport.set_source(-1., -1., -1., -1.);
-                        window.viewport.set_destination(
-                            window.window_geom.inner_size.x as i32,
-                            window.window_geom.inner_size.y as i32,
                         );
                     }
                 }

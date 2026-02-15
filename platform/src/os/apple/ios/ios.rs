@@ -460,17 +460,13 @@ impl CxOsApi for Cx {
         self.os.start_time = Some(Instant::now());
         #[cfg(not(apple_sim))]
         {
-            self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
+            self.package_root = Some("makepad".to_string());
         }
-
-        self.live_expand();
 
         if !Self::has_studio_web_socket() {
             #[cfg(apple_sim)]
             self.start_disk_live_file_watcher(50);
         }
-
-        self.live_scan_dependencies();
 
         #[cfg(apple_sim)]
         self.native_load_dependencies();

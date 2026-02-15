@@ -2,20 +2,56 @@ use super::super::cx_stdin::PollTimers;
 use super::linux_media::CxLinuxMedia;
 
 use crate::{
-    cx::Cx, opengl_cx::OpenglCx, x11::xlib_app::get_xlib_app_global, CxOsApi, OpenUrlInPlace,
+    cx::Cx,
+    event::{Event, NetworkResponseChannel},
+    opengl_cx::OpenglCx,
+    CxOsApi,
+    OpenUrlInPlace,
 };
 use std::{cell::RefCell, rc::Rc, time::Instant};
 // Import OpenglCx from x11 for the unified type
 
+fn env_var_is_nonempty(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+fn is_stdin_loop_mode() -> bool {
+    std::env::args().any(|arg| arg == "--stdin-loop")
+}
+
+fn forced_windowing_protocol_from_args() -> Option<WindowingProtocol> {
+    for arg in std::env::args() {
+        if let Some(value) = arg.strip_prefix("--linux-backend=") {
+            match value {
+                "x11" => return Some(WindowingProtocol::X11),
+                "wayland" => return Some(WindowingProtocol::Wayland),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 // Protocol detection for windowing system
 fn detect_windowing_protocol() -> WindowingProtocol {
+    // Linux stdin-loop rendering path is currently implemented for X11.
+    // Force child processes started by Studio into that backend so they
+    // render into RunView instead of opening a standalone window.
+    if is_stdin_loop_mode() {
+        return WindowingProtocol::X11;
+    }
+
+    if let Some(protocol) = forced_windowing_protocol_from_args() {
+        return protocol;
+    }
+
     // Check for Wayland first
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+    if env_var_is_nonempty("WAYLAND_DISPLAY") {
         return WindowingProtocol::Wayland;
     }
 
     // Check for X11
-    if std::env::var("DISPLAY").is_ok() {
+    if env_var_is_nonempty("DISPLAY") {
         return WindowingProtocol::X11;
     }
 
@@ -34,16 +70,20 @@ impl Cx {
         let protocol = detect_windowing_protocol();
 
         // Show environment variables
-        if let Ok(wayland_display) = std::env::var("WAYLAND_DISPLAY") {
-            println!("WAYLAND_DISPLAY: {}", wayland_display);
-        } else {
-            println!("WAYLAND_DISPLAY: Not set");
+        match std::env::var("WAYLAND_DISPLAY") {
+            Ok(wayland_display) if !wayland_display.is_empty() => {
+                println!("WAYLAND_DISPLAY: {}", wayland_display);
+            }
+            Ok(_) => println!("WAYLAND_DISPLAY: <empty>"),
+            Err(_) => println!("WAYLAND_DISPLAY: Not set"),
         }
 
-        if let Ok(x11_display) = std::env::var("DISPLAY") {
-            println!("DISPLAY: {}", x11_display);
-        } else {
-            println!("DISPLAY: Not set");
+        match std::env::var("DISPLAY") {
+            Ok(x11_display) if !x11_display.is_empty() => {
+                println!("DISPLAY: {}", x11_display);
+            }
+            Ok(_) => println!("DISPLAY: <empty>"),
+            Err(_) => println!("DISPLAY: Not set"),
         }
 
         // Show additional environment info
@@ -59,11 +99,19 @@ impl Cx {
         match protocol {
             WindowingProtocol::Wayland => {
                 println!("Selected: Wayland backend");
-                println!("Reason: WAYLAND_DISPLAY environment variable is set");
+                if forced_windowing_protocol_from_args() == Some(WindowingProtocol::Wayland) {
+                    println!("Reason: --linux-backend=wayland override");
+                } else {
+                    println!("Reason: WAYLAND_DISPLAY environment variable is set");
+                }
             }
             WindowingProtocol::X11 => {
                 println!("Selected: X11 backend");
-                if std::env::var("DISPLAY").is_ok() {
+                if is_stdin_loop_mode() {
+                    println!("Reason: --stdin-loop mode uses X11 stdin backend");
+                } else if forced_windowing_protocol_from_args() == Some(WindowingProtocol::X11) {
+                    println!("Reason: --linux-backend=x11 override");
+                } else if env_var_is_nonempty("DISPLAY") {
                     println!("Reason: DISPLAY environment variable is set");
                 } else {
                     println!("Reason: Default fallback (no display variables set)");
@@ -86,20 +134,24 @@ impl Cx {
         super::x11::linux_x11::x11_event_loop(cx)
     }
 
-    pub(crate) fn handle_networking_events(&mut self) {}
+    pub(crate) fn handle_networking_events(&mut self) {
+        let mut out = Vec::new();
+        while let Ok(item) = self.os.network_response.receiver.try_recv() {
+            out.push(item);
+        }
+        if !out.is_empty() {
+            self.handle_script_network_events(&out);
+            self.call_event_handler(&Event::NetworkResponses(out));
+        }
+    }
 }
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
         if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
-            self.live_registry.borrow_mut().package_root = Some(item.to_string());
+            self.package_root = Some(item.to_string());
         }
-        self.live_expand();
-        if !Self::has_studio_web_socket() {
-            self.start_disk_live_file_watcher(100);
-        }
-        self.live_scan_dependencies();
         self.native_load_dependencies();
     }
 
@@ -125,6 +177,7 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
+    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
     pub(super) opengl_cx: Option<OpenglCx>,

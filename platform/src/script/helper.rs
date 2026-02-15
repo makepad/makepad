@@ -13,7 +13,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         move |vm, args| {
             let value = script_value!(vm, args.value);
             let cx = vm.host.cx_mut();
-            cx.script_data.resources.load_all_resources();
+            cx.load_all_script_resources();
             let modules = vm.bx.heap.modules;
             vm.bx.heap.set_static(modules.into());
             value

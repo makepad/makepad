@@ -216,21 +216,22 @@ impl DrawSvgGlyph {
         if self.svg_loaded {
             return;
         }
-        self.svg_loaded = true;
 
         let Some(ref handle_ref) = self.svg else {
+            self.svg_loaded = true;
             return;
         };
         let handle = handle_ref.as_handle();
         let data = if let Some(data) = cx.get_resource(handle) {
             data
         } else {
-            cx.script_data.resources.load_all_resources();
+            cx.load_all_script_resources();
             match cx.get_resource(handle) {
                 Some(data) => data,
                 None => return,
             }
         };
+        self.svg_loaded = true;
         let svg_str = match std::str::from_utf8(&data) {
             Ok(s) => s,
             Err(_) => return,

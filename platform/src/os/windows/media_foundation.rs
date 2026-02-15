@@ -6,7 +6,6 @@ use {
         video::*,
         windows::{
             core::{
-                implement,
                 AsImpl,
                 GUID,
                 HRESULT,
@@ -47,7 +46,7 @@ use {
                 MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             },
             Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL},
-            Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
+            Win32::Foundation::PROPERTYKEY,
         },
     },
     std::sync::{Arc, Mutex},
@@ -334,33 +333,31 @@ struct SourceReaderConfig {
     callback: Arc<Mutex<Option<VideoInputFn>>>,
 }
 
-#[implement(IMFSourceReaderCallback)]
-struct SourceReaderCallback {
+pub(crate) struct SourceReaderCallback {
     config: Mutex<Option<SourceReaderConfig>>,
     source_reader: Mutex<Option<IMFSourceReader>>,
 }
-/*
-implement_com!{
+crate::implement_com! {
     for_struct: SourceReaderCallback,
     identity: IMFSourceReaderCallback,
-    wrapper_struct: SourceReaderCallback_Com,
+    wrapper_struct: SourceReaderCallback_Impl,
     interface_count: 1,
     interfaces: {
         0: IMFSourceReaderCallback
     }
-}*/
+}
 
-impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
+impl IMFSourceReaderCallback_Impl for SourceReaderCallback_Impl {
     fn OnReadSample(
         &self,
         _hrstatus: HRESULT,
         _dwstreamindex: u32,
         _dwstreamflags: u32,
         _lltimestamp: i64,
-        psample: Option<&IMFSample>,
+        psample: crate::windows::core::Ref<'_, IMFSample>,
     ) -> crate::windows::core::Result<()> {
         unsafe {
-            if let Some(sample) = psample {
+            if let Some(sample) = psample.as_ref() {
                 if let Ok(buffer) = sample.GetBufferByIndex(0) {
                     let config = self.config.lock().unwrap();
                     if let Some(config) = &*config {
@@ -430,28 +427,26 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
     fn OnEvent(
         &self,
         _dwstreamindex: u32,
-        _pevent: Option<&IMFMediaEvent>,
+        _pevent: crate::windows::core::Ref<'_, IMFMediaEvent>,
     ) -> crate::windows::core::Result<()> {
         Ok(())
     }
 }
 
-#[implement(IMMNotificationClient)]
-struct MediaFoundationChangeListener {
+pub(crate) struct MediaFoundationChangeListener {
     change_signal: SignalToUI,
 }
-/*
-implement_com!{
+crate::implement_com! {
     for_struct: MediaFoundationChangeListener,
     identity: IMMNotificationClient,
-    wrapper_struct: MediaFoundationChangeListener_Com,
+    wrapper_struct: MediaFoundationChangeListener_Impl,
     interface_count: 1,
     interfaces: {
         0: IMMNotificationClient
     }
-}*/
+}
 
-impl IMMNotificationClient_Impl for MediaFoundationChangeListener {
+impl IMMNotificationClient_Impl for MediaFoundationChangeListener_Impl {
     fn OnDeviceStateChanged(
         &self,
         _pwstrdeviceid: &PCWSTR,

@@ -2,7 +2,7 @@ pub use crate::register_widget;
 use {
     crate::makepad_draw::*,
     crate::widget_async::{ScriptAsyncId, ScriptAsyncResult},
-    crate::widget_tree::CxWidgetExt,
+    crate::widget_tree::{set_ui_root, CxWidgetExt},
     //crate::designer_data::DesignerDataToWidget,
     std::any::TypeId,
     std::cell::RefCell,
@@ -381,8 +381,14 @@ impl WidgetSet {
         let mut results = WidgetSet::default();
         let tree = cx.widget_tree();
         for widget in &self.0 {
-            tree.seed_from_widget(widget.clone());
             let uid = widget.widget_uid();
+            if uid != WidgetUid(0) {
+                if let Ok(inner) = widget.0.try_borrow() {
+                    if let Some(inner) = inner.as_ref() {
+                        tree.refresh_from_borrowed(uid, |visit| inner.widget.children(visit));
+                    }
+                }
+            }
             for path in paths {
                 results.0.extend(tree.find_all_within(uid, path));
             }
@@ -522,7 +528,7 @@ impl WidgetRef {
     /// the widget should implement the `handle_event_with` fn in `impl Widget for $Widget`
     ///
     /// ### Example
-    /// ```rust
+    /// ```ignore
     /// impl Widget for Button {
     /// fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, sweep_area: Area) {
     ///     let uid = self.widget_uid();
@@ -752,7 +758,6 @@ impl WidgetRef {
 
     pub fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
         let tree = cx.widget_tree();
-        tree.seed_from_widget(self.clone());
         if let Ok(inner) = self.0.try_borrow() {
             if let Some(inner) = inner.as_ref() {
                 let uid = inner.widget.widget_uid();
@@ -770,7 +775,6 @@ impl WidgetRef {
     pub fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         let tree = cx.widget_tree();
-        tree.seed_from_widget(self.clone());
         let mut uid = self.widget_uid();
         if let Ok(inner) = self.0.try_borrow() {
             if let Some(inner) = inner.as_ref() {
@@ -795,7 +799,6 @@ impl WidgetRef {
 
     pub fn widget_flood(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
         let tree = cx.widget_tree();
-        tree.seed_from_widget(self.clone());
         if let Ok(inner) = self.0.try_borrow() {
             if let Some(inner) = inner.as_ref() {
                 let uid = inner.widget.widget_uid();
@@ -813,7 +816,6 @@ impl WidgetRef {
     pub fn widgets_flood(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         let tree = cx.widget_tree();
-        tree.seed_from_widget(self.clone());
         let mut uid = self.widget_uid();
         if let Ok(inner) = self.0.try_borrow() {
             if let Some(inner) = inner.as_ref() {
@@ -1022,6 +1024,7 @@ impl WidgetRef {
         value: ScriptValue,
     ) {
         let mut inner = self.0.borrow_mut();
+        let mut set_ui_after_apply = false;
 
         // Get the TypeId from the value if it's an object with a registered type
         let type_id = if let Some(obj) = value.as_object() {
@@ -1064,7 +1067,9 @@ impl WidgetRef {
 
             if let Some(new_widget) = new_widget {
                 *inner = Some(WidgetRefInner { widget: new_widget });
-
+                if type_id == crate::Root::script_type_id_static() {
+                    set_ui_after_apply = true;
+                }
                 // Apply value to the new widget and redraw
                 if let Some(component) = &mut *inner {
                     component.widget.script_apply(vm, apply, scope, value);
@@ -1072,6 +1077,10 @@ impl WidgetRef {
                     component.widget.redraw(cx);
                 }
             }
+        }
+        drop(inner);
+        if set_ui_after_apply {
+            vm.with_cx_mut(|cx| set_ui_root(cx, self));
         }
     }
 }
@@ -1237,7 +1246,7 @@ pub trait WidgetActionsApi {
     /// #### find and directly do target action without param
     /// you can `filter_widget_actions` and then do find to get target action you want,
     /// then do map to do want you what
-    /// ```rust
+    /// ```ignore
     /// let actions = cx.capture_actions(|cx| self.super_widget.handle_event(cx, event, scope));
     ///
     /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
@@ -1254,7 +1263,7 @@ pub trait WidgetActionsApi {
     /// });
     /// ```
     /// #### find and cast
-    /// ```rust
+    /// ```ignore
     /// let actions = cx.capture_actions(|cx| self.super_widget.handle_event(cx, event, scope));
     ///
     /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
@@ -1272,7 +1281,7 @@ pub trait WidgetActionsApi {
     /// - try cast all widget actions (This method is not recommended when a large number of actions occur simultaneously)
     /// - back `Iterator<Item = T>` not `Iterator<Item = &T>`
     /// ### Example
-    /// ```rust
+    /// ```ignore
     /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
     /// let actions = actions.filter_widget_actions_cast::<GButtonEvent>(x.widget_uid());
     ///     actions.for_each(|action| {

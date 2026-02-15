@@ -57,32 +57,12 @@ impl App {
     }
 }
 
-#[derive(Script)]
+#[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     pub ui: WidgetRef,
     #[rust]
     pub data: AppData,
-}
-
-impl ScriptHook for App {
-    fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        vm.with_cx_mut(|cx| {
-            cx.widget_tree().set_root_widget(self.ui.clone());
-        });
-    }
-
-    fn on_after_apply(
-        &mut self,
-        vm: &mut ScriptVm,
-        _apply: &Apply,
-        _scope: &mut Scope,
-        _value: ScriptValue,
-    ) {
-        vm.with_cx_mut(|cx| {
-            cx.widget_tree().set_root_widget(self.ui.clone());
-        });
-    }
 }
 
 impl App {
@@ -702,6 +682,9 @@ impl MatchEvent for App {
                             }
                         }
                     }
+                    StdinToHost::PngFrame { path, .. } => {
+                        crate::log!("headless frame written: {}", path);
+                    }
                 }
             }
             BuildManagerAction::None => (),
@@ -1045,22 +1028,20 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        cx.with_widget_tree(|cx| {
-            self.match_event(cx, event);
-            self.ui
-                .handle_event(cx, event, &mut Scope::with_data(&mut self.data));
+        self.match_event(cx, event);
+        self.ui
+            .handle_event(cx, event, &mut Scope::with_data(&mut self.data));
 
-            self.data.file_system.handle_event(cx, event, &self.ui);
-            self.data
-                .build_manager
-                .handle_event(cx, event, &mut self.data.file_system);
-            self.data
-                .ai_chat_manager
-                .handle_event(cx, event, &mut self.data.file_system);
-            if self.ui.dock(cx, ids!(dock)).check_and_clear_need_save() {
-                self.save_state(cx, 0);
-            }
-        });
+        self.data.file_system.handle_event(cx, event, &self.ui);
+        self.data
+            .build_manager
+            .handle_event(cx, event, &mut self.data.file_system);
+        self.data
+            .ai_chat_manager
+            .handle_event(cx, event, &mut self.data.file_system);
+        if self.ui.dock(cx, ids!(dock)).check_and_clear_need_save() {
+            self.save_state(cx, 0);
+        }
     }
 }
 

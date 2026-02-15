@@ -56,6 +56,7 @@ pub const TEXTURE0: GLenum = 0x84C0;
 pub const TEXTURE_2D: GLenum = 0x0DE1;
 pub const TRIANGLES: GLenum = 0x0004;
 pub const UNSIGNED_INT: GLenum = 0x1405;
+pub const INT: GLenum = 0x1404;
 pub const DEPTH_TEST: GLenum = 0x0B71;
 pub const LEQUAL: GLenum = 0x0203;
 pub const FUNC_ADD: GLenum = 0x8006;
@@ -79,6 +80,8 @@ pub const VERTEX_SHADER: GLenum = 0x8B31;
 pub const FRAGMENT_SHADER: GLenum = 0x8B30;
 pub const TEXTURE_MIN_FILTER: GLenum = 0x2801;
 pub const LINEAR: GLenum = 0x2601;
+pub const REPEAT: GLenum = 0x2901;
+pub const MIRRORED_REPEAT: GLenum = 0x8370;
 pub const LINEAR_MIPMAP_LINEAR: GLenum = 0x2703;
 pub const TEXTURE_BASE_LEVEL: GLenum = 0x813C;
 pub const TEXTURE_MAX_LEVEL: GLenum = 0x813D;
@@ -104,6 +107,7 @@ pub const STATIC_DRAW: GLenum = 0x88E4;
 pub const NEAREST: GLenum = 0x2600;
 pub const TEXTURE_WRAP_S: GLenum = 0x2802;
 pub const TEXTURE_WRAP_T: GLenum = 0x2803;
+pub const TEXTURE_WRAP_R: GLenum = 0x8072;
 pub const CLAMP_TO_EDGE: GLenum = 0x812F;
 pub const CLAMP_TO_BORDER: GLenum = 0x812D;
 pub const PROGRAM_BINARY_LENGTH: GLenum = 0x8741;
@@ -112,6 +116,10 @@ pub const UNPACK_ALIGNMENT: GLenum = 0x0CF5;
 pub const UNPACK_ROW_LENGTH: GLenum = 0x0CF2;
 pub const UNPACK_SKIP_PIXELS: GLenum = 0x0CF4;
 pub const UNPACK_SKIP_ROWS: GLenum = 0x0CF3;
+pub const PACK_ALIGNMENT: GLenum = 0x0D05;
+pub const PACK_ROW_LENGTH: GLenum = 0x0D02;
+pub const PACK_SKIP_PIXELS: GLenum = 0x0D04;
+pub const PACK_SKIP_ROWS: GLenum = 0x0D03;
 pub const DRAW_FRAMEBUFFER: GLenum = 0x8CA9;
 pub const TEXTURE_EXTERNAL_OES: GLenum = 0x8D65;
 pub const EXTENSIONS: GLenum = 0x1F03;
@@ -130,6 +138,13 @@ pub type TglVertexAttribPointer = unsafe extern "C" fn(
     size: GLint,
     type_: GLenum,
     normalized: GLboolean,
+    stride: GLsizei,
+    pointer: *const raw::c_void,
+) -> ();
+pub type TglVertexAttribIPointer = unsafe extern "C" fn(
+    index: GLuint,
+    size: GLint,
+    type_: GLenum,
     stride: GLsizei,
     pointer: *const raw::c_void,
 ) -> ();
@@ -255,6 +270,11 @@ pub type TglBufferData = unsafe extern "C" fn(
 ) -> ();
 pub type TglUniform1i = unsafe extern "C" fn(location: GLint, v0: GLint) -> ();
 pub type TglGetError = unsafe extern "C" fn() -> GLenum;
+pub type TglGenSamplers = unsafe extern "C" fn(n: GLsizei, samplers: *mut GLuint) -> ();
+pub type TglDeleteSamplers = unsafe extern "C" fn(n: GLsizei, samplers: *const GLuint) -> ();
+pub type TglBindSampler = unsafe extern "C" fn(unit: GLuint, sampler: GLuint) -> ();
+pub type TglSamplerParameteri =
+    unsafe extern "C" fn(sampler: GLuint, pname: GLenum, param: GLint) -> ();
 pub type TglFlush = unsafe extern "C" fn() -> ();
 pub type TglFinish = unsafe extern "C" fn() -> ();
 pub type TglGetProgramBinary = unsafe extern "C" fn(
@@ -365,6 +385,7 @@ pub struct LibGl {
     pub glBindVertexArray: TglBindVertexArray,
     pub glBindBuffer: TglBindBuffer,
     pub glVertexAttribPointer: TglVertexAttribPointer,
+    pub glVertexAttribIPointer: TglVertexAttribIPointer,
     pub glEnableVertexAttribArray: TglEnableVertexAttribArray,
     pub glVertexAttribDivisor: TglVertexAttribDivisor,
     pub glUseProgram: TglUseProgram,
@@ -411,6 +432,10 @@ pub struct LibGl {
     pub glBufferData: TglBufferData,
     pub glUniform1i: TglUniform1i,
     pub glGetError: TglGetError,
+    pub glGenSamplers: Option<TglGenSamplers>,
+    pub glDeleteSamplers: Option<TglDeleteSamplers>,
+    pub glBindSampler: Option<TglBindSampler>,
+    pub glSamplerParameteri: Option<TglSamplerParameteri>,
     pub glDisableVertexAttribArray: TglDisableVertexAttribArray,
     pub glDrawArrays: TglDrawArrays,
     pub glReadPixels: TglReadPixels,
@@ -510,6 +535,12 @@ impl LibGl {
                 TglVertexAttribPointer,
                 "glVertexAttribPointer",
                 "glVertexAttribPointerARB"
+            )?,
+            glVertexAttribIPointer: load!(
+                loadfn,
+                TglVertexAttribIPointer,
+                "glVertexAttribIPointer",
+                "glVertexAttribIPointerEXT"
             )?,
             glEnableVertexAttribArray: load!(
                 loadfn,
@@ -663,6 +694,10 @@ impl LibGl {
             glBufferData: load!(loadfn, TglBufferData, "glBufferData", "glBufferDataARB")?,
             glUniform1i: load!(loadfn, TglUniform1i, "glUniform1i", "glUniform1iARB")?,
             glGetError: load!(loadfn, TglGetError, "glGetError")?,
+            glGenSamplers: load!(loadfn, TglGenSamplers, "glGenSamplers").ok(),
+            glDeleteSamplers: load!(loadfn, TglDeleteSamplers, "glDeleteSamplers").ok(),
+            glBindSampler: load!(loadfn, TglBindSampler, "glBindSampler").ok(),
+            glSamplerParameteri: load!(loadfn, TglSamplerParameteri, "glSamplerParameteri").ok(),
             glFlush: load!(loadfn, TglFlush, "glFlush")?,
             glFinish: load!(loadfn, TglFinish, "glFinish")?,
             glClearDepthf: load!(loadfn, TglClearDepthf, "glClearDepthf", "glClearDepthfOES")?,

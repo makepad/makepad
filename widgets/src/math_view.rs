@@ -76,6 +76,8 @@ pub struct MathView {
     layout_cache: Option<latex_math::LayoutOutput>,
     #[rust]
     components: Vec<MathComponent>,
+    #[rust]
+    debug_reason: Option<String>,
 }
 
 impl Widget for MathView {
@@ -85,6 +87,11 @@ impl Widget for MathView {
         self.compile_math(cx);
 
         let Some(layout) = self.layout_cache.as_ref() else {
+            if let Some(reason) = &self.debug_reason {
+                let debug_text = format!("[{}]", reason);
+                self.draw_text
+                    .draw_walk(cx, walk, Align::default(), debug_text.as_str());
+            }
             return DrawStep::done();
         };
 
@@ -130,10 +137,15 @@ impl Widget for MathView {
 
 impl MathView {
     fn compile_math(&mut self, cx: &mut Cx2d) {
+        // Match DrawText behavior so crate/http resources start loading
+        // before we attempt to resolve the math font family.
+        cx.cx.cx.load_all_script_resources();
         let font_family_id = self.draw_text.text_style.font_family_id();
+        self.draw_text.text_style.ensure_fonts_loaded(cx.cx.cx);
         if self.text == self.old_text
             && self.font_size == self.old_font_size
             && self.old_font_family_id == Some(font_family_id)
+            && (self.layout_cache.is_some() || self.text.is_empty())
         {
             return;
         }
@@ -146,6 +158,7 @@ impl MathView {
             self.layout_cache = None;
             self.components.clear();
             self.draw_glyph.clear_shapes();
+            self.debug_reason = None;
             return;
         }
 
@@ -159,6 +172,7 @@ impl MathView {
             self.layout_cache = None;
             self.components.clear();
             self.draw_glyph.clear_shapes();
+            self.debug_reason = Some("missing-math-font".to_string());
             return;
         };
 
@@ -173,6 +187,7 @@ impl MathView {
             self.layout_cache = None;
             self.components.clear();
             self.draw_glyph.clear_shapes();
+            self.debug_reason = Some("math-layout-failed".to_string());
             return;
         };
 
@@ -213,6 +228,7 @@ impl MathView {
 
         self.layout_cache = Some(layout);
         self.components = components;
+        self.debug_reason = None;
     }
 }
 

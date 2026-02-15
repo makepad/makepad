@@ -156,18 +156,14 @@ impl<'a> ScriptVm<'a> {
 
     /// Run garbage collection (mark and sweep), only logs if it takes >1ms.
     pub fn gc(&mut self) {
-        let start = std::time::Instant::now();
         self.bx.heap.mark(&self.bx.threads, &self.bx.code);
-        // Only log if GC takes more than 1ms to avoid spamming logs
-        let log_stats = start.elapsed().as_micros() > 1000;
-        self.bx.heap.sweep(start, log_stats);
+        self.bx.heap.sweep(false);
     }
 
     /// Run garbage collection with status logging.
     pub fn gc_with_status(&mut self) {
-        let start = std::time::Instant::now();
         self.bx.heap.mark(&self.bx.threads, &self.bx.code);
-        self.bx.heap.sweep(start, true);
+        self.bx.heap.sweep(true);
     }
 
     pub fn thread(&self) -> &ScriptThread {

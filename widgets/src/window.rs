@@ -263,7 +263,13 @@ impl Window {
                     self.view(cx, ids!(caption_bar)).set_visible(cx, true);
                 }
             }
-            OsType::LinuxWindow(_) | OsType::LinuxDirect | OsType::Android(_) => {
+            OsType::LinuxWindow(params) => {
+                if params.custom_window_chrome && !cx.in_makepad_studio() {
+                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
+                }
+            }
+            OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
             }
             OsType::Web(_) => {
@@ -276,7 +282,8 @@ impl Window {
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
         self.ensure_initialized(cx);
 
-        if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
+        let will_redraw = cx.will_redraw(&mut self.main_draw_list, Walk::default());
+        if !will_redraw {
             return Redrawing::no();
         }
 
@@ -501,6 +508,8 @@ impl Widget for Window {
                         if dq.abs.y < 25. {
                             if dq.abs.x < size.x - 135.0 {
                                 dq.response.set(WindowDragQueryResponse::Caption);
+                            } else {
+                                dq.response.set(WindowDragQueryResponse::Client);
                             }
                             cx.set_cursor(MouseCursor::Default);
                         }

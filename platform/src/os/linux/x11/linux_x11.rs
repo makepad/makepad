@@ -1,25 +1,23 @@
 use {
     self::super::super::{
-        egl_sys, gl_sys::LibGl, linux_media::CxLinuxMedia, opengl_cx::OpenglCx, x11::x11_sys,
-        x11::xlib_app::*, x11::xlib_event::*,
+        egl_sys, opengl_cx::OpenglCx, x11::x11_sys, x11::xlib_app::*, x11::xlib_event::*,
     },
     self::super::opengl_x11::OpenglWindow,
     crate::{
         cx::{Cx, LinuxWindowParams, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_api::CxOsOp,
         draw_pass::CxDrawPassParent,
         event::*,
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::dvec2,
         os::cx_native::EventFlow,
-        os::cx_stdin::PollTimers,
-        permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
+        CxWindowPool,
     },
     std::cell::RefCell,
     std::rc::Rc,
-    std::time::Instant,
+    std::sync::{Arc, Mutex},
 };
 
 pub fn x11_event_loop(cx: Rc<RefCell<Cx>>) {
@@ -28,11 +26,15 @@ pub fn x11_event_loop(cx: Rc<RefCell<Cx>>) {
 
 pub struct X11Cx {
     pub cx: Rc<RefCell<Cx>>,
+    internal_drag_items: Option<Arc<Vec<DragItem>>>,
 }
 
 impl X11Cx {
     pub fn event_loop_impl(cx: Rc<RefCell<Cx>>) {
-        let mut x11_cx = X11Cx { cx: cx.clone() };
+        let mut x11_cx = X11Cx {
+            cx: cx.clone(),
+            internal_drag_items: None,
+        };
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::LinuxWindow(LinuxWindowParams {
             custom_window_chrome: false,
@@ -54,6 +56,9 @@ impl X11Cx {
             }
         }));
 
+        // Stdin-loop runs Linux child rendering through the X11 backend.
+        // Keep EGL platform selection consistent to avoid mixed X11/Wayland
+        // context behavior in WSL/Xwayland setups.
         cx.borrow_mut().os.opengl_cx = Some(unsafe {
             OpenglCx::from_egl_platform_display(
                 egl_sys::EGL_PLATFORM_X11_EXT,
@@ -122,7 +127,6 @@ impl X11Cx {
                         }
                     }
                 }
-                println!("re: {:?}", re);
                 // ok lets not redraw all, just this window
                 cx.call_event_handler(&Event::WindowGeomChange(re));
             }
@@ -166,16 +170,43 @@ impl X11Cx {
             }
             XlibEvent::MouseMove(e) => {
                 let mut cx = self.cx.borrow_mut();
+                let abs = e.abs;
+                let modifiers = e.modifiers;
                 cx.call_event_handler(&Event::MouseMove(e.into()));
+                if let Some(items) = self.internal_drag_items.as_ref() {
+                    cx.call_event_handler(&Event::Drag(DragEvent {
+                        modifiers,
+                        handled: Arc::new(Mutex::new(false)),
+                        abs,
+                        items: items.clone(),
+                        response: Arc::new(Mutex::new(DragResponse::None)),
+                    }));
+                    cx.drag_drop.cycle_drag();
+                }
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
                 cx.fingers.switch_captures();
             }
             XlibEvent::MouseUp(e) => {
                 let mut cx = self.cx.borrow_mut();
                 let button = e.button;
+                let abs = e.abs;
+                let modifiers = e.modifiers;
                 cx.call_event_handler(&Event::MouseUp(e.into()));
                 cx.fingers.mouse_up(button);
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
+                if button == MouseButton::PRIMARY {
+                    if let Some(items) = self.internal_drag_items.take() {
+                        cx.call_event_handler(&Event::Drop(DropEvent {
+                            modifiers,
+                            handled: Arc::new(Mutex::new(false)),
+                            abs,
+                            items,
+                        }));
+                        cx.drag_drop.cycle_drag();
+                        cx.call_event_handler(&Event::DragEnd);
+                        cx.drag_drop.cycle_drag();
+                    }
+                }
             }
             XlibEvent::Scroll(e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -195,15 +226,27 @@ impl X11Cx {
             }
             XlibEvent::Drag(e) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::Drag(e))
+                cx.call_event_handler(&Event::Drag(e));
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::Drop(e) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::Drop(e))
+                cx.call_event_handler(&Event::Drop(e));
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::DragEnd => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::DragEnd)
+                cx.call_event_handler(&Event::MouseUp(MouseUpEvent {
+                    abs: dvec2(-100000.0, -100000.0),
+                    button: MouseButton::PRIMARY,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0,
+                }));
+                cx.fingers.mouse_up(MouseButton::PRIMARY);
+                cx.fingers.cycle_hover_area(live_id!(mouse).into());
+                cx.call_event_handler(&Event::DragEnd);
+                cx.drag_drop.cycle_drag();
             }
             XlibEvent::KeyDown(e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -232,8 +275,12 @@ impl X11Cx {
                         cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
                     }
-                    cx.handle_action_receiver();
+                    if SignalToUI::check_and_clear_action_signal() {
+                        cx.handle_action_receiver();
+                    }
+                    cx.handle_networking_events();
                 } else {
+                    cx.handle_script_timer(&e);
                     cx.call_event_handler(&Event::Timer(e))
                 }
 
@@ -306,7 +353,6 @@ impl X11Cx {
         let mut ret = EventFlow::Poll;
         let mut cx = self.cx.borrow_mut();
         while let Some(op) = cx.platform_ops.pop() {
-            println!("handle op: {:?}", op);
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
@@ -387,6 +433,9 @@ impl X11Cx {
                         }
                     }
                 }
+                CxOsOp::StartDragging(items) => {
+                    self.internal_drag_items = Some(Arc::new(items));
+                }
                 CxOsOp::SetCursor(cursor) => {
                     xlib_app.set_mouse_cursor(cursor);
                 }
@@ -399,6 +448,17 @@ impl X11Cx {
                 }
                 CxOsOp::StopTimer(timer_id) => {
                     xlib_app.stop_timer(timer_id);
+                }
+                CxOsOp::HttpRequest {
+                    request_id,
+                    request,
+                } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::open(request_id, request, cx.os.network_response.sender.clone());
+                }
+                CxOsOp::CancelHttpRequest { request_id } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::cancel(request_id);
                 }
                 CxOsOp::ShowTextIME(area, pos) => {
                     let pos = area.clipped_rect(&cx).pos + pos;

@@ -5,7 +5,7 @@ use makepad_futures_legacy::executor;
 use std::sync::mpsc::Sender;
 
 use windows::{
-    core::*,
+    core::Interface,
     Foundation::Uri,
     Storage::Streams::{Buffer, DataWriter, InMemoryRandomAccessStream, InputStreamOptions},
     Web::Http::{

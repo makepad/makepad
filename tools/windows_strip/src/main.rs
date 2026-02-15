@@ -1,195 +1,137 @@
-use std::fs;
-use makepad_rust_tokenizer::{Cursor, State, FullToken, Delim, LiveId, live_id, id};
+use makepad_rust_tokenizer::{live_id, Cursor, Delim, FullToken, LiveId, State};
 use std::{
-    ops::Deref,
-    ops::DerefMut,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    env,
+    fs,
+    io,
+    path::{Path, PathBuf},
 };
+
+#[derive(Clone, Copy, Debug)]
+struct VendoredCrate {
+    crate_name: &'static str,
+    version: &'static str,
+    local_dir: &'static str,
+}
+
+const WINDOWS_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows",
+    version: "0.62.2",
+    local_dir: "windows-rs",
+};
+const WINDOWS_COLLECTIONS_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-collections",
+    version: "0.3.2",
+    local_dir: "windows-collections",
+};
+const WINDOWS_CORE_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-core",
+    version: "0.62.2",
+    local_dir: "windows-core",
+};
+const WINDOWS_FUTURE_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-future",
+    version: "0.3.2",
+    local_dir: "windows-future",
+};
+const WINDOWS_NUMERICS_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-numerics",
+    version: "0.3.1",
+    local_dir: "windows-numerics",
+};
+const WINDOWS_LINK_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-link",
+    version: "0.2.1",
+    local_dir: "windows-link",
+};
+const WINDOWS_RESULT_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-result",
+    version: "0.4.1",
+    local_dir: "windows-result",
+};
+const WINDOWS_STRINGS_CRATE: VendoredCrate = VendoredCrate {
+    crate_name: "windows-strings",
+    version: "0.5.1",
+    local_dir: "windows-strings",
+};
+
+const BASE_SUPPORT_CRATES: &[VendoredCrate] = &[
+    WINDOWS_CORE_CRATE,
+    WINDOWS_LINK_CRATE,
+    WINDOWS_RESULT_CRATE,
+    WINDOWS_STRINGS_CRATE,
+];
+
+const LEGACY_FLAT_VENDORED_DIRS: &[&str] = &[
+    "windows-rs",
+    "windows-core",
+    "windows-collections",
+    "windows-future",
+    "windows-numerics",
+    "windows-link",
+    "windows-result",
+    "windows-strings",
+];
+
+const LEGACY_WINDOWS_SUBDIRS: &[&str] = &[
+    "windows-collections",
+    "windows-future",
+    "windows-numerics",
+    "windows-threading",
+];
+
+#[derive(Clone, Copy, Debug)]
+struct StripDecisions {
+    use_collections: bool,
+    use_future: bool,
+    use_numerics: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MethodUsage {
+    global_methods: HashSet<String>,
+    typed_methods: HashMap<String, HashSet<String>>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TokenWithString {
     pub token: FullToken,
-    pub value: String
+    pub value: String,
 }
 
-impl Deref for TokenWithString {
-    type Target = FullToken;
-    fn deref(&self) -> &Self::Target {&self.token}
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SymbolRef {
+    module: Vec<String>,
+    name: String,
 }
 
-impl DerefMut for TokenWithString {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.token}
+#[derive(Clone, Debug)]
+struct RawItem {
+    order: usize,
+    tokens: Vec<TokenWithString>,
+    keyword: Option<String>,
+    name: Option<String>,
 }
 
-pub trait TokenSliceApi {
-    fn find_tokens_index(&self, tokens: &[TokenWithString]) -> Option<usize>;
-    fn find_str_index(&self, what: &str) -> Option<usize>;
-    fn after(&self, what: &str) -> Option<&[TokenWithString]>;
-    fn at(&self, what: &str) -> Option<(&[TokenWithString], &[TokenWithString])>;
-    fn find_close(&self, delim: Delim) -> Option<&[TokenWithString]>;
-    fn find_token(&self, token: FullToken) -> Option<&[TokenWithString]>;
-    fn find_strs_rev(&self, what: &[Vec<TokenWithString>]) -> Option<usize>;
-    fn parse_use(&self) -> Vec<Vec<LiveId >>;
-    fn to_string(&self) -> String;
+#[derive(Clone, Debug, Default)]
+struct Entry {
+    order: usize,
+    snippets: Vec<(usize, String)>,
+    deps: HashSet<SymbolRef>,
 }
 
-impl<T> TokenSliceApi for T where T: AsRef<[TokenWithString]> {
-    fn to_string(&self) -> String {
-        let mut out = String::new();
-        for token in self.as_ref() {
-            out.push_str(&token.value);
-        }
-        out
-    }
-    
-    fn find_tokens_index(&self, what: &[TokenWithString]) -> Option<usize> {
-        let source = self.as_ref();
-        let mut depth = 0;
-        for i in 0..source.len() {
-            if source[i].is_open() {
-                depth += 1;
-            }
-            else if source[i].is_close() {
-                if depth == 0 { // unexpected end
-                    panic!()
-                }
-                depth -= 1;
-            }
-            if depth == 0{
-                for j in 0..what.len() {
-                    if source[i + j].token != what[j].token {
-                        break;
-                    }
-                    if j == what.len() - 1 {
-                        return Some(i)
-                    }
-                }
-            }
-        }
-        None
-    }
-    
-    fn find_strs_rev(&self, what: &[Vec<TokenWithString>]) -> Option<usize> {
-        let source = self.as_ref();
-        for i in (0..source.len()).rev() {
-            for (index, what) in what.iter().enumerate() {
-                if what.len() <= source.len() - i {
-                    for j in 0..what.len() {
-                        if source[i + j].token != what[j].token {
-                            break;
-                        }
-                        if j == what.len() - 1 {
-                            return Some(index)
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-    
-    fn find_str_index(&self, what: &str) -> Option<usize> {
-        self.find_tokens_index(&parse_to_tokens(what))
-    }
-    
-    fn after(&self, what: &str) -> Option<&[TokenWithString]> {
-        let source = self.as_ref();
-        let what = &parse_to_tokens(what);
-        if let Some(pos) = source.find_tokens_index(what) {
-            return Some(&source[pos + what.len()..])
-        }
-        None
-    }
-    
-    fn at(&self, what: &str) -> Option<(&[TokenWithString], &[TokenWithString])> {
-        let source = self.as_ref();
-        let what = &parse_to_tokens(what);
-        if let Some(pos) = source.find_tokens_index(what) {
-            return Some((&source[..pos], &source[pos..]))
-        }
-        None
-    }
-    
-    fn find_close(&self, delim: Delim) -> Option<&[TokenWithString]> {
-        let source = self.as_ref();
-        let mut depth = 0;
-        for i in 0..source.len() {
-            if source[i].is_open_delim(delim) {
-                depth += 1;
-            }
-            else if source[i].is_close_delim(delim) {
-                if depth == 0 { // unexpected end
-                    panic!()
-                }
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&source[0..i + 1])
-                }
-            }
-        }
-        None
-    }
-    
-    fn find_token(&self, token: FullToken) -> Option<&[TokenWithString]> {
-        let source = self.as_ref();
-        let mut depth = 0;
-        for i in 0..source.len() {
-            if source[i].is_open() {
-                depth += 1;
-            }
-            else if source[i].is_close() {
-                if depth == 0 { // unexpected end
-                    panic!()
-                }
-                depth -= 1;
-            }
-            else if depth == 0 && source[i].token == token {
-                return Some(&source[0..i + 1])
-            }
-        }
-        None
-    }
-    
-    fn parse_use(&self) -> Vec<Vec<LiveId >> {
-        // fetch use { }
-        let after_use = self.after("use").unwrap();
-        let source = after_use.find_close(Delim::Brace).unwrap();
-        
-        // now we have to flatten the use tree
-        let mut stack = Vec::new();
-        let mut ident = Vec::new();
-        let mut deps = Vec::new();
-        for i in 0..source.len() {
-            match source[i].token {
-                FullToken::Ident(id) => {
-                    ident.push(id);
-                }
-                FullToken::Punct(live_id!(::)) => {}
-                FullToken::Punct(live_id!(,)) => {
-                    let len = *stack.last().unwrap();
-                    if ident.len()>len {
-                        deps.push(ident.clone());
-                    }
-                    ident.truncate(len);
-                }
-                FullToken::Open(Delim::Brace) => {
-                    stack.push(ident.len());
-                }
-                FullToken::Close(Delim::Brace) => {
-                    let len = stack.pop().unwrap();
-                    if ident.len()>len {
-                        deps.push(ident.clone());
-                        ident.truncate(*stack.last().unwrap());
-                    }
-                }
-                _ => {
-                    // unexpected
-                }
-            }
-        }
-        // we should parse all our use things into a fully qualified list.
-        deps
-    }
-    
+#[derive(Clone, Debug, Default)]
+struct ModuleData {
+    names: HashSet<String>,
+    child_modules: HashSet<String>,
+    entries: HashMap<String, Entry>,
+}
+
+#[derive(Default)]
+struct ModuleNode {
+    children: BTreeMap<String, ModuleNode>,
+    snippets: Vec<(usize, String)>,
+    seen: HashSet<String>,
 }
 
 fn parse_to_tokens(source: &str) -> Vec<TokenWithString> {
@@ -206,340 +148,2485 @@ fn parse_to_tokens(source: &str) -> Vec<TokenWithString> {
             let (next_state, full_token) = state.next(&mut cursor);
             if let Some(full_token) = full_token {
                 let next_token_start = last_token_start + full_token.len;
-                let value: String = total_chars[last_token_start..next_token_start].into_iter().collect();
+                let value: String = total_chars[last_token_start..next_token_start]
+                    .iter()
+                    .collect();
                 if !full_token.is_ws_or_comment() {
                     tokens.push(TokenWithString {
                         token: full_token.token,
-                        value
+                        value,
                     });
-                }
-                else {
-                    if let Some(last) = tokens.last_mut() {
-                        last.value.push_str(&value);
-                    }
+                } else if let Some(last) = tokens.last_mut() {
+                    last.value.push_str(&value);
                 }
                 last_token_start = next_token_start;
-            }
-            else {
+            } else {
                 break;
             }
             state = next_state;
         }
         if let Some(last) = tokens.last_mut() {
-            last.value.push_str("\n");
+            last.value.push('\n');
         }
     }
     tokens
 }
 
-fn parse_file<'a>(file: &str, cache: &'a mut Vec<(String, Vec<TokenWithString>)>) -> Result<&'a [TokenWithString],
-Box<dyn std::error::Error >> {
-    if let Some(index) = cache.iter().position( | v | v.0 == file) {
-        return Ok(&cache[index].1)
+fn tokens_to_string(tokens: &[TokenWithString]) -> String {
+    let mut out = String::new();
+    for token in tokens {
+        out.push_str(&token.value);
     }
-    else {
-        let source = fs::read_to_string(file) ?;
-        let source = parse_to_tokens(&source);
-        cache.push((file.to_string(), source));
-        Ok(&cache.last().unwrap().1)
+    out
+}
+
+fn token_is_punct(tokens: &[TokenWithString], index: usize, punct: LiveId) -> bool {
+    matches!(
+        tokens.get(index),
+        Some(TokenWithString {
+            token: FullToken::Punct(id),
+            ..
+        }) if *id == punct
+    )
+}
+
+fn token_ident<'a>(tokens: &'a [TokenWithString], index: usize) -> Option<&'a str> {
+    match tokens.get(index) {
+        Some(TokenWithString {
+            token: FullToken::Ident(_),
+            value,
+        }) => Some(value.trim()),
+        _ => None,
     }
 }
 
-fn filter_symbols(inp: Vec<Vec<LiveId >>, filter: &[LiveId]) -> Vec<Vec<LiveId >> {
-    let mut out = Vec::new();
-    'outer: for sym in inp {
-        if sym.len() >= filter.len() {
-            for i in 0..filter.len() {
-                if sym[i] != filter[i] {
-                    continue 'outer;
+fn ident_eq(tokens: &[TokenWithString], index: usize, value: &str) -> bool {
+    token_ident(tokens, index) == Some(value)
+}
+
+fn is_colon_colon(tokens: &[TokenWithString], index: usize) -> bool {
+    token_is_punct(tokens, index, live_id!(::))
+}
+
+fn is_semicolon(tokens: &[TokenWithString], index: usize) -> bool {
+    token_is_punct(tokens, index, live_id!(;))
+}
+
+fn is_comma(tokens: &[TokenWithString], index: usize) -> bool {
+    token_is_punct(tokens, index, live_id!(,))
+}
+
+fn is_star(tokens: &[TokenWithString], index: usize) -> bool {
+    token_is_punct(tokens, index, live_id!(*))
+}
+
+fn is_ampersand(tokens: &[TokenWithString], index: usize) -> bool {
+    token_is_punct(tokens, index, live_id!(&))
+}
+
+fn is_hash(tokens: &[TokenWithString], index: usize) -> bool {
+    token_is_punct(tokens, index, live_id!(#))
+}
+
+fn find_matching_delim(tokens: &[TokenWithString], open_index: usize, delim: Delim) -> Option<usize> {
+    let mut depth = 0usize;
+    for i in open_index..tokens.len() {
+        match tokens[i].token {
+            FullToken::Open(d) if d == delim => {
+                depth += 1;
+            }
+            FullToken::Close(d) if d == delim => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
                 }
             }
-            out.push(sym[filter.len()..sym.len()].to_vec());
+            _ => {}
+        }
+    }
+    None
+}
+
+fn skip_outer_attributes(tokens: &[TokenWithString], mut index: usize) -> usize {
+    loop {
+        if is_hash(tokens, index) {
+            if matches!(
+                tokens.get(index + 1),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Bracket),
+                    ..
+                })
+            ) {
+                if let Some(close) = find_matching_delim(tokens, index + 1, Delim::Bracket) {
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    index
+}
+
+fn extract_quoted_values(line: &str, out: &mut HashSet<String>) {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            let start = i + 1;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    if let Some(value) = line.get(start..i) {
+                        out.insert(value.to_string());
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+}
+
+fn load_enabled_windows_features(platform_cargo_toml: &Path) -> HashSet<String> {
+    let mut features = HashSet::new();
+    let Ok(source) = fs::read_to_string(platform_cargo_toml) else {
+        return features;
+    };
+
+    let mut in_windows_dep = false;
+    let mut in_features = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_windows_dep = trimmed == "[target.'cfg(windows)'.dependencies.windows]";
+            in_features = false;
+            continue;
+        }
+        if !in_windows_dep {
+            continue;
+        }
+        if in_features {
+            extract_quoted_values(trimmed, &mut features);
+            if trimmed.contains(']') {
+                in_features = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("features") {
+            if let Some(open) = trimmed.find('[') {
+                let tail = &trimmed[open + 1..];
+                extract_quoted_values(tail, &mut features);
+                if !tail.contains(']') {
+                    in_features = true;
+                }
+            }
+        }
+    }
+    features
+}
+
+#[derive(Clone)]
+struct CfgExprParser<'a> {
+    source: &'a [u8],
+    index: usize,
+    enabled_features: &'a HashSet<String>,
+}
+
+impl<'a> CfgExprParser<'a> {
+    fn new(source: &'a str, enabled_features: &'a HashSet<String>) -> Self {
+        Self {
+            source: source.as_bytes(),
+            index: 0,
+            enabled_features,
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while self.index < self.source.len() && self.source[self.index].is_ascii_whitespace() {
+            self.index += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.source.get(self.index).copied()
+    }
+
+    fn consume_byte(&mut self, byte: u8) -> bool {
+        self.skip_ws();
+        if self.peek() == Some(byte) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_ident(&mut self) -> Option<String> {
+        self.skip_ws();
+        let start = self.index;
+        while self.index < self.source.len() {
+            let b = self.source[self.index];
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                self.index += 1;
+            } else {
+                break;
+            }
+        }
+        if self.index == start {
+            return None;
+        }
+        String::from_utf8(self.source[start..self.index].to_vec()).ok()
+    }
+
+    fn parse_string(&mut self) -> Option<String> {
+        self.skip_ws();
+        if self.peek()? != b'"' {
+            return None;
+        }
+        self.index += 1;
+        let start = self.index;
+        while self.index < self.source.len() {
+            let b = self.source[self.index];
+            if b == b'\\' {
+                self.index += 2;
+                continue;
+            }
+            if b == b'"' {
+                let value = String::from_utf8(self.source[start..self.index].to_vec()).ok()?;
+                self.index += 1;
+                return Some(value);
+            }
+            self.index += 1;
+        }
+        None
+    }
+
+    fn skip_group(&mut self) {
+        self.skip_ws();
+        if self.peek() != Some(b'(') {
+            return;
+        }
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escape = false;
+        while self.index < self.source.len() {
+            let b = self.source[self.index];
+            self.index += 1;
+            if in_string {
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if b == b'\\' {
+                    escape = true;
+                } else if b == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            if b == b'"' {
+                in_string = true;
+                continue;
+            }
+            if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn parse_expr(&mut self) -> Option<bool> {
+        let ident = self.parse_ident()?;
+        match ident.as_str() {
+            "all" | "any" => {
+                if !self.consume_byte(b'(') {
+                    return Some(true);
+                }
+                let mut values = Vec::new();
+                loop {
+                    self.skip_ws();
+                    if self.consume_byte(b')') {
+                        break;
+                    }
+                    values.push(self.parse_expr().unwrap_or(true));
+                    self.skip_ws();
+                    if self.consume_byte(b',') {
+                        continue;
+                    }
+                    if self.consume_byte(b')') {
+                        break;
+                    }
+                    return Some(true);
+                }
+                if ident == "all" {
+                    Some(values.into_iter().all(|v| v))
+                } else {
+                    Some(values.into_iter().any(|v| v))
+                }
+            }
+            "not" => {
+                if !self.consume_byte(b'(') {
+                    return Some(true);
+                }
+                let value = self.parse_expr().unwrap_or(true);
+                let _ = self.consume_byte(b')');
+                Some(!value)
+            }
+            "feature" => {
+                if !self.consume_byte(b'=') {
+                    return Some(true);
+                }
+                let value = self.parse_string()?;
+                Some(self.enabled_features.contains(&value))
+            }
+            _ => {
+                if self.consume_byte(b'=') {
+                    if self.parse_string().is_none() {
+                        let _ = self.parse_ident();
+                    }
+                } else {
+                    self.skip_group();
+                }
+                Some(true)
+            }
+        }
+    }
+}
+
+fn cfg_expr_is_enabled(expr: &str, enabled_features: &HashSet<String>) -> bool {
+    let mut parser = CfgExprParser::new(expr, enabled_features);
+    parser.parse_expr().unwrap_or(true)
+}
+
+fn item_enabled_for_features(tokens: &[TokenWithString], enabled_features: &HashSet<String>) -> bool {
+    let mut index = 0usize;
+    while is_hash(tokens, index) {
+        let Some(TokenWithString {
+            token: FullToken::Open(Delim::Bracket),
+            ..
+        }) = tokens.get(index + 1)
+        else {
+            break;
+        };
+        let Some(close) = find_matching_delim(tokens, index + 1, Delim::Bracket) else {
+            break;
+        };
+
+        let attr_tokens = &tokens[index + 2..close];
+        if ident_eq(attr_tokens, 0, "cfg")
+            && matches!(
+                attr_tokens.get(1),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Paren),
+                    ..
+                })
+            )
+        {
+            if let Some(close_paren) = find_matching_delim(attr_tokens, 1, Delim::Paren) {
+                let expr_tokens = &attr_tokens[2..close_paren];
+                let expr = tokens_to_string(expr_tokens);
+                if !cfg_expr_is_enabled(&expr, enabled_features) {
+                    return false;
+                }
+            }
+        }
+        index = close + 1;
+    }
+    true
+}
+
+fn find_item_end(tokens: &[TokenWithString], start: usize) -> Option<usize> {
+    let mut depth: isize = 0;
+    let mut saw_block = false;
+    for i in start..tokens.len() {
+        match tokens[i].token {
+            FullToken::Open(delim) => {
+                depth += 1;
+                if depth == 1 && delim == Delim::Brace {
+                    saw_block = true;
+                }
+            }
+            FullToken::Close(_) => {
+                depth -= 1;
+                if depth == 0 && saw_block {
+                    if is_semicolon(tokens, i + 1) {
+                        return Some(i + 1);
+                    }
+                    return Some(i);
+                }
+            }
+            FullToken::Punct(id) if id == live_id!(;) && depth == 0 => {
+                return Some(i);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn extract_keyword_and_name(tokens: &[TokenWithString], start: usize) -> (Option<String>, Option<String>) {
+    let mut i = start;
+    if ident_eq(tokens, i, "pub") {
+        i += 1;
+        if matches!(
+            tokens.get(i),
+            Some(TokenWithString {
+                token: FullToken::Open(Delim::Paren),
+                ..
+            })
+        ) {
+            if let Some(close) = find_matching_delim(tokens, i, Delim::Paren) {
+                i = close + 1;
+            }
+        }
+    }
+    if ident_eq(tokens, i, "unsafe") {
+        i += 1;
+    }
+
+    let (path, path_end) = parse_ident_path(tokens, i);
+    if !path.is_empty() && token_is_punct(tokens, path_end, live_id!(!)) {
+        let macro_name = path[path.len() - 1].as_str();
+        if matches!(
+            macro_name,
+            "define_interface" | "interface_hierarchy" | "required_hierarchy"
+        ) {
+            let macro_keyword = Some(macro_name.to_string());
+            let mut macro_name_arg = None;
+            if matches!(
+                tokens.get(path_end + 1),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Paren),
+                    ..
+                })
+            ) {
+                macro_name_arg = token_ident(tokens, path_end + 2).map(|v| v.to_string());
+            }
+            if macro_name == "define_interface" {
+                return (macro_keyword, macro_name_arg);
+            }
+            return (macro_keyword, None);
+        }
+    }
+
+    let keyword = token_ident(tokens, i).map(|v| v.to_string());
+    let name = match keyword.as_deref() {
+        Some("fn")
+        | Some("const")
+        | Some("type")
+        | Some("struct")
+        | Some("union")
+        | Some("enum")
+        | Some("trait")
+        | Some("mod") => token_ident(tokens, i + 1).map(|v| v.to_string()),
+        _ => None,
+    };
+
+    (keyword, name)
+}
+
+fn parse_top_level_items(tokens: &[TokenWithString]) -> Vec<RawItem> {
+    let mut items = Vec::new();
+    let mut i = 0usize;
+    let mut order = 0usize;
+    while i < tokens.len() {
+        if is_semicolon(tokens, i) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let header_start = skip_outer_attributes(tokens, start);
+        if header_start >= tokens.len() {
+            break;
+        }
+        let Some(end) = find_item_end(tokens, header_start) else {
+            i += 1;
+            continue;
+        };
+        let (keyword, name) = extract_keyword_and_name(tokens, header_start);
+        items.push(RawItem {
+            order,
+            tokens: tokens[start..=end].to_vec(),
+            keyword,
+            name,
+        });
+        order += 1;
+        i = end + 1;
+    }
+    items
+}
+
+fn collect_idents(tokens: &[TokenWithString]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for token in tokens {
+        if matches!(token.token, FullToken::Ident(_)) {
+            out.insert(token.value.trim().to_string());
         }
     }
     out
 }
 
-enum Node {
-    Sub(Vec<(LiveId, Node)>),
-    Value(String)
-}
-
-fn push_unique(output: &mut Node, what: &[LiveId], value: String) {
-    if what.len() == 1 {
-        // terminator node
-        if let Node::Sub(vec) = output {
-            if vec.iter_mut().find( | v | v.0 == what[0]).is_none() {
-                vec.push((what[0], Node::Value(value)));
-            }
-        }
-        else {
-            panic!();
-        }
-    }
-    else {
-        if let Node::Sub(vec) = output {
-            if let Some(child) = vec.iter_mut().find( | v | v.0 == what[0]) {
-                return push_unique(&mut child.1, &what[1..], value);
-            }
-            let mut child = Node::Sub(Vec::new());
-            push_unique(&mut child, &what[1..], value);
-            vec.push((what[0], child));
-        }
-        else {
-            panic!();
-        }
-    }
-}
-
-fn remove_node(output: &mut Node, what: &[LiveId]) {
-    if what.len() == 1 {
-        if let Node::Sub(vec) = output {
-            vec.retain( | v | v.0 != what[0]);
-        }
-        else{
-            panic!();
-        }
-    }
-    else {
-        if let Node::Sub(vec) = output {
-            if let Some(child) = vec.iter_mut().find( | v | v.0 == what[0]) {
-                return remove_node(&mut child.1, &what[1..]);
-            }
-            return
-        }
-        else {
-            panic!();
-        }
-    }
-}
-
-fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(String, Vec<TokenWithString>)>) {
-    
-    println!("processing {}",file);
-
-    let source = parse_file(file, cache).unwrap();
-    let symbols = source.parse_use();
-    let symbols = filter_symbols(symbols, ids!(crate.windows));
-    
-
-    fn add_impl(out: &mut String, input: &[TokenWithString], at: String,) -> bool {
-        if let Some((_, is_impl)) = input.at(&at) {
-            add_impl(out, &is_impl[1..], at);
-            let is_impl = is_impl.find_close(Delim::Brace).unwrap();
-            out.push_str(&is_impl.to_string());
-            true
-        }
-        else {
-            false
-        }
-    }
-    
-    
-    let prefixes_str = ["#[repr(C)]", "#[repr(C, packed(1))]", "#[repr(transparent)]"];
-    let prefixes_tok = [parse_to_tokens(prefixes_str[0]), parse_to_tokens(prefixes_str[1]), parse_to_tokens(prefixes_str[2])];
-    
-    for sym in symbols {
-        if sym.len() == 0 || sym[0] == live_id!(core){
+fn parse_ident_path(tokens: &[TokenWithString], start: usize) -> (Vec<String>, usize) {
+    let mut segments = Vec::new();
+    let mut i = start;
+    loop {
+        let Some(ident) = token_ident(tokens, i) else {
+            break;
+        };
+        segments.push(ident.to_string());
+        i += 1;
+        if is_colon_colon(tokens, i) && token_ident(tokens, i + 1).is_some() {
+            i += 1;
             continue;
         }
-        // allright lets open the module
-        let mut path = format!("./tools/windows_strip/windows/src/Windows/");
-        // ok so everything is going to go into the module Win32
-        // but how do we sort the substructure
-        for i in 0..sym.len() - 1 {
-            path.push_str(&format!("/{}", sym[i]));
-        }
-        
-        let mod_tokens = parse_file(&format!("{}/mod.rs", path), cache).expect(&format!("{}", path));
-        
-        let sym_id = sym[sym.len() - 1];
-        
-        if let Some((_, is_fn)) = mod_tokens.at(&format!("pub unsafe fn {}", sym_id)) {
-            let is_fun = is_fn.find_close(Delim::Brace).unwrap();
-            //  ok so how do we do this
-            push_unique(output, &sym, is_fun.to_string());
-        }
-        /*if let Some((_, is_fn)) = mod_tokens.at(&format!("pub fn {}", sym_id)) {
-            let is_fun = is_fn.find_close(Delim::Brace).unwrap();
-            //  ok so how do we do this
-            push_unique(output, &sym, is_fun.to_string());
-        }*/
-        else if let Some((_, is_const)) = mod_tokens.at(&format!("pub const {}", sym_id)) {
-            let is_const = is_const.find_token(FullToken::Punct(live_id!(;))).unwrap();
-            push_unique(output, &sym, is_const.to_string());
-        }
-        else if let Some((_, is_type)) = mod_tokens.at(&format!("pub type {}", sym_id)) {
-            let is_type = is_type.find_token(FullToken::Punct(live_id!(;))).unwrap();
-            push_unique(output, &sym, is_type.to_string());
-        }
-        else if let Some((pre_union, is_union)) = mod_tokens.at(&format!("pub union {}", sym_id)) {
-            let is_union = is_union.find_close(Delim::Brace).unwrap();
-            let pre = if let Some(pre) = pre_union.find_strs_rev(&prefixes_tok) {prefixes_str[pre]}else {""};
-            
-            let mut out = String::new();
-            out.push_str(pre);
-            out.push_str(&is_union.to_string());
-            
-            add_impl(&mut out, mod_tokens, format!("impl ::core::marker::Copy for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::Eq for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::PartialEq for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::clone::Clone for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::default::Default for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows::core::Abi for {}", sym_id));
-            push_unique(output, &sym, out);
-        }
-        else if let Some((pre_struct, is_struct)) = mod_tokens.at(&format!("struct {}", sym_id)) {
-            let mut out = String::new();
-            let is_struct = if let FullToken::Open(Delim::Paren) = is_struct[2].token {
-                is_struct.find_token(FullToken::Punct(live_id!(;))).unwrap()
+        break;
+    }
+    (segments, i)
+}
+
+fn header_tokens(item_tokens: &[TokenWithString]) -> &[TokenWithString] {
+    let mut depth = 0isize;
+    for i in 0..item_tokens.len() {
+        match item_tokens[i].token {
+            FullToken::Open(delim) => {
+                if depth == 0 && delim == Delim::Brace {
+                    return &item_tokens[..i];
+                }
+                depth += 1;
             }
-            else {
-                is_struct.find_close(Delim::Brace).unwrap()
-            };
-            
-            let pre = if let Some(pre) = pre_struct.find_strs_rev(&prefixes_tok) {prefixes_str[pre]}else {""};
-            
-            out.push_str(&pre);
-            out.push_str("pub ");
-            out.push_str(&is_struct.to_string());
-            
-            add_impl(&mut out, mod_tokens, format!("impl {}", sym_id));
-            
-            add_impl(&mut out, mod_tokens, format!("impl ::core::marker::Copy for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::Eq for {}", sym_id));
-            if !add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::PartialEq for {}", sym_id)) {
-                if let FullToken::Open(Delim::Paren) = is_struct[2].token {
-                    out.insert_str(0, "#[derive(PartialEq, Eq)]")
+            FullToken::Close(_) => {
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    item_tokens
+}
+
+fn is_caps_type_candidate(ident: &str) -> bool {
+    let bytes = ident.as_bytes();
+    if bytes.len() < 3 {
+        return false;
+    }
+    if bytes.len() >= 2 && bytes[0] == b'P' && bytes[1..].iter().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let mut has_upper = false;
+    for b in bytes {
+        match *b {
+            b'A'..=b'Z' => has_upper = true,
+            b'0'..=b'9' | b'_' => {}
+            _ => return false,
+        }
+    }
+    has_upper
+}
+
+fn analyze_deps(
+    item_tokens: &[TokenWithString],
+    current_module: &[String],
+    module_names: &HashSet<String>,
+    child_modules: &HashSet<String>,
+) -> HashSet<SymbolRef> {
+    let mut deps = HashSet::new();
+    let mut i = 0usize;
+    while i < item_tokens.len() {
+        if ident_eq(item_tokens, i, "crate")
+            && is_colon_colon(item_tokens, i + 1)
+            && ident_eq(item_tokens, i + 2, "Windows")
+            && is_colon_colon(item_tokens, i + 3)
+        {
+            let (segments, next) = parse_ident_path(item_tokens, i + 4);
+            if segments.len() >= 2 && segments[0] != "core" {
+                deps.insert(SymbolRef {
+                    module: segments[..segments.len() - 1].to_vec(),
+                    name: segments[segments.len() - 1].clone(),
+                });
+            }
+            i = next;
+            continue;
+        }
+
+        if ident_eq(item_tokens, i, "super") {
+            let mut j = i;
+            let mut up = 0usize;
+            loop {
+                if ident_eq(item_tokens, j, "super") && is_colon_colon(item_tokens, j + 1) {
+                    up += 1;
+                    j += 2;
+                } else {
+                    break;
                 }
             }
-            add_impl(&mut out, mod_tokens, format!("impl ::core::clone::Clone for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::default::Default for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows::core::Abi for {}", sym_id));
-            
-            add_impl(&mut out, mod_tokens, format!("impl ::core::fmt::Debug for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::ops::BitOr for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::ops::BitAnd for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::ops::BitOrAssign for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::ops::BitAndAssign for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::ops::Not for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl::core::convert::From<::core::option::Option<{}>> for {}", sym_id, sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::convert::TryFrom<{}> for", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::convert::TryFrom<&{}> for", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::windows_core::CanInto<{}> for", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::convert::From<{}> for", sym_id));
-
-            add_impl(&mut out, mod_tokens, format!("impl ::core::iter::IntoIterator for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::core::iter::IntoIterator for &{}", sym_id));
-
-            add_impl(&mut out, mod_tokens, format!("unsafe impl ::core::marker::Send for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl ::core::marker::Sync for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows_core::Vtable for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::windows_core::TypeKind for {}", sym_id));
-
-            add_impl(&mut out, mod_tokens, format!("unsafe impl<TResult: ::windows_core::RuntimeType + 'static> ::core::marker::Send for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl<TResult: ::windows_core::RuntimeType + 'static> ::core::marker::Sync for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl<TResult: ::windows_core::RuntimeType + 'static> ::windows_core::Interface for {}", sym_id));
-
-            add_impl(&mut out, mod_tokens, format!("unsafe impl<TResult: ::windows_core::RuntimeType + 'static, TProgress: ::windows::core::RuntimeType + 'static> ::core::marker::Send for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl<TResult: ::windows_core::RuntimeType + 'static, TProgress: ::windows::core::RuntimeType + 'static> ::core::marker::Sync for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl<TResult: ::windows_core::RuntimeType + 'static, TProgress: ::windows::core::RuntimeType + 'static> ::windows::core::Vtable for {}", sym_id));
-            
-            add_impl(&mut out, mod_tokens, format!("impl<K: ::windows_core::RuntimeType + 'static, V: ::windows_core::RuntimeType + 'static> ::windows_core::CanInto<::windows_core::IUnknown> for {}", sym_id));
-             
-            add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows_core::Interface for {}", sym_id)); 
-            add_impl(&mut out, mod_tokens, format!("impl ::windows_core::RuntimeName for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows_core::RuntimeType for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("impl ::windows_core::RuntimeType for {}", sym_id));
-            add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows_core::ComInterface for {}", sym_id));
-            
-            push_unique(output, &sym, out);
-        } 
-        
-        if let Some((_, is_com)) = mod_tokens.at(&format!("pub struct {}_Vtbl", sym_id)) {
-            
-            let mut sym = sym.clone();
-            let sym_end = sym.len() - 1;
-            
-            if let Some((_, is_hier)) = mod_tokens.at(&format!("::windows_core::imp::interface_hierarchy!({}", sym_id)) { 
-                let is_hier = is_hier.find_token(FullToken::Punct(live_id!(;))).unwrap();
-                sym[sym_end] = LiveId::from_str_with_lut(&format!("{}_hierarchy", sym_id)).unwrap();
-                push_unique(output, &sym, is_hier.to_string());
+            if up > 0 {
+                let (segments, next) = parse_ident_path(item_tokens, j);
+                if !segments.is_empty() && current_module.len() >= up {
+                    let mut module = current_module[..current_module.len() - up].to_vec();
+                    let name = if segments.len() >= 2 {
+                        module.extend(segments[..segments.len() - 1].iter().cloned());
+                        segments[segments.len() - 1].clone()
+                    } else {
+                        segments[0].clone()
+                    };
+                    deps.insert(SymbolRef { module, name });
+                }
+                i = next;
+                continue;
             }
-            
-            let is_com = is_com.find_close(Delim::Brace).unwrap();
-            sym[sym_end] = LiveId::from_str_with_lut(&format!("{}_Vtbl", sym_id)).unwrap();
-            push_unique(output, &sym, format!("#[repr(C)]\n{}", is_com.to_string()));
-            
-            // fetch impl tokens
-            
-            let impl_tokens = parse_file(&format!("{}/impl.rs", path), cache).unwrap();
- 
-            if let Some((_, is_trait)) = impl_tokens.at(&format!("pub trait {}_Impl", sym_id)){
-                let is_trait = is_trait.find_close(Delim::Brace).unwrap();
-                sym[sym_end] = LiveId::from_str_with_lut(&format!("{}_Impl", sym_id)).unwrap();
-                push_unique(output, &sym, is_trait.to_string());
+        }
+
+        if let Some(segment) = token_ident(item_tokens, i) {
+            if child_modules.contains(segment) && is_colon_colon(item_tokens, i + 1) {
+                let (segments, next) = parse_ident_path(item_tokens, i);
+                if segments.len() >= 2 {
+                    let mut module = current_module.to_vec();
+                    module.extend(segments[..segments.len() - 1].iter().cloned());
+                    deps.insert(SymbolRef {
+                        module,
+                        name: segments[segments.len() - 1].clone(),
+                    });
+                }
+                i = next;
+                continue;
             }
-            if let Some((_, is_runtime_name)) = impl_tokens.at(&format!("impl ::windows_core::RuntimeName for {}", sym_id)){
-                let is_runtime_name = is_runtime_name.find_close(Delim::Brace).unwrap();
-                sym[sym_end] = LiveId::from_str_with_lut(&format!("{}_RuntimeName", sym_id)).unwrap();
-                push_unique(output, &sym, is_runtime_name.to_string());
+        }
+
+        if token_is_punct(item_tokens, i, live_id!(:)) {
+            let mut type_start = i + 1;
+            while type_start < item_tokens.len() {
+                if is_star(item_tokens, type_start)
+                    || is_ampersand(item_tokens, type_start)
+                    || ident_eq(item_tokens, type_start, "mut")
+                    || ident_eq(item_tokens, type_start, "const")
+                    || ident_eq(item_tokens, type_start, "dyn")
+                {
+                    type_start += 1;
+                    continue;
+                }
+                break;
             }
-            
-            if let Some((_, is_impl)) = impl_tokens.at(&format!("impl {}_Vtbl", sym_id)){
-                let is_impl = is_impl.find_close(Delim::Brace).unwrap();
-                sym[sym_end] = LiveId::from_str_with_lut(&format!("{}_Vtbl2", sym_id)).unwrap();
-                push_unique(output, &sym, is_impl.to_string());
+            let (segments, _) = parse_ident_path(item_tokens, type_start);
+            if segments.len() == 1 {
+                let candidate = &segments[0];
+                if is_caps_type_candidate(candidate) {
+                    deps.insert(SymbolRef {
+                        module: current_module.to_vec(),
+                        name: candidate.clone(),
+                    });
+                }
             }
-            
+        }
+
+        if let Some(ident) = token_ident(item_tokens, i) {
+            if module_names.contains(ident) {
+                deps.insert(SymbolRef {
+                    module: current_module.to_vec(),
+                    name: ident.to_string(),
+                });
+            }
+        }
+        i += 1;
+    }
+    deps
+}
+
+fn parse_module_data(
+    module: &[String],
+    windows_mod_root: &Path,
+    enabled_features: &HashSet<String>,
+) -> Option<ModuleData> {
+    let mut module_dir = windows_mod_root.to_path_buf();
+    for part in module {
+        module_dir.push(part);
+    }
+
+    let mod_source = fs::read_to_string(module_dir.join("mod.rs")).ok()?;
+    let mut parsed_sources = Vec::new();
+    let mod_tokens = parse_to_tokens(&mod_source);
+    let mod_raw_items = parse_top_level_items(&mod_tokens);
+    parsed_sources.push(mod_raw_items);
+
+    if mod_source.contains("core::include!(\"impl.rs\")") {
+        if let Ok(impl_source) = fs::read_to_string(module_dir.join("impl.rs")) {
+            let impl_tokens = parse_to_tokens(&impl_source);
+            let impl_raw_items = parse_top_level_items(&impl_tokens);
+            parsed_sources.push(impl_raw_items);
+        }
+    }
+
+    let mut raw_items = Vec::new();
+    let mut names = HashSet::new();
+    let mut child_modules = HashSet::new();
+    let mut order = 0usize;
+    for file_raw_items in &parsed_sources {
+        for item in file_raw_items {
+            let mut item = item.clone();
+            item.order = order;
+            order += 1;
+            if !item_enabled_for_features(&item.tokens, enabled_features) {
+                continue;
+            }
+
+            if let Some(name) = &item.name {
+                if item.keyword.as_deref() == Some("mod") {
+                    child_modules.insert(name.clone());
+                } else {
+                    names.insert(name.clone());
+                }
+            }
+            raw_items.push(item);
+        }
+    }
+
+    let mut entries: HashMap<String, Entry> = HashMap::new();
+
+    for item in &raw_items {
+        if let Some(name) = &item.name {
+            if item.keyword.as_deref() == Some("mod") {
+                continue;
+            }
+            let snippet = tokens_to_string(&item.tokens);
+            let deps = analyze_deps(&item.tokens, module, &names, &child_modules);
+            let entry = entries.entry(name.clone()).or_insert_with(|| Entry {
+                order: item.order,
+                snippets: Vec::new(),
+                deps: HashSet::new(),
+            });
+            entry.order = entry.order.min(item.order);
+            entry.snippets.push((item.order, snippet));
+            entry.deps.extend(deps);
+        }
+    }
+
+    for item in &raw_items {
+        if item.name.is_some() {
+            continue;
+        }
+        let idents = if item.keyword.as_deref() == Some("impl") {
+            collect_idents(header_tokens(&item.tokens))
+        } else {
+            collect_idents(&item.tokens)
+        };
+        let mut related = Vec::new();
+        if idents.len() <= names.len() {
+            for ident in &idents {
+                if names.contains(ident) {
+                    related.push(ident.clone());
+                }
+            }
+        } else {
+            for name in &names {
+                if idents.contains(name) {
+                    related.push(name.clone());
+                }
+            }
+        }
+        if related.is_empty() {
+            continue;
+        }
+        let snippet = tokens_to_string(&item.tokens);
+        let deps = analyze_deps(&item.tokens, module, &names, &child_modules);
+        for name in related {
+            if let Some(entry) = entries.get_mut(&name) {
+                entry.snippets.push((item.order, snippet.clone()));
+                entry.deps.extend(deps.clone());
+            }
+        }
+    }
+
+    for entry in entries.values_mut() {
+        let mut seen = HashSet::new();
+        entry.snippets.retain(|(_, snippet)| seen.insert(snippet.clone()));
+        entry.snippets.sort_by_key(|(order, _)| *order);
+    }
+
+    Some(ModuleData {
+        names,
+        child_modules,
+        entries,
+    })
+}
+
+fn fallback_extract_entry(
+    module: &[String],
+    symbol_name: &str,
+    windows_mod_root: &Path,
+    module_names: &HashSet<String>,
+    child_modules: &HashSet<String>,
+    enabled_features: &HashSet<String>,
+) -> Option<Entry> {
+    let mut path = windows_mod_root.to_path_buf();
+    for part in module {
+        path.push(part);
+    }
+    path.push("mod.rs");
+    let source = fs::read_to_string(path).ok()?;
+
+    // First try a token-based extraction so we can include full definitions and related impl blocks.
+    let mut sources = vec![source.clone()];
+    if source.contains("core::include!(\"impl.rs\")") {
+        let mut impl_path = windows_mod_root.to_path_buf();
+        for part in module {
+            impl_path.push(part);
+        }
+        impl_path.push("impl.rs");
+        if let Ok(impl_source) = fs::read_to_string(impl_path) {
+            sources.push(impl_source);
+        }
+    }
+
+    let mut token_snippets: Vec<(usize, String)> = Vec::new();
+    let mut token_deps: HashSet<SymbolRef> = HashSet::new();
+    let mut order_base = 0usize;
+    for source_text in &sources {
+        let tokens = parse_to_tokens(source_text);
+        let raw_items = parse_top_level_items(&tokens);
+        for item in &raw_items {
+            if !item_enabled_for_features(&item.tokens, enabled_features) {
+                continue;
+            }
+            let mut include = item.name.as_deref() == Some(symbol_name)
+                && item.keyword.as_deref() != Some("mod");
+            if !include && item.name.is_none() {
+                let idents = if item.keyword.as_deref() == Some("impl") {
+                    collect_idents(header_tokens(&item.tokens))
+                } else {
+                    collect_idents(&item.tokens)
+                };
+                include = idents.contains(symbol_name);
+            }
+            if !include {
+                continue;
+            }
+
+            let snippet = tokens_to_string(&item.tokens);
+            let deps = analyze_deps(&item.tokens, module, module_names, child_modules);
+            token_snippets.push((order_base + item.order, snippet));
+            token_deps.extend(deps);
+        }
+        order_base += raw_items.len() + 1;
+    }
+    if !token_snippets.is_empty() {
+        let mut seen = HashSet::new();
+        token_snippets.retain(|(_, snippet)| seen.insert(snippet.clone()));
+        token_snippets.sort_by_key(|(order, _)| *order);
+        let order = token_snippets
+            .first()
+            .map(|(order, _)| *order)
+            .unwrap_or(usize::MAX / 2);
+        return Some(Entry {
+            order,
+            snippets: token_snippets,
+            deps: token_deps,
+        });
+    }
+
+    let patterns = [
+        format!("windows_core::imp::define_interface!({}", symbol_name),
+        format!("pub struct {}", symbol_name),
+        format!("struct {}", symbol_name),
+        format!("pub union {}", symbol_name),
+        format!("pub enum {}", symbol_name),
+        format!("pub trait {}", symbol_name),
+        format!("pub type {}", symbol_name),
+        format!("pub unsafe fn {}", symbol_name),
+        format!("pub fn {}", symbol_name),
+        format!("pub const {}", symbol_name),
+    ];
+
+    fn find_item_end_in_source(source: &str, start: usize) -> Option<usize> {
+        let bytes = source.as_bytes();
+        let mut i = start;
+        let mut depth_brace = 0usize;
+        let mut depth_paren = 0usize;
+        let mut depth_bracket = 0usize;
+        let mut saw_brace = false;
+        let mut in_string = false;
+        let mut in_char = false;
+        let mut escape = false;
+
+        while i < bytes.len() {
+            let b = bytes[i];
+
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if b == b'\\' {
+                    escape = true;
+                } else if b == b'"' {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+            if in_char {
+                if escape {
+                    escape = false;
+                } else if b == b'\\' {
+                    escape = true;
+                } else if b == b'\'' {
+                    in_char = false;
+                }
+                i += 1;
+                continue;
+            }
+
+            match b {
+                b'"' => in_string = true,
+                b'\'' => in_char = true,
+                b'{' => {
+                    depth_brace += 1;
+                    saw_brace = true;
+                }
+                b'}' => {
+                    if depth_brace > 0 {
+                        depth_brace -= 1;
+                    }
+                    if depth_brace == 0 && saw_brace {
+                        let mut end = i;
+                        let mut j = i + 1;
+                        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        if j < bytes.len() && bytes[j] == b';' {
+                            end = j;
+                        }
+                        return Some(end);
+                    }
+                }
+                b'(' => depth_paren += 1,
+                b')' => {
+                    if depth_paren > 0 {
+                        depth_paren -= 1;
+                    }
+                }
+                b'[' => depth_bracket += 1,
+                b']' => {
+                    if depth_bracket > 0 {
+                        depth_bracket -= 1;
+                    }
+                }
+                b';' if depth_brace == 0 && depth_paren == 0 && depth_bracket == 0 => {
+                    return Some(i);
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn include_leading_attrs(source: &str, start: usize) -> usize {
+        let mut item_start = source[..start].rfind('\n').map(|v| v + 1).unwrap_or(0);
+        while item_start > 0 {
+            let prev_end = item_start - 1;
+            let prev_start = source[..prev_end].rfind('\n').map(|v| v + 1).unwrap_or(0);
+            let prev_line = source[prev_start..prev_end].trim();
+            if prev_line.is_empty() || prev_line.starts_with("#[") {
+                item_start = prev_start;
+                continue;
+            }
+            break;
+        }
+        item_start
+    }
+
+    fn is_ident_char(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+
+    fn module_declares_symbol(source: &str, symbol: &str) -> bool {
+        let patterns = [
+            format!("windows_core::imp::define_interface!({}", symbol),
+            format!("pub struct {}", symbol),
+            format!("struct {}", symbol),
+            format!("pub union {}", symbol),
+            format!("pub enum {}", symbol),
+            format!("pub trait {}", symbol),
+            format!("pub type {}", symbol),
+            format!("pub unsafe fn {}", symbol),
+            format!("pub fn {}", symbol),
+            format!("pub const {}", symbol),
+        ];
+        let bytes = source.as_bytes();
+        for pattern in patterns {
+            let mut search_start = 0usize;
+            while let Some(rel) = source[search_start..].find(&pattern) {
+                let index = search_start + rel;
+                let end = index + pattern.len();
+                if end == bytes.len() || !is_ident_char(bytes[end]) {
+                    return true;
+                }
+                search_start = end;
+            }
+        }
+        false
+    }
+
+    let source_bytes = source.as_bytes();
+    let mut snippet = None;
+    let mut snippet_start = 0usize;
+    for pattern in patterns {
+        let mut search_start = 0usize;
+        while let Some(rel) = source[search_start..].find(&pattern) {
+            let index = search_start + rel;
+            let pattern_end = index + pattern.len();
+            if pattern_end < source_bytes.len() && is_ident_char(source_bytes[pattern_end]) {
+                search_start = pattern_end;
+                continue;
+            }
+            let start = include_leading_attrs(&source, index);
+            if let Some(end) = find_item_end_in_source(&source, start) {
+                snippet = Some(source[start..=end].to_string());
+                snippet_start = start;
+                break;
+            }
+            search_start = index + 1;
+        }
+        if snippet.is_some() {
+            break;
+        }
+    }
+    let snippet = snippet?;
+    let mut snippets = Vec::new();
+    let mut deps = HashSet::new();
+
+    let tail_source = &source[snippet_start..];
+    let tail_tokens = parse_to_tokens(tail_source);
+    let tail_raw_items = parse_top_level_items(&tail_tokens);
+    for item in &tail_raw_items {
+        if !item_enabled_for_features(&item.tokens, enabled_features) {
+            continue;
+        }
+        let mut include = item.name.as_deref() == Some(symbol_name)
+            && item.keyword.as_deref() != Some("mod");
+        if !include && item.name.is_none() {
+            let idents = if item.keyword.as_deref() == Some("impl") {
+                collect_idents(header_tokens(&item.tokens))
+            } else {
+                collect_idents(&item.tokens)
+            };
+            include = idents.contains(symbol_name);
+        }
+        if !include {
+            continue;
+        }
+
+        let snippet = tokens_to_string(&item.tokens);
+        deps.extend(analyze_deps(&item.tokens, module, module_names, child_modules));
+        snippets.push((usize::MAX / 2 + item.order, snippet));
+    }
+    if snippets.is_empty() {
+        let snippet_tokens = parse_to_tokens(&snippet);
+        deps.extend(analyze_deps(
+            &snippet_tokens,
+            module,
+            module_names,
+            child_modules,
+        ));
+        snippets.push((usize::MAX / 2, snippet));
+    }
+
+    let pub_struct_pattern = format!("pub struct {}", symbol_name);
+    let struct_pattern = format!("struct {}", symbol_name);
+    for (_, snippet) in &mut snippets {
+        let trimmed = snippet.trim_start();
+        let is_struct = trimmed.starts_with(&pub_struct_pattern) || trimmed.starts_with(&struct_pattern);
+        let has_attrs = trimmed.starts_with("#[");
+        if !is_struct || has_attrs {
+            continue;
+        }
+        let struct_index = source
+            .find(&pub_struct_pattern)
+            .or_else(|| source.find(&struct_pattern));
+        let Some(struct_index) = struct_index else {
+            continue;
+        };
+        let attr_start = include_leading_attrs(&source, struct_index);
+        if attr_start < struct_index {
+            let attrs = &source[attr_start..struct_index];
+            if !attrs.trim().is_empty() {
+                *snippet = format!("{}{}", attrs, snippet);
+            }
+        }
+    }
+
+    for (_, snippet) in &snippets {
+        let snippet_tokens = parse_to_tokens(snippet);
+
+        if (ident_eq(&snippet_tokens, 0, "pub") && ident_eq(&snippet_tokens, 1, "const"))
+            || ident_eq(&snippet_tokens, 0, "const")
+        {
+            let mut i = 0usize;
+            while i < snippet_tokens.len() {
+                if token_is_punct(&snippet_tokens, i, live_id!(:)) {
+                    let (segments, _) = parse_ident_path(&snippet_tokens, i + 1);
+                    if segments.len() == 1 {
+                        let candidate = &segments[0];
+                        if candidate != symbol_name && module_declares_symbol(&source, candidate) {
+                            deps.insert(SymbolRef {
+                                module: module.to_vec(),
+                                name: candidate.clone(),
+                            });
+                        }
+                    }
+                    break;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    snippets.retain(|(_, snippet)| seen.insert(snippet.clone()));
+    snippets.sort_by_key(|(order, _)| *order);
+
+    Some(Entry {
+        order: snippets
+            .first()
+            .map(|(order, _)| *order)
+            .unwrap_or(usize::MAX / 2),
+        snippets,
+        deps,
+    })
+}
+
+fn normalize_windows_path(path: &[String]) -> Option<Vec<String>> {
+    for i in 0..path.len() {
+        if path[i] == "windows" {
+            if i > 0 && path[i - 1] == "os" {
+                continue;
+            }
+            let rest = path[i + 1..].to_vec();
+            if rest.is_empty() {
+                return None;
+            }
+            return Some(rest);
+        }
+    }
+    None
+}
+
+fn parse_use_tokens(tokens: &[TokenWithString]) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+    let mut explicit = Vec::new();
+    let mut globs = Vec::new();
+    let mut stack: Vec<Vec<String>> = vec![Vec::new()];
+    let mut current: Vec<String> = Vec::new();
+    let mut pending = false;
+    let mut skip_alias = false;
+    let mut i = 0usize;
+
+    while i < tokens.len() {
+        if let Some(ident) = token_ident(tokens, i) {
+            if skip_alias {
+                skip_alias = false;
+                i += 1;
+                continue;
+            }
+            if ident == "as" {
+                skip_alias = true;
+                i += 1;
+                continue;
+            }
+            current.push(ident.to_string());
+            pending = true;
+            i += 1;
+            continue;
+        }
+
+        if is_colon_colon(tokens, i) {
+            i += 1;
+            continue;
+        }
+
+        if is_star(tokens, i) {
+            if !current.is_empty() {
+                globs.push(current.clone());
+            }
+            pending = false;
+            i += 1;
+            continue;
+        }
+
+        if matches!(
+            tokens.get(i),
+            Some(TokenWithString {
+                token: FullToken::Open(Delim::Brace),
+                ..
+            })
+        ) {
+            stack.push(current.clone());
+            pending = false;
+            i += 1;
+            continue;
+        }
+
+        if matches!(
+            tokens.get(i),
+            Some(TokenWithString {
+                token: FullToken::Close(Delim::Brace),
+                ..
+            })
+        ) {
+            if pending {
+                explicit.push(current.clone());
+            }
+            stack.pop();
+            current = stack.last().cloned().unwrap_or_default();
+            pending = false;
+            i += 1;
+            continue;
+        }
+
+        if is_comma(tokens, i) {
+            if pending {
+                explicit.push(current.clone());
+            }
+            current = stack.last().cloned().unwrap_or_default();
+            pending = false;
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    if pending {
+        explicit.push(current);
+    }
+
+    (explicit, globs)
+}
+
+fn collect_imports_from_file(
+    file_path: &Path,
+) -> (HashSet<SymbolRef>, Vec<(Vec<String>, HashSet<String>)>) {
+    let source = fs::read_to_string(file_path).unwrap();
+    let tokens = parse_to_tokens(&source);
+    let idents = collect_idents(&tokens);
+
+    let mut explicit = HashSet::new();
+    let mut globs = Vec::new();
+
+    let mut depth = 0isize;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        match tokens[i].token {
+            FullToken::Open(_) => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            FullToken::Close(_) => {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if depth == 0 && ident_eq(&tokens, i, "use") {
+            let mut j = i + 1;
+            let mut local_depth = 0isize;
+            while j < tokens.len() {
+                match tokens[j].token {
+                    FullToken::Open(_) => local_depth += 1,
+                    FullToken::Close(_) => local_depth -= 1,
+                    FullToken::Punct(id) if id == live_id!(;) && local_depth == 0 => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if j <= tokens.len() {
+                let (use_explicit, use_globs) = parse_use_tokens(&tokens[i + 1..j]);
+                for path in use_explicit {
+                    if let Some(path) = normalize_windows_path(&path) {
+                        if path[0] == "core" {
+                            continue;
+                        }
+                        if path.len() >= 1 {
+                            explicit.insert(SymbolRef {
+                                module: path[..path.len() - 1].to_vec(),
+                                name: path[path.len() - 1].clone(),
+                            });
+                        }
+                    }
+                }
+                for path in use_globs {
+                    if let Some(path) = normalize_windows_path(&path) {
+                        if path[0] == "core" {
+                            continue;
+                        }
+                        globs.push((path, idents.clone()));
+                    }
+                }
+            }
+            i = j + 1;
+            continue;
+        }
+
+        if ident_eq(&tokens, i, "windows") && is_colon_colon(&tokens, i + 1) {
+            let (path, next) = parse_ident_path(&tokens, i);
+            if let Some(path) = normalize_windows_path(&path) {
+                if path[0] != "core" && !path.is_empty() {
+                    explicit.insert(SymbolRef {
+                        module: path[..path.len() - 1].to_vec(),
+                        name: path[path.len() - 1].clone(),
+                    });
+                }
+            }
+            if next > i {
+                i = next;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    (explicit, globs)
+}
+
+fn collect_method_usage_from_source(
+    source: &str,
+    usage: &mut MethodUsage,
+    promote_assoc_calls_to_global: bool,
+) {
+    let tokens = parse_to_tokens(source);
+
+    for i in 0..tokens.len() {
+        if token_is_punct(&tokens, i, live_id!(.)) {
+            let Some(name) = token_ident(&tokens, i + 1) else {
+                continue;
+            };
+            let looks_like_call = matches!(
+                tokens.get(i + 2),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Paren),
+                    ..
+                })
+            ) || token_is_punct(&tokens, i + 2, live_id!(<));
+            if looks_like_call {
+                usage.global_methods.insert(name.to_string());
+            }
+        }
+
+        if !is_colon_colon(&tokens, i) {
+            continue;
+        }
+        let Some(method_name) = token_ident(&tokens, i + 1) else {
+            continue;
+        };
+        let looks_like_call = matches!(
+            tokens.get(i + 2),
+            Some(TokenWithString {
+                token: FullToken::Open(Delim::Paren),
+                ..
+            })
+        ) || token_is_punct(&tokens, i + 2, live_id!(<));
+        if !looks_like_call {
+            continue;
+        }
+        if promote_assoc_calls_to_global {
+            usage.global_methods.insert(method_name.to_string());
+        }
+        if i > 0 {
+            if let Some(type_name) = token_ident(&tokens, i - 1) {
+                if type_name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false)
+                {
+                    usage
+                        .typed_methods
+                        .entry(type_name.to_string())
+                        .or_default()
+                        .insert(method_name.to_string());
+                }
+            }
+        }
+    }
+}
+
+fn collect_method_usage_from_file(file_path: &Path, usage: &mut MethodUsage) {
+    let source = fs::read_to_string(file_path).unwrap();
+    collect_method_usage_from_source(&source, usage, true);
+}
+
+fn cargo_home_candidates() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    if let Ok(cargo_home) = env::var("CARGO_HOME") {
+        if !cargo_home.is_empty() {
+            homes.push(PathBuf::from(cargo_home));
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        if !home.is_empty() {
+            homes.push(PathBuf::from(home).join(".cargo"));
+        }
+    }
+    homes.sort();
+    homes.dedup();
+    homes
+}
+
+fn find_crate_in_cargo_registry(crate_spec: VendoredCrate) -> Option<PathBuf> {
+    let crate_dir_name = format!("{}-{}", crate_spec.crate_name, crate_spec.version);
+    for cargo_home in cargo_home_candidates() {
+        let registry_src = cargo_home.join("registry").join("src");
+        let Ok(entries) = fs::read_dir(registry_src) else {
+            continue;
+        };
+        let mut index_dirs = Vec::new();
+        for entry in entries.flatten() {
+            let index_dir = entry.path();
+            if index_dir.is_dir() {
+                index_dirs.push(index_dir);
+            }
+        }
+        index_dirs.sort();
+        for index_dir in index_dirs {
+            let candidate = index_dir.join(&crate_dir_name);
+            if candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_windows_source_input() -> PathBuf {
+    if let Some(arg) = env::args().nth(1) {
+        return PathBuf::from(arg);
+    }
+
+    find_crate_in_cargo_registry(WINDOWS_CRATE).unwrap_or_else(|| {
+        panic!(
+            "could not locate {}-{} in the Cargo registry; run `cargo fetch --manifest-path tools/windows_strip/Cargo.toml --features fetch-windows-upstream` or pass an explicit source path",
+            WINDOWS_CRATE.crate_name,
+            WINDOWS_CRATE.version
+        )
+    })
+}
+
+fn resolve_windows_source_and_mod_root(windows_source: &Path) -> (PathBuf, PathBuf) {
+    if windows_source.join("src/Windows").is_dir() {
+        return (windows_source.to_path_buf(), windows_source.join("src/Windows"));
+    }
+    if windows_source.join("Windows").is_dir() {
+        let source_root = windows_source
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        return (source_root, windows_source.join("Windows"));
+    }
+    if windows_source
+        .file_name()
+        .and_then(|v| v.to_str())
+        .map(|v| v == "Windows")
+        .unwrap_or(false)
+        && windows_source.is_dir()
+    {
+        let source_root = windows_source
+            .parent()
+            .and_then(|v| v.parent())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        return (source_root, windows_source.to_path_buf());
+    }
+    panic!(
+        "windows source path '{}' must contain 'src/Windows' or 'Windows'",
+        windows_source.display()
+    );
+}
+
+fn resolve_sibling_crate_source(windows_source_root: &Path, crate_spec: VendoredCrate) -> Option<PathBuf> {
+    let Some(parent) = windows_source_root.parent() else {
+        return None;
+    };
+    let candidate = parent.join(format!("{}-{}", crate_spec.crate_name, crate_spec.version));
+    if candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn resolve_support_crate_source(windows_source_root: &Path, crate_spec: VendoredCrate) -> PathBuf {
+    if let Some(path) = resolve_sibling_crate_source(windows_source_root, crate_spec) {
+        return path;
+    }
+    find_crate_in_cargo_registry(crate_spec).unwrap_or_else(|| {
+        panic!(
+            "could not locate {}-{} in the Cargo registry; run `cargo fetch --manifest-path tools/windows_strip/Cargo.toml --features fetch-windows-upstream`",
+            crate_spec.crate_name, crate_spec.version
+        )
+    })
+}
+
+fn vendored_crate_root(crate_spec: VendoredCrate) -> PathBuf {
+    Path::new("./libs/windows").join(crate_spec.local_dir)
+}
+
+fn copy_tree(src_root: &Path, dst_root: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst_root)?;
+    for entry in fs::read_dir(src_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if matches!(name_str.as_ref(), ".cargo-ok" | ".cargo_vcs_info.json" | "Cargo.lock") {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst_root.join(name);
+        if src_path.is_dir() {
+            copy_tree(&src_path, &dst_path)?;
+        } else if src_path.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_legacy_flat_vendored_dirs() {
+    for dir_name in LEGACY_FLAT_VENDORED_DIRS {
+        let legacy = Path::new("./libs").join(dir_name);
+        if legacy.exists() {
+            fs::remove_dir_all(legacy).unwrap();
+        }
+    }
+    for dir_name in LEGACY_WINDOWS_SUBDIRS {
+        let legacy = Path::new("./libs/windows").join(dir_name);
+        if legacy.exists() {
+            fs::remove_dir_all(legacy).unwrap();
+        }
+    }
+}
+
+fn copy_crate_source(crate_spec: VendoredCrate, source_root: &Path) -> PathBuf {
+    let dest_root = vendored_crate_root(crate_spec);
+    if dest_root.exists() {
+        fs::remove_dir_all(&dest_root).unwrap();
+    }
+    copy_tree(source_root, &dest_root).unwrap();
+    dest_root
+}
+
+fn remove_manifest_section(manifest: &mut String, section_name: &str) {
+    let header = format!("[{}]", section_name);
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            skipping = trimmed == header;
+        }
+        if skipping {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    *manifest = out;
+}
+
+fn set_manifest_dependency_path(manifest: &mut String, section_name: &str, path: &str) {
+    let header = format!("[{}]", section_name);
+    let mut out = String::new();
+    let mut in_section = false;
+    let mut saw_section = false;
+    let mut wrote_path = false;
+
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_section && !wrote_path {
+                out.push_str(&format!("path = \"{}\"\n", path));
+            }
+            in_section = trimmed == header;
+            if in_section {
+                saw_section = true;
+                wrote_path = false;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        if in_section && trimmed.starts_with("path") {
+            if !wrote_path {
+                out.push_str(&format!("path = \"{}\"\n", path));
+                wrote_path = true;
+            }
+            continue;
+        }
+
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    if in_section && !wrote_path {
+        out.push_str(&format!("path = \"{}\"\n", path));
+    }
+
+    if !saw_section {
+        panic!("missing dependency section [{}] in Cargo.toml", section_name);
+    }
+
+    *manifest = out;
+}
+
+fn replace_windows_std_feature_block(
+    manifest: &mut String,
+    include_future_std: bool,
+) {
+    let old_std_feature = "std = [\n    \"windows-collections/std\",\n    \"windows-core/std\",\n    \"windows-future/std\",\n    \"windows-numerics/std\",\n]\n";
+    let mut new_std_feature = String::from("std = [\n    \"windows-core/std\",\n");
+    if include_future_std {
+        new_std_feature.push_str("    \"windows-future/std\",\n");
+    }
+    new_std_feature.push_str("]\n");
+    if !manifest.contains(old_std_feature) {
+        panic!("windows std feature block did not match expected upstream shape");
+    }
+    *manifest = manifest.replacen(old_std_feature, &new_std_feature, 1);
+}
+
+fn patch_manifest_for_crate(
+    crate_spec: VendoredCrate,
+    crate_root: &Path,
+    decisions: StripDecisions,
+) {
+    let manifest_path = crate_root.join("Cargo.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    remove_manifest_section(&mut manifest, "hints");
+
+    match crate_spec.crate_name {
+        "windows" => {
+            if decisions.use_collections {
+                set_manifest_dependency_path(
+                    &mut manifest,
+                    "dependencies.windows-collections",
+                    "../windows-collections",
+                );
+            } else {
+                remove_manifest_section(&mut manifest, "dependencies.windows-collections");
+            }
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-core",
+                "../windows-core",
+            );
+            if decisions.use_future {
+                set_manifest_dependency_path(
+                    &mut manifest,
+                    "dependencies.windows-future",
+                    "../windows-future",
+                );
+            } else {
+                remove_manifest_section(&mut manifest, "dependencies.windows-future");
+            }
+            if decisions.use_numerics {
+                set_manifest_dependency_path(
+                    &mut manifest,
+                    "dependencies.windows-numerics",
+                    "../windows-numerics",
+                );
+            } else {
+                remove_manifest_section(&mut manifest, "dependencies.windows-numerics");
+            }
+            replace_windows_std_feature_block(&mut manifest, decisions.use_future);
+        }
+        "windows-core" => {
+            remove_manifest_section(&mut manifest, "dependencies.windows-implement");
+            remove_manifest_section(&mut manifest, "dependencies.windows-interface");
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-link",
+                "../windows-link",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-result",
+                "../windows-result",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-strings",
+                "../windows-strings",
+            );
+        }
+        "windows-collections" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-core",
+                "../windows-core",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dev-dependencies.windows-strings",
+                "../windows-strings",
+            );
+            manifest = manifest.replacen("default = [\"std\"]", "default = []", 1);
+        }
+        "windows-future" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-core",
+                "../windows-core",
+            );
+            remove_manifest_section(&mut manifest, "dependencies.windows-link");
+            remove_manifest_section(&mut manifest, "dependencies.windows-threading");
+        }
+        "windows-numerics" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-core",
+                "../windows-core",
+            );
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-link",
+                "../windows-link",
+            );
+        }
+        "windows-result" | "windows-strings" => {
+            set_manifest_dependency_path(
+                &mut manifest,
+                "dependencies.windows-link",
+                "../windows-link",
+            );
+        }
+        "windows-link" | "windows-threading" => {}
+        _ => panic!("unsupported vendored crate {}", crate_spec.crate_name),
+    }
+
+    fs::write(manifest_path, manifest).unwrap();
+}
+
+fn strip_windows_core_macros(crate_root: &Path) {
+    let lib_path = crate_root.join("src/lib.rs");
+    let mut source = fs::read_to_string(&lib_path).unwrap();
+    source = source.replace("pub use windows_implement::implement;\n", "");
+    source = source.replace("pub use windows_interface::interface;\n", "");
+    fs::write(lib_path, source).unwrap();
+}
+
+fn replace_function_block(source: &mut String, signature: &str, replacement: &str) {
+    let Some(start) = source.find(signature) else {
+        panic!("missing function signature `{}`", signature);
+    };
+    let body_start = source[start..]
+        .find('{')
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("missing function body for `{}`", signature));
+    let bytes = source.as_bytes();
+    let mut depth: i32 = 0;
+    let mut end = None;
+    for (index, byte) in bytes.iter().enumerate().skip(body_start) {
+        if *byte == b'{' {
+            depth += 1;
+        } else if *byte == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                end = Some(index + 1);
+                break;
+            }
+        }
+    }
+    let end = end.unwrap_or_else(|| panic!("unbalanced braces for `{}`", signature));
+    source.replace_range(start..end, replacement);
+}
+
+fn strip_windows_future_implement_helpers(crate_root: &Path) {
+    let lib_path = crate_root.join("src/lib.rs");
+    let mut source = fs::read_to_string(&lib_path).unwrap();
+    source = source.replace("mod bindings_impl;\n", "");
+    source = source.replace("mod join;\n", "");
+    source = source.replace("mod waiter;\n", "");
+    source = source.replace("mod when;\n", "");
+    source = source.replace("use bindings_impl::*;\n", "");
+    source = source.replace("use waiter::*;\n", "");
+    source = source.replace("#[cfg(feature = \"std\")]\nmod async_ready;\n", "");
+    source = source.replace("#[cfg(feature = \"std\")]\nmod async_spawn;\n", "");
+    fs::write(lib_path, source).unwrap();
+
+    let async_path = crate_root.join("src/async.rs");
+    let mut async_source = fs::read_to_string(&async_path).unwrap();
+    replace_function_block(
+        &mut async_source,
+        "fn join(&self) -> Result<Self::Output>",
+        "fn join(&self) -> Result<Self::Output> {\n        while self.status()? == AsyncStatus::Started {\n            core::hint::spin_loop();\n        }\n        self.get_results()\n    }",
+    );
+    fs::write(async_path, async_source).unwrap();
+
+    let _ = fs::remove_file(crate_root.join("src/async_ready.rs"));
+    let _ = fs::remove_file(crate_root.join("src/async_spawn.rs"));
+    let _ = fs::remove_file(crate_root.join("src/bindings_impl.rs"));
+    let _ = fs::remove_file(crate_root.join("src/join.rs"));
+    let _ = fs::remove_file(crate_root.join("src/waiter.rs"));
+    let _ = fs::remove_file(crate_root.join("src/when.rs"));
+}
+
+fn strip_windows_collections_helpers(crate_root: &Path) {
+    let lib_path = crate_root.join("src/lib.rs");
+    let mut source = fs::read_to_string(&lib_path).unwrap();
+    source = source.replace(
+        "\n#[cfg(feature = \"std\")]\nconst E_BOUNDS: windows_core::HRESULT = windows_core::HRESULT(0x8000000B_u32 as _);\n",
+        "\n",
+    );
+    source = source.replace("#[cfg(feature = \"std\")]\nmod iterable;\n", "");
+    source = source.replace("#[cfg(feature = \"std\")]\nmod map_view;\n", "");
+    source = source.replace("#[cfg(feature = \"std\")]\nmod vector_view;\n", "");
+    fs::write(lib_path, source).unwrap();
+
+    let _ = fs::remove_file(crate_root.join("src/iterable.rs"));
+    let _ = fs::remove_file(crate_root.join("src/map_view.rs"));
+    let _ = fs::remove_file(crate_root.join("src/vector_view.rs"));
+}
+
+fn load_module<'a>(
+    module: &[String],
+    windows_mod_root: &Path,
+    cache: &'a mut HashMap<Vec<String>, Option<ModuleData>>,
+    enabled_features: &HashSet<String>,
+) -> Option<&'a ModuleData> {
+    let key = module.to_vec();
+    let data = cache
+        .entry(key)
+        .or_insert_with(|| parse_module_data(module, windows_mod_root, enabled_features));
+    data.as_ref()
+}
+
+fn insert_snippet(node: &mut ModuleNode, module: &[String], order: usize, snippet: &str) {
+    let mut cursor = node;
+    for part in module {
+        cursor = cursor.children.entry(part.clone()).or_default();
+    }
+    let key = snippet.trim();
+    if !cursor.seen.contains(key) {
+        let owned = snippet.to_string();
+        cursor.seen.insert(key.to_string());
+        cursor.snippets.push((order, owned));
+    }
+}
+
+fn enqueue_symbol(queue: &mut VecDeque<SymbolRef>, enqueued: &mut HashSet<SymbolRef>, symbol: SymbolRef) {
+    if enqueued.insert(symbol.clone()) {
+        queue.push_back(symbol);
+    }
+}
+
+fn render_module(node: &ModuleNode, out: &mut String) {
+    let mut snippets = node.snippets.clone();
+    snippets.sort_by_key(|(order, _)| *order);
+    for (_, snippet) in snippets {
+        out.push_str(&snippet);
+        if !snippet.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+
+    for (module_name, child) in &node.children {
+        out.push_str(&format!("pub mod {}{{\n", module_name));
+        render_module(child, out);
+        out.push_str("}\n");
+    }
+}
+
+fn impl_target_name(header: &[TokenWithString]) -> Option<String> {
+    let mut i = skip_outer_attributes(header, 0);
+    if !ident_eq(header, i, "impl") {
+        return None;
+    }
+    i += 1;
+
+    let mut angle_depth = 0isize;
+    if token_is_punct(header, i, live_id!(<)) {
+        angle_depth = 1;
+        i += 1;
+        while i < header.len() {
+            if token_is_punct(header, i, live_id!(<)) {
+                angle_depth += 1;
+            } else if token_is_punct(header, i, live_id!(>)) {
+                angle_depth -= 1;
+                if angle_depth == 0 {
+                    i += 1;
+                    break;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    for j in i..header.len() {
+        if token_is_punct(header, j, live_id!(<)) {
+            angle_depth += 1;
+            continue;
+        }
+        if token_is_punct(header, j, live_id!(>)) {
+            angle_depth -= 1;
+            continue;
+        }
+        if angle_depth == 0 && ident_eq(header, j, "for") {
+            return None;
+        }
+    }
+
+    let (path, _) = parse_ident_path(header, i);
+    path.last().cloned()
+}
+
+fn impl_for_target_name(header: &[TokenWithString]) -> Option<String> {
+    let mut i = 0usize;
+    while i < header.len() {
+        if ident_eq(header, i, "for") {
+            i += 1;
+            while i < header.len()
+                && (is_ampersand(header, i) || ident_eq(header, i, "mut"))
+            {
+                i += 1;
+            }
+            let (path, _) = parse_ident_path(header, i);
+            return path.last().cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
+fn collect_called_method_names_for_target(
+    item_tokens: &[TokenWithString],
+    impl_target: &str,
+) -> HashSet<String> {
+    let mut called = HashSet::new();
+    for i in 0..item_tokens.len() {
+        if token_is_punct(item_tokens, i, live_id!(.)) {
+            let Some(method_name) = token_ident(item_tokens, i + 1) else {
+                continue;
+            };
+            let looks_like_call = matches!(
+                item_tokens.get(i + 2),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Paren),
+                    ..
+                })
+            ) || token_is_punct(item_tokens, i + 2, live_id!(<));
+            if looks_like_call {
+                called.insert(method_name.to_string());
+            }
+            continue;
+        }
+
+        let Some(owner) = token_ident(item_tokens, i) else {
+            continue;
+        };
+        if owner != "Self" && owner != impl_target {
+            continue;
+        }
+        if !is_colon_colon(item_tokens, i + 1) {
+            continue;
+        }
+        let Some(method_name) = token_ident(item_tokens, i + 2) else {
+            continue;
+        };
+        let looks_like_call = matches!(
+            item_tokens.get(i + 3),
+            Some(TokenWithString {
+                token: FullToken::Open(Delim::Paren),
+                ..
+            })
+        ) || token_is_punct(item_tokens, i + 3, live_id!(<));
+        if looks_like_call {
+            called.insert(method_name.to_string());
+        }
+    }
+    called
+}
+
+fn collect_generated_impl_method_usage(source: &str, usage: &mut MethodUsage) {
+    let tokens = parse_to_tokens(source);
+    let raw_items = parse_top_level_items(&tokens);
+
+    for item in raw_items {
+        if item.keyword.as_deref() == Some("mod") {
+            let open_index = item
+                .tokens
+                .iter()
+                .position(|token| matches!(token.token, FullToken::Open(Delim::Brace)));
+            let Some(open_index) = open_index else {
+                continue;
+            };
+            let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace) else {
+                continue;
+            };
+            let body = tokens_to_string(&item.tokens[open_index + 1..close_index]);
+            collect_generated_impl_method_usage(&body, usage);
+            continue;
+        }
+        if item.keyword.as_deref() != Some("impl") {
+            continue;
+        }
+
+        let header = header_tokens(&item.tokens);
+        let target = impl_target_name(header).or_else(|| impl_for_target_name(header));
+        let Some(target) = target else {
+            continue;
+        };
+        let called = collect_called_method_names_for_target(&item.tokens, &target);
+        if called.is_empty() {
+            continue;
+        }
+        usage
+            .typed_methods
+            .entry(target)
+            .or_default()
+            .extend(called);
+    }
+}
+
+fn public_function_name(item_tokens: &[TokenWithString]) -> Option<String> {
+    let mut i = skip_outer_attributes(item_tokens, 0);
+    if !ident_eq(item_tokens, i, "pub") {
+        return None;
+    }
+    i += 1;
+    if matches!(
+        item_tokens.get(i),
+        Some(TokenWithString {
+            token: FullToken::Open(Delim::Paren),
+            ..
+        })
+    ) {
+        return None;
+    }
+    if ident_eq(item_tokens, i, "unsafe") {
+        i += 1;
+    }
+    if !ident_eq(item_tokens, i, "fn") {
+        return None;
+    }
+    token_ident(item_tokens, i + 1).map(|v| v.to_string())
+}
+
+fn method_used_for_target(
+    target: &str,
+    method: &str,
+    used_methods: &MethodUsage,
+) -> bool {
+    if used_methods.global_methods.contains(method) {
+        return true;
+    }
+    used_methods
+        .typed_methods
+        .get(target)
+        .map(|methods| methods.contains(method))
+        .unwrap_or(false)
+}
+
+fn collect_called_impl_methods(
+    item_tokens: &[TokenWithString],
+    impl_target: &str,
+    available_methods: &HashSet<String>,
+) -> HashSet<String> {
+    let mut called = HashSet::new();
+    for i in 0..item_tokens.len() {
+        if token_is_punct(item_tokens, i, live_id!(.)) {
+            let Some(method_name) = token_ident(item_tokens, i + 1) else {
+                continue;
+            };
+            if !available_methods.contains(method_name) {
+                continue;
+            }
+            let looks_like_call = matches!(
+                item_tokens.get(i + 2),
+                Some(TokenWithString {
+                    token: FullToken::Open(Delim::Paren),
+                    ..
+                })
+            ) || token_is_punct(item_tokens, i + 2, live_id!(<));
+            if looks_like_call {
+                called.insert(method_name.to_string());
+            }
+            continue;
+        }
+
+        let Some(owner) = token_ident(item_tokens, i) else {
+            continue;
+        };
+        if owner != "Self" && owner != impl_target {
+            continue;
+        }
+        if !is_colon_colon(item_tokens, i + 1) {
+            continue;
+        }
+        let Some(method_name) = token_ident(item_tokens, i + 2) else {
+            continue;
+        };
+        if !available_methods.contains(method_name) {
+            continue;
+        }
+        let looks_like_call = matches!(
+            item_tokens.get(i + 3),
+            Some(TokenWithString {
+                token: FullToken::Open(Delim::Paren),
+                ..
+            })
+        ) || token_is_punct(item_tokens, i + 3, live_id!(<));
+        if looks_like_call {
+            called.insert(method_name.to_string());
+        }
+    }
+    called
+}
+
+fn strip_impl_item_methods(item: &RawItem, used_methods: &MethodUsage) -> String {
+    if item.keyword.as_deref() != Some("impl") {
+        return tokens_to_string(&item.tokens);
+    }
+    let header = header_tokens(&item.tokens);
+    let Some(target) = impl_target_name(header) else {
+        return tokens_to_string(&item.tokens);
+    };
+
+    let open_index = item
+        .tokens
+        .iter()
+        .position(|token| matches!(token.token, FullToken::Open(Delim::Brace)));
+    let Some(open_index) = open_index else {
+        return tokens_to_string(&item.tokens);
+    };
+    let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace) else {
+        return tokens_to_string(&item.tokens);
+    };
+
+    let body_tokens = item.tokens[open_index + 1..close_index].to_vec();
+    let body_items = parse_top_level_items(&body_tokens);
+    if body_items.is_empty() {
+        return tokens_to_string(&item.tokens);
+    }
+
+    let mut available_methods = HashSet::new();
+    for body_item in &body_items {
+        if let Some(method_name) = public_function_name(&body_item.tokens) {
+            available_methods.insert(method_name);
+        }
+    }
+
+    let mut kept_methods: HashSet<String> = available_methods
+        .iter()
+        .filter(|method| method_used_for_target(&target, method, used_methods))
+        .cloned()
+        .collect();
+
+    loop {
+        let mut changed = false;
+        for body_item in &body_items {
+            let include = if let Some(method_name) = public_function_name(&body_item.tokens) {
+                kept_methods.contains(&method_name)
+            } else {
+                true
+            };
+            if !include {
+                continue;
+            }
+            for called in collect_called_impl_methods(&body_item.tokens, &target, &available_methods) {
+                if kept_methods.insert(called) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut kept_body = String::new();
+    for body_item in body_items {
+        if let Some(method_name) = public_function_name(&body_item.tokens) {
+            if !kept_methods.contains(&method_name) {
+                continue;
+            }
+        }
+        kept_body.push_str(&tokens_to_string(&body_item.tokens));
+    }
+
+    if kept_body.trim().is_empty() {
+        return String::new();
+    }
+
+    let mut rebuilt = String::new();
+    rebuilt.push_str(&tokens_to_string(&item.tokens[..=open_index]));
+    rebuilt.push_str(&kept_body);
+    rebuilt.push_str(&tokens_to_string(&item.tokens[close_index..]));
+    rebuilt
+}
+
+fn strip_unused_impl_methods(source: &str, used_methods: &MethodUsage) -> String {
+    let tokens = parse_to_tokens(source);
+    let raw_items = parse_top_level_items(&tokens);
+    if raw_items.is_empty() {
+        return source.to_string();
+    }
+
+    let mut out = String::new();
+    for item in raw_items {
+        if item.keyword.as_deref() == Some("mod") {
+            let open_index = item
+                .tokens
+                .iter()
+                .position(|token| matches!(token.token, FullToken::Open(Delim::Brace)));
+            if let Some(open_index) = open_index {
+                if let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace) {
+                    let body = tokens_to_string(&item.tokens[open_index + 1..close_index]);
+                    let stripped_body = strip_unused_impl_methods(&body, used_methods);
+                    out.push_str(&tokens_to_string(&item.tokens[..=open_index]));
+                    out.push_str(&stripped_body);
+                    out.push_str(&tokens_to_string(&item.tokens[close_index..]));
+                    continue;
+                }
+            }
+            out.push_str(&tokens_to_string(&item.tokens));
+            continue;
+        }
+
+        if item.keyword.as_deref() == Some("impl") {
+            out.push_str(&strip_impl_item_methods(&item, used_methods));
+            continue;
+        }
+
+        out.push_str(&tokens_to_string(&item.tokens));
+    }
+    out
+}
+
+fn decide_strip_from_generated(generated_mod: &str) -> StripDecisions {
+    StripDecisions {
+        use_collections: generated_mod.contains("windows_collections::"),
+        use_future: generated_mod.contains("windows_future::"),
+        use_numerics: generated_mod.contains("windows_numerics::"),
+    }
+}
+
+fn regenerate_vendored_windows_crate(
+    source_root: &Path,
+    generated_mod: &str,
+    decisions: StripDecisions,
+) {
+    let vendored_root = copy_crate_source(WINDOWS_CRATE, source_root);
+    patch_manifest_for_crate(WINDOWS_CRATE, &vendored_root, decisions);
+    let mut lib_source = fs::read_to_string(source_root.join("src/lib.rs")).unwrap();
+    lib_source = lib_source.replace("\nmod extensions;\n", "\n");
+    lib_source = lib_source.replace("\r\nmod extensions;\r\n", "\r\n");
+    fs::write(vendored_root.join("src/lib.rs"), lib_source).unwrap();
+    let windows_mod_dir = vendored_root.join("src/Windows");
+    if windows_mod_dir.exists() {
+        fs::remove_dir_all(&windows_mod_dir).unwrap();
+    }
+    fs::create_dir_all(&windows_mod_dir).unwrap();
+    fs::write(windows_mod_dir.join("mod.rs"), generated_mod).unwrap();
+}
+
+fn regenerate_vendored_support_crates(windows_source_root: &Path, decisions: StripDecisions) {
+    let mut support_crates: Vec<VendoredCrate> = BASE_SUPPORT_CRATES.to_vec();
+    if decisions.use_collections {
+        support_crates.push(WINDOWS_COLLECTIONS_CRATE);
+    }
+    if decisions.use_future {
+        support_crates.push(WINDOWS_FUTURE_CRATE);
+    }
+    if decisions.use_numerics {
+        support_crates.push(WINDOWS_NUMERICS_CRATE);
+    }
+    support_crates.sort_by_key(|c| c.crate_name);
+    support_crates.dedup_by_key(|c| c.crate_name);
+
+    for crate_spec in &support_crates {
+        let source_root = resolve_support_crate_source(windows_source_root, *crate_spec);
+        let vendored_root = copy_crate_source(*crate_spec, &source_root);
+        patch_manifest_for_crate(*crate_spec, &vendored_root, decisions);
+        if crate_spec.crate_name == "windows-core" {
+            strip_windows_core_macros(&vendored_root);
+        } else if crate_spec.crate_name == "windows-collections" {
+            strip_windows_collections_helpers(&vendored_root);
+        } else if crate_spec.crate_name == "windows-future" {
+            strip_windows_future_implement_helpers(&vendored_root);
         }
     }
 }
 
 fn main() {
-    let mut output = Node::Sub(Vec::new());
-    let mut cache = Vec::new();
-    generate_outputs_from_file("./platform/src/os/windows/win32_app.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/win32_window.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/d3d11.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/wasapi.rs", &mut output, &mut cache);
-    //generate_outputs_from_file("./platform/src/os/mswindows/win32_midi.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/winrt_midi.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/media_foundation.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./tools/windows_strip/dep_of_deps.rs", &mut output, &mut cache);
+    remove_legacy_flat_vendored_dirs();
 
-    generate_outputs_from_file("./platform/src/os/windows/droptarget.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/dropsource.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/dataobject.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/enumformatetc.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/windows/dropfiles.rs", &mut output, &mut cache);
-    
-    fn generate_string_from_outputs(node: &Node, output: &mut String) {
-        match node {
-            Node::Sub(vec) => {
-                for (sub, node) in vec {
-                    if let Node::Value(v) = node {
-                        output.push_str(&v);
-                        output.push_str("\n");
+    let windows_source_arg = resolve_windows_source_input();
+    let (windows_source_root, windows_mod_root) =
+        resolve_windows_source_and_mod_root(&windows_source_arg);
+    let mut enabled_features = load_enabled_windows_features(Path::new("./platform/Cargo.toml"));
+    enabled_features.extend(load_enabled_windows_features(Path::new(
+        "./libs/terminal_core/Cargo.toml",
+    )));
+
+    let mut explicit_imports = HashSet::new();
+    let mut glob_imports: Vec<(Vec<String>, HashSet<String>)> = Vec::new();
+    let mut used_methods = MethodUsage::default();
+
+    let windows_src_dir = Path::new("./platform/src/os/windows");
+    for entry in fs::read_dir(windows_src_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("rs") {
+            continue;
+        }
+        let (file_explicit, file_globs) = collect_imports_from_file(&path);
+        explicit_imports.extend(file_explicit);
+        glob_imports.extend(file_globs);
+        collect_method_usage_from_file(&path, &mut used_methods);
+    }
+    let terminal_pty_path = Path::new("./libs/terminal_core/src/pty.rs");
+    if terminal_pty_path.is_file() {
+        let (file_explicit, file_globs) = collect_imports_from_file(terminal_pty_path);
+        explicit_imports.extend(file_explicit);
+        glob_imports.extend(file_globs);
+        collect_method_usage_from_file(terminal_pty_path, &mut used_methods);
+    }
+
+    let mut module_cache: HashMap<Vec<String>, Option<ModuleData>> = HashMap::new();
+    let mut selected: HashMap<Vec<String>, HashSet<String>> = HashMap::new();
+    let mut selected_symbols: HashSet<SymbolRef> = HashSet::new();
+    let mut queue: VecDeque<SymbolRef> = VecDeque::new();
+    let mut enqueued: HashSet<SymbolRef> = HashSet::new();
+
+    for symbol in explicit_imports {
+        enqueue_symbol(&mut queue, &mut enqueued, symbol);
+    }
+
+    for (module, used_idents) in glob_imports {
+        if let Some(module_data) = load_module(
+            &module,
+            &windows_mod_root,
+            &mut module_cache,
+            &enabled_features,
+        ) {
+            if used_idents.len() <= module_data.names.len() {
+                for ident in &used_idents {
+                    if module_data.names.contains(ident) {
+                        enqueue_symbol(
+                            &mut queue,
+                            &mut enqueued,
+                            SymbolRef {
+                                module: module.clone(),
+                                name: ident.clone(),
+                            },
+                        );
                     }
-                    else {
-                        output.push_str(&format!("pub mod {}{{\n", sub));
-                        generate_string_from_outputs(node, output);
-                        output.push_str("}\n");
+                }
+            } else {
+                for name in &module_data.names {
+                    if used_idents.contains(name) {
+                        enqueue_symbol(
+                            &mut queue,
+                            &mut enqueued,
+                            SymbolRef {
+                                module: module.clone(),
+                                name: name.clone(),
+                            },
+                        );
                     }
                 }
             }
-            _ => panic!()
         }
     }
 
-    // lets just copy in collections 
-    remove_node(&mut output, ids!(Foundation));
-    
-    // ok lets recursively walk the tree now
-    let mut gen = String::new();
-    gen.push_str("#![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]\n pub mod Foundation;");
-    generate_string_from_outputs(&output, &mut gen);
-    // lets write the output file
-    fs::write("./libs/windows/src/Windows/mod.rs", gen).unwrap();
+    while let Some(symbol) = queue.pop_front() {
+        if selected_symbols.contains(&symbol) {
+            continue;
+        }
+
+        let module_key = symbol.module.clone();
+        let module_data = module_cache
+            .entry(module_key)
+            .or_insert_with(|| {
+                parse_module_data(&symbol.module, &windows_mod_root, &enabled_features)
+            });
+        let Some(module_data) = module_data.as_mut() else {
+            continue;
+        };
+        if !module_data.entries.contains_key(&symbol.name) {
+            if let Some(entry) = fallback_extract_entry(
+                &symbol.module,
+                &symbol.name,
+                &windows_mod_root,
+                &module_data.names,
+                &module_data.child_modules,
+                &enabled_features,
+            ) {
+                module_data.names.insert(symbol.name.clone());
+                module_data.entries.insert(symbol.name.clone(), entry);
+            }
+        }
+        let Some(entry) = module_data.entries.get(&symbol.name) else {
+            continue;
+        };
+        let deps = entry.deps.clone();
+
+        selected_symbols.insert(symbol.clone());
+        selected
+            .entry(symbol.module.clone())
+            .or_default()
+            .insert(symbol.name.clone());
+
+        for dep in deps {
+            if dep.module.first().map(|v| v.as_str()) == Some("core") {
+                continue;
+            }
+            enqueue_symbol(&mut queue, &mut enqueued, dep);
+        }
+    }
+
+    let mut root = ModuleNode::default();
+    for (module, names) in &selected {
+        let Some(module_data) = load_module(
+            module,
+            &windows_mod_root,
+            &mut module_cache,
+            &enabled_features,
+        ) else {
+            continue;
+        };
+        for name in names {
+            if let Some(entry) = module_data.entries.get(name) {
+                for (order, snippet) in &entry.snippets {
+                    insert_snippet(&mut root, module, *order, snippet);
+                }
+            }
+        }
+    }
+
+    let mut generated = String::new();
+    render_module(&root, &mut generated);
+    collect_generated_impl_method_usage(&generated, &mut used_methods);
+    generated = strip_unused_impl_methods(&generated, &used_methods);
+
+    let decisions = decide_strip_from_generated(&generated);
+    regenerate_vendored_windows_crate(&windows_source_root, &generated, decisions);
+    regenerate_vendored_support_crates(&windows_source_root, decisions);
 }

@@ -5,6 +5,7 @@
 
 use crate::opcode::*;
 use crate::shader::*;
+use crate::shader_backend::ShaderBackend;
 use crate::shader_tables::*;
 use crate::suggest::*;
 use crate::vm::*;
@@ -42,7 +43,66 @@ impl ShaderFnCompiler {
         };
         let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
-        write!(s, "({} {} {})", s1, op, s2).ok();
+
+        let is_simple_int_literal = |value: &str| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        };
+        let is_simple_uint_literal =
+            |value: &str| value.ends_with('u') && is_simple_int_literal(&value[..value.len() - 1]);
+        let to_float_literal = |value: &str| {
+            if is_simple_int_literal(value) {
+                Some(format!("{}.0", value))
+            } else if is_simple_uint_literal(value) {
+                Some(format!("{}.0", &value[..value.len() - 1]))
+            } else {
+                None
+            }
+        };
+        let is_float_like = |ty: &ShaderType| match ty {
+            ShaderType::Pod(pt) => vm.bx.heap.pod_types[pt.index as usize].ty.is_float_type(),
+            ShaderType::AbstractFloat => true,
+            _ => false,
+        };
+        let is_int_like = |ty: &ShaderType| match ty {
+            ShaderType::AbstractInt => true,
+            ShaderType::Pod(pt)
+                if *pt == vm.bx.code.builtins.pod.pod_i32
+                    || *pt == vm.bx.code.builtins.pod.pod_u32 =>
+            {
+                true
+            }
+            _ => false,
+        };
+
+        let lhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
+            && is_int_like(&t1)
+            && is_float_like(&t2)
+        {
+            if let Some(v) = to_float_literal(&s1) {
+                v
+            } else {
+                format!("({} as f32)", s1)
+            }
+        } else {
+            s1.to_string()
+        };
+        let rhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
+            && is_int_like(&t2)
+            && is_float_like(&t1)
+        {
+            if let Some(v) = to_float_literal(&s2) {
+                v
+            } else {
+                format!("({} as f32)", s2)
+            }
+        } else {
+            s2.to_string()
+        };
+
+        write!(s, "({} {} {})", lhs, op, rhs).ok();
         let ty = type_table_eq(&t1, &t2, self.trap.pass(), &vm.bx.code.builtins.pod);
         self.stack.push(self.trap.pass(), ty, s);
     }
@@ -136,7 +196,57 @@ impl ShaderFnCompiler {
         };
         let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
-        write!(s, "({} {} {})", s1, op, s2).ok();
+
+        let is_simple_int_literal = |value: &str| {
+            value
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        };
+        let is_float_like = |ty: &ShaderType| match ty {
+            ShaderType::Pod(pt) => vm.bx.heap.pod_types[pt.index as usize].ty.is_float_type(),
+            ShaderType::AbstractFloat => true,
+            _ => false,
+        };
+
+        let lhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
+            && !is_int
+            && matches!(t1, ShaderType::AbstractInt)
+            && is_float_like(&t2)
+            && is_simple_int_literal(&s1)
+        {
+            format!("{}.0", s1)
+        } else {
+            s1.to_string()
+        };
+        let rhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
+            && !is_int
+            && matches!(t2, ShaderType::AbstractInt)
+            && is_float_like(&t1)
+            && is_simple_int_literal(&s2)
+        {
+            format!("{}.0", s2)
+        } else {
+            s2.to_string()
+        };
+
+        let is_hlsl_matrix_mul = if op == "*" && matches!(output.backend, ShaderBackend::Hlsl) {
+            let is_matrix = |ty: &ShaderType| match ty {
+                ShaderType::Pod(pod_ty) => matches!(
+                    vm.bx.heap.pod_types[pod_ty.index as usize].ty,
+                    crate::pod::ScriptPodTy::Mat(_)
+                ),
+                _ => false,
+            };
+            is_matrix(&t1) || is_matrix(&t2)
+        } else {
+            false
+        };
+
+        if is_hlsl_matrix_mul {
+            write!(s, "mul({}, {})", lhs, rhs).ok();
+        } else {
+            write!(s, "({} {} {})", lhs, op, rhs).ok();
+        }
         let ty = if is_int {
             type_table_int_arithmetic(&t1, &t2, self.trap.pass(), &vm.bx.code.builtins.pod)
         } else {
@@ -183,11 +293,12 @@ impl ShaderFnCompiler {
                 };
 
                 let mut s = self.stack.new_string();
-                if shadow > 0 {
-                    write!(s, "_s{}{}", shadow, id).ok();
+                let var_name = if matches!(var, ShaderScopeItem::Param { .. }) {
+                    output.backend.map_param_name(id, shadow)
                 } else {
-                    write!(s, "{}", id).ok();
-                }
+                    output.backend.map_local_name(id, shadow)
+                };
+                write!(s, "{}", var_name).ok();
                 write!(s, " {} {}", op, s2).ok();
                 self.stack.push(
                     self.trap.pass(),
@@ -275,7 +386,8 @@ impl ShaderFnCompiler {
                     }
 
                     let mut s = self.stack.new_string();
-                    write!(s, "{0}.{1} {2} {3}", instance_s, field_id, op, s2).ok();
+                    let field_name = output.backend.map_field_name(field_id);
+                    write!(s, "{0}.{1} {2} {3}", instance_s, field_name, op, s2).ok();
                     self.stack.push(
                         self.trap.pass(),
                         ShaderType::Pod(vm.bx.code.builtins.pod.pod_void),
@@ -326,7 +438,8 @@ impl ShaderFnCompiler {
                     }
 
                     let mut s = self.stack.new_string();
-                    write!(s, "{0}->{1} {2} {3}", instance_s, field_id, op, s2).ok();
+                    let field_name = output.backend.map_field_name(field_id);
+                    write!(s, "{0}->{1} {2} {3}", instance_s, field_name, op, s2).ok();
                     self.stack.push(
                         self.trap.pass(),
                         ShaderType::Pod(vm.bx.code.builtins.pod.pod_void),

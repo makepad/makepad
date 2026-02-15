@@ -28,6 +28,8 @@ pub mod gl_sys;
 pub mod libc_sys;
 pub mod module_loader;
 pub mod opengl;
+#[cfg(use_vulkan)]
+pub mod vulkan_naga;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod dma_buf;
@@ -50,6 +52,10 @@ pub mod select_timer;
 pub mod pulse_audio;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod pulse_sys;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod http;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+mod socket_stream;
 
 #[cfg(not(target_os = "android"))]
 mod web_socket;

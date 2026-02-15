@@ -1,5 +1,4 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
-
 pub mod os;
 
 #[macro_use]

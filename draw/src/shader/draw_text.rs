@@ -90,7 +90,7 @@ script_mod! {
         }
 
         sdf: fn(scale, p, color) {
-            let sampled = self.grayscale_texture.sample(p);
+            let sampled = self.grayscale_texture.sample_as_bgra(p);
             let s = if self.atlas_plane < 0.5 {
                 sampled.r
             } else if self.atlas_plane < 1.5 {
@@ -117,7 +117,7 @@ script_mod! {
         }
 
         msdf: fn(scale, p, color) {
-            let s = self.msdf_texture.sample(p);
+            let s = self.msdf_texture.sample_as_bgra(p);
             // Use alpha as the coverage source to keep parity with SDF while RGB stores MSDF.
             let dist = s.a;
             let safe_scale = max(scale, 0.0001);
@@ -158,7 +158,7 @@ script_mod! {
                 let tex_size = self.color_texture.size()
                 let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
                 let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
-                let c = self.color_texture.sample(p)
+                let c = self.color_texture.sample_as_bgra(p)
                 return vec4(c.rgb * c.a, c.a)
             } else {
                 let c = self.get_color()
@@ -514,6 +514,8 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
+        cx.load_all_script_resources();
+        self.text_style.font_family.ensure_fonts_loaded(cx);
         CxDraw::lazy_construct_fonts(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
@@ -762,17 +764,65 @@ pub struct FontMember {
 pub struct FontFamily {
     #[rust]
     id: LiveId,
+    #[rust]
+    members: Vec<FontMemberDef>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FontMemberDef {
+    handle: ScriptHandle,
+    asc: f32,
+    desc: f32,
 }
 
 impl FontFamily {
     fn to_font_family_id(&self) -> FontFamilyId {
         (self.id.0).into()
     }
+
+    fn update_font_definitions(&self, cx: &mut Cx, fonts: &mut Fonts) {
+        let mut font_ids = Vec::new();
+
+        for member in &self.members {
+            let font_id: FontId = (member.handle.index() as u64).into();
+
+            if !fonts.is_font_known(font_id) {
+                if let Some(data) = cx.get_resource(member.handle) {
+                    fonts.define_font(
+                        font_id,
+                        FontDefinition {
+                            data,
+                            index: 0,
+                            ascender_fudge_in_ems: member.asc,
+                            descender_fudge_in_ems: member.desc,
+                        },
+                    );
+                }
+            }
+
+            if fonts.is_font_known(font_id) {
+                font_ids.push(font_id);
+            }
+        }
+
+        fonts.set_font_family_definition(self.to_font_family_id(), FontFamilyDefinition { font_ids });
+    }
+
+    fn ensure_fonts_loaded(&self, cx: &mut Cx) {
+        CxDraw::lazy_construct_fonts(cx);
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let mut fonts = fonts.borrow_mut();
+        self.update_font_definitions(cx, &mut fonts);
+    }
 }
 
 impl TextStyle {
     pub fn font_family_id(&self) -> FontFamilyId {
         self.font_family.to_font_family_id()
+    }
+
+    pub fn ensure_fonts_loaded(&self, cx: &mut Cx) {
+        self.font_family.ensure_fonts_loaded(cx);
     }
 }
 
@@ -788,47 +838,29 @@ impl ScriptHook for FontFamily {
             return false;
         };
 
+        // Use the object index as the unique id
+        self.id = LiveId(obj.index() as u64);
+        self.members.clear();
+
+        let len = vm.bx.heap.vec_len(obj);
+        for i in 0..len {
+            let kv = vm.bx.heap.vec_key_value(obj, i, NoTrap);
+            let member = FontMember::script_from_value(vm, kv.value);
+            if let Some(ref handle_ref) = member.res {
+                self.members.push(FontMemberDef {
+                    handle: handle_ref.as_handle(),
+                    asc: member.asc,
+                    desc: member.desc,
+                });
+            }
+        }
+
         let cx = vm.host.cx_mut();
+        cx.load_all_script_resources();
         CxDraw::lazy_construct_fonts(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
-
-        // Use the object index as the unique id
-        self.id = LiveId(obj.index() as u64);
-
-        let font_family_id = self.to_font_family_id();
-        if !fonts.is_font_family_known(font_family_id) {
-            let mut font_ids = Vec::new();
-
-            let len = vm.bx.heap.vec_len(obj);
-            for i in 0..len {
-                let kv = vm.bx.heap.vec_key_value(obj, i, NoTrap);
-                let member = FontMember::script_from_value(vm, kv.value);
-
-                if let Some(ref handle_ref) = member.res {
-                    let handle = handle_ref.as_handle();
-                    let font_id: FontId = (handle.index() as u64).into();
-
-                    if !fonts.is_font_known(font_id) {
-                        let cx = vm.host.cx_mut();
-                        if let Some(data) = cx.get_resource(handle) {
-                            fonts.define_font(
-                                font_id,
-                                FontDefinition {
-                                    data,
-                                    index: 0,
-                                    ascender_fudge_in_ems: member.asc,
-                                    descender_fudge_in_ems: member.desc,
-                                },
-                            );
-                        }
-                    }
-                    font_ids.push(font_id);
-                }
-            }
-
-            fonts.define_font_family(font_family_id, FontFamilyDefinition { font_ids });
-        }
+        self.update_font_definitions(cx, &mut fonts);
 
         true
     }

@@ -185,10 +185,17 @@ pub struct ShaderOutput {
     pub scope_uniforms: Vec<ScopeUniformSource>,
     pub scope_uniform_buffers: Vec<ScopeUniformBufferSource>,
     pub scope_textures: Vec<ScopeTextureSource>,
+    /// Per-texture sampler bindings inferred during shader lowering.
+    /// Entries are `(texture_expr, sampler_index)`.
+    pub texture_sampler_bindings: Vec<(String, usize)>,
     /// HLSL helper: needs _mpTexSize helper function for texture.size()
     pub hlsl_needs_tex_size: bool,
     /// Set to true if any errors occurred during shader compilation
     pub has_errors: bool,
+    /// True if this shader uses screen-space derivatives (dFdx/dFdy).
+    pub uses_derivatives: bool,
+    /// Monotonic temporary id source for Rust backend expression hoisting.
+    pub rust_tmp_counter: usize,
 }
 
 /// Mapping of uniform buffer type names to their assigned buffer indices
@@ -222,6 +229,12 @@ pub struct ShaderFn {
 }
 
 impl ShaderOutput {
+    pub fn next_rust_tmp_id(&mut self) -> usize {
+        let id = self.rust_tmp_counter;
+        self.rust_tmp_counter = self.rust_tmp_counter.wrapping_add(1);
+        id
+    }
+
     /// Pre-collect ALL Rust instance fields in the correct order for struct layout.
     /// Uses recursion to process from deepest prototype to io_self, collecting all rust type properties.
     /// Dyn instance fields are NOT pre-collected - they are added during compilation
@@ -411,7 +424,19 @@ impl ShaderOutput {
 
     pub fn create_functions(&self, out: &mut String) {
         for fns in &self.functions {
-            writeln!(out, "{}{{\n{}}}\n", fns.call_sig, fns.out).ok();
+            writeln!(out, "{}{{", fns.call_sig).ok();
+            if matches!(self.backend, ShaderBackend::Hlsl) {
+                if fns.call_sig.contains("inout IoV _iov") {
+                    // DXC requires explicit definite assignment for inout params.
+                    writeln!(out, "    _iov = _iov;").ok();
+                }
+                if fns.call_sig.contains("inout IoF _iof") {
+                    // DXC requires explicit definite assignment for inout params.
+                    writeln!(out, "    _iof = _iof;").ok();
+                }
+            }
+            writeln!(out, "{}", fns.out).ok();
+            writeln!(out, "}}\n").ok();
         }
     }
 
@@ -529,5 +554,19 @@ impl ShaderOutput {
         let idx = self.samplers.len();
         self.samplers.push(sampler);
         idx
+    }
+
+    /// Record sampler usage for a texture expression.
+    /// If the same texture is sampled multiple times, the first sampler wins.
+    pub fn bind_texture_sampler(&mut self, texture_expr: &str, sampler_idx: usize) {
+        if self
+            .texture_sampler_bindings
+            .iter()
+            .any(|(expr, _)| expr == texture_expr)
+        {
+            return;
+        }
+        self.texture_sampler_bindings
+            .push((texture_expr.to_string(), sampler_idx));
     }
 }

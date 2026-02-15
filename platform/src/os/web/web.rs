@@ -50,7 +50,6 @@ impl Cx {
                     for (path, _) in &self.dependencies {
                         deps.push(path.to_string());
                     }
-
                     self.os.from_wasm(FromWasmLoadDeps { deps });
                 }
 
@@ -66,6 +65,7 @@ impl Cx {
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
                     self.call_event_handler(&Event::Startup);
+                    self.redraw_all();
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 }
 
@@ -196,6 +196,9 @@ impl Cx {
 
                 live_id!(ToWasmRedrawAll) => {
                     self.redraw_all();
+                    self.os.from_wasm(FromWasmSetDocumentTitle {
+                        title: "debug got ToWasmRedrawAll".to_string(),
+                    });
                 }
 
                 live_id!(ToWasmPaintDirty) => {
@@ -496,7 +499,7 @@ impl Cx {
                 }
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.from_wasm(FromWasmStopTimer {
-                        id: timer_id as f64,
+                        timer_id: timer_id as f64,
                     });
                 }
                 CxOsOp::HttpRequest {
@@ -580,9 +583,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
-        self.live_registry.borrow_mut().package_root = Some("".to_string());
-        self.live_expand();
-        self.live_scan_dependencies();
+        self.package_root = Some(String::new());
 
         self.os.append_to_wasm_js(&[
             ToWasmGetDeps::to_js_code(),
@@ -647,6 +648,7 @@ impl CxOsApi for Cx {
             FromWasmAllocVao::to_js_code(),
             FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
+            FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
             FromWasmBeginRenderTexture::to_js_code(),
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),

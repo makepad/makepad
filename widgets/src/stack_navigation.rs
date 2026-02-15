@@ -409,10 +409,8 @@ impl Widget for StackNavigation {
                 visible_views.insert(0, (live_id!(root_view), root_view));
             }
         }
-        for (id, widget_ref) in visible_views {
-            cx.with_node(widget_ref.widget_uid(), id, widget_ref.clone(), |cx| {
-                widget_ref.handle_event(cx, event, scope);
-            });
+        for (_id, widget_ref) in visible_views {
+            widget_ref.handle_event(cx, event, scope);
         }
 
         // Leaving this to the final step, so that the active stack view can handle the event first.
@@ -422,10 +420,8 @@ impl Widget for StackNavigation {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        for (id, widget_ref) in self.get_visible_views(cx.cx).iter() {
-            cx.with_node(widget_ref.widget_uid(), *id, widget_ref.clone(), |cx| {
-                widget_ref.draw_walk(cx, scope, walk)
-            })?;
+        for (_id, widget_ref) in self.get_visible_views(cx.cx).iter() {
+            widget_ref.draw_walk(cx, scope, walk)?;
         }
         DrawStep::done()
     }
@@ -574,7 +570,7 @@ impl StackNavigationRef {
     /// * `view_id` - The LiveId of the view to push onto the stack
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// navigation.push(cx, live_id!(settings_view));
     /// ```
     pub fn push(&self, cx: &mut Cx, view_id: LiveId) {
@@ -590,7 +586,7 @@ impl StackNavigationRef {
     /// The current view will slide out with an animation.
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// navigation.pop(cx);
     /// ```
     pub fn pop(&self, cx: &mut Cx) {
@@ -605,7 +601,7 @@ impl StackNavigationRef {
     /// The current view will slide out with an animation.
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// navigation.pop_to_root(cx);
     /// ```
     pub fn pop_to_root(&self, cx: &mut Cx) {

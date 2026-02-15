@@ -141,18 +141,14 @@ impl Widget for Root {
             }
         }
 
-        for (id, component) in self.components.iter_mut() {
-            cx.with_node(component.widget_uid(), *id, component.clone(), |cx| {
-                component.handle_event(cx, event, scope);
-            });
+        for (_id, component) in self.components.iter_mut() {
+            component.handle_event(cx, event, scope);
         }
     }
 
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        for (id, component) in self.components.iter() {
-            cx.with_node(component.widget_uid(), *id, component.clone(), |cx| {
-                component.draw_3d_all(cx, scope);
-            });
+        for (_id, component) in self.components.iter() {
+            component.draw_3d_all(cx, scope);
         }
         DrawStep::done()
     }
@@ -162,11 +158,9 @@ impl Widget for Root {
 
         while let Some(DrawState::Component(step)) = self.draw_state.get() {
             if let Some((id, component)) = self.components.iter_mut().nth(step) {
-                let id = *id;
+                let _id = *id;
                 let walk = component.walk(cx);
-                cx.with_node(component.widget_uid(), id, component.clone(), |cx| {
-                    component.draw_walk(cx, scope, walk)
-                })?;
+                component.draw_walk(cx, scope, walk)?;
                 self.draw_state.set(DrawState::Component(step + 1));
             } else {
                 self.draw_state.end();

@@ -22,7 +22,7 @@ script_mod! {
         async_load: 0.0
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
-            return self.image_texture.sample(self.pos * scale + pan)
+            return self.image_texture.sample_as_bgra(self.pos * scale + pan)
         }
 
         get_color: fn() {
@@ -145,7 +145,7 @@ impl Image {
         let data = if let Some(data) = cx.get_resource(handle) {
             data
         } else {
-            cx.script_data.resources.load_all_resources();
+            cx.load_all_script_resources();
             match cx.get_resource(handle) {
                 Some(data) => data,
                 None => {

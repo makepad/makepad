@@ -8,8 +8,7 @@ use {
         log,
         os::windows::dropfiles::*,
         windows::{
-            core,
-            core::implement,
+            core::{self as wcore},
             Win32::{
                 Foundation::{HWND, LPARAM, POINTL, WPARAM},
                 System::{
@@ -36,21 +35,19 @@ pub enum DropTargetMessage {
 pub const WM_DROPTARGET: u32 = WM_USER + 0;
 
 #[derive(Clone)]
-#[implement(IDropTarget)]
-pub struct DropTarget {
+pub(crate) struct DropTarget {
     pub drag_item: RefCell<Option<DragItem>>, // Windows only provides the data item for Enter and Drop, but makepad needs it for Over as well
     pub hwnd: HWND,                           // which window to send the messages to
 }
-/*
-implement_com!{
+crate::implement_com! {
     for_struct: DropTarget,
     identity: IDropTarget,
-    wrapper_struct: DropTarget_Com,
+    wrapper_struct: DropTarget_Impl,
     interface_count: 1,
     interfaces: {
         0: IDropTarget
     }
-}*/
+}
 
 fn create_dragitem_from_idataobject(data_object: &IDataObject) -> Option<DragItem> {
     // obtain enumerator for all DATADIR_GET formats of this object
@@ -92,21 +89,21 @@ fn create_dragitem_from_idataobject(data_object: &IDataObject) -> Option<DragIte
 
 // IDropTarget implementation for DropTarget, which sends WM_DROPTARGET messages to the window as they appear
 
-impl IDropTarget_Impl for DropTarget {
+impl IDropTarget_Impl for DropTarget_Impl {
     fn DragEnter(
         &self,
-        _p_data_obj: Option<&IDataObject>,
+        _p_data_obj: wcore::Ref<'_, IDataObject>,
         _grf_key_state: MODIFIERKEYS_FLAGS,
         _pt: &POINTL,
         _pdweffect: *mut DROPEFFECT,
-    ) -> core::Result<()> {
+    ) -> wcore::Result<()> {
         // ignore null pointer
-        if let None = _p_data_obj {
+        let Some(p_data_obj) = _p_data_obj.as_ref() else {
             return Ok(());
-        }
+        };
 
         // convert _p_data_obj to DragItem
-        let drag_item_opt = create_dragitem_from_idataobject(_p_data_obj.unwrap());
+        let drag_item_opt = create_dragitem_from_idataobject(p_data_obj);
 
         // ignore if conversion fails
         if let None = drag_item_opt {
@@ -130,15 +127,15 @@ impl IDropTarget_Impl for DropTarget {
             SendMessageW(
                 self.hwnd,
                 WM_DROPTARGET,
-                WPARAM(0),
-                LPARAM(Box::into_raw(param) as isize),
+                Some(WPARAM(0)),
+                Some(LPARAM(Box::into_raw(param) as isize)),
             )
         };
 
         Ok(())
     }
 
-    fn DragLeave(&self) -> core::Result<()> {
+    fn DragLeave(&self) -> wcore::Result<()> {
         // allocate message
         let param = Box::new(DropTargetMessage::Leave);
 
@@ -150,8 +147,8 @@ impl IDropTarget_Impl for DropTarget {
             SendMessageW(
                 self.hwnd,
                 WM_DROPTARGET,
-                WPARAM(0),
-                LPARAM(Box::into_raw(param) as isize),
+                Some(WPARAM(0)),
+                Some(LPARAM(Box::into_raw(param) as isize)),
             )
         };
 
@@ -163,7 +160,7 @@ impl IDropTarget_Impl for DropTarget {
         _grf_key_state: MODIFIERKEYS_FLAGS,
         _pt: &POINTL,
         _pdweffect: *mut DROPEFFECT,
-    ) -> core::Result<()> {
+    ) -> wcore::Result<()> {
         // if for some reason there is no current drag item, exit
         if let None = *self.drag_item.borrow() {
             return Ok(());
@@ -183,8 +180,8 @@ impl IDropTarget_Impl for DropTarget {
             SendMessageW(
                 self.hwnd,
                 WM_DROPTARGET,
-                WPARAM(0),
-                LPARAM(Box::into_raw(param) as isize),
+                Some(WPARAM(0)),
+                Some(LPARAM(Box::into_raw(param) as isize)),
             )
         };
 
@@ -193,20 +190,20 @@ impl IDropTarget_Impl for DropTarget {
 
     fn Drop(
         &self,
-        _p_data_obj: Option<&IDataObject>,
+        _p_data_obj: wcore::Ref<'_, IDataObject>,
         _grf_key_state: MODIFIERKEYS_FLAGS,
         _pt: &POINTL,
         _pdweffect: *mut DROPEFFECT,
-    ) -> core::Result<()> {
+    ) -> wcore::Result<()> {
         //log!("DropTarget::Drop");
 
         // ignore null pointer
-        if let None = _p_data_obj {
+        let Some(p_data_obj) = _p_data_obj.as_ref() else {
             return Ok(());
-        }
+        };
 
         // convert _p_data_obj to DragItem
-        let drag_item_opt = create_dragitem_from_idataobject(_p_data_obj.unwrap());
+        let drag_item_opt = create_dragitem_from_idataobject(p_data_obj);
 
         // ignore if conversion fails
         if let None = drag_item_opt {
@@ -230,8 +227,8 @@ impl IDropTarget_Impl for DropTarget {
             SendMessageW(
                 self.hwnd,
                 WM_DROPTARGET,
-                WPARAM(0),
-                LPARAM(Box::into_raw(param) as isize),
+                Some(WPARAM(0)),
+                Some(LPARAM(Box::into_raw(param) as isize)),
             )
         };
 

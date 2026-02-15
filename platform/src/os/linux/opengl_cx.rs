@@ -17,6 +17,27 @@ pub struct OpenglCx {
     pub egl_platform_display: *mut c_void,
 }
 
+fn egl_error_name(error: egl_sys::EGLint) -> &'static str {
+    match error as u32 {
+        0x3000 => "EGL_SUCCESS",
+        0x3001 => "EGL_NOT_INITIALIZED",
+        0x3002 => "EGL_BAD_ACCESS",
+        0x3003 => "EGL_BAD_ALLOC",
+        0x3004 => "EGL_BAD_ATTRIBUTE",
+        0x3005 => "EGL_BAD_CONFIG",
+        0x3006 => "EGL_BAD_CONTEXT",
+        0x3007 => "EGL_BAD_CURRENT_SURFACE",
+        0x3008 => "EGL_BAD_DISPLAY",
+        0x3009 => "EGL_BAD_MATCH",
+        0x300A => "EGL_BAD_NATIVE_PIXMAP",
+        0x300B => "EGL_BAD_NATIVE_WINDOW",
+        0x300C => "EGL_BAD_PARAMETER",
+        0x300D => "EGL_BAD_SURFACE",
+        0x300E => "EGL_CONTEXT_LOST",
+        _ => "EGL_UNKNOWN_ERROR",
+    }
+}
+
 impl OpenglCx {
     pub unsafe fn from_egl_platform_display<T>(
         egl_platform: egl_sys::EGLenum,
@@ -62,7 +83,7 @@ impl OpenglCx {
             // egl_sys::EGL_STENCIL_SIZE,
             // 8,
             egl_sys::EGL_RENDERABLE_TYPE,
-            egl_sys::EGL_OPENGL_ES2_BIT,
+            egl_sys::EGL_OPENGL_ES3_BIT_KHR,
             egl_sys::EGL_NONE,
         ];
 
@@ -83,10 +104,7 @@ impl OpenglCx {
         // Create EGL context.
         let ctx_attribs = [
             egl_sys::EGL_CONTEXT_MAJOR_VERSION,
-            #[cfg(use_gles_3)]
             3,
-            #[cfg(not(use_gles_3))]
-            2,
             egl_sys::EGL_NONE,
         ];
 
@@ -144,21 +162,31 @@ impl Cx {
     ) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        self.setup_render_pass(draw_pass_id);
-
-        self.passes[draw_pass_id].paint_dirty = false;
-
-        let gl = self.os.gl();
         unsafe {
+            let gl = self.os.gl();
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
-            (opengl_cx.libegl.eglMakeCurrent.unwrap())(
+            let make_current_ok = (opengl_cx.libegl.eglMakeCurrent.unwrap())(
                 opengl_cx.egl_display,
                 egl_surface,
                 egl_surface,
                 opengl_cx.egl_context,
             );
+            if make_current_ok == 0 {
+                let egl_error = (opengl_cx.libegl.eglGetError.unwrap())();
+                crate::error!(
+                    "eglMakeCurrent failed surface={:?} error=0x{:04x} ({})",
+                    egl_surface,
+                    egl_error as u32,
+                    egl_error_name(egl_error)
+                );
+                return;
+            }
             (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
+
+        self.setup_render_pass(draw_pass_id);
+
+        self.passes[draw_pass_id].paint_dirty = false;
 
         let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
             self.passes[draw_pass_id].clear_color
@@ -175,22 +203,67 @@ impl Cx {
 
         if !self.passes[draw_pass_id].dont_clear {
             unsafe {
+                let gl = self.os.gl();
                 (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
                 (gl.glClearDepthf)(clear_depth as f32);
                 (gl.glClearColor)(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
         }
-        Cx::set_default_depth_and_blend_mode(self.os.gl());
+        {
+            let gl = self.os.gl();
+            Cx::set_default_depth_and_blend_mode(gl);
+        }
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
 
+        if std::env::var_os("MAKEPAD_GL_READBACK").is_some() {
+            let mut pixel = [0u8; 4];
+            let cx = (pix_width.floor() as i32) / 2;
+            let cy = (pix_height.floor() as i32) / 2;
+            unsafe {
+                let gl = self.os.gl();
+                (gl.glReadPixels)(
+                    cx,
+                    cy,
+                    1,
+                    1,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    pixel.as_mut_ptr() as *mut _,
+                );
+            }
+            crate::log!(
+                "GL readback size={}x{} center=({}, {}) rgba=({}, {}, {}, {})",
+                pix_width.floor() as i32,
+                pix_height.floor() as i32,
+                cx,
+                cy,
+                pixel[0],
+                pixel[1],
+                pixel[2],
+                pixel[3]
+            );
+        }
+
         unsafe {
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
-            (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface);
+            let swap_ok = (opengl_cx.libegl.eglSwapBuffers.unwrap())(
+                opengl_cx.egl_display,
+                egl_surface,
+            );
+            if swap_ok == 0 {
+                let egl_error = (opengl_cx.libegl.eglGetError.unwrap())();
+                crate::error!(
+                    "eglSwapBuffers failed surface={:?} error=0x{:04x} ({})",
+                    egl_surface,
+                    egl_error as u32,
+                    egl_error_name(egl_error)
+                );
+            }
         }
     }
 }

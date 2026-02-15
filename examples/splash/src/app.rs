@@ -1405,7 +1405,7 @@ script_mod! {
         // Center panel - content widgets
         center_tabs := DockTabs{
             tabs: [@bigtext_tab, @math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
-            selected: 0
+            selected: 1
             closable: true
         }
 
@@ -1754,10 +1754,8 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        cx.with_widget_tree(|cx| {
-            self.match_event(cx, event);
-            self.ui.handle_event(cx, event, &mut Scope::empty());
-        });
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
 
