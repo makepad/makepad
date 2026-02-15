@@ -2813,12 +2813,16 @@ impl Default for XrFrameState {
 
 pub fn xr_string(slc: &[c_char]) -> &str {
     let slc_end = slc.iter().position(|v| *v == 0).unwrap();
-    std::str::from_utf8(&slc[0..slc_end]).unwrap_or("")
+    // `c_char` is platform-dependent (`i8` or `u8`), reinterpret as bytes for UTF-8 decoding.
+    let bytes = unsafe { std::slice::from_raw_parts(slc.as_ptr() as *const u8, slc_end) };
+    std::str::from_utf8(bytes).unwrap_or("")
 }
 
 pub fn xr_string_zero_terminated(slc: &[c_char]) -> &str {
     let slc_end = slc.iter().position(|v| *v == 0).unwrap();
-    std::str::from_utf8(&slc[0..slc_end + 1]).unwrap_or("")
+    // Keep the trailing NUL to match existing extension-name comparisons.
+    let bytes = unsafe { std::slice::from_raw_parts(slc.as_ptr() as *const u8, slc_end + 1) };
+    std::str::from_utf8(bytes).unwrap_or("")
 }
 
 pub fn xr_array_fetch<T, F>(default: T, f: F) -> Result<Vec<T>, String>
@@ -2835,9 +2839,12 @@ where
 }
 
 pub fn xr_to_string<const N: usize>(v: &str) -> [c_char; N] {
-    let mut ret = [0u8; N];
+    let mut ret = [0 as c_char; N];
     for (i, c) in v.bytes().enumerate() {
-        ret[i] = c;
+        if i >= N {
+            break;
+        }
+        ret[i] = c as c_char;
     }
     ret
 }
@@ -2845,7 +2852,7 @@ pub fn xr_to_string<const N: usize>(v: &str) -> [c_char; N] {
 pub fn xr_static_str_array<const N: usize>(v: &[&'static str; N]) -> [*const c_char; N] {
     let mut ret = [0 as *const c_char; N];
     for (i, c) in v.iter().enumerate() {
-        ret[i] = c.as_ptr();
+        ret[i] = c.as_ptr() as *const c_char;
     }
     ret
 }

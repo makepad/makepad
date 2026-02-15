@@ -384,7 +384,7 @@ impl Widget for Video {
             Event::VideoPlaybackPrepared(event) => {
                 if event.video_id == self.id {
                     self.handle_playback_prepared(cx, event);
-                    cx.widget_action(uid, &scope.path, VideoAction::PlaybackPrepared);
+                    cx.widget_action(uid, VideoAction::PlaybackPrepared);
                 }
             }
             Event::VideoTextureUpdated(event) => {
@@ -392,11 +392,11 @@ impl Widget for Video {
                     self.redraw(cx);
                     if self.playback_state == PlaybackState::Prepared {
                         self.playback_state = PlaybackState::Playing;
-                        cx.widget_action(uid, &scope.path, VideoAction::PlaybackBegan);
+                        cx.widget_action(uid, VideoAction::PlaybackBegan);
                         self.draw_bg.set_uniform(cx, id!(show_thumbnail), &[0.0]);
                     }
                     if self.should_dispatch_texture_updates {
-                        cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
+                        cx.widget_action(uid, VideoAction::TextureUpdated);
                     }
                 }
             }
@@ -404,14 +404,14 @@ impl Widget for Video {
                 if event.video_id == self.id {
                     if !self.is_looping {
                         self.playback_state = PlaybackState::Completed;
-                        cx.widget_action(uid, &scope.path, VideoAction::PlaybackCompleted);
+                        cx.widget_action(uid, VideoAction::PlaybackCompleted);
                     }
                 }
             }
             Event::VideoPlaybackResourcesReleased(event) => {
                 if event.video_id == self.id {
                     self.playback_state = PlaybackState::Unprepared;
-                    cx.widget_action(uid, &scope.path, VideoAction::PlayerReset);
+                    cx.widget_action(uid, VideoAction::PlayerReset);
                 }
             }
             Event::TextureHandleReady(event) => {
@@ -609,11 +609,7 @@ impl Video {
         abs: Vec2d,
         modifiers: KeyModifiers,
     ) {
-        cx.widget_action(
-            self.widget_uid(),
-            &scope.path,
-            VideoAction::SecondaryClicked { abs, modifiers },
-        );
+        cx.widget_action(self.widget_uid(), VideoAction::SecondaryClicked { abs, modifiers });
     }
 
     fn pause_playback(&mut self, cx: &mut Cx) {
