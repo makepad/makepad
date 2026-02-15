@@ -1130,7 +1130,23 @@ impl ShaderFnCompiler {
                     let local_name = output.backend.map_local_name(id, shadow);
                     match output.backend {
                         ShaderBackend::Wgsl => {
-                            write!(self.out, "let {} = {};\n", local_name, value).ok();
+                            // Composite values are frequently mutated through method calls or
+                            // component writes. Keep scalar lets immutable, but lower composite
+                            // lets to `var` so WGSL can take references and assign fields.
+                            let is_composite_let = matches!(
+                                vm.bx.heap.pod_types[ty.index as usize].ty,
+                                crate::pod::ScriptPodTy::Vec(_)
+                                    | crate::pod::ScriptPodTy::Mat(_)
+                                    | crate::pod::ScriptPodTy::Struct { .. }
+                                    | crate::pod::ScriptPodTy::Enum { .. }
+                                    | crate::pod::ScriptPodTy::FixedArray { .. }
+                                    | crate::pod::ScriptPodTy::VariableArray { .. }
+                            );
+                            if is_composite_let {
+                                write!(self.out, "var {} = {};\n", local_name, value).ok();
+                            } else {
+                                write!(self.out, "let {} = {};\n", local_name, value).ok();
+                            }
                         }
                         ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
                             let type_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {

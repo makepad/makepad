@@ -421,7 +421,14 @@ impl FileSystem {
                             }
                         }
                         FileResponse::LoadFileTree(response) => {
-                            self.process_load_file_tree(response.unwrap());
+                            match response {
+                                Ok(tree_data) => {
+                                    self.process_load_file_tree(tree_data);
+                                }
+                                Err(err) => {
+                                    crate::error!("LoadFileTree failed: {:?}", err);
+                                }
+                            }
                             cx.action(FileSystemAction::TreeLoaded)
                             // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                         }
