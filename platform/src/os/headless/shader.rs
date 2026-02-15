@@ -303,7 +303,6 @@ fn generate_headless_rust_shader_module(
     vm: &ScriptVm,
     io_self: crate::ScriptObject,
 ) -> HeadlessShaderGenResult {
-    use crate::makepad_script::shader::ShaderIoKind;
     let mut out = String::with_capacity(8192);
     let io_self_idx = io_self.index();
 
@@ -336,6 +335,7 @@ fn generate_headless_rust_shader_module(
     let varying_total_slots = count_varying_slots(output, vm);
     // Flat varying prefix: dyn/rust instance slots in the packed varying stream.
     let flat_varying_slots = count_flat_varying_slots(output, vm);
+    let uses_derivatives = output.uses_derivatives;
 
     // ── Pod struct definitions from shader output (uniform buffer structs etc.) ──
     write_filtered_struct_defs(output, vm, &mut out);
@@ -365,6 +365,13 @@ fn generate_headless_rust_shader_module(
         out,
         "pub extern \"C\" fn makepad_headless_flat_varying_slots() -> u32 {{ {}u32 }}",
         flat_varying_slots
+    )
+    .ok();
+    writeln!(out, "#[no_mangle]").ok();
+    writeln!(
+        out,
+        "pub extern \"C\" fn makepad_headless_uses_derivatives() -> u32 {{ {}u32 }}",
+        if uses_derivatives { 1 } else { 0 }
     )
     .ok();
     writeln!(out).ok();

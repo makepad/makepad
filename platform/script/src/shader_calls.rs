@@ -1115,12 +1115,17 @@ impl ShaderFnCompiler {
             self.stack.free_string(s);
         }
 
+        let is_derivative_builtin = name == id!(dFdx) || name == id!(dFdy);
+        if is_derivative_builtin {
+            output.uses_derivatives = true;
+        }
+
         // For Rust backend, dFdx/dFdy are emitted as inline record/compute blocks
         // using the 3-pass quad approach. In recording passes (quad_mode 0=dx, 1=dy),
         // the value is stored into quad_dx_buf/quad_dy_buf. In compute pass (mode 2),
         // the stored neighbor value is diffed against the current value.
         if matches!(output.backend, ShaderBackend::Rust)
-            && (name == id!(dFdx) || name == id!(dFdy))
+            && is_derivative_builtin
             && !formatted_args.is_empty()
         {
             let expr = &formatted_args[0];
