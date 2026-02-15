@@ -160,13 +160,22 @@ fn rasterize_instances_rows(
     rcx_vary_offset: usize,
     rcx_quad_mode_offset: usize,
     rcx_frag_offset: usize,
+    uses_derivatives: bool,
     fragment_fn: FragmentFn,
     debug_text: bool,
     is_draw_text_shader: bool,
 ) {
     let mut rcx_buf = rcx_template.to_vec();
-    let mut dx_varyings = vec![0.0f32; varying_slots];
-    let mut dy_varyings = vec![0.0f32; varying_slots];
+    let mut dx_varyings = if uses_derivatives {
+        vec![0.0f32; varying_slots]
+    } else {
+        Vec::new()
+    };
+    let mut dy_varyings = if uses_derivatives {
+        vec![0.0f32; varying_slots]
+    } else {
+        Vec::new()
+    };
     let shift_start = flat_slots.min(varying_slots);
     let tri_count = indices.len() / 3;
     let vary_bytes = varying_slots * std::mem::size_of::<f32>();
@@ -212,108 +221,155 @@ fn rasterize_instances_rows(
             let vary1 = &shaded_varyings[v1_off..v1_off + varying_slots];
             let vary2 = &shaded_varyings[v2_off..v2_off + varying_slots];
 
-            let mut frag_closure = |varyings: &[f32],
-                                    derivs: &TriangleDerivatives,
-                                    lane_x: u32,
-                                    lane_y: u32,
-                                    x: i32,
-                                    y: i32|
-             -> Option<[f32; 4]> {
-                for i in 0..varyings.len() {
-                    if i < shift_start {
-                        dx_varyings[i] = varyings[i];
-                        dy_varyings[i] = varyings[i];
-                    } else {
-                        dx_varyings[i] = varyings[i] + derivs.dvary_dx[i];
-                        dy_varyings[i] = varyings[i] + derivs.dvary_dy[i];
-                    }
-                }
-
-                clear_quad_buffers(&mut rcx_buf, rcx_quad_mode_offset, rcx_size);
-                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
-                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
-                write_varyings(
-                    &mut rcx_buf,
-                    rcx_vary_offset,
-                    &dx_varyings,
-                    vary_bytes,
-                    rcx_size,
-                );
-                set_u32(&mut rcx_buf, rcx_quad_mode_offset, 0);
-                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
-                unsafe {
-                    fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
-                }
-
-                write_varyings(
-                    &mut rcx_buf,
-                    rcx_vary_offset,
-                    &dy_varyings,
-                    vary_bytes,
-                    rcx_size,
-                );
-                set_u32(&mut rcx_buf, rcx_quad_mode_offset, 1);
-                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
-                unsafe {
-                    fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
-                }
-
-                write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
-                set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
-                set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
-                let write_pixel = unsafe { fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32) };
-                if write_pixel == 0 {
-                    return None;
-                }
-
-                if rcx_frag_offset + 16 <= rcx_size {
-                    let color_ptr = unsafe { rcx_buf.as_ptr().add(rcx_frag_offset) as *const [f32; 4] };
-                    let color = unsafe { *color_ptr };
-                    if debug_text && is_draw_text_shader && debug_text_prints < 120 {
-                        let text_t_slot = shift_start + 2;
-                        if text_t_slot + 1 < varyings.len() {
-                            let a = color[3];
-                            if a > 0.0 && a < 1.0 {
-                                eprintln!(
-                                    "[headless][draw_text] px=({}, {}) lane=({}, {}) t=({:.6}, {:.6}) dFdx(t)=({:.6}, {:.6}) dFdy(t)=({:.6}, {:.6}) a={:.5}",
-                                    x,
-                                    y,
-                                    lane_x,
-                                    lane_y,
-                                    varyings[text_t_slot],
-                                    varyings[text_t_slot + 1],
-                                    derivs.dvary_dx[text_t_slot],
-                                    derivs.dvary_dx[text_t_slot + 1],
-                                    derivs.dvary_dy[text_t_slot],
-                                    derivs.dvary_dy[text_t_slot + 1],
-                                    a,
-                                );
-                                debug_text_prints += 1;
-                            }
+            if uses_derivatives {
+                let mut frag_closure = |varyings: &[f32],
+                                        derivs: &TriangleDerivatives,
+                                        lane_x: u32,
+                                        lane_y: u32,
+                                        x: i32,
+                                        y: i32|
+                 -> Option<[f32; 4]> {
+                    for i in 0..varyings.len() {
+                        if i < shift_start {
+                            dx_varyings[i] = varyings[i];
+                            dy_varyings[i] = varyings[i];
+                        } else {
+                            dx_varyings[i] = varyings[i] + derivs.dvary_dx[i];
+                            dy_varyings[i] = varyings[i] + derivs.dvary_dy[i];
                         }
                     }
-                    Some(color)
-                } else {
-                    Some([0.0, 0.0, 0.0, 0.0])
-                }
-            };
 
-            rasterize_triangle_rows(
-                width,
-                height,
-                row_start,
-                row_end,
-                color_chunk,
-                depth_chunk,
-                p0,
-                vary0,
-                p1,
-                vary1,
-                p2,
-                vary2,
-                flat_slots,
-                &mut frag_closure,
-            );
+                    clear_quad_buffers(&mut rcx_buf, rcx_quad_mode_offset, rcx_size);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
+                    write_varyings(
+                        &mut rcx_buf,
+                        rcx_vary_offset,
+                        &dx_varyings,
+                        vary_bytes,
+                        rcx_size,
+                    );
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset, 0);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                    unsafe {
+                        fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                    }
+
+                    write_varyings(
+                        &mut rcx_buf,
+                        rcx_vary_offset,
+                        &dy_varyings,
+                        vary_bytes,
+                        rcx_size,
+                    );
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset, 1);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                    unsafe {
+                        fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                    }
+
+                    write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                    let write_pixel =
+                        unsafe { fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32) };
+                    if write_pixel == 0 {
+                        return None;
+                    }
+
+                    if rcx_frag_offset + 16 <= rcx_size {
+                        let color_ptr =
+                            unsafe { rcx_buf.as_ptr().add(rcx_frag_offset) as *const [f32; 4] };
+                        let color = unsafe { *color_ptr };
+                        if debug_text && is_draw_text_shader && debug_text_prints < 120 {
+                            let text_t_slot = shift_start + 2;
+                            if text_t_slot + 1 < varyings.len() {
+                                let a = color[3];
+                                if a > 0.0 && a < 1.0 {
+                                    eprintln!(
+                                        "[headless][draw_text] px=({}, {}) lane=({}, {}) t=({:.6}, {:.6}) dFdx(t)=({:.6}, {:.6}) dFdy(t)=({:.6}, {:.6}) a={:.5}",
+                                        x,
+                                        y,
+                                        lane_x,
+                                        lane_y,
+                                        varyings[text_t_slot],
+                                        varyings[text_t_slot + 1],
+                                        derivs.dvary_dx[text_t_slot],
+                                        derivs.dvary_dx[text_t_slot + 1],
+                                        derivs.dvary_dy[text_t_slot],
+                                        derivs.dvary_dy[text_t_slot + 1],
+                                        a,
+                                    );
+                                    debug_text_prints += 1;
+                                }
+                            }
+                        }
+                        Some(color)
+                    } else {
+                        Some([0.0, 0.0, 0.0, 0.0])
+                    }
+                };
+
+                rasterize_triangle_rows(
+                    width,
+                    height,
+                    row_start,
+                    row_end,
+                    color_chunk,
+                    depth_chunk,
+                    p0,
+                    vary0,
+                    p1,
+                    vary1,
+                    p2,
+                    vary2,
+                    flat_slots,
+                    &mut frag_closure,
+                );
+            } else {
+                let mut frag_closure = |varyings: &[f32],
+                                        _derivs: &TriangleDerivatives,
+                                        lane_x: u32,
+                                        lane_y: u32,
+                                        _x: i32,
+                                        _y: i32|
+                 -> Option<[f32; 4]> {
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
+                    write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
+                    set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
+                    let write_pixel =
+                        unsafe { fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32) };
+                    if write_pixel == 0 {
+                        return None;
+                    }
+                    if rcx_frag_offset + 16 <= rcx_size {
+                        let color_ptr =
+                            unsafe { rcx_buf.as_ptr().add(rcx_frag_offset) as *const [f32; 4] };
+                        Some(unsafe { *color_ptr })
+                    } else {
+                        Some([0.0, 0.0, 0.0, 0.0])
+                    }
+                };
+
+                rasterize_triangle_rows(
+                    width,
+                    height,
+                    row_start,
+                    row_end,
+                    color_chunk,
+                    depth_chunk,
+                    p0,
+                    vary0,
+                    p1,
+                    vary1,
+                    p2,
+                    vary2,
+                    flat_slots,
+                    &mut frag_closure,
+                );
+            }
         }
     }
 }
@@ -787,6 +843,7 @@ impl Cx {
             }
 
             let flat_slots = os_shader.flat_varying_slots.min(varying_slots);
+            let uses_derivatives = os_shader.uses_derivatives;
             let row_chunks = compute_row_chunks(fb.height, render_threads);
             let use_parallel = row_chunks.len() > 1
                 && tri_count.saturating_mul(instance_count) >= parallel_min_tris
@@ -884,6 +941,7 @@ impl Cx {
                             rcx_vary_offset,
                             rcx_quad_mode_offset,
                             rcx_frag_offset,
+                            uses_derivatives,
                             fragment_fn,
                             debug_text,
                             is_draw_text_shader,
@@ -920,6 +978,7 @@ impl Cx {
                     rcx_vary_offset,
                     rcx_quad_mode_offset,
                     rcx_frag_offset,
+                    uses_derivatives,
                     fragment_fn,
                     debug_text,
                     is_draw_text_shader,

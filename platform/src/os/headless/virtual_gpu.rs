@@ -1,9 +1,6 @@
 /// A software rasterizer that interpolates float varyings and calls a fragment
 /// shader callback per pixel.
 
-#[cfg(feature = "nightly_simd")]
-use std::simd::f32x4;
-
 pub struct Framebuffer {
     pub width: usize,
     pub height: usize,
@@ -315,21 +312,11 @@ fn edge_pass(edge_value: f32, top_left: bool) -> bool {
 
 #[inline]
 fn blend_premul_src_over(src: [f32; 4], dst: [f32; 4]) -> [f32; 4] {
-    #[cfg(feature = "nightly_simd")]
-    {
-        let src_v = f32x4::from_array(src);
-        let dst_v = f32x4::from_array(dst);
-        let out = src_v + dst_v * f32x4::splat(1.0 - src[3]);
-        out.to_array()
-    }
-    #[cfg(not(feature = "nightly_simd"))]
-    {
-        let inv_src_a = 1.0 - src[3];
-        [
-            src[0] + dst[0] * inv_src_a,
-            src[1] + dst[1] * inv_src_a,
-            src[2] + dst[2] * inv_src_a,
-            src[3] + dst[3] * inv_src_a,
-        ]
-    }
+    let inv_src_a = 1.0 - src[3];
+    [
+        src[0] + dst[0] * inv_src_a,
+        src[1] + dst[1] * inv_src_a,
+        src[2] + dst[2] * inv_src_a,
+        src[3] + dst[3] * inv_src_a,
+    ]
 }
