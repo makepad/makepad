@@ -662,14 +662,39 @@ impl Texture2D {
             unsafe { std::slice::from_raw_parts(self.data_ptr as *const f32, self.data_len) };
         let u = coord.x.max(0.0).min(1.0);
         let v = coord.y.max(0.0).min(1.0);
-        let px = ((u * self.width as f32) as usize).min(self.width - 1);
-        let py = ((v * self.height as f32) as usize).min(self.height - 1);
-        let idx = (py * self.width + px) * 4;
-        if idx + 3 < data.len() {
-            vec4(data[idx], data[idx + 1], data[idx + 2], data[idx + 3])
-        } else {
-            vec4(0.0, 0.0, 0.0, 0.0)
-        }
+        // Bilinear sample with clamp-to-edge, matching GPU filtered text sampling.
+        let fx = u * self.width as f32 - 0.5;
+        let fy = v * self.height as f32 - 0.5;
+
+        let x0f = fx.floor();
+        let y0f = fy.floor();
+        let tx = fx - x0f;
+        let ty = fy - y0f;
+
+        let x0 = x0f.max(0.0).min((self.width - 1) as f32) as usize;
+        let y0 = y0f.max(0.0).min((self.height - 1) as f32) as usize;
+        // Clamp the two taps independently from the unclamped base coordinate.
+        // This matches clamp-to-edge behavior at low edges (u/v near 0).
+        let x1 = (x0f + 1.0).max(0.0).min((self.width - 1) as f32) as usize;
+        let y1 = (y0f + 1.0).max(0.0).min((self.height - 1) as f32) as usize;
+
+        let sample_px = |x: usize, y: usize| -> Vec4f {
+            let idx = (y * self.width + x) * 4;
+            if idx + 3 < data.len() {
+                vec4(data[idx], data[idx + 1], data[idx + 2], data[idx + 3])
+            } else {
+                vec4(0.0, 0.0, 0.0, 0.0)
+            }
+        };
+
+        let c00 = sample_px(x0, y0);
+        let c10 = sample_px(x1, y0);
+        let c01 = sample_px(x0, y1);
+        let c11 = sample_px(x1, y1);
+
+        let c0 = c00 * (1.0 - tx) + c10 * tx;
+        let c1 = c01 * (1.0 - tx) + c11 * tx;
+        c0 * (1.0 - ty) + c1 * ty
     }
 
 }

@@ -202,8 +202,6 @@ pub struct Window {
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
     initialized: bool,
-    #[rust]
-    debug_begin_count: u32,
 }
 
 #[derive(Clone)]
@@ -285,18 +283,6 @@ impl Window {
         self.ensure_initialized(cx);
 
         let will_redraw = cx.will_redraw(&mut self.main_draw_list, Walk::default());
-        if self.debug_begin_count < 10 {
-            self.debug_begin_count += 1;
-            log!(
-                "window.begin #{} will_redraw={} redraw_all={} draw_lists={} draw_lists_and_children={}",
-                self.debug_begin_count,
-                will_redraw,
-                cx.draw_event.redraw_all,
-                cx.draw_event.draw_lists.len(),
-                cx.draw_event.draw_lists_and_children.len()
-            );
-        }
-
         if !will_redraw {
             return Redrawing::no();
         }

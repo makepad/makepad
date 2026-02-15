@@ -1104,7 +1104,7 @@ impl ShaderFnCompiler {
 
             if i == 0 {
                 if let Some(n) = hlsl_ctor_splat_len {
-                    for j in 0..n {
+                    for _j in 0..n {
                         formatted_args.push(formatted.clone());
                     }
                     self.stack.free_string(s);
@@ -1115,71 +1115,138 @@ impl ShaderFnCompiler {
             self.stack.free_string(s);
         }
 
-        // For Rust backend, append a type suffix for overloaded builtins
-        if matches!(output.backend, ShaderBackend::Rust) {
-            let needs_suffix = matches!(
-                name,
-                id if id == id!(clamp)
-                    || id == id!(max)
-                    || id == id!(min)
-                    || id == id!(abs)
-                    || id == id!(length)
-                    || id == id!(dot)
-                    || id == id!(normalize)
-                    || id == id!(distance)
-                    || id == id!(dFdx)
-                    || id == id!(dFdy)
-                    || id == id!(floor)
-                    || id == id!(ceil)
-                    || id == id!(fract)
-                    || id == id!(round)
-                    || id == id!(sign)
-                    || id == id!(sqrt)
-                    || id == id!(sin)
-                    || id == id!(cos)
-                    || id == id!(step)
-                    || id == id!(smoothstep)
-            );
-            if needs_suffix && !concrete_args.is_empty() {
-                let first_ty = concrete_args[0];
-                let suffix = if first_ty == builtins.pod_vec2f {
-                    "_2f"
-                } else if first_ty == builtins.pod_vec3f {
-                    "_3f"
-                } else if first_ty == builtins.pod_vec4f {
-                    "_4f"
+        // For Rust backend, dFdx/dFdy are emitted as inline record/compute blocks
+        // using the 3-pass quad approach. In recording passes (quad_mode 0=dx, 1=dy),
+        // the value is stored into quad_dx_buf/quad_dy_buf. In compute pass (mode 2),
+        // the stored neighbor value is diffed against the current value.
+        if matches!(output.backend, ShaderBackend::Rust)
+            && (name == id!(dFdx) || name == id!(dFdy))
+            && !formatted_args.is_empty()
+        {
+            let expr = &formatted_args[0];
+            let is_dfdx = name == id!(dFdx);
+            // Determine number of f32 slots from the argument type
+            let first_ty = if !concrete_args.is_empty() {
+                concrete_args[0]
+            } else {
+                builtins.pod_f32
+            };
+            let slots = if first_ty == builtins.pod_vec4f {
+                4
+            } else if first_ty == builtins.pod_vec3f {
+                3
+            } else if first_ty == builtins.pod_vec2f {
+                2
+            } else {
+                1
+            };
+            // The compute buffer: dFdx reads from quad_dx_buf, dFdy from quad_dy_buf
+            let compute_buf = if is_dfdx {
+                "quad_dx_buf"
+            } else {
+                "quad_dy_buf"
+            };
+            let lane_field = if is_dfdx {
+                "quad_lane_x"
+            } else {
+                "quad_lane_y"
+            };
+
+            if slots == 1 {
+                write!(
+                    out,
+                    "{{ let __s = rcx.quad_slot as usize; rcx.quad_slot = rcx.quad_slot.saturating_add(1); \
+                     let __v: f32 = ({expr}); \
+                     if __s < rcx.quad_dx_buf.len() {{ \
+                        if rcx.quad_mode == 2 {{ let __d = rcx.{compute_buf}[__s] - __v; if rcx.{lane_field} == 0 {{ __d }} else {{ -__d }} }} \
+                        else {{ if rcx.quad_mode == 0 {{ rcx.quad_dx_buf[__s] = __v; }} \
+                        else {{ rcx.quad_dy_buf[__s] = __v; }}; 0.0f32 }} \
+                     }} else {{ 0.0f32 }} }}"
+                )
+                .ok();
+            } else if slots == 2 {
+                write!(out,
+                    "{{ let __s = rcx.quad_slot as usize; rcx.quad_slot = rcx.quad_slot.saturating_add(2); \
+                     let __v: Vec2f = ({expr}); \
+                     if __s <= rcx.quad_dx_buf.len().saturating_sub(2) {{ \
+                        if rcx.quad_mode == 2 {{ let __d = vec2f(rcx.{compute_buf}[__s] - __v.x, rcx.{compute_buf}[__s+1] - __v.y); if rcx.{lane_field} == 0 {{ __d }} else {{ vec2f(-__d.x, -__d.y) }} }} \
+                        else {{ if rcx.quad_mode == 0 {{ rcx.quad_dx_buf[__s] = __v.x; rcx.quad_dx_buf[__s+1] = __v.y; }} \
+                        else {{ rcx.quad_dy_buf[__s] = __v.x; rcx.quad_dy_buf[__s+1] = __v.y; }}; vec2f(0.0, 0.0) }} \
+                     }} else {{ vec2f(0.0, 0.0) }} }}"
+                ).ok();
+            } else if slots == 3 {
+                write!(out,
+                    "{{ let __s = rcx.quad_slot as usize; rcx.quad_slot = rcx.quad_slot.saturating_add(3); \
+                     let __v: Vec3f = ({expr}); \
+                     if __s <= rcx.quad_dx_buf.len().saturating_sub(3) {{ \
+                        if rcx.quad_mode == 2 {{ let __d = vec3f(rcx.{compute_buf}[__s] - __v.x, rcx.{compute_buf}[__s+1] - __v.y, rcx.{compute_buf}[__s+2] - __v.z); if rcx.{lane_field} == 0 {{ __d }} else {{ vec3f(-__d.x, -__d.y, -__d.z) }} }} \
+                        else {{ if rcx.quad_mode == 0 {{ rcx.quad_dx_buf[__s] = __v.x; rcx.quad_dx_buf[__s+1] = __v.y; rcx.quad_dx_buf[__s+2] = __v.z; }} \
+                        else {{ rcx.quad_dy_buf[__s] = __v.x; rcx.quad_dy_buf[__s+1] = __v.y; rcx.quad_dy_buf[__s+2] = __v.z; }}; vec3f(0.0, 0.0, 0.0) }} \
+                     }} else {{ vec3f(0.0, 0.0, 0.0) }} }}"
+                ).ok();
+            } else {
+                write!(out,
+                    "{{ let __s = rcx.quad_slot as usize; rcx.quad_slot = rcx.quad_slot.saturating_add(4); \
+                     let __v: Vec4f = ({expr}); \
+                     if __s <= rcx.quad_dx_buf.len().saturating_sub(4) {{ \
+                        if rcx.quad_mode == 2 {{ let __d = vec4f(rcx.{compute_buf}[__s] - __v.x, rcx.{compute_buf}[__s+1] - __v.y, rcx.{compute_buf}[__s+2] - __v.z, rcx.{compute_buf}[__s+3] - __v.w); if rcx.{lane_field} == 0 {{ __d }} else {{ vec4f(-__d.x, -__d.y, -__d.z, -__d.w) }} }} \
+                        else {{ if rcx.quad_mode == 0 {{ rcx.quad_dx_buf[__s] = __v.x; rcx.quad_dx_buf[__s+1] = __v.y; rcx.quad_dx_buf[__s+2] = __v.z; rcx.quad_dx_buf[__s+3] = __v.w; }} \
+                        else {{ rcx.quad_dy_buf[__s] = __v.x; rcx.quad_dy_buf[__s+1] = __v.y; rcx.quad_dy_buf[__s+2] = __v.z; rcx.quad_dy_buf[__s+3] = __v.w; }}; vec4f(0.0, 0.0, 0.0, 0.0) }} \
+                     }} else {{ vec4f(0.0, 0.0, 0.0, 0.0) }} }}"
+                ).ok();
+            }
+        } else {
+            // For Rust backend, append a type suffix for overloaded builtins
+            if matches!(output.backend, ShaderBackend::Rust) {
+                let needs_suffix = matches!(
+                    name,
+                    id if id == id!(clamp)
+                        || id == id!(max)
+                        || id == id!(min)
+                        || id == id!(abs)
+                        || id == id!(length)
+                        || id == id!(dot)
+                        || id == id!(normalize)
+                        || id == id!(distance)
+                        || id == id!(floor)
+                        || id == id!(ceil)
+                        || id == id!(fract)
+                        || id == id!(round)
+                        || id == id!(sign)
+                        || id == id!(sqrt)
+                        || id == id!(sin)
+                        || id == id!(cos)
+                        || id == id!(step)
+                        || id == id!(smoothstep)
+                );
+                if needs_suffix && !concrete_args.is_empty() {
+                    let first_ty = concrete_args[0];
+                    let suffix = if first_ty == builtins.pod_vec2f {
+                        "_2f"
+                    } else if first_ty == builtins.pod_vec3f {
+                        "_3f"
+                    } else if first_ty == builtins.pod_vec4f {
+                        "_4f"
+                    } else {
+                        ""
+                    };
+                    write!(out, "{}{}(", mapped_name, suffix).ok();
                 } else {
-                    ""
-                };
-                write!(out, "{}{}(", mapped_name, suffix).ok();
+                    write!(out, "{}(", mapped_name).ok();
+                }
             } else {
                 write!(out, "{}(", mapped_name).ok();
             }
-        } else {
-            write!(out, "{}(", mapped_name).ok();
-        }
 
-        // For Rust backend, dFdx/dFdy need rcx as the first argument
-        let mut needs_rcx_prefix = false;
-        if matches!(output.backend, ShaderBackend::Rust) {
-            if name == id!(dFdx) || name == id!(dFdy) {
-                needs_rcx_prefix = true;
+            for (i, formatted) in formatted_args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(formatted);
             }
-        }
 
-        for (i, formatted) in formatted_args.iter().enumerate() {
-            if i == 0 && needs_rcx_prefix {
-                out.push_str("rcx, ");
-            } else if i > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(formatted);
+            out.push_str(")");
         }
-        if formatted_args.is_empty() && needs_rcx_prefix {
-            out.push_str("rcx");
-        }
-
-        out.push_str(")");
         let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
         self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
     }
@@ -1918,7 +1985,7 @@ impl ShaderFnCompiler {
         args: &[ShaderPodArg],
         total_slots: usize,
     ) -> String {
-        let builtins = &vm.bx.code.builtins.pod;
+        //let builtins = &vm.bx.code.builtins.pod;
         let mut components = Vec::new();
 
         for arg in args {

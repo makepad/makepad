@@ -42,12 +42,14 @@ pub struct CxOsDrawShader {
     pub shader_version: Option<u32>,
     /// Total number of f32 slots in the varying buffer passed between vertex and fragment shaders.
     pub varying_total_slots: usize,
+    /// Number of packed varying slots that come from dyn/rust instances.
+    /// These must be treated as flat (non-interpolated) in rasterization.
+    pub flat_varying_slots: usize,
     /// RenderCx layout — queried once from the loaded module.
     pub rcx_size: usize, // total byte size of RenderCx
-    pub rcx_vary_offset: usize,    // byte offset of varying region
-    pub rcx_dfdx_offset: usize,    // byte offset of dfdx array
-    pub rcx_dfdy_offset: usize,    // byte offset of dfdy array
-    pub rcx_frag_offset: usize,    // byte offset of frag_fb0
+    pub rcx_vary_offset: usize, // byte offset of varying region (Group 1)
+    pub rcx_quad_mode_offset: usize, // byte offset of quad_mode field
+    pub rcx_frag_offset: usize, // byte offset of frag_fb0
     pub rcx_discard_offset: usize, // byte offset of discard flag
 }
 
