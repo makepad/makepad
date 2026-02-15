@@ -17,9 +17,19 @@ impl Default for HeadlessShaderJit {
     fn default() -> Self {
         let root_dir = std::env::var("MAKEPAD_HEADLESS_JIT_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("local/headless/jit"));
+            .unwrap_or_else(|_| default_jit_root_dir());
         Self { root_dir }
     }
+}
+
+fn default_jit_root_dir() -> PathBuf {
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        return PathBuf::from(target_dir).join("makepad-headless-jit");
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return cwd.join("target").join("makepad-headless-jit");
+    }
+    PathBuf::from("target/makepad-headless-jit")
 }
 
 impl HeadlessShaderJit {

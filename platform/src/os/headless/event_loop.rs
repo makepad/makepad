@@ -361,7 +361,7 @@ impl Cx {
         }
         let path = std::env::var("MAKEPAD_HEADLESS_OUT_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("local/headless/frames"));
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         if let Err(err) = std::fs::create_dir_all(&path) {
             crate::error!(
                 "failed to create headless frame output dir `{}`: {}",
