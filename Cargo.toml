@@ -10,6 +10,7 @@ workspace.members = [
     "examples/todo",
     "examples/vector",
     "examples/gltf",
+    "examples/physics",
     "examples/comfyui",
     "examples/aichat",
     "examples/pdf",
