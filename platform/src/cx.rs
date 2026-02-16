@@ -52,6 +52,7 @@ pub struct Cx {
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
     pub null_texture: Texture,
+    pub null_cube_texture: Texture,
     pub windows: CxWindowPool,
     pub passes: CxDrawPassPool,
     pub draw_lists: CxDrawListPool,
@@ -258,6 +259,12 @@ impl Cx {
             data: Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             updated: TextureUpdated::Full,
         });
+        let null_cube_texture = textures.alloc(TextureFormat::VecCubeBGRAu8_32 {
+            width: 4,
+            height: 4,
+            data: Some(vec![0; 4 * 4 * 6]),
+            updated: TextureUpdated::Full,
+        });
 
         let (executor, spawner) = executor::new_executor_and_spawner();
         //let (live_file_change_sender, live_file_change_receiver) = std::sync::mpsc::channel();
@@ -278,6 +285,7 @@ impl Cx {
             package_root: None,
             demo_time_repaint: false,
             null_texture,
+            null_cube_texture,
             cpu_cores: 8,
             in_makepad_studio: false,
             in_draw_event: false,

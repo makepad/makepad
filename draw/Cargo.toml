@@ -13,6 +13,7 @@ metadata.makepad-auto-version = "4ghwd5Pq8xlLJrln_NpXXshbpeE="
 makepad-platform = { path = "../platform", version = "2.0.0" }
 makepad-svg = { path = "../libs/svg", version = "1.0.0" }
 makepad-live-id = { path = "../libs/live_id", version = "1.0.0" }
+makepad-gltf = { path = "../libs/gltf", version = "1.0.0" }
 
 rustybuzz = { version = "0.18.0", path = "../libs/rustybuzz" }
 unicode-bidi = { version = "0.3", path = "../libs/unicode/unicode-bidi" }
@@ -22,6 +23,7 @@ fxhash = { version = "0.2.1", path = "../libs/fxhash" }
 unicode-linebreak = { version = "0.1.5", path = "../libs/unicode/unicode-linebreak" }
 unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
 makepad-zune-png = { version = "0.5.1", path = "../libs/zune/zune-png" }
+makepad-zune-jpeg = { version = "0.5.12", path = "../libs/zune/zune-jpeg" }
 
 serde = { version = "1.0", optional = true, features = ["derive"] }
 

@@ -112,6 +112,13 @@ pub enum TextureFormat {
         data: Option<Vec<u32>>,
         updated: TextureUpdated,
     },
+    /// Cubemap faces are packed in this order: +X, -X, +Y, -Y, +Z, -Z.
+    VecCubeBGRAu8_32 {
+        width: usize,
+        height: usize,
+        data: Option<Vec<u32>>,
+        updated: TextureUpdated,
+    },
     VecMipBGRAu8_32 {
         width: usize,
         height: usize,
@@ -180,6 +187,10 @@ impl std::fmt::Debug for TextureFormat {
                 f,
                 "TextureFormat::VecBGRAu8_32(width:{width},height:{height})"
             ),
+            TextureFormat::VecCubeBGRAu8_32 { width, height, .. } => write!(
+                f,
+                "TextureFormat::VecCubeBGRAu8_32(width:{width},height:{height})"
+            ),
             TextureFormat::VecMipBGRAu8_32 { width, height, .. } => write!(
                 f,
                 "TextureFormat::VecMipBGRAu8_32(width:{width},height:{height})"
@@ -238,6 +249,7 @@ pub(crate) struct TextureAlloc {
 #[derive(Clone, Debug)]
 pub enum TextureCategory {
     Vec,
+    VecCube,
     Render,
     DepthBuffer,
     Shared,
@@ -249,6 +261,13 @@ impl PartialEq for TextureCategory {
         match self {
             Self::Vec { .. } => {
                 if let Self::Vec { .. } = other {
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::VecCube { .. } => {
+                if let Self::VecCube { .. } = other {
                     true
                 } else {
                     false
@@ -338,6 +357,7 @@ impl CxTexture {
     pub(crate) fn updated(&self) -> TextureUpdated {
         match self.format {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
+            TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
@@ -363,6 +383,7 @@ impl CxTexture {
     pub(crate) fn set_updated(&mut self, updated: TextureUpdated) {
         *match &mut self.format {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
+            TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
@@ -463,6 +484,7 @@ impl TextureFormat {
     pub fn is_vec(&self) -> bool {
         match self {
             Self::VecBGRAu8_32 { .. } => true,
+            Self::VecCubeBGRAu8_32 { .. } => true,
             Self::VecMipBGRAu8_32 { .. } => true,
             Self::VecRGBAf32 { .. } => true,
             Self::VecRu8 { .. } => true,
@@ -499,6 +521,7 @@ impl TextureFormat {
     pub fn vec_width_height(&self) -> Option<(usize, usize)> {
         match self {
             Self::VecBGRAu8_32 { width, height, .. } => Some((*width, *height)),
+            Self::VecCubeBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecRu8 { width, height, .. } => Some((*width, *height)),
@@ -516,6 +539,12 @@ impl TextureFormat {
                 height: *height,
                 pixel: TexturePixel::BGRAu8,
                 category: TextureCategory::Vec,
+            }),
+            Self::VecCubeBGRAu8_32 { width, height, .. } => Some(TextureAlloc {
+                width: *width,
+                height: *height,
+                pixel: TexturePixel::BGRAu8,
+                category: TextureCategory::VecCube,
             }),
             Self::VecMipBGRAu8_32 { width, height, .. } => Some(TextureAlloc {
                 width: *width,

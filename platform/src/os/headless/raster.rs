@@ -184,6 +184,46 @@ fn headless_texture_info(
                 *height,
             ])
         }
+        TextureFormat::VecCubeBGRAu8_32 {
+            width,
+            height,
+            data: Some(data),
+            updated,
+        } => {
+            let expected = width.saturating_mul(*height).saturating_mul(6);
+            let sig = TextureConversionSignature {
+                kind: 4,
+                width: *width,
+                height: *height,
+                data_ptr: data.as_ptr() as usize,
+                data_len: data.len(),
+            };
+            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
+                signature: sig,
+                rgba: Vec::new(),
+            });
+            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+                entry.signature = sig;
+                entry.rgba.clear();
+                entry.rgba.reserve(expected.saturating_mul(4));
+                for &pixel in data.iter().take(expected) {
+                    let b = (pixel & 0xFF) as f32 / 255.0;
+                    let g = ((pixel >> 8) & 0xFF) as f32 / 255.0;
+                    let r = ((pixel >> 16) & 0xFF) as f32 / 255.0;
+                    let a = ((pixel >> 24) & 0xFF) as f32 / 255.0;
+                    entry.rgba.push(r);
+                    entry.rgba.push(g);
+                    entry.rgba.push(b);
+                    entry.rgba.push(a);
+                }
+            }
+            Some([
+                entry.rgba.as_ptr() as usize,
+                entry.rgba.len(),
+                *width,
+                *height,
+            ])
+        }
         TextureFormat::VecRu8 {
             width,
             height,

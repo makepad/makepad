@@ -406,6 +406,8 @@ precision highp int;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
 vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
+vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
+vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_vertex
@@ -418,6 +420,8 @@ precision highp int;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
 vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
+vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
+vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_pixel
