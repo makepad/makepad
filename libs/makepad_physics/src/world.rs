@@ -39,6 +39,13 @@ const NUM_INTERNAL_PGS_ITERATIONS: usize = 1;
 const NUM_INTERNAL_STABILIZATION_ITERATIONS: usize = 1;
 const WARMSTART_COEFFICIENT: f32 = 1.0;
 
+// Rapier-like sleep defaults.
+const SLEEP_LINEAR_THRESHOLD: f32 = 0.4;
+const SLEEP_ANGULAR_THRESHOLD: f32 = 0.5;
+const TIME_UNTIL_SLEEP: f32 = 2.0;
+const WAKE_LINEAR_THRESHOLD: f32 = 0.5;
+const WAKE_ANGULAR_THRESHOLD: f32 = 0.625;
+
 pub struct PhysicsWorld {
     pub bodies: Vec<RigidBody>,
     pub gravity: Vec3f,
@@ -77,6 +84,14 @@ impl PhysicsWorld {
     pub fn step(&mut self, ops: &[PhysicsOp]) {
         self.apply_ops(ops);
 
+        // Keep sleeping bodies fully frozen unless contacts/impulses wake them.
+        for body in self.bodies.iter_mut() {
+            if body.body_type == BodyType::Dynamic && body.sleeping {
+                body.linear_velocity = Vec3f::default();
+                body.angular_velocity = Vec3f::default();
+            }
+        }
+
         let substep_dt = self.dt / NUM_SOLVER_ITERATIONS as f32;
 
         // Pre-compute per-substep gravity increment (rapier: force * inv_mass * substep_dt).
@@ -105,7 +120,7 @@ impl PhysicsWorld {
         for substep in 0..NUM_SOLVER_ITERATIONS {
             // 1. Apply gravity increment for this substep
             for body in self.bodies.iter_mut() {
-                if body.body_type == BodyType::Dynamic {
+                if body.body_type == BodyType::Dynamic && !body.sleeping {
                     body.linear_velocity += gravity_increment;
                 }
             }
@@ -136,7 +151,7 @@ impl PhysicsWorld {
 
             // 5. Integrate positions with substep dt
             for body in self.bodies.iter_mut() {
-                if body.body_type == BodyType::Dynamic {
+                if body.body_type == BodyType::Dynamic && !body.sleeping {
                     body.pose.position += body.linear_velocity * substep_dt;
                     body.pose.orientation = body
                         .pose
@@ -153,6 +168,7 @@ impl PhysicsWorld {
             );
         }
 
+        self.update_sleep_states();
         self.frame += 1;
     }
 
@@ -196,6 +212,7 @@ impl PhysicsWorld {
                 } => {
                     let mut body = RigidBody::new_dynamic(*position, *half_extents, *density);
                     body.linear_velocity = *velocity;
+                    body.wake_up();
                     self.bodies.push(body);
                 }
                 PhysicsOp::SpawnFixed {
@@ -208,12 +225,14 @@ impl PhysicsWorld {
                 PhysicsOp::ApplyForce { body, force } => {
                     if *body < self.bodies.len() && self.bodies[*body].is_dynamic() {
                         self.bodies[*body].linear_velocity += *force * self.dt;
+                        self.bodies[*body].wake_up();
                     }
                 }
                 PhysicsOp::ApplyImpulse { body, impulse } => {
                     if *body < self.bodies.len() && self.bodies[*body].is_dynamic() {
                         let inv_mass = self.bodies[*body].inv_mass;
                         self.bodies[*body].linear_velocity += *impulse * inv_mass;
+                        self.bodies[*body].wake_up();
                     }
                 }
                 PhysicsOp::RemoveBody { body } => {
@@ -221,6 +240,38 @@ impl PhysicsWorld {
                         self.bodies.swap_remove(*body);
                     }
                 }
+            }
+        }
+    }
+
+    fn update_sleep_states(&mut self) {
+        for body in self.bodies.iter_mut() {
+            if body.body_type != BodyType::Dynamic {
+                continue;
+            }
+
+            let lin_speed = body.linear_velocity.length();
+            let ang_speed = body.angular_velocity.length();
+
+            if body.sleeping {
+                if lin_speed > WAKE_LINEAR_THRESHOLD || ang_speed > WAKE_ANGULAR_THRESHOLD {
+                    body.wake_up();
+                } else {
+                    body.linear_velocity = Vec3f::default();
+                    body.angular_velocity = Vec3f::default();
+                }
+                continue;
+            }
+
+            if lin_speed <= SLEEP_LINEAR_THRESHOLD && ang_speed <= SLEEP_ANGULAR_THRESHOLD {
+                body.sleep_time += self.dt;
+                if body.sleep_time >= TIME_UNTIL_SLEEP {
+                    body.sleeping = true;
+                    body.linear_velocity = Vec3f::default();
+                    body.angular_velocity = Vec3f::default();
+                }
+            } else {
+                body.sleep_time = 0.0;
             }
         }
     }

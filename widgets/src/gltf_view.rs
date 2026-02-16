@@ -66,11 +66,11 @@ pub struct GltfView {
     camera_near: f32,
     #[live(100.0)]
     camera_far: f32,
-    /// NDC depth slice reserved for 3D content to avoid z-fighting with 2D UI.
-    #[live(vec2(0.6, 0.98))]
+    /// NDC depth range used for 3D content.
+    #[live(vec2(0.0, 1.0))]
     depth_range: Vec2f,
-    /// Extra forward depth bias to keep 3D above the regular 2D draw stack.
-    #[live(0.7)]
+    /// Extra forward depth bias; keep at 0 unless specifically needed.
+    #[live(0.0)]
     depth_forward_bias: f32,
 
     #[rust]
