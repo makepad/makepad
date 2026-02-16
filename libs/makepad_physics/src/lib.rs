@@ -491,7 +491,9 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// Kept for reference only. This module depends on rapier3d and is intentionally
+// disabled so the crate stays self-contained/committable without local rapier.
+#[cfg(any())]
 mod rapier_comparison {
     use makepad_math::*;
     // Use our types explicitly to avoid name clashes with rapier
