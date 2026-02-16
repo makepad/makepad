@@ -627,12 +627,12 @@ impl ops::Mul<Vec4f> for Mat4f {
     }
 }
 
-// ─── Texture2D (POD — fits inside #[repr(C)] RenderCx) ───
+// ─── Texture2D/Cube (POD — fits inside #[repr(C)] RenderCx) ───
 
 /// Texture stored as POD fields so the whole RenderCx can be #[repr(C)].
 /// The host writes (data_ptr, data_len, width, height) and the shader
-/// reconstructs a slice in `sample()`. The one unsafe `from_raw_parts`
-/// is bounds-checked: null ptr → empty, and idx+3 < len before read.
+/// reconstructs a slice in `sample()`. For cubemaps, data is six faces
+/// packed in +X, -X, +Y, -Y, +Z, -Z order.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Texture2D {
@@ -654,12 +654,35 @@ impl Default for Texture2D {
 }
 
 impl Texture2D {
-    pub fn sample(&self, coord: Vec2f) -> Vec4f {
+    fn data_slice(&self) -> Option<&[f32]> {
         if self.width == 0 || self.height == 0 || self.data_ptr == 0 || self.data_len == 0 {
+            return None;
+        }
+        Some(unsafe { std::slice::from_raw_parts(self.data_ptr as *const f32, self.data_len) })
+    }
+
+    fn face_stride_f32(&self) -> usize {
+        self.width.saturating_mul(self.height).saturating_mul(4)
+    }
+
+    fn face_count(&self) -> usize {
+        let stride = self.face_stride_f32();
+        if stride == 0 {
+            return 0;
+        }
+        self.data_len / stride
+    }
+
+    fn sample_face_from_data(&self, data: &[f32], face: usize, coord: Vec2f) -> Vec4f {
+        if self.width == 0 || self.height == 0 {
             return vec4(0.0, 0.0, 0.0, 0.0);
         }
-        let data =
-            unsafe { std::slice::from_raw_parts(self.data_ptr as *const f32, self.data_len) };
+        let stride = self.face_stride_f32();
+        if stride == 0 || face >= self.face_count() {
+            return vec4(0.0, 0.0, 0.0, 0.0);
+        }
+        let base = face.saturating_mul(stride);
+
         let u = coord.x.max(0.0).min(1.0);
         let v = coord.y.max(0.0).min(1.0);
         // Bilinear sample with clamp-to-edge, matching GPU filtered text sampling.
@@ -679,7 +702,7 @@ impl Texture2D {
         let y1 = (y0f + 1.0).max(0.0).min((self.height - 1) as f32) as usize;
 
         let sample_px = |x: usize, y: usize| -> Vec4f {
-            let idx = (y * self.width + x) * 4;
+            let idx = base + (y * self.width + x) * 4;
             if idx + 3 < data.len() {
                 vec4(data[idx], data[idx + 1], data[idx + 2], data[idx + 3])
             } else {
@@ -697,6 +720,67 @@ impl Texture2D {
         c0 * (1.0 - ty) + c1 * ty
     }
 
+    fn sample_2d(&self, coord: Vec2f) -> Vec4f {
+        let Some(data) = self.data_slice() else {
+            return vec4(0.0, 0.0, 0.0, 0.0);
+        };
+        let wrapped = vec2(coord.x.rem_euclid(1.0), coord.y.rem_euclid(1.0));
+        self.sample_face_from_data(data, 0, wrapped)
+    }
+
+    fn sample_cube(&self, dir: Vec3f) -> Vec4f {
+        let Some(data) = self.data_slice() else {
+            return vec4(0.0, 0.0, 0.0, 0.0);
+        };
+        if self.face_count() < 6 {
+            return vec4(0.0, 0.0, 0.0, 0.0);
+        }
+        let d = normalize_3f(dir);
+        let ax = d.x.abs();
+        let ay = d.y.abs();
+        let az = d.z.abs();
+
+        let (face, u, v) = if ax >= ay && ax >= az {
+            if d.x >= 0.0 {
+                (0usize, -d.z / ax.max(1e-8), -d.y / ax.max(1e-8))
+            } else {
+                (1usize, d.z / ax.max(1e-8), -d.y / ax.max(1e-8))
+            }
+        } else if ay >= az {
+            if d.y >= 0.0 {
+                (2usize, d.x / ay.max(1e-8), d.z / ay.max(1e-8))
+            } else {
+                (3usize, d.x / ay.max(1e-8), -d.z / ay.max(1e-8))
+            }
+        } else if d.z >= 0.0 {
+            (4usize, d.x / az.max(1e-8), -d.y / az.max(1e-8))
+        } else {
+            (5usize, -d.x / az.max(1e-8), -d.y / az.max(1e-8))
+        };
+
+        let uv = vec2(u * 0.5 + 0.5, v * 0.5 + 0.5);
+        self.sample_face_from_data(data, face, uv)
+    }
+
+    pub fn sample<C: TextureSampleCoord>(&self, coord: C) -> Vec4f {
+        coord.sample_texture(self)
+    }
+}
+
+pub trait TextureSampleCoord {
+    fn sample_texture(self, texture: &Texture2D) -> Vec4f;
+}
+
+impl TextureSampleCoord for Vec2f {
+    fn sample_texture(self, texture: &Texture2D) -> Vec4f {
+        texture.sample_2d(self)
+    }
+}
+
+impl TextureSampleCoord for Vec3f {
+    fn sample_texture(self, texture: &Texture2D) -> Vec4f {
+        texture.sample_cube(self)
+    }
 }
 
 // ─── Shader builtin functions ───
@@ -1045,6 +1129,13 @@ pub fn normalize_3f(v: Vec3f) -> Vec3f {
     } else {
         vec3(0.0, 0.0, 0.0)
     }
+}
+pub fn cross(a: Vec3f, b: Vec3f) -> Vec3f {
+    vec3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x,
+    )
 }
 pub fn dot_4f(a: Vec4f, b: Vec4f) -> f32 {
     a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w

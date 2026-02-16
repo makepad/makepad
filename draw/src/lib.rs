@@ -1,11 +1,15 @@
 //pub use makepad_image_formats;
 pub use makepad_platform;
 pub use makepad_platform::*;
+pub use makepad_zune_jpeg;
+pub use makepad_zune_png;
 pub mod cx_2d;
 pub mod cx_3d;
 pub mod cx_draw;
 pub mod draw_list_2d;
 pub mod geometry;
+pub mod gltf_bridge;
+pub mod image_cache;
 pub mod match_event;
 pub mod nav;
 pub mod overlay;
@@ -20,11 +24,17 @@ pub use crate::{
     cx_3d::Cx3d,
     cx_draw::CxDraw,
     draw_list_2d::{DrawList2d, DrawListExt, ManyInstances, Redrawing, RedrawingApi},
+    image_cache::{
+        handle_image_cache_network_responses, load_image_file_by_path_async, load_image_from_cache,
+        load_image_from_data_async, load_image_http_by_url_async, process_async_image_load,
+        AsyncImageLoad, AsyncLoadResult, ImageBuffer, ImageCache, ImageCacheImpl, ImageError,
+        JpgDecodeErrors, PngDecodeErrors,
+    },
     match_event::MatchEvent,
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
     overlay::Overlay,
     shader::{
-        draw_glyph::DrawGlyph, draw_quad::DrawColor, draw_quad::DrawQuad,
+        draw_glyph::DrawGlyph, draw_pbr::DrawPbr, draw_quad::DrawColor, draw_quad::DrawQuad,
         draw_rotated_text::DrawRotatedText, draw_rotated_text::PathGlyphInstance,
         draw_rotated_text::PathTextPlacement, draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText,
         draw_text::TextStyle, draw_vector::DrawVector,
@@ -38,6 +48,10 @@ pub use crate::{
     vector::{GradientStop, VectorPaint},
 };
 
+pub use crate::gltf_bridge::{
+    GltfDecodedMeshes, GltfDecodedPrimitiveObject, GltfDrawObject, GltfMaterialState,
+    GltfMeshObjects, GltfPrimitiveObject, GltfRenderer,
+};
 pub use crate::shader::draw_svg::DrawSvg;
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
@@ -49,6 +63,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::draw_text::script_mod(vm);
     crate::shader::draw_rotated_text::script_mod(vm);
     crate::shader::draw_vector::script_mod(vm);
+    crate::shader::draw_pbr::script_mod(vm);
     crate::shader::draw_svg::script_mod(vm);
     crate::shader::draw_svg_glyph::script_mod(vm);
     NIL

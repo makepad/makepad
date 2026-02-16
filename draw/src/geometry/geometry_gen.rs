@@ -51,6 +51,18 @@ pub struct VectorVertex {
     pub zbias: f32,
 }
 
+#[derive(Clone, Script, ScriptHook)]
+pub struct PbrVertex {
+    #[live]
+    pub pos_nx: Vec4f, // xyz + nx
+    #[live]
+    pub ny_nz_uv: Vec4f, // ny nz u v
+    #[live]
+    pub color: Vec4f, // rgba
+    #[live]
+    pub tangent: Vec4f, // tangent xyz + handedness
+}
+
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     let geom = vm.new_module(id!(geom));
     // lets make a Quad geometry here
@@ -66,6 +78,12 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         .into_geometry(vm.cx_mut())
         .into_script_handle(vm);
     set_script_value!(vm, geom.VectorGeom = vgen);
+    // PBR geometry: vertex type + placeholder geom (overridden at draw time)
+    set_script_value_to_pod!(vm, geom.PbrVertex);
+    let pgen = GeometryGen::from_triangle_pbr()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.PbrGeom = pgen);
     NIL
 }
 
@@ -114,6 +132,23 @@ impl GeometryGen {
     pub fn from_quad_2d(x1: f32, y1: f32, x2: f32, y2: f32) -> GeometryGen {
         let mut g = Self::default();
         g.add_quad_2d(x1, y1, x2, y2);
+        g
+    }
+
+    /// Placeholder single-triangle geometry for PBR drawing (overridden at draw time)
+    pub fn from_triangle_pbr() -> GeometryGen {
+        let mut g = Self::default();
+        // 3 vertices with full PbrVertex stride (16 floats each)
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[
+                0.0, 0.0, 0.0, // x, y, z
+                0.0, 0.0, 1.0, // nx, ny, nz
+                0.0, 0.0, // u, v
+                1.0, 1.0, 1.0, 1.0, // color r, g, b, a
+                1.0, 0.0, 0.0, 1.0, // tx, ty, tz, tw
+            ]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
         g
     }
 

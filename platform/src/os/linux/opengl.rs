@@ -20,6 +20,7 @@ use {
                 ShaderType,
             },
             shader_backend::ShaderBackend,
+            shader_output::TextureType,
             trap::NoTrap,
             value::ScriptValue,
             ScriptVm,
@@ -111,56 +112,6 @@ impl DrawVars {
 
             #[cfg(use_vulkan)]
             let mut compiled_vulkan_shader: Option<CxVulkanShaderBinary> = None;
-
-            #[cfg(use_vulkan)]
-            {
-                static LOG_ONCE: std::sync::Once = std::sync::Once::new();
-                LOG_ONCE.call_once(|| {
-                    crate::log!(
-                        "MAKEPAD=vulkan active: running WGSL->SPIR-V shader compilation path"
-                    );
-                });
-                static IO_LOG_ONCE: std::sync::Once = std::sync::Once::new();
-                let dyn_io = output
-                    .io
-                    .iter()
-                    .filter(|io| {
-                        matches!(
-                            io.kind,
-                            crate::makepad_script::shader::ShaderIoKind::DynInstance
-                        )
-                    })
-                    .count();
-                let rust_io = output
-                    .io
-                    .iter()
-                    .filter(|io| {
-                        matches!(
-                            io.kind,
-                            crate::makepad_script::shader::ShaderIoKind::RustInstance
-                        )
-                    })
-                    .count();
-                IO_LOG_ONCE.call_once(|| {
-                    crate::log!(
-                        "Vulkan source IO stats: dyn_io={}, rust_io={}, total_io={}",
-                        dyn_io,
-                        rust_io,
-                        output.io.len()
-                    );
-                });
-                static DYN_IO_LOG_ONCE: std::sync::Once = std::sync::Once::new();
-                if dyn_io > 0 {
-                    DYN_IO_LOG_ONCE.call_once(|| {
-                        crate::log!(
-                            "Vulkan source IO stats (dyn shader): dyn_io={}, rust_io={}, total_io={}",
-                            dyn_io,
-                            rust_io,
-                            output.io.len()
-                        );
-                    });
-                }
-            }
 
             #[cfg(use_vulkan)]
             {
@@ -604,31 +555,36 @@ impl Cx {
                         }
                     }
                     for i in 0..sh.mapping.textures.len() {
-                        let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
-                            texture.texture_id()
-                        } else {
-                            continue;
-                        };
-                        let cxtexture = &mut self.textures[texture_id];
                         let gl = self.os.gl();
-                        // get the loc
                         (gl.glActiveTexture)(gl_sys::TEXTURE0 + i as u32);
-                        if let Some(texture) = cxtexture.os.gl_texture {
-                            // Video playback with SurfaceTexture requires TEXTURE_EXTERNAL_OES, for any other format we assume regular 2D textures
-                            match cxtexture.format {
-                                TextureFormat::VideoRGB => {
-                                    (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, texture)
-                                }
-                                _ => (gl.glBindTexture)(gl_sys::TEXTURE_2D, texture),
+
+                        let expected_target =
+                            if matches!(
+                                sh.mapping.textures[i].tex_type,
+                                TextureType::TextureCube | TextureType::TextureCubeArray
+                            ) {
+                                gl_sys::TEXTURE_CUBE_MAP
+                            } else {
+                                gl_sys::TEXTURE_2D
+                            };
+
+                        if let Some(texture) = &draw_call.texture_slots[i] {
+                            let texture_id = texture.texture_id();
+                            let cxtexture = &mut self.textures[texture_id];
+                            let bind_target = match cxtexture.format {
+                                TextureFormat::VideoRGB => gl_sys::TEXTURE_EXTERNAL_OES,
+                                TextureFormat::VecCubeBGRAu8_32 { .. } => gl_sys::TEXTURE_CUBE_MAP,
+                                _ => gl_sys::TEXTURE_2D,
+                            };
+                            if let Some(texture) = cxtexture.os.gl_texture {
+                                (gl.glBindTexture)(bind_target, texture);
+                            } else {
+                                (gl.glBindTexture)(bind_target, 0);
                             }
                         } else {
-                            match cxtexture.format {
-                                TextureFormat::VideoRGB => {
-                                    (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, 0)
-                                }
-                                _ => (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0),
-                            }
+                            (gl.glBindTexture)(expected_target, 0);
                         }
+
                         if let Some(loc) = shgl.textures[i].loc {
                             (gl.glUniform1i)(loc, i as i32);
                         }
@@ -1599,6 +1555,25 @@ impl CxOsDrawShader {
         let nop_depth_clip = "
             vec4 depth_clip(vec4 w, vec4 c, float clip){return c;}
         ";
+        #[cfg(target_os = "android")]
+        let sampler_helpers = "
+            vec4 depth_clip(vec4 w, vec4 c, float clip);
+            vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
+            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
+            vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).zyxw;}
+            ";
+        #[cfg(not(target_os = "android"))]
+        let sampler_helpers = "
+            vec4 depth_clip(vec4 w, vec4 c, float clip);
+            vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
+            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
+            vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            ";
+
         let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = if os_type
             .has_xr_mode()
         {
@@ -1617,12 +1592,7 @@ impl CxOsDrawShader {
             ",
             "",
             "",
-            "
-            vec4 depth_clip(vec4 w, vec4 c, float clip);
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
-            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
-            "
+            sampler_helpers
         )
         } else {
             (
@@ -1631,12 +1601,7 @@ impl CxOsDrawShader {
             "",
             "",
             "",
-            "
-            vec4 depth_clip(vec4 w, vec4 c, float clip);
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
-            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
-            "
+            sampler_helpers
         )
         };
 
@@ -1851,6 +1816,78 @@ impl CxTexture {
 
         let updated = self.take_updated();
         if updated.is_empty() {
+            return;
+        }
+
+        if let TextureFormat::VecCubeBGRAu8_32 {
+            width,
+            height,
+            data,
+            ..
+        } = &self.format
+        {
+            unsafe {
+                (gl.glBindTexture)(gl_sys::TEXTURE_CUBE_MAP, self.os.gl_texture.unwrap());
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_CUBE_MAP,
+                    gl_sys::TEXTURE_WRAP_S,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_CUBE_MAP,
+                    gl_sys::TEXTURE_WRAP_T,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_CUBE_MAP,
+                    gl_sys::TEXTURE_WRAP_R,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_CUBE_MAP,
+                    gl_sys::TEXTURE_MIN_FILTER,
+                    gl_sys::LINEAR as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_CUBE_MAP,
+                    gl_sys::TEXTURE_MAG_FILTER,
+                    gl_sys::LINEAR as i32,
+                );
+
+                let targets = [
+                    gl_sys::TEXTURE_CUBE_MAP_POSITIVE_X,
+                    gl_sys::TEXTURE_CUBE_MAP_NEGATIVE_X,
+                    gl_sys::TEXTURE_CUBE_MAP_POSITIVE_Y,
+                    gl_sys::TEXTURE_CUBE_MAP_NEGATIVE_Y,
+                    gl_sys::TEXTURE_CUBE_MAP_POSITIVE_Z,
+                    gl_sys::TEXTURE_CUBE_MAP_NEGATIVE_Z,
+                ];
+                let pixels_per_face = width.saturating_mul(*height);
+                for (face, target) in targets.iter().enumerate() {
+                    let face_ptr = if let Some(data) = data.as_ref() {
+                        if data.len() >= pixels_per_face.saturating_mul(6) {
+                            data.as_ptr().add(face.saturating_mul(pixels_per_face))
+                                as *const std::ffi::c_void
+                        } else {
+                            std::ptr::null()
+                        }
+                    } else {
+                        std::ptr::null()
+                    };
+                    (gl.glTexImage2D)(
+                        *target,
+                        0,
+                        gl_sys::BGRA as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::BGRA,
+                        gl_sys::UNSIGNED_BYTE,
+                        face_ptr,
+                    );
+                }
+                (gl.glBindTexture)(gl_sys::TEXTURE_CUBE_MAP, 0);
+            }
             return;
         }
 

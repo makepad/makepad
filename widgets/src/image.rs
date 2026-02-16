@@ -182,6 +182,9 @@ impl Widget for Image {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
+        if let Event::NetworkResponses(e) = event {
+            handle_image_cache_network_responses(cx, e);
+        }
         // lets check if we have a post action
         if let Event::Actions(actions) = &event {
             for action in actions {
@@ -430,6 +433,28 @@ impl Image {
         }
         Ok(())
     }
+
+    pub fn load_image_http_by_url_async(
+        &mut self,
+        cx: &mut Cx,
+        url: &str,
+    ) -> Result<(), ImageError> {
+        self.lazy_create_image_cache(cx);
+        if let Ok(result) = self.load_image_http_by_url_async_impl(cx, url, 0) {
+            match result {
+                AsyncLoadResult::Loading(w, h) => {
+                    self.async_image_size = Some((w, h));
+                    self.async_image_path = Some(PathBuf::from(url));
+                    self.animator_play(cx, ids!(async_load.on));
+                    self.redraw(cx);
+                }
+                AsyncLoadResult::Loaded => {
+                    self.redraw(cx);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub enum AsyncLoad {
@@ -483,6 +508,14 @@ impl ImageRef {
     ) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             return inner.load_image_from_data_async(cx, image_path, data);
+        }
+        Ok(())
+    }
+
+    /// Loads an image from a URL using platform HTTP + async decode.
+    pub fn load_image_http_by_url_async(&self, cx: &mut Cx, url: &str) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            return inner.load_image_http_by_url_async(cx, url);
         }
         Ok(())
     }

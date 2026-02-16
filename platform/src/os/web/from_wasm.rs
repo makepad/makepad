@@ -1,6 +1,6 @@
 use crate::{
     cursor::MouseCursor, draw_shader::DrawShaderTextureInput, draw_vars::DRAW_CALL_TEXTURE_SLOTS,
-    makepad_math::Vec4f, makepad_wasm_bridge::*,
+    makepad_math::Vec4f, makepad_script::shader::TextureType, makepad_wasm_bridge::*,
 };
 
 // WebBrowser API
@@ -129,8 +129,12 @@ pub struct WTextureInput {
 
 impl DrawShaderTextureInput {
     pub fn to_from_wasm_texture_input(&self) -> WTextureInput {
+        let ty = match self.tex_type {
+            TextureType::TextureCube | TextureType::TextureCubeArray => "samplerCube",
+            _ => "sampler2D",
+        };
         WTextureInput {
-            ty: "sampler2D".to_string(),
+            ty: ty.to_string(),
             name: self.id.to_string(),
         }
     }

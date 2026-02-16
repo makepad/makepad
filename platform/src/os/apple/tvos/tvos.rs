@@ -1,13 +1,13 @@
 use {
     crate::{
-        cx::{Cx, OsType},
+        cx::{Cx, IosParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{Event, NetworkResponseChannel},
         //makepad_live_id::*,
         os::{
             apple::apple_sys::*,
-            apple::apple_util::str_to_nsstring,
+            apple::apple_util::{nsstring_to_string, str_to_nsstring},
             apple::{
                 tvos::{
                     tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
@@ -32,8 +32,36 @@ impl Cx {
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        let data_path = unsafe {
+            let file_manager: ObjcId = msg_send![class!(NSFileManager), defaultManager];
+            let app_support_dir: ObjcId = msg_send![
+                file_manager,
+                URLsForDirectory: NSApplicationSupportDirectory
+                inDomains: NSUserDomainMask
+            ];
+            let app_support_url: ObjcId = msg_send![app_support_dir, firstObject];
+            let app_support_path: ObjcId = msg_send![app_support_url, path];
+            nsstring_to_string(app_support_path)
+        };
+
+        let device_model = unsafe {
+            let device: ObjcId = msg_send![class!(UIDevice), currentDevice];
+            let model: ObjcId = msg_send![device, model];
+            nsstring_to_string(model)
+        };
+
+        let system_version = unsafe {
+            let device: ObjcId = msg_send![class!(UIDevice), currentDevice];
+            let version: ObjcId = msg_send![device, systemVersion];
+            nsstring_to_string(version)
+        };
+
         cx.borrow_mut().self_ref = Some(cx.clone());
-        cx.borrow_mut().os_type = OsType::Ios;
+        cx.borrow_mut().os_type = OsType::Ios(IosParams {
+            data_path,
+            device_model,
+            system_version,
+        });
         let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
         crate::log!("Makepad tvOS application started.");
@@ -131,8 +159,6 @@ impl Cx {
         match event {
             TvosEvent::Init => {
                 get_tvos_app_global().start_timer(0, 0.008, true);
-                // Start gamepad monitoring - especially important for tvOS
-                crate::os::apple::apple_gamepad::start_gamepad_monitoring();
                 self.start_studio_websocket_delayed();
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
@@ -171,7 +197,6 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(e))
                 }
             }
-            TvosEvent::GamepadConnected(e) => self.call_event_handler(&Event::GamepadConnected(e)),
         }
 
         if self.any_passes_dirty()
@@ -235,15 +260,8 @@ impl CxOsApi for Cx {
         self.os.start_time = Some(Instant::now());
         #[cfg(not(apple_sim))]
         {
-            self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
+            self.package_root = Some("makepad".to_string());
         }
-
-        self.live_expand();
-
-        #[cfg(apple_sim)]
-        self.start_disk_live_file_watcher(50);
-
-        self.live_scan_dependencies();
 
         #[cfg(not(apple_sim))]
         self.apple_bundle_load_dependencies();
@@ -286,4 +304,5 @@ pub struct CxOs {
     pub(crate) draw_calls_done: usize,
     pub(crate) network_response: NetworkResponseChannel,
     pub(crate) http_requests: AppleHttpRequests,
+    pub(crate) apple_game_input: Option<crate::os::apple::apple_game_input::AppleGameInput>,
 }

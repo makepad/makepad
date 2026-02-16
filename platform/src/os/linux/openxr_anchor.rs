@@ -867,6 +867,7 @@ impl Default for AsyncAnchorState {
 }
 
 #[derive(SerBin, DeBin)]
+#[allow(dead_code)]
 struct AnchorAdvertisement {
     group_uuid: XrUuid,
     anchor_left_uuid: XrUuid,

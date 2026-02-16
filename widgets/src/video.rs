@@ -605,11 +605,14 @@ impl Video {
     fn handle_secondary_click(
         &mut self,
         cx: &mut Cx,
-        scope: &mut Scope,
+        _scope: &mut Scope,
         abs: Vec2d,
         modifiers: KeyModifiers,
     ) {
-        cx.widget_action(self.widget_uid(), VideoAction::SecondaryClicked { abs, modifiers });
+        cx.widget_action(
+            self.widget_uid(),
+            VideoAction::SecondaryClicked { abs, modifiers },
+        );
     }
 
     fn pause_playback(&mut self, cx: &mut Cx) {

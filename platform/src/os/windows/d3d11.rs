@@ -52,7 +52,7 @@ use crate::{
                     D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA,
                     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC,
                     D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
-                    D3D11_RESOURCE_MISC_FLAG, D3D11_SDK_VERSION, D3D11_STENCIL_OP_REPLACE,
+                    D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_SDK_VERSION, D3D11_STENCIL_OP_REPLACE,
                     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
                     D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
@@ -279,6 +279,10 @@ impl Cx {
                     let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
                         texture.texture_id()
                     } else {
+                        unsafe {
+                            d3d11_cx.context.PSSetShaderResources(i as u32, None);
+                            d3d11_cx.context.VSSetShaderResources(i as u32, None);
+                        }
                         continue;
                     };
 
@@ -917,6 +921,68 @@ impl CxTexture {
         // TODO maybe we can update the data instead of making a new texture?
         if self.alloc_vec() {}
         if !self.take_updated().is_empty() {
+            if let TextureFormat::VecCubeBGRAu8_32 {
+                width,
+                height,
+                data,
+                ..
+            } = &self.format
+            {
+                let texture_desc = D3D11_TEXTURE2D_DESC {
+                    Width: *width as u32,
+                    Height: *height as u32,
+                    MipLevels: 1,
+                    ArraySize: 6,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: D3D11_RESOURCE_MISC_TEXTURECUBE.0 as u32,
+                };
+
+                let face_pixels = width.saturating_mul(*height);
+                let mut sub_data = Vec::with_capacity(6);
+                for face in 0..6usize {
+                    let p_sys_mem = if let Some(data) = data.as_ref() {
+                        if data.len() >= face_pixels.saturating_mul(6) {
+                            unsafe { data.as_ptr().add(face.saturating_mul(face_pixels)) as *const _ }
+                        } else {
+                            std::ptr::null()
+                        }
+                    } else {
+                        std::ptr::null()
+                    };
+                    sub_data.push(D3D11_SUBRESOURCE_DATA {
+                        pSysMem: p_sys_mem,
+                        SysMemPitch: (width.saturating_mul(4)) as u32,
+                        SysMemSlicePitch: (width.saturating_mul(*height).saturating_mul(4)) as u32,
+                    });
+                }
+
+                let mut texture = None;
+                unsafe {
+                    d3d11_cx
+                        .device
+                        .CreateTexture2D(&texture_desc, Some(sub_data.as_ptr()), Some(&mut texture))
+                        .unwrap()
+                };
+                let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
+                let mut shader_resource_view = None;
+                unsafe {
+                    d3d11_cx
+                        .device
+                        .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+                        .unwrap()
+                };
+                self.os.texture = texture;
+                self.os.shader_resource_view = shader_resource_view;
+                return;
+            }
+
             fn get_descs(
                 format: DXGI_FORMAT,
                 width: usize,

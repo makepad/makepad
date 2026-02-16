@@ -808,12 +808,14 @@ impl Cx {
                             slice: 0
                         ]};
                         let () = msg_send![sf.texture, release];
-                        Self::send_studio_message(AppToStudio::Screenshot(StudioScreenshotResponse{
-                            request_ids: sf.request_ids.clone(),
-                            image: Some(buf),
-                            width: sf.width as _,
-                            height: sf.height as _,
-                        }))
+                        if !sf.request_ids.is_empty() {
+                            Self::send_studio_message(AppToStudio::Screenshot(StudioScreenshotResponse{
+                                request_ids: sf.request_ids.clone(),
+                                image: Some(buf),
+                                width: sf.width as _,
+                                height: sf.height as _,
+                            }))
+                        }
                     }
 
                     let start:f64 = unsafe {msg_send![command_buffer, GPUStartTime]};
@@ -1371,8 +1373,11 @@ impl CxTexture {
             let descriptor = RcObjcId::from_owned(
                 NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
             );
-            let _: () =
-                unsafe { msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2] };
+            let texture_type = match &self.format {
+                TextureFormat::VecCubeBGRAu8_32 { .. } => MTLTextureType::Cube,
+                _ => MTLTextureType::D2,
+            };
+            let _: () = unsafe { msg_send![descriptor.as_id(), setTextureType: texture_type] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
             let _: () =
                 unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared] };
@@ -1391,6 +1396,7 @@ impl CxTexture {
         if update.is_empty() {
             return;
         }
+
         fn update_data(
             texture: &Option<RcObjcId>,
             width: usize,
@@ -1417,6 +1423,44 @@ impl CxTexture {
                 ]
             };
         }
+
+        fn update_cube_data(
+            texture: &Option<RcObjcId>,
+            width: usize,
+            height: usize,
+            bpp: u64,
+            data: &[u32],
+        ) {
+            let pixels_per_face = width.saturating_mul(height);
+            let words_per_face = pixels_per_face;
+            if data.len() < words_per_face.saturating_mul(6) {
+                return;
+            }
+            let region = MTLRegion {
+                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                size: MTLSize {
+                    width: width as u64,
+                    height: height as u64,
+                    depth: 1,
+                },
+            };
+            let face_bytes = words_per_face.saturating_mul(4);
+            for face in 0..6usize {
+                let face_offset_words = face.saturating_mul(words_per_face);
+                let face_ptr = unsafe { data.as_ptr().add(face_offset_words) };
+                let _: () = unsafe {
+                    msg_send![
+                        texture.as_ref().unwrap().as_id(),
+                        replaceRegion: region
+                        mipmapLevel: 0
+                        slice: face as u64
+                        withBytes: face_ptr as *const std::ffi::c_void
+                        bytesPerRow: (width as u64) * bpp
+                        bytesPerImage: face_bytes as u64
+                    ]
+                };
+            }
+        }
         match &self.format {
             TextureFormat::VecBGRAu8_32 {
                 width,
@@ -1431,6 +1475,16 @@ impl CxTexture {
                     4,
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                 );
+            }
+            TextureFormat::VecCubeBGRAu8_32 {
+                width,
+                height,
+                data,
+                ..
+            } => {
+                if let Some(data) = data.as_ref() {
+                    update_cube_data(&self.os.texture, *width, *height, 4, data);
+                }
             }
             TextureFormat::VecRGBAf32 {
                 width,

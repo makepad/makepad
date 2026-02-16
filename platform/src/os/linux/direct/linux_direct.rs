@@ -10,7 +10,7 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-        event::{Event, TimerEvent, WindowGeom},
+        event::{Event, NetworkResponseChannel, TimerEvent, WindowGeom},
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::*,
@@ -64,6 +64,17 @@ impl DirectApp {
 }
 
 impl Cx {
+    pub(crate) fn handle_networking_events(&mut self) {
+        let mut out = Vec::new();
+        while let Ok(item) = self.os.network_response.receiver.try_recv() {
+            out.push(item);
+        }
+        if !out.is_empty() {
+            self.handle_script_network_events(&out);
+            self.call_event_handler(&Event::NetworkResponses(out));
+        }
+    }
+
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
         let mut cx = cx.borrow_mut();
 
@@ -168,6 +179,7 @@ impl Cx {
                     if SignalToUI::check_and_clear_action_signal() {
                         self.handle_action_receiver();
                     }
+                    self.handle_networking_events();
                 } else {
                     self.handle_script_timer(&e);
                     self.call_event_handler(&Event::Timer(e))
@@ -294,6 +306,24 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     direct_app.timers.stop_timer(timer_id);
                 }
+                CxOsOp::HttpRequest {
+                    request_id,
+                    request,
+                } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::open(
+                        request_id,
+                        request,
+                        self.os.network_response.sender.clone(),
+                    );
+                }
+                CxOsOp::CancelHttpRequest { request_id } => {
+                    use crate::os::linux::http::LinuxHttpSocket;
+                    LinuxHttpSocket::cancel(request_id);
+                }
+                CxOsOp::Quit => {
+                    return EventFlow::Exit;
+                }
                 CxOsOp::ResizeWindow(window_id, size) => {
                     let window = &mut self.windows[window_id];
                     window.window_geom.inner_size = size;
@@ -301,6 +331,30 @@ impl Cx {
                 CxOsOp::RepositionWindow(window_id, size) => {
                     let window = &mut self.windows[window_id];
                     window.window_geom.position = size;
+                }
+                CxOsOp::CheckPermission {
+                    permission,
+                    request_id,
+                } => {
+                    self.call_event_handler(&Event::PermissionResult(
+                        crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status: crate::permission::PermissionStatus::Granted,
+                        },
+                    ));
+                }
+                CxOsOp::RequestPermission {
+                    permission,
+                    request_id,
+                } => {
+                    self.call_event_handler(&Event::PermissionResult(
+                        crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status: crate::permission::PermissionStatus::Granted,
+                        },
+                    ));
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
@@ -341,6 +395,7 @@ impl CxOsApi for Cx {
 
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
+    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) start_time: Instant,
 }
 
@@ -349,6 +404,7 @@ impl Default for CxOs {
         Self {
             start_time: Instant::now(),
             media: Default::default(),
+            network_response: Default::default(),
         }
     }
 }
