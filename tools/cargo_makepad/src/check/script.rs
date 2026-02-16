@@ -136,9 +136,13 @@ fn run_parse_checks(blocks: &[ScriptBlock]) -> Vec<ScriptIssue> {
         let file_name = block.path.display().to_string();
         let result = parse_script_full(&block.code, &file_name);
 
-        // Run semantic analysis on the opcodes first (before consuming result.issues)
-        let mut analysis_issues = analyze_opcodes(&result, block.line_offset);
-        issues.append(&mut analysis_issues);
+        // Semantic opcode analysis is currently reliable for `script!` expressions but too
+        // coarse for full `script_mod!` module DSL (complex shader scopes/implicit names).
+        // Runtime validation covers `script_mod!` semantics.
+        if block.macro_kind == ScriptMacroKind::Script {
+            let mut analysis_issues = analyze_opcodes(&result, block.line_offset);
+            issues.append(&mut analysis_issues);
+        }
 
         // Add parse errors (adjusted for block offset)
         for mut issue in result.issues {
@@ -250,8 +254,8 @@ pub fn check_scripts(config: &CheckConfig) -> std::result::Result<ScriptCheckRes
     }
 
     // Run parse checks for all blocks.
-    // Runtime validation only executes reachable paths, so parser/semantic checks
-    // must always run to catch static issues in dead/unreached code.
+    // Runtime validation only executes reachable paths, so parser checks always run.
+    // Semantic checks currently run only for `script!` blocks.
     let parse_blocks: Vec<ScriptBlock> = blocks
         .into_iter()
         .filter(|_block| true)
@@ -338,5 +342,37 @@ mod tests {
         let (line, col) = result.get_location(0);
         assert!(line >= 1, "Line should be at least 1");
         assert!(col >= 1, "Column should be at least 1");
+    }
+
+    #[test]
+    fn test_script_mod_does_not_report_false_undefined_variable() {
+        let block = ScriptBlock::new(
+            std::path::PathBuf::from("test_script_mod.rs"),
+            0,
+            r#"
+            use mod.prelude.widgets_internal.*
+            use mod.widgets.*
+
+            mod.widgets.TestButton = Button {
+                draw_bg +: {
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                        sdf.rect(0., 0., self.rect_size.x, self.rect_size.y)
+                        sdf.fill(#fff)
+                        return sdf.result
+                    }
+                }
+            }
+            "#
+            .to_string(),
+            ScriptMacroKind::ScriptMod,
+        );
+
+        let issues = run_parse_checks(&[block]);
+        assert!(
+            !issues.iter().any(|i| i.message.contains("undefined variable `sdf`")),
+            "Expected no false undefined-variable issue for script_mod, got: {:?}",
+            issues
+        );
     }
 }
