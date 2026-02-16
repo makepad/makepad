@@ -1,0 +1,12 @@
+[package]
+name = "makepad-physics"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic physics engine for networked synced simulations"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-math = { path = "../math" }
+
+[dev-dependencies]
+rapier3d = { path = "../../local/rapier/crates/rapier3d" }
