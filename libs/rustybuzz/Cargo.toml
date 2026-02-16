@@ -61,21 +61,21 @@ default-features = false
 
 [dependencies.unicode-bidi-mirroring]
 version = "0.3.0"
-path = "../unicode-bidi-mirroring"
+path = "../unicode/unicode-bidi-mirroring"
 
 [dependencies.unicode-ccc]
 version = "0.3.0"
-path = "../unicode-ccc"
+path = "../unicode/unicode-ccc"
 
 [dependencies.unicode-properties]
 version = "0.1.0"
-path = "../unicode-properties"
+path = "../unicode/unicode-properties"
 features = ["general-category"]
 default-features = false
 
 [dependencies.unicode-script]
 version = "0.5.2"
-path = "../unicode-script"
+path = "../unicode/unicode-script"
 
 [lints.rust.unexpected_cfgs]
 level = "allow"
