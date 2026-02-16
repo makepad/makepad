@@ -1,0 +1,13 @@
+[package]
+name = "makepad-gltf"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "glTF 2.0 parsing and loading for Makepad"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
+makepad-base64 = { path = "../base64", version = "1.0.0" }

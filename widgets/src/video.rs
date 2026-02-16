@@ -609,7 +609,10 @@ impl Video {
         abs: Vec2d,
         modifiers: KeyModifiers,
     ) {
-        cx.widget_action(self.widget_uid(), VideoAction::SecondaryClicked { abs, modifiers });
+        cx.widget_action(
+            self.widget_uid(),
+            VideoAction::SecondaryClicked { abs, modifiers },
+        );
     }
 
     fn pause_playback(&mut self, cx: &mut Cx) {

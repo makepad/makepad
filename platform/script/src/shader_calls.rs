@@ -988,11 +988,18 @@ impl ShaderFnCompiler {
                 }
                 ShaderMe::TextureBuiltin {
                     method_id,
-                    tex_type: _,
+                    tex_type,
                     texture_expr,
                     args,
                 } => {
-                    self.handle_texture_builtin_exec(vm, output, method_id, texture_expr, args);
+                    self.handle_texture_builtin_exec(
+                        vm,
+                        output,
+                        method_id,
+                        tex_type,
+                        texture_expr,
+                        args,
+                    );
                 }
                 ShaderMe::BuiltinCall {
                     name,
@@ -1272,6 +1279,7 @@ impl ShaderFnCompiler {
         vm: &mut ScriptVm,
         output: &mut ShaderOutput,
         method_id: LiveId,
+        tex_type: TextureType,
         texture_expr: String,
         args: Vec<String>,
     ) {
@@ -1372,10 +1380,21 @@ impl ShaderFnCompiler {
                             // so we sample via helper functions and track texture->sampler
                             // bindings separately in ShaderOutput.
                             output.bind_texture_sampler(&texture_expr, sampler_idx);
-                            if method_id == id!(sample_as_bgra) {
-                                write!(s, "sample2d_bgra({}, {})", texture_expr, coord).ok();
-                            } else {
-                                write!(s, "sample2d({}, {})", texture_expr, coord).ok();
+                            match tex_type {
+                                TextureType::TextureCube | TextureType::TextureCubeArray => {
+                                    if method_id == id!(sample_as_bgra) {
+                                        write!(s, "samplecube_bgra({}, {})", texture_expr, coord).ok();
+                                    } else {
+                                        write!(s, "samplecube({}, {})", texture_expr, coord).ok();
+                                    }
+                                }
+                                _ => {
+                                    if method_id == id!(sample_as_bgra) {
+                                        write!(s, "sample2d_bgra({}, {})", texture_expr, coord).ok();
+                                    } else {
+                                        write!(s, "sample2d({}, {})", texture_expr, coord).ok();
+                                    }
+                                }
                             }
                         }
                         ShaderBackend::Rust => {

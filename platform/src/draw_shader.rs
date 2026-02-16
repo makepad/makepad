@@ -291,7 +291,7 @@ impl DrawShaderInputs {
 #[derive(Clone)]
 pub struct DrawShaderTextureInput {
     pub id: LiveId,
-    //pub ty: ShaderTy
+    pub tex_type: TextureType,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -438,8 +438,11 @@ impl CxDrawShaderMapping {
         // Process texture fields.
         for io in &output.io {
             match &io.kind {
-                ShaderIoKind::Texture(_) => {
-                    textures.push(DrawShaderTextureInput { id: io.name });
+                ShaderIoKind::Texture(tex_type) => {
+                    textures.push(DrawShaderTextureInput {
+                        id: io.name,
+                        tex_type: *tex_type,
+                    });
                     let texture_name = format!("tex_{}", io.name);
                     let sampler_idx = output
                         .texture_sampler_bindings

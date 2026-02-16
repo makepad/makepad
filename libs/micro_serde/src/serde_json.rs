@@ -440,17 +440,37 @@ impl DeJsonState {
                 } else {
                     false
                 };
+                let mut is_float = false;
                 while self.cur >= '0' && self.cur <= '9' {
                     self.numbuf.push(self.cur);
                     self.next(i);
                 }
                 if self.cur == '.' {
+                    is_float = true;
                     self.numbuf.push(self.cur);
                     self.next(i);
                     while self.cur >= '0' && self.cur <= '9' {
                         self.numbuf.push(self.cur);
                         self.next(i);
                     }
+                }
+                if self.cur == 'e' || self.cur == 'E' {
+                    is_float = true;
+                    self.numbuf.push(self.cur);
+                    self.next(i);
+                    if self.cur == '+' || self.cur == '-' {
+                        self.numbuf.push(self.cur);
+                        self.next(i);
+                    }
+                    if !(self.cur >= '0' && self.cur <= '9') {
+                        return Err(self.err_parse("number"));
+                    }
+                    while self.cur >= '0' && self.cur <= '9' {
+                        self.numbuf.push(self.cur);
+                        self.next(i);
+                    }
+                }
+                if is_float {
                     if let Ok(num) = self.numbuf.parse() {
                         self.tok = DeJsonTok::F64(num);
                         Ok(())
@@ -1113,12 +1133,21 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::SerJson;
+    use super::{DeJson, SerJson};
     use std::collections::HashMap;
 
     #[test]
     fn serialize_empty_hashmap_json() {
         let map: HashMap<String, String> = HashMap::new();
         assert_eq!(map.serialize_json(), "{}");
+    }
+
+    #[test]
+    fn deserialize_f64_scientific_notation() {
+        let v: f64 = DeJson::deserialize_json("1.25e-2").unwrap();
+        assert!((v - 0.0125).abs() < 1e-12);
+
+        let v: f64 = DeJson::deserialize_json("-3E+1").unwrap();
+        assert!((v + 30.0).abs() < 1e-12);
     }
 }
