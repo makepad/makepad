@@ -22,8 +22,8 @@ script_mod! {
                         camera_distance: 8.0
                         camera_near: 0.05
                         camera_far: 100.0
-                        depth_range: vec2(0.6, 0.96)
-                        depth_forward_bias: 0.72
+                        depth_range: vec2(0.0, 1.0)
+                        depth_forward_bias: 0.0
                         draw_bg +: {
                             color: #x131922
                             draw_depth: -99.0

@@ -15,6 +15,12 @@ use crate::{
     texture::Texture,
 };
 
+#[cfg(target_arch = "wasm32")]
+use crate::makepad_script::{
+    shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
+    shader_backend::ShaderBackend,
+};
+
 pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 8;
 pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
@@ -589,9 +595,7 @@ impl DrawVars {
         if let Some(v) = value.as_i32() {
             let v = match attr_format {
                 DrawShaderAttrFormat::Float => v as f32,
-                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
-                    f32::from_bits(v as u32)
-                }
+                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => f32::from_bits(v as u32),
             };
             for i in 0..slots {
                 output[offset + i] = v;
@@ -672,7 +676,9 @@ impl DrawVars {
                 ScriptPodTy::F32 => {
                     let v = match attr_format {
                         DrawShaderAttrFormat::Float => f32::from_bits(data[0]),
-                        DrawShaderAttrFormat::UInt => f32::from_bits(f32::from_bits(data[0]) as u32),
+                        DrawShaderAttrFormat::UInt => {
+                            f32::from_bits(f32::from_bits(data[0]) as u32)
+                        }
                         DrawShaderAttrFormat::SInt => {
                             f32::from_bits(f32::from_bits(data[0]) as i32 as u32)
                         }

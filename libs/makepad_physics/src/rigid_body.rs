@@ -26,6 +26,10 @@ pub struct RigidBody {
     pub friction: f32,
     /// Coefficient of restitution (bounciness).
     pub restitution: f32,
+    /// Whether this body is currently sleeping.
+    pub sleeping: bool,
+    /// Time the body has continuously stayed below sleep thresholds.
+    pub sleep_time: f32,
     /// Body type.
     pub body_type: BodyType,
 }
@@ -69,6 +73,8 @@ impl RigidBody {
             half_extents,
             friction: 0.5,
             restitution: 0.0,
+            sleeping: false,
+            sleep_time: 0.0,
             body_type: BodyType::Dynamic,
         }
     }
@@ -87,6 +93,8 @@ impl RigidBody {
             half_extents,
             friction: 0.5,
             restitution: 0.0,
+            sleeping: false,
+            sleep_time: 0.0,
             body_type: BodyType::Fixed,
         }
     }
@@ -101,5 +109,11 @@ impl RigidBody {
     /// Is this body dynamic (can move)?
     pub fn is_dynamic(&self) -> bool {
         self.body_type == BodyType::Dynamic
+    }
+
+    /// Wake this body up immediately.
+    pub fn wake_up(&mut self) {
+        self.sleeping = false;
+        self.sleep_time = 0.0;
     }
 }

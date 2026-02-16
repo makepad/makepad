@@ -91,6 +91,19 @@ impl Cx {
                                         data: WasmPtrU32::new((*data).as_ref().unwrap()),
                                     });
                                 }
+                                TextureFormat::VecMipBGRAu8_32 {
+                                    width,
+                                    height,
+                                    data,
+                                    ..
+                                } => {
+                                    self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        data: WasmPtrU32::new((*data).as_ref().unwrap()),
+                                    });
+                                }
                                 TextureFormat::VecRu8 {
                                     width,
                                     height,
@@ -117,7 +130,20 @@ impl Cx {
                                         data: WasmPtrF32::new((*data).as_ref().unwrap()),
                                     });
                                 }
-                                x => panic!("Texture format not implemented for webGL {:?}", x),
+                                TextureFormat::VecCubeBGRAu8_32 {
+                                    width,
+                                    height,
+                                    data,
+                                    ..
+                                } => {
+                                    self.os.from_wasm(FromWasmAllocTextureCube_BGRAu8_32 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        data: WasmPtrU32::new((*data).as_ref().unwrap()),
+                                    });
+                                }
+                                _ => continue,
                             }
                         }
                     }
@@ -407,7 +433,7 @@ vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
 vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
-vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
+vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir).zyxw;}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_vertex
@@ -421,7 +447,7 @@ vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
 vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
-vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
+vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir).zyxw;}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_pixel

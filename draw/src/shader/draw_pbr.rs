@@ -59,6 +59,7 @@ script_mod! {
         u_has_occlusion_texture: uniform(float(0.0))
         u_has_emissive_texture: uniform(float(0.0))
         u_has_env_texture: uniform(float(0.0))
+        u_uv_flip: uniform(float(0.0))
         u_light_dir: uniform(vec3(0.3, 0.7, 1.0))
         u_light_color: uniform(vec3(1.0, 1.0, 1.0))
         u_ambient: uniform(float(0.15))
@@ -71,7 +72,6 @@ script_mod! {
         v_tangent: varying(vec4f)
         v_uv: varying(vec2f)
         v_color: varying(vec4f)
-        v_clip_ndc: varying(vec2f)
 
         vertex: fn() {
             let local_pos = vec4(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z, 1.0);
@@ -109,9 +109,7 @@ script_mod! {
                 self.proj_c1 * view_pos.y +
                 self.proj_c2 * view_pos.z +
                 self.proj_c3 * view_pos.w;
-            let inv_w = 1.0 / max(abs(clip_pos_base.w), 0.000001);
-            let ndc01 = (clip_pos_base.xy * inv_w) * 0.5 + vec2(0.5, 0.5);
-            let mapped_ndc = mix(self.clip_ndc.xy, self.clip_ndc.zw, ndc01);
+            let inv_w = 1.0 / max(clip_pos_base.w, 0.000001);
             let depth01 = clamp((clip_pos_base.z * inv_w) * 0.5 + 0.5, 0.0, 1.0);
             let depth_mapped = clamp(
                 mix(self.depth_range.x, self.depth_range.y, depth01) - self.depth_forward_bias,
@@ -119,12 +117,11 @@ script_mod! {
                 1.0
             );
             let clip_pos = vec4(
-                mapped_ndc.x * clip_pos_base.w,
-                mapped_ndc.y * clip_pos_base.w,
+                clip_pos_base.x,
+                clip_pos_base.y,
                 depth_mapped * clip_pos_base.w,
                 clip_pos_base.w
             );
-            self.v_clip_ndc = mapped_ndc;
             self.vertex_pos = clip_pos;
         }
 
@@ -133,13 +130,13 @@ script_mod! {
         }
 
         pixel: fn() {
-            if self.v_clip_ndc.x < self.clip_ndc.x || self.v_clip_ndc.y < self.clip_ndc.y
-                || self.v_clip_ndc.x > self.clip_ndc.z || self.v_clip_ndc.y > self.clip_ndc.w {
-                return vec4(0.0, 0.0, 0.0, 0.0)
-            }
-
+            let uv = mix(
+                self.v_uv,
+                vec2(self.v_uv.x, 1.0 - self.v_uv.y),
+                clamp(self.u_uv_flip, 0.0, 1.0)
+            );
             let base = self.u_base_color_factor * self.v_color;
-            let tex_srgb = self.base_color_texture.sample_as_bgra(self.v_uv);
+            let tex_srgb = self.base_color_texture.sample_as_bgra(uv);
             let tex_linear = vec4(
                 pow(max(tex_srgb.x, 0.0), 2.2),
                 pow(max(tex_srgb.y, 0.0), 2.2),
@@ -152,7 +149,7 @@ script_mod! {
                 clamp(self.u_has_base_color_texture, 0.0, 1.0)
             );
             let albedo = base * tex_mix;
-            let mr_tex = self.metallic_roughness_texture.sample_as_bgra(self.v_uv);
+            let mr_tex = self.metallic_roughness_texture.sample_as_bgra(uv);
             let mr_mix = mix(vec4(1.0, 1.0, 1.0, 1.0), mr_tex, clamp(self.u_has_metal_roughness_texture, 0.0, 1.0));
 
             let n_geom = normalize(self.v_normal);
@@ -168,7 +165,7 @@ script_mod! {
             let up_axis = if abs(n_geom.y) > 0.99 { vec3(1.0, 0.0, 0.0) } else { vec3(0.0, 1.0, 0.0) };
             let t = if t_len > 0.00001 { t_raw / t_len } else { normalize(cross(up_axis, n_geom)) };
             let b = normalize(cross(n_geom, t)) * self.v_tangent.w;
-            let n_tex_s = self.normal_texture.sample_as_bgra(self.v_uv);
+            let n_tex_s = self.normal_texture.sample_as_bgra(uv);
             let n_tex = vec3(
                 n_tex_s.x * 2.0 - 1.0,
                 (n_tex_s.y * 2.0 - 1.0) * self.u_normal_scale,
@@ -209,7 +206,7 @@ script_mod! {
             let kd = (vec3(1.0, 1.0, 1.0) - f) * (1.0 - metal);
             let diffuse = kd * albedo.xyz * (1.0 / 3.14159265);
 
-            let occlusion_tex = self.occlusion_texture.sample_as_bgra(self.v_uv);
+            let occlusion_tex = self.occlusion_texture.sample_as_bgra(uv);
             let occ_val = mix(1.0, occlusion_tex.x, clamp(self.u_occlusion_strength, 0.0, 1.0));
             let occlusion = mix(1.0, occ_val, clamp(self.u_has_occlusion_texture, 0.0, 1.0));
 
@@ -240,7 +237,7 @@ script_mod! {
             let ibl_diffuse = kd * albedo.xyz * env_diff_color * self.u_env_intensity;
             let env_spec = env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity;
 
-            let emissive_tex_srgb = self.emissive_texture.sample_as_bgra(self.v_uv);
+            let emissive_tex_srgb = self.emissive_texture.sample_as_bgra(uv);
             let emissive_tex = vec3(
                 pow(max(emissive_tex_srgb.x, 0.0), 2.2),
                 pow(max(emissive_tex_srgb.y, 0.0), 2.2),
@@ -650,6 +647,13 @@ impl DrawPbr {
             live_id!(u_has_env_texture),
             &[self.has_env_texture],
         );
+        let uv_flip = if cfg!(target_arch = "wasm32") {
+            1.0
+        } else {
+            0.0
+        };
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_uv_flip), &[uv_flip]);
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(u_light_dir),
