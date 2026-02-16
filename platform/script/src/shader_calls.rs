@@ -1367,7 +1367,9 @@ impl ShaderFnCompiler {
                             .ok();
                         }
                         ShaderBackend::Hlsl => {
-                            // Use explicit LOD in HLSL so sampling is valid inside dynamic loops.
+                            // D3D11 uses DXGI_FORMAT_B8G8R8A8_UNORM, so the GPU already
+                            // interprets BGRA data as RGBA when sampling. No swizzle needed
+                            // for sample_as_bgra (same as Metal).
                             write!(
                                 s,
                                 "{}.SampleLevel(_s{}, {}, 0.0)",
@@ -1383,14 +1385,16 @@ impl ShaderFnCompiler {
                             match tex_type {
                                 TextureType::TextureCube | TextureType::TextureCubeArray => {
                                     if method_id == id!(sample_as_bgra) {
-                                        write!(s, "samplecube_bgra({}, {})", texture_expr, coord).ok();
+                                        write!(s, "samplecube_bgra({}, {})", texture_expr, coord)
+                                            .ok();
                                     } else {
                                         write!(s, "samplecube({}, {})", texture_expr, coord).ok();
                                     }
                                 }
                                 _ => {
                                     if method_id == id!(sample_as_bgra) {
-                                        write!(s, "sample2d_bgra({}, {})", texture_expr, coord).ok();
+                                        write!(s, "sample2d_bgra({}, {})", texture_expr, coord)
+                                            .ok();
                                     } else {
                                         write!(s, "sample2d({}, {})", texture_expr, coord).ok();
                                     }
@@ -1480,8 +1484,7 @@ impl ShaderFnCompiler {
                     if let Some(pod_ty) = pod_ty_opt {
                         let self_s_slice = if self_id == id!(self) {
                             // Rust and WGSL pass self as a pointer.
-                            if matches!(output.backend, ShaderBackend::Rust | ShaderBackend::Wgsl)
-                            {
+                            if matches!(output.backend, ShaderBackend::Rust | ShaderBackend::Wgsl) {
                                 "(*_self)"
                             } else {
                                 "_self"

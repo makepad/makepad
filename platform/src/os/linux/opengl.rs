@@ -116,9 +116,7 @@ impl DrawVars {
             #[cfg(use_vulkan)]
             {
                 match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
-                    vm,
-                    io_self,
-                    &output,
+                    vm, io_self, &output,
                 ) {
                     Ok(vk_shader) => compiled_vulkan_shader = Some(vk_shader),
                     Err(err) => {
@@ -558,15 +556,14 @@ impl Cx {
                         let gl = self.os.gl();
                         (gl.glActiveTexture)(gl_sys::TEXTURE0 + i as u32);
 
-                        let expected_target =
-                            if matches!(
-                                sh.mapping.textures[i].tex_type,
-                                TextureType::TextureCube | TextureType::TextureCubeArray
-                            ) {
-                                gl_sys::TEXTURE_CUBE_MAP
-                            } else {
-                                gl_sys::TEXTURE_2D
-                            };
+                        let expected_target = if matches!(
+                            sh.mapping.textures[i].tex_type,
+                            TextureType::TextureCube | TextureType::TextureCubeArray
+                        ) {
+                            gl_sys::TEXTURE_CUBE_MAP
+                        } else {
+                            gl_sys::TEXTURE_2D
+                        };
 
                         if let Some(texture) = &draw_call.texture_slots[i] {
                             let texture_id = texture.texture_id();
@@ -1571,39 +1568,31 @@ impl CxOsDrawShader {
             vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
             vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
-            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).zyxw;}
             ";
 
-        let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = if os_type
-            .has_xr_mode()
-        {
-            (
-            "#version 300 es",
-            // Vertex shader
-            "
+        let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) =
+            if os_type.has_xr_mode() {
+                (
+                    "#version 300 es",
+                    // Vertex shader
+                    "
             #define VIEW_ID 0
             #extension GL_OVR_multiview2 : require
             layout(num_views=2) in;
             ",
-            // Pixel shader
-            "
+                    // Pixel shader
+                    "
             #define VIEW_ID 0
             #extension GL_OVR_multiview2 : require
             ",
-            "",
-            "",
-            sampler_helpers
-        )
-        } else {
-            (
-            "#version 300 es",
-            "",
-            "",
-            "",
-            "",
-            sampler_helpers
-        )
-        };
+                    "",
+                    "",
+                    sampler_helpers,
+                )
+            } else {
+                ("#version 300 es", "", "", "", "", sampler_helpers)
+            };
 
         /*
         let transpose_impl = "
@@ -1877,11 +1866,11 @@ impl CxTexture {
                     (gl.glTexImage2D)(
                         *target,
                         0,
-                        gl_sys::BGRA as i32,
+                        gl_sys::RGBA as i32,
                         *width as i32,
                         *height as i32,
                         0,
-                        gl_sys::BGRA,
+                        gl_sys::RGBA,
                         gl_sys::UNSIGNED_BYTE,
                         face_ptr,
                     );
@@ -1921,25 +1910,7 @@ impl CxTexture {
                     data,
                     ..
                 } => {
-                    let (internal_format, format) = {
-                        #[cfg(ohos_sim)]
-                        {
-                            // The OHOS emulators only support RGBA texture formats, so we swap the `R` and `B` channels.
-                            // TODO: test this on *real* OHOS hardware, it may behave differently.
-                            for p in data.as_mut().unwrap() {
-                                let orig = *p;
-                                *p = *p & 0xFF00FF00
-                                    | (orig & 0x000000FF) << 16
-                                    | (orig & 0x00FF0000) >> 16;
-                            }
-                            (gl_sys::RGBA, gl_sys::RGBA)
-                        }
-                        #[cfg(not(ohos_sim))]
-                        {
-                            // The default for all other devices: use the BGRA texture format
-                            (gl_sys::BGRA, gl_sys::BGRA)
-                        }
-                    };
+                    let (internal_format, format) = (gl_sys::BGRA, gl_sys::BGRA);
 
                     (
                         *width,

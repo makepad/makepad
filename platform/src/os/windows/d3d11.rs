@@ -31,8 +31,7 @@ use crate::{
             Foundation::{HANDLE, HMODULE, S_FALSE},
             Graphics::{
                 Direct3D::{
-                    Fxc::D3DCompile,
-                    ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                    Fxc::D3DCompile, ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
                 },
                 Direct3D11::{
@@ -52,9 +51,9 @@ use crate::{
                     D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA,
                     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC,
                     D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
-                    D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_SDK_VERSION, D3D11_STENCIL_OP_REPLACE,
-                    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-                    D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+                    D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_SDK_VERSION,
+                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+                    D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
                     Common::{
@@ -230,8 +229,13 @@ impl Cx {
                                 d3d11_cx.context.VSSetConstantBuffers(index, Some(&buffers));
                                 d3d11_cx.context.PSSetConstantBuffers(index, Some(&buffers));
                             } else {
-                                d3d11_cx.context.VSSetConstantBuffers(index, None);
-                                d3d11_cx.context.PSSetConstantBuffers(index, None);
+                                let clear_buffers = [None];
+                                d3d11_cx
+                                    .context
+                                    .VSSetConstantBuffers(index, Some(&clear_buffers));
+                                d3d11_cx
+                                    .context
+                                    .PSSetConstantBuffers(index, Some(&clear_buffers));
                             }
                         }
                     }
@@ -279,9 +283,14 @@ impl Cx {
                     let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
                         texture.texture_id()
                     } else {
+                        let clear_srvs = [None];
                         unsafe {
-                            d3d11_cx.context.PSSetShaderResources(i as u32, None);
-                            d3d11_cx.context.VSSetShaderResources(i as u32, None);
+                            d3d11_cx
+                                .context
+                                .PSSetShaderResources(i as u32, Some(&clear_srvs));
+                            d3d11_cx
+                                .context
+                                .VSSetShaderResources(i as u32, Some(&clear_srvs));
                         }
                         continue;
                     };
@@ -302,8 +311,13 @@ impl Cx {
                                 .context
                                 .VSSetShaderResources(i as u32, Some(&[Some(sr.clone())]));
                         } else {
-                            d3d11_cx.context.PSSetShaderResources(i as u32, None);
-                            d3d11_cx.context.VSSetShaderResources(i as u32, None);
+                            let clear_srvs = [None];
+                            d3d11_cx
+                                .context
+                                .PSSetShaderResources(i as u32, Some(&clear_srvs));
+                            d3d11_cx
+                                .context
+                                .VSSetShaderResources(i as u32, Some(&clear_srvs));
                         }
                     }
                 }
@@ -430,10 +444,9 @@ impl Cx {
                 },
             }
             unsafe {
-                d3d11_cx.context.OMSetRenderTargets(
-                    Some(&color_textures),
-                    Some(&depth_stencil_view),
-                )
+                d3d11_cx
+                    .context
+                    .OMSetRenderTargets(Some(&color_textures), Some(&depth_stencil_view))
             }
         } else {
             unsafe {
@@ -709,8 +722,7 @@ pub struct D3d11Cx {
 impl D3d11Cx {
     pub fn new() -> D3d11Cx {
         unsafe {
-            let factory: IDXGIFactory2 =
-                CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).unwrap();
+            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).unwrap();
             let adapter = factory.EnumAdapters(0).unwrap();
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
@@ -950,7 +962,9 @@ impl CxTexture {
                 for face in 0..6usize {
                     let p_sys_mem = if let Some(data) = data.as_ref() {
                         if data.len() >= face_pixels.saturating_mul(6) {
-                            unsafe { data.as_ptr().add(face.saturating_mul(face_pixels)) as *const _ }
+                            unsafe {
+                                data.as_ptr().add(face.saturating_mul(face_pixels)) as *const _
+                            }
                         } else {
                             std::ptr::null()
                         }
@@ -1626,7 +1640,7 @@ impl CxOsDrawShader {
                     PCSTR(entry.as_ptr()),              // entry point
                     PCSTR(target.as_ptr()),             // target
                     D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY,
-                    0,                                  // flags2
+                    0, // flags2
                     &mut blob,
                     Some(&mut errors),
                 )
@@ -1778,7 +1792,8 @@ impl CxOsDrawShader {
             strings.push(format!("GEOM{}\0", index_to_char(geom_sem_index)));
             let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
             let mut slot_offset = 0usize;
-            for (semantic_chunk_index, chunk_slots) in slot_chunks(geom.slots).into_iter().enumerate()
+            for (semantic_chunk_index, chunk_slots) in
+                slot_chunks(geom.slots).into_iter().enumerate()
             {
                 layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
                     SemanticName: semantic_name,
@@ -1807,7 +1822,8 @@ impl CxOsDrawShader {
             strings.push(format!("INST{}\0", index_to_char(inst_sem_index)));
             let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
             let mut slot_offset = 0usize;
-            for (semantic_chunk_index, chunk_slots) in slot_chunks(inst.slots).into_iter().enumerate()
+            for (semantic_chunk_index, chunk_slots) in
+                slot_chunks(inst.slots).into_iter().enumerate()
             {
                 layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
                     SemanticName: semantic_name,
