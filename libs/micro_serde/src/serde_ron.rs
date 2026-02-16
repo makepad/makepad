@@ -743,7 +743,7 @@ where
 {
     fn ser_ron(&self, d: usize, s: &mut SerRonState) {
         s.out.push('(');
-        let last = self.len() - 1;
+        let last = self.len().saturating_sub(1);
         for (index, item) in self.iter().enumerate() {
             item.ser_ron(d + 1, s);
             if index != last {
