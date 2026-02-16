@@ -1,9 +1,6 @@
 use core::{fmt::Display, num::NonZeroU32, ops};
 
-use crate::{
-    arena::{Handle, HandleVec},
-    valid::MAX_TYPE_SIZE,
-};
+use crate::arena::{Handle, HandleVec};
 
 /// A newtype struct where its only valid values are powers of 2
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,7 +135,7 @@ pub enum LayoutErrorInner {
     InvalidStructMemberType(u32, Handle<crate::Type>),
     #[error("Type width must be a power of two")]
     NonPowerOfTwoWidth,
-    #[error("Size exceeds limit of {MAX_TYPE_SIZE} bytes")]
+    #[error("Size exceeds implementation limit")]
     TooLarge,
 }
 

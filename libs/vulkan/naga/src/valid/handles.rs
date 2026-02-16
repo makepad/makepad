@@ -873,6 +873,7 @@ pub enum InvalidHandleError {
     BadRange(#[from] BadRangeError),
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, thiserror::Error)]
 #[cfg_attr(test, derive(PartialEq))]
 #[error(

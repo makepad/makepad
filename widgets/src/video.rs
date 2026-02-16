@@ -605,7 +605,7 @@ impl Video {
     fn handle_secondary_click(
         &mut self,
         cx: &mut Cx,
-        scope: &mut Scope,
+        _scope: &mut Scope,
         abs: Vec2d,
         modifiers: KeyModifiers,
     ) {

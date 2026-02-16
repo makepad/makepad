@@ -38,6 +38,7 @@ impl<T> Range<T> {
 }
 
 // NOTE: Keep this diagnostic in sync with that of [`BadHandle`].
+#[allow(dead_code)]
 #[derive(Clone, Debug, thiserror::Error)]
 #[cfg_attr(test, derive(PartialEq))]
 #[error("Handle range {range:?} of {kind} is either not present, or inaccessible yet")]

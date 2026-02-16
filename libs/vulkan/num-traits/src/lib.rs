@@ -16,6 +16,7 @@
 
 #![doc(html_root_url = "https://docs.rs/num-traits/0.2")]
 #![deny(unconditional_recursion)]
+#![allow(unexpected_cfgs)]
 #![no_std]
 
 // Need to explicitly bring the crate in for inherent float methods

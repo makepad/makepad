@@ -4,7 +4,7 @@ use crate::prelude::*;
 use crate::vk;
 use crate::RawPtr;
 use alloc::vec::Vec;
-use core::mem;
+use core::mem::{self, size_of_val};
 
 impl crate::nv::ray_tracing::Device {
     /// <https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/vkCreateAccelerationStructureNV.html>
@@ -203,7 +203,7 @@ impl crate::nv::ray_tracing::Device {
         (self.fp.get_acceleration_structure_handle_nv)(
             self.handle,
             accel_struct,
-            mem::size_of_val(&handle),
+            size_of_val(&handle),
             handle.as_mut_ptr().cast(),
         )
         .assume_init_on_success(handle)
