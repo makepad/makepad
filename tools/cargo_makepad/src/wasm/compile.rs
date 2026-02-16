@@ -468,6 +468,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     println!("*.js => text/javascript");
     println!("*.ttf => application/ttf");
     println!("*.png => image/png");
+    println!("*.glb => data/binary");
     println!("*.jpg => image/jpg");
     println!("*.svg => image/svg+xml");
     println!("*.md => text/markdown");
@@ -602,6 +603,8 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                         "image/jpg"
                     } else if path.ends_with(".svg") {
                         "image/svg+xml"
+                    } else if path.ends_with(".glb") {
+                        "model/gltf-binary"
                     } else if path.ends_with(".md") {
                         "text/markdown"
                     } else if path.ends_with(".woff") {

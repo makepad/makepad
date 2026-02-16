@@ -568,6 +568,36 @@ export class WasmWebGL extends WasmWebBrowser {
         this.textures[args.texture_id] = gl_tex;
     }
 
+    FromWasmAllocTextureCube_BGRAu8_32(args) {
+        var gl = this.gl;
+        var gl_tex = this.textures[args.texture_id] || gl.createTexture()
+
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, gl_tex)
+        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE)
+
+        let face_size = args.width * args.height * 4;
+        let all_faces = new Uint8Array(this.memory.buffer, args.data.ptr, face_size * 6);
+        let faces = [
+            gl.TEXTURE_CUBE_MAP_POSITIVE_X,
+            gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
+            gl.TEXTURE_CUBE_MAP_POSITIVE_Y,
+            gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+            gl.TEXTURE_CUBE_MAP_POSITIVE_Z,
+            gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+        ];
+        for (let i = 0; i < 6; i++) {
+            let begin = i * face_size;
+            let end = begin + face_size;
+            let data_array = all_faces.subarray(begin, end);
+            gl.texImage2D(faces[i], 0, gl.RGBA, args.width, args.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data_array);
+        }
+        this.textures[args.texture_id] = gl_tex;
+    }
+
     FromWasmBeginRenderTexture(args) {
         if(this.xr !== undefined){
             this.xr.in_xr_pass = false;

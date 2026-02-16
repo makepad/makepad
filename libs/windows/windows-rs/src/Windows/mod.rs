@@ -21747,6 +21747,7 @@ impl core::ops::Not for D3D11_RESOURCE_MISC_FLAG {
         Self(self.0.not())
     }
 }
+pub const D3D11_RESOURCE_MISC_TEXTURECUBE: D3D11_RESOURCE_MISC_FLAG = D3D11_RESOURCE_MISC_FLAG(4i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct D3D11_RTV_DIMENSION(pub i32);
@@ -42486,6 +42487,12 @@ impl IRecordInfo_Vtbl {
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl windows_core::RuntimeName for IRecordInfo {}
+#[repr(C)]
+#[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
+pub struct PARAMDESCEX {
+    pub cBytes: u32,
+    pub varDefaultValue: super::Variant::VARIANT,
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PARAMFLAGS(pub u16);
@@ -42496,11 +42503,11 @@ pub struct PARAMDESC {
     pub pparamdescex: *mut PARAMDESCEX,
     pub wParamFlags: PARAMFLAGS,
 }
-#[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-pub struct PARAMDESCEX {
-    pub cBytes: u32,
-    pub varDefaultValue: super::Variant::VARIANT,
+impl Clone for PARAMDESCEX {
+    fn clone(&self) -> Self {
+        unsafe { core::mem::transmute_copy(self) }
+    }
 }
 impl PARAMFLAGS {
     pub const fn contains(&self, other: Self) -> bool {
@@ -42514,21 +42521,15 @@ impl Default for PARAMDESC {
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-impl Clone for PARAMDESCEX {
-    fn clone(&self) -> Self {
-        unsafe { core::mem::transmute_copy(self) }
+impl Default for PARAMDESCEX {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
     }
 }
 impl core::ops::BitOr for PARAMFLAGS {
     type Output = Self;
     fn bitor(self, other: Self) -> Self {
         Self(self.0 | other.0)
-    }
-}
-#[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-impl Default for PARAMDESCEX {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
     }
 }
 impl core::ops::BitAnd for PARAMFLAGS {

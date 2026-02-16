@@ -300,6 +300,21 @@ fn image_decode_debug_enabled() -> bool {
     })
 }
 
+#[inline]
+fn decode_timing_start() -> Option<Instant> {
+    if !image_decode_debug_enabled() {
+        return None;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+}
+
 fn headless_mode_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -391,7 +406,7 @@ fn spawn_decode_job(cx: &mut Cx, image_path: PathBuf, data: Arc<Vec<u8>>) {
         .as_mut()
         .unwrap()
         .execute_rev(image_path, move |image_path| {
-            let start = Instant::now();
+            let start = decode_timing_start();
             if image_decode_debug_enabled() {
                 log!(
                     "ImageCache: decode_start key={} bytes={}",
@@ -401,17 +416,20 @@ fn spawn_decode_job(cx: &mut Cx, image_path: PathBuf, data: Arc<Vec<u8>>) {
             }
             let result = decode_image_buffer(&image_path, &data);
             if image_decode_debug_enabled() {
-                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let status = match &result {
                     Ok(buffer) => format!("ok {}x{}", buffer.width, buffer.height),
                     Err(err) => format!("err {err}"),
                 };
-                log!(
-                    "ImageCache: decode_done key={} elapsed_ms={:.1} {}",
-                    image_path.display(),
-                    elapsed_ms,
-                    status
-                );
+                if let Some(start) = start {
+                    log!(
+                        "ImageCache: decode_done key={} elapsed_ms={:.1} {}",
+                        image_path.display(),
+                        start.elapsed().as_secs_f64() * 1000.0,
+                        status
+                    );
+                } else {
+                    log!("ImageCache: decode_done key={} {}", image_path.display(), status);
+                }
             }
             Cx::post_action(AsyncImageLoad {
                 image_path,
@@ -433,16 +451,25 @@ pub fn process_async_image_load(
     if let Ok(data) = result {
         let width = data.width;
         let height = data.height;
-        let upload_start = Instant::now();
+        let upload_start = decode_timing_start();
         let texture = data.into_new_texture(cx);
         if image_decode_debug_enabled() {
-            log!(
-                "ImageCache: gpu_commit key={} elapsed_ms={:.1} size={}x{}",
-                image_path.display(),
-                upload_start.elapsed().as_secs_f64() * 1000.0,
-                width,
-                height
-            );
+            if let Some(upload_start) = upload_start {
+                log!(
+                    "ImageCache: gpu_commit key={} elapsed_ms={:.1} size={}x{}",
+                    image_path.display(),
+                    upload_start.elapsed().as_secs_f64() * 1000.0,
+                    width,
+                    height
+                );
+            } else {
+                log!(
+                    "ImageCache: gpu_commit key={} size={}x{}",
+                    image_path.display(),
+                    width,
+                    height
+                );
+            }
         }
         cx.get_global::<ImageCache>()
             .map
