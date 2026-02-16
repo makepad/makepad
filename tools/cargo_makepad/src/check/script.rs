@@ -12,7 +12,7 @@ use makepad_script::{
     ScriptValue,
 };
 
-use super::cargo::{canonicalize_path, find_manifest_path, read_cargo_metadata, select_package};
+use super::cargo::{find_manifest_path, read_cargo_metadata, select_package};
 use super::diagnostic::{print_diagnostics, stderr_supports_color};
 use super::error::{CheckError, IssueKind, ScriptIssue};
 use super::parser::{
@@ -128,19 +128,6 @@ fn parse_script(code: &str, file_name: &str) -> Vec<ScriptIssue> {
     parse_script_full(code, file_name).issues
 }
 
-/// Count script_mod blocks per file.
-fn count_script_mod_blocks(blocks: &[ScriptBlock]) -> HashMap<PathBuf, usize> {
-    let mut counts = HashMap::new();
-    for block in blocks {
-        if block.macro_kind == ScriptMacroKind::ScriptMod {
-            let canon = canonicalize_path(&block.path);
-            *counts.entry(canon).or_insert(0) += 1;
-        }
-    }
-    counts
-}
-
-
 /// Run parse and semantic analysis checks for script blocks.
 fn run_parse_checks(blocks: &[ScriptBlock]) -> Vec<ScriptIssue> {
     let mut issues = Vec::new();
@@ -244,11 +231,6 @@ pub fn check_scripts(config: &CheckConfig) -> std::result::Result<ScriptCheckRes
     }
 
     let mut issues = Vec::<ScriptIssue>::new();
-    let mut runtime_checked_files = HashSet::<PathBuf>::new();
-
-    // Track script_mod counts per file
-    let script_mod_counts = count_script_mod_blocks(&blocks);
-
     // Check if widgets prelude is needed
     let needs_widgets_prelude = blocks.iter().any(|b| b.code.contains("mod.prelude.widgets"));
 
@@ -258,9 +240,8 @@ pub fn check_scripts(config: &CheckConfig) -> std::result::Result<ScriptCheckRes
     // Try runtime validation for script_mod blocks
     if has_script_mod {
         match try_runtime_validation(cwd, needs_widgets_prelude) {
-            Ok((runtime_issues, covered_files)) => {
+            Ok((runtime_issues, _covered_files)) => {
                 issues.extend(runtime_issues);
-                runtime_checked_files = covered_files;
             }
             Err(warning) => {
                 issues.push(ScriptIssue::fallback_warning(warning));
@@ -268,25 +249,12 @@ pub fn check_scripts(config: &CheckConfig) -> std::result::Result<ScriptCheckRes
         }
     }
 
-    // Run parse checks for blocks not covered by runtime validation
+    // Run parse checks for all blocks.
+    // Runtime validation only executes reachable paths, so parser/semantic checks
+    // must always run to catch static issues in dead/unreached code.
     let parse_blocks: Vec<ScriptBlock> = blocks
         .into_iter()
-        .filter(|block| {
-            match block.macro_kind {
-                // Always parse-check script! blocks
-                ScriptMacroKind::Script => true,
-                // Parse-check script_mod! if not runtime-checked, or if file has multiple blocks
-                ScriptMacroKind::ScriptMod => {
-                    let canon = canonicalize_path(&block.path);
-                    if !runtime_checked_files.contains(&canon) {
-                        true
-                    } else {
-                        // If file has multiple script_mod blocks, we need parse check too
-                        script_mod_counts.get(&canon).copied().unwrap_or(0) > 1
-                    }
-                }
-            }
-        })
+        .filter(|_block| true)
         .collect();
 
     let parse_issues = run_parse_checks(&parse_blocks);

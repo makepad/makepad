@@ -12,6 +12,7 @@ use super::script::ParseResult;
 
 /// A symbol definition in the script.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Symbol {
     /// The symbol name.
     pub name: String,
@@ -144,9 +145,47 @@ fn is_builtin(name: &str) -> bool {
     matches!(name,
         "print" | "println" | "log" | "mod" | "self" | "true" | "false" | "null" |
         "Math" | "String" | "Array" | "Object" | "Number" | "Boolean" |
-        "console" | "JSON" | "Date" | "RegExp" | "Error" |
+        "console" | "JSON" | "Date" | "RegExp" | "Error" | "ui" | "vm" | "theme" |
         "parseInt" | "parseFloat" | "isNaN" | "isFinite"
     )
+}
+
+fn prev_id_index(opcodes: &[makepad_script::ScriptValue], from: usize, ordinal: usize) -> Option<usize> {
+    let mut seen = 0usize;
+    for idx in (0..from).rev() {
+        if opcodes[idx].as_id().is_some() {
+            seen += 1;
+            if seen == ordinal {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn push_undefined_issue(
+    issues: &mut Vec<ScriptIssue>,
+    result: &ParseResult,
+    line_offset: u32,
+    table: &SymbolTable,
+    name: &str,
+    at_idx: usize,
+) {
+    let (line, col) = result.get_location(at_idx);
+    let all_names = table.all_names();
+    let suggestion = suggest_similar(name, &all_names);
+
+    let mut issue = ScriptIssue::new(
+        IssueKind::RuntimeError,
+        result.file.clone(),
+        line + line_offset,
+        col,
+        format!("undefined variable `{}`", name),
+    );
+    if let Some(s) = suggestion {
+        issue = issue.with_suggestion(format!("did you mean `{}`?", s));
+    }
+    issues.push(issue);
 }
 
 /// Analyze opcodes for semantic issues.
@@ -162,39 +201,123 @@ pub fn analyze_opcodes(result: &ParseResult, line_offset: u32) -> Vec<ScriptIssu
         if let Some((opcode, _args)) = value.as_opcode() {
             match opcode {
                 // Variable definitions
-                Opcode::LET_DYN | Opcode::LET_TYPED => {
-                    // Next value should be the variable name as LiveId
-                    if i + 1 < opcodes.len() {
-                        if let Some(name_id) = opcodes[i + 1].as_id() {
+                Opcode::LET_DYN
+                | Opcode::LET_TYPED
+                | Opcode::VAR_DYN
+                | Opcode::VAR_TYPED
+                | Opcode::FN_ARG_DYN
+                | Opcode::FN_ARG_TYPED => {
+                    // LET/VAR consume identifier from stack; in opcode stream the id is before the opcode.
+                    if let Some(def_idx) = prev_id_index(opcodes, i, 1) {
+                        if let Some(name_id) = opcodes[def_idx].as_id() {
                             let name = format!("{}", name_id);
-                            let (line, col) = result.get_location(i);
+                            let (line, col) = result.get_location(def_idx);
                             table.define(&name, line + line_offset, col);
                         }
                     }
                 }
-                // Variable references (dynamic)
-                Opcode::VAR_DYN | Opcode::VAR_TYPED => {
-                    if i + 1 < opcodes.len() {
-                        if let Some(name_id) = opcodes[i + 1].as_id() {
+                // FOR_1 introduces one loop variable. Infer it from ids before opcode.
+                Opcode::FOR_1 => {
+                    if let Some(source_idx) = prev_id_index(opcodes, i, 1) {
+                        if let Some(source_id) = opcodes[source_idx].as_id() {
+                            let source_name = format!("{}", source_id);
+                            if !table.is_defined(&source_name) && !is_builtin(&source_name) {
+                                push_undefined_issue(
+                                    &mut issues,
+                                    result,
+                                    line_offset,
+                                    &table,
+                                    &source_name,
+                                    source_idx,
+                                );
+                            } else {
+                                table.mark_used(&source_name);
+                            }
+                        }
+                    }
+                    if let Some(def_idx) = prev_id_index(opcodes, i, 2) {
+                        if let Some(name_id) = opcodes[def_idx].as_id() {
+                            let name = format!("{}", name_id);
+                            let (line, col) = result.get_location(def_idx);
+                            table.define(&name, line + line_offset, col);
+                        }
+                    }
+                }
+                // FOR_2 introduces two loop variables (`for k, v in source`).
+                Opcode::FOR_2 => {
+                    if let Some(source_idx) = prev_id_index(opcodes, i, 1) {
+                        if let Some(source_id) = opcodes[source_idx].as_id() {
+                            let source_name = format!("{}", source_id);
+                            if !table.is_defined(&source_name) && !is_builtin(&source_name) {
+                                push_undefined_issue(
+                                    &mut issues,
+                                    result,
+                                    line_offset,
+                                    &table,
+                                    &source_name,
+                                    source_idx,
+                                );
+                            } else {
+                                table.mark_used(&source_name);
+                            }
+                        }
+                    }
+                    for ord in [3, 2] {
+                        if let Some(def_idx) = prev_id_index(opcodes, i, ord) {
+                            if let Some(name_id) = opcodes[def_idx].as_id() {
+                                let name = format!("{}", name_id);
+                                let (line, col) = result.get_location(def_idx);
+                                table.define(&name, line + line_offset, col);
+                            }
+                        }
+                    }
+                }
+                // FOR_3 introduces three loop variables (`for i, k, v in source`).
+                Opcode::FOR_3 => {
+                    if let Some(source_idx) = prev_id_index(opcodes, i, 1) {
+                        if let Some(source_id) = opcodes[source_idx].as_id() {
+                            let source_name = format!("{}", source_id);
+                            if !table.is_defined(&source_name) && !is_builtin(&source_name) {
+                                push_undefined_issue(
+                                    &mut issues,
+                                    result,
+                                    line_offset,
+                                    &table,
+                                    &source_name,
+                                    source_idx,
+                                );
+                            } else {
+                                table.mark_used(&source_name);
+                            }
+                        }
+                    }
+                    for ord in [4, 3, 2] {
+                        if let Some(def_idx) = prev_id_index(opcodes, i, ord) {
+                            if let Some(name_id) = opcodes[def_idx].as_id() {
+                                let name = format!("{}", name_id);
+                                let (line, col) = result.get_location(def_idx);
+                                table.define(&name, line + line_offset, col);
+                            }
+                        }
+                    }
+                }
+                // Field read/write roots use ids on stack; detect undefined root identifiers.
+                Opcode::FIELD | Opcode::FIELD_NIL => {
+                    // Only handle direct `id.field` reads where the two previous entries are ids.
+                    // This avoids false positives on chained access where the "object" comes from
+                    // a prior FIELD opcode result (e.g. `mod.prelude.widgets`).
+                    if i >= 2 && opcodes[i - 1].as_id().is_some() && opcodes[i - 2].as_id().is_some() {
+                        if let Some(name_id) = opcodes[i - 2].as_id() {
                             let name = format!("{}", name_id);
                             if !table.is_defined(&name) && !is_builtin(&name) {
-                                let (line, col) = result.get_location(i);
-                                let all_names = table.all_names();
-                                let suggestion = suggest_similar(&name, &all_names);
-
-                                let mut issue = ScriptIssue::new(
-                                    IssueKind::RuntimeError,
-                                    result.file.clone(),
-                                    line + line_offset,
-                                    col,
-                                    format!("undefined variable `{}`", name),
+                                push_undefined_issue(
+                                    &mut issues,
+                                    result,
+                                    line_offset,
+                                    &table,
+                                    &name,
+                                    i - 2,
                                 );
-
-                                if let Some(s) = suggestion {
-                                    issue = issue.with_suggestion(format!("did you mean `{}`?", s));
-                                }
-
-                                issues.push(issue);
                             } else {
                                 table.mark_used(&name);
                             }
@@ -206,22 +329,9 @@ pub fn analyze_opcodes(result: &ParseResult, line_offset: u32) -> Vec<ScriptIssu
                     table.push_scope();
                 }
                 Opcode::RETURN => {
-                    // Check for unused variables when exiting scope
-                    let unused = table.pop_scope();
-                    for sym in unused {
-                        if !sym.used && !sym.name.starts_with('_') {
-                            issues.push(
-                                ScriptIssue::new(
-                                    IssueKind::FallbackWarning,
-                                    result.file.clone(),
-                                    sym.line,
-                                    sym.column,
-                                    format!("unused variable `{}`", sym.name),
-                                )
-                                .with_suggestion(format!("prefix with underscore: `_{}`", sym.name))
-                            );
-                        }
-                    }
+                    // Scope pop for consistency; unused-variable warnings are intentionally disabled
+                    // because opcode-only analysis currently yields too many false positives.
+                    let _ = table.pop_scope();
                 }
                 _ => {}
             }
@@ -229,23 +339,8 @@ pub fn analyze_opcodes(result: &ParseResult, line_offset: u32) -> Vec<ScriptIssu
         i += 1;
     }
 
-    // Check global scope for unused variables at the end
-    while table.scopes.len() > 0 {
-        let unused = table.pop_scope();
-        for sym in unused {
-            if !sym.used && !sym.name.starts_with('_') {
-                issues.push(
-                    ScriptIssue::new(
-                        IssueKind::FallbackWarning,
-                        result.file.clone(),
-                        sym.line,
-                        sym.column,
-                        format!("unused variable `{}`", sym.name),
-                    )
-                    .with_suggestion(format!("prefix with underscore: `_{}`", sym.name))
-                );
-            }
-        }
+    while !table.scopes.is_empty() {
+        let _ = table.pop_scope();
     }
 
     issues
@@ -336,5 +431,70 @@ mod tests {
 
         // Run analysis - should not panic
         let _issues = analyze_opcodes(&result, 0);
+    }
+
+    #[test]
+    fn test_for_loop_typo_reports_undefined_field_root() {
+        use crate::check::script::parse_script_full;
+
+        let code = r#"
+            let todos = []
+            for todoo in todos {
+                if !todo.done { }
+            }
+        "#;
+
+        let result = parse_script_full(code, "test.splash");
+        let issues = analyze_opcodes(&result, 0);
+
+        assert!(
+            issues.iter().any(|i| i.message.contains("undefined variable `todo`")),
+            "Expected undefined variable `todo` issue, got: {:?}",
+            issues
+        );
+    }
+
+    #[test]
+    fn test_for_loop_bindings_are_recognized() {
+        use crate::check::script::parse_script_full;
+
+        let code = r#"
+            let todos = []
+            for i, todo in todos {
+                if !todo.done { }
+            }
+        "#;
+
+        let result = parse_script_full(code, "test.splash");
+        let issues = analyze_opcodes(&result, 0);
+        let undefined: Vec<_> = issues
+            .iter()
+            .filter(|i| i.message.contains("undefined variable"))
+            .collect();
+        assert!(
+            undefined.is_empty(),
+            "Expected no undefined-variable issues, got: {:?}",
+            undefined
+        );
+    }
+
+    #[test]
+    fn test_for_loop_source_typo_reports_undefined() {
+        use crate::check::script::parse_script_full;
+
+        let code = r#"
+            let todos = []
+            for todo in todoss {
+                if !todo.done { }
+            }
+        "#;
+
+        let result = parse_script_full(code, "test.splash");
+        let issues = analyze_opcodes(&result, 0);
+        assert!(
+            issues.iter().any(|i| i.message.contains("undefined variable `todoss`")),
+            "Expected undefined variable `todoss` issue, got: {:?}",
+            issues
+        );
     }
 }
