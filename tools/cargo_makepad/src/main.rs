@@ -32,14 +32,22 @@ fn show_help() {
     println!();
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
-    println!("       --strip                                   Strip the wasm file of debug symbols");
-    println!("       --brotli                                  Use brotli to compress the wasm file");
+    println!(
+        "       --strip                                   Strip the wasm file of debug symbols"
+    );
+    println!(
+        "       --brotli                                  Use brotli to compress the wasm file"
+    );
     println!("       --bindgen                                 Enable wasm-bindgen compatibility");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();
-    println!("    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup");
-    println!("    apple list                                   Lists all certificates/profiles/devices");
+    println!(
+        "    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup"
+    );
+    println!(
+        "    apple list                                   Lists all certificates/profiles/devices"
+    );
     println!("    apple <ios|tvos> [options] run-sim <cargo args>      Runs the project on the aarch64 simulator");
     println!("    apple <ios|tvos> [options] run-device <cargo args>   Runs the project on a real device");
     println!(" * Note: in order for Makepad to be able to install an ios application on a real device, a provisioning");
@@ -50,7 +58,9 @@ fn show_help() {
     println!();
     println!("    [options]:");
     println!();
-    println!("       --stable                                  Use the stable compiler (not nightly)");
+    println!(
+        "       --stable                                  Use the stable compiler (not nightly)"
+    );
     println!("       --org=<ORGANISATION_NAME>                 The organisation name to use for signing/provisioning");
     println!("       --app=<PRODUCT_NAME>                      The product name to use for signing/provisioning");
     println!("       --profile=<PROFILE_NAME>                  The profile name to use for signing/provisioning");
@@ -69,7 +79,9 @@ fn show_help() {
     println!("                                                 Be sure to add this also to install-toolchain");
     println!("       --package-name='PACKAGE_NAME'             The package name");
     println!("       --app-label='APP_LABEL'                   The app name/label");
-    println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
+    println!(
+        "       --sdk-path=./android_33_sdk               The path to read/write the android SDK"
+    );
     println!("       --full-ndk                                Install the full NDK prebuilts for the selected Host OS (default is a minimal subset).");
     println!("                                                 This is required for building apps that compile native code as part of the Rust build process.");
     println!("       --keep-sdk-sources                        Keep downloaded SDK source files (default is to remove them).");
@@ -83,7 +95,9 @@ fn show_help() {
     println!();
     println!("Open Harmony commands:");
     println!();
-    println!("    ohos [options] install-toolchain             Install the toolchain needed with rustup");
+    println!(
+        "    ohos [options] install-toolchain             Install the toolchain needed with rustup"
+    );
     println!("    ohos [options] deveco <cargo args>           Create a DevEco project for Open Harmony OS");
     println!("    ohos [options] build <cargo args>            Build  DevEco project and output the Hap package for the Open Harmony OS");
     println!("    ohos [options] run <cargo args>              Run the Hap package on a open harmony device via hdc");
@@ -135,24 +149,9 @@ fn main() -> Result<(), Cow<'static, str>> {
     }
     let result = match args[0].as_ref() {
         "android" => handle_android(&args[1..]),
-        "wasm" => {
-            if let Err(e) = handle_wasm(&args[1..]) {
-                println!("Got error: {}", e);
-            }
-            Ok(())
-        }
-        "apple" => {
-            if let Err(e) = handle_apple(&args[1..]) {
-                println!("Got error: {}", e);
-            }
-            Ok(())
-        }
-        "ohos" => {
-            if let Err(e) = handle_open_harmony(&args[1..]) {
-                println!("Got error: {}", e);
-            }
-            Ok(())
-        }
+        "wasm" => handle_wasm(&args[1..]),
+        "apple" => handle_apple(&args[1..]),
+        "ohos" => handle_open_harmony(&args[1..]),
         "check" => handle_check(&args[1..]),
         unsupported => {
             show_help();
