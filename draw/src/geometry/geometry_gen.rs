@@ -54,37 +54,13 @@ pub struct VectorVertex {
 #[derive(Clone, Script, ScriptHook)]
 pub struct PbrVertex {
     #[live]
-    pub x: f32,
+    pub pos_nx: Vec4f, // xyz + nx
     #[live]
-    pub y: f32,
+    pub ny_nz_uv: Vec4f, // ny nz u v
     #[live]
-    pub z: f32,
+    pub color: Vec4f, // rgba
     #[live]
-    pub nx: f32,
-    #[live]
-    pub ny: f32,
-    #[live]
-    pub nz: f32,
-    #[live]
-    pub u: f32,
-    #[live]
-    pub v: f32,
-    #[live]
-    pub color_r: f32,
-    #[live]
-    pub color_g: f32,
-    #[live]
-    pub color_b: f32,
-    #[live]
-    pub color_a: f32,
-    #[live]
-    pub tx: f32,
-    #[live]
-    pub ty: f32,
-    #[live]
-    pub tz: f32,
-    #[live]
-    pub tw: f32,
+    pub tangent: Vec4f, // tangent xyz + handedness
 }
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {

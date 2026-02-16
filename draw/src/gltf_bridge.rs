@@ -7,8 +7,8 @@ use crate::{
     shader::draw_pbr::{DrawPbr, PbrMeshHandle},
 };
 use makepad_gltf::{
-    decode_mesh_primitive, load_gltf_from_path, load_image_bytes, DecodedPrimitive, GltfDocument,
-    GltfError, GltfNode, LoadedGltf,
+    decode_mesh_primitive, load_gltf_from_bytes, load_gltf_from_path, load_image_bytes,
+    DecodedPrimitive, GltfDocument, GltfError, GltfNode, LoadedGltf,
 };
 use makepad_platform::*;
 use std::{
@@ -234,6 +234,19 @@ pub struct GltfRenderer {
 }
 
 impl GltfRenderer {
+    pub fn load_from_bytes(
+        draw: &mut DrawPbr,
+        cx: &mut Cx2d,
+        bytes: &[u8],
+        source_path: Option<&Path>,
+    ) -> Result<Self, GltfError> {
+        let base_dir = source_path.and_then(|path| path.parent());
+        let mut loaded = load_gltf_from_bytes(bytes, base_dir)?;
+        loaded.source_path = source_path.map(|path| path.to_path_buf());
+        loaded.base_dir = base_dir.map(|path| path.to_path_buf());
+        Self::from_loaded(draw, cx, &loaded)
+    }
+
     pub fn load_from_path(
         draw: &mut DrawPbr,
         cx: &mut Cx2d,
