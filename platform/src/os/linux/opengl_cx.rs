@@ -68,38 +68,122 @@ impl OpenglCx {
             "can't bind EGL_OPENGL_ES_API",
         );
 
-        // Choose framebuffer configuration.
-        let cfg_attribs = [
-            egl_sys::EGL_RED_SIZE,
-            8,
-            egl_sys::EGL_GREEN_SIZE,
-            8,
-            egl_sys::EGL_BLUE_SIZE,
-            8,
-            egl_sys::EGL_ALPHA_SIZE,
-            8,
-            // egl_sys::EGL_DEPTH_SIZE,
-            // 24,
-            // egl_sys::EGL_STENCIL_SIZE,
-            // 8,
-            egl_sys::EGL_RENDERABLE_TYPE,
-            egl_sys::EGL_OPENGL_ES3_BIT_KHR,
-            egl_sys::EGL_NONE,
+        // Choose framebuffer configuration with depth support for window rendering.
+        // Keep a fallback chain because Linux drivers vary widely in advertised configs.
+        let cfg_attrib_sets: &[&[u32]] = &[
+            &[
+                egl_sys::EGL_RED_SIZE,
+                8,
+                egl_sys::EGL_GREEN_SIZE,
+                8,
+                egl_sys::EGL_BLUE_SIZE,
+                8,
+                egl_sys::EGL_ALPHA_SIZE,
+                8,
+                egl_sys::EGL_DEPTH_SIZE,
+                24,
+                egl_sys::EGL_STENCIL_SIZE,
+                8,
+                egl_sys::EGL_SURFACE_TYPE,
+                egl_sys::EGL_WINDOW_BIT,
+                egl_sys::EGL_RENDERABLE_TYPE,
+                egl_sys::EGL_OPENGL_ES3_BIT_KHR,
+                egl_sys::EGL_NONE,
+            ],
+            &[
+                egl_sys::EGL_RED_SIZE,
+                8,
+                egl_sys::EGL_GREEN_SIZE,
+                8,
+                egl_sys::EGL_BLUE_SIZE,
+                8,
+                egl_sys::EGL_ALPHA_SIZE,
+                8,
+                egl_sys::EGL_DEPTH_SIZE,
+                24,
+                egl_sys::EGL_SURFACE_TYPE,
+                egl_sys::EGL_WINDOW_BIT,
+                egl_sys::EGL_RENDERABLE_TYPE,
+                egl_sys::EGL_OPENGL_ES3_BIT_KHR,
+                egl_sys::EGL_NONE,
+            ],
+            &[
+                egl_sys::EGL_RED_SIZE,
+                8,
+                egl_sys::EGL_GREEN_SIZE,
+                8,
+                egl_sys::EGL_BLUE_SIZE,
+                8,
+                egl_sys::EGL_ALPHA_SIZE,
+                8,
+                egl_sys::EGL_DEPTH_SIZE,
+                16,
+                egl_sys::EGL_SURFACE_TYPE,
+                egl_sys::EGL_WINDOW_BIT,
+                egl_sys::EGL_RENDERABLE_TYPE,
+                egl_sys::EGL_OPENGL_ES3_BIT_KHR,
+                egl_sys::EGL_NONE,
+            ],
+            // Last resort (old behavior).
+            &[
+                egl_sys::EGL_RED_SIZE,
+                8,
+                egl_sys::EGL_GREEN_SIZE,
+                8,
+                egl_sys::EGL_BLUE_SIZE,
+                8,
+                egl_sys::EGL_ALPHA_SIZE,
+                8,
+                egl_sys::EGL_SURFACE_TYPE,
+                egl_sys::EGL_WINDOW_BIT,
+                egl_sys::EGL_RENDERABLE_TYPE,
+                egl_sys::EGL_OPENGL_ES3_BIT_KHR,
+                egl_sys::EGL_NONE,
+            ],
         ];
 
         let mut egl_config = 0 as egl_sys::EGLConfig;
         let mut matched_egl_configs = 0;
-        assert!(
-            (libegl.eglChooseConfig.unwrap())(
+        for cfg_attribs in cfg_attrib_sets {
+            matched_egl_configs = 0;
+            if (libegl.eglChooseConfig.unwrap())(
                 egl_display,
                 cfg_attribs.as_ptr() as _,
                 &mut egl_config,
                 1,
-                &mut matched_egl_configs
+                &mut matched_egl_configs,
             ) != 0
-                && matched_egl_configs == 1,
-            "eglChooseConfig failed",
-        );
+                && matched_egl_configs == 1
+            {
+                break;
+            }
+        }
+        assert!(matched_egl_configs == 1, "eglChooseConfig failed");
+
+        // Sanity-check selected depth/stencil sizes so z-testing on the default framebuffer works.
+        let mut depth_bits = 0;
+        let mut stencil_bits = 0;
+        unsafe {
+            (libegl.eglGetConfigAttrib.unwrap())(
+                egl_display,
+                egl_config,
+                egl_sys::EGL_DEPTH_SIZE as _,
+                &mut depth_bits,
+            );
+            (libegl.eglGetConfigAttrib.unwrap())(
+                egl_display,
+                egl_config,
+                egl_sys::EGL_STENCIL_SIZE as _,
+                &mut stencil_bits,
+            );
+        }
+        if depth_bits <= 0 {
+            crate::warning!(
+                "Selected EGL config has no depth buffer (depth_bits={}, stencil_bits={})",
+                depth_bits,
+                stencil_bits
+            );
+        }
 
         // Create EGL context.
         let ctx_attribs = [
