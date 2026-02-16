@@ -15,7 +15,6 @@ script_mod! {
             draw_depth: -99.0
         }
         draw_pbr +: {
-            debug: true
             light_dir: vec3(0.35, 0.8, 0.45)
             light_color: vec3(1.0, 1.0, 1.0)
             ambient: 0.22
