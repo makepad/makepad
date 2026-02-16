@@ -4,7 +4,7 @@ use crate::event::LongPressEvent;
 #[allow(unused)]
 use makepad_jni_sys as jni_sys;
 #[cfg(use_vulkan)]
-use self::super::android_vulkan::CxAndroidVulkan;
+use self::super::super::vulkan::CxVulkan;
 
 use {
     self::super::super::{
@@ -244,7 +244,7 @@ impl Cx {
                             crate::error!("Android Vulkan surface update failed: {err}");
                         }
                     } else {
-                        match CxAndroidVulkan::new(window, width_u32, height_u32) {
+                        match CxVulkan::new(window, width_u32, height_u32) {
                             Ok(vulkan) => {
                                 crate::log!("Android Vulkan backend initialized");
                                 self.os.vulkan = Some(vulkan);
@@ -973,7 +973,7 @@ impl Cx {
 
             #[cfg(use_vulkan)]
             {
-                match CxAndroidVulkan::new(
+                match CxVulkan::new(
                     window,
                     cx.os.display_size.x.max(1.0) as u32,
                     cx.os.display_size.y.max(1.0) as u32,
@@ -1533,7 +1533,7 @@ pub struct CxOs {
     pub(crate) timers: PollTimers,
     pub(crate) display: Option<CxAndroidDisplay>,
     #[cfg(use_vulkan)]
-    pub(crate) vulkan: Option<CxAndroidVulkan>,
+    pub(crate) vulkan: Option<CxVulkan>,
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,

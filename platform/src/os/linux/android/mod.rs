@@ -9,7 +9,5 @@ pub mod android_keycodes;
 pub mod android_media;
 pub mod android_midi;
 pub mod android_web_socket;
-#[cfg(use_vulkan)]
-pub mod android_vulkan;
 pub mod ndk_sys;
 pub mod ndk_utils;

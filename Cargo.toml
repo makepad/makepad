@@ -50,18 +50,18 @@ workspace.exclude = [
     "libs/smallvec",
     "libs/ttf-parser",
     "libs/unicase",
-    "libs/unicode-bidi",
-    "libs/unicode-bidi-mirroring",
-    "libs/unicode-ccc",
-    "libs/unicode-linebreak",
-    "libs/unicode-properties",
-    "libs/unicode-script",
-    "libs/unicode-segmentation",
+    "libs/unicode/unicode-bidi",
+    "libs/unicode/unicode-bidi-mirroring",
+    "libs/unicode/unicode-ccc",
+    "libs/unicode/unicode-linebreak",
+    "libs/unicode/unicode-properties",
+    "libs/unicode/unicode-script",
+    "libs/unicode/unicode-segmentation",
     # vendored zune libs (doctests reference original crate names)
-    "libs/zune-core",
-    "libs/zune-inflate",
-    "libs/zune-jpeg",
-    "libs/zune-png",
+    "libs/zune/zune-core",
+    "libs/zune/zune-inflate",
+    "libs/zune/zune-jpeg",
+    "libs/zune/zune-png",
     # platform-specific libs
     "libs/windows/windows-collections",
     "libs/windows/windows-core",
@@ -83,6 +83,36 @@ workspace.exclude = [
 
 workspace.resolver = "2"
 #debug = true
+
+[patch.crates-io]
+arrayvec = { path = "libs/vulkan/arrayvec" }
+ash = { path = "libs/vulkan/ash" }
+bit-set = { path = "libs/vulkan/bit-set" }
+bit-vec = { path = "libs/vulkan/bit-vec" }
+bitflags = { path = "libs/bitflags" }
+cfg-if = { path = "libs/cfg-if" }
+cfg_aliases = { path = "libs/vulkan/cfg_aliases" }
+equivalent = { path = "libs/vulkan/equivalent" }
+foldhash = { path = "libs/vulkan/foldhash" }
+hashbrown = { path = "libs/vulkan/hashbrown" }
+hexf-parse = { path = "libs/vulkan/hexf-parse" }
+indexmap = { path = "libs/vulkan/indexmap" }
+libloading = { path = "libs/vulkan/libloading" }
+log = { path = "libs/vulkan/log" }
+naga = { path = "libs/vulkan/naga" }
+num-traits = { path = "libs/vulkan/num-traits" }
+once_cell = { path = "libs/vulkan/once_cell" }
+downcast-rs = { path = "libs/linux/downcast-rs" }
+scoped-tls = { path = "libs/linux/scoped-tls" }
+pkg-config = { path = "libs/linux/pkg-config" }
+smallvec = { path = "libs/smallvec" }
+rustc-hash = { path = "libs/vulkan/rustc-hash" }
+spirv = { path = "libs/vulkan/spirv" }
+thiserror = { path = "libs/vulkan/thiserror" }
+thiserror-impl = { path = "libs/vulkan/thiserror-impl" }
+unicode-ident = { path = "libs/vulkan/unicode-ident" }
+windows-link = { path = "libs/windows/windows-link" }
+zerocopy = { path = "libs/vulkan/zerocopy" }
 
 [profile.small]
 inherits = "release"

@@ -6,4 +6,4 @@ description = "Minimal PDF parser for Makepad - text, vector graphics, and image
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-makepad-zune-inflate = { path = "../zune-inflate", version = "0.2.0", default-features = false, features = ["zlib"] }
+makepad-zune-inflate = { path = "../zune/zune-inflate", version = "0.2.0", default-features = false, features = ["zlib"] }

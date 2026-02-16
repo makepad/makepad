@@ -114,56 +114,6 @@ impl DrawVars {
 
             #[cfg(use_vulkan)]
             {
-                static LOG_ONCE: std::sync::Once = std::sync::Once::new();
-                LOG_ONCE.call_once(|| {
-                    crate::log!(
-                        "MAKEPAD=vulkan active: running WGSL->SPIR-V shader compilation path"
-                    );
-                });
-                static IO_LOG_ONCE: std::sync::Once = std::sync::Once::new();
-                let dyn_io = output
-                    .io
-                    .iter()
-                    .filter(|io| {
-                        matches!(
-                            io.kind,
-                            crate::makepad_script::shader::ShaderIoKind::DynInstance
-                        )
-                    })
-                    .count();
-                let rust_io = output
-                    .io
-                    .iter()
-                    .filter(|io| {
-                        matches!(
-                            io.kind,
-                            crate::makepad_script::shader::ShaderIoKind::RustInstance
-                        )
-                    })
-                    .count();
-                IO_LOG_ONCE.call_once(|| {
-                    crate::log!(
-                        "Vulkan source IO stats: dyn_io={}, rust_io={}, total_io={}",
-                        dyn_io,
-                        rust_io,
-                        output.io.len()
-                    );
-                });
-                static DYN_IO_LOG_ONCE: std::sync::Once = std::sync::Once::new();
-                if dyn_io > 0 {
-                    DYN_IO_LOG_ONCE.call_once(|| {
-                        crate::log!(
-                            "Vulkan source IO stats (dyn shader): dyn_io={}, rust_io={}, total_io={}",
-                            dyn_io,
-                            rust_io,
-                            output.io.len()
-                        );
-                    });
-                }
-            }
-
-            #[cfg(use_vulkan)]
-            {
                 match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
                     vm,
                     io_self,
