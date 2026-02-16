@@ -1,7 +1,9 @@
 use crate::makepad_code_editor::draw_selection::DrawSelection;
+use crate::makepad_widgets::text::geom::Point;
+use crate::makepad_widgets::text::rasterizer::RasterizedGlyph;
 use crate::makepad_widgets::*;
 use makepad_terminal_core::{Color, CursorShape, Pty, StyleFlags, TermKeyCode, Terminal};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -121,6 +123,14 @@ struct DrawTerminalCursor {
     focus: f32,
     #[live(1.0)]
     border_width: f32,
+}
+
+#[derive(Clone, Copy)]
+struct CachedTerminalGlyph {
+    rasterized: RasterizedGlyph,
+    font_size_in_lpxs: f32,
+    x_offset_in_lpxs: f32,
+    baseline_offset_in_lpxs: f32,
 }
 
 struct EnterCoalesce {
@@ -262,6 +272,14 @@ pub struct StudioTerminal {
     cell_height: f64,
     #[rust]
     cell_offset_y: f64,
+    #[rust]
+    glyph_cache: HashMap<char, CachedTerminalGlyph>,
+    #[rust]
+    glyph_cache_font_size: f32,
+    #[rust]
+    glyph_cache_font_scale: f32,
+    #[rust]
+    glyph_cache_dpi_factor: f64,
 
     // Selection state
     #[rust]
@@ -294,6 +312,52 @@ impl StudioTerminal {
     /// Slightly longer than coalesce timeout to cover the frame(s) where
     /// partial data is being processed.
     const CURSOR_HOLD_TIMEOUT: Duration = Duration::from_millis(150);
+
+    fn invalidate_glyph_cache_if_needed(
+        glyph_cache: &mut HashMap<char, CachedTerminalGlyph>,
+        glyph_cache_font_size: &mut f32,
+        glyph_cache_font_scale: &mut f32,
+        glyph_cache_dpi_factor: &mut f64,
+        draw_text: &DrawText,
+        dpi_factor: f64,
+    ) {
+        let font_size = draw_text.text_style.font_size;
+        let font_scale = draw_text.font_scale;
+        if glyph_cache_font_size.to_bits() == font_size.to_bits()
+            && glyph_cache_font_scale.to_bits() == font_scale.to_bits()
+            && glyph_cache_dpi_factor.to_bits() == dpi_factor.to_bits()
+        {
+            return;
+        }
+        glyph_cache.clear();
+        *glyph_cache_font_size = font_size;
+        *glyph_cache_font_scale = font_scale;
+        *glyph_cache_dpi_factor = dpi_factor;
+    }
+
+    fn cached_terminal_glyph(
+        draw_text: &mut DrawText,
+        glyph_cache: &mut HashMap<char, CachedTerminalGlyph>,
+        cx: &mut Cx2d,
+        ch: char,
+    ) -> Option<CachedTerminalGlyph> {
+        if let Some(cached) = glyph_cache.get(&ch) {
+            return Some(*cached);
+        }
+
+        let mut utf8 = [0u8; 4];
+        let text = ch.encode_utf8(&mut utf8);
+        let run = draw_text.prepare_single_line_run(cx, text)?;
+        let glyph = run.glyphs.first()?;
+        let cached = CachedTerminalGlyph {
+            rasterized: glyph.rasterized,
+            font_size_in_lpxs: glyph.font_size_in_lpxs,
+            x_offset_in_lpxs: glyph.pen_x_in_lpxs + glyph.offset_x_in_lpxs,
+            baseline_offset_in_lpxs: run.ascender_in_lpxs,
+        };
+        glyph_cache.insert(ch, cached);
+        Some(cached)
+    }
 
     fn scale_channel(v: u8, factor: f64) -> u8 {
         ((v as f64 * factor).round()).clamp(0.0, 255.0) as u8
@@ -721,10 +785,7 @@ impl StudioTerminal {
                     // Not settled yet — keep buffering, don't process.
                     return;
                 }
-                if scan.saw_newline
-                    && !scan.saw_visible_after_newline
-                    && now < coal.hard_deadline
-                {
+                if scan.saw_newline && !scan.saw_visible_after_newline && now < coal.hard_deadline {
                     // We've already advanced to a new line, but there is still
                     // no visible content for it. Keep coalescing so we don't
                     // briefly reveal an empty scrolled line.
@@ -1114,6 +1175,14 @@ impl StudioTerminal {
         self.draw_cursor.new_draw_call(cx);
         self.draw_text.new_draw_call(cx);
         self.draw_decor.new_draw_call(cx);
+        Self::invalidate_glyph_cache_if_needed(
+            &mut self.glyph_cache,
+            &mut self.glyph_cache_font_size,
+            &mut self.glyph_cache_font_scale,
+            &mut self.glyph_cache_dpi_factor,
+            &self.draw_text,
+            cx.current_dpi_factor(),
+        );
 
         // Draw selection highlight
         let selection = self.selection_ordered();
@@ -1214,6 +1283,7 @@ impl StudioTerminal {
 
         // Draw cells — interleaved bg/text/decor appends to predefined layers.
         let total_draw_rows = rows.saturating_add(1);
+        self.draw_text.begin_many_instances(cx);
         for row in 0..total_draw_rows {
             let virtual_row = top_row + row;
             let row_slice = screen.row_slice_virtual(virtual_row);
@@ -1242,25 +1312,55 @@ impl StudioTerminal {
                 let blink_hidden = flags.has(StyleFlags::BLINK) && !self.cursor_blink_on;
                 let ch = cell.codepoint;
                 if ch != ' ' && ch != '\0' && !blink_hidden && !flags.has(StyleFlags::INVISIBLE) {
-                    let mut s = [0u8; 4];
-                    let text = ch.encode_utf8(&mut s);
-                    self.draw_text.color = vec4(
+                    let color = vec4(
                         fg_r as f32 / 255.0,
                         fg_g as f32 / 255.0,
                         fg_b as f32 / 255.0,
                         1.0,
                     );
-                    self.draw_text.draw_abs(
+                    if let Some(glyph) = Self::cached_terminal_glyph(
+                        &mut self.draw_text,
+                        &mut self.glyph_cache,
                         cx,
-                        dvec2(x, y + self.cell_offset_y + self.text_y_offset),
-                        text,
-                    );
-                    if flags.has(StyleFlags::BOLD) {
+                        ch,
+                    ) {
+                        let baseline_y = y
+                            + self.cell_offset_y
+                            + self.text_y_offset
+                            + glyph.baseline_offset_in_lpxs as f64;
+                        let origin_x = x + glyph.x_offset_in_lpxs as f64;
+                        self.draw_text.draw_rasterized_glyph_abs(
+                            cx,
+                            Point::new(origin_x as f32, baseline_y as f32),
+                            glyph.font_size_in_lpxs,
+                            glyph.rasterized,
+                            color,
+                        );
+                        if flags.has(StyleFlags::BOLD) {
+                            self.draw_text.draw_rasterized_glyph_abs(
+                                cx,
+                                Point::new((origin_x + 0.6) as f32, baseline_y as f32),
+                                glyph.font_size_in_lpxs,
+                                glyph.rasterized,
+                                color,
+                            );
+                        }
+                    } else {
+                        let mut s = [0u8; 4];
+                        let text = ch.encode_utf8(&mut s);
+                        self.draw_text.color = color;
                         self.draw_text.draw_abs(
                             cx,
-                            dvec2(x + 0.6, y + self.cell_offset_y + self.text_y_offset),
+                            dvec2(x, y + self.cell_offset_y + self.text_y_offset),
                             text,
                         );
+                        if flags.has(StyleFlags::BOLD) {
+                            self.draw_text.draw_abs(
+                                cx,
+                                dvec2(x + 0.6, y + self.cell_offset_y + self.text_y_offset),
+                                text,
+                            );
+                        }
                     }
                 }
 
@@ -1315,6 +1415,7 @@ impl StudioTerminal {
                 }
             }
         }
+        self.draw_text.end_many_instances(cx);
     }
 
     fn update_terminal_size(&mut self, _cx: &mut Cx2d) {

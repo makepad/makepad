@@ -132,7 +132,6 @@ impl Writer {
     /// or something like a `Default` impl that returns an oddly-initialized
     /// `Writer`, which is worse.
     fn reset(&mut self) {
-        use super::recyclable::Recyclable;
         use core::mem::take;
 
         let mut id_gen = IdGenerator::default();
@@ -158,24 +157,38 @@ impl Writer {
             gl450_ext_inst_id,
 
             // Recycled:
-            capabilities_used: take(&mut self.capabilities_used).recycle(),
-            extensions_used: take(&mut self.extensions_used).recycle(),
-            physical_layout: self.physical_layout.clone().recycle(),
-            logical_layout: take(&mut self.logical_layout).recycle(),
-            debugs: take(&mut self.debugs).recycle(),
-            annotations: take(&mut self.annotations).recycle(),
-            lookup_type: take(&mut self.lookup_type).recycle(),
-            lookup_function: take(&mut self.lookup_function).recycle(),
-            lookup_function_type: take(&mut self.lookup_function_type).recycle(),
-            wrapped_functions: take(&mut self.wrapped_functions).recycle(),
-            constant_ids: take(&mut self.constant_ids).recycle(),
-            cached_constants: take(&mut self.cached_constants).recycle(),
-            global_variables: take(&mut self.global_variables).recycle(),
-            saved_cached: take(&mut self.saved_cached).recycle(),
-            temp_list: take(&mut self.temp_list).recycle(),
+            capabilities_used: super::recyclable::Recyclable::recycle(take(
+                &mut self.capabilities_used,
+            )),
+            extensions_used: super::recyclable::Recyclable::recycle(take(
+                &mut self.extensions_used,
+            )),
+            physical_layout: super::recyclable::Recyclable::recycle(self.physical_layout.clone()),
+            logical_layout: super::recyclable::Recyclable::recycle(take(&mut self.logical_layout)),
+            debugs: super::recyclable::Recyclable::recycle(take(&mut self.debugs)),
+            annotations: super::recyclable::Recyclable::recycle(take(&mut self.annotations)),
+            lookup_type: super::recyclable::Recyclable::recycle(take(&mut self.lookup_type)),
+            lookup_function: super::recyclable::Recyclable::recycle(take(&mut self.lookup_function)),
+            lookup_function_type: super::recyclable::Recyclable::recycle(take(
+                &mut self.lookup_function_type,
+            )),
+            wrapped_functions: super::recyclable::Recyclable::recycle(take(
+                &mut self.wrapped_functions,
+            )),
+            constant_ids: super::recyclable::Recyclable::recycle(take(&mut self.constant_ids)),
+            cached_constants: super::recyclable::Recyclable::recycle(take(
+                &mut self.cached_constants,
+            )),
+            global_variables: super::recyclable::Recyclable::recycle(take(
+                &mut self.global_variables,
+            )),
+            saved_cached: super::recyclable::Recyclable::recycle(take(&mut self.saved_cached)),
+            temp_list: super::recyclable::Recyclable::recycle(take(&mut self.temp_list)),
             ray_get_candidate_intersection_function: None,
             ray_get_committed_intersection_function: None,
-            io_f16_polyfills: take(&mut self.io_f16_polyfills).recycle(),
+            io_f16_polyfills: super::recyclable::Recyclable::recycle(take(
+                &mut self.io_f16_polyfills,
+            )),
         };
 
         *self = fresh;

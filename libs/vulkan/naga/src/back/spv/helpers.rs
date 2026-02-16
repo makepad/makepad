@@ -123,6 +123,7 @@ pub fn global_needs_wrapper(ir_module: &crate::Module, var: &crate::GlobalVariab
 }
 
 ///HACK: this is taken from std unstable, remove it when std's floor_char_boundary is stable
+#[allow(dead_code)]
 trait U8Internal {
     fn is_utf8_char_boundary(&self) -> bool;
 }
@@ -134,6 +135,7 @@ impl U8Internal for u8 {
     }
 }
 
+#[allow(dead_code)]
 trait StrUnstable {
     fn floor_char_boundary(&self, index: usize) -> usize;
 }

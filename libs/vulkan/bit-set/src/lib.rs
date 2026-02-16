@@ -464,7 +464,7 @@ impl<B: BitBlock> BitSet<B> {
     /// }
     /// ```
     #[inline]
-    pub fn iter(&self) -> Iter<B> {
+    pub fn iter(&self) -> Iter<'_, B> {
         Iter(BlockIter::from_blocks(self.bit_vec.blocks()))
     }
 

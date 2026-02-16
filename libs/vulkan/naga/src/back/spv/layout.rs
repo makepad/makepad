@@ -70,17 +70,19 @@ impl LogicalLayout {
 impl super::recyclable::Recyclable for LogicalLayout {
     fn recycle(self) -> Self {
         Self {
-            capabilities: self.capabilities.recycle(),
-            extensions: self.extensions.recycle(),
-            ext_inst_imports: self.ext_inst_imports.recycle(),
-            memory_model: self.memory_model.recycle(),
-            entry_points: self.entry_points.recycle(),
-            execution_modes: self.execution_modes.recycle(),
-            debugs: self.debugs.recycle(),
-            annotations: self.annotations.recycle(),
-            declarations: self.declarations.recycle(),
-            function_declarations: self.function_declarations.recycle(),
-            function_definitions: self.function_definitions.recycle(),
+            capabilities: super::recyclable::Recyclable::recycle(self.capabilities),
+            extensions: super::recyclable::Recyclable::recycle(self.extensions),
+            ext_inst_imports: super::recyclable::Recyclable::recycle(self.ext_inst_imports),
+            memory_model: super::recyclable::Recyclable::recycle(self.memory_model),
+            entry_points: super::recyclable::Recyclable::recycle(self.entry_points),
+            execution_modes: super::recyclable::Recyclable::recycle(self.execution_modes),
+            debugs: super::recyclable::Recyclable::recycle(self.debugs),
+            annotations: super::recyclable::Recyclable::recycle(self.annotations),
+            declarations: super::recyclable::Recyclable::recycle(self.declarations),
+            function_declarations: super::recyclable::Recyclable::recycle(
+                self.function_declarations,
+            ),
+            function_definitions: super::recyclable::Recyclable::recycle(self.function_definitions),
         }
     }
 }

@@ -541,6 +541,7 @@ pub struct CxOpenXrSession {
 }
 
 #[derive(SerBin, DeBin)]
+#[allow(dead_code)]
 struct AnchorAdvertisement {
     group_uuid: XrUuid,
     anchor_uuid: XrUuid,

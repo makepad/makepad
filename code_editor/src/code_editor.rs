@@ -499,10 +499,14 @@ impl CodeEditor {
         self.draw_cursor.begin_many_instances(cx);
 
         if self.show_gutter {
+            self.draw_gutter.begin_many_instances(cx);
             self.draw_gutter(cx, session);
+            self.draw_gutter.end_many_instances(cx);
         }
         self.draw_selection_layer(cx, session);
+        self.draw_text.begin_many_instances(cx);
         self.draw_text_layer(cx, session);
+        self.draw_text.end_many_instances(cx);
         self.draw_indent_guide_layer(cx, session);
         self.draw_decoration_layer(cx, session);
         self.draw_selection_layer(cx, session);

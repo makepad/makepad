@@ -107,6 +107,9 @@ impl Cx {
             self.handle_script_signals();
             self.call_event_handler(&Event::Signal);
         }
+        if SignalToUI::check_and_clear_action_signal() {
+            self.handle_action_receiver();
+        }
 
         // Video updates
         // let to_dispatch = self.get_video_updates();
@@ -542,6 +545,9 @@ impl Cx {
                 }
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
+                }
+                CxOsOp::Quit => {
+                    self.os.quit = true;
                 }
                 CxOsOp::ShowTextIME(_area, _pos) => {
                     let _ = self.os.arkts_obj.as_mut().unwrap().call_js_function(

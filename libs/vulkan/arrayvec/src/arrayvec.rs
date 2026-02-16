@@ -602,7 +602,7 @@ impl<T, const CAP: usize> ArrayVec<T, CAP> {
     /// assert_eq!(&v1[..], &[3]);
     /// assert_eq!(&v2[..], &[1, 2]);
     /// ```
-    pub fn drain<R>(&mut self, range: R) -> Drain<T, CAP>
+    pub fn drain<R>(&mut self, range: R) -> Drain<'_, T, CAP>
         where R: RangeBounds<usize>
     {
         // Memory safety
@@ -629,7 +629,7 @@ impl<T, const CAP: usize> ArrayVec<T, CAP> {
         self.drain_range(start, end)
     }
 
-    fn drain_range(&mut self, start: usize, end: usize) -> Drain<T, CAP>
+    fn drain_range(&mut self, start: usize, end: usize) -> Drain<'_, T, CAP>
     {
         let len = self.len();
 
