@@ -32,6 +32,39 @@ script_mod! {
         occlusion_texture: texture_2d(float)
         emissive_texture: texture_2d(float)
         env_texture: texture_cube(float)
+        model_c0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        model_c1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+        model_c2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        model_c3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        view_c0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        view_c1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+        view_c2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        view_c3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        proj_c0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        proj_c1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+        proj_c2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        proj_c3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
+        depth_range: uniform(vec2(0.0, 1.0))
+        depth_forward_bias: uniform(float(0.0))
+        u_base_color_factor: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        u_metallic_factor: uniform(float(1.0))
+        u_roughness_factor: uniform(float(1.0))
+        u_emissive_factor: uniform(vec3(0.0, 0.0, 0.0))
+        u_normal_scale: uniform(float(1.0))
+        u_occlusion_strength: uniform(float(1.0))
+        u_has_base_color_texture: uniform(float(0.0))
+        u_has_metal_roughness_texture: uniform(float(0.0))
+        u_has_normal_texture: uniform(float(0.0))
+        u_has_occlusion_texture: uniform(float(0.0))
+        u_has_emissive_texture: uniform(float(0.0))
+        u_has_env_texture: uniform(float(0.0))
+        u_light_dir: uniform(vec3(0.3, 0.7, 1.0))
+        u_light_color: uniform(vec3(1.0, 1.0, 1.0))
+        u_ambient: uniform(float(0.15))
+        u_spec_strength: uniform(float(0.9))
+        u_env_intensity: uniform(float(1.8))
+        u_camera_pos: uniform(vec3(0.0, 0.0, 5.0))
 
         v_world: varying(vec3f)
         v_normal: varying(vec3f)
@@ -41,10 +74,9 @@ script_mod! {
         v_clip_ndc: varying(vec2f)
 
         vertex: fn() {
-            let local_pos = vec4(self.geom.x, self.geom.y, self.geom.z, 1.0);
-            let local_n = vec4(self.geom.nx, self.geom.ny, self.geom.nz, 0.0);
+            let local_pos = vec4(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z, 1.0);
+            let local_n = vec4(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y, 0.0);
 
-            // Column-major model transform from instance fields.
             let model_pos =
                 self.model_c0 * local_pos.x +
                 self.model_c1 * local_pos.y +
@@ -54,7 +86,7 @@ script_mod! {
                 self.model_c0 * local_n.x +
                 self.model_c1 * local_n.y +
                 self.model_c2 * local_n.z;
-            let local_t = vec4(self.geom.tx, self.geom.ty, self.geom.tz, 0.0);
+            let local_t = vec4(self.geom.tangent.x, self.geom.tangent.y, self.geom.tangent.z, 0.0);
             let model_t =
                 self.model_c0 * local_t.x +
                 self.model_c1 * local_t.y +
@@ -62,16 +94,11 @@ script_mod! {
 
             self.v_world = vec3(model_pos.x, model_pos.y, model_pos.z);
             self.v_normal = vec3(model_n.x, model_n.y, model_n.z);
-            self.v_tangent = vec4(model_t.x, model_t.y, model_t.z, self.geom.tw);
-            self.v_uv = vec2(self.geom.u, self.geom.v);
-            self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
+            self.v_tangent = vec4(model_t.x, model_t.y, model_t.z, self.geom.tangent.w);
+            self.v_uv = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w);
+            self.v_color = self.geom.color;
 
-            let world = vec4(
-                model_pos.x
-                model_pos.y
-                model_pos.z + self.draw_depth + self.draw_call.zbias
-                1.
-            );
+            let world = vec4(model_pos.x, model_pos.y, model_pos.z + self.draw_call.zbias, 1.0);
             let view_pos =
                 self.view_c0 * world.x +
                 self.view_c1 * world.y +
@@ -111,7 +138,7 @@ script_mod! {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
 
-            let base = self.base_color_factor * self.v_color;
+            let base = self.u_base_color_factor * self.v_color;
             let tex_srgb = self.base_color_texture.sample_as_bgra(self.v_uv);
             let tex_linear = vec4(
                 pow(max(tex_srgb.x, 0.0), 2.2),
@@ -122,11 +149,11 @@ script_mod! {
             let tex_mix = mix(
                 vec4(1.0, 1.0, 1.0, 1.0),
                 tex_linear,
-                clamp(self.has_base_color_texture, 0.0, 1.0)
+                clamp(self.u_has_base_color_texture, 0.0, 1.0)
             );
             let albedo = base * tex_mix;
             let mr_tex = self.metallic_roughness_texture.sample_as_bgra(self.v_uv);
-            let mr_mix = mix(vec4(1.0, 1.0, 1.0, 1.0), mr_tex, clamp(self.has_metal_roughness_texture, 0.0, 1.0));
+            let mr_mix = mix(vec4(1.0, 1.0, 1.0, 1.0), mr_tex, clamp(self.u_has_metal_roughness_texture, 0.0, 1.0));
 
             let n_geom = normalize(self.v_normal);
             let tangent_world = self.v_tangent.xyz;
@@ -144,22 +171,22 @@ script_mod! {
             let n_tex_s = self.normal_texture.sample_as_bgra(self.v_uv);
             let n_tex = vec3(
                 n_tex_s.x * 2.0 - 1.0,
-                (n_tex_s.y * 2.0 - 1.0) * self.normal_scale,
+                (n_tex_s.y * 2.0 - 1.0) * self.u_normal_scale,
                 n_tex_s.z * 2.0 - 1.0
             );
             let n_tangent = normalize(t * n_tex.x + b * n_tex.y + n_geom * n_tex.z);
-            let n = normalize(mix(n_geom, n_tangent, clamp(self.has_normal_texture, 0.0, 1.0)));
+            let n = normalize(mix(n_geom, n_tangent, clamp(self.u_has_normal_texture, 0.0, 1.0)));
 
-            let l = normalize(self.light_dir);
-            let v = normalize(self.camera_pos - self.v_world);
+            let l = normalize(self.u_light_dir);
+            let v = normalize(self.u_camera_pos - self.v_world);
             let h = normalize(l + v);
             let ndotl = max(dot(n, l), 0.0);
             let ndotv = max(dot(n, v), 0.0001);
             let ndoth = max(dot(n, h), 0.0001);
             let vdoth = max(dot(v, h), 0.0);
 
-            let rough = clamp(self.roughness_factor * mr_mix.y, 0.045, 1.0);
-            let metal = clamp(self.metallic_factor * mr_mix.z, 0.0, 1.0);
+            let rough = clamp(self.u_roughness_factor * mr_mix.y, 0.045, 1.0);
+            let metal = clamp(self.u_metallic_factor * mr_mix.z, 0.0, 1.0);
 
             let a = rough * rough;
             let a2 = a * a;
@@ -177,19 +204,19 @@ script_mod! {
             let f = f0 + (vec3(1.0, 1.0, 1.0) - f0) * fresnel;
 
             let spec = (d * g) / max(4.0 * ndotv * ndotl, 0.0001);
-            let specular = f * spec * self.spec_strength;
+            let specular = f * spec * self.u_spec_strength;
 
             let kd = (vec3(1.0, 1.0, 1.0) - f) * (1.0 - metal);
             let diffuse = kd * albedo.xyz * (1.0 / 3.14159265);
 
             let occlusion_tex = self.occlusion_texture.sample_as_bgra(self.v_uv);
-            let occ_val = mix(1.0, occlusion_tex.x, clamp(self.occlusion_strength, 0.0, 1.0));
-            let occlusion = mix(1.0, occ_val, clamp(self.has_occlusion_texture, 0.0, 1.0));
+            let occ_val = mix(1.0, occlusion_tex.x, clamp(self.u_occlusion_strength, 0.0, 1.0));
+            let occlusion = mix(1.0, occ_val, clamp(self.u_has_occlusion_texture, 0.0, 1.0));
 
             let ndotv_env = clamp(dot(n, v), 0.0, 1.0);
             let refl = normalize(n * (2.0 * ndotv_env) - v);
             let refl_rough = normalize(mix(refl, n, rough * rough));
-            let env_has = clamp(self.has_env_texture, 0.0, 1.0);
+            let env_has = clamp(self.u_has_env_texture, 0.0, 1.0);
 
             let env_t_spec = clamp(refl_rough.y * 0.5 + 0.5, 0.0, 1.0);
             let env_t_diff = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
@@ -210,8 +237,8 @@ script_mod! {
             let env_brdf = vec2(-1.04, 1.04) * a004 + r.zw;
             let env_fresnel = f0 * env_brdf.x + vec3(env_brdf.y, env_brdf.y, env_brdf.y);
 
-            let ibl_diffuse = kd * albedo.xyz * env_diff_color * self.env_intensity;
-            let env_spec = env_spec_color * env_fresnel * self.spec_strength * self.env_intensity;
+            let ibl_diffuse = kd * albedo.xyz * env_diff_color * self.u_env_intensity;
+            let env_spec = env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity;
 
             let emissive_tex_srgb = self.emissive_texture.sample_as_bgra(self.v_uv);
             let emissive_tex = vec3(
@@ -222,12 +249,12 @@ script_mod! {
             let emissive_src = mix(
                 vec3(1.0, 1.0, 1.0),
                 emissive_tex,
-                clamp(self.has_emissive_texture, 0.0, 1.0)
+                clamp(self.u_has_emissive_texture, 0.0, 1.0)
             );
-            let emissive = self.emissive_factor * emissive_src;
+            let emissive = self.u_emissive_factor * emissive_src;
 
-            let lit = (diffuse + specular) * self.light_color * ndotl;
-            let ambient = albedo.xyz * self.ambient;
+            let lit = (diffuse + specular) * self.u_light_color * ndotl;
+            let ambient = albedo.xyz * self.u_ambient;
             let indirect_diffuse = (ambient + ibl_diffuse) * occlusion;
             let indirect_spec = env_spec * mix(1.0, occlusion, 0.35);
             let color_linear = lit + indirect_diffuse + indirect_spec + emissive;
@@ -270,29 +297,29 @@ pub struct DrawPbr {
     pub draw_vars: DrawVars,
     #[live]
     pub draw_clip: Vec4f,
-    #[live(vec4(1.0, 0.0, 0.0, 0.0))]
+    #[rust(vec4(1.0, 0.0, 0.0, 0.0))]
     pub model_c0: Vec4f,
-    #[live(vec4(0.0, 1.0, 0.0, 0.0))]
+    #[rust(vec4(0.0, 1.0, 0.0, 0.0))]
     pub model_c1: Vec4f,
-    #[live(vec4(0.0, 0.0, 1.0, 0.0))]
+    #[rust(vec4(0.0, 0.0, 1.0, 0.0))]
     pub model_c2: Vec4f,
-    #[live(vec4(0.0, 0.0, 0.0, 1.0))]
+    #[rust(vec4(0.0, 0.0, 0.0, 1.0))]
     pub model_c3: Vec4f,
-    #[live(vec4(1.0, 0.0, 0.0, 0.0))]
+    #[rust(vec4(1.0, 0.0, 0.0, 0.0))]
     pub view_c0: Vec4f,
-    #[live(vec4(0.0, 1.0, 0.0, 0.0))]
+    #[rust(vec4(0.0, 1.0, 0.0, 0.0))]
     pub view_c1: Vec4f,
-    #[live(vec4(0.0, 0.0, 1.0, 0.0))]
+    #[rust(vec4(0.0, 0.0, 1.0, 0.0))]
     pub view_c2: Vec4f,
-    #[live(vec4(0.0, 0.0, 0.0, 1.0))]
+    #[rust(vec4(0.0, 0.0, 0.0, 1.0))]
     pub view_c3: Vec4f,
-    #[live(vec4(1.0, 0.0, 0.0, 0.0))]
+    #[rust(vec4(1.0, 0.0, 0.0, 0.0))]
     pub proj_c0: Vec4f,
-    #[live(vec4(0.0, 1.0, 0.0, 0.0))]
+    #[rust(vec4(0.0, 1.0, 0.0, 0.0))]
     pub proj_c1: Vec4f,
-    #[live(vec4(0.0, 0.0, 1.0, 0.0))]
+    #[rust(vec4(0.0, 0.0, 1.0, 0.0))]
     pub proj_c2: Vec4f,
-    #[live(vec4(0.0, 0.0, 0.0, 1.0))]
+    #[rust(vec4(0.0, 0.0, 0.0, 1.0))]
     pub proj_c3: Vec4f,
     #[live(vec4(1.0, 1.0, 1.0, 1.0))]
     pub base_color_factor: Vec4f,
@@ -318,15 +345,13 @@ pub struct DrawPbr {
     pub has_emissive_texture: f32,
     #[live(0.0)]
     pub has_env_texture: f32,
-    #[live(vec4(-1.0, -1.0, 1.0, 1.0))]
+    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
     pub clip_ndc: Vec4f,
-    #[live(vec2(0.0, 1.0))]
+    #[rust(vec2(0.0, 1.0))]
     pub depth_range: Vec2f,
     /// Positive values move the 3D content forward in depth (towards 0.0).
-    #[live(0.0)]
+    #[rust(0.0)]
     pub depth_forward_bias: f32,
-    #[live(0.0)]
-    pub draw_depth: f32,
     #[live(vec3(0.3, 0.7, 1.0))]
     pub light_dir: Vec3f,
     #[live(vec3(1.0, 1.0, 1.0))]
@@ -357,7 +382,6 @@ impl DrawPbr {
         self.emissive_factor = vec3(0.0, 0.0, 0.0);
         self.normal_scale = 1.0;
         self.occlusion_strength = 1.0;
-        self.draw_depth = 0.0;
         self.set_base_color_texture(None);
         self.set_metal_roughness_texture(None);
         self.set_normal_texture(None);
@@ -368,30 +392,10 @@ impl DrawPbr {
 
     pub fn set_transform(&mut self, transform: Mat4f) {
         self.cur_transform = transform;
-        self.model_c0 = vec4(
-            transform.v[0],
-            transform.v[1],
-            transform.v[2],
-            transform.v[3],
-        );
-        self.model_c1 = vec4(
-            transform.v[4],
-            transform.v[5],
-            transform.v[6],
-            transform.v[7],
-        );
-        self.model_c2 = vec4(
-            transform.v[8],
-            transform.v[9],
-            transform.v[10],
-            transform.v[11],
-        );
-        self.model_c3 = vec4(
-            transform.v[12],
-            transform.v[13],
-            transform.v[14],
-            transform.v[15],
-        );
+        self.model_c0 = vec4(transform.v[0], transform.v[1], transform.v[2], transform.v[3]);
+        self.model_c1 = vec4(transform.v[4], transform.v[5], transform.v[6], transform.v[7]);
+        self.model_c2 = vec4(transform.v[8], transform.v[9], transform.v[10], transform.v[11]);
+        self.model_c3 = vec4(transform.v[12], transform.v[13], transform.v[14], transform.v[15]);
     }
 
     pub fn set_view_projection(&mut self, view: Mat4f, projection: Mat4f) {
@@ -504,6 +508,171 @@ impl DrawPbr {
         self.depth_forward_bias = bias.clamp(0.0, 1.0);
     }
 
+    fn apply_draw_uniforms(&mut self, cx: &mut Cx2d) {
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(model_c0),
+            &[self.model_c0.x, self.model_c0.y, self.model_c0.z, self.model_c0.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(model_c1),
+            &[self.model_c1.x, self.model_c1.y, self.model_c1.z, self.model_c1.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(model_c2),
+            &[self.model_c2.x, self.model_c2.y, self.model_c2.z, self.model_c2.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(model_c3),
+            &[self.model_c3.x, self.model_c3.y, self.model_c3.z, self.model_c3.w],
+        );
+
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(view_c0),
+            &[self.view_c0.x, self.view_c0.y, self.view_c0.z, self.view_c0.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(view_c1),
+            &[self.view_c1.x, self.view_c1.y, self.view_c1.z, self.view_c1.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(view_c2),
+            &[self.view_c2.x, self.view_c2.y, self.view_c2.z, self.view_c2.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(view_c3),
+            &[self.view_c3.x, self.view_c3.y, self.view_c3.z, self.view_c3.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(proj_c0),
+            &[self.proj_c0.x, self.proj_c0.y, self.proj_c0.z, self.proj_c0.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(proj_c1),
+            &[self.proj_c1.x, self.proj_c1.y, self.proj_c1.z, self.proj_c1.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(proj_c2),
+            &[self.proj_c2.x, self.proj_c2.y, self.proj_c2.z, self.proj_c2.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(proj_c3),
+            &[self.proj_c3.x, self.proj_c3.y, self.proj_c3.z, self.proj_c3.w],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(clip_ndc),
+            &[
+                self.clip_ndc.x,
+                self.clip_ndc.y,
+                self.clip_ndc.z,
+                self.clip_ndc.w,
+            ],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(depth_range),
+            &[self.depth_range.x, self.depth_range.y],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(depth_forward_bias),
+            &[self.depth_forward_bias],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_base_color_factor),
+            &[
+                self.base_color_factor.x,
+                self.base_color_factor.y,
+                self.base_color_factor.z,
+                self.base_color_factor.w,
+            ],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_metallic_factor), &[self.metallic_factor]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_roughness_factor), &[self.roughness_factor]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_emissive_factor),
+            &[
+                self.emissive_factor.x,
+                self.emissive_factor.y,
+                self.emissive_factor.z,
+            ],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_normal_scale), &[self.normal_scale]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_occlusion_strength),
+            &[self.occlusion_strength],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_has_base_color_texture),
+            &[self.has_base_color_texture],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_has_metal_roughness_texture),
+            &[self.has_metal_roughness_texture],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_has_normal_texture),
+            &[self.has_normal_texture],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_has_occlusion_texture),
+            &[self.has_occlusion_texture],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_has_emissive_texture),
+            &[self.has_emissive_texture],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_has_env_texture),
+            &[self.has_env_texture],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_light_dir),
+            &[self.light_dir.x, self.light_dir.y, self.light_dir.z],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_light_color),
+            &[self.light_color.x, self.light_color.y, self.light_color.z],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_ambient), &[self.ambient]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_spec_strength), &[self.spec_strength]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_env_intensity), &[self.env_intensity]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_camera_pos),
+            &[self.camera_pos.x, self.camera_pos.y, self.camera_pos.z],
+        );
+    }
+
     pub fn add_decoded_primitive(&mut self, primitive: &DecodedPrimitive) -> Result<(), String> {
         self.add_indexed_triangles(
             &primitive.positions,
@@ -589,34 +758,16 @@ impl DrawPbr {
         let path = path.as_ref();
         let bytes = std::fs::read(path)
             .map_err(|err| format!("failed reading env map {}: {err}", path.display()))?;
+        self.load_default_env_equirect_from_bytes(cx, &bytes, Some(path))
+    }
 
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase());
-        let image = match ext.as_deref() {
-            Some("jpg") | Some("jpeg") => {
-                ImageBuffer::from_jpg(&bytes).map_err(|err| format!("jpg decode failed: {err}"))?
-            }
-            Some("png") => {
-                ImageBuffer::from_png(&bytes).map_err(|err| format!("png decode failed: {err}"))?
-            }
-            _ => {
-                if bytes.starts_with(&[0xFF, 0xD8]) {
-                    ImageBuffer::from_jpg(&bytes)
-                        .map_err(|err| format!("jpg decode failed: {err}"))?
-                } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-                    ImageBuffer::from_png(&bytes)
-                        .map_err(|err| format!("png decode failed: {err}"))?
-                } else {
-                    return Err(format!(
-                        "unsupported env map format for {}",
-                        path.display()
-                    ));
-                }
-            }
-        };
-
+    pub fn load_default_env_equirect_from_bytes(
+        &mut self,
+        cx: &mut Cx2d,
+        bytes: &[u8],
+        path_hint: Option<&Path>,
+    ) -> Result<(), String> {
+        let image = Self::decode_env_equirect(bytes, path_hint)?;
         let size = 512usize;
         let data = Self::build_env_cube_from_equirect(&image, size);
         let texture = Texture::new_with_format(
@@ -630,6 +781,33 @@ impl DrawPbr {
         );
         self.default_env_texture = Some(texture);
         Ok(())
+    }
+
+    fn decode_env_equirect(bytes: &[u8], path_hint: Option<&Path>) -> Result<ImageBuffer, String> {
+        let ext = path_hint
+            .and_then(|path| path.extension())
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase());
+        match ext.as_deref() {
+            Some("jpg") | Some("jpeg") => {
+                ImageBuffer::from_jpg(bytes).map_err(|err| format!("jpg decode failed: {err}"))
+            }
+            Some("png") => {
+                ImageBuffer::from_png(bytes).map_err(|err| format!("png decode failed: {err}"))
+            }
+            _ => {
+                if bytes.starts_with(&[0xFF, 0xD8]) {
+                    ImageBuffer::from_jpg(bytes).map_err(|err| format!("jpg decode failed: {err}"))
+                } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    ImageBuffer::from_png(bytes).map_err(|err| format!("png decode failed: {err}"))
+                } else {
+                    let source = path_hint
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "<memory>".to_string());
+                    Err(format!("unsupported env map format for {source}"))
+                }
+            }
+        }
     }
 
     pub fn default_env_texture(&mut self, cx: &mut Cx2d) -> Texture {
@@ -780,6 +958,7 @@ impl DrawPbr {
             .get(mesh)
             .ok_or_else(|| format!("invalid mesh handle {mesh}"))?;
         self.draw_vars.geometry_id = Some(geom.geometry_id());
+        self.apply_draw_uniforms(cx);
         if cx.new_draw_call(&self.draw_vars).is_none() {
             return Err("DrawPbr draw call failed (shader not initialized)".to_string());
         }
@@ -805,6 +984,7 @@ impl DrawPbr {
         let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
         geom.update(cx.cx.cx, indices, verts);
         self.draw_vars.geometry_id = Some(geom.geometry_id());
+        self.apply_draw_uniforms(cx);
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);

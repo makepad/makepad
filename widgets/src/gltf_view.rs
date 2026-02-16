@@ -1,5 +1,5 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
-use std::path::PathBuf;
+use std::{path::PathBuf, rc::Rc};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -15,6 +15,7 @@ script_mod! {
             draw_depth: -99.0
         }
         draw_pbr +: {
+            debug: true
             light_dir: vec3(0.35, 0.8, 0.45)
             light_color: vec3(1.0, 1.0, 1.0)
             ambient: 0.22
@@ -76,9 +77,9 @@ pub struct GltfView {
     #[rust]
     renderer: Option<GltfRenderer>,
     #[rust]
-    loaded_path: Option<PathBuf>,
+    loaded_src_handle: Option<ScriptHandle>,
     #[rust]
-    loaded_env_path: Option<PathBuf>,
+    loaded_env_handle: Option<ScriptHandle>,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -95,71 +96,134 @@ pub struct GltfView {
     camera_target: Vec3f,
 }
 
+enum ResourceResolve {
+    Ready {
+        handle: ScriptHandle,
+        abs_path: PathBuf,
+        data: Rc<Vec<u8>>,
+    },
+    Pending {
+        handle: ScriptHandle,
+    },
+    Error {
+        handle: ScriptHandle,
+    },
+    Missing,
+}
+
 impl GltfView {
-    fn resource_path_from_handle_ref(
-        cx: &mut Cx,
-        handle_ref: &ScriptHandleRef,
-    ) -> Option<PathBuf> {
-        let handle = handle_ref.as_handle();
-        cx.load_all_script_resources();
+    fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
         let resources = cx.script_data.resources.resources.borrow();
         let resource = resources.iter().find(|resource| resource.handle == handle)?;
-        if resource.is_error() {
-            return None;
+        Some((PathBuf::from(&resource.abs_path), resource.is_error()))
+    }
+
+    fn resolve_resource(cx: &mut Cx, handle_ref: &ScriptHandleRef) -> ResourceResolve {
+        let handle = handle_ref.as_handle();
+
+        if let Some(data) = cx.get_resource(handle) {
+            let abs_path = Self::resource_metadata_by_handle(cx, handle)
+                .map(|metadata| metadata.0)
+                .unwrap_or_else(|| PathBuf::from("resource"));
+            return ResourceResolve::Ready {
+                handle,
+                abs_path,
+                data,
+            };
         }
-        Some(PathBuf::from(&resource.abs_path))
-    }
 
-    fn source_path(&self, cx: &mut Cx) -> Option<PathBuf> {
-        let handle_ref = self.src.as_ref()?;
-        Self::resource_path_from_handle_ref(cx, handle_ref)
-    }
+        cx.load_all_script_resources();
 
-    fn env_source_path(&self, cx: &mut Cx) -> Option<PathBuf> {
-        let handle_ref = self.env_src.as_ref()?;
-        Self::resource_path_from_handle_ref(cx, handle_ref)
+        if let Some(data) = cx.get_resource(handle) {
+            let abs_path = Self::resource_metadata_by_handle(cx, handle)
+                .map(|metadata| metadata.0)
+                .unwrap_or_else(|| PathBuf::from("resource"));
+            return ResourceResolve::Ready {
+                handle,
+                abs_path,
+                data,
+            };
+        }
+
+        if let Some((_, is_error)) = Self::resource_metadata_by_handle(cx, handle) {
+            if is_error {
+                return ResourceResolve::Error { handle };
+            }
+            return ResourceResolve::Pending { handle };
+        }
+
+        ResourceResolve::Missing
     }
 
     fn ensure_env_loaded(&mut self, cx: &mut Cx2d) {
-        let Some(path) = self.env_source_path(cx) else {
+        let Some(handle_ref) = self.env_src.as_ref() else {
             return;
         };
-        if self.loaded_env_path.as_ref() == Some(&path) {
+        let handle = handle_ref.as_handle();
+        if self.loaded_env_handle == Some(handle) {
             return;
         }
-        match self
-            .draw_pbr
-            .load_default_env_equirect_from_path(cx, &path)
-        {
-            Ok(()) => {
-                self.loaded_env_path = Some(path);
-                self.area.redraw(cx);
+
+        match Self::resolve_resource(cx, handle_ref) {
+            ResourceResolve::Ready {
+                handle,
+                abs_path,
+                data,
+            } => {
+                if self
+                    .draw_pbr
+                    .load_default_env_equirect_from_bytes(cx, &data, Some(&abs_path))
+                    .is_ok()
+                {
+                    self.area.redraw(cx);
+                }
+                self.loaded_env_handle = Some(handle);
             }
-            Err(_) => {
-                self.loaded_env_path = Some(path);
+            ResourceResolve::Error { handle } => {
+                self.loaded_env_handle = Some(handle);
             }
+            ResourceResolve::Pending { handle } => {
+                let _ = handle;
+            }
+            ResourceResolve::Missing => {}
         }
     }
 
     fn ensure_renderer_loaded(&mut self, cx: &mut Cx2d) {
-        let Some(path) = self.source_path(cx) else {
+        let Some(handle_ref) = self.src.as_ref() else {
             return;
         };
+        let handle = handle_ref.as_handle();
 
-        if self.loaded_path.as_ref() == Some(&path) {
+        if self.loaded_src_handle == Some(handle) {
             return;
         }
 
-        match GltfRenderer::load_from_path(&mut self.draw_pbr, cx, &path) {
-            Ok(renderer) => {
-                self.apply_default_view_from_gltf(&renderer);
-                self.renderer = Some(renderer);
-                self.loaded_path = Some(path);
+        match Self::resolve_resource(cx, handle_ref) {
+            ResourceResolve::Ready {
+                handle,
+                abs_path,
+                data,
+            } => {
+                match GltfRenderer::load_from_bytes(&mut self.draw_pbr, cx, &data, Some(&abs_path)) {
+                    Ok(renderer) => {
+                        self.apply_default_view_from_gltf(&renderer);
+                        self.renderer = Some(renderer);
+                    }
+                    Err(_) => {
+                        self.renderer = None;
+                    }
+                }
+                self.loaded_src_handle = Some(handle);
             }
-            Err(_) => {
+            ResourceResolve::Error { handle } => {
                 self.renderer = None;
-                self.loaded_path = Some(path);
+                self.loaded_src_handle = Some(handle);
             }
+            ResourceResolve::Pending { handle } => {
+                let _ = handle;
+            }
+            ResourceResolve::Missing => {}
         }
     }
 
