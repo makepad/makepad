@@ -404,6 +404,7 @@ impl Cx {
             let cxtexture = &mut self.textures[depth_texture.texture_id()];
             let size = pass_rect.size * dpi_factor;
             cxtexture.update_depth_stencil(d3d11_cx, size.x as usize, size.y as usize);
+            let depth_stencil_view = cxtexture.os.depth_stencil_view.clone().unwrap();
             let is_initial = cxtexture.take_initial();
 
             match self.passes[pass_id].clear_depth {
@@ -411,7 +412,7 @@ impl Cx {
                     if is_initial {
                         unsafe {
                             d3d11_cx.context.ClearDepthStencilView(
-                                cxtexture.os.depth_stencil_view.as_ref().unwrap(),
+                                &depth_stencil_view,
                                 D3D11_CLEAR_DEPTH.0 as u32 | D3D11_CLEAR_STENCIL.0 as u32,
                                 depth_clear,
                                 0,
@@ -421,7 +422,7 @@ impl Cx {
                 }
                 DrawPassClearDepth::ClearWith(depth_clear) => unsafe {
                     d3d11_cx.context.ClearDepthStencilView(
-                        cxtexture.os.depth_stencil_view.as_ref().unwrap(),
+                        &depth_stencil_view,
                         D3D11_CLEAR_DEPTH.0 as u32 | D3D11_CLEAR_STENCIL.0 as u32,
                         depth_clear,
                         0,
@@ -431,7 +432,7 @@ impl Cx {
             unsafe {
                 d3d11_cx.context.OMSetRenderTargets(
                     Some(&color_textures),
-                    None, //cxtexture.os.depth_stencil_view.as_ref().unwrap()
+                    Some(&depth_stencil_view),
                 )
             }
         } else {
