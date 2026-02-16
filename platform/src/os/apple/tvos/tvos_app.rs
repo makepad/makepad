@@ -16,14 +16,13 @@ use {
         },
         makepad_math::*,
         os::{
-            apple::apple_gamepad::AppleGamepad,
             apple::apple_sys::*,
             cx_native::EventFlow,
             tvos::{tvos_delegates::*, tvos_event::*},
         },
         window::CxWindowPool,
     },
-    std::{cell::RefCell, rc::Rc, time::Instant},
+    std::{cell::RefCell, time::Instant},
 };
 
 // this value will be fetched from multiple threads (post signal uses it)
@@ -88,7 +87,6 @@ pub struct TvosApp {
     // pub textfield: Option<ObjcId>,
     event_callback: Option<Box<dyn FnMut(TvosEvent) -> EventFlow>>,
     event_flow: EventFlow,
-    pub apple_gamepad: Rc<RefCell<AppleGamepad>>,
 }
 
 impl TvosApp {
@@ -98,10 +96,6 @@ impl TvosApp {
     ) -> TvosApp {
         unsafe {
             // Construct the bits that are shared between windows
-
-            let apple_gamepad = AppleGamepad::init(|event| {
-                TvosApp::do_callback(TvosEvent::GamepadConnected(event));
-            });
 
             TvosApp {
                 //touches: Vec::new(),
@@ -114,7 +108,6 @@ impl TvosApp {
                 timers: Vec::new(),
                 event_flow: EventFlow::Poll,
                 event_callback: Some(event_callback),
-                apple_gamepad,
             }
         }
     }

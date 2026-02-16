@@ -72,7 +72,7 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
     let mut device_identifier = None;
     let mut app = None;
     let mut org = None;
-    let mut stable = true;
+    let mut stable = false;
     if args.len() < 1 {
         return Err(format!("not enough args"));
     }
@@ -101,6 +101,8 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
             org = Some(opt.to_string());
         } else if v == "--stable" {
             stable = true;
+        } else if v == "--nightly" {
+            stable = false;
         } else {
             args = &args[i..];
             break;
