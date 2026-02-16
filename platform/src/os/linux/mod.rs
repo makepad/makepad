@@ -30,6 +30,8 @@ pub mod module_loader;
 pub mod opengl;
 #[cfg(use_vulkan)]
 pub mod vulkan_naga;
+#[cfg(use_vulkan)]
+pub mod vulkan;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod dma_buf;

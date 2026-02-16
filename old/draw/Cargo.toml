@@ -16,12 +16,12 @@ makepad-html ={ path = "../libs/html", version = "1.0.0" }
 makepad-live-id = { path = "../libs/live_id", version = "1.0.0" }
 
 rustybuzz = { version = "0.18.0", path = "../libs/rustybuzz" }
-unicode-bidi = { version = "0.3", path = "../libs/unicode-bidi" }
+unicode-bidi = { version = "0.3", path = "../libs/unicode/unicode-bidi" }
 ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer"}
 sdfer = { path = "../libs/sdfer", version = "0.2.1" }
 fxhash = { version = "0.2.1", path = "../libs/fxhash" }
-unicode-linebreak = { version = "0.1.5", path = "../libs/unicode-linebreak" }
-unicode-segmentation = { version = "1.12.0", path = "../libs/unicode-segmentation" }
+unicode-linebreak = { version = "0.1.5", path = "../libs/unicode/unicode-linebreak" }
+unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
 png = { version = "0.17.16", path = "../libs/png-0.17.16" }
 ttf-parser = { version = "0.24.1", path = "../libs/ttf-parser" }
 serde = { version = "1.0", optional = true, features = ["derive"] }

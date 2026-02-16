@@ -281,27 +281,3 @@ impl<T, R: GenRef> std::ops::IndexMut<R> for GenVec<T> {
         &mut self.slots[r.index() as usize].data
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Test reference type
-    #[derive(Copy, Clone)]
-    struct TestRef {
-        index: u32,
-        generation: Generation,
-    }
-
-    impl GenRef for TestRef {
-        fn index(&self) -> u32 {
-            self.index
-        }
-        fn generation(&self) -> Generation {
-            self.generation
-        }
-        fn new(index: u32, generation: Generation) -> Self {
-            Self { index, generation }
-        }
-    }
-}
