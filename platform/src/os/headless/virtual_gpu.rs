@@ -131,7 +131,9 @@ pub fn rasterize_triangle_rows<F>(
         let ndc_z = pos[2] * inv_w;
         let sx = (ndc_x * 0.5 + 0.5) * w;
         let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * h; // flip Y
-        let sz = ndc_z * 0.5 + 0.5; // depth [0, 1]
+        // Makepad shaders output depth in [0, 1] clip space in practice.
+        // Keep it as-is to avoid collapsing depth precision.
+        let sz = ndc_z;
         (sx, sy, sz)
     };
 

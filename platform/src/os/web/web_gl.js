@@ -469,11 +469,15 @@ export class WasmWebGL extends WasmWebBrowser {
         for (let i = 0; i < texture_slots; i ++) {
             let tex_loc = shader.texture_locs[i];
             let texture_id = args.textures[i]
+            let target = tex_loc.ty === "samplerCube" ? gl.TEXTURE_CUBE_MAP : gl.TEXTURE_2D;
             if (texture_id !== undefined) {
                 let tex_obj = this.textures[texture_id];
                 gl.activeTexture(gl.TEXTURE0 + i);
-                gl.bindTexture(gl.TEXTURE_2D, tex_obj);
+                gl.bindTexture(target, tex_obj);
                 gl.uniform1i(tex_loc.loc, i);
+            } else {
+                gl.activeTexture(gl.TEXTURE0 + i);
+                gl.bindTexture(target, null);
             }
         }
         

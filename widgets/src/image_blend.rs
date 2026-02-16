@@ -1,7 +1,6 @@
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl},
     image::Image,
-    image_cache::*,
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,

@@ -7,6 +7,7 @@ use crate::{
     draw_shader::DrawShaderAttrFormat,
     geometry::GeometryId,
     makepad_live_id::*,
+    makepad_script::shader::TextureType,
     os::linux::android::ndk_sys,
     texture::{TextureFormat, TextureId, TextureUpdated},
 };
@@ -90,6 +91,7 @@ struct VulkanDrawPacket {
     dyn_uniform_binding: u32,
     scope_uniform_binding: Option<usize>,
     texture_ids: Vec<TextureId>,
+    texture_types: Vec<TextureType>,
 }
 
 struct VulkanTextureResource {
@@ -98,6 +100,8 @@ struct VulkanTextureResource {
     view: vk::ImageView,
     width: u32,
     height: u32,
+    layers: u32,
+    is_cube: bool,
     format: vk::Format,
     layout: vk::ImageLayout,
 }
@@ -108,6 +112,7 @@ struct VulkanTextureUpload {
     offset_y: u32,
     width: u32,
     height: u32,
+    layers: u32,
 }
 
 type VulkanTextureKey = usize;
@@ -741,12 +746,22 @@ impl CxVulkan {
                 } else if let Some(draw_call) = draw_item.kind.draw_call() {
                     let sh = &cx.draw_shaders.shaders[draw_call.draw_shader_id.index];
                     let null_texture_id = cx.null_texture.texture_id();
+                    let null_cube_texture_id = cx.null_cube_texture.texture_id();
                     let texture_ids = (0..sh.mapping.textures.len())
                         .map(|i| {
                             draw_call.texture_slots[i]
                                 .as_ref()
                                 .map(|texture| texture.texture_id())
-                                .unwrap_or(null_texture_id)
+                                .unwrap_or_else(|| {
+                                    if matches!(
+                                        sh.mapping.textures[i].tex_type,
+                                        TextureType::TextureCube | TextureType::TextureCubeArray
+                                    ) {
+                                        null_cube_texture_id
+                                    } else {
+                                        null_texture_id
+                                    }
+                                })
                         })
                         .collect();
                     (None, texture_ids)
@@ -769,27 +784,28 @@ impl CxVulkan {
         Ok(())
     }
 
-    fn vec_texture_meta(format: &TextureFormat) -> Option<(u32, u32, vk::Format)> {
+    fn vec_texture_meta(format: &TextureFormat) -> Option<(u32, u32, u32, bool, vk::Format)> {
         match format {
             TextureFormat::VecBGRAu8_32 { width, height, .. } => {
-                Some((*width as u32, *height as u32, vk::Format::B8G8R8A8_UNORM))
+                Some((*width as u32, *height as u32, 1, false, vk::Format::B8G8R8A8_UNORM))
+            }
+            TextureFormat::VecCubeBGRAu8_32 { width, height, .. } => {
+                Some((*width as u32, *height as u32, 6, true, vk::Format::B8G8R8A8_UNORM))
             }
             TextureFormat::VecMipBGRAu8_32 { width, height, .. } => {
-                Some((*width as u32, *height as u32, vk::Format::B8G8R8A8_UNORM))
+                Some((*width as u32, *height as u32, 1, false, vk::Format::B8G8R8A8_UNORM))
             }
-            TextureFormat::VecRGBAf32 { width, height, .. } => Some((
-                *width as u32,
-                *height as u32,
-                vk::Format::R32G32B32A32_SFLOAT,
-            )),
+            TextureFormat::VecRGBAf32 { width, height, .. } => {
+                Some((*width as u32, *height as u32, 1, false, vk::Format::R32G32B32A32_SFLOAT))
+            }
             TextureFormat::VecRu8 { width, height, .. } => {
-                Some((*width as u32, *height as u32, vk::Format::R8_UNORM))
+                Some((*width as u32, *height as u32, 1, false, vk::Format::R8_UNORM))
             }
             TextureFormat::VecRGu8 { width, height, .. } => {
-                Some((*width as u32, *height as u32, vk::Format::R8G8_UNORM))
+                Some((*width as u32, *height as u32, 1, false, vk::Format::R8G8_UNORM))
             }
             TextureFormat::VecRf32 { width, height, .. } => {
-                Some((*width as u32, *height as u32, vk::Format::R32_SFLOAT))
+                Some((*width as u32, *height as u32, 1, false, vk::Format::R32_SFLOAT))
             }
             _ => None,
         }
@@ -876,6 +892,40 @@ impl CxVulkan {
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
+                    layers: 1,
+                })
+            }
+            TextureFormat::VecCubeBGRAu8_32 {
+                width,
+                height,
+                data,
+                ..
+            } => {
+                let w = *width;
+                let h = *height;
+                if w == 0 || h == 0 {
+                    return None;
+                }
+                let out = if let Some(data) = data.as_ref() {
+                    let src = unsafe {
+                        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
+                    };
+                    let expected = w.saturating_mul(h).saturating_mul(4).saturating_mul(6);
+                    if src.len() >= expected {
+                        src[..expected].to_vec()
+                    } else {
+                        vec![0u8; expected]
+                    }
+                } else {
+                    vec![0u8; w.saturating_mul(h).saturating_mul(4).saturating_mul(6)]
+                };
+                Some(VulkanTextureUpload {
+                    data: out,
+                    offset_x: 0,
+                    offset_y: 0,
+                    width: w as u32,
+                    height: h as u32,
+                    layers: 6,
                 })
             }
             TextureFormat::VecRGBAf32 {
@@ -896,6 +946,7 @@ impl CxVulkan {
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
+                    layers: 1,
                 })
             }
             TextureFormat::VecRf32 {
@@ -916,6 +967,7 @@ impl CxVulkan {
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
+                    layers: 1,
                 })
             }
             TextureFormat::VecRu8 {
@@ -938,6 +990,7 @@ impl CxVulkan {
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
+                    layers: 1,
                 })
             }
             TextureFormat::VecRGu8 {
@@ -960,6 +1013,7 @@ impl CxVulkan {
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
+                    layers: 1,
                 })
             }
             _ => None,
@@ -970,9 +1024,17 @@ impl CxVulkan {
         &self,
         width: u32,
         height: u32,
+        layers: u32,
+        is_cube: bool,
         format: vk::Format,
     ) -> Result<VulkanTextureResource, String> {
+        let image_flags = if is_cube {
+            vk::ImageCreateFlags::CUBE_COMPATIBLE
+        } else {
+            vk::ImageCreateFlags::empty()
+        };
         let image_info = vk::ImageCreateInfo::default()
+            .flags(image_flags)
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D {
@@ -981,7 +1043,7 @@ impl CxVulkan {
                 depth: 1,
             })
             .mip_levels(1)
-            .array_layers(1)
+            .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
@@ -1017,9 +1079,14 @@ impl CxVulkan {
                 return Err(format!("bind_image_memory failed: {e:?}"));
             }
         }
+        let view_type = if is_cube {
+            vk::ImageViewType::CUBE
+        } else {
+            vk::ImageViewType::TYPE_2D
+        };
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(view_type)
             .format(format)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
@@ -1027,7 +1094,7 @@ impl CxVulkan {
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
-                    .layer_count(1),
+                    .layer_count(layers.max(1)),
             );
         let view = match unsafe { self.device.create_image_view(&view_info, None) } {
             Ok(view) => view,
@@ -1046,6 +1113,8 @@ impl CxVulkan {
             view,
             width: width.max(1),
             height: height.max(1),
+            layers: layers.max(1),
+            is_cube,
             format,
             layout: vk::ImageLayout::UNDEFINED,
         })
@@ -1093,16 +1162,16 @@ impl CxVulkan {
 
     fn ensure_texture_uploaded(&mut self, cx: &mut Cx, texture_id: TextureId) -> Result<(), String> {
         let texture_key = Self::texture_key(texture_id);
-        let (alloc_changed, updated, width, height, format) = {
+        let (alloc_changed, updated, width, height, layers, is_cube, format) = {
             let cxtexture = &mut cx.textures[texture_id];
             if !cxtexture.format.is_vec() {
                 return Ok(());
             }
             let alloc_changed = cxtexture.alloc_vec();
             let updated = cxtexture.take_updated();
-            let (width, height, format) = Self::vec_texture_meta(&cxtexture.format)
+            let (width, height, layers, is_cube, format) = Self::vec_texture_meta(&cxtexture.format)
                 .ok_or_else(|| format!("unsupported Vulkan texture format: {:?}", cxtexture.format))?;
-            (alloc_changed, updated, width, height, format)
+            (alloc_changed, updated, width, height, layers, is_cube, format)
         };
 
         let needs_recreate = match self.textures.get(&texture_key) {
@@ -1110,6 +1179,8 @@ impl CxVulkan {
                 alloc_changed
                     || resource.width != width.max(1)
                     || resource.height != height.max(1)
+                    || resource.layers != layers.max(1)
+                    || resource.is_cube != is_cube
                     || resource.format != format
             }
             None => true,
@@ -1119,7 +1190,7 @@ impl CxVulkan {
             if let Some(old_resource) = self.textures.remove(&texture_key) {
                 self.destroy_texture_resource(old_resource);
             }
-            let resource = self.create_texture_resource(width, height, format)?;
+            let resource = self.create_texture_resource(width, height, layers, is_cube, format)?;
             self.textures.insert(texture_key, resource);
         }
 
@@ -1139,6 +1210,7 @@ impl CxVulkan {
         if upload.data.is_empty() || upload.width == 0 || upload.height == 0 {
             return Ok(());
         }
+        let layer_count = upload.layers.max(1);
         self.texture_upload_count_this_frame += 1;
         self.texture_upload_bytes_this_frame += upload.data.len() as u64;
 
@@ -1167,7 +1239,7 @@ impl CxVulkan {
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
-                    .layer_count(1),
+                    .layer_count(layer_count),
             );
         let copy_region = vk::BufferImageCopy::default()
             .buffer_offset(0)
@@ -1178,7 +1250,7 @@ impl CxVulkan {
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .mip_level(0)
                     .base_array_layer(0)
-                    .layer_count(1),
+                    .layer_count(layer_count),
             )
             .image_offset(vk::Offset3D {
                 x: upload.offset_x as i32,
@@ -1202,7 +1274,7 @@ impl CxVulkan {
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
-                    .layer_count(1),
+                    .layer_count(layer_count),
             );
         unsafe {
             self.device.cmd_pipeline_barrier(
@@ -1223,7 +1295,7 @@ impl CxVulkan {
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
-                    .layer_count(1);
+                    .layer_count(layer_count);
                 self.device.cmd_clear_color_image(
                     self.command_buffer,
                     image,
@@ -1268,6 +1340,7 @@ impl CxVulkan {
         let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
         for draw_item_id in 0..draw_items_len {
             let null_texture_id = cx.null_texture.texture_id();
+            let null_cube_texture_id = cx.null_cube_texture.texture_id();
             draw_stats.draw_items += 1;
             if let Some(sub_list_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id]
                 .kind
@@ -1352,9 +1425,19 @@ impl CxVulkan {
                         draw_call.texture_slots[i]
                             .as_ref()
                             .map(|texture| texture.texture_id())
-                            .unwrap_or(null_texture_id)
+                            .unwrap_or_else(|| {
+                                if matches!(
+                                    sh.mapping.textures[i].tex_type,
+                                    TextureType::TextureCube | TextureType::TextureCubeArray
+                                ) {
+                                    null_cube_texture_id
+                                } else {
+                                    null_texture_id
+                                }
+                            })
                     })
                     .collect();
+                let texture_types = sh.mapping.textures.iter().map(|t| t.tex_type).collect();
 
                 VulkanDrawPacket {
                     shader_index: draw_call.draw_shader_id.index,
@@ -1375,6 +1458,7 @@ impl CxVulkan {
                         .uniform_buffer_bindings
                         .scope_uniform_buffer_index,
                     texture_ids,
+                    texture_types,
                 }
             };
 
@@ -1580,12 +1664,29 @@ impl CxVulkan {
         let mut texture_bindings = Vec::new();
         let mut texture_infos = Vec::new();
         let null_texture_key = Self::texture_key(cx.null_texture.texture_id());
+        let null_cube_texture_key = Self::texture_key(cx.null_cube_texture.texture_id());
         let null_texture_resource = self.textures.get(&null_texture_key);
+        let null_cube_texture_resource = self.textures.get(&null_cube_texture_key);
         for (slot, texture_id) in packet.texture_ids.iter().enumerate() {
+            let expected_cube = packet
+                .texture_types
+                .get(slot)
+                .map(|tex_type| {
+                    matches!(
+                        tex_type,
+                        TextureType::TextureCube | TextureType::TextureCubeArray
+                    )
+                })
+                .unwrap_or(false);
+            let fallback = if expected_cube {
+                null_cube_texture_resource
+            } else {
+                null_texture_resource
+            };
             let resource = self
                 .textures
                 .get(&Self::texture_key(*texture_id))
-                .or(null_texture_resource);
+                .or(fallback);
             let Some(resource) = resource else {
                 return Ok(());
             };

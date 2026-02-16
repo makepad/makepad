@@ -314,6 +314,9 @@ impl Cx {
     pub fn null_texture(&self) -> Texture {
         self.null_texture.clone()
     }
+    pub fn null_cube_texture(&self) -> Texture {
+        self.null_cube_texture.clone()
+    }
     pub fn redraw_id(&self) -> u64 {
         self.redraw_id
     }

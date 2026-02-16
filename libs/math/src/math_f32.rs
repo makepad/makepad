@@ -375,6 +375,42 @@ impl Vec3f {
         let sz = self.x * self.x + self.y * self.y + self.z * self.z;
         sz.sqrt()
     }
+
+    pub fn length_squared(&self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    pub fn abs(&self) -> Vec3f {
+        Vec3f {
+            x: self.x.abs(),
+            y: self.y.abs(),
+            z: self.z.abs(),
+        }
+    }
+
+    pub fn min_elem(&self) -> f32 {
+        self.x.min(self.y).min(self.z)
+    }
+
+    pub fn max_elem(&self) -> f32 {
+        self.x.max(self.y).max(self.z)
+    }
+
+    pub fn min_componentwise(a: Vec3f, b: Vec3f) -> Vec3f {
+        Vec3f {
+            x: a.x.min(b.x),
+            y: a.y.min(b.y),
+            z: a.z.min(b.z),
+        }
+    }
+
+    pub fn max_componentwise(a: Vec3f, b: Vec3f) -> Vec3f {
+        Vec3f {
+            x: a.x.max(b.x),
+            y: a.y.max(b.y),
+            z: a.z.max(b.z),
+        }
+    }
 }
 
 /*
@@ -728,6 +764,47 @@ impl Quat {
             z: self.z / len,
             w: self.w / len,
         }
+    }
+
+    pub fn from_axis_angle(axis: Vec3f, angle: f32) -> Self {
+        let half = angle * 0.5;
+        let s = half.sin();
+        let c = half.cos();
+        Quat {
+            x: axis.x * s,
+            y: axis.y * s,
+            z: axis.z * s,
+            w: c,
+        }
+    }
+
+    /// First-order quaternion integration: q' = normalize(q + 0.5 * dt * omega_quat * q)
+    /// where omega_quat = Quat(wx, wy, wz, 0). No transcendentals needed.
+    pub fn integrate(&self, angular_velocity: Vec3f, dt: f32) -> Quat {
+        let omega = Quat {
+            x: angular_velocity.x,
+            y: angular_velocity.y,
+            z: angular_velocity.z,
+            w: 0.0,
+        };
+        let omega_q = Quat::multiply(&omega, self);
+        let half_dt = 0.5 * dt;
+        let mut result = Quat {
+            x: self.x + half_dt * omega_q.x,
+            y: self.y + half_dt * omega_q.y,
+            z: self.z + half_dt * omega_q.z,
+            w: self.w + half_dt * omega_q.w,
+        };
+        // Normalize to keep unit quaternion
+        let len = result.length();
+        if len > 0.0 {
+            let inv = 1.0 / len;
+            result.x *= inv;
+            result.y *= inv;
+            result.z *= inv;
+            result.w *= inv;
+        }
+        result
     }
 
     pub fn look_rotation(forward: Vec3f, up: Vec3f) -> Self {
@@ -1086,6 +1163,33 @@ impl Mat4f {
             y: m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13] * v.w,
             z: m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14] * v.w,
             w: m[3] * v.x + m[7] * v.y + m[11] * v.z + m[15] * v.w,
+        }
+    }
+
+    pub fn look_at(eye: Vec3f, center: Vec3f, up: Vec3f) -> Mat4f {
+        let forward = (center - eye).normalize();
+        let side = Vec3f::cross(forward, up).normalize();
+        let up = Vec3f::cross(side, forward);
+
+        Mat4f {
+            v: [
+                side.x,
+                up.x,
+                -forward.x,
+                0.0,
+                side.y,
+                up.y,
+                -forward.y,
+                0.0,
+                side.z,
+                up.z,
+                -forward.z,
+                0.0,
+                -side.dot(eye),
+                -up.dot(eye),
+                forward.dot(eye),
+                1.0,
+            ],
         }
     }
 
@@ -1854,5 +1958,201 @@ impl ops::DivAssign<f32> for Vec4f {
         self.y = self.y / rhs;
         self.z = self.z / rhs;
         self.w = self.w / rhs;
+    }
+}
+
+// ---- Mat3f: column-major 3x3 matrix ----
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mat3f {
+    pub c0: Vec3f, // column 0
+    pub c1: Vec3f, // column 1
+    pub c2: Vec3f, // column 2
+}
+
+impl Default for Mat3f {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl Mat3f {
+    pub const fn identity() -> Self {
+        Mat3f {
+            c0: Vec3f {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            c1: Vec3f {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+            c2: Vec3f {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+        }
+    }
+
+    pub const fn zero() -> Self {
+        Mat3f {
+            c0: Vec3f {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            c1: Vec3f {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            c2: Vec3f {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        }
+    }
+
+    /// Diagonal matrix — used for cuboid inertia tensors.
+    pub const fn from_diagonal(d: Vec3f) -> Self {
+        Mat3f {
+            c0: Vec3f {
+                x: d.x,
+                y: 0.0,
+                z: 0.0,
+            },
+            c1: Vec3f {
+                x: 0.0,
+                y: d.y,
+                z: 0.0,
+            },
+            c2: Vec3f {
+                x: 0.0,
+                y: 0.0,
+                z: d.z,
+            },
+        }
+    }
+
+    /// Build rotation matrix from unit quaternion.
+    pub fn from_quat(q: Quat) -> Self {
+        let x2 = q.x + q.x;
+        let y2 = q.y + q.y;
+        let z2 = q.z + q.z;
+        let xx = q.x * x2;
+        let xy = q.x * y2;
+        let xz = q.x * z2;
+        let yy = q.y * y2;
+        let yz = q.y * z2;
+        let zz = q.z * z2;
+        let wx = q.w * x2;
+        let wy = q.w * y2;
+        let wz = q.w * z2;
+        Mat3f {
+            c0: Vec3f {
+                x: 1.0 - yy - zz,
+                y: xy + wz,
+                z: xz - wy,
+            },
+            c1: Vec3f {
+                x: xy - wz,
+                y: 1.0 - xx - zz,
+                z: yz + wx,
+            },
+            c2: Vec3f {
+                x: xz + wy,
+                y: yz - wx,
+                z: 1.0 - xx - yy,
+            },
+        }
+    }
+
+    pub fn transpose(&self) -> Self {
+        Mat3f {
+            c0: Vec3f {
+                x: self.c0.x,
+                y: self.c1.x,
+                z: self.c2.x,
+            },
+            c1: Vec3f {
+                x: self.c0.y,
+                y: self.c1.y,
+                z: self.c2.y,
+            },
+            c2: Vec3f {
+                x: self.c0.z,
+                y: self.c1.z,
+                z: self.c2.z,
+            },
+        }
+    }
+
+    pub fn mul_vec3(&self, v: Vec3f) -> Vec3f {
+        Vec3f {
+            x: self.c0.x * v.x + self.c1.x * v.y + self.c2.x * v.z,
+            y: self.c0.y * v.x + self.c1.y * v.y + self.c2.y * v.z,
+            z: self.c0.z * v.x + self.c1.z * v.y + self.c2.z * v.z,
+        }
+    }
+
+    pub fn mul_mat3(&self, rhs: &Mat3f) -> Mat3f {
+        Mat3f {
+            c0: self.mul_vec3(rhs.c0),
+            c1: self.mul_vec3(rhs.c1),
+            c2: self.mul_vec3(rhs.c2),
+        }
+    }
+
+    /// Scale each column by a scalar (equivalent to self * diag(s)).
+    pub fn scale(&self, s: f32) -> Self {
+        Mat3f {
+            c0: self.c0 * s,
+            c1: self.c1 * s,
+            c2: self.c2 * s,
+        }
+    }
+}
+
+// ---- Aabb: axis-aligned bounding box ----
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aabb {
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+impl Aabb {
+    pub fn overlaps(&self, other: &Aabb) -> bool {
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+            && self.min.z <= other.max.z
+            && self.max.z >= other.min.z
+    }
+
+    /// Compute AABB of a cuboid at the given pose.
+    /// Uses the abs-rotation-matrix trick: for each axis, the extent
+    /// is the dot product of half_extents with the abs of the corresponding
+    /// row of the rotation matrix.
+    pub fn from_cuboid(half_extents: Vec3f, pose: &Pose) -> Self {
+        let rot = Mat3f::from_quat(pose.orientation);
+        // Absolute value of each element — gives the extent contribution per axis
+        let abs_r = Mat3f {
+            c0: rot.c0.abs(),
+            c1: rot.c1.abs(),
+            c2: rot.c2.abs(),
+        };
+        let extent = abs_r.mul_vec3(half_extents);
+        Aabb {
+            min: pose.position - extent,
+            max: pose.position + extent,
+        }
     }
 }
