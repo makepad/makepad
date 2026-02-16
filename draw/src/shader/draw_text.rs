@@ -2,6 +2,7 @@ use {
     crate::{
         cx_2d::Cx2d,
         cx_draw::CxDraw,
+        draw_list_2d::ManyInstances,
         makepad_platform::*,
         text::{
             color::Color,
@@ -180,6 +181,8 @@ script_mod! {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawText {
+    #[rust]
+    pub many_instances: Option<ManyInstances>,
     #[live]
     pub text_style: TextStyle,
     #[live(1.0)]
@@ -252,6 +255,20 @@ impl DrawText {
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
     }
 
+    pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
+        if self.many_instances.is_some() {
+            return;
+        }
+        self.update_draw_vars(cx);
+        self.many_instances = cx.begin_many_aligned_instances(&self.draw_vars);
+    }
+
+    pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
+        if let Some(instances) = self.many_instances.take() {
+            self.finish_many_instances(cx, instances);
+        }
+    }
+
     pub fn draw_rasterized_glyphs_abs(
         &mut self,
         cx: &mut Cx2d,
@@ -262,6 +279,22 @@ impl DrawText {
             return;
         }
         self.update_draw_vars(cx);
+        if let Some(mut instances) = self.many_instances.take() {
+            self.glyph_depth = self.draw_depth;
+            self.color = color;
+            for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
+                self.draw_rasterized_glyph(
+                    *origin_in_lpxs,
+                    *font_size_in_lpxs,
+                    None,
+                    *rasterized_glyph,
+                    &mut instances.instances,
+                );
+            }
+            self.many_instances = Some(instances);
+            return;
+        }
+
         let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
             return;
         };
@@ -278,14 +311,7 @@ impl DrawText {
             );
         }
 
-        let new_area = cx.end_many_instances(instances);
-        let old_area = self.draw_vars.area;
-        if self.extend_area {
-            let extended = old_area.extend_with(cx, new_area);
-            self.draw_vars.area = cx.update_area_refs(old_area, extended);
-        } else {
-            self.draw_vars.area = cx.update_area_refs(old_area, new_area);
-        }
+        self.finish_many_instances(cx, instances);
     }
 
     pub fn draw_rasterized_glyph_abs(
@@ -540,6 +566,19 @@ impl DrawText {
 
     fn draw_text(&mut self, cx: &mut Cx2d, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
         self.update_draw_vars(cx);
+        if let Some(mut instances) = self.many_instances.take() {
+            self.glyph_depth = self.draw_depth;
+            for row in &text.rows {
+                self.draw_row(
+                    cx,
+                    origin_in_lpxs + Size::from(row.origin_in_lpxs) * self.font_scale,
+                    row,
+                    &mut instances.instances,
+                );
+            }
+            self.many_instances = Some(instances);
+            return;
+        }
         let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
             return;
         };
@@ -552,6 +591,10 @@ impl DrawText {
                 &mut instances.instances,
             );
         }
+        self.finish_many_instances(cx, instances);
+    }
+
+    fn finish_many_instances(&mut self, cx: &mut Cx2d, instances: ManyInstances) {
         let new_area = cx.end_many_instances(instances);
         let old_area = self.draw_vars.area;
         if self.extend_area {
@@ -805,7 +848,10 @@ impl FontFamily {
             }
         }
 
-        fonts.set_font_family_definition(self.to_font_family_id(), FontFamilyDefinition { font_ids });
+        fonts.set_font_family_definition(
+            self.to_font_family_id(),
+            FontFamilyDefinition { font_ids },
+        );
     }
 
     fn ensure_fonts_loaded(&self, cx: &mut Cx) {

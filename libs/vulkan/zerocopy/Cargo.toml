@@ -71,12 +71,10 @@ features = ["__internal_use_only_features_that_work_on_stable"]
 [features]
 __internal_use_only_features_that_work_on_stable = [
     "alloc",
-    "derive",
     "simd",
     "std",
 ]
 alloc = []
-derive = ["zerocopy-derive"]
 float-nightly = []
 simd = []
 simd-nightly = ["simd"]
@@ -85,18 +83,3 @@ std = ["alloc"]
 [lib]
 name = "zerocopy"
 path = "src/lib.rs"
-
-[[test]]
-name = "include"
-path = "tests/include.rs"
-
-[[test]]
-name = "trybuild"
-path = "tests/trybuild.rs"
-
-[dependencies.zerocopy-derive]
-version = "=0.8.39"
-optional = true
-
-[target."cfg(any())".dependencies.zerocopy-derive]
-version = "=0.8.39"

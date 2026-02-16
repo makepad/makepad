@@ -149,7 +149,7 @@ mod global {
         let func_ptr = generate_global_seed;
         let static_ptr = &GLOBAL_SEED_STORAGE as *const _;
         seed = mix(seed, stack_ptr as usize as u64);
-        seed = mix(seed, func_ptr as usize as u64);
+        seed = mix(seed, func_ptr as *const () as usize as u64);
         seed = mix(seed, static_ptr as usize as u64);
 
         // If we have the standard library available, augment entropy with the
