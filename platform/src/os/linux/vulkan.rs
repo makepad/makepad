@@ -3,7 +3,7 @@
 use crate::{
     cx::Cx,
     draw_list::DrawListId,
-    draw_pass::{DrawPassClearColor, DrawPassId},
+    draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
     draw_shader::DrawShaderAttrFormat,
     geometry::GeometryId,
     makepad_live_id::*,
@@ -148,7 +148,9 @@ pub struct CxVulkan {
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
+    swapchain_depth_targets: Vec<VulkanTextureResource>,
     swapchain_format: vk::Format,
+    depth_format: vk::Format,
     swapchain_extent: vk::Extent2D,
     render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
@@ -425,7 +427,9 @@ impl CxVulkan {
             swapchain: vk::SwapchainKHR::null(),
             swapchain_images: Vec::new(),
             swapchain_image_views: Vec::new(),
+            swapchain_depth_targets: Vec::new(),
             swapchain_format: vk::Format::UNDEFINED,
+            depth_format: vk::Format::UNDEFINED,
             swapchain_extent: vk::Extent2D {
                 width: 0,
                 height: 0,
@@ -612,11 +616,22 @@ impl CxVulkan {
         let mut zbias = 0.0f32;
         let zbias_step = cx.passes[draw_pass_id].zbias_step;
         let mut draw_stats = VulkanDrawStats::default();
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [clear_color.x, clear_color.y, clear_color.z, clear_color.w],
+        let clear_depth = match cx.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) | DrawPassClearDepth::ClearWith(depth) => depth,
+        };
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [clear_color.x, clear_color.y, clear_color.z, clear_color.w],
+                },
             },
-        }];
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: clear_depth,
+                    stencil: 0,
+                },
+            },
+        ];
         let framebuffer = *self
             .framebuffers
             .get(image_index as usize)
@@ -1115,6 +1130,127 @@ impl CxVulkan {
             height: height.max(1),
             layers: layers.max(1),
             is_cube,
+            format,
+            layout: vk::ImageLayout::UNDEFINED,
+        })
+    }
+
+    fn has_stencil_component(format: vk::Format) -> bool {
+        matches!(
+            format,
+            vk::Format::D24_UNORM_S8_UINT | vk::Format::D32_SFLOAT_S8_UINT
+        )
+    }
+
+    fn pick_depth_format(&self) -> Result<vk::Format, String> {
+        let candidates = [
+            vk::Format::D32_SFLOAT,
+            vk::Format::D24_UNORM_S8_UINT,
+            vk::Format::D16_UNORM,
+        ];
+        for format in candidates {
+            let props = unsafe {
+                self.instance
+                    .get_physical_device_format_properties(self.physical_device, format)
+            };
+            if props
+                .optimal_tiling_features
+                .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+            {
+                return Ok(format);
+            }
+        }
+        Err("No supported Vulkan depth format found".to_string())
+    }
+
+    fn create_depth_target(
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+    ) -> Result<VulkanTextureResource, String> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image = unsafe { self.device.create_image(&image_info, None) }
+            .map_err(|e| format!("create_image(depth) failed: {e:?}"))?;
+        let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
+        let memory_type_index = self
+            .find_memory_type(memory_req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .or_else(|_| {
+                self.find_memory_type(
+                    memory_req.memory_type_bits,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+            })?;
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(memory_req.size)
+            .memory_type_index(memory_type_index);
+        let memory = match unsafe { self.device.allocate_memory(&alloc_info, None) } {
+            Ok(memory) => memory,
+            Err(e) => {
+                unsafe {
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!("allocate_memory(depth) failed: {e:?}"));
+            }
+        };
+        unsafe {
+            if let Err(e) = self.device.bind_image_memory(image, memory, 0) {
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+                return Err(format!("bind_image_memory(depth) failed: {e:?}"));
+            }
+        }
+
+        let mut aspect = vk::ImageAspectFlags::DEPTH;
+        if Self::has_stencil_component(format) {
+            aspect |= vk::ImageAspectFlags::STENCIL;
+        }
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = match unsafe { self.device.create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(e) => {
+                unsafe {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!("create_image_view(depth) failed: {e:?}"));
+            }
+        };
+
+        Ok(VulkanTextureResource {
+            image,
+            memory,
+            view,
+            width: width.max(1),
+            height: height.max(1),
+            layers: 1,
+            is_cube: false,
             format,
             layout: vk::ImageLayout::UNDEFINED,
         })
@@ -2030,6 +2166,12 @@ impl CxVulkan {
         let color_blend_attachments = [color_blend_attachment];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
@@ -2040,6 +2182,7 @@ impl CxVulkan {
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterization)
             .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil)
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
             .layout(pipeline_layout)
@@ -2496,6 +2639,7 @@ impl CxVulkan {
         self.swapchain = new_swapchain;
         self.swapchain_images = new_images;
         self.swapchain_format = format.format;
+        self.depth_format = self.pick_depth_format()?;
         self.swapchain_extent = extent;
 
         crate::log!(
@@ -2517,20 +2661,42 @@ impl CxVulkan {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+        let depth_attachment = vk::AttachmentDescription::default()
+            .format(self.depth_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         let color_ref = vk::AttachmentReference::default()
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let depth_ref = vk::AttachmentReference::default()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         let color_refs = [color_ref];
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(&color_refs);
+            .color_attachments(&color_refs)
+            .depth_stencil_attachment(&depth_ref);
         let dependencies = [vk::SubpassDependency::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
             .dst_subpass(0)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)];
-        let attachments = [color_attachment];
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )];
+        let attachments = [color_attachment, depth_attachment];
         let subpasses = [subpass];
         let render_pass_info = vk::RenderPassCreateInfo::default()
             .attachments(&attachments)
@@ -2557,8 +2723,23 @@ impl CxVulkan {
             self.swapchain_image_views.push(view);
         }
 
-        for view in &self.swapchain_image_views {
-            let attachments = [*view];
+        self.swapchain_depth_targets.reserve(self.swapchain_images.len());
+        for _ in &self.swapchain_images {
+            let depth_target = self.create_depth_target(
+                self.swapchain_extent.width,
+                self.swapchain_extent.height,
+                self.depth_format,
+            )?;
+            self.swapchain_depth_targets.push(depth_target);
+        }
+
+        for (index, view) in self.swapchain_image_views.iter().enumerate() {
+            let depth_view = self
+                .swapchain_depth_targets
+                .get(index)
+                .ok_or_else(|| format!("missing depth target for framebuffer {index}"))?
+                .view;
+            let attachments = [*view, depth_view];
             let framebuffer_info = vk::FramebufferCreateInfo::default()
                 .render_pass(self.render_pass)
                 .attachments(&attachments)
@@ -2604,6 +2785,11 @@ impl CxVulkan {
             for framebuffer in self.framebuffers.drain(..) {
                 self.device.destroy_framebuffer(framebuffer, None);
             }
+            let depth_targets: Vec<VulkanTextureResource> =
+                self.swapchain_depth_targets.drain(..).collect();
+            for depth in depth_targets {
+                self.destroy_texture_resource(depth);
+            }
             for image_view in self.swapchain_image_views.drain(..) {
                 self.device.destroy_image_view(image_view, None);
             }
@@ -2611,6 +2797,7 @@ impl CxVulkan {
                 self.device.destroy_render_pass(self.render_pass, None);
                 self.render_pass = vk::RenderPass::null();
             }
+            self.depth_format = vk::Format::UNDEFINED;
         }
     }
 
