@@ -1,8 +1,8 @@
 use crate::{
     event::{
-        GamepadConnectedEvent, KeyEvent, LongPressEvent, MouseDownEvent, MouseMoveEvent,
-        MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TextRangeReplaceEvent,
-        TimerEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeomChangeEvent,
+        KeyEvent, LongPressEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
+        TextClipboardEvent, TextInputEvent, TextRangeReplaceEvent, TimerEvent, TouchUpdateEvent,
+        VirtualKeyboardEvent, WindowGeomChangeEvent,
     },
     permission::PermissionResult,
     window::WindowId,
@@ -32,5 +32,4 @@ pub enum IosEvent {
     TextCut(TextClipboardEvent),
     Timer(TimerEvent),
     PermissionResult(PermissionResult),
-    GamepadConnected(GamepadConnectedEvent),
 }

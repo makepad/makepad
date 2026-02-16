@@ -3,7 +3,7 @@ use {
         cx::{Cx, IosParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
-        event::{Event, NetworkResponseChannel},
+        event::{Event, KeyEvent, NetworkResponseChannel, TextInputEvent, TextRangeReplaceEvent},
         makepad_live_id::*,
         makepad_objc_sys::objc_block,
         os::{
@@ -11,7 +11,7 @@ use {
                 apple_sys::*,
                 apple_util::*,
                 ios::{
-                    ios_app::{init_ios_app_global, with_ios_app, IosApp},
+                    ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
                     ios_event::IosEvent,
                 },
                 url_session::AppleHttpRequests,
@@ -141,6 +141,40 @@ impl Cx {
                     if let Some(vk) = vk {
                         self.call_event_handler(&Event::VirtualKeyboard(vk));
                     }
+                    // Drain iOS text events as one batch to avoid re-entrancy from UITextInput callbacks.
+                    let queued_events =
+                        with_ios_app(|app| std::mem::take(&mut app.queued_text_events));
+                    let time = with_ios_app(|app| app.time_now());
+                    for queued_event in queued_events {
+                        match queued_event {
+                            ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
+                                self.call_event_handler(&Event::TextInput(TextInputEvent {
+                                    input,
+                                    replace_last,
+                                    was_paste: false,
+                                }));
+                            }
+                            ios_app::IosTextInputEvent::RangeReplace(start, end, text) => {
+                                self.call_event_handler(&Event::TextRangeReplace(
+                                    TextRangeReplaceEvent { start, end, text },
+                                ));
+                            }
+                            ios_app::IosTextInputEvent::KeyEvent(key_code) => {
+                                self.call_event_handler(&Event::KeyDown(KeyEvent {
+                                    key_code,
+                                    is_repeat: false,
+                                    modifiers: Default::default(),
+                                    time,
+                                }));
+                                self.call_event_handler(&Event::KeyUp(KeyEvent {
+                                    key_code,
+                                    is_repeat: false,
+                                    modifiers: Default::default(),
+                                    time,
+                                }));
+                            }
+                        }
+                    }
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
@@ -171,8 +205,6 @@ impl Cx {
             }
             IosEvent::Init => {
                 with_ios_app(|app| app.start_timer(0, 0.008, true));
-                // Start gamepad monitoring
-                crate::os::apple::apple_gamepad::start_gamepad_monitoring();
                 self.start_studio_websocket_delayed();
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
@@ -258,7 +290,6 @@ impl Cx {
             IosEvent::PermissionResult(result) => {
                 self.call_event_handler(&Event::PermissionResult(result))
             }
-            IosEvent::GamepadConnected(e) => self.call_event_handler(&Event::GamepadConnected(e)),
         }
 
         if self.any_passes_dirty()
@@ -281,7 +312,8 @@ impl Cx {
                     window.window_geom = with_ios_app(|app| app.last_window_geom.clone());
                     window.is_created = true;
                 }
-                CxOsOp::ShowTextIME(_area, _pos) => {
+                CxOsOp::ShowTextIME(_area, pos) => {
+                    IosApp::set_ime_position(pos);
                     IosApp::show_keyboard();
                 }
                 CxOsOp::HideTextIME => {
@@ -322,8 +354,15 @@ impl Cx {
                 CxOsOp::CancelHttpRequest { request_id } => {
                     self.os.http_requests.cancel_http_request(request_id);
                 }
-                CxOsOp::ShowClipboardActions { has_selection, .. } => {
-                    with_ios_app(|app| app.show_clipboard_actions(has_selection));
+                CxOsOp::ShowClipboardActions {
+                    has_selection,
+                    rect,
+                    keyboard_shift,
+                } => {
+                    IosApp::show_clipboard_actions(has_selection, rect, keyboard_shift);
+                }
+                CxOsOp::HideClipboardActions => {
+                    IosApp::hide_clipboard_actions();
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     with_ios_app(|app| app.copy_to_clipboard(&content));
@@ -364,10 +403,6 @@ impl Cx {
     ) {
         let status = match permission {
             crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
-            _ => {
-                crate::log!("iOS permission check not implemented for: {:?}", permission);
-                crate::permission::PermissionStatus::DeniedPermanent
-            }
         };
 
         self.call_event_handler(&crate::event::Event::PermissionResult(
@@ -463,11 +498,6 @@ impl CxOsApi for Cx {
             self.package_root = Some("makepad".to_string());
         }
 
-        if !Self::has_studio_web_socket() {
-            #[cfg(apple_sim)]
-            self.start_disk_live_file_watcher(50);
-        }
-
         #[cfg(apple_sim)]
         self.native_load_dependencies();
         #[cfg(not(apple_sim))]
@@ -514,6 +544,7 @@ pub struct CxOs {
     pub(crate) network_response: NetworkResponseChannel,
     pub(crate) http_requests: AppleHttpRequests,
     pub(crate) permission_response: PermissionResultChannel,
+    pub(crate) apple_game_input: Option<crate::os::apple::apple_game_input::AppleGameInput>,
 }
 
 pub struct PermissionResultChannel {

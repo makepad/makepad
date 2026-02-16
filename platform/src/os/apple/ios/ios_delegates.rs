@@ -1,12 +1,39 @@
 use crate::{
-    animator::Ease,
-    event::{TouchState, VirtualKeyboardEvent},
+    event::{Ease, TouchState, VirtualKeyboardEvent},
     makepad_math::*,
     os::{
-        apple::apple_sys::*, apple::apple_util::nsstring_to_string, apple::ios_app::with_ios_app,
+        apple::apple_sys::*,
         apple::ios_app::IosApp,
+        apple::ios_app::{with_ios_app, IOS_APP},
     },
 };
+use std::ffi::c_void;
+
+/// Helper to safely access IosApp without causing re-entrant borrow panics.
+/// Returns None if we're already inside a with_ios_app call.
+/// This is critical for callbacks from UIKit that can occur during borrows.
+///
+/// This function is shared by ios_delegates and ios_text_input modules.
+pub fn try_with_ios_app<R>(
+    f: impl FnOnce(&mut crate::os::apple::ios::ios_app::IosApp) -> R,
+) -> Option<R> {
+    IOS_APP
+        .try_with(|app| {
+            match app.try_borrow_mut() {
+                Ok(mut app_ref) => {
+                    if let Some(app) = app_ref.as_mut() {
+                        return Some(f(app));
+                    }
+                }
+                Err(_) => {
+                    crate::log!("Warning: try_with_ios_app skipped due to re-entrant borrow");
+                }
+            }
+            None
+        })
+        .ok()
+        .flatten()
+}
 
 pub fn define_ios_app_delegate() -> *const Class {
     let superclass = class!(NSObject);
@@ -35,8 +62,71 @@ pub fn define_ios_app_delegate() -> *const Class {
 
 pub fn define_mtk_view() -> *const Class {
     let mut decl = ClassDecl::new("MakepadView", class!(MTKView)).unwrap();
+
+    // Add instance variables for clipboard menu state
+    decl.add_ivar::<BOOL>("has_selection");
+    decl.add_ivar::<f64>("menu_rect_x");
+    decl.add_ivar::<f64>("menu_rect_y");
+    decl.add_ivar::<f64>("menu_rect_width");
+    decl.add_ivar::<f64>("menu_rect_height");
+    decl.add_ivar::<*mut c_void>("edit_menu_interaction");
+
     extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
         YES
+    }
+
+    // Required for UIEditMenuInteraction to work - view must be able to become first responder
+    extern "C" fn can_become_first_responder(_: &Object, _: Sel) -> BOOL {
+        YES
+    }
+
+    // Return nil to prevent keyboard from showing when MakepadView becomes first responder
+    // (The hidden UITextField handles keyboard input separately)
+    extern "C" fn input_view(_: &Object, _: Sel) -> ObjcId {
+        nil
+    }
+
+    // Filter which clipboard actions are available based on selection state
+    extern "C" fn can_perform_action(this: &Object, _: Sel, action: Sel, _sender: ObjcId) -> BOOL {
+        unsafe {
+            let has_selection: BOOL = *this.get_ivar("has_selection");
+
+            // Copy and Cut require a selection
+            if action == sel!(copy:) || action == sel!(cut:) {
+                return has_selection;
+            }
+
+            // Paste requires clipboard to have text content
+            if action == sel!(paste:) {
+                let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
+                let has_strings: BOOL = msg_send![pasteboard, hasStrings];
+                return has_strings;
+            }
+
+            // Select All is always available
+            if action == sel!(selectAll:) {
+                return YES;
+            }
+
+            NO
+        }
+    }
+
+    // Action handlers for clipboard operations
+    extern "C" fn copy_action(_this: &Object, _: Sel, _sender: ObjcId) {
+        IosApp::send_clipboard_action("copy");
+    }
+
+    extern "C" fn cut_action(_this: &Object, _: Sel, _sender: ObjcId) {
+        IosApp::send_clipboard_action("cut");
+    }
+
+    extern "C" fn paste_action(_this: &Object, _: Sel, _sender: ObjcId) {
+        IosApp::send_clipboard_paste();
+    }
+
+    extern "C" fn select_all_action(_this: &Object, _: Sel, _sender: ObjcId) {
+        IosApp::send_clipboard_action("select_all");
     }
 
     fn on_touch(this: &Object, event: ObjcId, state: TouchState) {
@@ -111,6 +201,39 @@ pub fn define_mtk_view() -> *const Class {
             sel!(touchesCanceled: withEvent:),
             touches_canceled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
+
+        // First responder support for clipboard menu
+        decl.add_method(
+            sel!(canBecomeFirstResponder),
+            can_become_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        // Return nil to prevent keyboard from appearing when view becomes first responder
+        decl.add_method(
+            sel!(inputView),
+            input_view as extern "C" fn(&Object, Sel) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(canPerformAction:withSender:),
+            can_perform_action as extern "C" fn(&Object, Sel, Sel, ObjcId) -> BOOL,
+        );
+
+        // Clipboard action handlers
+        decl.add_method(
+            sel!(copy:),
+            copy_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(cut:),
+            cut_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(paste:),
+            paste_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(selectAll:),
+            select_all_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
     }
 
     return decl.register();
@@ -124,7 +247,6 @@ pub fn define_mtk_view_delegate() -> *const Class {
     }
 
     extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _: ObjcId) {
-        crate::log!("Draw size will change");
         IosApp::draw_size_will_change();
     }
     unsafe {
@@ -215,10 +337,9 @@ pub fn define_ios_timer_delegate() -> *const Class {
 }
 
 pub fn define_textfield_delegate() -> *const Class {
-    let mut decl = ClassDecl::new("NSTexfieldDlg", class!(NSObject)).unwrap();
+    let mut decl = ClassDecl::new("NSTextFieldDlg", class!(NSObject)).unwrap();
 
-    // those 3 callbacks are for resizing the canvas when keyboard is opened
-    // which is not currenlty supported by miniquad
+    // Keyboard notification helpers - used for resizing the canvas when keyboard is shown/hidden
     fn get_height_delta(notif: ObjcId) -> f64 {
         unsafe {
             let info: ObjcId = msg_send![notif, userInfo];
@@ -238,13 +359,13 @@ pub fn define_textfield_delegate() -> *const Class {
             let curve: i64 = msg_send![obj, intValue];
 
             let ease = match curve >> 16 {
+                // UIViewAnimationOptionCurveEaseInOut - approximated with bezier
                 0 => Ease::Bezier {
-                    // this is not the right curve.
                     cp0: 0.25,
                     cp1: 0.1,
                     cp2: 0.25,
                     cp3: 0.1,
-                }, //::UIViewAnimationOptionCurveEaseInOut = 0 << 16,
+                },
                 1 => Ease::InExp,  //UIViewAnimationOptionCurveEaseIn = 1 << 16,
                 2 => Ease::OutExp, //UIViewAnimationOptionCurveEaseOut = 2 << 16,
                 _ => Ease::Linear, //UIViewAnimationOptionCurveLinear = 3 << 16,
@@ -253,71 +374,75 @@ pub fn define_textfield_delegate() -> *const Class {
         }
     }
 
+    // Required stubs for keyboard frame change notifications (registered with notification center)
     extern "C" fn keyboard_did_change_frame(_: &Object, _: Sel, _notif: ObjcId) {}
-
     extern "C" fn keyboard_will_change_frame(_: &Object, _: Sel, _notif: ObjcId) {}
 
     extern "C" fn keyboard_will_hide(_: &Object, _: Sel, notif: ObjcId) {
+        // Get notification data OUTSIDE the borrow
         let height = get_height_delta(notif);
         let (duration, ease) = get_curve_duration(notif);
-        let time = with_ios_app(|app| app.time_now());
-        with_ios_app(|app| {
-            app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
-                time,
-                ease,
-                height: -height,
-                duration,
-            })
-        });
+        // Now borrow to get time and queue event
+        if let Some(time) = try_with_ios_app(|app| app.time_now()) {
+            try_with_ios_app(|app| {
+                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
+                    time,
+                    ease,
+                    height: -height,
+                    duration,
+                })
+            });
+        }
     }
 
     extern "C" fn keyboard_did_hide(_: &Object, _: Sel, _notif: ObjcId) {
-        let time = with_ios_app(|app| app.time_now());
-        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::DidHide { time });
+        if let Some(time) = try_with_ios_app(|app| app.time_now()) {
+            try_with_ios_app(|app| {
+                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidHide { time })
+            });
+        }
     }
+
     extern "C" fn keyboard_will_show(_: &Object, _: Sel, notif: ObjcId) {
+        // Get notification data OUTSIDE the borrow
         let height = get_height_delta(notif);
         let (duration, ease) = get_curve_duration(notif);
-        let time = with_ios_app(|app| app.time_now());
-        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
-            time,
-            height,
-            ease,
-            duration,
-        });
-    }
-    extern "C" fn keyboard_did_show(_: &Object, _: Sel, notif: ObjcId) {
-        let height = get_height_delta(notif);
-        let time = with_ios_app(|app| app.time_now());
-        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::DidShow {
-            time,
-            height: height,
-        });
-    }
-    extern "C" fn should_change_characters_in_range(
-        _this: &Object,
-        _: Sel,
-        _textfield: ObjcId,
-        range: NSRange,
-        string: ObjcId,
-    ) -> BOOL {
-        unsafe {
-            let len: u64 = msg_send![string, length];
-            if len > 0 {
-                let string = nsstring_to_string(string);
-                IosApp::send_text_input(string, range.length != 0);
-            } else {
-                IosApp::send_backspace();
-            }
+        // Now borrow to get time and queue event
+        if let Some(time) = try_with_ios_app(|app| app.time_now()) {
+            try_with_ios_app(|app| {
+                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
+                    time,
+                    height,
+                    ease,
+                    duration,
+                })
+            });
         }
-        NO
+    }
+
+    extern "C" fn keyboard_did_show(_: &Object, _: Sel, notif: ObjcId) {
+        // Get notification data OUTSIDE the borrow
+        let height = get_height_delta(notif);
+        // Now borrow to get time and queue event
+        if let Some(time) = try_with_ios_app(|app| app.time_now()) {
+            try_with_ios_app(|app| {
+                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidShow { time, height })
+            });
+        }
+    }
+    extern "C" fn input_mode_did_change(_: &Object, _: Sel, _notif: ObjcId) {
+        // When keyboard language changes, reload input views so iOS re-queries
+        // autocorrectionType (which dynamically checks CJK vs non-CJK)
+        try_with_ios_app(|app| {
+            if let Some(text_input_view) = app.text_input_view {
+                unsafe {
+                    let () = msg_send![text_input_view, reloadInputViews];
+                }
+            }
+        });
     }
 
     unsafe {
-        /*decl.add_method(
-            sel!(drawInMTKView:),
-            draw_in_rect as extern "C" fn(&Object, Sel, ObjcId),
-        );*/
         decl.add_method(
             sel!(keyboardDidChangeFrame:),
             keyboard_did_change_frame as extern "C" fn(&Object, Sel, ObjcId),
@@ -343,11 +468,60 @@ pub fn define_textfield_delegate() -> *const Class {
             keyboard_did_hide as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
-            sel!(textField: shouldChangeCharactersInRange: replacementString:),
-            should_change_characters_in_range
-                as extern "C" fn(&Object, Sel, ObjcId, NSRange, ObjcId) -> BOOL,
+            sel!(inputModeDidChange:),
+            input_mode_did_change as extern "C" fn(&Object, Sel, ObjcId),
         );
     }
     decl.add_ivar::<*mut c_void>("display_ptr");
+    return decl.register();
+}
+
+/// Defines a delegate class for UIEditMenuInteraction
+/// This delegate provides the target rect for menu positioning.
+pub fn define_edit_menu_interaction_delegate() -> *const Class {
+    let mut decl = ClassDecl::new("MakepadEditMenuDelegate", class!(NSObject)).unwrap();
+
+    // Store a reference to the MTKView for accessing menu rect
+    decl.add_ivar::<*mut c_void>("mtk_view");
+
+    // editMenuInteraction:targetRectForConfiguration:
+    // Returns the rect where the menu should point to (selection rect)
+    extern "C" fn target_rect_for_configuration(
+        this: &Object,
+        _: Sel,
+        _interaction: ObjcId,
+        _configuration: ObjcId,
+    ) -> NSRect {
+        unsafe {
+            let mtk_view: *mut c_void = *this.get_ivar("mtk_view");
+            if mtk_view.is_null() {
+                return NSRect {
+                    origin: NSPoint { x: 0.0, y: 0.0 },
+                    size: NSSize {
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                };
+            }
+            let view = mtk_view as ObjcId;
+            let x: f64 = *(*view).get_ivar("menu_rect_x");
+            let y: f64 = *(*view).get_ivar("menu_rect_y");
+            let width: f64 = *(*view).get_ivar("menu_rect_width");
+            let height: f64 = *(*view).get_ivar("menu_rect_height");
+            NSRect {
+                origin: NSPoint { x, y },
+                size: NSSize { width, height },
+            }
+        }
+    }
+
+    unsafe {
+        // UIEditMenuInteractionDelegate method: editMenuInteraction:targetRectForConfiguration:
+        decl.add_method(
+            sel!(editMenuInteraction:targetRectForConfiguration:),
+            target_rect_for_configuration as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> NSRect,
+        );
+    }
+
     return decl.register();
 }

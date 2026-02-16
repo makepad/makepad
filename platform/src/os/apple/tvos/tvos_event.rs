@@ -1,5 +1,5 @@
 use crate::{
-    event::{GamepadConnectedEvent, TimerEvent, WindowGeomChangeEvent},
+    event::{TimerEvent, WindowGeomChangeEvent},
     window::WindowId,
 };
 
@@ -11,5 +11,4 @@ pub enum TvosEvent {
     WindowGeomChange(WindowGeomChangeEvent),
     Paint,
     Timer(TimerEvent),
-    GamepadConnected(GamepadConnectedEvent),
 }
