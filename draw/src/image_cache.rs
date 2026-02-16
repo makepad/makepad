@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
@@ -428,7 +428,11 @@ fn spawn_decode_job(cx: &mut Cx, image_path: PathBuf, data: Arc<Vec<u8>>) {
                         status
                     );
                 } else {
-                    log!("ImageCache: decode_done key={} {}", image_path.display(), status);
+                    log!(
+                        "ImageCache: decode_done key={} {}",
+                        image_path.display(),
+                        status
+                    );
                 }
             }
             Cx::post_action(AsyncImageLoad {
@@ -505,9 +509,15 @@ pub fn load_image_from_data_async(
         None => {}
     }
 
-    // Headless single-frame runs should decode synchronously so textured output
-    // is available in the first emitted PNG.
-    if headless_mode_enabled() {
+    // On wasm, decode synchronously on the UI thread since thread pools
+    // are not reliably available. Also decode synchronously for headless
+    // single-frame runs so textured output is available in the first emitted PNG.
+    #[cfg(target_arch = "wasm32")]
+    let force_sync = true;
+    #[cfg(not(target_arch = "wasm32"))]
+    let force_sync = headless_mode_enabled();
+
+    if force_sync {
         let image = decode_image_buffer(image_path, &data)?;
         let texture = image.into_new_texture(cx);
         cx.get_global::<ImageCache>()
