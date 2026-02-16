@@ -897,7 +897,7 @@ where
 {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('[');
-        let last = self.len() - 1;
+        let last = self.len().saturating_sub(1);
         for (index, item) in self.iter().enumerate() {
             item.ser_json(d + 1, s);
             if index != last {
@@ -1058,7 +1058,7 @@ where
 {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('{');
-        let last = self.len() - 1;
+        let last = self.len().saturating_sub(1);
         for (index, (k, v)) in self.iter().enumerate() {
             s.indent(d + 1);
             k.ser_json(d + 1, s);
@@ -1108,5 +1108,17 @@ where
 {
     fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<Box<T>, DeJsonErr> {
         Ok(Box::new(DeJson::de_json(s, i)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SerJson;
+    use std::collections::HashMap;
+
+    #[test]
+    fn serialize_empty_hashmap_json() {
+        let map: HashMap<String, String> = HashMap::new();
+        assert_eq!(map.serialize_json(), "{}");
     }
 }
