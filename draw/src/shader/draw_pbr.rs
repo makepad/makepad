@@ -59,7 +59,6 @@ script_mod! {
         u_has_occlusion_texture: uniform(float(0.0))
         u_has_emissive_texture: uniform(float(0.0))
         u_has_env_texture: uniform(float(0.0))
-        u_uv_flip: uniform(float(0.0))
         u_light_dir: uniform(vec3(0.3, 0.7, 1.0))
         u_light_color: uniform(vec3(1.0, 1.0, 1.0))
         u_ambient: uniform(float(0.15))
@@ -130,11 +129,7 @@ script_mod! {
         }
 
         pixel: fn() {
-            let uv = mix(
-                self.v_uv,
-                vec2(self.v_uv.x, 1.0 - self.v_uv.y),
-                clamp(self.u_uv_flip, 0.0, 1.0)
-            );
+            let uv = self.v_uv;
             let base = self.u_base_color_factor * self.v_color;
             let tex_srgb = self.base_color_texture.sample_as_bgra(uv);
             let tex_linear = vec4(
@@ -647,13 +642,6 @@ impl DrawPbr {
             live_id!(u_has_env_texture),
             &[self.has_env_texture],
         );
-        let uv_flip = if cfg!(target_arch = "wasm32") {
-            1.0
-        } else {
-            0.0
-        };
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(u_uv_flip), &[uv_flip]);
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(u_light_dir),
