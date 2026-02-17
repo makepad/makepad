@@ -1852,6 +1852,27 @@ impl CxOsDrawShader {
             inst_sem_index += 1;
         }
 
+        if mapping.flags.debug_layout {
+            crate::log!(
+                "debug_layout d3d11 input_layout: geometry_inputs={} instance_inputs={} total_descs={}",
+                mapping.geometries.inputs.len(),
+                mapping.instances.inputs.len(),
+                layout_debug.len()
+            );
+            for geom in &mapping.geometries.inputs {
+                crate::log!(
+                    "debug_layout d3d11 geometry_input id={:?} slots={} offset={} attr={:?}",
+                    geom.id,
+                    geom.slots,
+                    geom.offset,
+                    geom.attr_format
+                );
+            }
+            for item in &layout_debug {
+                crate::log!("debug_layout d3d11 layout {}", item);
+            }
+        }
+
         let mut input_layout = None;
         let input_layout_res = unsafe {
             d3d11_cx.device.CreateInputLayout(
