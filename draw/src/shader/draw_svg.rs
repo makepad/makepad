@@ -253,6 +253,9 @@ impl DrawSvg {
             let offset_x = rect.pos.x as f32 + (tw - bw * sx) * 0.5 - bmin_x * sx;
             let offset_y = rect.pos.y as f32 + (th - bh * sy) * 0.5 - bmin_y * sy;
 
+            eprintln!("SVG RENDER: content_bounds=({},{},{},{}) bw={} bh={} tw={} th={} sx={} sy={} offset=({},{}) rect_pos=({},{})",
+                bmin_x, bmin_y, bmax_x, bmax_y, bw, bh, tw, th, sx, sy, offset_x, offset_y, rect.pos.x, rect.pos.y);
+
             // svg_scale at uniform offset 0..1, svg_offset at 2..3, svg_time at 4
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
             uniforms[0] = sx;

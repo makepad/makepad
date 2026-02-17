@@ -516,6 +516,13 @@ fn emit_shape(
     grad_map: &GradientMap,
 ) {
     // Emit drop shadow geometry before the main shape
+    if style.filter.is_some() {
+        eprintln!(
+            "SHADOW: style.filter={:?} defs.filters.keys={:?}",
+            style.filter,
+            defs.filters.keys().collect::<Vec<_>>()
+        );
+    }
     if let Some(ref filter_id) = style.filter {
         if let Some(filter) = defs.filters.get(filter_id) {
             for effect in &filter.effects {
@@ -560,7 +567,55 @@ fn emit_shape(
                                 _ => {}
                             }
                         }
+                        let verts_before = dv.acc_verts.len();
+                        let indices_before = dv.acc_indices.len();
+                        let path_count = dv.path.cmds.len();
                         dv.shape_shadow(sblur.max(0.5));
+                        let verts_after = dv.acc_verts.len();
+                        let indices_after = dv.acc_indices.len();
+                        let num_shadow_verts = (verts_after - verts_before) / 19;
+                        eprintln!("SHADOW DEBUG: filter={} sblur={} sdx={} sdy={} scale={} path_cmds={} num_verts={} num_indices={}",
+                            filter_id, sblur, sdx, sdy, scale, path_count,
+                            num_shadow_verts, (indices_after - indices_before));
+                        // Analyze shadow vertex bounds
+                        let mut n_body = 0usize;
+                        let mut n_outer = 0usize;
+                        let (mut ob_min_x, mut ob_min_y) = (f32::MAX, f32::MAX);
+                        let (mut ob_max_x, mut ob_max_y) = (f32::MIN, f32::MIN);
+                        let (mut oo_min_x, mut oo_min_y) = (f32::MAX, f32::MAX);
+                        let (mut oo_max_x, mut oo_max_y) = (f32::MIN, f32::MIN);
+                        for vi in 0..num_shadow_verts {
+                            let off = verts_before + vi * 19;
+                            let vx = dv.acc_verts[off];
+                            let vy = dv.acc_verts[off + 1];
+                            let vu = dv.acc_verts[off + 2];
+                            if vu < 0.25 {
+                                n_outer += 1;
+                                oo_min_x = oo_min_x.min(vx);
+                                oo_max_x = oo_max_x.max(vx);
+                                oo_min_y = oo_min_y.min(vy);
+                                oo_max_y = oo_max_y.max(vy);
+                            } else {
+                                n_body += 1;
+                                ob_min_x = ob_min_x.min(vx);
+                                ob_max_x = ob_max_x.max(vx);
+                                ob_min_y = ob_min_y.min(vy);
+                                ob_max_y = ob_max_y.max(vy);
+                            }
+                        }
+                        eprintln!(
+                            "  BODY: n={} bounds=({:.1},{:.1})-({:.1},{:.1})",
+                            n_body, ob_min_x, ob_min_y, ob_max_x, ob_max_y
+                        );
+                        eprintln!(
+                            "  OUTER: n={} bounds=({:.1},{:.1})-({:.1},{:.1})",
+                            n_outer, oo_min_x, oo_min_y, oo_max_x, oo_max_y
+                        );
+                        eprintln!(
+                            "  Expected expansion: {:.1} (blur*3={:.1}*3)",
+                            sblur * 3.0,
+                            sblur
+                        );
                         dv.cur_paint = saved_paint;
                     }
                 }
