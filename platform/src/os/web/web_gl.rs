@@ -1,6 +1,6 @@
 use crate::{
     cx::Cx,
-    draw_shader::CxDrawShaderCode,
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping},
     draw_list::DrawListId,
     draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
     draw_vars::DRAW_CALL_TEXTURE_SLOTS,
@@ -213,6 +213,23 @@ impl Cx {
                 }
 
                 let pass_uniforms = &self.passes[draw_pass_id].pass_uniforms;
+                let instances = if sh.mapping.instances.total_slots == 0 {
+                    0
+                } else {
+                    draw_item.instances.as_ref().map_or(0, |instances| {
+                        instances.len() / sh.mapping.instances.total_slots
+                    })
+                };
+                if sh.mapping.flags.debug_draw && instances > 0 {
+                    CxDrawShaderMapping::debug_dump_shader_draw_call(
+                        "webgl",
+                        draw_item_id,
+                        sh,
+                        draw_call,
+                        draw_item.instances.as_ref().unwrap(),
+                        instances,
+                    );
+                }
 
                 let mut textures = [None; DRAW_CALL_TEXTURE_SLOTS];
                 for (index, texture_slot) in draw_call.texture_slots.iter().enumerate() {
@@ -361,7 +378,7 @@ impl Cx {
     pub fn webgl_compile_shaders(&mut self) {
         let compile_set: Vec<usize> = self.draw_shaders.compile_set.iter().copied().collect();
         for draw_shader_id in compile_set {
-            let (vertex, pixel, geometry_slots, instance_slots, textures, debug) = {
+            let (vertex, pixel, geometry_slots, instance_slots, textures, debug_code) = {
                 let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
                 let (vertex, pixel) = match &cx_shader.mapping.code {
                     CxDrawShaderCode::Separate { vertex, fragment } => {
@@ -384,11 +401,11 @@ impl Cx {
                     cx_shader.mapping.geometries.total_slots,
                     cx_shader.mapping.instances.total_slots,
                     textures,
-                    cx_shader.mapping.flags.debug,
+                    cx_shader.mapping.flags.debug_code,
                 )
             };
 
-            if debug {
+            if debug_code {
                 crate::log!("{}\n{}", vertex, pixel);
             }
 

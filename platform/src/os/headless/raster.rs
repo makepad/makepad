@@ -5,7 +5,7 @@ use crate::{
     cx::Cx,
     draw_list::{CxDrawKind, DrawListId},
     draw_pass::{CxDrawPassParent, DrawPassId},
-    draw_shader::CxDrawShaderCode,
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping},
     makepad_live_id::*,
     makepad_math::*,
     texture::TextureFormat,
@@ -913,6 +913,16 @@ impl Cx {
             let instance_count = instances_data.len() / total_instance_slots;
             if instance_count == 0 {
                 continue;
+            }
+            if sh.mapping.flags.debug_draw {
+                CxDrawShaderMapping::debug_dump_shader_draw_call(
+                    "headless",
+                    draw_item_id,
+                    sh,
+                    draw_call,
+                    instances_data,
+                    instance_count,
+                );
             }
 
             let geom_slots = sh.mapping.geometries.total_slots;

@@ -142,11 +142,6 @@ impl DrawVars {
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
             mapping.varying_total_slots = varying_total_slots;
 
-            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
-            if let Some(true) = debug_value.as_bool() {
-                mapping.flags.debug = true;
-            }
-
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
 
@@ -196,6 +191,9 @@ impl Cx {
                     }
                 }
             };
+            if cx_shader.mapping.flags.debug_code {
+                crate::log!("{}", source);
+            }
             let source_hash = hash_string(source);
 
             if let Some((existing_index, _)) = self
