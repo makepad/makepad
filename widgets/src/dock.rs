@@ -721,11 +721,29 @@ impl Dock {
         None
     }
 
-    pub fn item(&mut self, entry_id: LiveId) -> Option<WidgetRef> {
+    pub fn item(&self, entry_id: LiveId) -> Option<WidgetRef> {
         if let Some(entry) = self.items.get(&entry_id) {
             return Some(entry.1.clone());
         }
         None
+    }
+
+    fn drop_target_tab_id(&self, cx: &Cx, abs: Vec2d) -> Option<LiveId> {
+        let pos = self.find_drop_position(cx, abs)?;
+        match pos.part {
+            DropPart::Tab => Some(pos.id),
+            DropPart::TabBar
+            | DropPart::Left
+            | DropPart::Right
+            | DropPart::Top
+            | DropPart::Bottom
+            | DropPart::Center => {
+                let DockItem::Tabs { tabs, selected, .. } = self.dock_items.get(&pos.id)? else {
+                    return None;
+                };
+                tabs.get(*selected).copied()
+            }
+        }
     }
 
     pub fn item_or_create(
@@ -1452,7 +1470,7 @@ impl Widget for Dock {
 
 impl DockRef {
     pub fn item(&self, entry_id: LiveId) -> WidgetRef {
-        if let Some(mut dock) = self.borrow_mut() {
+        if let Some(dock) = self.borrow() {
             if let Some(item) = dock.item(entry_id) {
                 return item;
             }
@@ -1586,6 +1604,13 @@ impl DockRef {
     pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<(LiveId, usize)> {
         if let Some(mut dock) = self.borrow_mut() {
             return dock.find_tab_bar_of_tab(tab_id);
+        }
+        None
+    }
+
+    pub fn drop_target_tab_id(&self, cx: &Cx, abs: Vec2d) -> Option<LiveId> {
+        if let Some(dock) = self.borrow() {
+            return dock.drop_target_tab_id(cx, abs);
         }
         None
     }
