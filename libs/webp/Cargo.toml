@@ -8,6 +8,7 @@ description = "WebP decoding (and optional encoding) in pure Rust, inhoused for 
 [features]
 default = []
 encoder = []
+_benchmarks = []
 
 [dependencies]
 makepad-byteorder-lite = { path = "../byteorder-lite", version = "0.1.0" }
