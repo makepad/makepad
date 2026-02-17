@@ -5,8 +5,8 @@ use {
         draw_list::DrawListId,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         draw_shader::{
-            CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat,
-            DrawShaderId, DrawShaderTextureInput,
+            CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderId,
+            DrawShaderTextureInput,
         },
         draw_vars::DrawVars,
         event::{Event, TextureHandleReadyEvent},
@@ -202,11 +202,6 @@ impl DrawVars {
             );
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
 
-            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
-            if let Some(true) = debug_value.as_bool() {
-                mapping.flags.debug = true;
-            }
-
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
 
@@ -340,6 +335,17 @@ impl Cx {
 
                 if instances == 0 {
                     continue;
+                }
+
+                if sh.mapping.flags.debug_draw {
+                    CxDrawShaderMapping::debug_dump_shader_draw_call(
+                        "opengl",
+                        draw_item_id,
+                        sh,
+                        draw_call,
+                        draw_item.instances.as_ref().unwrap(),
+                        instances as usize,
+                    );
                 }
 
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
@@ -843,7 +849,7 @@ impl Cx {
                 CxDrawShaderCode::Combined { code } => (code.clone(), code.clone()),
             };
 
-            if cx_shader.mapping.flags.debug {
+            if cx_shader.mapping.flags.debug_code {
                 crate::log!("{}\n{}", vertex, pixel);
             }
 

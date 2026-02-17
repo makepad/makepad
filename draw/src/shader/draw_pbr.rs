@@ -20,6 +20,8 @@ script_mod! {
     use mod.geom
 
     mod.draw.DrawPbr = mod.std.set_type_default() do #(DrawPbr::script_shader(vm)){
+        debug_layout: true
+        debug_code: true
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -32,18 +34,24 @@ script_mod! {
         occlusion_texture: texture_2d(float)
         emissive_texture: texture_2d(float)
         env_texture: texture_cube(float)
-        model_c0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
-        model_c1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
-        model_c2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
-        model_c3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
-        view_c0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
-        view_c1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
-        view_c2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
-        view_c3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
-        proj_c0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
-        proj_c1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
-        proj_c2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
-        proj_c3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        model_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        view_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        projection_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
         clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
         depth_range: uniform(vec2(0.0, 1.0))
         depth_forward_bias: uniform(float(0.0))
@@ -71,25 +79,15 @@ script_mod! {
         v_tangent: varying(vec4f)
         v_uv: varying(vec2f)
         v_color: varying(vec4f)
-
+        
         vertex: fn() {
             let local_pos = vec4(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z, 1.0);
             let local_n = vec4(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y, 0.0);
 
-            let model_pos =
-                self.model_c0 * local_pos.x +
-                self.model_c1 * local_pos.y +
-                self.model_c2 * local_pos.z +
-                self.model_c3 * local_pos.w;
-            let model_n =
-                self.model_c0 * local_n.x +
-                self.model_c1 * local_n.y +
-                self.model_c2 * local_n.z;
+            let model_pos = self.model_matrix * local_pos;
+            let model_n = self.model_matrix * local_n;
             let local_t = vec4(self.geom.tangent.x, self.geom.tangent.y, self.geom.tangent.z, 0.0);
-            let model_t =
-                self.model_c0 * local_t.x +
-                self.model_c1 * local_t.y +
-                self.model_c2 * local_t.z;
+            let model_t = self.model_matrix * local_t;
 
             self.v_world = vec3(model_pos.x, model_pos.y, model_pos.z);
             self.v_normal = vec3(model_n.x, model_n.y, model_n.z);
@@ -98,16 +96,8 @@ script_mod! {
             self.v_color = self.geom.color;
 
             let world = vec4(model_pos.x, model_pos.y, model_pos.z + self.draw_call.zbias, 1.0);
-            let view_pos =
-                self.view_c0 * world.x +
-                self.view_c1 * world.y +
-                self.view_c2 * world.z +
-                self.view_c3 * world.w;
-            let clip_pos_base =
-                self.proj_c0 * view_pos.x +
-                self.proj_c1 * view_pos.y +
-                self.proj_c2 * view_pos.z +
-                self.proj_c3 * view_pos.w;
+            let view_pos = self.view_matrix * world;
+            let clip_pos_base = self.projection_matrix * view_pos;
             let inv_w = 1.0 / max(clip_pos_base.w, 0.000001);
             let depth01 = clamp((clip_pos_base.z * inv_w) * 0.5 + 0.5, 0.0, 1.0);
             let depth_mapped = clamp(
@@ -285,34 +275,23 @@ pub struct DrawPbr {
     pub cur_transform: Mat4f,
     #[rust(vec4(1.0, 1.0, 1.0, 1.0))]
     pub cur_color: Vec4f,
+    #[rust(Mat4f::identity())]
+    pub model_matrix: Mat4f,
+    #[rust(Mat4f::identity())]
+    pub view_matrix: Mat4f,
+    #[rust(Mat4f::identity())]
+    pub projection_matrix: Mat4f,
+    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
+    pub clip_ndc: Vec4f,
+    #[rust(vec2(0.0, 1.0))]
+    pub depth_range: Vec2f,
+    /// Positive values move the 3D content forward in depth (towards 0.0).
+    #[rust(0.0)]
+    pub depth_forward_bias: f32,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
     pub draw_clip: Vec4f,
-    #[rust(vec4(1.0, 0.0, 0.0, 0.0))]
-    pub model_c0: Vec4f,
-    #[rust(vec4(0.0, 1.0, 0.0, 0.0))]
-    pub model_c1: Vec4f,
-    #[rust(vec4(0.0, 0.0, 1.0, 0.0))]
-    pub model_c2: Vec4f,
-    #[rust(vec4(0.0, 0.0, 0.0, 1.0))]
-    pub model_c3: Vec4f,
-    #[rust(vec4(1.0, 0.0, 0.0, 0.0))]
-    pub view_c0: Vec4f,
-    #[rust(vec4(0.0, 1.0, 0.0, 0.0))]
-    pub view_c1: Vec4f,
-    #[rust(vec4(0.0, 0.0, 1.0, 0.0))]
-    pub view_c2: Vec4f,
-    #[rust(vec4(0.0, 0.0, 0.0, 1.0))]
-    pub view_c3: Vec4f,
-    #[rust(vec4(1.0, 0.0, 0.0, 0.0))]
-    pub proj_c0: Vec4f,
-    #[rust(vec4(0.0, 1.0, 0.0, 0.0))]
-    pub proj_c1: Vec4f,
-    #[rust(vec4(0.0, 0.0, 1.0, 0.0))]
-    pub proj_c2: Vec4f,
-    #[rust(vec4(0.0, 0.0, 0.0, 1.0))]
-    pub proj_c3: Vec4f,
     #[live(vec4(1.0, 1.0, 1.0, 1.0))]
     pub base_color_factor: Vec4f,
     #[live(1.0)]
@@ -337,13 +316,6 @@ pub struct DrawPbr {
     pub has_emissive_texture: f32,
     #[live(0.0)]
     pub has_env_texture: f32,
-    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
-    pub clip_ndc: Vec4f,
-    #[rust(vec2(0.0, 1.0))]
-    pub depth_range: Vec2f,
-    /// Positive values move the 3D content forward in depth (towards 0.0).
-    #[rust(0.0)]
-    pub depth_forward_bias: f32,
     #[live(vec3(0.3, 0.7, 1.0))]
     pub light_dir: Vec3f,
     #[live(vec3(1.0, 1.0, 1.0))]
@@ -384,42 +356,12 @@ impl DrawPbr {
 
     pub fn set_transform(&mut self, transform: Mat4f) {
         self.cur_transform = transform;
-        self.model_c0 = vec4(transform.v[0], transform.v[1], transform.v[2], transform.v[3]);
-        self.model_c1 = vec4(transform.v[4], transform.v[5], transform.v[6], transform.v[7]);
-        self.model_c2 = vec4(transform.v[8], transform.v[9], transform.v[10], transform.v[11]);
-        self.model_c3 = vec4(transform.v[12], transform.v[13], transform.v[14], transform.v[15]);
+        self.model_matrix = transform;
     }
 
     pub fn set_view_projection(&mut self, view: Mat4f, projection: Mat4f) {
-        self.view_c0 = vec4(view.v[0], view.v[1], view.v[2], view.v[3]);
-        self.view_c1 = vec4(view.v[4], view.v[5], view.v[6], view.v[7]);
-        self.view_c2 = vec4(view.v[8], view.v[9], view.v[10], view.v[11]);
-        self.view_c3 = vec4(view.v[12], view.v[13], view.v[14], view.v[15]);
-
-        self.proj_c0 = vec4(
-            projection.v[0],
-            projection.v[1],
-            projection.v[2],
-            projection.v[3],
-        );
-        self.proj_c1 = vec4(
-            projection.v[4],
-            projection.v[5],
-            projection.v[6],
-            projection.v[7],
-        );
-        self.proj_c2 = vec4(
-            projection.v[8],
-            projection.v[9],
-            projection.v[10],
-            projection.v[11],
-        );
-        self.proj_c3 = vec4(
-            projection.v[12],
-            projection.v[13],
-            projection.v[14],
-            projection.v[15],
-        );
+        self.view_matrix = view;
+        self.projection_matrix = projection;
     }
 
     pub fn set_color(&mut self, color: Vec4f) {
@@ -503,64 +445,18 @@ impl DrawPbr {
     fn apply_draw_uniforms(&mut self, cx: &mut Cx2d) {
         self.draw_vars.set_uniform(
             cx.cx,
-            live_id!(model_c0),
-            &[self.model_c0.x, self.model_c0.y, self.model_c0.z, self.model_c0.w],
+            live_id!(model_matrix),
+            &self.model_matrix.v,
         );
         self.draw_vars.set_uniform(
             cx.cx,
-            live_id!(model_c1),
-            &[self.model_c1.x, self.model_c1.y, self.model_c1.z, self.model_c1.w],
+            live_id!(view_matrix),
+            &self.view_matrix.v,
         );
         self.draw_vars.set_uniform(
             cx.cx,
-            live_id!(model_c2),
-            &[self.model_c2.x, self.model_c2.y, self.model_c2.z, self.model_c2.w],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(model_c3),
-            &[self.model_c3.x, self.model_c3.y, self.model_c3.z, self.model_c3.w],
-        );
-
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(view_c0),
-            &[self.view_c0.x, self.view_c0.y, self.view_c0.z, self.view_c0.w],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(view_c1),
-            &[self.view_c1.x, self.view_c1.y, self.view_c1.z, self.view_c1.w],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(view_c2),
-            &[self.view_c2.x, self.view_c2.y, self.view_c2.z, self.view_c2.w],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(view_c3),
-            &[self.view_c3.x, self.view_c3.y, self.view_c3.z, self.view_c3.w],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(proj_c0),
-            &[self.proj_c0.x, self.proj_c0.y, self.proj_c0.z, self.proj_c0.w],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(proj_c1),
-            &[self.proj_c1.x, self.proj_c1.y, self.proj_c1.z, self.proj_c1.w],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(proj_c2),
-            &[self.proj_c2.x, self.proj_c2.y, self.proj_c2.z, self.proj_c2.w],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(proj_c3),
-            &[self.proj_c3.x, self.proj_c3.y, self.proj_c3.z, self.proj_c3.w],
+            live_id!(projection_matrix),
+            &self.projection_matrix.v,
         );
         self.draw_vars.set_uniform(
             cx.cx,
