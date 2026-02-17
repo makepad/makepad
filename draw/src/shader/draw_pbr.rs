@@ -20,8 +20,6 @@ script_mod! {
     use mod.geom
 
     mod.draw.DrawPbr = mod.std.set_type_default() do #(DrawPbr::script_shader(vm)){
-        debug_layout: true
-        debug_code: true
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -119,7 +117,7 @@ script_mod! {
         }
 
         pixel: fn() {
-            let uv = self.v_uv;
+            let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
             let base = self.u_base_color_factor * self.v_color;
             let tex_srgb = self.base_color_texture.sample_as_bgra(uv);
             let tex_linear = vec4(

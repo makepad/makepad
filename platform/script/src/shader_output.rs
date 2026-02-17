@@ -38,7 +38,7 @@ impl Default for ShaderSampler {
     fn default() -> Self {
         Self {
             filter: SamplerFilter::Linear,
-            address: SamplerAddress::Repeat,
+            address: SamplerAddress::ClampToEdge,
             coord: SamplerCoord::Normalized,
         }
     }

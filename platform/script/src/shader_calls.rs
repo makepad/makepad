@@ -1348,7 +1348,7 @@ impl ShaderFnCompiler {
                     let coord = &args[0];
                     let mut s = self.stack.new_string();
 
-                    // Get or create the default sampler (linear, repeat, normalized)
+                    // Get or create the default sampler (linear, clamp_to_edge, normalized)
                     let sampler = ShaderSampler::default();
                     let sampler_idx = output.get_or_create_sampler(sampler);
 
