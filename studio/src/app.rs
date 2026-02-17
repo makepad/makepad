@@ -23,10 +23,12 @@ use crate::{
     snapshot::*,
     studio_editor::*,
     studio_file_tree::*,
+    studio_terminal::*,
 };
 use std::env;
 use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 
 app_main!(App);
 
@@ -66,6 +68,65 @@ pub struct App {
 }
 
 impl App {
+    fn is_image_path(path: &str) -> bool {
+        let Some(ext) = Path::new(path).extension().and_then(|ext| ext.to_str()) else {
+            return false;
+        };
+        let ext = ext.to_ascii_lowercase();
+        matches!(
+            ext.as_str(),
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "bmp"
+                | "tif"
+                | "tiff"
+                | "heic"
+                | "heif"
+                | "avif"
+        )
+    }
+
+    fn external_image_drop_paths(items: &[DragItem]) -> Option<Vec<String>> {
+        let mut paths = Vec::new();
+        for item in items {
+            match item {
+                DragItem::FilePath { path, internal_id } => {
+                    if internal_id.is_some() || !Self::is_image_path(path) {
+                        return None;
+                    }
+                    paths.push(path.clone());
+                }
+                _ => return None,
+            }
+        }
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    fn try_route_image_drop_to_terminal(
+        &mut self,
+        cx: &mut Cx,
+        dock: &DockRef,
+        abs: Vec2d,
+        items: &[DragItem],
+    ) -> bool {
+        let Some(paths) = Self::external_image_drop_paths(items) else {
+            return false;
+        };
+        let target_tab = dock.drop_target_tab_id(cx, abs);
+        if target_tab != Some(id!(terminal_tab)) {
+            return false;
+        }
+        let terminal_item = dock.item(id!(terminal_tab));
+        if let Some(mut terminal) = terminal_item.as_studio_terminal().borrow_mut() {
+            terminal.insert_dropped_image_paths(cx, &paths);
+            return true;
+        }
+        false
+    }
+
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
             let dock = self.ui.dock(cx, ids!(dock));
@@ -809,7 +870,12 @@ impl MatchEvent for App {
                     );
                 }
                 DockAction::Drag(drag_event) => {
-                    if drag_event.items.len() == 1 {
+                    let target_tab = dock.drop_target_tab_id(cx, drag_event.abs);
+                    if Self::external_image_drop_paths(drag_event.items.as_ref()).is_some()
+                        && target_tab == Some(id!(terminal_tab))
+                    {
+                        dock.accept_drag(cx, drag_event, DragResponse::Copy);
+                    } else if drag_event.items.len() == 1 {
                         if drag_event.modifiers.logo {
                             dock.accept_drag(cx, drag_event, DragResponse::Copy);
                         } else {
@@ -818,6 +884,14 @@ impl MatchEvent for App {
                     }
                 }
                 DockAction::Drop(drop_event) => {
+                    if self.try_route_image_drop_to_terminal(
+                        cx,
+                        &dock,
+                        drop_event.abs,
+                        drop_event.items.as_ref(),
+                    ) {
+                        return;
+                    }
                     if let DragItem::FilePath { path, internal_id } = &drop_event.items[0] {
                         if let Some(internal_id) = internal_id {
                             // from inside the dock

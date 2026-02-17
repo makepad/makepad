@@ -1,0 +1,10 @@
+[package]
+name = "makepad-byteorder-lite"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense OR MIT"
+description = "Library for reading/writing numbers in big-endian and little-endian (inhoused for makepad)"
+
+[features]
+default = ["std"]
+std = []

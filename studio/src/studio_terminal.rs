@@ -5,6 +5,7 @@ use crate::makepad_widgets::*;
 use makepad_terminal_core::{Color, CursorShape, Pty, StyleFlags, TermKeyCode, Terminal};
 use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -312,6 +313,144 @@ impl StudioTerminal {
     /// Slightly longer than coalesce timeout to cover the frame(s) where
     /// partial data is being processed.
     const CURSOR_HOLD_TIMEOUT: Duration = Duration::from_millis(150);
+
+    fn is_image_path(path: &str) -> bool {
+        let Some(ext) = Path::new(path).extension().and_then(|ext| ext.to_str()) else {
+            return false;
+        };
+        let ext = ext.to_ascii_lowercase();
+        matches!(
+            ext.as_str(),
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "bmp"
+                | "tif"
+                | "tiff"
+                | "heic"
+                | "heif"
+                | "avif"
+        )
+    }
+
+    fn shell_quote_path(path: &str) -> String {
+        let mut out = String::with_capacity(path.len() + 2);
+        out.push('\'');
+        for ch in path.chars() {
+            if ch == '\'' {
+                out.push_str("'\\''");
+            } else {
+                out.push(ch);
+            }
+        }
+        out.push('\'');
+        out
+    }
+
+    fn hex_nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(10 + (byte - b'a')),
+            b'A'..=b'F' => Some(10 + (byte - b'A')),
+            _ => None,
+        }
+    }
+
+    fn decode_percent_escapes(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let (Some(hi), Some(lo)) =
+                    (Self::hex_nibble(bytes[i + 1]), Self::hex_nibble(bytes[i + 2]))
+                {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+    }
+
+    fn dropped_image_paths(items: &[DragItem]) -> Option<Vec<String>> {
+        let mut paths = Vec::new();
+        for item in items {
+            match item {
+                DragItem::FilePath { path, internal_id } => {
+                    if internal_id.is_some() {
+                        return None;
+                    }
+                    let path = Self::decode_percent_escapes(path);
+                    if !Self::is_image_path(&path) {
+                        return None;
+                    }
+                    paths.push(path);
+                }
+                _ => return None,
+            }
+        }
+        if paths.is_empty() {
+            None
+        } else {
+            Some(paths)
+        }
+    }
+
+    fn send_dropped_image_paths(&mut self, cx: &mut Cx, paths: &[String]) {
+        if paths.is_empty() {
+            return;
+        }
+        self.ensure_pty(cx);
+        let mut payload = String::new();
+        for (index, path) in paths.iter().enumerate() {
+            payload.push_str(&Self::shell_quote_path(path));
+            if index + 1 < paths.len() {
+                payload.push(' ');
+            }
+        }
+        payload.push(' ');
+        self.note_local_input(cx);
+        self.send_text_to_pty(&payload, &KeyModifiers::default());
+    }
+
+    pub fn insert_dropped_image_paths(&mut self, cx: &mut Cx, paths: &[String]) {
+        self.send_dropped_image_paths(cx, paths);
+    }
+
+    fn handle_image_file_drop(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let drop_rect = self.scroll_bars.area().clipped_rect(cx);
+        match event {
+            Event::Drag(drag_event) => {
+                if *drag_event.handled.lock().unwrap() || !drop_rect.contains(drag_event.abs) {
+                    return false;
+                }
+                if Self::dropped_image_paths(drag_event.items.as_ref()).is_none() {
+                    return false;
+                }
+                *drag_event.response.lock().unwrap() = DragResponse::Copy;
+                *drag_event.handled.lock().unwrap() = true;
+                true
+            }
+            Event::Drop(drop_event) => {
+                if *drop_event.handled.lock().unwrap() || !drop_rect.contains(drop_event.abs) {
+                    return false;
+                }
+                let Some(paths) = Self::dropped_image_paths(drop_event.items.as_ref()) else {
+                    return false;
+                };
+                *drop_event.handled.lock().unwrap() = true;
+                self.send_dropped_image_paths(cx, &paths);
+                true
+            }
+            _ => false,
+        }
+    }
 
     fn invalidate_glyph_cache_if_needed(
         glyph_cache: &mut HashMap<char, CachedTerminalGlyph>,
@@ -1480,6 +1619,10 @@ impl Widget for StudioTerminal {
 
         if visible {
             self.ensure_pty(cx);
+
+            if self.handle_image_file_drop(cx, event) {
+                return;
+            }
 
             if self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
                 if self.enter_coalesce.is_none() {
