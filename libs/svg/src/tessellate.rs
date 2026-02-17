@@ -1003,6 +1003,12 @@ impl Tessellator {
             if count < 3 {
                 continue;
             }
+            // Determine outward direction sign from contour winding.
+            // For CCW (area >= 0), dmx/dmy points outward so -dmx is inward;
+            // for CW (area < 0), dmx/dmy points inward so -dmx is outward.
+            // We want to push fringe outward, so use -sign * dmx.
+            let area = poly_area(&self.points[first..first + count]);
+            let sign: f32 = if area >= 0.0 { 1.0 } else { -1.0 };
             // convex fan at original path positions (fully opaque, v=1.0)
             let base = verts.len() as u32;
             for j in 0..count {
@@ -1026,8 +1032,8 @@ impl Tessellator {
                 vi.stroke_dist = blur;
                 verts.push(vi);
                 // outer: pushed outward, clamped to expand distance
-                let mut ox = -p1.dmx * expand;
-                let mut oy = -p1.dmy * expand;
+                let mut ox = -sign * p1.dmx * expand;
+                let mut oy = -sign * p1.dmy * expand;
                 let ol = (ox * ox + oy * oy).sqrt();
                 if ol > expand {
                     let s = expand / ol;
