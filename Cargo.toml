@@ -117,7 +117,6 @@ rustc-hash = { path = "libs/vulkan/rustc-hash" }
 spirv = { path = "libs/vulkan/spirv" }
 thiserror = { path = "libs/vulkan/thiserror" }
 thiserror-impl = { path = "libs/vulkan/thiserror-impl" }
-unicode-ident = { path = "libs/vulkan/unicode-ident" }
 windows-link = { path = "libs/windows/windows-link" }
 crunchy = { path = "libs/vulkan/crunchy" }
 zerocopy = { path = "libs/vulkan/zerocopy" }
