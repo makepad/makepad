@@ -62,7 +62,9 @@ workspace.exclude = [
     "libs/unicode/unicode-properties",
     "libs/unicode/unicode-script",
     "libs/unicode/unicode-segmentation",
-    # vendored zune libs (doctests reference original crate names)
+    # vendored image libs (doctests reference original crate names)
+    "libs/byteorder-lite",
+    "libs/webp",
     "libs/zune/zune-core",
     "libs/zune/zune-inflate",
     "libs/zune/zune-jpeg",

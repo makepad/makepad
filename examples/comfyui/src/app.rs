@@ -47,7 +47,7 @@ impl MatchEvent for App {
             ]
 
             fn openai_completion(messages){
-                let task = std.task()
+                let promise = std.promise()
                 let req = net.HttpRequest{
                     url: openai_base + "/v1/chat/completions"
                     method: net.HttpMethod.POST
@@ -69,14 +69,14 @@ impl MatchEvent for App {
                             }
                         }
                     }
-                    on_complete: || task.resolve(total.trim())
+                    on_complete: || promise.resolve(total.trim())
                     on_error: |e| ~e
                 }
-                task
+                promise
             }
 
             fn comfy_image_download(image){
-                let task = std.task()
+                let promise = std.promise()
                 let req = net.HttpRequest{
                     url: "http://" + comfy_ip + "/view?"+
                     "filename=" + image.filename+
@@ -85,14 +85,14 @@ impl MatchEvent for App {
                     method: net.HttpMethod.GET
                 }
                 net.http_request(req) do net.HttpEvents{
-                    on_response: |res| task.resolve(res.body)
+                    on_response: |res| promise.resolve(res.body)
                     on_error: |e| ~e
                 }
-                task
+                promise
             }
 
             fn comfy_last_image(prompt_id, model){
-                let task = std.task()
+                let promise = std.promise()
                 let req = net.HttpRequest{
                     url: "http://"+comfy_ip+"/history/"+prompt_id
                     method: net.HttpMethod.GET
@@ -101,11 +101,11 @@ impl MatchEvent for App {
                     on_response: |res| {
                         let data = res.body.parse_json()
                         let image = ok{data[prompt_id].outputs[model.save].images[0]}
-                        task.resolve(image)
+                        promise.resolve(image)
                     }
                     on_error: |e| ~e
                 }
-                task
+                promise
             }
 
             let models = {
@@ -149,7 +149,7 @@ impl MatchEvent for App {
             }
 
             fn comfy_render(prompt, display, model){
-                let task = std.task()
+                let promise = std.promise()
                 std.println("Rendering AI: ");
                 let flow = fs.read(model.file).parse_json()
 
@@ -168,13 +168,13 @@ impl MatchEvent for App {
                     body:{prompt:flow client_id:"8a327a3e4961419ea7386c542f0ea491"}.to_json()
                 }
                 net.http_request(req) do net.HttpEvents{
-                    on_response: |res| task.resolve(ok{res.body.parse_json().prompt_id})
+                    on_response: |res| promise.resolve(ok{res.body.parse_json().prompt_id})
                 }
-                task
+                promise
             }
 
             fn eink_upload_image(display, path){
-                let task = std.task()
+                let promise = std.promise()
                 std.println("Uploading image: "+display.mac+" "+display.ip+" "+path)
                 run.child(run.ChildCmd{
                     cmd: "node"
@@ -272,9 +272,6 @@ impl MatchEvent for App {
                 web_socket.queue.clear()
 
                 let image_prompt = image_prompt.strip_prefix("```json").strip_suffix("```").parse_json();
-
-                std.println(image_prompt);
-
 
                 std.println("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
 

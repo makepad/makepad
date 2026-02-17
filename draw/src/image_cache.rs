@@ -1,4 +1,5 @@
 use crate::makepad_platform::*;
+use makepad_webp::WebPDecoder;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 use makepad_zune_png::{post_process_image, PngDecoder};
@@ -11,6 +12,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+pub use makepad_webp::DecodingError as WebpDecodeErrors;
 pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 pub use makepad_zune_png::error::PngDecodeErrors;
 
@@ -216,6 +218,21 @@ impl ImageBuffer {
         Ok(final_buffer)
     }
 
+    pub fn from_webp(data: &[u8]) -> Result<Self, ImageError> {
+        let cursor = std::io::Cursor::new(data);
+        let mut decoder =
+            WebPDecoder::new(std::io::BufReader::new(cursor)).map_err(ImageError::WebpDecode)?;
+        let (width, height) = decoder.dimensions();
+        let buf_size = decoder
+            .output_buffer_size()
+            .ok_or(ImageError::WebpDecode(WebpDecodeErrors::ImageTooLarge))?;
+        let mut buf = vec![0u8; buf_size];
+        decoder
+            .read_image(&mut buf)
+            .map_err(ImageError::WebpDecode)?;
+        Self::new(&buf, width as usize, height as usize)
+    }
+
     pub fn from_jpg(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
         let mut decoder = JpegDecoder::new(cursor);
@@ -268,6 +285,7 @@ pub enum ImageError {
     JpgDecode(JpgDecodeErrors),
     PathNotFound(PathBuf),
     PngDecode(PngDecodeErrors),
+    WebpDecode(WebpDecodeErrors),
     UnsupportedFormat,
     Http(String),
 }
@@ -329,6 +347,8 @@ fn detect_image_format(data: &[u8]) -> Option<&'static str> {
         Some("png")
     } else if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
         Some("jpg")
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some("webp")
     } else {
         None
     }
@@ -342,6 +362,7 @@ fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Opt
     match ext.as_deref() {
         Some("jpg") | Some("jpeg") => Some("jpg"),
         Some("png") => Some("png"),
+        Some("webp") => Some("webp"),
         _ => detect_image_format(data),
     }
 }
@@ -352,6 +373,7 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
     match format {
         "jpg" => ImageBuffer::from_jpg(data),
         "png" => ImageBuffer::from_png(data),
+        "webp" => ImageBuffer::from_webp(data),
         _ => Err(ImageError::UnsupportedFormat),
     }
 }
@@ -379,6 +401,13 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
                 PngDecodeErrors::GenericStatic("Failed to get PNG image dimensions"),
             ))?;
             Ok((width, height))
+        }
+        "webp" => {
+            let cursor = std::io::Cursor::new(data);
+            let decoder = WebPDecoder::new(std::io::BufReader::new(cursor))
+                .map_err(ImageError::WebpDecode)?;
+            let (width, height) = decoder.dimensions();
+            Ok((width as usize, height as usize))
         }
         _ => Err(ImageError::UnsupportedFormat),
     }
