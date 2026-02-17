@@ -303,7 +303,7 @@ fn load_enabled_windows_features(platform_cargo_toml: &Path) -> HashSet<String> 
     let Ok(source) = fs::read_to_string(platform_cargo_toml) else {
         return features;
     };
-
+    
     let mut in_windows_dep = false;
     let mut in_features = false;
     for line in source.lines() {
