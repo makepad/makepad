@@ -753,13 +753,19 @@ impl PortalList {
             self.update_scroll_bar(cx);
         }
 
-        // Keep items when selecting so we can copy text from scrolled-out items
+        // Keep items when selecting so we can copy text from scrolled-out items.
+        // When a selection is active (but drag finished), keep selected items alive
+        // so their selection state persists when scrolled back into view.
         if !self.keep_invisible && !self.is_selecting {
+            let selection_range = self.get_selection_range();
             if self.reuse_items {
                 let reusable_items = &mut self.reusable_items;
                 self.items.retain_visible_with(|v| {
                     reusable_items.push(v);
                 });
+            } else if let Some((start, end)) = selection_range {
+                self.items
+                    .retain_visible_and(|item_id, _| *item_id >= start.0 && *item_id <= end.0);
             } else {
                 self.items.retain_visible();
             }
@@ -1303,7 +1309,6 @@ impl PortalList {
     fn hit_test_selection(&self, cx: &Cx, abs: DVec2) -> Option<(usize, usize)> {
         let vi = self.vec_index;
         let mouse_pos = abs.index(vi);
-
         if self.items.is_empty() {
             return None;
         }
@@ -1362,7 +1367,6 @@ impl PortalList {
                 }
             }
         }
-
         // Mouse is inside viewport but not in any item (gap between items or empty space)
         // Find the closest item boundary and snap to it
 

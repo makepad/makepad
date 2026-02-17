@@ -34,6 +34,10 @@ script_mod! {
     mod.widgets.TextFlowBase = #(TextFlow::register_widget(vm)){
         font_size: 8
         flow: Flow.Right{wrap: true}
+        draw_selection +: {
+            draw_call_group: @selection
+            color: theme.color_u_3
+        }
     }
 
     mod.widgets.TextFlowLinkBase = #(TextFlowLink::register_widget(vm)){}
@@ -646,6 +650,9 @@ pub struct TextFlow {
     #[rust]
     templates: ComponentMap<LiveId, ScriptObjectRef>,
 
+    #[live]
+    pub draw_selection: DrawColor,
+
     /// Enable text selection
     #[live(false)]
     pub selectable: bool,
@@ -1023,7 +1030,7 @@ impl TextFlow {
 
     pub fn end(&mut self, cx: &mut Cx2d) {
         // Draw selection highlight before finishing the turtle
-        self.draw_selection(cx);
+        self.draw_selection_rects(cx);
 
         cx.end_turtle_with_area(&mut self.area);
         self.items.as_mut().unwrap().retain_visible();
@@ -1068,7 +1075,7 @@ impl TextFlow {
     }
 
     /// Draw selection highlight rectangles
-    fn draw_selection(&mut self, cx: &mut Cx2d) {
+    fn draw_selection_rects(&mut self, cx: &mut Cx2d) {
         if !self.selectable {
             return;
         }
@@ -1080,10 +1087,8 @@ impl TextFlow {
             return;
         }
 
-        self.draw_block.block_type = FlowBlockType::Selection;
-
         for rect in self.selection_tracker.selection_rects(start, end) {
-            self.draw_block.draw_abs(cx, rect);
+            self.draw_selection.draw_abs(cx, rect);
         }
     }
 

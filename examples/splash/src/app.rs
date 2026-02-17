@@ -1398,7 +1398,7 @@ script_mod! {
         // Left panel - Selection test first, then input widgets
         left_tabs := DockTabs{
             tabs: [@scrollbar_test_tab, @selection_test_tab, @toggles_tab, @sliders_tab, @text_tab, @dropdowns_tab]
-            selected: 0
+            selected: 1
             closable: false
         }
 
