@@ -1,16 +1,59 @@
 use crate::{
     cx_2d::*,
     draw_list_2d::ManyInstances,
+    geometry::geometry_gen::GeometryGen,
     image_cache::ImageBuffer,
     makepad_platform::*,
     turtle::*,
 };
 use makepad_gltf::DecodedPrimitive;
-use std::{f32::consts::PI, path::Path};
+use std::{collections::HashMap, f32::consts::PI, path::Path};
 
 const PBR_FLOATS_PER_VERTEX: usize = 16;
 
 pub type PbrMeshHandle = usize;
+
+#[derive(Clone, Debug, Default)]
+pub struct DrawPbrTextureSet {
+    pub base_color: Option<Texture>,
+    pub metallic_roughness: Option<Texture>,
+    pub normal: Option<Texture>,
+    pub occlusion: Option<Texture>,
+    pub emissive: Option<Texture>,
+    pub env: Option<Texture>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DrawPbrMaterialState {
+    pub base_color_factor: Vec4f,
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub emissive_factor: Vec3f,
+    pub normal_scale: f32,
+    pub occlusion_strength: f32,
+    pub textures: DrawPbrTextureSet,
+}
+
+impl Default for DrawPbrMaterialState {
+    fn default() -> Self {
+        Self {
+            base_color_factor: vec4(1.0, 1.0, 1.0, 1.0),
+            metallic_factor: 1.0,
+            roughness_factor: 1.0,
+            emissive_factor: vec3(0.0, 0.0, 0.0),
+            normal_scale: 1.0,
+            occlusion_strength: 1.0,
+            textures: DrawPbrTextureSet::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PbrPrimitiveMeshKey {
+    Cube { segments: u16 },
+    Surface { seg_u: u16, seg_v: u16 },
+    Sphere { lat: u16, lon: u16 },
+}
 
 script_mod! {
     use mod.pod.*
@@ -71,9 +114,21 @@ script_mod! {
         v_tangent: varying(vec4f)
         v_uv: varying(vec2f)
         v_color: varying(vec4f)
+
+        get_vertex_displacement: fn(uv: vec2, local_pos: vec3) {
+            return vec3(0.0, 0.0, 0.0)
+        }
         
         vertex: fn() {
-            let local_pos = vec4(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z, 1.0);
+            let local_uv = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w);
+            let local_pos_src = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z);
+            let displacement = self.get_vertex_displacement(local_uv, local_pos_src);
+            let local_pos = vec4(
+                local_pos_src.x + displacement.x,
+                local_pos_src.y + displacement.y,
+                local_pos_src.z + displacement.z,
+                1.0
+            );
             let local_n = vec4(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y, 0.0);
 
             let model_pos = self.model_matrix * local_pos;
@@ -84,35 +139,15 @@ script_mod! {
             self.v_world = vec3(model_pos.x, model_pos.y, model_pos.z);
             self.v_normal = vec3(model_n.x, model_n.y, model_n.z);
             self.v_tangent = vec4(model_t.x, model_t.y, model_t.z, self.geom.tangent.w);
-            self.v_uv = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w);
+            self.v_uv = local_uv;
             self.v_color = self.geom.color;
 
             let world = vec4(model_pos.x, model_pos.y, model_pos.z + self.draw_call.zbias, 1.0);
-            let view_pos = self.view_matrix * world;
-            let clip_pos_base = self.projection_matrix * view_pos;
-            let inv_w = 1.0 / max(clip_pos_base.w, 0.000001);
-            let depth01 = clamp((clip_pos_base.z * inv_w) * 0.5 + 0.5, 0.0, 1.0);
-            let depth_mapped = clamp(
-                mix(self.depth_range.x, self.depth_range.y, depth01) - self.depth_forward_bias,
-                0.0,
-                1.0
-            );
-            let clip_pos = vec4(
-                clip_pos_base.x,
-                clip_pos_base.y,
-                depth_mapped * clip_pos_base.w,
-                clip_pos_base.w
-            );
-            self.vertex_pos = clip_pos;
+            self.vertex_pos = self.projection_matrix * (self.view_matrix * world);
         }
 
-        fragment: fn(){
-            self.fb0 = self.pixel()
-        }
-
-        pixel: fn() {
-            let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
-            let base = self.u_base_color_factor * self.v_color;
+        get_base_color: fn(uv: vec2, vertex_color: vec4) {
+            let base = self.u_base_color_factor * vertex_color;
             let tex_srgb = self.base_color_texture.sample_as_bgra(uv);
             let tex_linear = vec4(
                 pow(max(tex_srgb.x, 0.0), 2.2),
@@ -125,9 +160,79 @@ script_mod! {
                 tex_linear,
                 clamp(self.u_has_base_color_texture, 0.0, 1.0)
             );
-            let albedo = base * tex_mix;
+            return base * tex_mix
+        }
+
+        get_metal_roughness: fn(uv: vec2) {
             let mr_tex = self.metallic_roughness_texture.sample_as_bgra(uv);
-            let mr_mix = mix(vec4(1.0, 1.0, 1.0, 1.0), mr_tex, clamp(self.u_has_metal_roughness_texture, 0.0, 1.0));
+            let mr_mix = mix(
+                vec4(1.0, 1.0, 1.0, 1.0),
+                mr_tex,
+                clamp(self.u_has_metal_roughness_texture, 0.0, 1.0)
+            );
+            return vec2(
+                clamp(self.u_metallic_factor * mr_mix.z, 0.0, 1.0),
+                clamp(self.u_roughness_factor * mr_mix.y, 0.045, 1.0)
+            )
+        }
+
+        get_normal_tangent: fn(uv: vec2) {
+            let n_tex_s = self.normal_texture.sample_as_bgra(uv);
+            return vec3(
+                n_tex_s.x * 2.0 - 1.0,
+                (n_tex_s.y * 2.0 - 1.0) * self.u_normal_scale,
+                n_tex_s.z * 2.0 - 1.0
+            )
+        }
+
+        get_occlusion: fn(uv: vec2) {
+            let occlusion_tex = self.occlusion_texture.sample_as_bgra(uv);
+            let occ_val = mix(1.0, occlusion_tex.x, clamp(self.u_occlusion_strength, 0.0, 1.0));
+            return mix(1.0, occ_val, clamp(self.u_has_occlusion_texture, 0.0, 1.0))
+        }
+
+        get_emissive: fn(uv: vec2) {
+            let emissive_tex_srgb = self.emissive_texture.sample_as_bgra(uv);
+            let emissive_tex = vec3(
+                pow(max(emissive_tex_srgb.x, 0.0), 2.2),
+                pow(max(emissive_tex_srgb.y, 0.0), 2.2),
+                pow(max(emissive_tex_srgb.z, 0.0), 2.2)
+            );
+            let emissive_src = mix(
+                vec3(1.0, 1.0, 1.0),
+                emissive_tex,
+                clamp(self.u_has_emissive_texture, 0.0, 1.0)
+            );
+            return self.u_emissive_factor * emissive_src
+        }
+
+        get_env_specular: fn(refl_dir: vec3) {
+            let env_has = clamp(self.u_has_env_texture, 0.0, 1.0);
+            let env_t_spec = clamp(refl_dir.y * 0.5 + 0.5, 0.0, 1.0);
+            let env_low = vec3(0.03, 0.035, 0.045);
+            let env_high = vec3(0.36, 0.43, 0.5);
+            let env_fallback_spec = mix(env_low, env_high, env_t_spec);
+            let env_spec_tex = self.env_texture.sample_as_bgra(refl_dir).xyz;
+            return mix(env_fallback_spec, env_spec_tex, env_has)
+        }
+
+        get_env_diffuse: fn(normal_dir: vec3) {
+            let env_has = clamp(self.u_has_env_texture, 0.0, 1.0);
+            let env_t_diff = clamp(normal_dir.y * 0.5 + 0.5, 0.0, 1.0);
+            let env_low = vec3(0.03, 0.035, 0.045);
+            let env_high = vec3(0.36, 0.43, 0.5);
+            let env_fallback_diff = mix(env_low, env_high, env_t_diff);
+            let env_diff_tex = self.env_texture.sample_as_bgra(normal_dir).xyz;
+            return mix(env_fallback_diff, env_diff_tex, env_has)
+        }
+
+        fragment: fn(){
+            self.fb0 = self.pixel()
+        }
+
+        pixel: fn() {
+            let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
+            let albedo = self.get_base_color(uv, self.v_color);
 
             let n_geom = normalize(self.v_normal);
             let tangent_world = self.v_tangent.xyz;
@@ -142,12 +247,7 @@ script_mod! {
             let up_axis = if abs(n_geom.y) > 0.99 { vec3(1.0, 0.0, 0.0) } else { vec3(0.0, 1.0, 0.0) };
             let t = if t_len > 0.00001 { t_raw / t_len } else { normalize(cross(up_axis, n_geom)) };
             let b = normalize(cross(n_geom, t)) * self.v_tangent.w;
-            let n_tex_s = self.normal_texture.sample_as_bgra(uv);
-            let n_tex = vec3(
-                n_tex_s.x * 2.0 - 1.0,
-                (n_tex_s.y * 2.0 - 1.0) * self.u_normal_scale,
-                n_tex_s.z * 2.0 - 1.0
-            );
+            let n_tex = self.get_normal_tangent(uv);
             let n_tangent = normalize(t * n_tex.x + b * n_tex.y + n_geom * n_tex.z);
             let n = normalize(mix(n_geom, n_tangent, clamp(self.u_has_normal_texture, 0.0, 1.0)));
 
@@ -159,8 +259,9 @@ script_mod! {
             let ndoth = max(dot(n, h), 0.0001);
             let vdoth = max(dot(v, h), 0.0);
 
-            let rough = clamp(self.u_roughness_factor * mr_mix.y, 0.045, 1.0);
-            let metal = clamp(self.u_metallic_factor * mr_mix.z, 0.0, 1.0);
+            let mr = self.get_metal_roughness(uv);
+            let metal = mr.x;
+            let rough = mr.y;
 
             let a = rough * rough;
             let a2 = a * a;
@@ -183,26 +284,14 @@ script_mod! {
             let kd = (vec3(1.0, 1.0, 1.0) - f) * (1.0 - metal);
             let diffuse = kd * albedo.xyz * (1.0 / 3.14159265);
 
-            let occlusion_tex = self.occlusion_texture.sample_as_bgra(uv);
-            let occ_val = mix(1.0, occlusion_tex.x, clamp(self.u_occlusion_strength, 0.0, 1.0));
-            let occlusion = mix(1.0, occ_val, clamp(self.u_has_occlusion_texture, 0.0, 1.0));
+            let occlusion = self.get_occlusion(uv);
 
             let ndotv_env = clamp(dot(n, v), 0.0, 1.0);
             let refl = normalize(n * (2.0 * ndotv_env) - v);
             let refl_rough = normalize(mix(refl, n, rough * rough));
-            let env_has = clamp(self.u_has_env_texture, 0.0, 1.0);
 
-            let env_t_spec = clamp(refl_rough.y * 0.5 + 0.5, 0.0, 1.0);
-            let env_t_diff = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-            let env_low = vec3(0.03, 0.035, 0.045);
-            let env_high = vec3(0.36, 0.43, 0.5);
-            let env_fallback_spec = mix(env_low, env_high, env_t_spec);
-            let env_fallback_diff = mix(env_low, env_high, env_t_diff);
-
-            let env_spec_tex = self.env_texture.sample_as_bgra(refl_rough).xyz;
-            let env_diff_tex = self.env_texture.sample_as_bgra(n).xyz;
-            let env_spec_color = mix(env_fallback_spec, env_spec_tex, env_has);
-            let env_diff_color = mix(env_fallback_diff, env_diff_tex, env_has);
+            let env_spec_color = self.get_env_specular(refl_rough);
+            let env_diff_color = self.get_env_diffuse(n);
 
             let c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
             let c1 = vec4(1.0, 0.0425, 1.04, -0.04);
@@ -213,19 +302,7 @@ script_mod! {
 
             let ibl_diffuse = kd * albedo.xyz * env_diff_color * self.u_env_intensity;
             let env_spec = env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity;
-
-            let emissive_tex_srgb = self.emissive_texture.sample_as_bgra(uv);
-            let emissive_tex = vec3(
-                pow(max(emissive_tex_srgb.x, 0.0), 2.2),
-                pow(max(emissive_tex_srgb.y, 0.0), 2.2),
-                pow(max(emissive_tex_srgb.z, 0.0), 2.2)
-            );
-            let emissive_src = mix(
-                vec3(1.0, 1.0, 1.0),
-                emissive_tex,
-                clamp(self.u_has_emissive_texture, 0.0, 1.0)
-            );
-            let emissive = self.u_emissive_factor * emissive_src;
+            let emissive = self.get_emissive(uv);
 
             let lit = (diffuse + specular) * self.u_light_color * ndotl;
             let ambient = albedo.xyz * self.u_ambient;
@@ -262,9 +339,13 @@ pub struct DrawPbr {
     #[rust]
     pub meshes: Vec<Geometry>,
     #[rust]
+    primitive_mesh_cache: HashMap<PbrPrimitiveMeshKey, PbrMeshHandle>,
+    #[rust]
     default_env_texture: Option<Texture>,
     #[rust(Mat4f::identity())]
     pub cur_transform: Mat4f,
+    #[rust]
+    pub transform_stack: Vec<Mat4f>,
     #[rust(vec4(1.0, 1.0, 1.0, 1.0))]
     pub cur_color: Vec4f,
     #[rust(Mat4f::identity())]
@@ -331,6 +412,7 @@ impl DrawPbr {
         self.acc_verts.clear();
         self.acc_indices.clear();
         self.set_transform(Mat4f::identity());
+        self.transform_stack.clear();
         self.cur_color = vec4(1.0, 1.0, 1.0, 1.0);
         self.base_color_factor = vec4(1.0, 1.0, 1.0, 1.0);
         self.metallic_factor = 1.0;
@@ -349,6 +431,93 @@ impl DrawPbr {
     pub fn set_transform(&mut self, transform: Mat4f) {
         self.cur_transform = transform;
         self.model_matrix = transform;
+    }
+
+    /// Reset the p5-style model matrix stack state to identity.
+    pub fn reset_matrix(&mut self) {
+        self.set_transform(Mat4f::identity());
+        self.transform_stack.clear();
+    }
+
+    /// Save current model matrix.
+    pub fn push_matrix(&mut self) {
+        self.transform_stack.push(self.cur_transform);
+    }
+
+    /// Restore last saved model matrix.
+    pub fn pop_matrix(&mut self) {
+        if let Some(transform) = self.transform_stack.pop() {
+            self.set_transform(transform);
+        } else {
+            self.set_transform(Mat4f::identity());
+        }
+    }
+
+    /// Post-multiply an additional transform onto the current model matrix.
+    pub fn apply_transform(&mut self, transform: Mat4f) {
+        self.set_transform(Mat4f::mul(&self.cur_transform, &transform));
+    }
+
+    pub fn translate_v(&mut self, offset: Vec3f) {
+        self.apply_transform(Mat4f::translation(offset));
+    }
+
+    pub fn translate(&mut self, x: f32, y: f32, z: f32) {
+        self.translate_v(vec3(x, y, z));
+    }
+
+    pub fn rotate_xyz(&mut self, x_rad: f32, y_rad: f32, z_rad: f32) {
+        self.apply_transform(Mat4f::rotation(vec3(x_rad, y_rad, z_rad)));
+    }
+
+    pub fn rotate_x(&mut self, x_rad: f32) {
+        self.rotate_xyz(x_rad, 0.0, 0.0);
+    }
+
+    pub fn rotate_y(&mut self, y_rad: f32) {
+        self.rotate_xyz(0.0, y_rad, 0.0);
+    }
+
+    pub fn rotate_z(&mut self, z_rad: f32) {
+        self.rotate_xyz(0.0, 0.0, z_rad);
+    }
+
+    pub fn scale(&mut self, uniform: f32) {
+        self.apply_transform(Mat4f::scale(uniform));
+    }
+
+    pub fn scale_xyz(&mut self, x: f32, y: f32, z: f32) {
+        self.apply_transform(Mat4f::nonuniform_scaled_translation(
+            vec3(x, y, z),
+            vec3(0.0, 0.0, 0.0),
+        ));
+    }
+
+    /// p5-like material convenience: set base color + metallic/roughness.
+    pub fn material(&mut self, base_color: Vec4f, metallic: f32, roughness: f32) {
+        self.set_base_color_factor(base_color);
+        self.set_metal_roughness(metallic, roughness);
+    }
+
+    pub fn material_rgba(
+        &mut self,
+        r: f32,
+        g: f32,
+        b: f32,
+        a: f32,
+        metallic: f32,
+        roughness: f32,
+    ) {
+        self.material(vec4(r, g, b, a), metallic, roughness);
+    }
+
+    /// p5-like alias for base color (PBR albedo factor).
+    pub fn fill(&mut self, color: Vec4f) {
+        self.set_base_color_factor(color);
+    }
+
+    pub fn fill_rgba(&mut self, r: f32, g: f32, b: f32, a: f32) {
+        self.fill(vec4(r, g, b, a));
     }
 
     pub fn set_view_projection(&mut self, view: Mat4f, projection: Mat4f) {
@@ -432,6 +601,26 @@ impl DrawPbr {
 
     pub fn set_depth_forward_bias(&mut self, bias: f32) {
         self.depth_forward_bias = bias.clamp(0.0, 1.0);
+    }
+
+    pub fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f, camera_pos: Vec3f) {
+        self.view_matrix = view;
+        self.projection_matrix = projection;
+        self.camera_pos = camera_pos;
+    }
+
+    pub fn apply_material_state(&mut self, material: &DrawPbrMaterialState) {
+        self.set_base_color_factor(material.base_color_factor);
+        self.set_metal_roughness(material.metallic_factor, material.roughness_factor);
+        self.set_emissive_factor(material.emissive_factor);
+        self.set_normal_scale(material.normal_scale);
+        self.set_occlusion_strength(material.occlusion_strength);
+        self.set_base_color_texture(material.textures.base_color.clone());
+        self.set_metal_roughness_texture(material.textures.metallic_roughness.clone());
+        self.set_normal_texture(material.textures.normal.clone());
+        self.set_occlusion_texture(material.textures.occlusion.clone());
+        self.set_emissive_texture(material.textures.emissive.clone());
+        self.set_env_texture(material.textures.env.clone());
     }
 
     fn apply_draw_uniforms(&mut self, cx: &mut Cx2d) {
@@ -623,6 +812,7 @@ impl DrawPbr {
 
     pub fn clear_meshes(&mut self) {
         self.meshes.clear();
+        self.primitive_mesh_cache.clear();
     }
 
     pub fn load_default_env_equirect_from_path(
@@ -825,6 +1015,321 @@ impl DrawPbr {
         let b = (b.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
         let a = (a.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
         (a << 24) | (r << 16) | (g << 8) | b
+    }
+
+    pub fn draw_mesh_with_transform(
+        &mut self,
+        cx: &mut Cx2d,
+        mesh: PbrMeshHandle,
+        transform: Mat4f,
+    ) -> Result<(), String> {
+        let prev_model = self.model_matrix;
+        self.model_matrix = transform;
+        let result = self.draw_mesh(cx, mesh);
+        self.model_matrix = prev_model;
+        result
+    }
+
+    /// Draw a cube using the current material/shader state.
+    /// Uses cached unit-cube meshes and applies size as a transform scale.
+    pub fn draw_cube(
+        &mut self,
+        cx: &mut Cx2d,
+        size: Vec3f,
+        subdivisions: usize,
+    ) -> Result<(), String> {
+        let mesh = self.ensure_cube_mesh(cx, subdivisions)?;
+        let scale =
+            Mat4f::nonuniform_scaled_translation(size, vec3(0.0, 0.0, 0.0));
+        let transform = Mat4f::mul(&self.cur_transform, &scale);
+        self.draw_mesh_with_transform(cx, mesh, transform)
+    }
+
+    pub fn draw_cube_with_material(
+        &mut self,
+        cx: &mut Cx2d,
+        size: Vec3f,
+        subdivisions: usize,
+        material: &DrawPbrMaterialState,
+    ) -> Result<(), String> {
+        self.apply_material_state(material);
+        self.draw_cube(cx, size, subdivisions)
+    }
+
+    /// Draw an XZ surface patch (normal +Y) using current material/shader state.
+    pub fn draw_surface(
+        &mut self,
+        cx: &mut Cx2d,
+        size: Vec2f,
+        seg_u: usize,
+        seg_v: usize,
+    ) -> Result<(), String> {
+        let mesh = self.ensure_surface_mesh(cx, seg_u, seg_v)?;
+        let scale = Mat4f::nonuniform_scaled_translation(
+            vec3(size.x, 1.0, size.y),
+            vec3(0.0, 0.0, 0.0),
+        );
+        let transform = Mat4f::mul(&self.cur_transform, &scale);
+        self.draw_mesh_with_transform(cx, mesh, transform)
+    }
+
+    pub fn draw_surface_with_material(
+        &mut self,
+        cx: &mut Cx2d,
+        size: Vec2f,
+        seg_u: usize,
+        seg_v: usize,
+        material: &DrawPbrMaterialState,
+    ) -> Result<(), String> {
+        self.apply_material_state(material);
+        self.draw_surface(cx, size, seg_u, seg_v)
+    }
+
+    /// Draw a UV sphere using current material/shader state.
+    pub fn draw_sphere(
+        &mut self,
+        cx: &mut Cx2d,
+        radius: f32,
+        subdivisions: usize,
+    ) -> Result<(), String> {
+        let lat = subdivisions.max(4).min(96);
+        let lon = (lat * 2).max(8).min(192);
+        let mesh = self.ensure_sphere_mesh(cx, lat, lon)?;
+        let scale = Mat4f::scaled_translation(
+            radius.max(0.0001),
+            vec3(0.0, 0.0, 0.0),
+        );
+        let transform = Mat4f::mul(&self.cur_transform, &scale);
+        self.draw_mesh_with_transform(cx, mesh, transform)
+    }
+
+    pub fn draw_sphere_with_material(
+        &mut self,
+        cx: &mut Cx2d,
+        radius: f32,
+        subdivisions: usize,
+        material: &DrawPbrMaterialState,
+    ) -> Result<(), String> {
+        self.apply_material_state(material);
+        self.draw_sphere(cx, radius, subdivisions)
+    }
+
+    fn ensure_cube_mesh(
+        &mut self,
+        cx: &mut Cx2d,
+        subdivisions: usize,
+    ) -> Result<PbrMeshHandle, String> {
+        let segments = subdivisions.max(1).min(64) as u16;
+        let key = PbrPrimitiveMeshKey::Cube { segments };
+        if let Some(handle) = self.primitive_mesh_cache.get(&key).copied() {
+            return Ok(handle);
+        }
+
+        let gen = GeometryGen::from_cube_3d(
+            1.0,
+            1.0,
+            1.0,
+            segments as usize,
+            segments as usize,
+            segments as usize,
+        );
+        let (positions, normals, uvs, indices) = Self::geometry_gen_to_pbr(&gen)?;
+        let handle = self.upload_indexed_triangles_mesh(
+            cx,
+            &positions,
+            Some(&normals),
+            None,
+            Some(&uvs),
+            None,
+            &indices,
+        )?;
+        self.primitive_mesh_cache.insert(key, handle);
+        Ok(handle)
+    }
+
+    fn ensure_surface_mesh(
+        &mut self,
+        cx: &mut Cx2d,
+        seg_u: usize,
+        seg_v: usize,
+    ) -> Result<PbrMeshHandle, String> {
+        let seg_u = seg_u.max(1).min(256) as u16;
+        let seg_v = seg_v.max(1).min(256) as u16;
+        let key = PbrPrimitiveMeshKey::Surface { seg_u, seg_v };
+        if let Some(handle) = self.primitive_mesh_cache.get(&key).copied() {
+            return Ok(handle);
+        }
+
+        let (positions, normals, uvs, indices) =
+            Self::build_surface_mesh(seg_u as usize, seg_v as usize);
+        let handle = self.upload_indexed_triangles_mesh(
+            cx,
+            &positions,
+            Some(&normals),
+            None,
+            Some(&uvs),
+            None,
+            &indices,
+        )?;
+        self.primitive_mesh_cache.insert(key, handle);
+        Ok(handle)
+    }
+
+    fn ensure_sphere_mesh(
+        &mut self,
+        cx: &mut Cx2d,
+        lat: usize,
+        lon: usize,
+    ) -> Result<PbrMeshHandle, String> {
+        let lat = lat.max(4).min(256) as u16;
+        let lon = lon.max(8).min(512) as u16;
+        let key = PbrPrimitiveMeshKey::Sphere { lat, lon };
+        if let Some(handle) = self.primitive_mesh_cache.get(&key).copied() {
+            return Ok(handle);
+        }
+
+        let (positions, normals, uvs, indices) =
+            Self::build_uv_sphere_mesh(lat as usize, lon as usize);
+        let handle = self.upload_indexed_triangles_mesh(
+            cx,
+            &positions,
+            Some(&normals),
+            None,
+            Some(&uvs),
+            None,
+            &indices,
+        )?;
+        self.primitive_mesh_cache.insert(key, handle);
+        Ok(handle)
+    }
+
+    fn geometry_gen_to_pbr(
+        gen: &GeometryGen,
+    ) -> Result<
+        (
+            Vec<[f32; 3]>,
+            Vec<[f32; 3]>,
+            Vec<[f32; 2]>,
+            Vec<u32>,
+        ),
+        String,
+    > {
+        if gen.vertices.len() % 9 != 0 {
+            return Err(format!(
+                "expected GeometryGen vertex stride 9, got {} floats",
+                gen.vertices.len()
+            ));
+        }
+        let mut positions = Vec::with_capacity(gen.vertices.len() / 9);
+        let mut normals = Vec::with_capacity(gen.vertices.len() / 9);
+        let mut uvs = Vec::with_capacity(gen.vertices.len() / 9);
+
+        for chunk in gen.vertices.chunks_exact(9) {
+            positions.push([chunk[0], chunk[1], chunk[2]]);
+            normals.push([chunk[4], chunk[5], chunk[6]]);
+            uvs.push([chunk[7], chunk[8]]);
+        }
+        Ok((positions, normals, uvs, gen.indices.clone()))
+    }
+
+    fn build_surface_mesh(
+        seg_u: usize,
+        seg_v: usize,
+    ) -> (
+        Vec<[f32; 3]>,
+        Vec<[f32; 3]>,
+        Vec<[f32; 2]>,
+        Vec<u32>,
+    ) {
+        let seg_u = seg_u.max(1);
+        let seg_v = seg_v.max(1);
+        let vert_count = (seg_u + 1) * (seg_v + 1);
+        let mut positions = Vec::with_capacity(vert_count);
+        let mut normals = Vec::with_capacity(vert_count);
+        let mut uvs = Vec::with_capacity(vert_count);
+        let mut indices = Vec::with_capacity(seg_u * seg_v * 6);
+
+        for y in 0..=seg_v {
+            let v = y as f32 / seg_v as f32;
+            let pz = v - 0.5;
+            for x in 0..=seg_u {
+                let u = x as f32 / seg_u as f32;
+                let px = u - 0.5;
+                positions.push([px, 0.0, pz]);
+                normals.push([0.0, 1.0, 0.0]);
+                uvs.push([u, 1.0 - v]);
+            }
+        }
+
+        let stride = seg_u + 1;
+        for y in 0..seg_v {
+            for x in 0..seg_u {
+                let i0 = (y * stride + x) as u32;
+                let i1 = i0 + 1;
+                let i2 = i0 + stride as u32;
+                let i3 = i2 + 1;
+                indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+            }
+        }
+
+        (positions, normals, uvs, indices)
+    }
+
+    fn build_uv_sphere_mesh(
+        lat: usize,
+        lon: usize,
+    ) -> (
+        Vec<[f32; 3]>,
+        Vec<[f32; 3]>,
+        Vec<[f32; 2]>,
+        Vec<u32>,
+    ) {
+        let lat = lat.max(4);
+        let lon = lon.max(8);
+        let mut positions = Vec::with_capacity((lat + 1) * (lon + 1));
+        let mut normals = Vec::with_capacity((lat + 1) * (lon + 1));
+        let mut uvs = Vec::with_capacity((lat + 1) * (lon + 1));
+        let mut indices = Vec::with_capacity(lat * lon * 6);
+
+        for y in 0..=lat {
+            let v = y as f32 / lat as f32;
+            let theta = v * PI;
+            let sin_theta = theta.sin();
+            let cos_theta = theta.cos();
+
+            for x in 0..=lon {
+                let u = x as f32 / lon as f32;
+                let phi = u * 2.0 * PI;
+                let sin_phi = phi.sin();
+                let cos_phi = phi.cos();
+                let px = sin_theta * cos_phi;
+                let py = cos_theta;
+                let pz = sin_theta * sin_phi;
+
+                positions.push([px, py, pz]);
+                normals.push([px, py, pz]);
+                uvs.push([u, 1.0 - v]);
+            }
+        }
+
+        let stride = lon + 1;
+        for y in 0..lat {
+            for x in 0..lon {
+                let i0 = (y * stride + x) as u32;
+                let i1 = i0 + 1;
+                let i2 = i0 + stride as u32;
+                let i3 = i2 + 1;
+
+                if y != 0 {
+                    indices.extend_from_slice(&[i0, i2, i1]);
+                }
+                if y != lat - 1 {
+                    indices.extend_from_slice(&[i1, i2, i3]);
+                }
+            }
+        }
+
+        (positions, normals, uvs, indices)
     }
 
     pub fn draw_mesh(&mut self, cx: &mut Cx2d, mesh: PbrMeshHandle) -> Result<(), String> {

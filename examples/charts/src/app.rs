@@ -16,7 +16,7 @@ script_mod! {
                         flow: Down
                         View{
                             width: Fill
-                            height: Fill
+                            height: 220
                             flow: Right
                             candlestick := CandlestickChart{
                                 width: Fill
@@ -29,7 +29,7 @@ script_mod! {
                         }
                         View{
                             width: Fill
-                            height: Fill
+                            height: 220
                             flow: Right
                             line := LineChart{
                                 width: Fill
@@ -43,14 +43,24 @@ script_mod! {
                         View{
                             width: Fill
                             height: Fill
-                            flow: Right
-                            bar := BarChart{
+                            chart3d := Chart3D{
                                 width: Fill
                                 height: Fill
-                            }
-                            scatter := ScatterChart{
-                                width: Fill
-                                height: Fill
+                                animating: false
+                                camera_distance: 12.0
+                                camera_distance_min: 8.0
+                                camera_distance_max: 30.0
+                                camera_fov_y: 36.0
+                                BarChart3D{
+                                    base_y: -0.01
+                                    spacing: 0.52
+                                    bar_width: 0.34
+                                    bar_depth: 0.34
+                                    height_scale: 5.8
+                                    show_axes: false
+                                    show_labels: false
+                                    billboard_labels: true
+                                }
                             }
                         }
                     }

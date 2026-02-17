@@ -268,37 +268,22 @@ impl PhysicsView {
         if pass_size.x <= 1.0 || pass_size.y <= 1.0 {
             return;
         }
-        let Some(draw_list_id) = cx.get_current_draw_list_id() else {
-            return;
-        };
         let Some(cube_mesh) = self.cube_mesh else {
             return;
         };
 
-        // Compute view/projection (orbit camera, same pattern as GltfView)
-        let pass_id = cx.draw_lists[draw_list_id].draw_pass_id.unwrap();
-        let pass_from_world = Mat4f::mul(
-            &cx.passes[pass_id].pass_uniforms.camera_projection,
-            &cx.passes[pass_id].pass_uniforms.camera_view,
-        );
-        let pass_from_world_inv = pass_from_world.invert();
-
+        // Compute view/projection (orbit camera, same pattern as Scene3D)
         let clip_ndc = clip_ndc_for_rect(rect, pass_size);
         let viewport = clip_space_viewport_matrix(clip_ndc);
         let (camera_pos, _camera_target, view, projection) = self.camera_setup(rect);
-
-        let clip_from_world = Mat4f::mul(&viewport, &Mat4f::mul(&view, &projection));
-        let draw_list_view = Mat4f::mul(&pass_from_world_inv, &clip_from_world);
-        cx.draw_lists[draw_list_id]
-            .draw_list_uniforms
-            .view_transform = draw_list_view;
+        let projection_viewport = Mat4f::mul(&viewport, &projection);
 
         self.draw_pbr.set_clip_ndc(clip_ndc);
         self.draw_pbr
             .set_depth_range(self.depth_range.x, self.depth_range.y);
         self.draw_pbr
             .set_depth_forward_bias(self.depth_forward_bias);
-        self.draw_pbr.set_view_projection(view, projection);
+        self.draw_pbr.set_view_projection(view, projection_viewport);
         self.draw_pbr.camera_pos = camera_pos;
 
         // No textures — pure material colors
