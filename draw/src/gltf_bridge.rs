@@ -4,7 +4,7 @@ use crate::{
         handle_image_cache_network_responses, load_image_from_cache, load_image_from_data_async,
         process_async_image_load, AsyncImageLoad, AsyncLoadResult, ImageError,
     },
-    shader::draw_pbr::{DrawPbr, PbrMeshHandle},
+    shader::draw_pbr::{DrawPbr, DrawPbrMaterialState, DrawPbrTextureSet, PbrMeshHandle},
 };
 use makepad_gltf::{
     decode_mesh_primitive, load_gltf_from_bytes, load_gltf_from_path, load_image_bytes,
@@ -346,6 +346,23 @@ impl GltfRenderer {
         Ok(())
     }
 
+    pub fn draw_with_transform(
+        &mut self,
+        draw: &mut DrawPbr,
+        cx: &mut Cx2d,
+        transform: Mat4f,
+    ) -> Result<(), GltfError> {
+        self.poll_textures(cx);
+
+        for object in &self.draw_objects {
+            draw.set_transform(Mat4f::mul(&transform, &object.world_transform));
+            self.apply_material(draw, cx, object.material_index);
+            draw.draw_mesh(cx, object.mesh_handle)
+                .map_err(GltfError::Validation)?;
+        }
+        Ok(())
+    }
+
     fn apply_material(&self, draw: &mut DrawPbr, cx: &mut Cx2d, material_index: Option<usize>) {
         let material = material_index
             .and_then(|index| self.materials.get(index))
@@ -374,17 +391,22 @@ impl GltfRenderer {
             .and_then(|texture| texture.clone());
         let env_texture = draw.default_env_texture(cx);
 
-        draw.set_base_color_factor(material.base_color_factor);
-        draw.set_metal_roughness(material.metallic_factor, material.roughness_factor);
-        draw.set_emissive_factor(material.emissive_factor);
-        draw.set_normal_scale(material.normal_scale);
-        draw.set_occlusion_strength(material.occlusion_strength);
-        draw.set_base_color_texture(base_color_texture);
-        draw.set_metal_roughness_texture(metallic_roughness_texture);
-        draw.set_normal_texture(normal_texture);
-        draw.set_occlusion_texture(occlusion_texture);
-        draw.set_emissive_texture(emissive_texture);
-        draw.set_env_texture(Some(env_texture));
+        draw.apply_material_state(&DrawPbrMaterialState {
+            base_color_factor: material.base_color_factor,
+            metallic_factor: material.metallic_factor,
+            roughness_factor: material.roughness_factor,
+            emissive_factor: material.emissive_factor,
+            normal_scale: material.normal_scale,
+            occlusion_strength: material.occlusion_strength,
+            textures: DrawPbrTextureSet {
+                base_color: base_color_texture,
+                metallic_roughness: metallic_roughness_texture,
+                normal: normal_texture,
+                occlusion: occlusion_texture,
+                emissive: emissive_texture,
+                env: Some(env_texture),
+            },
+        });
     }
 }
 

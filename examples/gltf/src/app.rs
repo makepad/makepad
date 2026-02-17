@@ -11,11 +11,9 @@ script_mod! {
                 window.inner_size: vec2(1280, 900)
                 pass.clear_color: #x0f141b
                 body +: {
-                    helmet := GltfView{
+                    helmet := Scene3D{
                         width: Fill
                         height: Fill
-                        src: crate_resource("self://resources/DamagedHelmet.glb")
-                        env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
                         animating: true
                         spin_speed: 0.0
                         camera_fov_y: 42.0
@@ -27,6 +25,10 @@ script_mod! {
                         draw_bg +: {
                             color: #x131922
                             draw_depth: -99.0
+                        }
+                        model := Gltf3D{
+                            src: crate_resource("self://resources/DamagedHelmet.glb")
+                            env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
                         }
                     }
                 }
