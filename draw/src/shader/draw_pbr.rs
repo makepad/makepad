@@ -1,10 +1,6 @@
 use crate::{
-    cx_2d::*,
-    draw_list_2d::ManyInstances,
-    geometry::geometry_gen::GeometryGen,
-    image_cache::ImageBuffer,
-    makepad_platform::*,
-    turtle::*,
+    cx_2d::*, draw_list_2d::ManyInstances, geometry::geometry_gen::GeometryGen,
+    image_cache::ImageBuffer, makepad_platform::*, turtle::*,
 };
 use makepad_gltf::DecodedPrimitive;
 use std::{collections::HashMap, f32::consts::PI, path::Path};
@@ -50,9 +46,22 @@ impl Default for DrawPbrMaterialState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum PbrPrimitiveMeshKey {
-    Cube { segments: u16 },
-    Surface { seg_u: u16, seg_v: u16 },
-    Sphere { lat: u16, lon: u16 },
+    Cube {
+        segments: u16,
+    },
+    Surface {
+        seg_u: u16,
+        seg_v: u16,
+    },
+    Sphere {
+        lat: u16,
+        lon: u16,
+    },
+    RoundedCube {
+        segments: u16,
+        corner_segments: u16,
+        radius_permille: u16,
+    },
 }
 
 script_mod! {
@@ -118,7 +127,7 @@ script_mod! {
         get_vertex_displacement: fn(uv: vec2, local_pos: vec3) {
             return vec3(0.0, 0.0, 0.0)
         }
-        
+
         vertex: fn() {
             let local_uv = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w);
             let local_pos_src = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z);
@@ -499,15 +508,7 @@ impl DrawPbr {
         self.set_metal_roughness(metallic, roughness);
     }
 
-    pub fn material_rgba(
-        &mut self,
-        r: f32,
-        g: f32,
-        b: f32,
-        a: f32,
-        metallic: f32,
-        roughness: f32,
-    ) {
+    pub fn material_rgba(&mut self, r: f32, g: f32, b: f32, a: f32, metallic: f32, roughness: f32) {
         self.material(vec4(r, g, b, a), metallic, roughness);
     }
 
@@ -624,11 +625,8 @@ impl DrawPbr {
     }
 
     fn apply_draw_uniforms(&mut self, cx: &mut Cx2d) {
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(view_matrix),
-            &self.view_matrix.v,
-        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(projection_matrix),
@@ -666,8 +664,11 @@ impl DrawPbr {
         );
         self.draw_vars
             .set_uniform(cx.cx, live_id!(u_metallic_factor), &[self.metallic_factor]);
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(u_roughness_factor), &[self.roughness_factor]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_roughness_factor),
+            &[self.roughness_factor],
+        );
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(u_emissive_factor),
@@ -709,11 +710,8 @@ impl DrawPbr {
             live_id!(u_has_emissive_texture),
             &[self.has_emissive_texture],
         );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(u_has_env_texture),
-            &[self.has_env_texture],
-        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_has_env_texture), &[self.has_env_texture]);
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(u_light_dir),
@@ -760,14 +758,8 @@ impl DrawPbr {
         if positions.is_empty() || indices.is_empty() {
             return Ok(());
         }
-        let (verts, inds) = self.build_vertex_data(
-            positions,
-            normals,
-            tangents,
-            uvs,
-            colors,
-            indices,
-        )?;
+        let (verts, inds) =
+            self.build_vertex_data(positions, normals, tangents, uvs, colors, indices)?;
         let base_index = (self.acc_verts.len() / PBR_FLOATS_PER_VERTEX) as u32;
         self.acc_verts.extend_from_slice(&verts);
         self.acc_indices
@@ -787,7 +779,8 @@ impl DrawPbr {
         colors: Option<&[[f32; 4]]>,
         indices: &[u32],
     ) -> Result<PbrMeshHandle, String> {
-        let (verts, inds) = self.build_vertex_data(positions, normals, tangents, uvs, colors, indices)?;
+        let (verts, inds) =
+            self.build_vertex_data(positions, normals, tangents, uvs, colors, indices)?;
         let geom = Geometry::new(cx.cx.cx);
         geom.update(cx.cx.cx, inds, verts);
         self.meshes.push(geom);
@@ -903,11 +896,11 @@ impl DrawPbr {
                     let u = ((x as f32 + 0.5) / size as f32) * 2.0 - 1.0;
                     let v = ((y as f32 + 0.5) / size as f32) * 2.0 - 1.0;
                     let d = match face {
-                        0 => vec3(1.0, -v, -u),   // +X
-                        1 => vec3(-1.0, -v, u),   // -X
-                        2 => vec3(u, 1.0, v),     // +Y
-                        3 => vec3(u, -1.0, -v),   // -Y
-                        4 => vec3(u, -v, 1.0),    // +Z
+                        0 => vec3(1.0, -v, -u),  // +X
+                        1 => vec3(-1.0, -v, u),  // -X
+                        2 => vec3(u, 1.0, v),    // +Y
+                        3 => vec3(u, -1.0, -v),  // -Y
+                        4 => vec3(u, -v, 1.0),   // +Z
                         _ => vec3(-u, -v, -1.0), // -Z
                     }
                     .normalize();
@@ -947,11 +940,11 @@ impl DrawPbr {
                     let u = ((x as f32 + 0.5) / size as f32) * 2.0 - 1.0;
                     let v = ((y as f32 + 0.5) / size as f32) * 2.0 - 1.0;
                     let d = match face {
-                        0 => vec3(1.0, -v, -u),   // +X
-                        1 => vec3(-1.0, -v, u),   // -X
-                        2 => vec3(u, 1.0, v),     // +Y
-                        3 => vec3(u, -1.0, -v),   // -Y
-                        4 => vec3(u, -v, 1.0),    // +Z
+                        0 => vec3(1.0, -v, -u),  // +X
+                        1 => vec3(-1.0, -v, u),  // -X
+                        2 => vec3(u, 1.0, v),    // +Y
+                        3 => vec3(u, -1.0, -v),  // -Y
+                        4 => vec3(u, -v, 1.0),   // +Z
                         _ => vec3(-u, -v, -1.0), // -Z
                     }
                     .normalize();
@@ -1039,8 +1032,7 @@ impl DrawPbr {
         subdivisions: usize,
     ) -> Result<(), String> {
         let mesh = self.ensure_cube_mesh(cx, subdivisions)?;
-        let scale =
-            Mat4f::nonuniform_scaled_translation(size, vec3(0.0, 0.0, 0.0));
+        let scale = Mat4f::nonuniform_scaled_translation(size, vec3(0.0, 0.0, 0.0));
         let transform = Mat4f::mul(&self.cur_transform, &scale);
         self.draw_mesh_with_transform(cx, mesh, transform)
     }
@@ -1065,10 +1057,8 @@ impl DrawPbr {
         seg_v: usize,
     ) -> Result<(), String> {
         let mesh = self.ensure_surface_mesh(cx, seg_u, seg_v)?;
-        let scale = Mat4f::nonuniform_scaled_translation(
-            vec3(size.x, 1.0, size.y),
-            vec3(0.0, 0.0, 0.0),
-        );
+        let scale =
+            Mat4f::nonuniform_scaled_translation(vec3(size.x, 1.0, size.y), vec3(0.0, 0.0, 0.0));
         let transform = Mat4f::mul(&self.cur_transform, &scale);
         self.draw_mesh_with_transform(cx, mesh, transform)
     }
@@ -1095,10 +1085,7 @@ impl DrawPbr {
         let lat = subdivisions.max(4).min(96);
         let lon = (lat * 2).max(8).min(192);
         let mesh = self.ensure_sphere_mesh(cx, lat, lon)?;
-        let scale = Mat4f::scaled_translation(
-            radius.max(0.0001),
-            vec3(0.0, 0.0, 0.0),
-        );
+        let scale = Mat4f::scaled_translation(radius.max(0.0001), vec3(0.0, 0.0, 0.0));
         let transform = Mat4f::mul(&self.cur_transform, &scale);
         self.draw_mesh_with_transform(cx, mesh, transform)
     }
@@ -1112,6 +1099,51 @@ impl DrawPbr {
     ) -> Result<(), String> {
         self.apply_material_state(material);
         self.draw_sphere(cx, radius, subdivisions)
+    }
+
+    /// Draw a rounded cube (box with smooth rounded edges and corners).
+    ///
+    /// * `size` — half-extents along each axis (the full box spans ±size on each axis before rounding).
+    /// * `radius` — corner radius. Clamped to half the smallest axis so the shape stays valid.
+    /// * `subdivisions` — tessellation of the flat face quads (per-edge segment count).
+    /// * `corner_segments` — tessellation of the rounded edges/corners (number of arc steps).
+    pub fn draw_rounded_cube(
+        &mut self,
+        cx: &mut Cx2d,
+        size: Vec3f,
+        radius: f32,
+        subdivisions: usize,
+        corner_segments: usize,
+    ) -> Result<(), String> {
+        // Clamp radius to at most the half of the smallest axis
+        let min_half = size.x.min(size.y).min(size.z);
+        let clamped_radius = radius.max(0.0).min(min_half);
+        // Express radius as a fraction of the half-extent (0..1000 permille for cache key)
+        let frac = if min_half > 0.0001 {
+            clamped_radius / min_half
+        } else {
+            0.0
+        };
+        let mesh = self.ensure_rounded_cube_mesh(cx, subdivisions, corner_segments, frac)?;
+        let scale = Mat4f::nonuniform_scaled_translation(
+            vec3(size.x * 2.0, size.y * 2.0, size.z * 2.0),
+            vec3(0.0, 0.0, 0.0),
+        );
+        let transform = Mat4f::mul(&self.cur_transform, &scale);
+        self.draw_mesh_with_transform(cx, mesh, transform)
+    }
+
+    pub fn draw_rounded_cube_with_material(
+        &mut self,
+        cx: &mut Cx2d,
+        size: Vec3f,
+        radius: f32,
+        subdivisions: usize,
+        corner_segments: usize,
+        material: &DrawPbrMaterialState,
+    ) -> Result<(), String> {
+        self.apply_material_state(material);
+        self.draw_rounded_cube(cx, size, radius, subdivisions, corner_segments)
     }
 
     fn ensure_cube_mesh(
@@ -1203,17 +1235,357 @@ impl DrawPbr {
         Ok(handle)
     }
 
+    fn ensure_rounded_cube_mesh(
+        &mut self,
+        cx: &mut Cx2d,
+        subdivisions: usize,
+        corner_segments: usize,
+        radius_frac: f32,
+    ) -> Result<PbrMeshHandle, String> {
+        let segments = subdivisions.max(1).min(64) as u16;
+        let cseg = corner_segments.max(1).min(32) as u16;
+        let radius_permille = (radius_frac.clamp(0.0, 1.0) * 1000.0) as u16;
+        let key = PbrPrimitiveMeshKey::RoundedCube {
+            segments,
+            corner_segments: cseg,
+            radius_permille,
+        };
+        if let Some(handle) = self.primitive_mesh_cache.get(&key).copied() {
+            return Ok(handle);
+        }
+
+        // Build a unit rounded cube (half_extent=0.5) with the radius as a fraction of 0.5
+        let unit_radius = 0.5 * radius_frac.clamp(0.0, 1.0);
+        let (positions, normals, uvs, indices) =
+            Self::build_rounded_cube_mesh(0.5, unit_radius, segments as usize, cseg as usize);
+        let handle = self.upload_indexed_triangles_mesh(
+            cx,
+            &positions,
+            Some(&normals),
+            None,
+            Some(&uvs),
+            None,
+            &indices,
+        )?;
+        self.primitive_mesh_cache.insert(key, handle);
+        Ok(handle)
+    }
+
+    /// Build a rounded cube mesh centered at origin.
+    ///
+    /// The cube spans from -half_extent to +half_extent on each axis, with edges
+    /// and corners rounded to `radius`. The flat faces are subdivided by `segments`,
+    /// and the rounded parts use `corner_segments` arc steps.
+    ///
+    /// Geometry structure:
+    /// - 6 flat face quads (inset by radius), each subdivided
+    /// - 12 edge cylinder strips (quarter-cylinder arcs along each edge)
+    /// - 8 corner sphere patches (octant of a sphere at each corner)
+    fn build_rounded_cube_mesh(
+        half_extent: f32,
+        radius: f32,
+        segments: usize,
+        corner_segments: usize,
+    ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+        let segments = segments.max(1);
+        let cs = corner_segments.max(1);
+        let radius = radius.min(half_extent).max(0.0);
+        let inner = half_extent - radius; // Half-extent of the inner (flat) box
+
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+
+        // Macro to push a vertex inline (avoids borrow-checker issues with closures)
+        macro_rules! push_vert {
+            ($pos:expr, $nor:expr, $uv:expr) => {{
+                positions.push($pos);
+                normals.push($nor);
+                uvs.push($uv);
+            }};
+        }
+
+        // ── 1. SIX FLAT FACES ──────────────────────────────────────────────
+        // Each face is a subdivided quad on the face plane, inset by `radius`
+        // so it covers only the flat region (from -inner to +inner on the two
+        // tangent axes, at ±half_extent on the normal axis).
+        struct FaceDef {
+            normal: [f32; 3],
+            // Two tangent axes (u_axis, v_axis) forming a right-handed frame with normal
+            u_axis: [f32; 3],
+            v_axis: [f32; 3],
+        }
+        let faces = [
+            FaceDef {
+                normal: [0.0, 0.0, 1.0],
+                u_axis: [1.0, 0.0, 0.0],
+                v_axis: [0.0, 1.0, 0.0],
+            }, // +Z
+            FaceDef {
+                normal: [0.0, 0.0, -1.0],
+                u_axis: [-1.0, 0.0, 0.0],
+                v_axis: [0.0, 1.0, 0.0],
+            }, // -Z
+            FaceDef {
+                normal: [1.0, 0.0, 0.0],
+                u_axis: [0.0, 0.0, -1.0],
+                v_axis: [0.0, 1.0, 0.0],
+            }, // +X
+            FaceDef {
+                normal: [-1.0, 0.0, 0.0],
+                u_axis: [0.0, 0.0, 1.0],
+                v_axis: [0.0, 1.0, 0.0],
+            }, // -X
+            FaceDef {
+                normal: [0.0, 1.0, 0.0],
+                u_axis: [1.0, 0.0, 0.0],
+                v_axis: [0.0, 0.0, 1.0],
+            }, // +Y
+            FaceDef {
+                normal: [0.0, -1.0, 0.0],
+                u_axis: [1.0, 0.0, 0.0],
+                v_axis: [0.0, 0.0, -1.0],
+            }, // -Y
+        ];
+
+        for face in &faces {
+            let n = face.normal;
+            let u_ax = face.u_axis;
+            let v_ax = face.v_axis;
+            let base_idx = positions.len() as u32;
+
+            for iy in 0..=segments {
+                let v = iy as f32 / segments as f32;
+                let fv = -inner + 2.0 * inner * v;
+                for ix in 0..=segments {
+                    let u = ix as f32 / segments as f32;
+                    let fu = -inner + 2.0 * inner * u;
+
+                    let pos = [
+                        n[0] * half_extent + u_ax[0] * fu + v_ax[0] * fv,
+                        n[1] * half_extent + u_ax[1] * fu + v_ax[1] * fv,
+                        n[2] * half_extent + u_ax[2] * fu + v_ax[2] * fv,
+                    ];
+                    push_vert!(pos, n, [u, v]);
+                }
+            }
+
+            let stride = (segments + 1) as u32;
+            for iy in 0..segments as u32 {
+                for ix in 0..segments as u32 {
+                    let i0 = base_idx + iy * stride + ix;
+                    let i1 = i0 + 1;
+                    let i2 = i0 + stride;
+                    let i3 = i2 + 1;
+                    indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+                }
+            }
+        }
+
+        // ── 2. TWELVE EDGES ────────────────────────────────────────────────
+        // Each edge is a quarter-cylinder connecting two adjacent faces.
+        // We parameterise along the edge (t) and around the arc (a).
+        struct EdgeDef {
+            // The edge runs from corner0 to corner1 (inner box corners)
+            axis: [f32; 3],         // unit direction along the edge
+            center_start: [f32; 3], // start point of the edge center-line (inner box)
+            n0: [f32; 3],           // outward normal of face 0 at this edge
+            n1: [f32; 3],           // outward normal of face 1 at this edge
+        }
+
+        // The 12 edges of a cube: 4 along each primary axis
+        let edge_defs = [
+            // Edges along X axis (y,z combinations)
+            EdgeDef {
+                axis: [1.0, 0.0, 0.0],
+                center_start: [-inner, inner, inner],
+                n0: [0.0, 1.0, 0.0],
+                n1: [0.0, 0.0, 1.0],
+            },
+            EdgeDef {
+                axis: [1.0, 0.0, 0.0],
+                center_start: [-inner, -inner, inner],
+                n0: [0.0, 0.0, 1.0],
+                n1: [0.0, -1.0, 0.0],
+            },
+            EdgeDef {
+                axis: [1.0, 0.0, 0.0],
+                center_start: [-inner, -inner, -inner],
+                n0: [0.0, -1.0, 0.0],
+                n1: [0.0, 0.0, -1.0],
+            },
+            EdgeDef {
+                axis: [1.0, 0.0, 0.0],
+                center_start: [-inner, inner, -inner],
+                n0: [0.0, 0.0, -1.0],
+                n1: [0.0, 1.0, 0.0],
+            },
+            // Edges along Y axis (x,z combinations)
+            EdgeDef {
+                axis: [0.0, 1.0, 0.0],
+                center_start: [inner, -inner, inner],
+                n0: [1.0, 0.0, 0.0],
+                n1: [0.0, 0.0, 1.0],
+            },
+            EdgeDef {
+                axis: [0.0, 1.0, 0.0],
+                center_start: [-inner, -inner, inner],
+                n0: [0.0, 0.0, 1.0],
+                n1: [-1.0, 0.0, 0.0],
+            },
+            EdgeDef {
+                axis: [0.0, 1.0, 0.0],
+                center_start: [-inner, -inner, -inner],
+                n0: [-1.0, 0.0, 0.0],
+                n1: [0.0, 0.0, -1.0],
+            },
+            EdgeDef {
+                axis: [0.0, 1.0, 0.0],
+                center_start: [inner, -inner, -inner],
+                n0: [0.0, 0.0, -1.0],
+                n1: [1.0, 0.0, 0.0],
+            },
+            // Edges along Z axis (x,y combinations)
+            EdgeDef {
+                axis: [0.0, 0.0, 1.0],
+                center_start: [inner, inner, -inner],
+                n0: [1.0, 0.0, 0.0],
+                n1: [0.0, 1.0, 0.0],
+            },
+            EdgeDef {
+                axis: [0.0, 0.0, 1.0],
+                center_start: [-inner, inner, -inner],
+                n0: [0.0, 1.0, 0.0],
+                n1: [-1.0, 0.0, 0.0],
+            },
+            EdgeDef {
+                axis: [0.0, 0.0, 1.0],
+                center_start: [-inner, -inner, -inner],
+                n0: [-1.0, 0.0, 0.0],
+                n1: [0.0, -1.0, 0.0],
+            },
+            EdgeDef {
+                axis: [0.0, 0.0, 1.0],
+                center_start: [inner, -inner, -inner],
+                n0: [0.0, -1.0, 0.0],
+                n1: [1.0, 0.0, 0.0],
+            },
+        ];
+
+        for edge in &edge_defs {
+            let base_idx = positions.len() as u32;
+            let edge_len = 2.0 * inner;
+
+            for it in 0..=segments {
+                let t = it as f32 / segments as f32;
+                let along = t * edge_len;
+                // Center point on the inner box edge
+                let cx = edge.center_start[0] + edge.axis[0] * along;
+                let cy = edge.center_start[1] + edge.axis[1] * along;
+                let cz = edge.center_start[2] + edge.axis[2] * along;
+
+                for ia in 0..=cs {
+                    let a = ia as f32 / cs as f32;
+                    let angle = a * PI * 0.5; // 0 to π/2
+                    let cos_a = angle.cos();
+                    let sin_a = angle.sin();
+
+                    // Normal interpolates from n0 to n1 via rotation
+                    let nx = edge.n0[0] * cos_a + edge.n1[0] * sin_a;
+                    let ny = edge.n0[1] * cos_a + edge.n1[1] * sin_a;
+                    let nz = edge.n0[2] * cos_a + edge.n1[2] * sin_a;
+
+                    let pos = [cx + nx * radius, cy + ny * radius, cz + nz * radius];
+                    let uv = [t, a];
+                    push_vert!(pos, [nx, ny, nz], uv);
+                }
+            }
+
+            let arc_stride = (cs + 1) as u32;
+            for it in 0..segments as u32 {
+                for ia in 0..cs as u32 {
+                    let i0 = base_idx + it * arc_stride + ia;
+                    let i1 = i0 + 1;
+                    let i2 = i0 + arc_stride;
+                    let i3 = i2 + 1;
+                    indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+                }
+            }
+        }
+
+        // ── 3. EIGHT CORNERS ───────────────────────────────────────────────
+        // Each corner is a spherical triangle patch (octant of a sphere).
+        // We use a simple latitude/longitude parameterization over the octant.
+        let corner_signs: [[f32; 3]; 8] = [
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+        ];
+
+        for signs in &corner_signs {
+            let base_idx = positions.len() as u32;
+            // Center of this corner's sphere
+            let center = [signs[0] * inner, signs[1] * inner, signs[2] * inner];
+
+            // We generate a patch from the three face normals meeting at this corner.
+            // Use spherical interpolation: latitude from one axis, longitude sweeps the other two.
+            // The octant goes from the primary axis toward the two secondary axes.
+            // We parameterize using two angles: phi (0..π/2) and theta (0..π/2)
+            for iy in 0..=cs {
+                let v = iy as f32 / cs as f32;
+                let phi = v * PI * 0.5; // 0 to π/2 (latitude from +Y toward XZ plane)
+                let cos_phi = phi.cos();
+                let sin_phi = phi.sin();
+
+                for ix in 0..=cs {
+                    let u = ix as f32 / cs as f32;
+                    let theta = u * PI * 0.5; // 0 to π/2 (longitude from +X toward +Z)
+                    let cos_theta = theta.cos();
+                    let sin_theta = theta.sin();
+
+                    // Spherical normal in the octant (+x, +y, +z)
+                    let nx = sin_phi * cos_theta;
+                    let ny = cos_phi;
+                    let nz = sin_phi * sin_theta;
+
+                    // Apply the sign to map to the correct octant
+                    let snx = nx * signs[0];
+                    let sny = ny * signs[1];
+                    let snz = nz * signs[2];
+
+                    let pos = [
+                        center[0] + snx * radius,
+                        center[1] + sny * radius,
+                        center[2] + snz * radius,
+                    ];
+                    push_vert!(pos, [snx, sny, snz], [u, v]);
+                }
+            }
+
+            let stride = (cs + 1) as u32;
+            for iy in 0..cs as u32 {
+                for ix in 0..cs as u32 {
+                    let i0 = base_idx + iy * stride + ix;
+                    let i1 = i0 + 1;
+                    let i2 = i0 + stride;
+                    let i3 = i2 + 1;
+                    indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+                }
+            }
+        }
+
+        (positions, normals, uvs, indices)
+    }
+
     fn geometry_gen_to_pbr(
         gen: &GeometryGen,
-    ) -> Result<
-        (
-            Vec<[f32; 3]>,
-            Vec<[f32; 3]>,
-            Vec<[f32; 2]>,
-            Vec<u32>,
-        ),
-        String,
-    > {
+    ) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>), String> {
         if gen.vertices.len() % 9 != 0 {
             return Err(format!(
                 "expected GeometryGen vertex stride 9, got {} floats",
@@ -1235,12 +1607,7 @@ impl DrawPbr {
     fn build_surface_mesh(
         seg_u: usize,
         seg_v: usize,
-    ) -> (
-        Vec<[f32; 3]>,
-        Vec<[f32; 3]>,
-        Vec<[f32; 2]>,
-        Vec<u32>,
-    ) {
+    ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
         let seg_u = seg_u.max(1);
         let seg_v = seg_v.max(1);
         let vert_count = (seg_u + 1) * (seg_v + 1);
@@ -1278,12 +1645,7 @@ impl DrawPbr {
     fn build_uv_sphere_mesh(
         lat: usize,
         lon: usize,
-    ) -> (
-        Vec<[f32; 3]>,
-        Vec<[f32; 3]>,
-        Vec<[f32; 2]>,
-        Vec<u32>,
-    ) {
+    ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
         let lat = lat.max(4);
         let lon = lon.max(8);
         let mut positions = Vec::with_capacity((lat + 1) * (lon + 1));
@@ -1448,8 +1810,7 @@ impl DrawPbr {
         let tangent_data = if let Some(tangents) = tangents {
             tangents
         } else {
-            generated_tangents =
-                Self::compute_tangent_frame(positions, normals, uvs, &out_indices);
+            generated_tangents = Self::compute_tangent_frame(positions, normals, uvs, &out_indices);
             generated_tangents.as_slice()
         };
 
@@ -1470,22 +1831,8 @@ impl DrawPbr {
             ]);
 
             out_verts.extend_from_slice(&[
-                pos[0],
-                pos[1],
-                pos[2],
-                src_n[0],
-                src_n[1],
-                src_n[2],
-                uv[0],
-                uv[1],
-                color[0],
-                color[1],
-                color[2],
-                color[3],
-                src_t[0],
-                src_t[1],
-                src_t[2],
-                src_t[3],
+                pos[0], pos[1], pos[2], src_n[0], src_n[1], src_n[2], uv[0], uv[1], color[0],
+                color[1], color[2], color[3], src_t[0], src_t[1], src_t[2], src_t[3],
             ]);
         }
         Ok((out_verts, out_indices))
@@ -1562,7 +1909,11 @@ impl DrawPbr {
                 Vec3f::cross(n, up).normalize()
             };
             let bitangent = Vec3f::cross(n, tangent);
-            let w = if bitangent.dot(tan2[i]) < 0.0 { -1.0 } else { 1.0 };
+            let w = if bitangent.dot(tan2[i]) < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
             out[i] = [tangent.x, tangent.y, tangent.z, w];
         }
         out

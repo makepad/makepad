@@ -12,7 +12,7 @@ script_mod! {
         height: Fill
         draw_bg +: {
             color: #x131922
-            draw_depth: -99.0
+            draw_depth: -299.0
         }
         draw_pbr +: {
             light_dir: vec3(0.35, 0.8, 0.45)
@@ -78,8 +78,6 @@ pub struct PhysicsView {
     #[live(0.7)]
     depth_forward_bias: f32,
     #[rust]
-    cube_mesh: Option<usize>,
-    #[rust]
     ground_mesh: Option<usize>,
     #[rust]
     world: Option<PhysicsWorld>,
@@ -107,24 +105,6 @@ impl PhysicsView {
             return;
         }
         self.initialized = true;
-
-        // Upload a unit cube mesh (half-extent = 1.0, centered at origin).
-        // We scale it per-body using the model transform.
-        let positions: Vec<[f32; 3]> = UNIT_CUBE_POSITIONS.to_vec();
-        let normals: Vec<[f32; 3]> = UNIT_CUBE_NORMALS.to_vec();
-        let indices: Vec<u32> = UNIT_CUBE_INDICES.to_vec();
-        match self.draw_pbr.upload_indexed_triangles_mesh(
-            cx,
-            &positions,
-            Some(&normals),
-            None,
-            None,
-            None,
-            &indices,
-        ) {
-            Ok(handle) => self.cube_mesh = Some(handle),
-            Err(e) => log!("Failed to upload cube mesh: {}", e),
-        }
 
         // Upload a tessellated ground grid.
         let (ground_positions, ground_normals, ground_indices) = build_ground_grid_mesh(64, 24.0);
@@ -268,10 +248,6 @@ impl PhysicsView {
         if pass_size.x <= 1.0 || pass_size.y <= 1.0 {
             return;
         }
-        let Some(cube_mesh) = self.cube_mesh else {
-            return;
-        };
-
         // Compute view/projection (orbit camera, same pattern as Scene3D)
         let clip_ndc = clip_ndc_for_rect(rect, pass_size);
         let viewport = clip_space_viewport_matrix(clip_ndc);
@@ -315,19 +291,19 @@ impl PhysicsView {
             let _ = self.draw_pbr.draw_mesh(cx, ground_mesh);
         }
 
-        // Draw physics bodies
+        // Draw physics bodies as rounded cubes
         self.draw_pbr.set_metal_roughness(0.0, 0.55);
 
         if let Some(world) = &self.world {
             for (i, body) in world.bodies.iter().enumerate() {
                 let color = CUBE_COLORS[i % CUBE_COLORS.len()];
                 let he = body.half_extents;
-                let model = pose_scaled_model(&body.pose, he);
+                let model = pose_scaled_model(&body.pose, vec3(1.0, 1.0, 1.0));
 
                 self.draw_pbr.set_transform(model);
                 self.draw_pbr
                     .set_base_color_factor(vec4(color[0], color[1], color[2], 1.0));
-                let _ = self.draw_pbr.draw_mesh(cx, cube_mesh);
+                let _ = self.draw_pbr.draw_rounded_cube(cx, he, 0.08, 1, 4);
             }
         }
     }
@@ -561,47 +537,3 @@ fn build_ground_grid_mesh(
 
     (positions, normals, indices)
 }
-
-// --- Unit cube geometry (half-extent = 1.0, 24 verts with face normals, 36 indices) ---
-
-#[rustfmt::skip]
-const UNIT_CUBE_POSITIONS: &[[f32; 3]] = &[
-    // +X face
-    [ 1.0, -1.0, -1.0], [ 1.0, -1.0,  1.0], [ 1.0,  1.0,  1.0], [ 1.0,  1.0, -1.0],
-    // -X face
-    [-1.0, -1.0,  1.0], [-1.0, -1.0, -1.0], [-1.0,  1.0, -1.0], [-1.0,  1.0,  1.0],
-    // +Y face
-    [-1.0,  1.0, -1.0], [ 1.0,  1.0, -1.0], [ 1.0,  1.0,  1.0], [-1.0,  1.0,  1.0],
-    // -Y face
-    [-1.0, -1.0,  1.0], [ 1.0, -1.0,  1.0], [ 1.0, -1.0, -1.0], [-1.0, -1.0, -1.0],
-    // +Z face
-    [-1.0, -1.0,  1.0], [-1.0,  1.0,  1.0], [ 1.0,  1.0,  1.0], [ 1.0, -1.0,  1.0],
-    // -Z face
-    [ 1.0, -1.0, -1.0], [ 1.0,  1.0, -1.0], [-1.0,  1.0, -1.0], [-1.0, -1.0, -1.0],
-];
-
-#[rustfmt::skip]
-const UNIT_CUBE_NORMALS: &[[f32; 3]] = &[
-    // +X
-    [ 1.0, 0.0, 0.0], [ 1.0, 0.0, 0.0], [ 1.0, 0.0, 0.0], [ 1.0, 0.0, 0.0],
-    // -X
-    [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0],
-    // +Y
-    [ 0.0, 1.0, 0.0], [ 0.0, 1.0, 0.0], [ 0.0, 1.0, 0.0], [ 0.0, 1.0, 0.0],
-    // -Y
-    [ 0.0,-1.0, 0.0], [ 0.0,-1.0, 0.0], [ 0.0,-1.0, 0.0], [ 0.0,-1.0, 0.0],
-    // +Z
-    [ 0.0, 0.0, 1.0], [ 0.0, 0.0, 1.0], [ 0.0, 0.0, 1.0], [ 0.0, 0.0, 1.0],
-    // -Z
-    [ 0.0, 0.0,-1.0], [ 0.0, 0.0,-1.0], [ 0.0, 0.0,-1.0], [ 0.0, 0.0,-1.0],
-];
-
-#[rustfmt::skip]
-const UNIT_CUBE_INDICES: &[u32] = &[
-     0,  1,  2,   2,  3,  0, // +X
-     4,  5,  6,   6,  7,  4, // -X
-     8,  9, 10,  10, 11,  8, // +Y
-    12, 13, 14,  14, 15, 12, // -Y
-    16, 17, 18,  18, 19, 16, // +Z
-    20, 21, 22,  22, 23, 20, // -Z
-];
