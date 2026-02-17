@@ -173,6 +173,17 @@ impl Cx {
                     continue;
                 }
 
+                if sh.mapping.flags.debug_draw {
+                    CxDrawShaderMapping::debug_dump_shader_draw_call(
+                        "d3d11",
+                        draw_item_id,
+                        sh,
+                        draw_call,
+                        draw_item.instances.as_ref().unwrap(),
+                        instances as usize,
+                    );
+                }
+
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
                     geometry_id
                 } else {
@@ -530,7 +541,7 @@ impl Cx {
                 }
             };
 
-            if cx_shader.mapping.flags.debug {
+            if cx_shader.mapping.flags.debug_code {
                 crate::log!("{}", hlsl);
             }
 
@@ -1553,12 +1564,6 @@ impl DrawVars {
 
             // Fill the scope uniform buffer from current script values
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
-
-            // Check for debug: true on the shader object
-            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
-            if let Some(true) = debug_value.as_bool() {
-                mapping.flags.debug = true;
-            }
 
             // Set dyn_instance_start and dyn_instance_slots based on mapping
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;

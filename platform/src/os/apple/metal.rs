@@ -283,14 +283,15 @@ impl Cx {
                     }
                 }
 
-                // Debug output when shader has debug flag enabled
-                if sh.mapping.flags.debug {
-                    Self::_debug_call_info(
+                // Debug output when shader has debug_draw flag enabled
+                if sh.mapping.flags.debug_draw {
+                    CxDrawShaderMapping::debug_dump_shader_draw_call(
+                        "metal",
+                        draw_item_id,
                         sh,
-                        draw_item.instances.as_ref().unwrap(),
                         draw_call,
-                        instances,
-                        geometry,
+                        draw_item.instances.as_ref().unwrap(),
+                        instances as usize,
                     );
                 }
 
@@ -314,7 +315,7 @@ impl Cx {
         }
     }
 
-    /// Debug helper for printing draw call info. Called when shader has `debug: true` flag.
+    /// Debug helper for printing draw call info. Called from draw-list debug dumps.
     fn debug_dump_draw_call(
         draw_item_id: usize,
         sh: &CxDrawShader,
@@ -358,61 +359,6 @@ impl Cx {
                 println!("  i[{}] {}", inst_idx, parts.join(" "));
             }
         }
-    }
-
-    fn _debug_call_info(
-        sh: &CxDrawShader,
-        instance_data: &[f32],
-        draw_call: &crate::draw_list::CxDrawCall,
-        instances: u64,
-        geometry: &crate::geometry::CxGeometry,
-    ) {
-        let total_slots = sh.mapping.instances.total_slots;
-        println!("=== METAL DRAW CALL DEBUG ===");
-        println!("  shader debug_id: {:?}", sh.debug_id);
-        println!(
-            "  instance_count: {}, total_slots: {}, data_len: {}",
-            instances,
-            total_slots,
-            instance_data.len()
-        );
-        for input in &sh.mapping.instances.inputs {
-            println!(
-                "    inst {:?}: offset={}, slots={}",
-                input.id, input.offset, input.slots
-            );
-        }
-        let num = 3.min(instances as usize);
-        for i in 0..num {
-            let base = i * total_slots;
-            if base + total_slots <= instance_data.len() {
-                println!("  --- Instance {} ---", i);
-                for input in &sh.mapping.instances.inputs {
-                    let s = base + input.offset;
-                    let e = s + input.slots;
-                    if e <= instance_data.len() {
-                        println!("    {:?}: {:?}", input.id, &instance_data[s..e]);
-                    }
-                }
-            }
-        }
-        if instances > 3 {
-            println!("  ... ({} more)", instances - 3);
-        }
-        println!(
-            "  dyn_uniforms: {:?}",
-            &draw_call.dyn_uniforms[..draw_call.dyn_uniforms.len().min(8)]
-        );
-        println!(
-            "  draw_call_uniforms: {:?}",
-            draw_call.draw_call_uniforms.as_slice()
-        );
-        println!(
-            "  geom: indices={} vertices={}",
-            geometry.indices.len(),
-            geometry.vertices.len()
-        );
-        println!("=============================");
     }
 
     pub fn draw_pass(
@@ -855,7 +801,7 @@ impl Cx {
                 }
             };
 
-            if cx_shader.mapping.flags.debug {
+            if cx_shader.mapping.flags.debug_code {
                 println!(
                     "=== Generated Metal Shader ===\n{}\n=== End Metal Shader ===",
                     mtlsl
@@ -1123,12 +1069,6 @@ impl DrawVars {
 
             // Fill the scope uniform buffer from current script values
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
-
-            // Check for debug: true on the shader object (use NoTrap since it's optional)
-            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
-            if let Some(true) = debug_value.as_bool() {
-                mapping.flags.debug = true;
-            }
 
             // Set dyn_instance_start and dyn_instance_slots based on mapping
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
