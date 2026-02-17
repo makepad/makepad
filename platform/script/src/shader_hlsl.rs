@@ -105,7 +105,13 @@ impl ShaderOutput {
                 let args = scalars[start..end].join(", ");
                 let mut ty_name = String::new();
                 self.backend.pod_type_name(ty, &mut ty_name);
-                format!("{}({})", ty_name, args)
+                if matches!(ty.data.ty, ScriptPodTy::Mat(_)) {
+                    // Mat4f/MatNxM are stored column-major in CPU slot streams.
+                    // HLSL scalar constructors consume row-major order, so transpose.
+                    format!("transpose({}({}))", ty_name, args)
+                } else {
+                    format!("{}({})", ty_name, args)
+                }
             }
         }
     }
@@ -264,7 +270,7 @@ impl ShaderOutput {
                         out,
                         " {} : VARY{};",
                         self.backend.map_io_name(io.name),
-                        index_to_char(semantic_idx)
+                        index_to_semantic(semantic_idx)
                     )
                     .ok();
                     semantic_idx += 1;
@@ -309,7 +315,7 @@ impl ShaderOutput {
                             Self::hlsl_chunk_ty(chunk_slots),
                             io_name,
                             chunk_idx,
-                            index_to_char(semantic_idx),
+                            index_to_semantic(semantic_idx),
                             chunk_idx
                         )
                         .ok();
@@ -321,7 +327,7 @@ impl ShaderOutput {
                         out,
                         " vb_{} : GEOM{};",
                         io_name,
-                        index_to_char(semantic_idx)
+                        index_to_semantic(semantic_idx)
                     )
                     .ok();
                 }
@@ -346,7 +352,7 @@ impl ShaderOutput {
                             Self::hlsl_chunk_ty(chunk_slots),
                             io_name,
                             chunk_idx,
-                            index_to_char(semantic_idx),
+                            index_to_semantic(semantic_idx),
                             chunk_idx
                         )
                         .ok();
@@ -354,7 +360,13 @@ impl ShaderOutput {
                 } else {
                     write!(out, "    ").ok();
                     self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    writeln!(out, " i_{} : INST{};", io_name, index_to_char(semantic_idx)).ok();
+                    writeln!(
+                        out,
+                        " i_{} : INST{};",
+                        io_name,
+                        index_to_semantic(semantic_idx)
+                    )
+                    .ok();
                 }
                 semantic_idx += 1;
             }
@@ -374,7 +386,7 @@ impl ShaderOutput {
                             Self::hlsl_chunk_ty(chunk_slots),
                             io_name,
                             chunk_idx,
-                            index_to_char(semantic_idx),
+                            index_to_semantic(semantic_idx),
                             chunk_idx
                         )
                         .ok();
@@ -382,7 +394,13 @@ impl ShaderOutput {
                 } else {
                     write!(out, "    ").ok();
                     self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    writeln!(out, " i_{} : INST{};", io_name, index_to_char(semantic_idx)).ok();
+                    writeln!(
+                        out,
+                        " i_{} : INST{};",
+                        io_name,
+                        index_to_semantic(semantic_idx)
+                    )
+                    .ok();
                 }
                 semantic_idx += 1;
             }
@@ -555,7 +573,18 @@ impl ShaderOutput {
     }
 }
 
-/// Convert index to HLSL semantic character (A, B, C, ...)
-pub fn index_to_char(index: usize) -> char {
-    std::char::from_u32(index as u32 + 65).unwrap_or('?')
+/// Convert index to HLSL semantic suffix (A..Z, AA..AZ, BA..).
+pub fn index_to_semantic(index: usize) -> String {
+    const LETTERS: &[u8; 26] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut value = index;
+    let mut out = Vec::new();
+    loop {
+        let rem = value % 26;
+        out.push(LETTERS[rem] as char);
+        if value < 26 {
+            break;
+        }
+        value = value / 26 - 1;
+    }
+    out.iter().rev().collect()
 }

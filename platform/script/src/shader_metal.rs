@@ -1,3 +1,4 @@
+use crate::pod::{ScriptPodMat, ScriptPodTy};
 use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
 use crate::vm::ScriptVm;
 use makepad_live_id::{id, LiveId};
@@ -7,7 +8,7 @@ impl ShaderOutput {
     pub fn metal_create_io_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct Io {{").ok();
         writeln!(out, "    constant IoUniform *u;").ok();
-        writeln!(out, "    constant IoInstance *i;").ok();
+        writeln!(out, "    thread IoInstance *i;").ok();
 
         // Add scope uniforms buffer pointer if we have any scope uniforms
         let has_scope_uniforms = self
@@ -83,16 +84,23 @@ impl ShaderOutput {
     }
 
     pub fn metal_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
-        writeln!(out, "struct IoInstance {{").ok();
+        writeln!(out, "struct IoInstanceRaw {{").ok();
 
         // 1. Output Dyn instance fields first (order doesn't matter, just output as encountered)
         // Use packed types to match CPU-side repr(C) struct alignment
         for io in &self.io {
             if let ShaderIoKind::DynInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend
-                    .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " {};", io.name).ok();
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                    for col in 0..4 {
+                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
+                    }
+                } else {
+                    write!(out, "    ").ok();
+                    self.backend
+                        .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                    writeln!(out, " {};", io.name).ok();
+                }
             }
         }
 
@@ -100,14 +108,73 @@ impl ShaderOutput {
         // Use packed types to match CPU-side repr(C) struct alignment
         for io in &self.io {
             if let ShaderIoKind::RustInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend
-                    .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " {};", io.name).ok();
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                    for col in 0..4 {
+                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
+                    }
+                } else {
+                    write!(out, "    ").ok();
+                    self.backend
+                        .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                    writeln!(out, " {};", io.name).ok();
+                }
             }
         }
 
         writeln!(out, "}};").ok();
+
+        writeln!(out, "struct IoInstance {{").ok();
+        for io in &self.io {
+            if let ShaderIoKind::DynInstance = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
+            }
+        }
+        for io in &self.io {
+            if let ShaderIoKind::RustInstance = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
+            }
+        }
+        writeln!(out, "}};").ok();
+
+        writeln!(out, "inline IoInstance _mp_decode_instance(constant IoInstanceRaw &raw) {{").ok();
+        writeln!(out, "    IoInstance out_instance;").ok();
+        for io in &self.io {
+            if let ShaderIoKind::DynInstance = io.kind {
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                    writeln!(
+                        out,
+                        "    out_instance.{0} = float4x4(float4(raw.{0}_0), float4(raw.{0}_1), float4(raw.{0}_2), float4(raw.{0}_3));",
+                        io.name
+                    )
+                    .ok();
+                } else {
+                    writeln!(out, "    out_instance.{0} = raw.{0};", io.name).ok();
+                }
+            }
+        }
+        for io in &self.io {
+            if let ShaderIoKind::RustInstance = io.kind {
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                    writeln!(
+                        out,
+                        "    out_instance.{0} = float4x4(float4(raw.{0}_0), float4(raw.{0}_1), float4(raw.{0}_2), float4(raw.{0}_3));",
+                        io.name
+                    )
+                    .ok();
+                } else {
+                    writeln!(out, "    out_instance.{0} = raw.{0};", io.name).ok();
+                }
+            }
+        }
+        writeln!(out, "    return out_instance;").ok();
+        writeln!(out, "}}").ok();
     }
 
     pub fn metal_create_uniform_struct(&self, vm: &ScriptVm, out: &mut String) {
@@ -173,7 +240,7 @@ impl ShaderOutput {
 
         writeln!(out, "vertex IoVarying vertex_main(").ok();
         writeln!(out, "    constant IoVertexBuffer *vb [[buffer(0)]],").ok();
-        writeln!(out, "    constant IoInstance *i [[buffer(1)]],").ok();
+        writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
         writeln!(out, "    constant IoUniform *u [[buffer(2)]],").ok();
 
         // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
@@ -244,8 +311,9 @@ impl ShaderOutput {
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
+        writeln!(out, "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);").ok();
         writeln!(out, "    _io.vb = vb;").ok();
-        writeln!(out, "    _io.i = i;").ok();
+        writeln!(out, "    _io.i = &_inst;").ok();
         writeln!(out, "    _io.u = u;").ok();
 
         if has_scope_uniforms {
@@ -299,7 +367,7 @@ impl ShaderOutput {
         writeln!(out, "fragment IoFb fragment_main(").ok();
         writeln!(out, "    IoVarying v [[stage_in]],").ok();
         writeln!(out, "    constant IoVertexBuffer *vb [[buffer(0)]],").ok();
-        writeln!(out, "    constant IoInstance *i [[buffer(1)]],").ok();
+        writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
         write!(out, "    constant IoUniform *u [[buffer(2)]]").ok();
 
         // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
@@ -371,8 +439,9 @@ impl ShaderOutput {
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
+        writeln!(out, "    IoInstance _inst = _mp_decode_instance(i_raw[v._iid]);").ok();
         writeln!(out, "    _io.vb = vb;").ok();
-        writeln!(out, "    _io.i = i;").ok();
+        writeln!(out, "    _io.i = &_inst;").ok();
         writeln!(out, "    _io.u = u;").ok();
 
         if has_scope_uniforms {

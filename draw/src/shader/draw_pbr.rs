@@ -32,12 +32,6 @@ script_mod! {
         occlusion_texture: texture_2d(float)
         emissive_texture: texture_2d(float)
         env_texture: texture_cube(float)
-        model_matrix: uniform(mat4x4f(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        ))
         view_matrix: uniform(mat4x4f(
             1.0, 0.0, 0.0, 0.0,
             0.0, 1.0, 0.0, 0.0,
@@ -274,8 +268,6 @@ pub struct DrawPbr {
     #[rust(vec4(1.0, 1.0, 1.0, 1.0))]
     pub cur_color: Vec4f,
     #[rust(Mat4f::identity())]
-    pub model_matrix: Mat4f,
-    #[rust(Mat4f::identity())]
     pub view_matrix: Mat4f,
     #[rust(Mat4f::identity())]
     pub projection_matrix: Mat4f,
@@ -286,50 +278,52 @@ pub struct DrawPbr {
     /// Positive values move the 3D content forward in depth (towards 0.0).
     #[rust(0.0)]
     pub depth_forward_bias: f32,
+    #[rust(vec4(1.0, 1.0, 1.0, 1.0))]
+    pub base_color_factor: Vec4f,
+    #[rust(1.0)]
+    pub metallic_factor: f32,
+    #[rust(1.0)]
+    pub roughness_factor: f32,
+    #[rust(vec3(0.0, 0.0, 0.0))]
+    pub emissive_factor: Vec3f,
+    #[rust(1.0)]
+    pub normal_scale: f32,
+    #[rust(1.0)]
+    pub occlusion_strength: f32,
+    #[rust(0.0)]
+    pub has_base_color_texture: f32,
+    #[rust(0.0)]
+    pub has_metal_roughness_texture: f32,
+    #[rust(0.0)]
+    pub has_normal_texture: f32,
+    #[rust(0.0)]
+    pub has_occlusion_texture: f32,
+    #[rust(0.0)]
+    pub has_emissive_texture: f32,
+    #[rust(0.0)]
+    pub has_env_texture: f32,
+    #[rust(vec3(0.3, 0.7, 1.0))]
+    pub light_dir: Vec3f,
+    #[rust(vec3(1.0, 1.0, 1.0))]
+    pub light_color: Vec3f,
+    #[rust(0.15)]
+    pub ambient: f32,
+    #[rust(128.0)]
+    pub spec_power: f32,
+    #[rust(0.9)]
+    pub spec_strength: f32,
+    #[rust(1.8)]
+    pub env_intensity: f32,
+    #[rust(vec3(0.0, 0.0, 5.0))]
+    pub camera_pos: Vec3f,
+    #[rust(0.0)]
+    pub pad1: f32,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
-    pub draw_clip: Vec4f,
-    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
-    pub base_color_factor: Vec4f,
-    #[live(1.0)]
-    pub metallic_factor: f32,
-    #[live(1.0)]
-    pub roughness_factor: f32,
-    #[live(vec3(0.0, 0.0, 0.0))]
-    pub emissive_factor: Vec3f,
-    #[live(1.0)]
-    pub normal_scale: f32,
-    #[live(1.0)]
-    pub occlusion_strength: f32,
-    #[live(0.0)]
-    pub has_base_color_texture: f32,
-    #[live(0.0)]
-    pub has_metal_roughness_texture: f32,
-    #[live(0.0)]
-    pub has_normal_texture: f32,
-    #[live(0.0)]
-    pub has_occlusion_texture: f32,
-    #[live(0.0)]
-    pub has_emissive_texture: f32,
-    #[live(0.0)]
-    pub has_env_texture: f32,
-    #[live(vec3(0.3, 0.7, 1.0))]
-    pub light_dir: Vec3f,
-    #[live(vec3(1.0, 1.0, 1.0))]
-    pub light_color: Vec3f,
-    #[live(0.15)]
-    pub ambient: f32,
-    #[live(128.0)]
-    pub spec_power: f32,
-    #[live(0.9)]
-    pub spec_strength: f32,
-    #[live(1.8)]
-    pub env_intensity: f32,
-    #[live(vec3(0.0, 0.0, 5.0))]
-    pub camera_pos: Vec3f,
+    pub model_matrix: Mat4f,
     #[live]
-    pub pad1: f32,
+    pub draw_clip: Vec4f,
 }
 
 impl DrawPbr {
@@ -441,11 +435,6 @@ impl DrawPbr {
     }
 
     fn apply_draw_uniforms(&mut self, cx: &mut Cx2d) {
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(model_matrix),
-            &self.model_matrix.v,
-        );
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(view_matrix),

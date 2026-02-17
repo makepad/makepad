@@ -39,11 +39,11 @@ impl ShaderBackend {
                     ShaderMode::Vertex => match io_type {
                         SHADER_IO_RUST_INSTANCE => (
                             ShaderIoKind::RustInstance,
-                            ShaderIoPrefix::Prefix("_io.i[_iov.iid]."),
+                            ShaderIoPrefix::Prefix("_io.i->"),
                         ),
                         SHADER_IO_DYN_INSTANCE => (
                             ShaderIoKind::DynInstance,
-                            ShaderIoPrefix::Prefix("_io.i[_iov.iid]."),
+                            ShaderIoPrefix::Prefix("_io.i->"),
                         ),
                         SHADER_IO_DYN_UNIFORM => {
                             (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->"))
@@ -131,11 +131,11 @@ impl ShaderBackend {
                         match io_type {
                             SHADER_IO_RUST_INSTANCE => (
                                 ShaderIoKind::RustInstance,
-                                ShaderIoPrefix::Prefix("_io.i[_iof.v->_iid]."),
+                                ShaderIoPrefix::Prefix("_io.i->"),
                             ),
                             SHADER_IO_DYN_INSTANCE => (
                                 ShaderIoKind::DynInstance,
-                                ShaderIoPrefix::Prefix("_io.i[_iof.v->_iid]."),
+                                ShaderIoPrefix::Prefix("_io.i->"),
                             ),
                             SHADER_IO_DYN_UNIFORM => {
                                 (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->"))
