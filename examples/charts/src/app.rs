@@ -51,6 +51,7 @@ script_mod! {
                                 camera_distance_min: 8.0
                                 camera_distance_max: 30.0
                                 camera_fov_y: 36.0
+                                camera_target: vec3(0.0, 2.8, 0.0)
                                 BarChart3D{
                                     base_y: -0.01
                                     spacing: 0.52
