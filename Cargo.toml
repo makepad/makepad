@@ -30,6 +30,7 @@ workspace.members = [
     "tools/remote",
     "libs/terminal_core",
     "libs/git",
+    "libs/fast_inflate",
 #    "libs/matrix",
 ]
 

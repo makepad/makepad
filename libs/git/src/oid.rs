@@ -1,5 +1,5 @@
 use crate::error::GitError;
-use sha1::{Digest, Sha1};
+use crate::sha1::Sha1;
 use std::fmt;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,10 +77,7 @@ pub fn hash_object(kind: &str, data: &[u8]) -> ObjectId {
     let mut hasher = Sha1::new();
     hasher.update(header.as_bytes());
     hasher.update(data);
-    let result = hasher.finalize();
-    let mut bytes = [0u8; 20];
-    bytes.copy_from_slice(&result);
-    ObjectId(bytes)
+    ObjectId(hasher.finalize())
 }
 
 #[cfg(test)]
