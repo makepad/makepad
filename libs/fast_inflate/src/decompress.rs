@@ -1287,6 +1287,98 @@ pub fn zlib_decompress_with(
     Ok((footer_start + 4, written))
 }
 
+// --- Auto-sizing decompression (unknown output size) ---
+
+const INITIAL_VEC_CAPACITY: usize = 4096;
+const MAX_VEC_CAPACITY: usize = 256 * 1024 * 1024; // 256 MB safety cap
+
+/// Decompress raw DEFLATE data when the output size is unknown.
+/// Automatically sizes the output buffer, retrying with larger buffers as needed.
+/// Returns the decompressed data as a Vec<u8>, or an error.
+pub fn deflate_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
+    let mut d = Decompressor::new();
+    // Start with a reasonable estimate: 3x input or 4KB, whichever is larger
+    let mut capacity = (input.len() * 3).max(INITIAL_VEC_CAPACITY);
+    loop {
+        let mut output = vec![0u8; capacity];
+        match deflate_decompress_with(&mut d, input, &mut output) {
+            Ok((_consumed, written)) => {
+                output.truncate(written);
+                return Ok(output);
+            }
+            Err(DecompressError::InsufficientSpace) => {
+                capacity = capacity
+                    .checked_mul(2)
+                    .ok_or(DecompressError::InsufficientSpace)?;
+                if capacity > MAX_VEC_CAPACITY {
+                    return Err(DecompressError::InsufficientSpace);
+                }
+                // Retry with bigger buffer
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Decompress zlib-wrapped data when the output size is unknown.
+/// Automatically sizes the output buffer, retrying with larger buffers as needed.
+/// Returns the decompressed data as a Vec<u8>, or an error.
+pub fn zlib_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
+    let mut d = Decompressor::new();
+    // Start with a reasonable estimate: 3x input or 4KB, whichever is larger
+    let mut capacity = (input.len() * 3).max(INITIAL_VEC_CAPACITY);
+    loop {
+        let mut output = vec![0u8; capacity];
+        match zlib_decompress_with(&mut d, input, &mut output) {
+            Ok((_consumed, written)) => {
+                output.truncate(written);
+                return Ok(output);
+            }
+            Err(DecompressError::InsufficientSpace) => {
+                capacity = capacity
+                    .checked_mul(2)
+                    .ok_or(DecompressError::InsufficientSpace)?;
+                if capacity > MAX_VEC_CAPACITY {
+                    return Err(DecompressError::InsufficientSpace);
+                }
+                // Retry with bigger buffer
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Decompress zlib-wrapped data with a size hint.
+/// If the hint is correct, avoids any retry overhead. If not, falls back to auto-sizing.
+/// This is ideal for git objects where the header tells you the size.
+pub fn zlib_decompress_vec_with_hint(
+    input: &[u8],
+    size_hint: usize,
+) -> Result<Vec<u8>, DecompressError> {
+    let mut d = Decompressor::new();
+    // Try with the hint first
+    let mut capacity = size_hint;
+    loop {
+        let mut output = vec![0u8; capacity];
+        match zlib_decompress_with(&mut d, input, &mut output) {
+            Ok((_consumed, written)) => {
+                output.truncate(written);
+                return Ok(output);
+            }
+            Err(DecompressError::InsufficientSpace) => {
+                // Hint was wrong, double and retry
+                capacity = capacity
+                    .checked_mul(2)
+                    .ok_or(DecompressError::InsufficientSpace)?;
+                if capacity > MAX_VEC_CAPACITY {
+                    return Err(DecompressError::InsufficientSpace);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1546,6 +1638,78 @@ mod tests {
             let garbage: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
             let _ = deflate_decompress(&garbage, &mut empty_out);
             let _ = zlib_decompress(&garbage, &mut empty_out);
+        }
+    }
+
+    #[test]
+    fn test_zlib_decompress_vec() {
+        // Compress with flate2, decompress with our vec API
+        use std::io::Write;
+        let data = b"Hello, this is a test of the auto-sizing zlib decompressor!".repeat(100);
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = zlib_decompress_vec(&compressed).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_deflate_decompress_vec() {
+        use std::io::Write;
+        let data = b"Auto-sizing deflate decompression test data!".repeat(200);
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = deflate_decompress_vec(&compressed).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_zlib_decompress_vec_with_hint_correct() {
+        use std::io::Write;
+        let data = b"Hint test with correct size".repeat(50);
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        // Correct hint - should decompress in one shot
+        let result = zlib_decompress_vec_with_hint(&compressed, data.len()).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_zlib_decompress_vec_with_hint_too_small() {
+        use std::io::Write;
+        let data = b"Hint test with undersized hint".repeat(100);
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        // Hint too small - should retry and succeed
+        let result = zlib_decompress_vec_with_hint(&compressed, 10).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_zlib_decompress_vec_various_sizes() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+        for size in [0, 1, 10, 100, 1000, 10000, 100000] {
+            let data: Vec<u8> = (0..size).map(|_| rng.gen()).collect();
+            let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+            let max_sz = c.zlib_compress_bound(data.len());
+            let mut compressed = vec![0u8; max_sz];
+            let clen = c.zlib_compress(&data, &mut compressed).unwrap();
+            compressed.truncate(clen);
+
+            let result = zlib_decompress_vec(&compressed).unwrap();
+            assert_eq!(result, data, "mismatch at size {}", size);
         }
     }
 }
