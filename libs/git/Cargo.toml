@@ -1,0 +1,11 @@
+[package]
+name = "makepad-git"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sha1 = "0.10"
+flate2 = "1"
+
+[dev-dependencies]
+tempfile = "3"
