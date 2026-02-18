@@ -848,8 +848,8 @@ impl CxOsApi for Cx {
     }
 
     fn start_stdin_service(&mut self) {
-        // IOSurface-based texture sharing doesn't need a separate service
-        // The mach ports are passed directly via stdin JSON messages
+        // macOS studio mode routes control and frame messages over websocket.
+        // No separate stdin-side texture sharing service is required.
     }
 
     fn seconds_since_app_start(&self) -> f64 {

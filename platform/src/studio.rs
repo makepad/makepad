@@ -1,4 +1,5 @@
 use crate::makepad_micro_serde::*;
+use crate::os::cx_stdin::{HostToStdin, StdinToHost};
 use crate::LiveId;
 //use crate::action::*;
 use crate::log::LogLevel;
@@ -112,6 +113,7 @@ pub enum AppToStudio {
     SwapSelection(SwapSelection),
     Screenshot(StudioScreenshotResponse),
     FocusDesign,
+    StdinToHost(StdinToHost),
 }
 
 #[derive(SerBin, DeBin, Debug)]
@@ -148,6 +150,7 @@ pub enum StudioToApp {
     },
     #[default]
     None,
+    HostToStdin(HostToStdin),
 }
 
 #[derive(SerBin, DeBin)]
