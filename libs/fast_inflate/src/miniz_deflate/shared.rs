@@ -2,6 +2,7 @@
 
 pub const MZ_ADLER32_INIT: u32 = 1;
 
+#[cfg(test)]
 pub const MZ_DEFAULT_WINDOW_BITS: i32 = 15;
 
 pub const HUFFMAN_LENGTH_ORDER: [u8; 19] = [

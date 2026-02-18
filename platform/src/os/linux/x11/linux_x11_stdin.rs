@@ -169,7 +169,7 @@ impl Cx {
     }
 
     pub fn stdin_event_loop(&mut self) {
-        let aux_chan_client_endpoint = aux_chan::ClientEndpoint::connect_from_studio_http_env()
+        let aux_chan_client_endpoint = aux_chan::ClientEndpoint::connect_from_studio_env()
             .expect("failed to acquire auxiliary channel");
 
         Self::stdin_send_to_host(StdinToHost::ReadyToStart);
@@ -204,7 +204,14 @@ impl Cx {
                                 StudioToApp::Screenshot(request) => {
                                     self.screenshot_requests.push(request);
                                 }
+                                StudioToApp::WidgetTreeDump(request) => {
+                                    self.send_studio_widget_tree_dump_response(request.request_id);
+                                }
                                 StudioToApp::KeepAlive => {}
+                                StudioToApp::Kill => {
+                                    self.call_event_handler(&Event::Shutdown);
+                                    return;
+                                }
                                 other => {
                                     self.action(other);
                                 }

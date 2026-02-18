@@ -131,8 +131,8 @@ pub fn rasterize_triangle_rows<F>(
         let ndc_z = pos[2] * inv_w;
         let sx = (ndc_x * 0.5 + 0.5) * w;
         let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * h; // flip Y
-        // Makepad shaders output depth in [0, 1] clip space in practice.
-        // Keep it as-is to avoid collapsing depth precision.
+                                                  // Makepad shaders output depth in [0, 1] clip space in practice.
+                                                  // Keep it as-is to avoid collapsing depth precision.
         let sz = ndc_z;
         (sx, sy, sz)
     };
@@ -177,26 +177,10 @@ pub fn rasterize_triangle_rows<F>(
         area = -area;
     }
 
-    let min_x = sx[0]
-        .min(sx[1])
-        .min(sx[2])
-        .floor()
-        .max(0.0) as i32;
-    let min_y = sy[0]
-        .min(sy[1])
-        .min(sy[2])
-        .floor()
-        .max(row_start as f32) as i32;
-    let max_x = sx[0]
-        .max(sx[1])
-        .max(sx[2])
-        .ceil()
-        .min(w - 1.0) as i32;
-    let max_y = sy[0]
-        .max(sy[1])
-        .max(sy[2])
-        .ceil()
-        .min(row_end as f32 - 1.0) as i32;
+    let min_x = sx[0].min(sx[1]).min(sx[2]).floor().max(0.0) as i32;
+    let min_y = sy[0].min(sy[1]).min(sy[2]).floor().max(row_start as f32) as i32;
+    let max_x = sx[0].max(sx[1]).max(sx[2]).ceil().min(w - 1.0) as i32;
+    let max_y = sy[0].max(sy[1]).max(sy[2]).ceil().min(row_end as f32 - 1.0) as i32;
 
     if max_x < min_x || max_y < min_y {
         return;
@@ -222,19 +206,18 @@ pub fn rasterize_triangle_rows<F>(
     let top_left_2 = is_top_left(sx[0], sy[0], sx[1], sy[1]);
 
     let interpolate_perspective = |w0: f32, w1: f32, w2: f32, out: &mut [f32]| -> bool {
-            let a0 = w0 * inv_clip_w[0];
-            let a1 = w1 * inv_clip_w[1];
-            let a2 = w2 * inv_clip_w[2];
-            let denom = a0 + a1 + a2;
-            if denom.abs() <= f32::EPSILON {
-                return false;
-            }
-            let inv_denom = 1.0 / denom;
-            for i in 0..vary_len {
-                out[i] = (a0 * vary_src[0][i] + a1 * vary_src[1][i] + a2 * vary_src[2][i])
-                    * inv_denom;
-            }
-            true
+        let a0 = w0 * inv_clip_w[0];
+        let a1 = w1 * inv_clip_w[1];
+        let a2 = w2 * inv_clip_w[2];
+        let denom = a0 + a1 + a2;
+        if denom.abs() <= f32::EPSILON {
+            return false;
+        }
+        let inv_denom = 1.0 / denom;
+        for i in 0..vary_len {
+            out[i] = (a0 * vary_src[0][i] + a1 * vary_src[1][i] + a2 * vary_src[2][i]) * inv_denom;
+        }
+        true
     };
 
     for y in min_y..=max_y {
@@ -247,7 +230,10 @@ pub fn rasterize_triangle_rows<F>(
             let e2 = edge(sx[0], sy[0], sx[1], sy[1], px, py);
 
             // GPU-like top-left rule avoids shared-edge gaps and overlaps.
-            if !edge_pass(e0, top_left_0) || !edge_pass(e1, top_left_1) || !edge_pass(e2, top_left_2) {
+            if !edge_pass(e0, top_left_0)
+                || !edge_pass(e1, top_left_1)
+                || !edge_pass(e2, top_left_2)
+            {
                 continue;
             }
 

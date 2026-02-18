@@ -19,7 +19,6 @@ use {
 };
 
 struct BuildServerProcess {
-    cmd_id: LiveId,
     stdin_sender: Mutex<Sender<ChildStdIn>>,
     line_sender: Mutex<Sender<ChildStdIO>>,
 }
@@ -27,7 +26,7 @@ struct BuildServerProcess {
 struct BuildServerShared {
     roots: FileSystemRoots,
     // here we should store our connections send slots
-    processes: HashMap<BuildProcess, BuildServerProcess>,
+    processes: HashMap<LiveId, BuildServerProcess>,
 }
 
 pub struct BuildServer {
@@ -69,15 +68,24 @@ enum StdErrState {
 impl BuildConnection {
     pub fn stop(&self, cmd_id: LiveId) {
         let shared = self.shared.clone();
-
-        let shared = shared.write().unwrap();
-        if let Some(proc) = shared.processes.values().find(|v| v.cmd_id == cmd_id) {
+        let mut shared = shared.write().unwrap();
+        if let Some(proc) = shared.processes.remove(&cmd_id) {
             let line_sender = proc.line_sender.lock().unwrap();
             let _ = line_sender.send(ChildStdIO::Kill);
         }
     }
 
-    pub fn run(&self, what: BuildProcess, cmd_id: LiveId, http: String) {
+    pub fn run(&self, what: BuildProcess, cmd_id: LiveId, studio_addr: String) {
+        let args = default_cargo_args_for_build_target(&what);
+        self.run_with_args(what, cmd_id, studio_addr, args);
+    }
+
+    pub fn run_cargo(&self, what: BuildProcess, cmd_id: LiveId, studio_addr: String, args: Vec<String>) {
+        self.run_with_args(what, cmd_id, studio_addr, args);
+    }
+
+    fn run_with_args(&self, what: BuildProcess, cmd_id: LiveId, studio_addr: String, args: Vec<String>) {
+        self.stop(cmd_id);
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
@@ -89,192 +97,20 @@ impl BuildConnection {
             .unwrap()
             .clone();
 
-        let http = format!("{}/{}", http, cmd_id.0);
-        let mut env = vec![
-            ("RUST_BACKTRACE", "1"),
-            ("MAKEPAD_STUDIO_HTTP", http.as_str()),
-            ("MAKEPAD", "lines"),
-        ];
+        let is_in_studio = matches!(
+            what.target,
+            BuildTarget::ReleaseStudio | BuildTarget::DebugStudio
+        );
 
-        let args: Vec<String> = match &what.target {
-            BuildTarget::ReleaseStudio => vec![
-                "run".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--message-format=json".into(),
-                "--release".into(),
-                "--".into(),
-                "--message-format=json".into(),
-                "--stdin-loop".into(),
-            ],
-            BuildTarget::DebugStudio => vec![
-                "run".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--message-format=json".into(),
-                "--".into(),
-                "--message-format=json".into(),
-                "--stdin-loop".into(),
-            ],
-            BuildTarget::Release => vec![
-                "run".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--message-format=json".into(),
-                "--release".into(),
-                "--".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::Debug => vec![
-                "run".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--message-format=json".into(),
-                "--".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::Profiler => vec![
-                "instruments".into(),
-                "-t".into(),
-                "time".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-                "--".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::IosSim => vec![
-                "makepad".into(),
-                "apple".into(),
-                "ios".into(),
-                format!("--org={}", "makepad"),
-                format!("--app={}", "example"),
-                "run-sim".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::IosDevice => vec![
-                "makepad".into(),
-                "ios".into(),
-                format!("--org={}", "makepad"),
-                format!("--app={}", "example"),
-                "run-device".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::TvosSim => vec![
-                "makepad".into(),
-                "apple".into(),
-                "tvos".into(),
-                format!("--org={}", "makepad"),
-                format!("--app={}", "example"),
-                "run-sim".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::TvosDevice => vec![
-                "makepad".into(),
-                "apple".into(),
-                "tvos".into(),
-                "--org=makepad".into(),
-                "--app=aiview".into(),
-                "--app=aiview".into(),
-                "--cert=61".into(),
-                "--device=F8,27".into(),
-                "--profile=./local/tvos4.mobileprovision".into(),
-                "run-device".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::Android => vec![
-                "makepad".into(),
-                "android".into(),
-                "--variant=default".into(),
-                "run".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::Quest => vec![
-                "makepad".into(),
-                "android".into(),
-                "--variant=quest".into(),
-                "run".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::Harmony => {
-                env.push(("MAKEPAD", "no_android_choreographer"));
-                vec![
-                    "makepad".into(),
-                    "android".into(),
-                    "run".into(),
-                    "-p".into(),
-                    what.binary.clone(),
-                    "--release".into(),
-                    "--message-format=json".into(),
-                ]
-            }
-            BuildTarget::WebAssembly => vec![
-                "makepad".into(),
-                "wasm".into(),
-                "run".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::CheckMacos => vec![
-                "check".into(),
-                "--target=aarch64-apple-darwin".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::CheckWindows => vec![
-                "check".into(),
-                "--target=x86_64-pc-windows-msvc".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::CheckLinux => vec![
-                "check".into(),
-                "--target=x86_64-unknown-linux-gnu".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-            BuildTarget::CheckAll => vec![
-                "makepad".into(),
-                "check".into(),
-                "all".into(),
-                "-p".into(),
-                what.binary.clone(),
-                "--release".into(),
-                "--message-format=json".into(),
-            ],
-        };
-
-        let is_in_studio = match what.target {
-            BuildTarget::ReleaseStudio | BuildTarget::DebugStudio => true,
-            _ => false,
-        };
+        let cmd_id_string = cmd_id.0.to_string();
+        let mut env = vec![("RUST_BACKTRACE", "1"), ("MAKEPAD", "lines")];
+        if is_in_studio && !studio_addr.trim().is_empty() {
+            env.push(("STUDIO", studio_addr.as_str()));
+            env.push(("STUDIO_BUILD_ID", cmd_id_string.as_str()));
+        }
+        if matches!(what.target, BuildTarget::Harmony) {
+            env.push(("MAKEPAD", "no_android_choreographer"));
+        }
 
         // Default to nightly rustc but don't overwrite any user request for a
         // specific nightly version.
@@ -288,9 +124,8 @@ impl BuildConnection {
             .expect("Cannot start process");
 
         shared.write().unwrap().processes.insert(
-            what,
+            cmd_id,
             BuildServerProcess {
-                cmd_id,
                 stdin_sender: Mutex::new(process.stdin_sender.clone()),
                 line_sender: Mutex::new(process.line_sender.clone()),
             },
@@ -377,9 +212,12 @@ impl BuildConnection {
 
     pub fn handle_cmd(&self, cmd_wrap: BuildCmdWrap) {
         match cmd_wrap.cmd {
-            BuildCmd::Run(process, http) => {
+            BuildCmd::Run(process, studio_addr) => {
                 // lets kill all other 'whats'
-                self.run(process, cmd_wrap.cmd_id, http);
+                self.run(process, cmd_wrap.cmd_id, studio_addr);
+            }
+            BuildCmd::RunCargo(process, args, studio_addr) => {
+                self.run_cargo(process, cmd_wrap.cmd_id, studio_addr, args);
             }
             BuildCmd::Stop => {
                 // lets kill all other 'whats'
@@ -389,18 +227,188 @@ impl BuildConnection {
                 // ok lets fetch the running process from the cmd_id
                 // and plug this msg on the standard input as serialiser json
                 if let Ok(shared) = self.shared.read() {
-                    for v in shared.processes.values() {
-                        if v.cmd_id == cmd_wrap.cmd_id {
-                            // lets send it on sender
-                            if let Ok(stdin_sender) = v.stdin_sender.lock() {
-                                let _ = stdin_sender.send(ChildStdIn::Send(msg));
-                            }
-                            break;
+                    if let Some(v) = shared.processes.get(&cmd_wrap.cmd_id) {
+                        if let Ok(stdin_sender) = v.stdin_sender.lock() {
+                            let _ = stdin_sender.send(ChildStdIn::Send(msg));
                         }
                     }
                 }
             }
         }
+    }
+}
+
+fn default_cargo_args_for_build_target(what: &BuildProcess) -> Vec<String> {
+    match &what.target {
+        BuildTarget::ReleaseStudio => vec![
+            "run".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--message-format=json".into(),
+            "--release".into(),
+            "--".into(),
+            "--message-format=json".into(),
+            "--stdin-loop".into(),
+        ],
+        BuildTarget::DebugStudio => vec![
+            "run".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--message-format=json".into(),
+            "--".into(),
+            "--message-format=json".into(),
+            "--stdin-loop".into(),
+        ],
+        BuildTarget::Release => vec![
+            "run".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--message-format=json".into(),
+            "--release".into(),
+            "--".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::Debug => vec![
+            "run".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--message-format=json".into(),
+            "--".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::Profiler => vec![
+            "instruments".into(),
+            "-t".into(),
+            "time".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+            "--".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::IosSim => vec![
+            "makepad".into(),
+            "apple".into(),
+            "ios".into(),
+            format!("--org={}", "makepad"),
+            format!("--app={}", "example"),
+            "run-sim".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::IosDevice => vec![
+            "makepad".into(),
+            "ios".into(),
+            format!("--org={}", "makepad"),
+            format!("--app={}", "example"),
+            "run-device".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::TvosSim => vec![
+            "makepad".into(),
+            "apple".into(),
+            "tvos".into(),
+            format!("--org={}", "makepad"),
+            format!("--app={}", "example"),
+            "run-sim".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::TvosDevice => vec![
+            "makepad".into(),
+            "apple".into(),
+            "tvos".into(),
+            "--org=makepad".into(),
+            "--app=aiview".into(),
+            "--app=aiview".into(),
+            "--cert=61".into(),
+            "--device=F8,27".into(),
+            "--profile=./local/tvos4.mobileprovision".into(),
+            "run-device".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::Android => vec![
+            "makepad".into(),
+            "android".into(),
+            "--variant=default".into(),
+            "run".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::Quest => vec![
+            "makepad".into(),
+            "android".into(),
+            "--variant=quest".into(),
+            "run".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::Harmony => vec![
+            "makepad".into(),
+            "android".into(),
+            "run".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::WebAssembly => vec![
+            "makepad".into(),
+            "wasm".into(),
+            "run".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::CheckMacos => vec![
+            "check".into(),
+            "--target=aarch64-apple-darwin".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::CheckWindows => vec![
+            "check".into(),
+            "--target=x86_64-pc-windows-msvc".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::CheckLinux => vec![
+            "check".into(),
+            "--target=x86_64-unknown-linux-gnu".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
+        BuildTarget::CheckAll => vec![
+            "makepad".into(),
+            "check".into(),
+            "all".into(),
+            "-p".into(),
+            what.binary.clone(),
+            "--release".into(),
+            "--message-format=json".into(),
+        ],
     }
 }
 

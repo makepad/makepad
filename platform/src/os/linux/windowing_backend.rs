@@ -5,8 +5,7 @@ use crate::{
     cx::Cx,
     event::{Event, NetworkResponseChannel},
     opengl_cx::OpenglCx,
-    CxOsApi,
-    OpenUrlInPlace,
+    CxOsApi, OpenUrlInPlace,
 };
 use std::{cell::RefCell, rc::Rc, time::Instant};
 // Import OpenglCx from x11 for the unified type
@@ -16,7 +15,7 @@ fn env_var_is_nonempty(name: &str) -> bool {
 }
 
 fn is_stdin_loop_mode() -> bool {
-    std::env::args().any(|arg| arg == "--stdin-loop")
+    crate::app_main::should_run_stdin_loop_from_env()
 }
 
 fn forced_windowing_protocol_from_args() -> Option<WindowingProtocol> {

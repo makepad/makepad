@@ -1,10 +1,10 @@
 use std::cell::Cell;
 
+#[cfg(use_vulkan)]
+use self::super::super::vulkan::CxVulkan;
 use crate::event::LongPressEvent;
 #[allow(unused)]
 use makepad_jni_sys as jni_sys;
-#[cfg(use_vulkan)]
-use self::super::super::vulkan::CxVulkan;
 
 use {
     self::super::super::{
@@ -758,7 +758,10 @@ impl Cx {
             if self.os.vulkan.is_none() {
                 unsafe {
                     if let Some(display) = &mut self.os.display {
-                        (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                        (display.libegl.eglSwapBuffers.unwrap())(
+                            display.egl_display,
+                            display.surface,
+                        );
                     }
                 }
             }
@@ -861,7 +864,9 @@ impl Cx {
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
             #[cfg(use_vulkan)]
-            crate::log!("Android backend mode: Vulkan renderer + OpenGL shader compiler compatibility path");
+            crate::log!(
+                "Android backend mode: Vulkan renderer + OpenGL shader compiler compatibility path"
+            );
             #[cfg(not(use_vulkan))]
             crate::log!("Android backend mode: OpenGL renderer");
 

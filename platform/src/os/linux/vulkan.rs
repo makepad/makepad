@@ -801,27 +801,55 @@ impl CxVulkan {
 
     fn vec_texture_meta(format: &TextureFormat) -> Option<(u32, u32, u32, bool, vk::Format)> {
         match format {
-            TextureFormat::VecBGRAu8_32 { width, height, .. } => {
-                Some((*width as u32, *height as u32, 1, false, vk::Format::B8G8R8A8_UNORM))
-            }
-            TextureFormat::VecCubeBGRAu8_32 { width, height, .. } => {
-                Some((*width as u32, *height as u32, 6, true, vk::Format::B8G8R8A8_UNORM))
-            }
-            TextureFormat::VecMipBGRAu8_32 { width, height, .. } => {
-                Some((*width as u32, *height as u32, 1, false, vk::Format::B8G8R8A8_UNORM))
-            }
-            TextureFormat::VecRGBAf32 { width, height, .. } => {
-                Some((*width as u32, *height as u32, 1, false, vk::Format::R32G32B32A32_SFLOAT))
-            }
-            TextureFormat::VecRu8 { width, height, .. } => {
-                Some((*width as u32, *height as u32, 1, false, vk::Format::R8_UNORM))
-            }
-            TextureFormat::VecRGu8 { width, height, .. } => {
-                Some((*width as u32, *height as u32, 1, false, vk::Format::R8G8_UNORM))
-            }
-            TextureFormat::VecRf32 { width, height, .. } => {
-                Some((*width as u32, *height as u32, 1, false, vk::Format::R32_SFLOAT))
-            }
+            TextureFormat::VecBGRAu8_32 { width, height, .. } => Some((
+                *width as u32,
+                *height as u32,
+                1,
+                false,
+                vk::Format::B8G8R8A8_UNORM,
+            )),
+            TextureFormat::VecCubeBGRAu8_32 { width, height, .. } => Some((
+                *width as u32,
+                *height as u32,
+                6,
+                true,
+                vk::Format::B8G8R8A8_UNORM,
+            )),
+            TextureFormat::VecMipBGRAu8_32 { width, height, .. } => Some((
+                *width as u32,
+                *height as u32,
+                1,
+                false,
+                vk::Format::B8G8R8A8_UNORM,
+            )),
+            TextureFormat::VecRGBAf32 { width, height, .. } => Some((
+                *width as u32,
+                *height as u32,
+                1,
+                false,
+                vk::Format::R32G32B32A32_SFLOAT,
+            )),
+            TextureFormat::VecRu8 { width, height, .. } => Some((
+                *width as u32,
+                *height as u32,
+                1,
+                false,
+                vk::Format::R8_UNORM,
+            )),
+            TextureFormat::VecRGu8 { width, height, .. } => Some((
+                *width as u32,
+                *height as u32,
+                1,
+                false,
+                vk::Format::R8G8_UNORM,
+            )),
+            TextureFormat::VecRf32 { width, height, .. } => Some((
+                *width as u32,
+                *height as u32,
+                1,
+                false,
+                vk::Format::R32_SFLOAT,
+            )),
             _ => None,
         }
     }
@@ -887,10 +915,16 @@ impl CxVulkan {
     ) -> Option<VulkanTextureUpload> {
         match format {
             TextureFormat::VecBGRAu8_32 {
-                width, height, data, ..
+                width,
+                height,
+                data,
+                ..
             }
             | TextureFormat::VecMipBGRAu8_32 {
-                width, height, data, ..
+                width,
+                height,
+                data,
+                ..
             } => {
                 let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
                 let out = if let Some(data) = data.as_ref() {
@@ -944,7 +978,10 @@ impl CxVulkan {
                 })
             }
             TextureFormat::VecRGBAf32 {
-                width, height, data, ..
+                width,
+                height,
+                data,
+                ..
             } => {
                 let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
                 let out = if let Some(data) = data.as_ref() {
@@ -965,7 +1002,10 @@ impl CxVulkan {
                 })
             }
             TextureFormat::VecRf32 {
-                width, height, data, ..
+                width,
+                height,
+                data,
+                ..
             } => {
                 let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
                 let out = if let Some(data) = data.as_ref() {
@@ -1068,7 +1108,10 @@ impl CxVulkan {
             .map_err(|e| format!("create_image failed: {e:?}"))?;
         let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
         let memory_type_index = self
-            .find_memory_type(memory_req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .find_memory_type(
+                memory_req.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
             .or_else(|_| {
                 self.find_memory_type(
                     memory_req.memory_type_bits,
@@ -1189,7 +1232,10 @@ impl CxVulkan {
             .map_err(|e| format!("create_image(depth) failed: {e:?}"))?;
         let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
         let memory_type_index = self
-            .find_memory_type(memory_req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .find_memory_type(
+                memory_req.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
             .or_else(|_| {
                 self.find_memory_type(
                     memory_req.memory_type_bits,
@@ -1270,13 +1316,12 @@ impl CxVulkan {
         }
     }
 
-    fn layout_stage_access(
-        layout: vk::ImageLayout,
-    ) -> (vk::PipelineStageFlags, vk::AccessFlags) {
+    fn layout_stage_access(layout: vk::ImageLayout) -> (vk::PipelineStageFlags, vk::AccessFlags) {
         match layout {
-            vk::ImageLayout::UNDEFINED => {
-                (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty())
-            }
+            vk::ImageLayout::UNDEFINED => (
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::AccessFlags::empty(),
+            ),
             vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
                 vk::PipelineStageFlags::TRANSFER,
                 vk::AccessFlags::TRANSFER_WRITE,
@@ -1296,7 +1341,11 @@ impl CxVulkan {
         texture_id.0
     }
 
-    fn ensure_texture_uploaded(&mut self, cx: &mut Cx, texture_id: TextureId) -> Result<(), String> {
+    fn ensure_texture_uploaded(
+        &mut self,
+        cx: &mut Cx,
+        texture_id: TextureId,
+    ) -> Result<(), String> {
         let texture_key = Self::texture_key(texture_id);
         let (alloc_changed, updated, width, height, layers, is_cube, format) = {
             let cxtexture = &mut cx.textures[texture_id];
@@ -1305,9 +1354,19 @@ impl CxVulkan {
             }
             let alloc_changed = cxtexture.alloc_vec();
             let updated = cxtexture.take_updated();
-            let (width, height, layers, is_cube, format) = Self::vec_texture_meta(&cxtexture.format)
-                .ok_or_else(|| format!("unsupported Vulkan texture format: {:?}", cxtexture.format))?;
-            (alloc_changed, updated, width, height, layers, is_cube, format)
+            let (width, height, layers, is_cube, format) =
+                Self::vec_texture_meta(&cxtexture.format).ok_or_else(|| {
+                    format!("unsupported Vulkan texture format: {:?}", cxtexture.format)
+                })?;
+            (
+                alloc_changed,
+                updated,
+                width,
+                height,
+                layers,
+                is_cube,
+                format,
+            )
         };
 
         let needs_recreate = match self.textures.get(&texture_key) {
@@ -1339,9 +1398,8 @@ impl CxVulkan {
             needs_recreate && matches!(updated, TextureUpdated::Partial(_));
         let upload = {
             let cxtexture = &cx.textures[texture_id];
-            Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload).ok_or_else(|| {
-                format!("texture {} has unsupported upload format", texture_key)
-            })?
+            Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload)
+                .ok_or_else(|| format!("texture {} has unsupported upload format", texture_key))?
         };
         if upload.data.is_empty() || upload.width == 0 || upload.height == 0 {
             return Ok(());
@@ -1861,8 +1919,9 @@ impl CxVulkan {
                 );
             }
 
-            let mut writes =
-                Vec::with_capacity(uniform_uploads.len() + texture_infos.len() + sampler_infos.len());
+            let mut writes = Vec::with_capacity(
+                uniform_uploads.len() + texture_infos.len() + sampler_infos.len(),
+            );
             for (index, uniform) in uniform_uploads.iter().enumerate() {
                 writes.push(
                     vk::WriteDescriptorSet::default()
@@ -1982,7 +2041,10 @@ impl CxVulkan {
             descriptor_bindings.push((*idx as u32, vk::DescriptorType::UNIFORM_BUFFER));
         }
         if !sh.mapping.dyn_uniforms.inputs.is_empty() {
-            descriptor_bindings.push((vk_shader.dyn_uniform_binding, vk::DescriptorType::UNIFORM_BUFFER));
+            descriptor_bindings.push((
+                vk_shader.dyn_uniform_binding,
+                vk::DescriptorType::UNIFORM_BUFFER,
+            ));
         }
         if !sh.mapping.scope_uniforms.inputs.is_empty() {
             if let Some(idx) = sh
@@ -2027,7 +2089,10 @@ impl CxVulkan {
         let set_layouts = [descriptor_set_layout];
         let pipeline_layout_info =
             vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
-        let pipeline_layout = match unsafe { self.device.create_pipeline_layout(&pipeline_layout_info, None) } {
+        let pipeline_layout = match unsafe {
+            self.device
+                .create_pipeline_layout(&pipeline_layout_info, None)
+        } {
             Ok(pipeline_layout) => pipeline_layout,
             Err(e) => {
                 unsafe {
@@ -2217,9 +2282,10 @@ impl CxVulkan {
                 crate::makepad_script::shader::SamplerFilter::Linear => vk::Filter::LINEAR,
             };
             let (address_mode, border_color) = match sampler_desc.address {
-                crate::makepad_script::shader::SamplerAddress::Repeat => {
-                    (vk::SamplerAddressMode::REPEAT, vk::BorderColor::FLOAT_TRANSPARENT_BLACK)
-                }
+                crate::makepad_script::shader::SamplerAddress::Repeat => (
+                    vk::SamplerAddressMode::REPEAT,
+                    vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+                ),
                 crate::makepad_script::shader::SamplerAddress::ClampToEdge => (
                     vk::SamplerAddressMode::CLAMP_TO_EDGE,
                     vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
@@ -2723,7 +2789,8 @@ impl CxVulkan {
             self.swapchain_image_views.push(view);
         }
 
-        self.swapchain_depth_targets.reserve(self.swapchain_images.len());
+        self.swapchain_depth_targets
+            .reserve(self.swapchain_images.len());
         for _ in &self.swapchain_images {
             let depth_target = self.create_depth_target(
                 self.swapchain_extent.width,

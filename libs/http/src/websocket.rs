@@ -132,6 +132,7 @@ impl ServerWebSocketMessageHeader {
         if self.masked {
             match self.len {
                 6 => Some(&self.data[2..6]),
+                8 => Some(&self.data[4..8]),
                 10 => Some(&self.data[6..10]),
                 14 => Some(&self.data[10..14]),
                 _ => None,

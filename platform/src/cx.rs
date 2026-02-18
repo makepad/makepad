@@ -119,6 +119,7 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<StudioScreenshotRequest>,
+    pub(crate) widget_tree_dump_requests: Vec<u64>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
     /// on the next event loop cycle. This ensures all views process the cache clear
@@ -129,6 +130,7 @@ pub struct Cx {
     pub widget_query_invalidation_event: Option<u64>,
 
     pub widget_tree_ptr: *mut (),
+    pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
 }
 
 #[derive(Clone)]
@@ -323,6 +325,7 @@ impl Cx {
             new_next_frames: Default::default(),
 
             screenshot_requests: Default::default(),
+            widget_tree_dump_requests: Default::default(),
 
             dependencies: Default::default(),
 
@@ -352,6 +355,7 @@ impl Cx {
 
             widget_query_invalidation_event: None,
             widget_tree_ptr: std::ptr::null_mut(),
+            widget_tree_dump_callback: None,
 
             script_vm: Some(vm.bx),
             script_data: Default::default(),

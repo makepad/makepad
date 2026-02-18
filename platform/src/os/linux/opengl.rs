@@ -5,8 +5,8 @@ use {
         draw_list::DrawListId,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         draw_shader::{
-            CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderId,
-            DrawShaderTextureInput,
+            CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat,
+            DrawShaderId, DrawShaderTextureInput,
         },
         draw_vars::DrawVars,
         event::{Event, TextureHandleReadyEvent},

@@ -72,7 +72,11 @@ fn configured_parallel_min_tris(default_min: usize) -> usize {
         .unwrap_or(default_min)
 }
 
-fn compute_index_chunks(total: usize, desired_chunks: usize, min_items_per_chunk: usize) -> Vec<RowChunk> {
+fn compute_index_chunks(
+    total: usize,
+    desired_chunks: usize,
+    min_items_per_chunk: usize,
+) -> Vec<RowChunk> {
     if total == 0 {
         return Vec::new();
     }
@@ -158,10 +162,12 @@ fn headless_texture_info(
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
             };
-            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
-                signature: sig,
-                rgba: Vec::new(),
-            });
+            let entry = cache
+                .entry(texture_index)
+                .or_insert_with(|| CachedTextureConversion {
+                    signature: sig,
+                    rgba: Vec::new(),
+                });
             if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
                 entry.signature = sig;
                 entry.rgba.clear();
@@ -198,10 +204,12 @@ fn headless_texture_info(
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
             };
-            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
-                signature: sig,
-                rgba: Vec::new(),
-            });
+            let entry = cache
+                .entry(texture_index)
+                .or_insert_with(|| CachedTextureConversion {
+                    signature: sig,
+                    rgba: Vec::new(),
+                });
             if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
                 entry.signature = sig;
                 entry.rgba.clear();
@@ -239,10 +247,12 @@ fn headless_texture_info(
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
             };
-            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
-                signature: sig,
-                rgba: Vec::new(),
-            });
+            let entry = cache
+                .entry(texture_index)
+                .or_insert_with(|| CachedTextureConversion {
+                    signature: sig,
+                    rgba: Vec::new(),
+                });
             if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
                 entry.signature = sig;
                 entry.rgba.clear();
@@ -276,10 +286,12 @@ fn headless_texture_info(
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
             };
-            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
-                signature: sig,
-                rgba: Vec::new(),
-            });
+            let entry = cache
+                .entry(texture_index)
+                .or_insert_with(|| CachedTextureConversion {
+                    signature: sig,
+                    rgba: Vec::new(),
+                });
             if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
                 entry.signature = sig;
                 entry.rgba.clear();
@@ -442,7 +454,13 @@ fn rasterize_instances_rows(
                         fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
                     }
 
-                    write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                    write_varyings(
+                        &mut rcx_buf,
+                        rcx_vary_offset,
+                        varyings,
+                        vary_bytes,
+                        rcx_size,
+                    );
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
                     let write_pixel =
@@ -512,7 +530,13 @@ fn rasterize_instances_rows(
                  -> Option<[f32; 4]> {
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
-                    write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                    write_varyings(
+                        &mut rcx_buf,
+                        rcx_vary_offset,
+                        varyings,
+                        vary_bytes,
+                        rcx_size,
+                    );
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
                     let write_pixel =
@@ -854,7 +878,9 @@ impl Cx {
                 if let Some(texture) = &draw_call.texture_slots[tex_idx] {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
-                    if let Some(info) = headless_texture_info(texture_id.0, cxtexture, texture_cache) {
+                    if let Some(info) =
+                        headless_texture_info(texture_id.0, cxtexture, texture_cache)
+                    {
                         tex_infos.push(info);
                     } else {
                         tex_infos.push([0, 0, 0, 0]);
@@ -961,8 +987,8 @@ impl Cx {
                     let geom_slice = &vertices[geom_offset..geom_offset + geom_slots];
                     let shaded_idx = inst_base + vert_idx;
                     let vary_offset = shaded_idx * varying_slots;
-                    let varying_out =
-                        &mut shaded_varyings[vary_offset..vary_offset.saturating_add(varying_slots)];
+                    let varying_out = &mut shaded_varyings
+                        [vary_offset..vary_offset.saturating_add(varying_slots)];
 
                     unsafe {
                         vertex_fn(
@@ -1128,7 +1154,6 @@ impl Cx {
             if let Some(p) = profile.as_deref_mut() {
                 p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
             }
-
         }
     }
 }

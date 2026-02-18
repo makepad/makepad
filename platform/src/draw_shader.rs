@@ -364,35 +364,35 @@ impl CxDrawShaderMapping {
                 _ => DrawShaderAttrFormat::Float,
             },
             _ => DrawShaderAttrFormat::Float,
+        }
     }
-}
 
-pub fn debug_dump_shader_draw_call(
-    backend: &str,
-    draw_item_id: usize,
-    draw_shader: &CxDrawShader,
-    draw_call: &crate::draw_list::CxDrawCall,
-    instance_data: &[f32],
-    instances: usize,
-) {
-    let instance_slots = draw_shader.mapping.instances.total_slots;
-    if instance_slots == 0 {
+    pub fn debug_dump_shader_draw_call(
+        backend: &str,
+        draw_item_id: usize,
+        draw_shader: &CxDrawShader,
+        draw_call: &crate::draw_list::CxDrawCall,
+        instance_data: &[f32],
+        instances: usize,
+    ) {
+        let instance_slots = draw_shader.mapping.instances.total_slots;
+        if instance_slots == 0 {
+            crate::log!(
+                "debug_draw [{}] item={} shader={} debug_id={:?}: no instance layout",
+                backend,
+                draw_item_id,
+                draw_call.draw_shader_id.index,
+                draw_call.options.debug_id.unwrap_or(draw_shader.debug_id)
+            );
+            return;
+        }
+
+        let dyn_slots = draw_shader
+            .mapping
+            .dyn_uniforms
+            .total_slots
+            .min(draw_call.dyn_uniforms.len());
         crate::log!(
-            "debug_draw [{}] item={} shader={} debug_id={:?}: no instance layout",
-            backend,
-            draw_item_id,
-            draw_call.draw_shader_id.index,
-            draw_call.options.debug_id.unwrap_or(draw_shader.debug_id)
-        );
-        return;
-    }
-
-    let dyn_slots = draw_shader
-        .mapping
-        .dyn_uniforms
-        .total_slots
-        .min(draw_call.dyn_uniforms.len());
-    crate::log!(
         "debug_draw [{}] item={} shader={} debug_id={:?} instances={} instance_slots={} dyn_uniform_slots={}",
         backend,
         draw_item_id,
@@ -403,41 +403,46 @@ pub fn debug_dump_shader_draw_call(
         dyn_slots
     );
 
-    for input in &draw_shader.mapping.dyn_uniforms.inputs {
-        if input.offset >= dyn_slots {
-            continue;
-        }
-        let end = (input.offset + input.slots).min(dyn_slots);
-        crate::log!(
-            "debug_draw [{}]   u {:?}: {:?}",
-            backend,
-            input.id,
-            &draw_call.dyn_uniforms[input.offset..end]
-        );
-    }
-
-    for inst_idx in 0..instances {
-        let base = inst_idx * instance_slots;
-        if base + instance_slots > instance_data.len() {
-            break;
-        }
-        let mut parts = Vec::new();
-        for input in &draw_shader.mapping.instances.inputs {
-            let start = base + input.offset;
-            let end = start + input.slots;
-            if end > instance_data.len() {
+        for input in &draw_shader.mapping.dyn_uniforms.inputs {
+            if input.offset >= dyn_slots {
                 continue;
             }
-            let vals = &instance_data[start..end];
-            if input.slots == 1 {
-                parts.push(format!("{:?}={}", input.id, vals[0]));
-            } else {
-                parts.push(format!("{:?}={:?}", input.id, vals));
-            }
+            let end = (input.offset + input.slots).min(dyn_slots);
+            crate::log!(
+                "debug_draw [{}]   u {:?}: {:?}",
+                backend,
+                input.id,
+                &draw_call.dyn_uniforms[input.offset..end]
+            );
         }
-        crate::log!("debug_draw [{}]   i[{}] {}", backend, inst_idx, parts.join(" "));
+
+        for inst_idx in 0..instances {
+            let base = inst_idx * instance_slots;
+            if base + instance_slots > instance_data.len() {
+                break;
+            }
+            let mut parts = Vec::new();
+            for input in &draw_shader.mapping.instances.inputs {
+                let start = base + input.offset;
+                let end = start + input.slots;
+                if end > instance_data.len() {
+                    continue;
+                }
+                let vals = &instance_data[start..end];
+                if input.slots == 1 {
+                    parts.push(format!("{:?}={}", input.id, vals[0]));
+                } else {
+                    parts.push(format!("{:?}={:?}", input.id, vals));
+                }
+            }
+            crate::log!(
+                "debug_draw [{}]   i[{}] {}",
+                backend,
+                inst_idx,
+                parts.join(" ")
+            );
+        }
     }
-}
 
     pub fn from_shader_output(
         source: ScriptObjectRef,
@@ -602,7 +607,11 @@ pub fn debug_dump_shader_draw_call(
                 .filter(|io| matches!(io.kind, ShaderIoKind::DynInstance))
             {
                 let pod_ty = heap.pod_type_ref(io.ty);
-                if let Some(input) = dyn_instances.inputs.iter().find(|input| input.id == io.name) {
+                if let Some(input) = dyn_instances
+                    .inputs
+                    .iter()
+                    .find(|input| input.id == io.name)
+                {
                     crate::log!(
                         "debug_layout shader {:?}: dyn_instance {:?} ty={:?} slots={} offset={} attr={:?}",
                         source.as_object(),

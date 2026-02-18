@@ -186,11 +186,7 @@ impl OpenglCx {
         }
 
         // Create EGL context.
-        let ctx_attribs = [
-            egl_sys::EGL_CONTEXT_MAJOR_VERSION,
-            3,
-            egl_sys::EGL_NONE,
-        ];
+        let ctx_attribs = [egl_sys::EGL_CONTEXT_MAJOR_VERSION, 3, egl_sys::EGL_NONE];
 
         let egl_context = (libegl.eglCreateContext.unwrap())(
             egl_display,
@@ -335,10 +331,8 @@ impl Cx {
 
         unsafe {
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
-            let swap_ok = (opengl_cx.libegl.eglSwapBuffers.unwrap())(
-                opengl_cx.egl_display,
-                egl_surface,
-            );
+            let swap_ok =
+                (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface);
             if swap_ok == 0 {
                 let egl_error = (opengl_cx.libegl.eglGetError.unwrap())();
                 crate::error!(

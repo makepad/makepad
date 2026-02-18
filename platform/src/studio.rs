@@ -112,6 +112,7 @@ pub enum AppToStudio {
     DesignerFileSelected { file_name: String },
     SwapSelection(SwapSelection),
     Screenshot(StudioScreenshotResponse),
+    WidgetTreeDump(StudioWidgetTreeDumpResponse),
     FocusDesign,
     StdinToHost(StdinToHost),
 }
@@ -122,6 +123,17 @@ pub struct StudioScreenshotResponse {
     pub image: Option<Vec<u8>>,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Default, SerBin, DeBin)]
+pub struct StudioWidgetTreeDumpRequest {
+    pub request_id: u64,
+}
+
+#[derive(Debug, Default, SerBin, DeBin)]
+pub struct StudioWidgetTreeDumpResponse {
+    pub request_id: u64,
+    pub dump: String,
 }
 
 #[derive(SerBin, DeBin)]
@@ -136,6 +148,7 @@ pub struct StudioScreenshotRequest {
 #[derive(Debug, Default, SerBin, DeBin)]
 pub enum StudioToApp {
     Screenshot(StudioScreenshotRequest),
+    WidgetTreeDump(StudioWidgetTreeDumpRequest),
     KeepAlive,
     LiveChange {
         file_name: String,
@@ -151,6 +164,7 @@ pub enum StudioToApp {
     #[default]
     None,
     HostToStdin(HostToStdin),
+    Kill,
 }
 
 #[derive(SerBin, DeBin)]

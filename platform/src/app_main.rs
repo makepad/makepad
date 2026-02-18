@@ -5,6 +5,60 @@ use crate::ui_runner::UiRunner;
 #[cfg(target_env = "ohos")]
 pub use napi_ohos;
 
+pub fn should_run_stdin_loop_from_env() -> bool {
+    std::env::args().any(|v| v == "--stdin-loop")
+        || std::env::var("STUDIO").is_ok_and(|v| !v.trim().is_empty())
+}
+
+fn normalize_studio_http_from_studio_var(studio: &str) -> String {
+    let studio = studio.trim().trim_end_matches('/');
+    if studio.is_empty() {
+        return String::new();
+    }
+
+    let base = if studio.contains("://") {
+        studio.to_string()
+    } else {
+        format!("http://{studio}")
+    };
+
+    if base.contains("/$studio_web_socket") {
+        base
+    } else {
+        format!("{base}/$studio_web_socket")
+    }
+}
+
+fn with_studio_build_id(studio_http: String) -> String {
+    let Ok(build_id) = std::env::var("STUDIO_BUILD_ID") else {
+        return studio_http;
+    };
+    let build_id = build_id.trim();
+    if build_id.is_empty() {
+        return studio_http;
+    }
+
+    let normalized = studio_http.trim_end_matches('/').to_string();
+    if normalized.rsplit('/').next().is_some_and(|part| part == build_id) {
+        return normalized;
+    }
+    if normalized.contains("/$studio_web_socket/") {
+        return normalized;
+    }
+    format!("{normalized}/{build_id}")
+}
+
+pub fn resolve_studio_http(default: &str) -> String {
+    if let Ok(studio) = std::env::var("STUDIO") {
+        let studio_http = normalize_studio_http_from_studio_var(&studio);
+        if !studio_http.is_empty() {
+            return with_studio_build_id(studio_http);
+        }
+    }
+
+    with_studio_build_id(default.to_string())
+}
+
 pub trait AppMain {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
     fn ui_runner(&self) -> UiRunner<Self>
@@ -40,9 +94,9 @@ macro_rules! app_main {
                     }
                 },
             ))));
-            cx.borrow_mut()
-                .init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
-            if std::env::args().find(|v| v == "--stdin-loop").is_some() {
+            let studio_http = $crate::resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+            cx.borrow_mut().init_websockets(&studio_http);
+            if $crate::should_run_stdin_loop_from_env() {
                 cx.borrow_mut().in_makepad_studio = true;
             }
             //cx.borrow_mut().init_websockets("");
@@ -92,7 +146,9 @@ macro_rules! app_main {
                         <dyn AppMain>::handle_event(app, cx, event);
                     }
                 })));
-                cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
+                let studio_http =
+                    $crate::resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+                cx.init_websockets(&studio_http);
                 cx.init_cx_os();
                 cx
             })
@@ -117,7 +173,9 @@ macro_rules! app_main {
                         <dyn AppMain>::handle_event(app, cx, event);
                     }
                 })));
-                cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
+                let studio_http =
+                    $crate::resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+                cx.init_websockets(&studio_http);
                 cx.init_cx_os();
                 cx
             });
@@ -139,7 +197,8 @@ macro_rules! app_main {
                     <dyn AppMain>::handle_event(app, cx, event);
                 }
             })));
-            cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
+            let studio_http = $crate::resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+            cx.init_websockets(&studio_http);
             cx.init_cx_os();
             Box::into_raw(cx) as u32
         }

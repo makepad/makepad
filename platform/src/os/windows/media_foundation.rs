@@ -13,6 +13,7 @@ use {
                 //Interface,
                 PWSTR,
             },
+            Win32::Foundation::PROPERTYKEY,
             Win32::Media::Audio::{
                 EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient,
                 IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE,
@@ -46,7 +47,6 @@ use {
                 MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             },
             Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL},
-            Win32::Foundation::PROPERTYKEY,
         },
     },
     std::sync::{Arc, Mutex},

@@ -56,8 +56,8 @@ impl WaylandWindow {
         assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_WAYLAND_KHR);
 
         let base_surface = compositer.create_surface(qhandle, ());
-        let fractional_scale =
-            scale_manager.map(|manager| manager.get_fractional_scale(&base_surface, qhandle, window_id));
+        let fractional_scale = scale_manager
+            .map(|manager| manager.get_fractional_scale(&base_surface, qhandle, window_id));
         let viewport = viewporter.map(|vp| vp.get_viewport(&base_surface, qhandle, ()));
 
         let shell_surface = wm_base.get_xdg_surface(&base_surface, qhandle, window_id);

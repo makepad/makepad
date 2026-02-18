@@ -32,12 +32,6 @@ pub struct HashBuffers {
 }
 
 impl HashBuffers {
-    #[inline]
-    pub fn reset(&mut self) {
-        self.dict.fill(0);
-        self.next.fill(0);
-        self.hash.fill(0);
-    }
 }
 
 impl Default for HashBuffers {
