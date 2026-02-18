@@ -9,6 +9,7 @@ pub mod oid;
 pub mod pack;
 pub mod refs;
 pub mod repo;
+mod sha1;
 pub mod tree;
 pub mod worktree;
 

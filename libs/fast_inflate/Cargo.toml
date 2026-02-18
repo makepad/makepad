@@ -1,0 +1,20 @@
+[package]
+name = "makepad-fast-inflate"
+version = "0.1.0"
+edition = "2021"
+description = "Fast DEFLATE/zlib decompression ported from libdeflate"
+
+[dependencies]
+
+[dev-dependencies]
+libdeflater = "1.25"
+flate2 = "1"
+rand = "0.8"
+
+[[bench]]
+name = "decompress_bench"
+harness = false
+
+[[bench]]
+name = "pack_bench"
+harness = false

@@ -195,7 +195,7 @@ pub fn write_index(git_dir: &Path, index: &Index) -> Result<(), GitError> {
 
 /// Serialize an index to binary v2 format.
 pub fn serialize_index(index: &Index) -> Result<Vec<u8>, GitError> {
-    use sha1::{Digest, Sha1};
+    use crate::sha1::Sha1;
 
     let mut buf = Vec::new();
 

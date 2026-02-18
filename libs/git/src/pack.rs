@@ -1,6 +1,4 @@
-use flate2::read::ZlibDecoder;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::error::GitError;
@@ -367,11 +365,10 @@ fn read_delta_size(data: &[u8], start: usize) -> Result<(u64, usize), GitError> 
 }
 
 fn zlib_decompress(data: &[u8], expected_size: usize) -> Result<Vec<u8>, GitError> {
-    let mut decoder = ZlibDecoder::new(data);
-    let mut buf = Vec::with_capacity(expected_size);
-    decoder
-        .read_to_end(&mut buf)
+    let mut buf = vec![0u8; expected_size];
+    let (_, written) = makepad_fast_inflate::zlib_decompress(data, &mut buf)
         .map_err(|e| GitError::CorruptPack(format!("zlib decompress failed: {}", e)))?;
+    buf.truncate(written);
     Ok(buf)
 }
 
