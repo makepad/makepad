@@ -906,12 +906,7 @@ fn read_loose_object_from_objects_dir(
         }
     })?;
 
-    use flate2::read::ZlibDecoder;
-    use std::io::Read;
-    let mut decoder = ZlibDecoder::new(&compressed[..]);
-    let mut raw = Vec::new();
-    decoder
-        .read_to_end(&mut raw)
+    let raw = makepad_fast_inflate::zlib_decompress_vec(&compressed)
         .map_err(|e| GitError::InvalidObject(format!("zlib failed for {}: {}", oid, e)))?;
 
     let null_pos = raw
