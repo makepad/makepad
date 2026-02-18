@@ -342,7 +342,7 @@ impl DesignerState {
             match DesignerState::deserialize_ron(&contents) {
                 Ok(state) => *self = state,
                 Err(e) => {
-                    println!("ERR {:?}", e);
+                    crate::warning!("Failed to parse makepad_designer.ron: {:?}", e);
                 }
             }
         }
