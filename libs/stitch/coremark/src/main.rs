@@ -23,21 +23,6 @@ fn stitch(bytes: &[u8]) -> f32 {
     results[0].to_f32().unwrap()
 }
 
-fn wasm3(bytes: &[u8]) -> f32 {
-    use wasm3::Environment;
-
-    wasm3::make_func_wrapper!(clock_ms_wrap: clock_ms() -> u64);
-
-    let environment = Environment::new().unwrap();
-    let runtime = environment.create_runtime(1024 * 1024).unwrap();
-    let mut module = runtime.parse_and_load_module(bytes).unwrap();
-    module
-        .link_function::<(), u64>("env", "clock_ms", clock_ms_wrap)
-        .unwrap();
-    let run = module.find_function::<(), f32>("run").unwrap();
-    run.call().unwrap()
-}
-
 fn wasmi(bytes: &[u8]) -> f32 {
     use wasmi::{core::F32, *};
 
@@ -56,29 +41,8 @@ fn wasmi(bytes: &[u8]) -> f32 {
     results[0].f32().unwrap().to_float()
 }
 
-fn wasmtime(bytes: &[u8]) -> f32 {
-    use wasmtime::*;
-
-    let config = Config::default();
-    let engine = Engine::new(&config).unwrap();
-    let mut store = Store::new(&engine, ());
-    let module = Module::new(&engine, bytes).unwrap();
-    let mut linker = Linker::new(&engine);
-    let clock_ms = Func::wrap(&mut store, clock_ms);
-    linker
-        .define(&mut store, "env", "clock_ms", clock_ms)
-        .unwrap();
-    let instance = linker.instantiate(&mut store, &module).unwrap();
-    let run = instance.get_func(&mut store, "run").unwrap();
-    let mut results = [Val::F32(0)];
-    run.call(&mut store, &[], &mut results).unwrap();
-    results[0].f32().unwrap()
-}
-
 fn main() {
     let bytes = include_bytes!("coremark-minimal.wasm");
     println!("stitch {}", stitch(bytes));
-    println!("wasm3 {}", wasm3(bytes));
     println!("wasmi {}", wasmi(bytes));
-    println!("wasmtime {}", wasmtime(bytes));
 }

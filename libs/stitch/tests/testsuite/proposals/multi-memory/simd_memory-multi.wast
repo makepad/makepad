@@ -1,4 +1,4 @@
-;; From wasmtime misc_testsuite/multi-memory/simple.wast
+;; From upstream misc_testsuite/multi-memory/simple.wast
 
 ;; Test syntax for load/store_lane immediates
 

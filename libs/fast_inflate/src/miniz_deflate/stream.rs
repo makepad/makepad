@@ -4,8 +4,8 @@
 //!
 //! There is no DeflateState as the needed state is contained in the compressor struct itself.
 
-use crate::deflate::core::{compress, CompressorOxide, TDEFLFlush, TDEFLStatus};
-use crate::{MZError, MZFlush, MZStatus, StreamResult};
+use super::core::{compress, CompressorOxide, TDEFLFlush, TDEFLStatus};
+use super::{MZError, MZFlush, MZStatus, StreamResult};
 
 /// Try to compress from input to output with the given [`CompressorOxide`].
 ///
@@ -99,11 +99,11 @@ pub fn deflate(
 #[cfg(test)]
 mod test {
     use super::deflate;
-    use crate::deflate::CompressorOxide;
-    use crate::inflate::decompress_to_vec_zlib;
-    use crate::{MZFlush, MZStatus};
-    use alloc::boxed::Box;
-    use alloc::vec;
+    use super::CompressorOxide;
+    use super::{MZFlush, MZStatus};
+    use crate::decompress::zlib_decompress_vec;
+    use std::boxed::Box;
+    use std::vec;
 
     #[test]
     fn test_state() {
@@ -113,7 +113,7 @@ mod test {
         let res = deflate(&mut compressor, data, &mut compressed, MZFlush::Finish);
         let status = res.status.expect("Failed to compress!");
         let decomp =
-            decompress_to_vec_zlib(&compressed).expect("Failed to decompress compressed data");
+            zlib_decompress_vec(&compressed).expect("Failed to decompress compressed data");
         assert_eq!(status, MZStatus::StreamEnd);
         assert_eq!(decomp[..], data[..]);
         assert_eq!(res.bytes_consumed, data.len());

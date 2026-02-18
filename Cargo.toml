@@ -49,7 +49,6 @@ workspace.exclude = [
     "libs/fxhash",
     "libs/jpeg-encoder",
     "libs/memchr",
-    "libs/miniz_oxide",
     "libs/pulldown-cmark",
     "libs/rustybuzz",
     "libs/sdfer",

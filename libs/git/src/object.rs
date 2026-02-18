@@ -1,7 +1,4 @@
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 use crate::error::GitError;
@@ -119,7 +116,7 @@ pub fn write_loose_object(
     kind: ObjectKind,
     data: &[u8],
 ) -> Result<ObjectId, GitError> {
-    write_loose_object_level(git_dir, kind, data, Compression::default())
+    write_loose_object_level(git_dir, kind, data, 6)
 }
 
 /// Write a loose object with a specific compression level.
@@ -129,14 +126,14 @@ pub fn write_loose_object_fast(
     kind: ObjectKind,
     data: &[u8],
 ) -> Result<ObjectId, GitError> {
-    write_loose_object_level(git_dir, kind, data, Compression::fast())
+    write_loose_object_level(git_dir, kind, data, 1)
 }
 
 fn write_loose_object_level(
     git_dir: &Path,
     kind: ObjectKind,
     data: &[u8],
-    level: Compression,
+    level: u32,
 ) -> Result<ObjectId, GitError> {
     let oid = hash_object(kind.as_str(), data);
     let (dir, file) = oid.loose_path_components();
@@ -150,10 +147,10 @@ fn write_loose_object_level(
 
     // Build raw content: header + data
     let header = format!("{} {}\0", kind.as_str(), data.len());
-    let mut encoder = ZlibEncoder::new(Vec::new(), level);
-    encoder.write_all(header.as_bytes())?;
-    encoder.write_all(data)?;
-    let compressed = encoder.finish()?;
+    let mut raw = Vec::with_capacity(header.len() + data.len());
+    raw.extend_from_slice(header.as_bytes());
+    raw.extend_from_slice(data);
+    let compressed = makepad_fast_inflate::zlib_compress(&raw, level);
 
     // Write atomically: write to temp file, then rename
     fs::create_dir_all(&obj_dir)?;
