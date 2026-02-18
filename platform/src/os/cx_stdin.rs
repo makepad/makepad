@@ -751,12 +751,90 @@ pub mod aux_chan {
     use crate::os::linux::ipc::{self as linux_ipc, FixedSizeEncoding};
     use std::{
         io,
-        os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+        os::fd::OwnedFd,
+        os::unix::net::{UnixListener, UnixStream},
+        path::PathBuf,
+        thread,
+        time::{Duration, Instant},
     };
 
     // HACK(eddyb) `io::Error::other` stabilization is too recent.
     fn io_error_other(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
         io::Error::new(io::ErrorKind::Other, error)
+    }
+
+    fn path_for_studio_http(studio_http: &str) -> io::Result<PathBuf> {
+        let without_scheme = studio_http
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(studio_http);
+        let (host_port, path) = without_scheme
+            .split_once('/')
+            .ok_or_else(|| io_error_other("invalid MAKEPAD_STUDIO_HTTP value"))?;
+        let port = host_port
+            .rsplit_once(':')
+            .map(|(_, port)| port)
+            .unwrap_or("80");
+        let build_id = path
+            .rsplit('/')
+            .next()
+            .filter(|build_id| !build_id.is_empty())
+            .ok_or_else(|| io_error_other("missing build id in MAKEPAD_STUDIO_HTTP"))?;
+        Ok(PathBuf::from(format!(
+            "/tmp/makepad-stdin-aux-{port}-{build_id}.sock"
+        )))
+    }
+
+    pub struct ExternalEndpointListener {
+        path: PathBuf,
+        listener: UnixListener,
+    }
+
+    impl ExternalEndpointListener {
+        pub fn new_for_studio_http(studio_http: &str) -> io::Result<Self> {
+            let path = path_for_studio_http(studio_http)?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+            let listener = UnixListener::bind(&path)?;
+            listener.set_nonblocking(true)?;
+            Ok(Self { path, listener })
+        }
+
+        pub fn accept_host_endpoint(self) -> io::Result<HostEndpoint> {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match self.listener.accept() {
+                    Ok((stream, _)) => {
+                        let owned_fd: OwnedFd = stream.into();
+                        return linux_ipc::InheritableChannel::<H2C, C2H>::from(owned_fd)
+                            .into_uninheritable();
+                    }
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        if Instant::now() >= deadline {
+                            return Err(io_error_other(
+                                "timeout while waiting for child aux-channel connection",
+                            ));
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+    }
+
+    impl Drop for ExternalEndpointListener {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 
     // Host->Client and Client->Host message types.
@@ -775,27 +853,35 @@ pub mod aux_chan {
 
     pub type HostEndpoint = linux_ipc::Channel<H2C, C2H>;
     pub type ClientEndpoint = linux_ipc::Channel<C2H, H2C>;
-    pub fn make_host_and_client_endpoint_pair() -> io::Result<(HostEndpoint, ClientEndpoint)> {
-        linux_ipc::channel()
-    }
 
-    pub type InheritableClientEndpoint = linux_ipc::InheritableChannel<C2H, H2C>;
-    impl InheritableClientEndpoint {
-        pub fn extra_args_for_client_spawning(&self) -> [String; 1] {
-            [format!(
-                "--stdin-loop-aux-chan-fd={}",
-                self.as_fd().as_raw_fd()
-            )]
-        }
-        pub fn from_process_args_in_client() -> io::Result<Self> {
-            for arg in std::env::args() {
-                if let Some(fd) = arg.strip_prefix("--stdin-loop-aux-chan-fd=") {
-                    let raw_fd = fd.parse().map_err(io_error_other)?;
-                    let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-                    return Ok(Self::from(owned_fd));
+    impl ClientEndpoint {
+        pub fn connect_from_studio_http_env() -> io::Result<Self> {
+            let studio_http = std::env::var("MAKEPAD_STUDIO_HTTP").map_err(io_error_other)?;
+            let path = path_for_studio_http(&studio_http)?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match UnixStream::connect(&path) {
+                    Ok(stream) => {
+                        let owned_fd: OwnedFd = stream.into();
+                        return linux_ipc::InheritableChannel::<C2H, H2C>::from(owned_fd)
+                            .into_uninheritable();
+                    }
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::NotFound
+                                | io::ErrorKind::ConnectionRefused
+                                | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        if Instant::now() >= deadline {
+                            return Err(err);
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => return Err(err),
                 }
             }
-            Err(io_error_other("missing --stdin-loop-aux-chan-fd argument"))
         }
     }
 
@@ -862,25 +948,20 @@ pub mod aux_chan {
     pub struct ClientEndpoint {
         _private: (),
     }
-    pub fn make_host_and_client_endpoint_pair() -> io::Result<(HostEndpoint, ClientEndpoint)> {
-        Ok((
-            HostEndpoint { _private: () },
-            ClientEndpoint { _private: () },
-        ))
+    pub struct ExternalEndpointListener {
+        _private: (),
     }
-
-    pub struct InheritableClientEndpoint(ClientEndpoint);
     impl ClientEndpoint {
-        pub fn into_child_process_inheritable(self) -> io::Result<InheritableClientEndpoint> {
-            Ok(InheritableClientEndpoint(self))
+        pub fn connect_from_studio_http_env() -> io::Result<ClientEndpoint> {
+            Ok(ClientEndpoint { _private: () })
         }
     }
-    impl InheritableClientEndpoint {
-        pub fn into_uninheritable(self) -> io::Result<ClientEndpoint> {
-            Ok(self.0)
+    impl ExternalEndpointListener {
+        pub fn new_for_studio_http(_studio_http: &str) -> io::Result<Self> {
+            Ok(Self { _private: () })
         }
-        pub fn extra_args_for_client_spawning(&self) -> [String; 0] {
-            []
+        pub fn accept_host_endpoint(self) -> io::Result<HostEndpoint> {
+            Ok(HostEndpoint { _private: () })
         }
     }
 }

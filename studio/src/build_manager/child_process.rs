@@ -1,4 +1,6 @@
 use crate::makepad_platform::cx_stdin::aux_chan;
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt;
 use std::{
     io::prelude::*,
     io::BufReader,
@@ -8,8 +10,6 @@ use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
-#[cfg(target_os = "macos")]
-use std::os::unix::process::CommandExt;
 
 pub struct ChildProcess {
     pub child: Child,
@@ -40,15 +40,27 @@ impl ChildProcess {
         aux_chan: bool,
     ) -> Result<ChildProcess, std::io::Error> {
         let (mut child, aux_chan_host_endpoint) = if aux_chan {
-            let (aux_chan_host_endpoint, aux_chan_client_endpoint) =
-                aux_chan::make_host_and_client_endpoint_pair()?;
+            let studio_http = env
+                .iter()
+                .find_map(|(key, value)| {
+                    if *key == "MAKEPAD_STUDIO_HTTP" {
+                        Some(*value)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "missing MAKEPAD_STUDIO_HTTP in child env",
+                    )
+                })?;
+            let aux_chan_listener =
+                aux_chan::ExternalEndpointListener::new_for_studio_http(studio_http)?;
 
-            let aux_chan_client_endpoint_inheritable =
-                aux_chan_client_endpoint.into_child_process_inheritable()?;
             let mut cmd_build = Command::new(cmd);
             cmd_build
                 .args(args)
-                .args(aux_chan_client_endpoint_inheritable.extra_args_for_client_spawning())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -59,8 +71,15 @@ impl ChildProcess {
             }
 
             prepare_child_process_stdio_isolation(&mut cmd_build);
-            let child = cmd_build.spawn()?;
-            drop(aux_chan_client_endpoint_inheritable);
+            let mut child = cmd_build.spawn()?;
+            let aux_chan_host_endpoint = match aux_chan_listener.accept_host_endpoint() {
+                Ok(endpoint) => endpoint,
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(err);
+                }
+            };
             (child, Some(aux_chan_host_endpoint))
         } else {
             let mut cmd_build = Command::new(cmd);
@@ -77,9 +96,6 @@ impl ChildProcess {
             prepare_child_process_stdio_isolation(&mut cmd_build);
             (cmd_build.spawn()?, None)
         };
-
-        // In the parent process, an inherited fd doesn't need to exist past
-        // the spawning of the child process (which clones non-`CLOEXEC` fds).
 
         let (line_sender, line_receiver) = mpsc::channel();
         let (stdin_sender, stdin_receiver) = mpsc::channel();
