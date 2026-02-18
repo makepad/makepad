@@ -357,8 +357,9 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             let entries = fs::read_dir(&fonts_path)
                 .map_err(|e| format!("Unable to read fonts dir {:?}: {:?}", fonts_path, e))?;
             for entry in entries {
-                let entry = entry
-                    .map_err(|e| format!("Unable to read fonts entry in {:?}: {:?}", fonts_path, e))?;
+                let entry = entry.map_err(|e| {
+                    format!("Unable to read fonts entry in {:?}: {:?}", fonts_path, e)
+                })?;
                 let sub_path = entry.path();
                 let resources_subdir = sub_path.join("resources");
                 if !resources_subdir.is_dir() {
@@ -676,7 +677,11 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                     body,
                     response,
                 } => {
-                    let path = headers.path.split('?').next().unwrap_or(headers.path.as_str());
+                    let path = headers
+                        .path
+                        .split('?')
+                        .next()
+                        .unwrap_or(headers.path.as_str());
                     if path == "/$report_error" {
                         let message = String::from_utf8_lossy(&body);
                         println!("Browser error report: {}", message);

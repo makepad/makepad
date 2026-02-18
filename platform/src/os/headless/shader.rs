@@ -1,8 +1,8 @@
 use super::CxOsDrawShader;
 use crate::{
     draw_shader::{
-        CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat,
-        DrawShaderId, DrawShaderInputPacking, DrawShaderInputs,
+        CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderId,
+        DrawShaderInputPacking, DrawShaderInputs,
     },
     draw_vars::DrawVars,
     geometry::Geometry,
@@ -233,11 +233,13 @@ impl Cx {
                         {
                             os_shader.rcx_quad_mode_offset = f() as usize;
                         }
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_flat_varying_slots")
+                        if let Ok(f) =
+                            module.symbol::<LayoutFn>("makepad_headless_flat_varying_slots")
                         {
                             os_shader.flat_varying_slots = f() as usize;
                         }
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_uses_derivatives")
+                        if let Ok(f) =
+                            module.symbol::<LayoutFn>("makepad_headless_uses_derivatives")
                         {
                             os_shader.uses_derivatives = f() != 0;
                             has_derivative_export = true;

@@ -12,9 +12,6 @@ use super::buffer::{
 use super::shared::{update_adler32, HUFFMAN_LENGTH_ORDER, MZ_ADLER32_INIT};
 use super::stored::compress_stored;
 use super::zlib;
-use super::CompressionLevel;
-use super::DataFormat;
-use super::*;
 
 // Currently not bubbled up outside this module, so can fill in with more
 // context eventually if needed.
@@ -175,9 +172,6 @@ pub mod deflate_flags {
     /// Should we use greedy parsing (as opposed to lazy parsing where look ahead one or more
     /// bytes to check for better matches.)
     pub const TDEFL_GREEDY_PARSING_FLAG: u32 = 0x0000_4000;
-    /// Used in miniz to skip zero-initializing hash and dict. We don't do this here, so
-    /// this flag is ignored.
-    pub const TDEFL_NONDETERMINISTIC_PARSING_FLAG: u32 = 0x0000_8000;
     /// Only look for matches with a distance of 0.
     pub const TDEFL_RLE_MATCHES: u32 = 0x0001_0000;
     /// Only use matches that are at least 6 bytes long.
@@ -223,10 +217,7 @@ pub enum TDEFLFlush {
     /// Compress as much as there is space for, and then return waiting for more input.
     None = 0,
 
-    /// Try to flush all the current data and output an empty raw block.
-    Sync = 2,
-
-    /// Same as [`Sync`][Self::Sync], but reset the dictionary so that the following data does not
+    /// Flush output and reset the dictionary so that following data does not
     /// depend on previous data.
     Full = 3,
 
@@ -234,30 +225,6 @@ pub enum TDEFLFlush {
     ///
     /// On success this will yield a [`TDEFLStatus::Done`] return status.
     Finish = 4,
-}
-
-impl From<MZFlush> for TDEFLFlush {
-    fn from(flush: MZFlush) -> Self {
-        match flush {
-            MZFlush::None => TDEFLFlush::None,
-            MZFlush::Sync => TDEFLFlush::Sync,
-            MZFlush::Full => TDEFLFlush::Full,
-            MZFlush::Finish => TDEFLFlush::Finish,
-            _ => TDEFLFlush::None, // TODO: ??? What to do ???
-        }
-    }
-}
-
-impl TDEFLFlush {
-    pub const fn new(flush: i32) -> Result<Self, MZError> {
-        match flush {
-            0 => Ok(TDEFLFlush::None),
-            2 => Ok(TDEFLFlush::Sync),
-            3 => Ok(TDEFLFlush::Full),
-            4 => Ok(TDEFLFlush::Finish),
-            _ => Err(MZError::Param),
-        }
-    }
 }
 
 /// Return status of compression.
@@ -344,85 +311,6 @@ impl CompressorOxide {
             dict: DictOxide::new(flags),
         }
     }
-
-    /// Get the adler32 checksum of the currently encoded data.
-    pub const fn adler32(&self) -> u32 {
-        self.params.adler32
-    }
-
-    /// Get the return status of the previous [`compress`](fn.compress.html)
-    /// call with this compressor.
-    pub const fn prev_return_status(&self) -> TDEFLStatus {
-        self.params.prev_return_status
-    }
-
-    /// Get the raw compressor flags.
-    ///
-    /// # Notes
-    /// This function may be deprecated or changed in the future to use more rust-style flags.
-    pub const fn flags(&self) -> i32 {
-        self.params.flags as i32
-    }
-
-    /// Returns whether the compressor is wrapping the data in a zlib format or not.
-    pub const fn data_format(&self) -> DataFormat {
-        if (self.params.flags & TDEFL_WRITE_ZLIB_HEADER) != 0 {
-            DataFormat::Zlib
-        } else {
-            DataFormat::Raw
-        }
-    }
-
-    /// Reset the state of the compressor, keeping the same parameters.
-    ///
-    /// This avoids re-allocating data.
-    pub fn reset(&mut self) {
-        // LZ buf and huffman has no settings or dynamic memory
-        // that needs to be saved, so we simply replace them.
-        self.lz = LZOxide::new();
-        self.params.reset();
-        *self.huff = HuffmanOxide::default();
-        self.dict.reset();
-    }
-
-    /// Set the compression level of the compressor.
-    ///
-    /// Using this to change level after compression has started is supported.
-    /// # Notes
-    /// The compression strategy will be reset to the default one when this is called.
-    pub fn set_compression_level(&mut self, level: CompressionLevel) {
-        let format = self.data_format();
-        self.set_format_and_level(format, level as u8);
-    }
-
-    /// Set the compression level of the compressor using an integer value.
-    ///
-    /// Using this to change level after compression has started is supported.
-    /// # Notes
-    /// The compression strategy will be reset to the default one when this is called.
-    pub fn set_compression_level_raw(&mut self, level: u8) {
-        let format = self.data_format();
-        self.set_format_and_level(format, level);
-    }
-
-    /// Update the compression settings of the compressor.
-    ///
-    /// Changing the `DataFormat` after compression has started will result in
-    /// a corrupted stream.
-    ///
-    /// # Notes
-    /// This function mainly intended for setting the initial settings after e.g creating with
-    /// `default` or after calling `CompressorOxide::reset()`, and behaviour may be changed
-    /// to disallow calling it after starting compression in the future.
-    pub fn set_format_and_level(&mut self, data_format: DataFormat, level: u8) {
-        let flags = create_comp_flags_from_zip_params(
-            level.into(),
-            data_format.to_window_bits(),
-            CompressionStrategy::Default as i32,
-        );
-        self.params.update_flags(flags);
-        self.dict.update_flags(flags);
-    }
 }
 
 impl Default for CompressorOxide {
@@ -435,31 +323,6 @@ impl Default for CompressorOxide {
             huff: Box::default(),
             dict: DictOxide::new(DEFAULT_FLAGS),
         }
-    }
-}
-
-/// Callback function and user used in `compress_to_output`.
-pub struct CallbackFunc<'a> {
-    pub put_buf_func: &'a mut dyn FnMut(&[u8]) -> bool,
-}
-
-impl CallbackFunc<'_> {
-    fn flush_output(
-        &mut self,
-        saved_output: SavedOutputBufferOxide,
-        params: &mut ParamsOxide,
-    ) -> i32 {
-        // TODO: As this could be unsafe since
-        // we can't verify the function pointer
-        // this whole function should maybe be unsafe as well.
-        let call_success = (self.put_buf_func)(&params.local_buf.b[0..saved_output.pos]);
-
-        if !call_success {
-            params.prev_return_status = TDEFLStatus::PutBufFailed;
-            return params.prev_return_status as i32;
-        }
-
-        params.flush_remaining as i32
     }
 }
 
@@ -492,7 +355,6 @@ impl CallbackBuf<'_> {
 }
 
 enum CallbackOut<'a> {
-    Func(CallbackFunc<'a>),
     Buf(CallbackBuf<'a>),
 }
 
@@ -542,15 +404,6 @@ impl<'a> CallbackOxide<'a> {
         }
     }
 
-    fn new_callback_func(in_buf: &'a [u8], callback_func: CallbackFunc<'a>) -> Self {
-        CallbackOxide {
-            in_buf: Some(in_buf),
-            in_buf_size: None,
-            out_buf_size: None,
-            out: CallbackOut::Func(callback_func),
-        }
-    }
-
     fn update_size(&mut self, in_size: Option<usize>, out_size: Option<usize>) {
         if let (Some(in_size), Some(size)) = (in_size, self.in_buf_size.as_mut()) {
             **size = in_size;
@@ -572,7 +425,6 @@ impl<'a> CallbackOxide<'a> {
 
         self.update_size(Some(params.src_pos), None);
         match self.out {
-            CallbackOut::Func(ref mut cf) => cf.flush_output(saved_output, params),
             CallbackOut::Buf(ref mut cb) => cb.flush_output(saved_output, params),
         }
     }
@@ -1161,18 +1013,6 @@ impl DictOxide {
         }
     }
 
-    fn update_flags(&mut self, flags: u32) {
-        self.max_probes = probes_from_flags(flags);
-    }
-
-    fn reset(&mut self) {
-        self.b.reset();
-        self.code_buf_dict_pos = 0;
-        self.lookahead_size = 0;
-        self.lookahead_pos = 0;
-        self.size = 0;
-    }
-
     /// Do an unaligned read of the data at `pos` in the dictionary and treat it as if it was of
     /// type T.
     #[inline]
@@ -1389,29 +1229,6 @@ impl ParamsOxide {
         }
     }
 
-    fn update_flags(&mut self, flags: u32) {
-        self.flags = flags;
-        self.greedy_parsing = self.flags & TDEFL_GREEDY_PARSING_FLAG != 0;
-    }
-
-    /// Reset state, saving settings.
-    fn reset(&mut self) {
-        self.block_index = 0;
-        self.saved_match_len = 0;
-        self.saved_match_dist = 0;
-        self.saved_lit = 0;
-        self.flush = TDEFLFlush::None;
-        self.flush_ofs = 0;
-        self.flush_remaining = 0;
-        self.finished = false;
-        self.adler32 = MZ_ADLER32_INIT;
-        self.src_pos = 0;
-        self.out_buf_ofs = 0;
-        self.prev_return_status = TDEFLStatus::Okay;
-        self.saved_bit_buffer = 0;
-        self.saved_bits_in = 0;
-        self.local_buf.b = [0; OUT_BUF_SIZE];
-    }
 }
 
 pub(crate) struct LZOxide {
@@ -2159,17 +1976,16 @@ fn compress_fast(d: &mut CompressorOxide, callback: &mut CallbackOxide) -> bool 
 
 fn flush_output_buffer(c: &mut CallbackOxide, p: &mut ParamsOxide) -> (TDEFLStatus, usize, usize) {
     let mut res = (TDEFLStatus::Okay, p.src_pos, 0);
-    if let CallbackOut::Buf(ref mut cb) = c.out {
-        let n = cmp::min(cb.out_buf.len() - p.out_buf_ofs, p.flush_remaining as usize);
-        if n != 0 {
-            cb.out_buf[p.out_buf_ofs..p.out_buf_ofs + n]
-                .copy_from_slice(&p.local_buf.b[p.flush_ofs as usize..p.flush_ofs as usize + n]);
-        }
-        p.flush_ofs += n as u32;
-        p.flush_remaining -= n as u32;
-        p.out_buf_ofs += n;
-        res.2 = p.out_buf_ofs;
+    let CallbackOut::Buf(ref mut cb) = c.out;
+    let n = cmp::min(cb.out_buf.len() - p.out_buf_ofs, p.flush_remaining as usize);
+    if n != 0 {
+        cb.out_buf[p.out_buf_ofs..p.out_buf_ofs + n]
+            .copy_from_slice(&p.local_buf.b[p.flush_ofs as usize..p.flush_ofs as usize + n]);
     }
+    p.flush_ofs += n as u32;
+    p.flush_remaining -= n as u32;
+    p.out_buf_ofs += n;
+    res.2 = p.out_buf_ofs;
 
     if p.finished && p.flush_remaining == 0 {
         res.0 = TDEFLStatus::Done
@@ -2186,7 +2002,7 @@ fn flush_output_buffer(c: &mut CallbackOxide, p: &mut ParamsOxide) -> (TDEFLStat
 /// Use [`TDEFLFlush::Finish`] on the final call to signal that the stream is finishing.
 ///
 /// Note that this function does not keep track of whether a flush marker has been output, so
-/// if called using [`TDEFLFlush::Sync`], the caller needs to ensure there is enough space in the
+/// if called using [`TDEFLFlush::Full`], the caller needs to ensure there is enough space in the
 /// output buffer if they want to avoid repeated flush markers.
 /// See #105 for details.
 ///
@@ -2204,34 +2020,6 @@ pub fn compress(
         &mut CallbackOxide::new_callback_buf(in_buf, out_buf),
         flush,
     )
-}
-
-/// Main compression function. Callbacks output.
-///
-/// # Returns
-/// Returns a tuple containing the current status of the compressor, the current position
-/// in the input buffer.
-///
-/// The caller is responsible for ensuring the `CallbackFunc` struct will not cause undefined
-/// behaviour.
-pub fn compress_to_output(
-    d: &mut CompressorOxide,
-    in_buf: &[u8],
-    flush: TDEFLFlush,
-    mut callback_func: impl FnMut(&[u8]) -> bool,
-) -> (TDEFLStatus, usize) {
-    let res = compress_inner(
-        d,
-        &mut CallbackOxide::new_callback_func(
-            in_buf,
-            CallbackFunc {
-                put_buf_func: &mut callback_func,
-            },
-        ),
-        flush,
-    );
-
-    (res.0, res.1)
 }
 
 fn compress_inner(
@@ -2327,8 +2115,7 @@ fn compress_inner(
 /// Mainly intended for use with transition from c libraries as it deals with raw integers.
 ///
 /// # Parameters
-/// `level` determines compression level. Clamped to maximum of 10. Negative values result in
-/// `CompressionLevel::DefaultLevel`.
+/// `level` determines compression level. Clamped to maximum of 10. Negative values use level 6.
 /// `window_bits`: Above 0, wraps the stream in a zlib wrapper, 0 or negative for a raw deflate
 /// stream.
 /// `strategy`: Sets the strategy if this conforms to any of the values in `CompressionStrategy`.
@@ -2339,7 +2126,7 @@ pub fn create_comp_flags_from_zip_params(level: i32, window_bits: i32, strategy:
     let num_probes = (if level >= 0 {
         cmp::min(10, level)
     } else {
-        CompressionLevel::DefaultLevel as i32
+        6
     }) as usize;
     let greedy = if level <= 3 {
         TDEFL_GREEDY_PARSING_FLAG
@@ -2369,9 +2156,8 @@ pub fn create_comp_flags_from_zip_params(level: i32, window_bits: i32, strategy:
 
 #[cfg(test)]
 mod test {
-    use super::super::shared::MZ_DEFAULT_WINDOW_BITS;
     use super::{
-        compress_to_output, create_comp_flags_from_zip_params, read_u16_le, write_u16_le,
+        compress, create_comp_flags_from_zip_params, read_u16_le, write_u16_le,
         CompressionStrategy, CompressorOxide, TDEFLFlush, TDEFLStatus, DEFAULT_FLAGS,
     };
     use crate::decompress::deflate_decompress_vec;
@@ -2396,7 +2182,7 @@ mod test {
             DEFAULT_FLAGS,
             create_comp_flags_from_zip_params(
                 4,
-                MZ_DEFAULT_WINDOW_BITS,
+                15,
                 CompressionStrategy::Default as i32
             )
         );
@@ -2404,14 +2190,12 @@ mod test {
         let slice = [
             1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 1, 2, 6, 1, 2, 3, 1, 2, 3, 2, 3, 1, 2, 3,
         ];
-        let mut encoded = vec![];
+        let mut encoded = vec![0; 1024];
         let flags = create_comp_flags_from_zip_params(6, 0, 0);
         let mut d = CompressorOxide::new(flags);
-        let (status, in_consumed) =
-            compress_to_output(&mut d, &slice, TDEFLFlush::Finish, |out: &[u8]| {
-                encoded.extend_from_slice(out);
-                true
-            });
+        let (status, in_consumed, out_consumed) =
+            compress(&mut d, &slice, &mut encoded, TDEFLFlush::Finish);
+        encoded.truncate(out_consumed);
 
         assert_eq!(status, TDEFLStatus::Done);
         assert_eq!(in_consumed, slice.len());
@@ -2425,14 +2209,12 @@ mod test {
         let slice = [
             1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 1, 2, 6, 1, 2, 3, 1, 2, 3, 2, 3, 1, 2, 3,
         ];
-        let mut encoded = vec![];
+        let mut encoded = vec![0; 1024];
         let flags = create_comp_flags_from_zip_params(1, 0, 0);
         let mut d = CompressorOxide::new(flags);
-        let (status, in_consumed) =
-            compress_to_output(&mut d, &slice, TDEFLFlush::Finish, |out: &[u8]| {
-                encoded.extend_from_slice(out);
-                true
-            });
+        let (status, in_consumed, out_consumed) =
+            compress(&mut d, &slice, &mut encoded, TDEFLFlush::Finish);
+        encoded.truncate(out_consumed);
 
         assert_eq!(status, TDEFLStatus::Done);
         assert_eq!(in_consumed, slice.len());

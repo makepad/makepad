@@ -763,25 +763,28 @@ pub mod aux_chan {
         io::Error::new(io::ErrorKind::Other, error)
     }
 
-    fn path_for_studio_http(studio_http: &str) -> io::Result<PathBuf> {
-        let without_scheme = studio_http
+    fn path_for_studio(studio: &str, studio_build_id: &str) -> io::Result<PathBuf> {
+        let without_scheme = studio
             .split_once("://")
             .map(|(_, rest)| rest)
-            .unwrap_or(studio_http);
-        let (host_port, path) = without_scheme
+            .unwrap_or(studio);
+        let host_port = without_scheme
             .split_once('/')
-            .ok_or_else(|| io_error_other("invalid MAKEPAD_STUDIO_HTTP value"))?;
+            .map(|(host_port, _)| host_port)
+            .unwrap_or(without_scheme);
+        if host_port.trim().is_empty() {
+            return Err(io_error_other("invalid STUDIO value"));
+        }
         let port = host_port
             .rsplit_once(':')
             .map(|(_, port)| port)
             .unwrap_or("80");
-        let build_id = path
-            .rsplit('/')
-            .next()
-            .filter(|build_id| !build_id.is_empty())
-            .ok_or_else(|| io_error_other("missing build id in MAKEPAD_STUDIO_HTTP"))?;
+        if studio_build_id.trim().is_empty() {
+            return Err(io_error_other("missing STUDIO_BUILD_ID"));
+        }
         Ok(PathBuf::from(format!(
-            "/tmp/makepad-stdin-aux-{port}-{build_id}.sock"
+            "/tmp/makepad-stdin-aux-{port}-{}.sock",
+            studio_build_id.trim()
         )))
     }
 
@@ -791,8 +794,8 @@ pub mod aux_chan {
     }
 
     impl ExternalEndpointListener {
-        pub fn new_for_studio_http(studio_http: &str) -> io::Result<Self> {
-            let path = path_for_studio_http(studio_http)?;
+        pub fn new_for_studio(studio: &str, studio_build_id: &str) -> io::Result<Self> {
+            let path = path_for_studio(studio, studio_build_id)?;
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -855,9 +858,10 @@ pub mod aux_chan {
     pub type ClientEndpoint = linux_ipc::Channel<C2H, H2C>;
 
     impl ClientEndpoint {
-        pub fn connect_from_studio_http_env() -> io::Result<Self> {
-            let studio_http = std::env::var("MAKEPAD_STUDIO_HTTP").map_err(io_error_other)?;
-            let path = path_for_studio_http(&studio_http)?;
+        pub fn connect_from_studio_env() -> io::Result<Self> {
+            let studio = std::env::var("STUDIO").map_err(io_error_other)?;
+            let studio_build_id = std::env::var("STUDIO_BUILD_ID").map_err(io_error_other)?;
+            let path = path_for_studio(&studio, &studio_build_id)?;
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 match UnixStream::connect(&path) {
@@ -952,12 +956,12 @@ pub mod aux_chan {
         _private: (),
     }
     impl ClientEndpoint {
-        pub fn connect_from_studio_http_env() -> io::Result<ClientEndpoint> {
+        pub fn connect_from_studio_env() -> io::Result<ClientEndpoint> {
             Ok(ClientEndpoint { _private: () })
         }
     }
     impl ExternalEndpointListener {
-        pub fn new_for_studio_http(_studio_http: &str) -> io::Result<Self> {
+        pub fn new_for_studio(_studio: &str, _studio_build_id: &str) -> io::Result<Self> {
             Ok(Self { _private: () })
         }
         pub fn accept_host_endpoint(self) -> io::Result<HostEndpoint> {

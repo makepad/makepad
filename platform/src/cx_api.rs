@@ -238,7 +238,9 @@ impl Cx {
 
         #[cfg(target_os = "android")]
         {
-            if let Some(data) = unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) } {
+            if let Some(data) =
+                unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) }
+            {
                 return Ok(Rc::new(data));
             }
             if let Some(package_root) = self.package_root.as_deref() {
@@ -269,7 +271,9 @@ impl Cx {
 
         #[cfg(target_os = "android")]
         {
-            if let Some(data) = unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) } {
+            if let Some(data) =
+                unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) }
+            {
                 return Ok(Rc::new(data));
             }
             if let Some(package_root) = self.package_root.as_deref() {

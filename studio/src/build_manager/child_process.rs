@@ -40,10 +40,27 @@ impl ChildProcess {
         aux_chan: bool,
     ) -> Result<ChildProcess, std::io::Error> {
         let (mut child, aux_chan_host_endpoint) = if aux_chan {
-            let studio_http = env
+            let studio_addr = env
+                .iter()
+                .find_map(
+                    |(key, value)| {
+                        if *key == "STUDIO" {
+                            Some(*value)
+                        } else {
+                            None
+                        }
+                    },
+                )
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "missing STUDIO in child env",
+                    )
+                })?;
+            let studio_build_id = env
                 .iter()
                 .find_map(|(key, value)| {
-                    if *key == "MAKEPAD_STUDIO_HTTP" {
+                    if *key == "STUDIO_BUILD_ID" {
                         Some(*value)
                     } else {
                         None
@@ -52,11 +69,11 @@ impl ChildProcess {
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        "missing MAKEPAD_STUDIO_HTTP in child env",
+                        "missing STUDIO_BUILD_ID in child env",
                     )
                 })?;
             let aux_chan_listener =
-                aux_chan::ExternalEndpointListener::new_for_studio_http(studio_http)?;
+                aux_chan::ExternalEndpointListener::new_for_studio(studio_addr, studio_build_id)?;
 
             let mut cmd_build = Command::new(cmd);
             cmd_build

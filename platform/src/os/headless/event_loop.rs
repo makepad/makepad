@@ -46,7 +46,7 @@ impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
 
-        if std::env::args().any(|arg| arg == "--stdin-loop") {
+        if crate::app_main::should_run_stdin_loop_from_env() {
             cx.borrow_mut().in_makepad_studio = true;
             cx.borrow_mut().stdin_event_loop();
         } else {

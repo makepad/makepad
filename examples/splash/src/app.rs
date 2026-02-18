@@ -1754,6 +1754,25 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::MouseDown(e) => {
+                log!(
+                    "INPUT mouse_down abs=({:.1},{:.1}) time={:.3}",
+                    e.abs.x,
+                    e.abs.y,
+                    e.time
+                );
+            }
+            Event::MouseUp(e) => {
+                log!(
+                    "INPUT mouse_up abs=({:.1},{:.1}) time={:.3}",
+                    e.abs.x,
+                    e.abs.y,
+                    e.time
+                );
+            }
+            _ => {}
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }

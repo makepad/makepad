@@ -600,6 +600,13 @@ impl WidgetRef {
             .and_then(|r| r.as_ref().map(|w| w.widget.widget_uid()))
     }
 
+    pub fn widget_type_id(&self) -> Option<TypeId> {
+        self.0
+            .try_borrow()
+            .ok()
+            .and_then(|r| r.as_ref().map(|w| w.widget.ref_cast_type_id()))
+    }
+
     pub fn area(&self) -> Area {
         if let Some(inner) = self.0.borrow().as_ref() {
             return inner.widget.area();

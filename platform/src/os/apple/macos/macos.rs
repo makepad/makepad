@@ -127,7 +127,7 @@ impl Cx {
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
 
         //let cx = Rc::new(RefCell::new(self));
-        if std::env::args().find(|v| v == "--stdin-loop").is_some() {
+        if crate::app_main::should_run_stdin_loop_from_env() {
             let mut cx = cx.borrow_mut();
             cx.in_makepad_studio = true;
             let mut metal_cx = metal_cx.borrow_mut();

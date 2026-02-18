@@ -19,9 +19,7 @@ use {
             core::PCWSTR,
             //core::IntoParam,
             Win32::{
-                Foundation::{
-                    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK,
-                },
+                Foundation::{COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK},
                 Graphics::Gdi::{
                     CreateSolidBrush, GetDC, GetDeviceCaps, MonitorFromWindow, HMONITOR,
                     LOGPIXELSX, MONITOR_DEFAULTTONEAREST,

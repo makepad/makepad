@@ -175,20 +175,28 @@ impl OsWebSocket {
             stream.shutdown();
         });
 
-        OsWebSocket { sender: Some(sender) }
+        OsWebSocket {
+            sender: Some(sender),
+        }
     }
 }
 
 fn handle_outgoing_message(stream: &mut SocketStream, msg: WebSocketMessage) -> bool {
     match msg {
         WebSocketMessage::Binary(data) => {
-            let header =
-                ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Binary, false);
+            let header = ServerWebSocketMessageHeader::from_len(
+                data.len(),
+                ServerWebSocketMessageFormat::Binary,
+                false,
+            );
             write_all_no_error(stream, header.as_slice()) || write_all_no_error(stream, &data)
         }
         WebSocketMessage::String(data) => {
-            let header =
-                ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, false);
+            let header = ServerWebSocketMessageHeader::from_len(
+                data.len(),
+                ServerWebSocketMessageFormat::Text,
+                false,
+            );
             write_all_no_error(stream, header.as_slice())
                 || write_all_no_error(stream, data.as_bytes())
         }
@@ -214,12 +222,18 @@ fn parse_incoming(
         }
         Ok(ServerWebSocketMessage::Pong(_)) => {}
         Ok(ServerWebSocketMessage::Text(text)) => {
-            if rx_sender.send(WebSocketMessage::String(text.into())).is_err() {
+            if rx_sender
+                .send(WebSocketMessage::String(text.into()))
+                .is_err()
+            {
                 *done = true;
             }
         }
         Ok(ServerWebSocketMessage::Binary(data)) => {
-            if rx_sender.send(WebSocketMessage::Binary(data.into())).is_err() {
+            if rx_sender
+                .send(WebSocketMessage::Binary(data.into()))
+                .is_err()
+            {
                 *done = true;
             }
         }
@@ -228,7 +242,9 @@ fn parse_incoming(
             *done = true;
         }
         Err(e) => {
-            let _ = rx_sender.send(WebSocketMessage::Error(format!("WebSocket parse error: {e:?}")));
+            let _ = rx_sender.send(WebSocketMessage::Error(format!(
+                "WebSocket parse error: {e:?}"
+            )));
         }
     });
 }

@@ -546,6 +546,29 @@ impl DockItem {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct DockCompactDump {
+    pub tabs: Vec<DockCompactTabsInfo>,
+    pub tab_headers: Vec<DockCompactTabInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DockCompactTabsInfo {
+    pub tabs_id: LiveId,
+    pub selected_tab_id: Option<LiveId>,
+    pub tab_count: usize,
+    pub rect: Rect,
+}
+
+#[derive(Clone, Debug)]
+pub struct DockCompactTabInfo {
+    pub tabs_id: LiveId,
+    pub tab_id: LiveId,
+    pub is_active: bool,
+    pub title: String,
+    pub rect: Rect,
+}
+
 impl Dock {
     pub fn unique_id(&self, base: u64) -> LiveId {
         let mut id = LiveId(base);
@@ -555,6 +578,55 @@ impl Dock {
             i += 1;
         }
         id
+    }
+
+    pub fn compact_dump(&self, cx: &Cx) -> DockCompactDump {
+        let mut tabs = Vec::new();
+        let mut tab_headers = Vec::new();
+        let mut tabs_ids = Vec::new();
+        tabs_ids.extend(self.tab_bars.keys().copied());
+        tabs_ids.sort_by_key(|id| id.0);
+
+        for tabs_id in tabs_ids {
+            let Some(DockItem::Tabs {
+                tabs: tab_ids,
+                selected,
+                ..
+            }) = self.dock_items.get(&tabs_id)
+            else {
+                continue;
+            };
+            let Some(tab_bar) = self.tab_bars.get(&tabs_id) else {
+                continue;
+            };
+
+            let bar_rect = tab_bar.tab_bar.bar_rect(cx);
+            tabs.push(DockCompactTabsInfo {
+                tabs_id,
+                selected_tab_id: tab_ids.get(*selected).copied(),
+                tab_count: tab_ids.len(),
+                rect: bar_rect,
+            });
+
+            for (index, tab_id) in tab_ids.iter().enumerate() {
+                let Some(tab_rect) = tab_bar.tab_bar.tab_rect(cx, *tab_id) else {
+                    continue;
+                };
+                let title = match self.dock_items.get(tab_id) {
+                    Some(DockItem::Tab { name, .. }) => name.clone(),
+                    _ => String::new(),
+                };
+                tab_headers.push(DockCompactTabInfo {
+                    tabs_id,
+                    tab_id: *tab_id,
+                    is_active: index == *selected,
+                    title,
+                    rect: tab_rect,
+                });
+            }
+        }
+
+        DockCompactDump { tabs, tab_headers }
     }
 
     fn create_all_items(&mut self, cx: &mut Cx) {

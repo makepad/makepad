@@ -1,8 +1,6 @@
 use {
     crate::makepad_script::{
-        shader::ShaderOutput,
-        shader_wgsl::compile_draw_shader_wgsl_source,
-        value::ScriptObject,
+        shader::ShaderOutput, shader_wgsl::compile_draw_shader_wgsl_source, value::ScriptObject,
         vm::ScriptVm,
     },
     std::fmt::Write,
