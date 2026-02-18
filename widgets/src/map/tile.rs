@@ -7,11 +7,10 @@ use crate::makepad_draw::vector::{
 };
 use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
-use flate2::read::{GzDecoder, ZlibDecoder};
+use makepad_fast_inflate::{gzip_decompress_vec, zlib_decompress_vec};
 use makepad_mbtile_reader::MbtilesReader;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const OVERPASS_ENDPOINTS: &[&str] = &["https://overpass.kumi.systems/api/interpreter"];
@@ -743,17 +742,10 @@ fn mbtiles_tile_to_overpass_json(
 
 fn decode_vector_tile_payload(raw: &[u8]) -> Result<Vec<u8>, String> {
     if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
-        let mut decoder = GzDecoder::new(raw);
-        let mut out = Vec::new();
-        decoder
-            .read_to_end(&mut out)
-            .map_err(|err| format!("gzip decode failed: {}", err))?;
-        return Ok(out);
+        return gzip_decompress_vec(raw).map_err(|e| format!("gzip decode failed: {}", e));
     }
     if raw.len() >= 2 && raw[0] == 0x78 {
-        let mut decoder = ZlibDecoder::new(raw);
-        let mut out = Vec::new();
-        if decoder.read_to_end(&mut out).is_ok() {
+        if let Ok(out) = zlib_decompress_vec(raw) {
             return Ok(out);
         }
     }

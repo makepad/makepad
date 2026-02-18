@@ -1,4 +1,4 @@
-;; From wasmtime misc_testsuite/multi-memory/simple.wast
+;; From upstream misc_testsuite/multi-memory/simple.wast
 
 ;; Should be replaced with suitable extensions to ../meta/generate_memory_*.js
 
