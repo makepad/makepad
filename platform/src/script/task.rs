@@ -82,8 +82,7 @@ impl Cx {
         self.script_data.tasks.pending_resumes.push_back(thread_id);
     }
 
-    pub fn set_script_task_trace(&mut self, _enabled: bool) {
-    }
+    pub fn set_script_task_trace(&mut self, _enabled: bool) {}
 
     fn run_script_task_thread_completed_hooks(
         &mut self,

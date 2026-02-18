@@ -2,6 +2,8 @@ mod android;
 mod apple;
 mod check;
 mod open_harmony;
+mod remote;
+mod studio;
 mod utils;
 mod wasm;
 
@@ -14,6 +16,8 @@ pub use makepad_http;
 pub use makepad_shell;
 pub use makepad_wasm_strip;
 use open_harmony::*;
+use remote::*;
+use studio::*;
 use wasm::*;
 
 fn show_help() {
@@ -32,14 +36,22 @@ fn show_help() {
     println!();
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
-    println!("       --strip                                   Strip the wasm file of debug symbols");
-    println!("       --brotli                                  Use brotli to compress the wasm file");
+    println!(
+        "       --strip                                   Strip the wasm file of debug symbols"
+    );
+    println!(
+        "       --brotli                                  Use brotli to compress the wasm file"
+    );
     println!("       --bindgen                                 Enable wasm-bindgen compatibility");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();
-    println!("    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup");
-    println!("    apple list                                   Lists all certificates/profiles/devices");
+    println!(
+        "    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup"
+    );
+    println!(
+        "    apple list                                   Lists all certificates/profiles/devices"
+    );
     println!("    apple <ios|tvos> [options] run-sim <cargo args>      Runs the project on the aarch64 simulator");
     println!("    apple <ios|tvos> [options] run-device <cargo args>   Runs the project on a real device");
     println!(" * Note: in order for Makepad to be able to install an ios application on a real device, a provisioning");
@@ -50,7 +62,9 @@ fn show_help() {
     println!();
     println!("    [options]:");
     println!();
-    println!("       --stable                                  Use the stable compiler (not nightly)");
+    println!(
+        "       --stable                                  Use the stable compiler (not nightly)"
+    );
     println!("       --org=<ORGANISATION_NAME>                 The organisation name to use for signing/provisioning");
     println!("       --app=<PRODUCT_NAME>                      The product name to use for signing/provisioning");
     println!("       --profile=<PROFILE_NAME>                  The profile name to use for signing/provisioning");
@@ -69,7 +83,9 @@ fn show_help() {
     println!("                                                 Be sure to add this also to install-toolchain");
     println!("       --package-name='PACKAGE_NAME'             The package name");
     println!("       --app-label='APP_LABEL'                   The app name/label");
-    println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
+    println!(
+        "       --sdk-path=./android_33_sdk               The path to read/write the android SDK"
+    );
     println!("       --full-ndk                                Install the full NDK prebuilts for the selected Host OS (default is a minimal subset).");
     println!("                                                 This is required for building apps that compile native code as part of the Rust build process.");
     println!("       --keep-sdk-sources                        Keep downloaded SDK source files (default is to remove them).");
@@ -83,7 +99,9 @@ fn show_help() {
     println!();
     println!("Open Harmony commands:");
     println!();
-    println!("    ohos [options] install-toolchain             Install the toolchain needed with rustup");
+    println!(
+        "    ohos [options] install-toolchain             Install the toolchain needed with rustup"
+    );
     println!("    ohos [options] deveco <cargo args>           Create a DevEco project for Open Harmony OS");
     println!("    ohos [options] build <cargo args>            Build  DevEco project and output the Hap package for the Open Harmony OS");
     println!("    ohos [options] run <cargo args>              Run the Hap package on a open harmony device via hdc");
@@ -99,6 +117,24 @@ fn show_help() {
     println!("Linux commands:");
     println!();
     println!("    linux apt-get-install-makepad-deps           Call apt-get install with all dependencies needed for makepad.");
+    println!();
+    println!("Remote commands:");
+    println!();
+    println!("    remote --server [--port PORT] [--all]        Start remote execution server");
+    println!("    remote <ip:port> cargo <args...>             Sync changed files and run cargo remotely");
+    println!("    remote <ip:port> shell <command...>          Run remote shell command (requires --all on server)");
+    println!();
+    println!("Studio commands:");
+    println!();
+    println!(
+        "    studio [options]                              Start newline-JSON websocket bridge"
+    );
+    println!("    studio terminal [options]                     Same as 'studio' (explicit mode)");
+    println!("    studio run [options] [cargo run args]         Ask Studio to start a cargo run child");
+    println!("    [options]:");
+    println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
+    println!("       --root=<ROOT>                             Studio root name (for 'studio run')");
+    println!("                                                 (or set STUDIO=127.0.0.1:8001)");
     println!();
     println!();
 }
@@ -127,11 +163,13 @@ fn main() -> Result<(), Cow<'static, str>> {
         return Err("not enough arguments; expected 2 or more.".into());
     }
     let result = match args[0].as_ref() {
-        "android"   => handle_android(&args[1..]),
-        "wasm"      => handle_wasm(&args[1..]),
-        "apple"     => handle_apple(&args[1..]),
-        "ohos"      => handle_open_harmony(&args[1..]),
-        "check"     => handle_check(&args[1..]),
+        "android" => handle_android(&args[1..]),
+        "wasm" => handle_wasm(&args[1..]),
+        "apple" => handle_apple(&args[1..]),
+        "ohos" => handle_open_harmony(&args[1..]),
+        "check" => handle_check(&args[1..]),
+        "remote" => handle_remote(&args[1..]),
+        "studio" => handle_studio(&args[1..]),
         unsupported => {
             show_help();
             Err(format!("unsupported command: '{unsupported}'").into())

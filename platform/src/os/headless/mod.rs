@@ -10,9 +10,9 @@ use crate::{
     event::HttpRequest,
     media_api::CxMediaApi,
     midi::{MidiData, MidiInput, MidiOutput, MidiPortId},
+    thread::MessageThreadPool,
     video::{VideoFormatId, VideoInputFn, VideoInputId},
     web_socket::WebSocketMessage,
-    thread::MessageThreadPool,
     Cx,
 };
 use std::path::PathBuf;

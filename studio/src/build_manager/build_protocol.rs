@@ -142,6 +142,7 @@ pub struct BuildCmdWrap {
 pub enum BuildCmd {
     Stop,
     Run(BuildProcess, String),
+    RunCargo(BuildProcess, Vec<String>, String),
     HostToStdin(String),
 }
 

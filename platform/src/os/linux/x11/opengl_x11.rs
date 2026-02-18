@@ -142,8 +142,7 @@ impl Cx {
                 return None;
             }
 
-            if (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(opengl_cx.egl_display, egl_image)
-                == 0
+            if (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(opengl_cx.egl_display, egl_image) == 0
             {
                 crate::error!("eglDestroyImageKHR failed after DMA-BUF export");
                 return None;

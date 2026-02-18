@@ -79,12 +79,14 @@ fn run_http_request(
         }
     };
 
-    let mut stream = SocketStream::connect(split.host, split.port, use_tls, request.ignore_ssl_cert)
-        .map_err(|e| format!("connect failed: {e}"))?;
+    let mut stream =
+        SocketStream::connect(split.host, split.port, use_tls, request.ignore_ssl_cert)
+            .map_err(|e| format!("connect failed: {e}"))?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
 
-    write_request(&mut stream, request, &split, use_tls).map_err(|e| format!("write failed: {e}"))?;
+    write_request(&mut stream, request, &split, use_tls)
+        .map_err(|e| format!("write failed: {e}"))?;
 
     let (status_code, headers_string, mut body_prefix, chunked) =
         read_response_head(&mut stream, cancel_flag).map_err(|e| format!("read failed: {e}"))?;
@@ -255,7 +257,10 @@ fn read_response_head(
 
     while header_end.is_none() {
         if cancel_flag.load(Ordering::SeqCst) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "request cancelled"));
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "request cancelled",
+            ));
         }
         match stream.read(&mut buf) {
             Ok(0) => {

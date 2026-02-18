@@ -142,7 +142,14 @@ impl Cx {
                                 StudioToApp::Screenshot(request) => {
                                     self.screenshot_requests.push(request);
                                 }
+                                StudioToApp::WidgetTreeDump(request) => {
+                                    self.send_studio_widget_tree_dump_response(request.request_id);
+                                }
                                 StudioToApp::KeepAlive => {}
+                                StudioToApp::Kill => {
+                                    self.call_event_handler(&Event::Shutdown);
+                                    return;
+                                }
                                 other => {
                                     self.action(other);
                                 }

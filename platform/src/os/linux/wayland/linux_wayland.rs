@@ -416,7 +416,11 @@ impl WaylandCx {
                     request,
                 } => {
                     use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::open(request_id, request, cx.os.network_response.sender.clone());
+                    LinuxHttpSocket::open(
+                        request_id,
+                        request,
+                        cx.os.network_response.sender.clone(),
+                    );
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
                     use crate::os::linux::http::LinuxHttpSocket;

@@ -4,7 +4,9 @@ use {
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
         event::{DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TimerEvent, TriggerEvent},
-        studio::{AppToStudio, EventSample},
+        studio::{
+            AppToStudio, EventSample, StudioScreenshotResponse, StudioWidgetTreeDumpResponse,
+        },
     },
     std::collections::{HashMap, HashSet},
 };
@@ -98,6 +100,91 @@ impl Cx {
         self.new_draw_event.will_redraw()
     }
 
+    pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
+        let mut request_ids = Vec::new();
+        self.screenshot_requests.retain(|request| {
+            if request.kind_id == kind_id {
+                request_ids.push(request.request_id);
+                false
+            } else {
+                true
+            }
+        });
+        request_ids
+    }
+
+    pub(crate) fn send_studio_screenshot_response(
+        request_ids: Vec<u64>,
+        width: u32,
+        height: u32,
+        image: Option<Vec<u8>>,
+    ) {
+        if request_ids.is_empty() {
+            return;
+        }
+        Cx::send_studio_message(AppToStudio::Screenshot(StudioScreenshotResponse {
+            request_ids,
+            image,
+            width,
+            height,
+        }));
+    }
+
+    pub(crate) fn send_studio_widget_tree_dump_response(&mut self, request_id: u64) {
+        self.widget_tree_dump_requests.push(request_id);
+        self.try_send_studio_widget_tree_dump_responses();
+    }
+
+    fn widget_tree_dump_ready(dump: &str) -> bool {
+        for line in dump.lines() {
+            let mut parts = line.split_whitespace();
+            let Some(first) = parts.next() else {
+                continue;
+            };
+            if first.starts_with('W') || first == "O" {
+                continue;
+            }
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.len() < 2 {
+                continue;
+            }
+            let Some(h) = tokens.last().and_then(|v| v.parse::<i64>().ok()) else {
+                continue;
+            };
+            let Some(w) = tokens
+                .get(tokens.len().saturating_sub(2))
+                .and_then(|v| v.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            if w > 0 && h > 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn try_send_studio_widget_tree_dump_responses(&mut self) {
+        if self.widget_tree_dump_requests.is_empty() {
+            return;
+        }
+        let dump = if let Some(callback) = self.widget_tree_dump_callback {
+            callback(self)
+        } else {
+            "W1 0\n".to_string()
+        };
+        if !Self::widget_tree_dump_ready(&dump) {
+            return;
+        }
+        let request_ids: Vec<u64> = self.widget_tree_dump_requests.drain(..).collect();
+        for request_id in request_ids {
+            Cx::send_studio_message(AppToStudio::WidgetTreeDump(StudioWidgetTreeDumpResponse {
+                request_id,
+                dump: dump.clone(),
+            }));
+        }
+    }
+
     // event handler wrappers
 
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
@@ -122,6 +209,10 @@ impl Cx {
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
             self.event_handler = Some(event_handler);
+        }
+
+        if Cx::has_studio_web_socket() {
+            self.try_send_studio_widget_tree_dump_responses();
         }
 
         // Reset widget query invalidation after all views have processed it.

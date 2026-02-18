@@ -264,7 +264,17 @@ impl RunView {
                 .active
                 .builds
                 .get_mut(&run_view_id)
-                .filter(|v| v.aux_chan_host_endpoint.is_some())
+                .filter(|v| {
+                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                    {
+                        v.aux_chan_host_endpoint.is_some()
+                    }
+                    #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+                    {
+                        let _ = v;
+                        true
+                    }
+                })
                 .filter(|v| {
                     v.swapchain(self.window_id)
                         .map(|swapchain| {

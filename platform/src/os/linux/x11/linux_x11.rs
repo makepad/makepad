@@ -42,7 +42,7 @@ impl X11Cx {
         cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
 
         let opengl_windows = Rc::new(RefCell::new(Vec::new()));
-        let is_stdin_loop = std::env::args().find(|v| v == "--stdin-loop").is_some();
+        let is_stdin_loop = crate::app_main::should_run_stdin_loop_from_env();
         if is_stdin_loop {
             cx.borrow_mut().in_makepad_studio = true;
         }
@@ -454,7 +454,11 @@ impl X11Cx {
                     request,
                 } => {
                     use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::open(request_id, request, cx.os.network_response.sender.clone());
+                    LinuxHttpSocket::open(
+                        request_id,
+                        request,
+                        cx.os.network_response.sender.clone(),
+                    );
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
                     use crate::os::linux::http::LinuxHttpSocket;

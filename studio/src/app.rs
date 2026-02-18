@@ -102,7 +102,11 @@ impl App {
                 _ => return None,
             }
         }
-        if paths.is_empty() { None } else { Some(paths) }
+        if paths.is_empty() {
+            None
+        } else {
+            Some(paths)
+        }
     }
 
     fn try_route_image_drop_to_terminal(
@@ -649,6 +653,7 @@ impl MatchEvent for App {
                 dock.close_tab(cx, run_view_id.add(2));
                 dock.redraw(cx);
                 log_list.redraw(cx);
+                run_list.redraw(cx);
             }
             AppAction::SetSnapshotMessage { message } => {
                 snapshot.set_message(cx, message);
@@ -693,6 +698,9 @@ impl MatchEvent for App {
                             } else {
                                 println!("WHIT");
                             }
+                            self.data
+                                .build_manager
+                                .register_window_tab(build_id, window_id, panel_id);
 
                             dock.redraw(cx);
                             log_list.redraw(cx);
@@ -852,7 +860,8 @@ impl MatchEvent for App {
             match action.cast() {
                 DockAction::TabCloseWasPressed(tab_id) => {
                     dock.close_tab(cx, tab_id);
-                    if self.data.build_manager.handle_tab_close(tab_id) {
+                    if let Some(run_view_id) = self.data.build_manager.handle_tab_close(tab_id) {
+                        cx.action(AppAction::DestroyRunViews { run_view_id });
                         log_list.redraw(cx);
                         run_list.redraw(cx);
                     }

@@ -16,7 +16,7 @@ use {
             cx_stdin::PresentableDraw,
         },
         script::vm::*,
-        studio::{AppToStudio, GPUSample, StudioScreenshotResponse},
+        studio::{AppToStudio, GPUSample},
         texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
@@ -674,21 +674,13 @@ impl Cx {
         in_texture: ObjcId,
         alloc: Option<TextureAlloc>,
     ) -> Option<ScreenshotInfo> {
-        let mut request_ids = Vec::new();
-        self.screenshot_requests.retain(|v| {
-            if v.kind_id == kind_id as u32 {
-                request_ids.push(v.request_id);
-                false
-            } else {
-                true
-            }
-        });
+        let request_ids = self.take_studio_screenshot_request_ids(kind_id as u32);
         let (tex_width, tex_height) = if let Some(alloc) = alloc {
             (alloc.width, alloc.height)
         } else {
             (width, height)
         };
-        if request_ids.len() > 0 {
+        if !request_ids.is_empty() {
             let descriptor = RcObjcId::from_owned(
                 NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
             );
@@ -754,14 +746,12 @@ impl Cx {
                             slice: 0
                         ]};
                         let () = msg_send![sf.texture, release];
-                        if !sf.request_ids.is_empty() {
-                            Self::send_studio_message(AppToStudio::Screenshot(StudioScreenshotResponse{
-                                request_ids: sf.request_ids.clone(),
-                                image: Some(buf),
-                                width: sf.width as _,
-                                height: sf.height as _,
-                            }))
-                        }
+                        Cx::send_studio_screenshot_response(
+                            sf.request_ids.clone(),
+                            sf.width as _,
+                            sf.height as _,
+                            Some(buf),
+                        );
                     }
 
                     let start:f64 = unsafe {msg_send![command_buffer, GPUStartTime]};

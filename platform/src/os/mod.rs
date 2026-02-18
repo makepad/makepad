@@ -56,11 +56,7 @@ pub use crate::os::linux::*;
 #[cfg(all(not(headless), target_os = "android"))]
 pub use crate::os::linux::android::android_media::*;
 
-#[cfg(all(
-    not(headless),
-    target_os = "linux",
-    not(target_env = "ohos")
-))]
+#[cfg(all(not(headless), target_os = "linux", not(target_env = "ohos")))]
 pub use crate::os::linux::linux_media::*;
 
 #[cfg(all(not(headless), target_env = "ohos"))]

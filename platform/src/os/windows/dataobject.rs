@@ -9,8 +9,8 @@ use {
             core::{self as wcore, BOOL},
             Win32::{
                 Foundation::{
-                    DATA_S_SAMEFORMATETC, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_LINDEX,
-                    DV_E_TYMED, E_NOTIMPL, E_UNEXPECTED, OLE_E_ADVISENOTSUPPORTED, S_OK,
+                    DATA_S_SAMEFORMATETC, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_LINDEX, DV_E_TYMED,
+                    E_NOTIMPL, E_UNEXPECTED, OLE_E_ADVISENOTSUPPORTED, S_OK,
                 },
                 System::{
                     Com::{

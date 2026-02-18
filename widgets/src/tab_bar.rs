@@ -430,8 +430,16 @@ impl TabBar {
         None
     }
 
+    pub fn tab_rect(&self, cx: &Cx, tab_id: LiveId) -> Option<Rect> {
+        self.tabs.get(&tab_id).map(|(tab, _)| tab.area().rect(cx))
+    }
+
+    pub fn bar_rect(&self, cx: &Cx) -> Rect {
+        self.scroll_bars.area().rect(cx)
+    }
+
     pub fn is_over_tab_bar(&self, cx: &Cx, abs: Vec2d) -> Option<Rect> {
-        let rect = self.scroll_bars.area().rect(cx);
+        let rect = self.bar_rect(cx);
         if rect.contains(abs) {
             return Some(rect);
         }

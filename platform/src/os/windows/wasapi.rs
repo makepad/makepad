@@ -8,6 +8,7 @@ use {
             core::Interface,
             core::PCWSTR,
             Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
+            Win32::Foundation::PROPERTYKEY,
             Win32::Foundation::{HANDLE, WAIT_OBJECT_0},
             Win32::Media::Audio::{
                 eAll,
@@ -54,7 +55,6 @@ use {
             Win32::System::Threading::{
                 AvSetMmThreadCharacteristicsW, CreateEventA, SetEvent, WaitForSingleObject,
             },
-            Win32::Foundation::PROPERTYKEY,
         },
     },
     std::collections::HashSet,

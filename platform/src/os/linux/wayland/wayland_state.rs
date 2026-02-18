@@ -5,14 +5,11 @@ use crate::{
     wayland::{wayland_type, xkb_sys},
     Area, DragEvent, DragItem, DragResponse, DropEvent, KeyEvent, KeyModifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextClipboardEvent, TextInputEvent,
-    WindowClosedEvent, WindowDragQueryEvent,
-    WindowDragQueryResponse,
+    WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse,
 };
 use std::{
     cell::{Cell, RefCell},
-    os::{
-        fd::{AsFd, AsRawFd, FromRawFd},
-    },
+    os::fd::{AsFd, AsRawFd, FromRawFd},
     rc::Rc,
     sync::Arc,
     sync::Mutex,
@@ -172,11 +169,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                 "wl_data_device_manager" => {
                     let data_device_manager = wl_registry
                         .bind::<wl_data_device_manager::WlDataDeviceManager, _, _>(
-                            name,
-                            version.min(3),
-                            qhandle,
-                            (),
-                        );
+                        name,
+                        version.min(3),
+                        qhandle,
+                        (),
+                    );
                     state.data_device_manager = Some(data_device_manager);
                     state.ensure_data_device(qhandle);
                 }
@@ -336,7 +333,11 @@ impl Dispatch<xdg_surface::XdgSurface, WindowId> for WaylandState {
         if let xdg_surface::Event::Configure { serial, .. } = event {
             xdg_surface.ack_configure(serial);
             let mut first_configure_event = None;
-            if let Some(window) = state.windows.iter_mut().find(|win| win.window_id == *window_id) {
+            if let Some(window) = state
+                .windows
+                .iter_mut()
+                .find(|win| win.window_id == *window_id)
+            {
                 if !window.configured {
                     let mut old_geom = window.window_geom.clone();
                     old_geom.inner_size = dvec2(0., 0.);
@@ -398,11 +399,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
     ) {
         match event {
             wl_data_device::Event::DataOffer { id } => {
-                if state
-                    .data_offers
-                    .iter()
-                    .all(|entry| entry.offer != id)
-                {
+                if state.data_offers.iter().all(|entry| entry.offer != id) {
                     state.data_offers.push(ClipboardOffer {
                         offer: id,
                         mime_types: Vec::new(),
@@ -411,8 +408,10 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
             }
             wl_data_device::Event::Selection { id } => {
                 state.clipboard_offer = id.map(|offer| {
-                    if let Some(index) =
-                        state.data_offers.iter().position(|entry| entry.offer == offer)
+                    if let Some(index) = state
+                        .data_offers
+                        .iter()
+                        .position(|entry| entry.offer == offer)
                     {
                         state.data_offers.swap_remove(index)
                     } else {
@@ -612,15 +611,15 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                     match key_state {
                         wl_keyboard::KeyState::Pressed => {
                             state.keyboard_serial = Some(serial);
-                            let (key_code, text_str) = if let Some(xkb_state) = state.xkb_state.as_mut()
-                            {
-                                (
-                                    xkb_state.keycode_to_makepad_keycode(key + 8),
-                                    xkb_state.key_get_utf8(key + 8),
-                                )
-                            } else {
-                                return;
-                            };
+                            let (key_code, text_str) =
+                                if let Some(xkb_state) = state.xkb_state.as_mut() {
+                                    (
+                                        xkb_state.keycode_to_makepad_keycode(key + 8),
+                                        xkb_state.key_get_utf8(key + 8),
+                                    )
+                                } else {
+                                    return;
+                                };
 
                             let primary_mod = state.modifiers.control || state.modifiers.logo;
                             if primary_mod {
@@ -628,9 +627,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                     KeyCode::KeyV => state.request_clipboard_paste(conn),
                                     KeyCode::KeyC => {
                                         let response = Rc::new(RefCell::new(None));
-                                        state.do_callback(XlibEvent::TextCopy(TextClipboardEvent {
-                                            response: response.clone(),
-                                        }));
+                                        state.do_callback(XlibEvent::TextCopy(
+                                            TextClipboardEvent {
+                                                response: response.clone(),
+                                            },
+                                        ));
                                         let content = response.borrow().clone();
                                         if let Some(content) = content {
                                             state.set_clipboard_text(qhandle, serial, content);
@@ -802,7 +803,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                     if matches!(response.get(), WindowDragQueryResponse::Caption) {
                                         if let (Some(seat), Some(window)) = (
                                             state.seat.as_ref(),
-                                            state.windows
+                                            state
+                                                .windows
                                                 .iter()
                                                 .find(|win| win.window_id == window_id),
                                         ) {
@@ -1048,8 +1050,7 @@ impl WaylandState {
     }
 
     pub(crate) fn available(&self) -> bool {
-        self.compositor.is_some()
-            && self.wm_base.is_some()
+        self.compositor.is_some() && self.wm_base.is_some()
     }
 
     fn xdg_toplevel_has_state(states: &[u8], needle: u32) -> bool {
