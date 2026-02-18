@@ -145,11 +145,13 @@ pub struct ActiveBuildWebSockets {
 }
 
 impl ActiveBuildWebSockets {
-    pub fn send_studio_to_app(&mut self, build_id: LiveId, msg: StudioToApp) {
+    pub fn send_studio_to_app(&mut self, build_id: LiveId, msg: StudioToApp) -> bool {
         if let Some(socket) = self.sockets.iter_mut().find(|v| v.build_id == build_id) {
             let data = StudioToAppVec(vec![msg]).serialize_bin();
-            let _ = socket.sender.send(data.clone());
+            let _ = socket.sender.send(data);
+            return true;
         }
+        false
     }
 }
 
@@ -273,6 +275,25 @@ impl BuildManager {
     }
 
     pub fn send_host_to_stdin(&self, item_id: LiveId, msg: HostToStdin) {
+        let runs_in_studio = self
+            .active
+            .builds
+            .get(&item_id)
+            .is_some_and(|build| build.process.target.runs_in_studio());
+
+        if let Ok(sockets) = self.active_build_websockets.lock() {
+            if sockets
+                .borrow_mut()
+                .send_studio_to_app(item_id, StudioToApp::HostToStdin(msg.clone()))
+            {
+                return;
+            }
+        }
+
+        if runs_in_studio {
+            return;
+        }
+
         self.clients[0].send_cmd_with_id(item_id, BuildCmd::HostToStdin(msg.to_json()));
     }
 
@@ -411,8 +432,9 @@ impl BuildManager {
     }
 
     pub fn broadcast_to_stdin(&mut self, msg: HostToStdin) {
-        for build_id in self.active.builds.keys() {
-            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::HostToStdin(msg.to_json()));
+        let build_ids: Vec<LiveId> = self.active.builds.keys().copied().collect();
+        for build_id in build_ids {
+            self.send_host_to_stdin(build_id, msg.clone());
         }
     }
 
@@ -436,20 +458,15 @@ impl BuildManager {
                 for (build_id, build) in &self.active.builds {
                     for area in build.app_area.values() {
                         if e.handled.get() == *area {
-                            self.clients[0].send_cmd_with_id(
+                            self.send_host_to_stdin(
                                 *build_id,
-                                BuildCmd::HostToStdin(
-                                    HostToStdin::MouseDown(StdinMouseDown {
-                                        time: e.time,
-                                        x: e.abs.x,
-                                        y: e.abs.y,
-                                        button_raw_bits: e.button.bits(),
-                                        modifiers: StdinKeyModifiers::from_key_modifiers(
-                                            &e.modifiers,
-                                        ),
-                                    })
-                                    .to_json(),
-                                ),
+                                HostToStdin::MouseDown(StdinMouseDown {
+                                    time: e.time,
+                                    x: e.abs.x,
+                                    y: e.abs.y,
+                                    button_raw_bits: e.button.bits(),
+                                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers),
+                                }),
                             );
                             break;
                         }
@@ -500,6 +517,9 @@ impl BuildManager {
             while let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
                 for msg in msgs.0 {
                     match msg {
+                        AppToStudio::StdinToHost(msg) => {
+                            cx.action(BuildManagerAction::StdinToHost { build_id, msg });
+                        }
                         AppToStudio::LogItem(item) => {
                             let file_name = if let Some(build) = active.builds.get(&build_id) {
                                 self.roots.map_path(&build.root, &item.file_name)
@@ -688,27 +708,18 @@ impl BuildManager {
                         //editor_state.messages.push(wrap.msg);
                     }
                     BuildClientMessage::LogItem(LogItem::StdinToHost(line)) => {
-                        let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
-                        match msg {
-                            Ok(msg) => cx.action(BuildManagerAction::StdinToHost {
-                                build_id: wrap.cmd_id,
-                                msg,
-                            }),
-                            Err(_) => {
-                                // we should output a log string
-                                log.push((
-                                    wrap.cmd_id,
-                                    LogItem::Bare(LogItemBare {
-                                        level: LogLevel::Log,
-                                        line: line.trim().to_string(),
-                                    }),
-                                ));
-                                cx.action(AppAction::RedrawLog)
-                                /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
-                                    level: BuildMsgLevel::Log,
-                                    line
-                                }));*/
-                            }
+                        // stdin-loop control traffic moved to websocket messages.
+                        // Any stdout lines in this channel are plain log output.
+                        let line = line.trim();
+                        if !line.is_empty() {
+                            log.push((
+                                wrap.cmd_id,
+                                LogItem::Bare(LogItemBare {
+                                    level: LogLevel::Log,
+                                    line: line.to_string(),
+                                }),
+                            ));
+                            cx.action(AppAction::RedrawLog);
                         }
                     }
                     BuildClientMessage::AuxChanHostEndpointCreated(aux_chan_host_endpoint) => {
@@ -728,14 +739,42 @@ impl BuildManager {
     }
 
     pub fn start_http_server(&mut self) {
-        let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), self.http_port as u16);
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest>();
-        //log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
-        start_http_server(HttpServer {
-            listen_address: addr,
-            post_max_size: 1024 * 1024,
-            request: tx_request,
-        });
+        const MAX_HTTP_PORT_RETRIES: u16 = 32;
+
+        let mut bound_port = None;
+        for offset in 0..MAX_HTTP_PORT_RETRIES {
+            let Some(port) = (self.http_port as u16).checked_add(offset) else {
+                break;
+            };
+            let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
+            if start_http_server(HttpServer {
+                listen_address: addr,
+                post_max_size: 1024 * 1024,
+                request: tx_request.clone(),
+            })
+            .is_some()
+            {
+                bound_port = Some(port as usize);
+                break;
+            }
+        }
+
+        let Some(bound_port) = bound_port else {
+            println!(
+                "Cannot bind studio http server on ports {}..{}",
+                self.http_port,
+                self.http_port + (MAX_HTTP_PORT_RETRIES as usize).saturating_sub(1)
+            );
+            return;
+        };
+
+        if bound_port != self.http_port {
+            self.http_port = bound_port;
+            let local_ip = get_local_ip();
+            self.studio_http = format!("http://{}:{}/$studio_web_socket", local_ip, self.http_port);
+            println!("Studio http fallback : {:?}", self.studio_http);
+        }
         /*
         let rx_file_change = self.send_file_change.receiver();
         //let (tx_live_file, rx_live_file) = mpsc::channel::<HttpServerRequest> ();
