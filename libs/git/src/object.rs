@@ -1,8 +1,6 @@
-use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::fs;
-use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 
@@ -75,9 +73,7 @@ pub fn read_loose_object(git_dir: &Path, oid: &ObjectId) -> Result<Object, GitEr
         }
     })?;
 
-    let mut decoder = ZlibDecoder::new(&compressed[..]);
-    let mut raw = Vec::new();
-    decoder.read_to_end(&mut raw).map_err(|e| {
+    let raw = makepad_fast_inflate::zlib_decompress_vec(&compressed).map_err(|e| {
         GitError::InvalidObject(format!("zlib decompress failed for {}: {}", oid, e))
     })?;
 
