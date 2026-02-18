@@ -29,6 +29,7 @@ workspace.members = [
     "tools/cargo_makepad",
     "tools/remote",
     "libs/terminal_core",
+    "libs/git",
 #    "libs/matrix",
 ]
 

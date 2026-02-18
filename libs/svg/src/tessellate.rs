@@ -993,6 +993,20 @@ impl Tessellator {
         indices: &mut Vec<u32>,
     ) {
         let expand = blur * 3.0;
+        // Ensure CCW winding so that dmx/dmy normals point outward.
+        // prepare_points no longer auto-corrects winding for paths
+        // without explicit winding, so we must enforce it here.
+        for pi in 0..self.paths.len() {
+            let sp = &self.paths[pi];
+            let first = sp.first;
+            let count = sp.count;
+            if count >= 3 {
+                let area = poly_area(&self.points[first..first + count]);
+                if area < 0.0 {
+                    self.points[first..first + count].reverse();
+                }
+            }
+        }
         self.calculate_joins(expand, line_join, miter_limit);
         verts.clear();
         indices.clear();
