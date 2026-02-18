@@ -1,9 +1,9 @@
-use crate::deflate::buffer::{update_hash, LZ_HASH_SHIFT, LZ_HASH_SIZE};
-use crate::deflate::core::{
+use super::buffer::{update_hash, LZ_HASH_SHIFT, LZ_HASH_SIZE};
+use super::core::{
     flush_block, CallbackOxide, CompressorOxide, TDEFLFlush, TDEFLStatus, LZ_DICT_SIZE,
     LZ_DICT_SIZE_MASK, MAX_MATCH_LEN, MIN_MATCH_LEN,
 };
-use core::cmp;
+use ::core::cmp;
 
 pub(crate) fn compress_stored(d: &mut CompressorOxide, callback: &mut CallbackOxide) -> bool {
     let in_buf = match callback.buf() {

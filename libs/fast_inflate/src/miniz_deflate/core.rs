@@ -1,24 +1,24 @@
 //! Streaming compression functionality.
 
-use alloc::boxed::Box;
-use core::convert::TryInto;
-use core::{cmp, mem};
+use ::core::convert::TryInto;
+use ::core::{cmp, mem};
+use std::boxed::Box;
 
-use super::super::*;
-use super::deflate_flags::*;
-use super::CompressionLevel;
-use crate::deflate::buffer::{
+use self::deflate_flags::*;
+use super::buffer::{
     update_hash, HashBuffers, LocalBuf, LZ_CODE_BUF_MASK, LZ_CODE_BUF_SIZE, LZ_DICT_FULL_SIZE,
     LZ_HASH_BITS, LZ_HASH_SHIFT, LZ_HASH_SIZE, OUT_BUF_SIZE,
 };
-use crate::deflate::stored::compress_stored;
-use crate::deflate::zlib;
-use crate::shared::{update_adler32, HUFFMAN_LENGTH_ORDER, MZ_ADLER32_INIT};
-use crate::DataFormat;
+use super::shared::{update_adler32, HUFFMAN_LENGTH_ORDER, MZ_ADLER32_INIT};
+use super::stored::compress_stored;
+use super::zlib;
+use super::CompressionLevel;
+use super::DataFormat;
+use super::*;
 
 // Currently not bubbled up outside this module, so can fill in with more
 // context eventually if needed.
-type Result<T, E = Error> = core::result::Result<T, E>;
+type Result<T, E = Error> = ::core::result::Result<T, E>;
 pub(crate) struct Error {}
 
 pub(crate) const MAX_PROBES_MASK: u32 = 0xFFF;
@@ -2369,13 +2369,13 @@ pub fn create_comp_flags_from_zip_params(level: i32, window_bits: i32, strategy:
 
 #[cfg(test)]
 mod test {
+    use super::super::shared::MZ_DEFAULT_WINDOW_BITS;
     use super::{
         compress_to_output, create_comp_flags_from_zip_params, read_u16_le, write_u16_le,
         CompressionStrategy, CompressorOxide, TDEFLFlush, TDEFLStatus, DEFAULT_FLAGS,
-        MZ_DEFAULT_WINDOW_BITS,
     };
-    use crate::inflate::decompress_to_vec;
-    use alloc::vec;
+    use crate::decompress::deflate_decompress_vec;
+    use std::vec;
 
     #[test]
     fn u16_to_slice() {
@@ -2416,12 +2416,11 @@ mod test {
         assert_eq!(status, TDEFLStatus::Done);
         assert_eq!(in_consumed, slice.len());
 
-        let decoded = decompress_to_vec(&encoded[..]).unwrap();
+        let decoded = deflate_decompress_vec(&encoded[..]).unwrap();
         assert_eq!(&decoded[..], &slice[..]);
     }
 
     #[test]
-    /// Check fast compress mode
     fn compress_fast() {
         let slice = [
             1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 1, 2, 6, 1, 2, 3, 1, 2, 3, 2, 3, 1, 2, 3,
@@ -2438,54 +2437,12 @@ mod test {
         assert_eq!(status, TDEFLStatus::Done);
         assert_eq!(in_consumed, slice.len());
 
-        // Needs to be altered if algorithm improves.
         assert_eq!(
             &encoded[..],
             [99, 100, 98, 102, 1, 98, 48, 98, 3, 147, 204, 76, 204, 140, 76, 204, 0]
         );
 
-        let decoded = decompress_to_vec(&encoded[..]).unwrap();
+        let decoded = deflate_decompress_vec(&encoded[..]).unwrap();
         assert_eq!(&decoded[..], &slice[..]);
-    }
-
-    #[test]
-    fn zlib_window_bits() {
-        use crate::inflate::stream::{inflate, InflateState};
-        use crate::DataFormat;
-        use alloc::boxed::Box;
-        let slice = [
-            1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 1, 2, 6, 1, 2, 3, 1, 2, 3, 2, 3, 1, 2, 3, 35, 22, 22, 2,
-            6, 2, 6,
-        ];
-        let mut encoded = vec![];
-        let flags = create_comp_flags_from_zip_params(2, 1, CompressionStrategy::RLE.into());
-        let mut d = CompressorOxide::new(flags);
-        let (status, in_consumed) =
-            compress_to_output(&mut d, &slice, TDEFLFlush::Finish, |out: &[u8]| {
-                encoded.extend_from_slice(out);
-                true
-            });
-
-        assert_eq!(status, TDEFLStatus::Done);
-        assert_eq!(in_consumed, slice.len());
-
-        let mut output = vec![0; slice.len()];
-
-        let mut decompressor = Box::new(InflateState::new(DataFormat::Zlib));
-
-        let mut out_slice = output.as_mut_slice();
-        // Feed 1 byte at a time and no back buffer to test that RLE encoding has been used.
-        for i in 0..encoded.len() {
-            let result = inflate(
-                &mut decompressor,
-                &encoded[i..i + 1],
-                out_slice,
-                crate::MZFlush::None,
-            );
-            out_slice = &mut out_slice[result.bytes_written..];
-        }
-        let cmf = decompressor.decompressor().zlib_header().0;
-        assert_eq!(cmf, 8);
-        assert_eq!(output, slice)
     }
 }

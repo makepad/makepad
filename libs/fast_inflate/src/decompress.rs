@@ -1274,6 +1274,144 @@ pub fn zlib_decompress_vec_with_hint(
     }
 }
 
+// --- Gzip decompression ---
+
+const GZIP_MIN_OVERHEAD: usize = 18; // 10-byte header + 8-byte trailer (CRC32 + ISIZE)
+const GZIP_ID1: u8 = 0x1f;
+const GZIP_ID2: u8 = 0x8b;
+const GZIP_CM_DEFLATE: u8 = 8;
+const GZIP_FHCRC: u8 = 1 << 1;
+const GZIP_FEXTRA: u8 = 1 << 2;
+const GZIP_FNAME: u8 = 1 << 3;
+const GZIP_FCOMMENT: u8 = 1 << 4;
+
+/// Decompress gzip-wrapped data into a pre-sized output buffer.
+/// Returns (bytes_consumed_from_input, bytes_written_to_output) or error.
+pub fn gzip_decompress(input: &[u8], output: &mut [u8]) -> Result<(usize, usize), DecompressError> {
+    let mut d = Decompressor::new();
+    gzip_decompress_with(&mut d, input, output)
+}
+
+fn gzip_decompress_with(
+    d: &mut Decompressor,
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<(usize, usize), DecompressError> {
+    if input.len() < GZIP_MIN_OVERHEAD {
+        return Err(DecompressError::BadData);
+    }
+
+    // Check magic number and compression method
+    if input[0] != GZIP_ID1 || input[1] != GZIP_ID2 {
+        return Err(DecompressError::BadData);
+    }
+    if input[2] != GZIP_CM_DEFLATE {
+        return Err(DecompressError::BadData);
+    }
+
+    let flg = input[3];
+    // bytes 4..8 = MTIME, byte 8 = XFL, byte 9 = OS
+    let mut pos = 10;
+
+    // Skip FEXTRA
+    if flg & GZIP_FEXTRA != 0 {
+        if pos + 2 > input.len() {
+            return Err(DecompressError::BadData);
+        }
+        let xlen = input[pos] as usize | ((input[pos + 1] as usize) << 8);
+        pos += 2 + xlen;
+        if pos > input.len() {
+            return Err(DecompressError::BadData);
+        }
+    }
+
+    // Skip FNAME (null-terminated)
+    if flg & GZIP_FNAME != 0 {
+        while pos < input.len() && input[pos] != 0 {
+            pos += 1;
+        }
+        if pos >= input.len() {
+            return Err(DecompressError::BadData);
+        }
+        pos += 1; // skip null terminator
+    }
+
+    // Skip FCOMMENT (null-terminated)
+    if flg & GZIP_FCOMMENT != 0 {
+        while pos < input.len() && input[pos] != 0 {
+            pos += 1;
+        }
+        if pos >= input.len() {
+            return Err(DecompressError::BadData);
+        }
+        pos += 1;
+    }
+
+    // Skip FHCRC (2-byte header CRC16)
+    if flg & GZIP_FHCRC != 0 {
+        pos += 2;
+        if pos > input.len() {
+            return Err(DecompressError::BadData);
+        }
+    }
+
+    let deflate_data = &input[pos..];
+    let (consumed, written) = deflate_decompress_with(d, deflate_data, output)?;
+
+    let footer_start = pos + consumed;
+    if footer_start + 8 > input.len() {
+        return Err(DecompressError::BadData);
+    }
+
+    // CRC32 (little-endian)
+    let expected_crc = read_le32(input, footer_start);
+    let actual_crc = crate::crc32::crc32(&output[..written]);
+    if actual_crc != expected_crc {
+        return Err(DecompressError::BadData);
+    }
+
+    // ISIZE (original size mod 2^32, little-endian)
+    let expected_size = read_le32(input, footer_start + 4) as usize;
+    if (written & 0xFFFF_FFFF) != expected_size {
+        return Err(DecompressError::BadData);
+    }
+
+    Ok((footer_start + 8, written))
+}
+
+fn read_le32(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
+
+/// Decompress gzip-wrapped data when the output size is unknown.
+pub fn gzip_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
+    let mut d = Decompressor::new();
+    let mut capacity = (input.len() * 3).max(INITIAL_VEC_CAPACITY);
+    loop {
+        let mut output = vec![0u8; capacity];
+        match gzip_decompress_with(&mut d, input, &mut output) {
+            Ok((_consumed, written)) => {
+                output.truncate(written);
+                return Ok(output);
+            }
+            Err(DecompressError::InsufficientSpace) => {
+                capacity = capacity
+                    .checked_mul(2)
+                    .ok_or(DecompressError::InsufficientSpace)?;
+                if capacity > MAX_VEC_CAPACITY {
+                    return Err(DecompressError::InsufficientSpace);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

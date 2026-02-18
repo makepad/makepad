@@ -2,9 +2,9 @@
 //! to avoid stack copies. Box::new() doesn't at the moment, and using a vec means we would lose
 //! static length info.
 
-use crate::deflate::core::{LZ_DICT_SIZE, MAX_MATCH_LEN};
-use alloc::boxed::Box;
-use alloc::vec;
+use super::core::{LZ_DICT_SIZE, MAX_MATCH_LEN};
+use std::boxed::Box;
+use std::vec;
 
 /// Size of the buffer of lz77 encoded data.
 pub const LZ_CODE_BUF_SIZE: usize = 64 * 1024;

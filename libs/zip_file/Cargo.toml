@@ -9,4 +9,4 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
-miniz_oxide = { version = "0.8.5", path = "../miniz_oxide", default-features = false, features = ["with-alloc"] }
+makepad-fast-inflate = { path = "../fast_inflate" }

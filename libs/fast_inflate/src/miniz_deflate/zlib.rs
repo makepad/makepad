@@ -1,4 +1,4 @@
-use crate::deflate::core::deflate_flags::{
+use super::core::deflate_flags::{
     TDEFL_FORCE_ALL_RAW_BLOCKS, TDEFL_GREEDY_PARSING_FLAG, TDEFL_RLE_MATCHES,
 };
 
@@ -29,7 +29,7 @@ fn add_fcheck(cmf: u8, flg: u8) -> u8 {
 
 #[inline]
 const fn zlib_level_from_flags(flags: u32) -> u8 {
-    use crate::deflate::core::NUM_PROBES;
+    use super::core::NUM_PROBES;
 
     let num_probes = flags & super::MAX_PROBES_MASK;
     if (flags & TDEFL_GREEDY_PARSING_FLAG != 0) || (flags & TDEFL_RLE_MATCHES != 0) {
@@ -74,7 +74,7 @@ pub fn header_from_flags(flags: u32) -> [u8; 2] {
 
 #[cfg(test)]
 mod test {
-    use crate::shared::MZ_DEFAULT_WINDOW_BITS;
+    use super::super::shared::MZ_DEFAULT_WINDOW_BITS;
     #[test]
     fn zlib() {
         use super::super::*;

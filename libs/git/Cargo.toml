@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 makepad-fast-inflate = { path = "../fast_inflate" }
-flate2 = { version = "1", path = "../flate2" }
 
 [dev-dependencies]
 tempfile = "3"

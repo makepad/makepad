@@ -13,7 +13,7 @@ metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
 makepad-draw = { path = "../draw", version = "2.0.0" }
 makepad-derive-widget = {path = "./derive_widget", version="2.0.0"}
 makepad-mbtile-reader = { path = "../libs/mbtile_reader", version = "1.0.0", optional = true }
-flate2 = { path = "../libs/flate2", default-features = false, features = ["rust_backend"], optional = true }
+makepad-fast-inflate = { path = "../libs/fast_inflate", optional = true }
 
 makepad-html = { path = "../libs/html", version = "1.0.0" }
 unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
@@ -27,7 +27,7 @@ serde = { version = "1.0", optional = true, features = ["derive"] }
 [features]
 default = []
 
-maps = ["dep:makepad-mbtile-reader", "dep:flate2"]
+maps = ["dep:makepad-mbtile-reader", "dep:makepad-fast-inflate"]
 pdf = ["dep:makepad-pdf-parse"]
 
 ## Enables certain public-facing types to derive serde serialization traits.
