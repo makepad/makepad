@@ -7,6 +7,9 @@
 // - Packed decode table entries with length/offset/extra bits built in
 // - Fast loop with bounds checks only at loop boundaries
 // - Branchless bitbuffer refill using unaligned word reads
+//
+// This version uses bounds-checked slice indexing (usize offsets) instead of
+// raw pointers, while retaining unaligned word loads/stores for performance.
 
 use std::fmt;
 
@@ -72,12 +75,10 @@ const HUFFDEC_END_OF_BLOCK: u32 = 0x00002000;
 
 // --- Bitstream constants ---
 
-// On 64-bit we use u64 as the bitbuffer
 type BitBuf = u64;
 const BITBUF_NBITS: u32 = 64;
 const WORDBYTES: usize = 8;
 
-// Unaligned access is fast on x86_64 and aarch64
 const UNALIGNED_ACCESS_IS_FAST: bool = cfg!(any(
     target_arch = "x86_64",
     target_arch = "x86",
@@ -126,48 +127,41 @@ fn bsr32(v: u32) -> u32 {
     31 - v.leading_zeros()
 }
 
+/// Load a little-endian u64 from a slice at the given offset (unaligned).
 #[inline(always)]
-fn load_word_unaligned(p: *const u8) -> u64 {
+fn load_word(buf: &[u8], pos: usize) -> u64 {
     unsafe {
         let mut v = 0u64;
-        std::ptr::copy_nonoverlapping(p, &mut v as *mut u64 as *mut u8, 8);
+        std::ptr::copy_nonoverlapping(buf.as_ptr().add(pos), &mut v as *mut u64 as *mut u8, 8);
         u64::from_le(v)
     }
 }
 
+/// Store a little-endian u64 into a mutable slice at the given offset (unaligned).
 #[inline(always)]
-fn store_word_unaligned(v: u64, p: *mut u8) {
+fn store_word(buf: &mut [u8], pos: usize, v: u64) {
     unsafe {
         let bytes = v.to_le_bytes();
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, 8);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.as_mut_ptr().add(pos), 8);
     }
 }
 
+/// Read a little-endian u16 from a slice at the given offset.
 #[inline(always)]
-fn get_unaligned_le16(p: *const u8) -> u16 {
-    unsafe {
-        let mut v = 0u16;
-        std::ptr::copy_nonoverlapping(p, &mut v as *mut u16 as *mut u8, 2);
-        u16::from_le(v)
-    }
+fn read_le16(buf: &[u8], pos: usize) -> u16 {
+    u16::from_le_bytes([buf[pos], buf[pos + 1]])
 }
 
+/// Read a big-endian u16 from a slice at the given offset.
 #[inline(always)]
-fn get_unaligned_be16(p: *const u8) -> u16 {
-    unsafe {
-        let mut v = 0u16;
-        std::ptr::copy_nonoverlapping(p, &mut v as *mut u16 as *mut u8, 2);
-        u16::from_be(v)
-    }
+fn read_be16(buf: &[u8], pos: usize) -> u16 {
+    u16::from_be_bytes([buf[pos], buf[pos + 1]])
 }
 
+/// Read a big-endian u32 from a slice at the given offset.
 #[inline(always)]
-fn get_unaligned_be32(p: *const u8) -> u32 {
-    unsafe {
-        let mut v = 0u32;
-        std::ptr::copy_nonoverlapping(p, &mut v as *mut u32 as *mut u8, 4);
-        u32::from_be(v)
-    }
+fn read_be32(buf: &[u8], pos: usize) -> u32 {
+    u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
 }
 
 #[inline(always)]
@@ -203,15 +197,12 @@ static PRECODE_DECODE_RESULTS: [u32; DEFLATE_NUM_PRECODE_SYMS] = {
 
 static LITLEN_DECODE_RESULTS: [u32; DEFLATE_NUM_LITLEN_SYMS] = {
     let mut t = [0u32; DEFLATE_NUM_LITLEN_SYMS];
-    // Literals 0..255
     let mut i = 0u32;
     while i < 256 {
         t[i as usize] = HUFFDEC_LITERAL | (i << 16);
         i += 1;
     }
-    // End of block (symbol 256)
     t[256] = HUFFDEC_EXCEPTIONAL | HUFFDEC_END_OF_BLOCK;
-    // Lengths (symbols 257..285)
     let length_bases: [u32; 29] = [
         3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
         131, 163, 195, 227, 258,
@@ -224,7 +215,6 @@ static LITLEN_DECODE_RESULTS: [u32; DEFLATE_NUM_LITLEN_SYMS] = {
         t[257 + i as usize] = (length_bases[i as usize] << 16) | length_extra[i as usize];
         i += 1;
     }
-    // Symbols 286, 287 are unused but map to 258,0 like libdeflate
     t[286] = (258 << 16) | 0;
     t[287] = (258 << 16) | 0;
     t
@@ -250,9 +240,7 @@ static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] = {
 
 // --- Decompressor state ---
 
-pub struct Decompressor {
-    // Union-like layout: precode_lens / (lens + precode_decode_table) / litlen_decode_table
-    // We just allocate all of them separately since Rust doesn't have C unions like this
+struct Decompressor {
     precode_lens: [u8; DEFLATE_NUM_PRECODE_SYMS],
     lens: [u8; DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS + DEFLATE_MAX_LENS_OVERRUN],
     precode_decode_table: [u32; PRECODE_ENOUGH],
@@ -270,7 +258,7 @@ impl Default for Decompressor {
 }
 
 impl Decompressor {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Decompressor {
             precode_lens: [0; DEFLATE_NUM_PRECODE_SYMS],
             lens: [0; DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS + DEFLATE_MAX_LENS_OVERRUN],
@@ -285,13 +273,11 @@ impl Decompressor {
 }
 
 // --- Build decode table ---
-// Faithful port of libdeflate's build_decode_table()
 
+#[inline(always)]
 fn make_decode_table_entry(decode_results: &[u32], sym: u32, len: u32) -> u32 {
     decode_results[sym as usize] + (len << 8) + len
 }
-
-// --- Build decode table (unified, matches libdeflate exactly) ---
 
 fn build_decode_table(
     decode_table: &mut [u32],
@@ -306,12 +292,10 @@ fn build_decode_table(
     let mut len_counts = [0u32; DEFLATE_MAX_CODEWORD_LEN as usize + 2];
     let mut offsets = [0u32; DEFLATE_MAX_CODEWORD_LEN as usize + 2];
 
-    // Count codeword lengths
     for i in 0..num_syms {
         len_counts[lens[i] as usize] += 1;
     }
 
-    // Sort symbols by length then by symbol index
     offsets[0] = 0;
     for l in 0..=max_codeword_len as usize {
         offsets[l + 1] = offsets[l] + len_counts[l];
@@ -326,7 +310,6 @@ fn build_decode_table(
 
     let num_used = num_syms as u32 - len_counts[0];
 
-    // Special cases: 0 or 1 used symbols
     if num_used <= 1 {
         if num_used == 0 {
             for i in 0..(1u32 << table_bits) as usize {
@@ -346,7 +329,6 @@ fn build_decode_table(
         return true;
     }
 
-    // Verify the code is complete (not over/under-subscribed)
     {
         let mut codespace_used: i64 = 0;
         for len in 1..=max_codeword_len {
@@ -357,7 +339,6 @@ fn build_decode_table(
         }
     }
 
-    // Optionally cap table_bits
     if actual_table_bits.is_some() {
         let mut tb = table_bits;
         while tb > 1 && len_counts[tb as usize] == 0 {
@@ -369,8 +350,6 @@ fn build_decode_table(
         *bits = table_bits;
     }
 
-    // --- Fill main table entries (codewords <= table_bits) ---
-
     let sym_base = len_counts[0] as usize;
     let mut sorted_ptr = sym_base;
     let mut codeword: u32 = 0;
@@ -378,7 +357,6 @@ fn build_decode_table(
     let mut count = len_counts[1];
     let mut cur_table_end: u32 = 1 << 1;
 
-    // Skip empty lengths
     while count == 0 {
         len += 1;
         if len > table_bits {
@@ -388,16 +366,13 @@ fn build_decode_table(
         cur_table_end = 1 << len;
     }
 
-    // Fill main table
     if len <= table_bits {
         loop {
-            // Process all symbols with this codeword length
             loop {
                 let entry =
                     make_decode_table_entry(decode_results, sorted_syms[sorted_ptr] as u32, len);
                 sorted_ptr += 1;
 
-                // Fill stride entries
                 let stride = 1u32 << len;
                 let mut i = codeword;
                 while i < cur_table_end {
@@ -405,15 +380,8 @@ fn build_decode_table(
                     i += stride;
                 }
 
-                // Advance codeword (bit-reversed increment)
                 if codeword == (1u32 << len) - 1 {
-                    // Special: all 1s
-                    // Check if we're done with main table
                     count -= 1;
-                    // All codewords at this length exhausted? should be.
-                    // Actually, if codeword == all 1s and count > 0,
-                    // we'd wrap around. But canonical codes don't do that.
-                    // Move to next length.
                     break;
                 }
                 let bit = 1u32 << bsr32(codeword ^ (cur_table_end - 1));
@@ -426,13 +394,11 @@ fn build_decode_table(
                 }
             }
 
-            // Advance to the next codeword length
             loop {
                 len += 1;
                 if len > table_bits {
                     break;
                 }
-                // Double the table
                 let end = cur_table_end as usize;
                 if end * 2 > decode_table.len() {
                     return false;
@@ -454,13 +420,10 @@ fn build_decode_table(
 
     cur_table_end = 1u32 << table_bits;
 
-    // --- Fill subtable entries (codewords > table_bits) ---
-    // Process remaining symbols
     if sorted_ptr >= sym_base + num_used as usize {
-        return true; // No subtables needed
+        return true;
     }
 
-    // Advance len to the first length with remaining symbols
     while len <= max_codeword_len && len_counts[len as usize] == 0 {
         len += 1;
     }
@@ -468,21 +431,17 @@ fn build_decode_table(
         return true;
     }
 
-    // Recompute codeword for this length
-    // Using the canonical code reconstruction:
     {
         let mut c: u32 = 0;
         for l in 1..=len {
             c = (c + len_counts[l as usize - 1]) << 1;
         }
-        // Advance past already-processed symbols at this length
         let already = if len <= table_bits {
             len_counts[len as usize] - count
         } else {
             0
         };
         c += already;
-        // Bit-reverse the codeword
         codeword = c.reverse_bits() >> (32 - len);
     }
 
@@ -491,7 +450,6 @@ fn build_decode_table(
     let mut subtable_prefix: u32 = u32::MAX;
 
     loop {
-        // Start a new subtable if needed
         let prefix = codeword & ((1u32 << table_bits) - 1);
         if prefix != subtable_prefix {
             subtable_prefix = prefix;
@@ -511,14 +469,12 @@ fn build_decode_table(
                 return false;
             }
 
-            // Write pointer entry in main table
             decode_table[subtable_prefix as usize] = (subtable_start << 16)
                 | HUFFDEC_EXCEPTIONAL
                 | HUFFDEC_SUBTABLE_POINTER
                 | (sub_bits << 8)
                 | table_bits;
 
-            // Fill subtable entries
             let entry = make_decode_table_entry(
                 decode_results,
                 sorted_syms[sorted_ptr] as u32,
@@ -533,7 +489,6 @@ fn build_decode_table(
                 i += stride;
             }
         } else {
-            // Same subtable prefix, just fill the entry
             let subtable_start_search = decode_table[subtable_prefix as usize] >> 16;
             let sub_bits_search = (decode_table[subtable_prefix as usize] >> 8) & 0x3F;
             let local_end = subtable_start_search + (1u32 << sub_bits_search);
@@ -553,9 +508,7 @@ fn build_decode_table(
             }
         }
 
-        // Advance codeword
         if codeword == (1u32 << len) - 1 {
-            // Last codeword
             return true;
         }
         let bit = 1u32 << bsr32(codeword ^ ((1u32 << len) - 1));
@@ -573,7 +526,7 @@ fn build_decode_table(
     }
 }
 
-// --- Main decompression ---
+// --- Main decompression (safe, bounds-checked) ---
 
 /// Decompress raw DEFLATE data.
 /// `input`: compressed deflate stream
@@ -588,33 +541,19 @@ pub fn deflate_decompress(
 }
 
 /// Decompress raw DEFLATE data using a reusable decompressor.
-pub fn deflate_decompress_with(
+fn deflate_decompress_with(
     d: &mut Decompressor,
     input: &[u8],
     output: &mut [u8],
 ) -> Result<(usize, usize), DecompressError> {
-    let out_ptr = output.as_mut_ptr();
-    let out_len = output.len();
-    let in_ptr = input.as_ptr();
     let in_len = input.len();
+    let out_len = output.len();
 
-    unsafe { deflate_decompress_impl(d, in_ptr, in_len, out_ptr, out_len) }
-}
+    let out_fastloop_end = out_len.saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
+    let in_fastloop_end = in_len.saturating_sub(FASTLOOP_MAX_BYTES_READ);
 
-unsafe fn deflate_decompress_impl(
-    d: &mut Decompressor,
-    in_base: *const u8,
-    in_nbytes: usize,
-    out_base: *mut u8,
-    out_nbytes_avail: usize,
-) -> Result<(usize, usize), DecompressError> {
-    let mut out_next = out_base;
-    let out_end = out_base.add(out_nbytes_avail);
-    let out_fastloop_end = out_end.sub(out_nbytes_avail.min(FASTLOOP_MAX_BYTES_WRITTEN));
-
-    let mut in_next = in_base;
-    let in_end = in_base.add(in_nbytes);
-    let in_fastloop_end = in_end.sub(in_nbytes.min(FASTLOOP_MAX_BYTES_READ));
+    let mut in_pos: usize = 0;
+    let mut out_pos: usize = 0;
 
     let mut bitbuf: BitBuf = 0;
     let mut bitsleft: u32 = 0;
@@ -630,22 +569,22 @@ unsafe fn deflate_decompress_impl(
 
     macro_rules! refill_bits_branchless {
         () => {
-            bitbuf |= load_word_unaligned(in_next) << (bitsleft as u8 as u32);
-            in_next = in_next.add(WORDBYTES - 1);
-            in_next = in_next.sub(((bitsleft >> 3) & 0x7) as usize);
+            bitbuf |= load_word(input, in_pos) << (bitsleft as u8 as u32);
+            in_pos += WORDBYTES - 1;
+            in_pos -= ((bitsleft >> 3) & 0x7) as usize;
             bitsleft |= MAX_BITSLEFT & !7;
         };
     }
 
     macro_rules! refill_bits {
         () => {
-            if UNALIGNED_ACCESS_IS_FAST && (in_end as usize - in_next as usize) >= WORDBYTES {
+            if UNALIGNED_ACCESS_IS_FAST && (in_len - in_pos) >= WORDBYTES {
                 refill_bits_branchless!();
             } else {
                 while (bitsleft as u8) < CONSUMABLE_NBITS as u8 {
-                    if in_next != in_end {
-                        bitbuf |= (*in_next as BitBuf) << (bitsleft as u8 as u32);
-                        in_next = in_next.add(1);
+                    if in_pos < in_len {
+                        bitbuf |= (input[in_pos] as BitBuf) << (bitsleft as u8 as u32);
+                        in_pos += 1;
                     } else {
                         overread_count += 1;
                         safety_check!(overread_count <= WORDBYTES);
@@ -662,8 +601,8 @@ unsafe fn deflate_decompress_impl(
                 refill_bits_branchless!();
             } else {
                 while (bitsleft as u8) < CONSUMABLE_NBITS as u8 {
-                    bitbuf |= (*in_next as BitBuf) << (bitsleft as u8 as u32);
-                    in_next = in_next.add(1);
+                    bitbuf |= (input[in_pos] as BitBuf) << (bitsleft as u8 as u32);
+                    in_pos += 1;
                     bitsleft += 8;
                 }
             }
@@ -679,7 +618,6 @@ unsafe fn deflate_decompress_impl(
         let block_type = ((bitbuf >> 1) & bitmask(2)) as u32;
 
         if block_type == DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN {
-            // Dynamic Huffman block
             static PRECODE_PERM: [u8; DEFLATE_NUM_PRECODE_SYMS] = [
                 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
             ];
@@ -690,7 +628,6 @@ unsafe fn deflate_decompress_impl(
 
             d.static_codes_loaded = false;
 
-            // Read precode lengths
             if can_consume(3 * (DEFLATE_NUM_PRECODE_SYMS as u32 - 1)) {
                 d.precode_lens[PRECODE_PERM[0] as usize] = ((bitbuf >> 17) & bitmask(3)) as u8;
                 bitbuf >>= 20;
@@ -717,7 +654,6 @@ unsafe fn deflate_decompress_impl(
                 d.precode_lens[PRECODE_PERM[i] as usize] = 0;
             }
 
-            // Build precode decode table
             safety_check!(build_decode_table(
                 &mut d.precode_decode_table,
                 &d.precode_lens,
@@ -729,7 +665,6 @@ unsafe fn deflate_decompress_impl(
                 None,
             ));
 
-            // Decode litlen and offset codeword lengths
             let mut i = 0usize;
             let total_lens = num_litlen_syms + num_offset_syms;
             while i < total_lens {
@@ -768,7 +703,6 @@ unsafe fn deflate_decompress_impl(
                     }
                     i += rep_count;
                 } else {
-                    // presym == 18
                     let rep_count = 11 + (bitbuf & bitmask(7)) as usize;
                     bitbuf >>= 7;
                     bitsleft -= 7;
@@ -781,7 +715,6 @@ unsafe fn deflate_decompress_impl(
             }
             safety_check!(i == total_lens);
 
-            // Build offset decode table first (because lens overlaps litlen_decode_table in C)
             safety_check!(build_decode_table(
                 &mut d.offset_decode_table,
                 &d.lens[num_litlen_syms..],
@@ -803,36 +736,34 @@ unsafe fn deflate_decompress_impl(
                 Some(&mut d.litlen_tablebits),
             ));
         } else if block_type == DEFLATE_BLOCKTYPE_UNCOMPRESSED {
-            // Uncompressed block
             bitsleft -= 3;
             bitsleft = bitsleft as u8 as u32;
             safety_check!(overread_count <= (bitsleft >> 3) as usize);
-            in_next = in_next.sub((bitsleft >> 3) as usize - overread_count);
+            in_pos -= (bitsleft >> 3) as usize - overread_count;
             overread_count = 0;
             bitbuf = 0;
             bitsleft = 0;
 
-            safety_check!((in_end as usize - in_next as usize) >= 4);
-            let len = get_unaligned_le16(in_next) as usize;
-            let nlen = get_unaligned_le16(in_next.add(2));
-            in_next = in_next.add(4);
+            safety_check!(in_len - in_pos >= 4);
+            let len = read_le16(input, in_pos) as usize;
+            let nlen = read_le16(input, in_pos + 2);
+            in_pos += 4;
 
             safety_check!(len == (!nlen & 0xFFFF) as usize);
-            if len > (out_end as usize - out_next as usize) {
+            if len > out_len - out_pos {
                 return Err(DecompressError::InsufficientSpace);
             }
-            safety_check!(len <= (in_end as usize - in_next as usize));
+            safety_check!(len <= in_len - in_pos);
 
-            std::ptr::copy_nonoverlapping(in_next, out_next, len);
-            in_next = in_next.add(len);
-            out_next = out_next.add(len);
+            output[out_pos..out_pos + len].copy_from_slice(&input[in_pos..in_pos + len]);
+            in_pos += len;
+            out_pos += len;
 
             if is_final_block {
                 break 'next_block;
             }
             continue 'next_block;
         } else {
-            // Static Huffman block
             safety_check!(block_type == DEFLATE_BLOCKTYPE_STATIC_HUFFMAN);
 
             bitbuf >>= 3;
@@ -891,18 +822,17 @@ unsafe fn deflate_decompress_impl(
         // --- Decode Huffman block (fast loop + generic loop) ---
         let litlen_tablemask = bitmask(d.litlen_tablebits);
 
-        // Fast loop
-        if in_next < in_fastloop_end && out_next < out_fastloop_end {
+        // Fast loop: only entered when we have enough margin in both buffers
+        if in_pos < in_fastloop_end && out_pos < out_fastloop_end {
             refill_bits_in_fastloop!();
             let mut entry = d.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
 
-            while in_next < in_fastloop_end && out_next < out_fastloop_end {
+            while in_pos < in_fastloop_end && out_pos < out_fastloop_end {
                 let mut saved_bitbuf = bitbuf;
                 bitbuf >>= entry as u8 as u32;
                 bitsleft -= entry & 0xFF;
 
                 if entry & HUFFDEC_LITERAL != 0 {
-                    // Fast literal path - try to decode up to 2 extra literals
                     if can_consume_and_then_preload(
                         2 * LITLEN_TABLEBITS + LENGTH_MAXBITS,
                         OFFSET_TABLEBITS,
@@ -916,8 +846,8 @@ unsafe fn deflate_decompress_impl(
                         saved_bitbuf = bitbuf;
                         bitbuf >>= entry as u8 as u32;
                         bitsleft -= entry & 0xFF;
-                        *out_next = lit;
-                        out_next = out_next.add(1);
+                        output[out_pos] = lit;
+                        out_pos += 1;
 
                         if entry & HUFFDEC_LITERAL != 0 {
                             // 2nd extra fast literal
@@ -926,15 +856,15 @@ unsafe fn deflate_decompress_impl(
                             saved_bitbuf = bitbuf;
                             bitbuf >>= entry as u8 as u32;
                             bitsleft -= entry & 0xFF;
-                            *out_next = lit;
-                            out_next = out_next.add(1);
+                            output[out_pos] = lit;
+                            out_pos += 1;
 
                             if entry & HUFFDEC_LITERAL != 0 {
                                 let lit = (entry >> 16) as u8;
                                 entry = d.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
                                 refill_bits_in_fastloop!();
-                                *out_next = lit;
-                                out_next = out_next.add(1);
+                                output[out_pos] = lit;
+                                out_pos += 1;
                                 continue;
                             }
                         }
@@ -942,8 +872,8 @@ unsafe fn deflate_decompress_impl(
                         let lit = (entry >> 16) as u8;
                         entry = d.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
                         refill_bits_in_fastloop!();
-                        *out_next = lit;
-                        out_next = out_next.add(1);
+                        output[out_pos] = lit;
+                        out_pos += 1;
                         continue;
                     }
                 }
@@ -977,8 +907,8 @@ unsafe fn deflate_decompress_impl(
                         let lit = (entry >> 16) as u8;
                         entry = d.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
                         refill_bits_in_fastloop!();
-                        *out_next = lit;
-                        out_next = out_next.add(1);
+                        output[out_pos] = lit;
+                        out_pos += 1;
                         continue;
                     }
                     if entry & HUFFDEC_END_OF_BLOCK != 0 {
@@ -1040,12 +970,12 @@ unsafe fn deflate_decompress_impl(
                     ((saved_bitbuf2 & bitmask(extra_off_bits as u32)) >> off_codelen) as usize;
 
                 // Validate offset
-                let out_pos = out_next as usize - out_base as usize;
                 safety_check!(offset <= out_pos);
+                safety_check!(offset > 0);
 
-                let src = out_next.sub(offset);
-                let dst = out_next;
-                out_next = out_next.add(length);
+                let src_start = out_pos - offset;
+                let dst_start = out_pos;
+                out_pos += length;
 
                 // Preload next entry + refill before copy
                 if !can_consume_and_then_preload(
@@ -1058,72 +988,62 @@ unsafe fn deflate_decompress_impl(
                 entry = d.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
                 refill_bits_in_fastloop!();
 
-                // Copy match
+                // Copy match using word-at-a-time with bounds-checked offsets
                 if UNALIGNED_ACCESS_IS_FAST && offset >= WORDBYTES {
-                    let mut s = src;
-                    let mut d = dst;
-                    store_word_unaligned(load_word_unaligned(s), d);
-                    s = s.add(WORDBYTES);
-                    d = d.add(WORDBYTES);
-                    store_word_unaligned(load_word_unaligned(s), d);
-                    s = s.add(WORDBYTES);
-                    d = d.add(WORDBYTES);
-                    store_word_unaligned(load_word_unaligned(s), d);
-                    s = s.add(WORDBYTES);
-                    d = d.add(WORDBYTES);
-                    store_word_unaligned(load_word_unaligned(s), d);
-                    s = s.add(WORDBYTES);
-                    d = d.add(WORDBYTES);
-                    store_word_unaligned(load_word_unaligned(s), d);
-                    s = s.add(WORDBYTES);
-                    d = d.add(WORDBYTES);
-                    while d < out_next {
-                        store_word_unaligned(load_word_unaligned(s), d);
-                        s = s.add(WORDBYTES);
-                        d = d.add(WORDBYTES);
+                    let mut s = src_start;
+                    let mut d = dst_start;
+                    store_word(output, d, load_word(output, s));
+                    s += WORDBYTES;
+                    d += WORDBYTES;
+                    store_word(output, d, load_word(output, s));
+                    s += WORDBYTES;
+                    d += WORDBYTES;
+                    store_word(output, d, load_word(output, s));
+                    s += WORDBYTES;
+                    d += WORDBYTES;
+                    store_word(output, d, load_word(output, s));
+                    s += WORDBYTES;
+                    d += WORDBYTES;
+                    store_word(output, d, load_word(output, s));
+                    s += WORDBYTES;
+                    d += WORDBYTES;
+                    while d < out_pos {
+                        store_word(output, d, load_word(output, s));
+                        s += WORDBYTES;
+                        d += WORDBYTES;
                     }
                 } else if UNALIGNED_ACCESS_IS_FAST && offset == 1 {
-                    let v = 0x0101010101010101u64 * (*src as u64);
-                    let mut d = dst;
-                    store_word_unaligned(v, d);
-                    d = d.add(WORDBYTES);
-                    store_word_unaligned(v, d);
-                    d = d.add(WORDBYTES);
-                    store_word_unaligned(v, d);
-                    d = d.add(WORDBYTES);
-                    store_word_unaligned(v, d);
-                    d = d.add(WORDBYTES);
-                    while d < out_next {
-                        store_word_unaligned(v, d);
-                        d = d.add(WORDBYTES);
+                    let v = 0x0101010101010101u64 * (output[src_start] as u64);
+                    let mut d = dst_start;
+                    store_word(output, d, v);
+                    d += WORDBYTES;
+                    store_word(output, d, v);
+                    d += WORDBYTES;
+                    store_word(output, d, v);
+                    d += WORDBYTES;
+                    store_word(output, d, v);
+                    d += WORDBYTES;
+                    while d < out_pos {
+                        store_word(output, d, v);
+                        d += WORDBYTES;
                     }
                 } else if UNALIGNED_ACCESS_IS_FAST {
-                    let mut s = src;
-                    let mut d = dst;
-                    store_word_unaligned(load_word_unaligned(s), d);
-                    s = s.add(offset);
-                    d = d.add(offset);
-                    store_word_unaligned(load_word_unaligned(s), d);
-                    s = s.add(offset);
-                    d = d.add(offset);
-                    while d < out_next {
-                        store_word_unaligned(load_word_unaligned(s), d);
-                        s = s.add(offset);
-                        d = d.add(offset);
+                    let mut s = src_start;
+                    let mut d = dst_start;
+                    store_word(output, d, load_word(output, s));
+                    s += offset;
+                    d += offset;
+                    store_word(output, d, load_word(output, s));
+                    s += offset;
+                    d += offset;
+                    while d < out_pos {
+                        store_word(output, d, load_word(output, s));
+                        s += offset;
+                        d += offset;
                     }
                 } else {
-                    let mut s = src;
-                    let mut d = dst;
-                    *d = *s;
-                    d = d.add(1);
-                    s = s.add(1);
-                    *d = *s;
-                    d = d.add(1);
-                    s = s.add(1);
-                    while d < out_next {
-                        *d = *s;
-                        d = d.add(1);
-                        s = s.add(1);
+                    for i in 0..length {
+                        output[dst_start + i] = output[src_start + (i % offset)];
                     }
                 }
             }
@@ -1148,11 +1068,11 @@ unsafe fn deflate_decompress_impl(
 
             let value = (entry >> 16) as usize;
             if entry & HUFFDEC_LITERAL != 0 {
-                if out_next == out_end {
+                if out_pos >= out_len {
                     return Err(DecompressError::InsufficientSpace);
                 }
-                *out_next = value as u8;
-                out_next = out_next.add(1);
+                output[out_pos] = value as u8;
+                out_pos += 1;
                 continue;
             }
             if entry & HUFFDEC_END_OF_BLOCK != 0 {
@@ -1163,7 +1083,7 @@ unsafe fn deflate_decompress_impl(
             let extra_bits = entry & 0xFF;
             let codelen = (entry >> 8) as u8 as u32;
             let length = value + ((saved_bitbuf & bitmask(extra_bits as u32)) >> codelen) as usize;
-            if length > (out_end as usize - out_next as usize) {
+            if length > out_len - out_pos {
                 return Err(DecompressError::InsufficientSpace);
             }
 
@@ -1190,26 +1110,16 @@ unsafe fn deflate_decompress_impl(
             bitbuf >>= entry as u8 as u32;
             bitsleft -= entry & 0xFF;
 
-            let out_pos = out_next as usize - out_base as usize;
             safety_check!(offset <= out_pos);
+            safety_check!(offset > 0);
 
-            let src = out_next.sub(offset);
-            let dst = out_next;
-            out_next = out_next.add(length);
+            let src_start = out_pos - offset;
+            let dst_start = out_pos;
+            out_pos += length;
 
             // Byte-at-a-time copy for generic loop
-            let mut s = src;
-            let mut d = dst;
-            *d = *s;
-            d = d.add(1);
-            s = s.add(1);
-            *d = *s;
-            d = d.add(1);
-            s = s.add(1);
-            while d < out_next {
-                *d = *s;
-                d = d.add(1);
-                s = s.add(1);
+            for i in 0..length {
+                output[dst_start + i] = output[src_start + (i % offset)];
             }
         }
 
@@ -1223,11 +1133,8 @@ unsafe fn deflate_decompress_impl(
     bitsleft = bitsleft as u8 as u32;
     safety_check!(overread_count <= (bitsleft >> 3) as usize);
 
-    let actual_in = in_next.sub((bitsleft >> 3) as usize - overread_count);
-    let bytes_consumed = actual_in as usize - in_base as usize;
-    let bytes_written = out_next as usize - out_base as usize;
-
-    Ok((bytes_consumed, bytes_written))
+    let actual_in_pos = in_pos - (bitsleft >> 3) as usize + overread_count;
+    Ok((actual_in_pos, out_pos))
 }
 
 // --- Zlib wrapper ---
@@ -1245,7 +1152,7 @@ pub fn zlib_decompress(input: &[u8], output: &mut [u8]) -> Result<(usize, usize)
 }
 
 /// Decompress zlib-wrapped data using a reusable decompressor.
-pub fn zlib_decompress_with(
+fn zlib_decompress_with(
     d: &mut Decompressor,
     input: &[u8],
     output: &mut [u8],
@@ -1254,8 +1161,7 @@ pub fn zlib_decompress_with(
         return Err(DecompressError::BadData);
     }
 
-    // Parse 2-byte header
-    let hdr = get_unaligned_be16(input.as_ptr());
+    let hdr = read_be16(input, 0);
     if (hdr % 31) != 0 {
         return Err(DecompressError::BadData);
     }
@@ -1265,7 +1171,6 @@ pub fn zlib_decompress_with(
     if (hdr >> 12) as u8 > ZLIB_CINFO_32K_WINDOW {
         return Err(DecompressError::BadData);
     }
-    // FDICT
     if ((hdr >> 5) & 1) != 0 {
         return Err(DecompressError::BadData);
     }
@@ -1273,12 +1178,11 @@ pub fn zlib_decompress_with(
     let deflate_data = &input[2..];
     let (consumed, written) = deflate_decompress_with(d, deflate_data, output)?;
 
-    // Verify Adler-32 footer follows immediately after consumed deflate data
     let footer_start = 2 + consumed;
     if footer_start + ZLIB_FOOTER_SIZE > input.len() {
         return Err(DecompressError::BadData);
     }
-    let expected_adler = get_unaligned_be32(unsafe { input.as_ptr().add(footer_start) });
+    let expected_adler = read_be32(input, footer_start);
     let actual_adler = adler32(1, &output[..written]);
     if actual_adler != expected_adler {
         return Err(DecompressError::BadData);
@@ -1294,10 +1198,8 @@ const MAX_VEC_CAPACITY: usize = 256 * 1024 * 1024; // 256 MB safety cap
 
 /// Decompress raw DEFLATE data when the output size is unknown.
 /// Automatically sizes the output buffer, retrying with larger buffers as needed.
-/// Returns the decompressed data as a Vec<u8>, or an error.
 pub fn deflate_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
     let mut d = Decompressor::new();
-    // Start with a reasonable estimate: 3x input or 4KB, whichever is larger
     let mut capacity = (input.len() * 3).max(INITIAL_VEC_CAPACITY);
     loop {
         let mut output = vec![0u8; capacity];
@@ -1313,7 +1215,6 @@ pub fn deflate_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> 
                 if capacity > MAX_VEC_CAPACITY {
                     return Err(DecompressError::InsufficientSpace);
                 }
-                // Retry with bigger buffer
             }
             Err(e) => return Err(e),
         }
@@ -1322,10 +1223,8 @@ pub fn deflate_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> 
 
 /// Decompress zlib-wrapped data when the output size is unknown.
 /// Automatically sizes the output buffer, retrying with larger buffers as needed.
-/// Returns the decompressed data as a Vec<u8>, or an error.
 pub fn zlib_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
     let mut d = Decompressor::new();
-    // Start with a reasonable estimate: 3x input or 4KB, whichever is larger
     let mut capacity = (input.len() * 3).max(INITIAL_VEC_CAPACITY);
     loop {
         let mut output = vec![0u8; capacity];
@@ -1341,7 +1240,6 @@ pub fn zlib_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
                 if capacity > MAX_VEC_CAPACITY {
                     return Err(DecompressError::InsufficientSpace);
                 }
-                // Retry with bigger buffer
             }
             Err(e) => return Err(e),
         }
@@ -1350,13 +1248,11 @@ pub fn zlib_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
 
 /// Decompress zlib-wrapped data with a size hint.
 /// If the hint is correct, avoids any retry overhead. If not, falls back to auto-sizing.
-/// This is ideal for git objects where the header tells you the size.
 pub fn zlib_decompress_vec_with_hint(
     input: &[u8],
     size_hint: usize,
 ) -> Result<Vec<u8>, DecompressError> {
     let mut d = Decompressor::new();
-    // Try with the hint first
     let mut capacity = size_hint;
     loop {
         let mut output = vec![0u8; capacity];
@@ -1366,7 +1262,6 @@ pub fn zlib_decompress_vec_with_hint(
                 return Ok(output);
             }
             Err(DecompressError::InsufficientSpace) => {
-                // Hint was wrong, double and retry
                 capacity = capacity
                     .checked_mul(2)
                     .ok_or(DecompressError::InsufficientSpace)?;
@@ -1383,9 +1278,7 @@ pub fn zlib_decompress_vec_with_hint(
 mod tests {
     use super::*;
 
-    // Helper: compress with C libdeflater, decompress with our Rust port, compare byte-for-byte
     fn roundtrip_vs_c_zlib(data: &[u8], level: i32) {
-        // Compress with C libdeflater
         let mut c_comp =
             libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
         let max_sz = c_comp.zlib_compress_bound(data.len());
@@ -1393,7 +1286,6 @@ mod tests {
         let c_compressed_len = c_comp.zlib_compress(data, &mut compressed).unwrap();
         compressed.truncate(c_compressed_len);
 
-        // Decompress with C libdeflater (reference)
         let mut c_decomp = libdeflater::Decompressor::new();
         let mut c_output = vec![0u8; data.len()];
         let c_written = c_decomp
@@ -1402,7 +1294,6 @@ mod tests {
         assert_eq!(c_written, data.len());
         assert_eq!(&c_output[..c_written], data);
 
-        // Decompress with our Rust port
         let mut rust_output = vec![0u8; data.len()];
         let (_, rust_written) =
             zlib_decompress(&compressed, &mut rust_output).expect("Rust zlib_decompress failed");
@@ -1418,7 +1309,6 @@ mod tests {
         let c_compressed_len = c_comp.deflate_compress(data, &mut compressed).unwrap();
         compressed.truncate(c_compressed_len);
 
-        // C reference
         let mut c_decomp = libdeflater::Decompressor::new();
         let mut c_output = vec![0u8; data.len()];
         let c_written = c_decomp
@@ -1426,7 +1316,6 @@ mod tests {
             .unwrap();
         assert_eq!(&c_output[..c_written], data);
 
-        // Our Rust port
         let mut rust_output = vec![0u8; data.len()];
         let (_, rust_written) = deflate_decompress(&compressed, &mut rust_output)
             .expect("Rust deflate_decompress failed");
@@ -1457,7 +1346,6 @@ mod tests {
 
     #[test]
     fn test_repeated_data() {
-        // Highly compressible - exercises long matches
         let data: Vec<u8> = b"ABCDEFGH".iter().copied().cycle().take(65536).collect();
         for level in [1, 6, 9, 12] {
             roundtrip_vs_c_zlib(&data, level);
@@ -1467,7 +1355,6 @@ mod tests {
 
     #[test]
     fn test_all_same_byte() {
-        // RLE-like compression
         let data = vec![0x42u8; 100_000];
         for level in [1, 6, 12] {
             roundtrip_vs_c_zlib(&data, level);
@@ -1484,7 +1371,6 @@ mod tests {
 
     #[test]
     fn test_pseudo_random() {
-        // Low compressibility - exercises many literals
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let data: Vec<u8> = (0..100_000).map(|_| rng.gen()).collect();
@@ -1525,7 +1411,6 @@ mod tests {
 
     #[test]
     fn test_uncompressed_block() {
-        // Level 0 forces uncompressed blocks
         use std::io::Write;
         let input = b"This is uncompressed data that should be stored as-is";
         let mut encoder =
@@ -1541,7 +1426,6 @@ mod tests {
 
     #[test]
     fn test_various_sizes() {
-        // Test a range of output sizes including edge cases
         use rand::Rng;
         let mut rng = rand::thread_rng();
         for size in [
@@ -1555,13 +1439,10 @@ mod tests {
 
     #[test]
     fn test_large_window_offsets() {
-        // Create data where matches reference far-back positions (large offsets)
         let mut data = Vec::with_capacity(100_000);
-        // Fill 32K with varied data
         for i in 0..32768u32 {
             data.push((i.wrapping_mul(7) ^ i.wrapping_mul(13)) as u8);
         }
-        // Now repeat chunks from the beginning (forces large offsets)
         for _ in 0..2 {
             data.extend_from_slice(&data[0..32768].to_vec());
         }
@@ -1571,7 +1452,6 @@ mod tests {
 
     #[test]
     fn test_cross_compressed_flate2_to_rust() {
-        // Compress with flate2 (miniz_oxide), decompress with our Rust port
         use std::io::Write;
         let data = b"Cross-library compatibility test! ".repeat(5000);
         let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
@@ -1586,11 +1466,9 @@ mod tests {
 
     #[test]
     fn test_benchmark_zlib_correctness_1mb() {
-        // 1MB test: ensures no off-by-one errors at scale
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(123);
         let size = 1_000_000;
-        // Mix of patterns: 75% compressible, 25% random
         let mut data = Vec::with_capacity(size);
         while data.len() < size {
             if rng.gen::<f32>() < 0.75 {
@@ -1608,8 +1486,6 @@ mod tests {
 
     #[test]
     fn test_garbage_input_no_panic() {
-        // Feed random garbage to both deflate and zlib decompressors.
-        // Must never panic — only return errors.
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(0xdead);
         let mut out = vec![0u8; 65536];
@@ -1617,12 +1493,10 @@ mod tests {
         for _ in 0..10_000 {
             let len = rng.gen_range(0..=512);
             let garbage: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
-            // These must not panic
             let _ = deflate_decompress(&garbage, &mut out);
             let _ = zlib_decompress(&garbage, &mut out);
         }
 
-        // Also test with tiny output buffers
         let mut tiny_out = vec![0u8; 1];
         for _ in 0..1_000 {
             let len = rng.gen_range(0..=256);
@@ -1631,7 +1505,6 @@ mod tests {
             let _ = zlib_decompress(&garbage, &mut tiny_out);
         }
 
-        // Test with zero-length output buffer
         let mut empty_out = vec![0u8; 0];
         for _ in 0..1_000 {
             let len = rng.gen_range(0..=256);
@@ -1643,7 +1516,6 @@ mod tests {
 
     #[test]
     fn test_zlib_decompress_vec() {
-        // Compress with flate2, decompress with our vec API
         use std::io::Write;
         let data = b"Hello, this is a test of the auto-sizing zlib decompressor!".repeat(100);
         let mut encoder =
@@ -1677,7 +1549,6 @@ mod tests {
         encoder.write_all(&data).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        // Correct hint - should decompress in one shot
         let result = zlib_decompress_vec_with_hint(&compressed, data.len()).unwrap();
         assert_eq!(result, data);
     }
@@ -1691,7 +1562,6 @@ mod tests {
         encoder.write_all(&data).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        // Hint too small - should retry and succeed
         let result = zlib_decompress_vec_with_hint(&compressed, 10).unwrap();
         assert_eq!(result, data);
     }
