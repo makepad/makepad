@@ -228,9 +228,11 @@ pub enum StudioTerminalRequest {
         text: String,
         replace_last: Option<bool>,
         was_paste: Option<bool>,
+        auto_dump: Option<bool>,
     },
     Return {
         build_id: u64,
+        auto_dump: Option<bool>,
     },
     Click {
         build_id: u64,
@@ -1312,6 +1314,7 @@ impl BuildManager {
                 text,
                 replace_last,
                 was_paste,
+                auto_dump,
             } => {
                 let build_id = LiveId(build_id);
                 let msg = HostToStdin::TextInput(TextInputEvent {
@@ -1319,8 +1322,13 @@ impl BuildManager {
                     replace_last: replace_last.unwrap_or(false),
                     was_paste: was_paste.unwrap_or(false),
                 });
-                if let Err(message) =
-                    self.send_terminal_host_to_stdin(cx, web_socket_id, build_id, msg, true)
+                if let Err(message) = self.send_terminal_host_to_stdin(
+                    cx,
+                    web_socket_id,
+                    build_id,
+                    msg,
+                    auto_dump.unwrap_or(false),
+                )
                 {
                     self.send_terminal_error(
                         web_socket_id,
@@ -1328,10 +1336,14 @@ impl BuildManager {
                     );
                 }
             }
-            StudioTerminalRequest::Return { build_id } => {
+            StudioTerminalRequest::Return {
+                build_id,
+                auto_dump,
+            } => {
                 let build_id = LiveId(build_id);
                 let now = Self::terminal_now();
                 let modifiers = KeyModifiers::default();
+                let auto_dump = auto_dump.unwrap_or(false);
                 let msgs = [
                     (
                         HostToStdin::KeyDown(KeyEvent {
@@ -1349,7 +1361,7 @@ impl BuildManager {
                             modifiers,
                             time: now + 0.01,
                         }),
-                        true,
+                        auto_dump,
                     ),
                 ];
                 for (msg, auto_dump) in msgs {
@@ -1377,7 +1389,7 @@ impl BuildManager {
             } => {
                 let build_id = LiveId(build_id);
                 let button_raw_bits = button.unwrap_or(1);
-                let auto_dump = auto_dump.unwrap_or(true);
+                let auto_dump = auto_dump.unwrap_or(false);
                 let now = Self::terminal_now();
                 let modifiers = StdinKeyModifiers::default();
                 let msgs = [

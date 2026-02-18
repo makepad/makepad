@@ -1403,29 +1403,30 @@ impl WidgetTree {
                 .and_then(|type_id| widget_type_names.get(&type_id).copied())
                 .unwrap_or(LiveId(0));
             let area = node.widget.area();
-            let rect = area.rect(cx);
-            let x = (rect.pos.x * dpi).round() as i64;
-            let y = (rect.pos.y * dpi).round() as i64;
-            let w = (rect.size.x * dpi).round() as i64;
-            let h = (rect.size.y * dpi).round() as i64;
-            let valid = area.is_valid(cx) as u8;
-            if valid != 0 && w > 0 && h > 0 {
-                let id_named = has_live_id_name(id);
-                let id_token = live_id_token(id);
-                let ty_token = live_id_token(ty);
-                if !id_named && !is_action_type(&ty_token) {
-                    continue;
+            if area.is_valid(cx) {
+                let rect = area.rect(cx);
+                let x = (rect.pos.x * dpi).round() as i64;
+                let y = (rect.pos.y * dpi).round() as i64;
+                let w = (rect.size.x * dpi).round() as i64;
+                let h = (rect.size.y * dpi).round() as i64;
+                if w > 0 && h > 0 {
+                    let id_named = has_live_id_name(id);
+                    let id_token = live_id_token(id);
+                    let ty_token = live_id_token(ty);
+                    if !id_named && !is_action_type(&ty_token) {
+                        continue;
+                    }
+                    dump_nodes.push(DumpNode {
+                        index,
+                        parent: node.parent,
+                        id: id_token,
+                        ty: ty_token,
+                        x,
+                        y,
+                        w,
+                        h,
+                    });
                 }
-                dump_nodes.push(DumpNode {
-                    index,
-                    parent: node.parent,
-                    id: id_token,
-                    ty: ty_token,
-                    x,
-                    y,
-                    w,
-                    h,
-                });
             }
 
             if let Some(dock) = node.widget.borrow::<Dock>() {
