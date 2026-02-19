@@ -89,13 +89,17 @@ impl BuildConnection {
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
-        let path = shared
-            .read()
-            .unwrap()
-            .roots
-            .find_root(&what.root)
-            .unwrap()
-            .clone();
+        let path = match shared.read().unwrap().roots.find_root(&what.root) {
+            Ok(path) => path.clone(),
+            Err(_) => {
+                msg_sender.send_bare_message(
+                    cmd_id,
+                    LogLevel::Error,
+                    format!("unknown build root '{}'", what.root),
+                );
+                return;
+            }
+        };
 
         let is_in_studio = matches!(
             what.target,

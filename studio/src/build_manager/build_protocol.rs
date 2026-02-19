@@ -127,8 +127,13 @@ pub struct BuildProcess {
 }
 
 impl BuildProcess {
+    pub fn binary_item_id(root: &str, binary: &str) -> LiveId {
+        LiveId::from_str(root).bytes_append(&LiveId::from_str(binary).0.to_be_bytes())
+    }
+
     pub fn as_id(&self) -> LiveId {
-        LiveId::from_str(&self.binary).bytes_append(&self.target.as_id().to_be_bytes())
+        Self::binary_item_id(&self.root, &self.binary)
+            .bytes_append(&self.target.as_id().to_be_bytes())
     }
 }
 
