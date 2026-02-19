@@ -28,9 +28,9 @@ script_mod! {
         color_active: instance(#fff)
         status_kind: instance(GitStatusDotKind.None)
         color_new: #x58c26d
-        color_modified: #xe0b24f
+        color_modified: #xd86464
         color_deleted: #xd86464
-        color_mixed: #x6db8e8
+        color_mixed: #xd86464
         pixel: fn() {
             let icon_color = mix(
                 self.color * self.scale,
@@ -47,7 +47,6 @@ script_mod! {
             let dot_blend = match self.status_kind {
                 GitStatusDotKind.New => 1f
                 GitStatusDotKind.Modified => 1f
-                GitStatusDotKind.Deleted => 1f
                 GitStatusDotKind.Mixed => 1f
                 _ => 0f
             }
@@ -58,15 +57,24 @@ script_mod! {
             if self.is_folder > 0.5 {
                 icon_sdf.box(0.02 * w, 0.36 * h, 0.86 * w, 0.40 * h, 0.75)
                 icon_sdf.box(0.02 * w, 0.28 * h, 0.50 * w, 0.30 * h, 1.0)
+                icon_sdf.union()
+                icon_sdf.fill(icon_color)
             } else {
-                icon_sdf.box(0.14 * w, 0.16 * h, 0.64 * w, 0.70 * h, 0.9)
-                icon_sdf.box(0.52 * w, 0.16 * h, 0.26 * w, 0.24 * h, 0.6)
+                icon_sdf.box(0.20 * w, 0.20 * h, 0.54 * w, 0.62 * h, 0.8)
+                icon_sdf.stroke_keep(icon_color, 1.0)
+                icon_sdf.move_to(0.52 * w, 0.20 * h)
+                icon_sdf.line_to(0.74 * w, 0.20 * h)
+                icon_sdf.line_to(0.74 * w, 0.42 * h)
+                icon_sdf.stroke_keep(icon_color, 1.0)
+                icon_sdf.move_to(0.52 * w, 0.20 * h)
+                icon_sdf.line_to(0.52 * w, 0.42 * h)
+                icon_sdf.line_to(0.74 * w, 0.42 * h)
+                icon_sdf.stroke_keep(icon_color, 1.0)
             }
-            icon_sdf.union()
-            let icon = icon_sdf.fill(icon_color)
+            let icon = icon_sdf.result
 
             let dot_sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            dot_sdf.circle(0.78 * w, 0.24 * h, min(w, h) * 0.14)
+            dot_sdf.circle(0.82 * w, 0.78 * h, min(w, h) * 0.21)
             let dot_mask = dot_sdf.fill(vec4(1f, 1f, 1f, dot_blend)).w
             return icon * (1.0 - dot_mask) + dot_color * dot_mask
         }
