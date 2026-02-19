@@ -1,0 +1,212 @@
+use crate::model::WhisperModel;
+use crate::tensor::{RawTensor, Tensor, parallel_for};
+
+const EPS: f32 = 1e-5;
+
+/// Multi-head self-attention with parallel head computation.
+/// x: [seq_len, n_state]
+/// Returns: [seq_len, n_state]
+fn multi_head_attention(
+    x: &Tensor,
+    q_w: &RawTensor,
+    q_b: &Tensor,
+    k_w: &RawTensor,
+    v_w: &RawTensor,
+    v_b: &Tensor,
+    out_w: &RawTensor,
+    out_b: &Tensor,
+    n_head: usize,
+) -> Tensor {
+    let seq_len = x.shape[0];
+    let n_state = x.shape[1];
+    let n_state_head = n_state / n_head;
+    let scale = 1.0 / (n_state_head as f32).sqrt();
+
+    let xq = if Tensor::activation_q8_enabled() && seq_len > 2 && n_state % 32 == 0 {
+        Some(Tensor::prequantize_rows_q8(x, n_state))
+    } else {
+        None
+    };
+
+    // Q, K, V projections: [seq_len, n_state]
+    let q = Tensor::add(&Tensor::matmul_raw_with_prequant(x, q_w, xq.as_deref()), q_b);
+    let k = Tensor::matmul_raw_with_prequant(x, k_w, xq.as_deref());
+    let v = Tensor::add(&Tensor::matmul_raw_with_prequant(x, v_w, xq.as_deref()), v_b);
+
+    let mut out = vec![0.0f32; seq_len * n_state];
+    let out_ptr = crate::tensor::SendPtr::new(out.as_mut_ptr());
+    let q_data = &q.data;
+    let k_data = &k.data;
+    let v_data = &v.data;
+
+    parallel_for(n_head, |h| {
+        let h_off = h * n_state_head;
+        let out_data = unsafe { std::slice::from_raw_parts_mut(out_ptr.ptr(), seq_len * n_state) };
+
+        // Extract contiguous per-head Q, K, V for SIMD-friendly access
+        let mut qh = vec![0.0f32; seq_len * n_state_head];
+        let mut kh = vec![0.0f32; seq_len * n_state_head];
+        let mut vh = vec![0.0f32; seq_len * n_state_head];
+        for i in 0..seq_len {
+            qh[i * n_state_head..(i + 1) * n_state_head]
+                .copy_from_slice(&q_data[i * n_state + h_off..i * n_state + h_off + n_state_head]);
+            kh[i * n_state_head..(i + 1) * n_state_head]
+                .copy_from_slice(&k_data[i * n_state + h_off..i * n_state + h_off + n_state_head]);
+            vh[i * n_state_head..(i + 1) * n_state_head]
+                .copy_from_slice(&v_data[i * n_state + h_off..i * n_state + h_off + n_state_head]);
+        }
+
+        // Transpose V head to [n_state_head, seq_len] for SIMD dot
+        let mut vh_t = vec![0.0f32; n_state_head * seq_len];
+        for i in 0..seq_len {
+            for d in 0..n_state_head {
+                vh_t[d * seq_len + i] = vh[i * n_state_head + d];
+            }
+        }
+
+        // Row-streamed attention: avoids allocating a full [seq_len, seq_len] score matrix.
+        let mut scores_row = vec![0.0f32; seq_len];
+        for i in 0..seq_len {
+            let q_row = &qh[i * n_state_head..(i + 1) * n_state_head];
+
+            let mut max_val = f32::NEG_INFINITY;
+            for j in 0..seq_len {
+                let k_row = &kh[j * n_state_head..(j + 1) * n_state_head];
+                let s = Tensor::dot_f32(q_row, k_row) * scale;
+                scores_row[j] = s;
+                if s > max_val {
+                    max_val = s;
+                }
+            }
+
+            let mut sum = 0.0f32;
+            for v in scores_row.iter_mut() {
+                *v = (*v - max_val).exp();
+                sum += *v;
+            }
+            let inv = 1.0 / sum;
+            for v in scores_row.iter_mut() {
+                *v *= inv;
+            }
+
+            for d in 0..n_state_head {
+                let v_col = &vh_t[d * seq_len..(d + 1) * seq_len];
+                out_data[i * n_state + h_off + d] = Tensor::dot_f32(&scores_row, v_col);
+            }
+        }
+    });
+
+    let attn_out = Tensor {
+        data: out,
+        shape: vec![seq_len, n_state],
+    };
+
+    // Output projection
+    Tensor::add(&Tensor::matmul_raw(&attn_out, out_w), out_b)
+}
+
+/// Run the whisper encoder on a mel spectrogram chunk.
+/// mel_data: slice of mel spectrogram for this chunk, shape [n_mels, 2*n_ctx]
+/// Returns encoder output: [n_ctx, n_state]
+pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
+    let n_mels = model.hparams.n_mels as usize;
+    let n_state = model.hparams.n_audio_state as usize;
+    let n_head = model.hparams.n_audio_head as usize;
+
+    // mel input: [n_mels, 2*n_ctx]
+    let mel = Tensor {
+        data: mel_data.to_vec(),
+        shape: vec![n_mels, 2 * n_ctx],
+    };
+
+    // Conv1 + GELU: [n_mels, 2*n_ctx] -> [n_state, 2*n_ctx]
+    let _tc = std::time::Instant::now();
+    let mut cur = Tensor::conv1d(&mel, &model.e_conv_1_w, &model.e_conv_1_b, 1);
+    cur = Tensor::gelu(&cur);
+
+    // Conv2 + GELU: [n_state, 2*n_ctx] -> [n_state, n_ctx] (stride 2)
+    cur = Tensor::conv1d(&cur, &model.e_conv_2_w, &model.e_conv_2_b, 2);
+    cur = Tensor::gelu(&cur);
+    crate::PROF_ENC_CONV.fetch_add(_tc.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+
+    // cur is [n_state, n_ctx], transpose to [n_ctx, n_state]
+    cur = Tensor::transpose_2d(&cur);
+
+    // Add positional embedding: [n_ctx, n_state]
+    // e_pe is [n_audio_ctx, n_state], take first n_ctx rows
+    let pe_data: Vec<f32> = model.e_pe.data[..n_ctx * n_state].to_vec();
+    let pe = Tensor {
+        data: pe_data,
+        shape: vec![n_ctx, n_state],
+    };
+    cur = Tensor::add(&cur, &pe);
+
+    // Transformer encoder blocks
+    for layer in &model.encoder_layers {
+        // Self-attention block
+        let residual = cur.clone();
+
+        // Layer norm
+        let normed = Tensor::layer_norm(&cur, EPS);
+        let normed = Tensor::add(
+            &Tensor::mul(&normed, &layer.attn_ln_0_w),
+            &layer.attn_ln_0_b,
+        );
+
+        // Multi-head self-attention
+        let attn_out = multi_head_attention(
+            &normed,
+            &layer.attn_q_w,
+            &layer.attn_q_b,
+            &layer.attn_k_w,
+            &layer.attn_v_w,
+            &layer.attn_v_b,
+            &layer.attn_ln_1_w,
+            &layer.attn_ln_1_b,
+            n_head,
+        );
+
+        cur = Tensor::add(&attn_out, &residual);
+
+        // Feed-forward block
+        let residual = cur.clone();
+
+        let normed = Tensor::layer_norm(&cur, EPS);
+        let normed = Tensor::add(&Tensor::mul(&normed, &layer.mlp_ln_w), &layer.mlp_ln_b);
+
+        // MLP: linear -> gelu -> linear
+        let mut ff = Tensor::add(&Tensor::matmul_raw(&normed, &layer.mlp_0_w), &layer.mlp_0_b);
+        ff = Tensor::gelu(&ff);
+        ff = Tensor::add(&Tensor::matmul_raw(&ff, &layer.mlp_1_w), &layer.mlp_1_b);
+
+        cur = Tensor::add(&ff, &residual);
+    }
+
+    // Final layer norm
+    let normed = Tensor::layer_norm(&cur, EPS);
+    Tensor::add(&Tensor::mul(&normed, &model.e_ln_w), &model.e_ln_b)
+}
+
+/// Pre-compute cross-attention K and V for all decoder layers.
+/// encoder_out: [n_ctx, n_state]
+/// Returns: Vec of (K, V) pairs, one per decoder layer.
+/// K: [n_ctx, n_state], V: [n_ctx, n_state]
+pub fn compute_cross_kv(model: &WhisperModel, encoder_out: &Tensor) -> Vec<(Tensor, Tensor)> {
+    let mut cross_kv = Vec::new();
+    let n_state = encoder_out.shape[1];
+    let batch = encoder_out.shape[0];
+    let xq = if Tensor::activation_q8_enabled() && batch > 2 && n_state % 32 == 0 {
+        Some(Tensor::prequantize_rows_q8(encoder_out, n_state))
+    } else {
+        None
+    };
+    for layer in &model.decoder_layers {
+        let k = Tensor::matmul_raw_with_prequant(encoder_out, &layer.cross_attn_k_w, xq.as_deref());
+        let v = Tensor::add(
+            &Tensor::matmul_raw_with_prequant(encoder_out, &layer.cross_attn_v_w, xq.as_deref()),
+            &layer.cross_attn_v_b,
+        );
+        cross_kv.push((k, v));
+    }
+    cross_kv
+}
