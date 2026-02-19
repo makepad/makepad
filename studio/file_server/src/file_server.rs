@@ -1,8 +1,10 @@
 use {
     crate::makepad_file_protocol::*,
+    makepad_git::{FileStatus as GitFileStatus, Repository as GitRepository},
     makepad_shell::*,
     std::{
         cmp::Ordering,
+        collections::HashMap,
         fmt, fs,
         path::{Path, PathBuf},
         str,
@@ -333,13 +335,76 @@ impl FileServerConnection {
 
     // Handles a `LoadFileTree` request.
     fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, FileError> {
+        fn merge_git_status(into: &mut GitStatus, other: &GitStatus) {
+            into.modified |= other.modified;
+            into.new_file |= other.new_file;
+            into.deleted |= other.deleted;
+            into.staged |= other.staged;
+        }
+
+        fn git_status_from_file_status(status: GitFileStatus) -> GitStatus {
+            match status {
+                GitFileStatus::Modified => GitStatus {
+                    modified: true,
+                    ..Default::default()
+                },
+                GitFileStatus::Deleted => GitStatus {
+                    deleted: true,
+                    ..Default::default()
+                },
+                GitFileStatus::Untracked => GitStatus {
+                    new_file: true,
+                    ..Default::default()
+                },
+                GitFileStatus::Staged => GitStatus {
+                    staged: true,
+                    ..Default::default()
+                },
+                GitFileStatus::StagedDeleted => GitStatus {
+                    deleted: true,
+                    staged: true,
+                    ..Default::default()
+                },
+                GitFileStatus::StagedNew => GitStatus {
+                    new_file: true,
+                    staged: true,
+                    ..Default::default()
+                },
+            }
+        }
+
+        fn path_to_repo_relative(path: &Path, root_path: &Path) -> Option<String> {
+            path.strip_prefix(root_path)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+        }
+
+        fn load_git_status_map(root_path: &Path) -> HashMap<String, GitStatus> {
+            let mut status_map = HashMap::<String, GitStatus>::new();
+            let Ok(mut repo) = GitRepository::open(root_path) else {
+                return status_map;
+            };
+            let Ok(status) = repo.status_for_file_tree() else {
+                return status_map;
+            };
+            for entry in status.entries {
+                let mapped = git_status_from_file_status(entry.status);
+                let slot = status_map.entry(entry.path).or_default();
+                merge_git_status(slot, &mapped);
+            }
+            status_map
+        }
+
         // A recursive helper function for traversing the entries of a directory and creating the
         // data structures that describe them.
         fn get_directory_entries(
             path: &Path,
+            root_path: &Path,
+            git_status_map: &HashMap<String, GitStatus>,
             with_data: bool,
-        ) -> Result<Vec<DirectoryEntry>, FileError> {
+        ) -> Result<(Vec<DirectoryEntry>, Option<GitStatus>), FileError> {
             let mut entries = Vec::new();
+            let mut aggregated_status: Option<GitStatus> = None;
             for entry in
                 fs::read_dir(path).map_err(|error| FileError::Unknown(error.to_string()))?
             {
@@ -365,29 +430,54 @@ impl FileServerConnection {
                     continue;
                 }
                 // Create a `DirectoryEntry` for this entry and add it to the list of entries.
-                entries.push(DirectoryEntry {
-                    name: entry.file_name().to_string_lossy().to_string(),
-                    node: if entry_path.is_dir() {
-                        // If this entry is a subdirectory, recursively create `DirectoryEntry`'s
-                        // for its entries as well.
-                        FileNodeData::Directory {
-                            git_log: None,
-                            entries: get_directory_entries(&entry_path, with_data)?,
-                        }
-                    } else if entry_path.is_file() {
-                        if with_data {
-                            let bytes: Vec<u8> = fs::read(&entry_path)
-                                .map_err(|error| FileError::Unknown(error.to_string()))?;
-                            FileNodeData::File { data: Some(bytes) }
-                        } else {
-                            FileNodeData::File { data: None }
+                let node = if entry_path.is_dir() {
+                    // If this entry is a subdirectory, recursively create `DirectoryEntry`'s
+                    // for its entries as well.
+                    let (dir_entries, dir_git_status) =
+                        get_directory_entries(&entry_path, root_path, git_status_map, with_data)?;
+                    FileNodeData::Directory {
+                        git_log: None,
+                        git_status: dir_git_status,
+                        entries: dir_entries,
+                    }
+                } else if entry_path.is_file() {
+                    let git_status = path_to_repo_relative(&entry_path, root_path)
+                        .and_then(|rel| git_status_map.get(&rel).copied());
+                    if with_data {
+                        let bytes: Vec<u8> = fs::read(&entry_path)
+                            .map_err(|error| FileError::Unknown(error.to_string()))?;
+                        FileNodeData::File {
+                            data: Some(bytes),
+                            git_status,
                         }
                     } else {
-                        // If this entry is neither a directory or a file, skip it. This ignores
-                        // things such as symlinks, for which we are not yet sure how we want to
-                        // handle them.
-                        continue;
-                    },
+                        FileNodeData::File {
+                            data: None,
+                            git_status,
+                        }
+                    }
+                } else {
+                    // If this entry is neither a directory or a file, skip it. This ignores
+                    // things such as symlinks, for which we are not yet sure how we want to
+                    // handle them.
+                    continue;
+                };
+
+                let entry_status = match &node {
+                    FileNodeData::Directory { git_status, .. } => *git_status,
+                    FileNodeData::File { git_status, .. } => *git_status,
+                };
+                if let Some(status) = entry_status {
+                    if let Some(agg) = &mut aggregated_status {
+                        merge_git_status(agg, &status);
+                    } else {
+                        aggregated_status = Some(status);
+                    }
+                }
+
+                entries.push(DirectoryEntry {
+                    name: entry.file_name().to_string_lossy().to_string(),
+                    node,
                 });
             }
 
@@ -402,12 +492,15 @@ impl FileServerConnection {
                     FileNodeData::File { .. } => entry_0.name.cmp(&entry_1.name),
                 },
             });
-            Ok(entries)
+            Ok((entries, aggregated_status))
         }
 
         let roots = self.shared.read().unwrap().roots.clone();
         let mut entries = Vec::new();
         for (root_name, root_path) in roots.roots {
+            let git_status_map = load_git_status_map(&root_path);
+            let (root_entries, root_git_status) =
+                get_directory_entries(&root_path, &root_path, &git_status_map, with_data)?;
             let mut commits = Vec::new();
             match shell_env_cap(&[], &root_path, "git", &["log", "--pretty=format:%H %s"]) {
                 Ok(stdout) => {
@@ -437,7 +530,8 @@ impl FileServerConnection {
                         root: root_name,
                         commits,
                     }),
-                    entries: get_directory_entries(&root_path, with_data)?,
+                    git_status: root_git_status,
+                    entries: root_entries,
                 },
             });
         }
@@ -445,6 +539,7 @@ impl FileServerConnection {
             root_path: "".into(),
             root: FileNodeData::Directory {
                 git_log: None,
+                git_status: None,
                 entries,
             },
         })

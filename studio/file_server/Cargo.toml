@@ -11,6 +11,7 @@ metadata.makepad-auto-version = "mVBrOPBAdeCzLt-WelLTCvBhBKM="
 
 [dependencies]
 makepad-shell = {path="../../libs/shell" , version="1.0.0"}
+makepad-git = {path="../../libs/git", version="0.1.0"}
 makepad-live-id = { path = "../../libs/live_id", version = "1.0.0"}
 makepad-micro-serde = {path = "../../libs/micro_serde", version = "1.0.0"}
 makepad-file-protocol = {path="../file_protocol", version="1.0.0"}
