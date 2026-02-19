@@ -170,7 +170,7 @@ fn get_pool() -> &'static ThreadPool {
             target_os = "windows",
             target_os = "linux"
         )) {
-            hw.saturating_sub(2).max(1)
+            hw.min(4).max(1)
         } else {
             hw.min(8).max(4).min(max_threads)
         };

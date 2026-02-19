@@ -113,24 +113,47 @@ fn main() {
         eprintln!("truncated to {:.1}s ({} samples)", max_sec, samples.len());
     }
 
-    let mut state = WhisperState::new(&model);
     let mut params = WhisperParams::default();
     if let Some(max_tokens) = max_tokens {
         params.max_tokens = max_tokens;
         eprintln!("using max_tokens={}", max_tokens);
     }
 
-    eprintln!("transcribing...");
-    makepad_voice::reset_profiling();
-    let t0 = std::time::Instant::now();
-    let segments = state.transcribe(&model, &samples, &params);
-    let total = t0.elapsed().as_secs_f64();
-    eprintln!("transcription done in {:.1}s", total);
-    makepad_voice::print_profiling();
+    let bench_repeat = std::env::args()
+        .nth(5)
+        .and_then(|s| s.parse::<usize>().ok())
+        .or_else(|| {
+            std::env::var("MAKEPAD_VOICE_BENCH_REPEAT")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+        })
+        .unwrap_or(1)
+        .max(1);
+    if bench_repeat > 1 {
+        eprintln!("using MAKEPAD_VOICE_BENCH_REPEAT={}", bench_repeat);
+    }
 
-    for seg in &segments {
-        let t0 = seg.start_ms as f64 / 1000.0;
-        let t1 = seg.end_ms as f64 / 1000.0;
-        println!("[{:.2} --> {:.2}]  {}", t0, t1, seg.text);
+    for run in 0..bench_repeat {
+        let mut state = WhisperState::new(&model);
+        eprintln!("transcribing run {}/{}...", run + 1, bench_repeat);
+        makepad_voice::reset_profiling();
+        let t0 = std::time::Instant::now();
+        let segments = state.transcribe(&model, &samples, &params);
+        let total = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "transcription run {}/{} done in {:.1}s",
+            run + 1,
+            bench_repeat,
+            total
+        );
+        makepad_voice::print_profiling();
+
+        if run + 1 == bench_repeat {
+            for seg in &segments {
+                let t0 = seg.start_ms as f64 / 1000.0;
+                let t1 = seg.end_ms as f64 / 1000.0;
+                println!("[{:.2} --> {:.2}]  {}", t0, t1, seg.text);
+            }
+        }
     }
 }
