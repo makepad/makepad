@@ -27,6 +27,7 @@ pub use refs::{Ref, RefTarget};
 pub use repo::Repository;
 pub use tree::{Tree, TreeEntry};
 pub use worktree::{
-    checkout_tree, compute_status, flatten_tree, stage_file, unstage_file, FileStatus, Status,
-    StatusEntry,
+    checkout_tree, compute_status, compute_status_with_options, compute_status_worktree_only,
+    compute_status_worktree_only_with_options, flatten_tree, stage_file, unstage_file, FileStatus,
+    Status, StatusEntry, StatusOptions,
 };

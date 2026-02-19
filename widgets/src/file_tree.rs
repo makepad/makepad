@@ -19,8 +19,57 @@ script_mod! {
         ..mod.draw.DrawText
     }
 
+    let GitStatusDotKind = set_type_default() do #(GitStatusDotKind::script_api(vm))
+    mod.widgets.GitStatusDotKind = GitStatusDotKind
+
     set_type_default() do #(DrawIconQuad::script_shader(vm)){
         ..mod.draw.DrawQuad
+        color: instance(#fff)
+        color_active: instance(#fff)
+        status_kind: instance(GitStatusDotKind.None)
+        color_new: #x58c26d
+        color_modified: #xe0b24f
+        color_deleted: #xd86464
+        color_mixed: #x6db8e8
+        pixel: fn() {
+            let icon_color = mix(
+                self.color * self.scale,
+                self.color_active,
+                self.active
+            )
+            let dot_color = match self.status_kind {
+                GitStatusDotKind.New => self.color_new
+                GitStatusDotKind.Modified => self.color_modified
+                GitStatusDotKind.Deleted => self.color_deleted
+                GitStatusDotKind.Mixed => self.color_mixed
+                _ => self.color_mixed
+            }
+            let dot_blend = match self.status_kind {
+                GitStatusDotKind.New => 1f
+                GitStatusDotKind.Modified => 1f
+                GitStatusDotKind.Deleted => 1f
+                GitStatusDotKind.Mixed => 1f
+                _ => 0f
+            }
+            let icon_sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+
+            if self.is_folder > 0.5 {
+                icon_sdf.box(0.02 * w, 0.36 * h, 0.86 * w, 0.40 * h, 0.75)
+                icon_sdf.box(0.02 * w, 0.28 * h, 0.50 * w, 0.30 * h, 1.0)
+            } else {
+                icon_sdf.box(0.14 * w, 0.16 * h, 0.64 * w, 0.70 * h, 0.9)
+                icon_sdf.box(0.52 * w, 0.16 * h, 0.26 * w, 0.24 * h, 0.6)
+            }
+            icon_sdf.union()
+            let icon = icon_sdf.fill(icon_color)
+
+            let dot_sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            dot_sdf.circle(0.78 * w, 0.24 * h, min(w, h) * 0.14)
+            let dot_mask = dot_sdf.fill(vec4(1f, 1f, 1f, dot_blend)).w
+            return icon * (1.0 - dot_mask) + dot_color * dot_mask
+        }
     }
 
     // Register FileTreeNode component
@@ -66,22 +115,6 @@ script_mod! {
         draw_icon +: {
             color: instance(theme.color_label_inner)
             color_active: instance(theme.color_label_inner_active)
-
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let w = self.rect_size.x
-                let h = self.rect_size.y
-                sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75)
-                sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.)
-                sdf.union()
-                return sdf.fill(
-                    mix(
-                        self.color * self.scale,
-                        self.color_active,
-                        self.active
-                    )
-                )
-            }
         }
 
         draw_text +: {
@@ -299,6 +332,27 @@ struct DrawIconQuad {
     hover: f32,
     #[live]
     opened: f32,
+    #[live]
+    status_kind: GitStatusDotKind,
+    #[live]
+    color_new: Vec4,
+    #[live]
+    color_modified: Vec4,
+    #[live]
+    color_deleted: Vec4,
+    #[live]
+    color_mixed: Vec4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum GitStatusDotKind {
+    #[pick]
+    None = 0,
+    New = 1,
+    Modified = 2,
+    Deleted = 3,
+    Mixed = 4,
 }
 
 #[derive(Script, ScriptHook, Animator)]
@@ -434,6 +488,7 @@ impl FileTreeNode {
         self.draw_text.is_even = is_even;
         self.draw_icon.scale = scale as f32;
         self.draw_icon.is_even = is_even;
+        self.draw_icon.is_folder = if self.is_folder { 1.0 } else { 0.0 };
         self.draw_text.font_scale = scale as f32;
     }
 
@@ -441,6 +496,7 @@ impl FileTreeNode {
         &mut self,
         cx: &mut Cx2d,
         name: &str,
+        status_kind: GitStatusDotKind,
         is_even: f32,
         node_height: f64,
         depth: usize,
@@ -456,6 +512,7 @@ impl FileTreeNode {
 
         cx.walk_turtle(self.indent_walk(depth));
 
+        self.draw_icon.status_kind = status_kind;
         self.draw_icon.draw_walk(cx, self.icon_walk);
 
         self.draw_text
@@ -467,6 +524,7 @@ impl FileTreeNode {
         &mut self,
         cx: &mut Cx2d,
         name: &str,
+        status_kind: GitStatusDotKind,
         is_even: f32,
         node_height: f64,
         depth: usize,
@@ -481,6 +539,8 @@ impl FileTreeNode {
         );
 
         cx.walk_turtle(self.indent_walk(depth));
+        self.draw_icon.status_kind = status_kind;
+        self.draw_icon.draw_walk(cx, self.icon_walk);
 
         self.draw_text
             .draw_walk(cx, Walk::fit(), Align::default(), name);
@@ -602,7 +662,13 @@ impl FileTree {
         }
     }
 
-    pub fn begin_folder(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) -> Result<(), ()> {
+    pub fn begin_folder_with_status(
+        &mut self,
+        cx: &mut Cx2d,
+        node_id: LiveId,
+        name: &str,
+        status_kind: GitStatusDotKind,
+    ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
 
         if scale > 0.2 {
@@ -624,6 +690,7 @@ impl FileTree {
             tree_node.draw_folder(
                 cx,
                 name,
+                status_kind,
                 Self::is_even(self.count),
                 self.node_height,
                 self.stack.len(),
@@ -644,11 +711,21 @@ impl FileTree {
         Ok(())
     }
 
+    pub fn begin_folder(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) -> Result<(), ()> {
+        self.begin_folder_with_status(cx, node_id, name, GitStatusDotKind::None)
+    }
+
     pub fn end_folder(&mut self) {
         self.stack.pop();
     }
 
-    pub fn file(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) {
+    pub fn file_with_status(
+        &mut self,
+        cx: &mut Cx2d,
+        node_id: LiveId,
+        name: &str,
+        status_kind: GitStatusDotKind,
+    ) {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
 
         if scale > 0.2 {
@@ -662,12 +739,17 @@ impl FileTree {
             tree_node.draw_file(
                 cx,
                 name,
+                status_kind,
                 Self::is_even(self.count),
                 self.node_height,
                 self.stack.len(),
                 scale,
             );
         }
+    }
+
+    pub fn file(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) {
+        self.file_with_status(cx, node_id, name, GitStatusDotKind::None);
     }
 
     pub fn forget(&mut self) {

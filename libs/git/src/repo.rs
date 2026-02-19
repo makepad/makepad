@@ -407,27 +407,65 @@ impl Repository {
 
     // --- Worktree Operations ---
 
-    /// Compute the full status of the working tree.
-    pub fn status(&mut self) -> Result<worktree::Status, GitError> {
+    fn status_with_options(
+        &mut self,
+        options: worktree::StatusOptions,
+    ) -> Result<worktree::Status, GitError> {
         let index = self.read_index()?;
 
-        // Get HEAD tree files (empty map if no HEAD yet)
-        let head_files = match self.head_oid() {
-            Ok(head_oid) => {
-                let commit = self.read_commit(&head_oid)?;
-                let tree = self.read_tree(&commit.tree)?;
-                let git_dir = self.git_dir.clone();
-                let packs = &self.packs;
-                let alts = &self.alternates;
-                worktree::flatten_tree(&tree, "", &mut |oid| {
-                    read_tree_standalone(&git_dir, oid, packs, alts)
-                })?
+        // Try to build HEAD tree file map. If HEAD objects are missing locally
+        // (e.g. partial clones), fall back to index/worktree-only status.
+        let head_files = match (|| -> Result<HashMap<String, ObjectId>, GitError> {
+            match self.head_oid() {
+                Ok(head_oid) => {
+                    let commit = self.read_commit(&head_oid)?;
+                    let tree = self.read_tree(&commit.tree)?;
+                    let git_dir = self.git_dir.clone();
+                    let packs = &self.packs;
+                    let alts = &self.alternates;
+                    worktree::flatten_tree(&tree, "", &mut |oid| {
+                        read_tree_standalone(&git_dir, oid, packs, alts)
+                    })
+                }
+                Err(GitError::RefNotFound(_)) => Ok(HashMap::new()),
+                Err(e) => Err(e),
             }
-            Err(GitError::RefNotFound(_)) => HashMap::new(),
+        })() {
+            Ok(head_files) => head_files,
+            Err(GitError::ObjectNotFound(_)) => {
+                return worktree::compute_status_worktree_only_with_options(
+                    &index,
+                    &self.workdir,
+                    options,
+                );
+            }
             Err(e) => return Err(e),
         };
 
-        worktree::compute_status(&head_files, &index, &self.workdir)
+        match worktree::compute_status_with_options(&head_files, &index, &self.workdir, options) {
+            Ok(status) => Ok(status),
+            // Some repos (e.g. partial clones) may miss HEAD objects locally.
+            // Fall back to index/worktree comparison so modified/untracked files
+            // still show up.
+            Err(GitError::ObjectNotFound(_)) => {
+                worktree::compute_status_worktree_only_with_options(&index, &self.workdir, options)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Compute the full status of the working tree.
+    pub fn status(&mut self) -> Result<worktree::Status, GitError> {
+        self.status_with_options(worktree::StatusOptions::default())
+    }
+
+    /// Compute status for file-tree UIs: skips hidden entries and `target/`
+    /// while scanning for untracked files to keep traversal bounded.
+    pub fn status_for_file_tree(&mut self) -> Result<worktree::Status, GitError> {
+        self.status_with_options(worktree::StatusOptions {
+            skip_hidden: true,
+            skip_target_dirs: true,
+        })
     }
 
     /// Stage a file (add to index).
