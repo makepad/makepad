@@ -701,6 +701,7 @@ impl ShaderOutput {
             TextureType::TextureCubeArray => "samplerCubeArray",
             TextureType::TextureDepth => "sampler2D",
             TextureType::TextureDepthArray => "sampler2DArray",
+            TextureType::TextureVideo => "samplerExternalOES",
         }
     }
 

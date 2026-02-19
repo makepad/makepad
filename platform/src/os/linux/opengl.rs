@@ -592,11 +592,21 @@ impl Cx {
                             (gl.glUniform1i)(loc, i as i32);
                         }
                         if let Some(gl_bind_sampler) = gl.glBindSampler {
-                            let sampler = shgl
-                                .samplers
-                                .get(i)
-                                .and_then(|sampler| sampler.sampler)
-                                .unwrap_or(0);
+                            // Do not bind sampler objects for OES external textures;
+                            // per GL ES spec, using sampler objects with external textures
+                            // is undefined behavior.
+                            let is_oes = matches!(
+                                sh.mapping.textures[i].tex_type,
+                                TextureType::TextureVideo
+                            );
+                            let sampler = if is_oes {
+                                0
+                            } else {
+                                shgl.samplers
+                                    .get(i)
+                                    .and_then(|sampler| sampler.sampler)
+                                    .unwrap_or(0)
+                            };
                             gl_bind_sampler(i as u32, sampler);
                         }
                     }
@@ -1517,8 +1527,8 @@ impl CxOsDrawShader {
             && !is_emulator
         {
             (
-            "#extension GL_OES_EGL_image_external : require\n",
-            "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){ return texture2D(sampler, vec2(pos.x, pos.y));}"
+            "#extension GL_OES_EGL_image_external_essl3 : require\n",
+            "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){ return texture(sampler, vec2(pos.x, pos.y));}"
         )
         } else {
             ("", "")
@@ -2123,8 +2133,7 @@ impl CxTexture {
                     self.os.gl_texture = Some(gl_texture.assume_init());
                 }
             }
-        }
-        if self.take_initial() {
+
             unsafe {
                 let gpu_renderer = get_gl_string(gl, gl_sys::RENDERER);
                 if gpu_renderer.contains("Adreno") {

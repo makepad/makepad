@@ -472,6 +472,7 @@ impl ShaderOutput {
                         TextureType::TextureCubeArray => "TextureCubeArray",
                         TextureType::TextureDepth => "Texture2D",
                         TextureType::TextureDepthArray => "Texture2DArray",
+                        TextureType::TextureVideo => "Texture2D", // Video textures are standard Texture2D on HLSL
                     };
                     let io_name = self.backend.map_io_name(io.name);
                     writeln!(out, "{} {} : register(t{});", hlsl_type, io_name, tex_idx).ok();

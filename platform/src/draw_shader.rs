@@ -233,12 +233,18 @@ impl DrawShaderInputs {
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsGLSL140 => {
-                if slots > 4 {
-                    if (self.total_slots & 3) != 0 {
-                        self.total_slots += 4 - (self.total_slots & 3);
-                    }
-                } else if (self.total_slots & 3) + slots > 4 {
-                    self.total_slots += 4 - (self.total_slots & 3);
+                // std140 alignment rules:
+                // scalar (1 slot): no alignment requirement
+                // vec2 (2 slots): 2-slot aligned
+                // vec3/vec4 (3-4 slots): 4-slot aligned
+                // larger (matrices, arrays): 4-slot aligned
+                let alignment = match slots {
+                    1 => 1,
+                    2 => 2,
+                    _ => 4,
+                };
+                if self.total_slots % alignment != 0 {
+                    self.total_slots += alignment - (self.total_slots % alignment);
                 }
                 self.inputs.push(DrawShaderInput {
                     id,

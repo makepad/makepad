@@ -106,6 +106,10 @@ impl ShaderBackend {
                             ShaderIoKind::Texture(TextureType::TextureDepthArray),
                             ShaderIoPrefix::Prefix("_io."),
                         ),
+                        SHADER_IO_TEXTURE_VIDEO => (
+                            ShaderIoKind::Texture(TextureType::TextureVideo),
+                            ShaderIoPrefix::Prefix("_io."),
+                        ),
                         SHADER_IO_SAMPLER => (
                             ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
                             ShaderIoPrefix::Prefix("_io."),
@@ -189,6 +193,10 @@ impl ShaderBackend {
                             ),
                             SHADER_IO_TEXTURE_DEPTH_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::TextureDepthArray),
+                                ShaderIoPrefix::Prefix("_io."),
+                            ),
+                            SHADER_IO_TEXTURE_VIDEO => (
+                                ShaderIoKind::Texture(TextureType::TextureVideo),
                                 ShaderIoPrefix::Prefix("_io."),
                             ),
                             SHADER_IO_SAMPLER => (
@@ -284,6 +292,10 @@ impl ShaderBackend {
                                 ShaderIoKind::Texture(TextureType::TextureDepthArray),
                                 ShaderIoPrefix::Prefix(""),
                             ),
+                            SHADER_IO_TEXTURE_VIDEO => (
+                                ShaderIoKind::Texture(TextureType::TextureVideo),
+                                ShaderIoPrefix::Prefix(""),
+                            ),
                             SHADER_IO_SAMPLER => (
                                 ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
                                 ShaderIoPrefix::Prefix(""),
@@ -365,6 +377,10 @@ impl ShaderBackend {
                             ),
                             SHADER_IO_TEXTURE_DEPTH_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::TextureDepthArray),
+                                ShaderIoPrefix::Prefix(""),
+                            ),
+                            SHADER_IO_TEXTURE_VIDEO => (
+                                ShaderIoKind::Texture(TextureType::TextureVideo),
                                 ShaderIoPrefix::Prefix(""),
                             ),
                             SHADER_IO_SAMPLER => (
@@ -458,6 +474,10 @@ impl ShaderBackend {
                         ShaderIoKind::Texture(TextureType::TextureDepthArray),
                         ShaderIoPrefix::Prefix("rcx.tex_"),
                     ),
+                    SHADER_IO_TEXTURE_VIDEO => (
+                        ShaderIoKind::Texture(TextureType::TextureVideo),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
                     SHADER_IO_SAMPLER => (
                         ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
                         ShaderIoPrefix::Prefix("rcx.sampler_"),
@@ -542,6 +562,10 @@ impl ShaderBackend {
                     ),
                     SHADER_IO_TEXTURE_DEPTH_ARRAY => (
                         ShaderIoKind::Texture(TextureType::TextureDepthArray),
+                        ShaderIoPrefix::Prefix("tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_VIDEO => (
+                        ShaderIoKind::Texture(TextureType::TextureVideo),
                         ShaderIoPrefix::Prefix("tex_"),
                     ),
                     SHADER_IO_SAMPLER => (
