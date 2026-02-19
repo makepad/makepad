@@ -50,9 +50,6 @@ func transcribe(
     let requestedLocale = resolveLocale(langStr)
     let count = Int(sampleCount)
 
-    NSLog("[speech_bridge] transcribe: %d samples (%.2fs), locale=%@",
-          count, Double(count) / 16000.0, requestedLocale.identifier(.bcp47))
-
     if count == 0 {
         outCount.pointee = 0
         outSegments.pointee = nil
@@ -65,10 +62,6 @@ func transcribe(
         let segments: [(String, Int64, Int64)] = try runAsyncSync {
             let locale = await SpeechTranscriber.supportedLocale(equivalentTo: requestedLocale)
                 ?? requestedLocale
-            if locale.identifier(.bcp47) != requestedLocale.identifier(.bcp47) {
-                NSLog("[speech_bridge] transcribe: using locale fallback %@ -> %@",
-                      requestedLocale.identifier(.bcp47), locale.identifier(.bcp47))
-            }
             let preset = SpeechTranscriber.Preset(
                 transcriptionOptions: [],
                 reportingOptions: [],
@@ -96,16 +89,11 @@ func transcribe(
             try outFile.write(from: outBuf)
 
             let inFile = try AVAudioFile(forReading: tempURL)
-            NSLog("[speech_bridge] analyzer: starting file analysis...")
             try await analyzer.start(inputAudioFile: inFile, finishAfterFile: true)
-            NSLog("[speech_bridge] analyzer: done processing")
-            NSLog("[speech_bridge] collector: waiting for results...")
             var segs: [(String, Int64, Int64)] = []
             for try await response in transcriber.results {
                 let text = String(response.text.characters)
                 let isFinal = response.isFinal
-                NSLog("[speech_bridge] collector: final=%@, text='%@'",
-                      isFinal ? "Y" : "N", text)
                 if isFinal {
                     let range = response.range
                     let startMs = Int64(CMTimeGetSeconds(range.start) * 1000)
@@ -114,7 +102,6 @@ func transcribe(
                     if !text.isEmpty { segs.append((text, startMs, endMs)) }
                 }
             }
-            NSLog("[speech_bridge] collector: done, %d segments", segs.count)
             return segs
         }
 
