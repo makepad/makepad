@@ -44,6 +44,7 @@ pub mod adaptive_view;
 pub mod desktop_button;
 pub mod keyboard_view;
 pub mod nav_control;
+#[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
 #[cfg(feature = "voice")]
@@ -164,7 +165,6 @@ pub use crate::{
     link_label::*,
     modal::*,
     nav_control::*,
-    voice_wave::*,
     page_flip::*,
     popup_menu::*,
     popup_notification::*,
@@ -213,6 +213,9 @@ pub use crate::{
 
     window_menu::*,
 };
+
+#[cfg(feature = "voice")]
+pub use crate::voice_wave::*;
 
 pub use crate::html::*;
 
@@ -288,6 +291,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::adaptive_view::script_mod(vm);
     crate::desktop_button::script_mod(vm);
     crate::keyboard_view::script_mod(vm);
+    #[cfg(feature = "voice")]
     crate::voice_wave::script_mod(vm);
     crate::window_menu::script_mod(vm);
     crate::nav_control::script_mod(vm);
