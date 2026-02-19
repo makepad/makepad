@@ -1414,6 +1414,50 @@ impl ShaderFnCompiler {
                     );
                 }
             }
+            id!(sample_video) => {
+                // sample_video(coord) samples a video texture (platform external texture).
+                // In GLSL this calls sample2dOES() which is provided by the runtime preamble.
+                // On other backends, falls back to regular sample.
+                if args.len() != 1 {
+                    script_err_invalid_args!(self.trap, "texture.sample_video requires 1 arg");
+                    let empty = self.stack.new_string();
+                    self.stack.push(
+                        self.trap.pass(),
+                        ShaderType::Pod(vm.bx.code.builtins.pod.pod_vec4f),
+                        empty,
+                    );
+                } else {
+                    let coord = &args[0];
+                    let mut s = self.stack.new_string();
+
+                    let sampler = ShaderSampler::default();
+                    let sampler_idx = output.get_or_create_sampler(sampler);
+
+                    match output.backend {
+                        ShaderBackend::Glsl => {
+                            output.bind_texture_sampler(&texture_expr, sampler_idx);
+                            write!(s, "sample2dOES({}, {})", texture_expr, coord).ok();
+                        }
+                        ShaderBackend::Metal => {
+                            write!(s, "{}.sample(_s{}, {})", texture_expr, sampler_idx, coord).ok();
+                        }
+                        ShaderBackend::Wgsl => {
+                            write!(s, "textureSample({}, _s{}, {})", texture_expr, sampler_idx, coord).ok();
+                        }
+                        ShaderBackend::Hlsl => {
+                            write!(s, "{}.SampleLevel(_s{}, {}, 0.0)", texture_expr, sampler_idx, coord).ok();
+                        }
+                        ShaderBackend::Rust => {
+                            write!(s, "{}.sample({})", texture_expr, coord).ok();
+                        }
+                    }
+                    self.stack.push(
+                        self.trap.pass(),
+                        ShaderType::Pod(vm.bx.code.builtins.pod.pod_vec4f),
+                        s,
+                    );
+                }
+            }
             _ => {
                 script_err_not_found!(
                     self.trap,
@@ -1421,7 +1465,7 @@ impl ShaderFnCompiler {
                     method_id,
                     suggest_from_live_ids(
                         method_id,
-                        &[id!(sample), id!(sample_as_bgra), id!(size)]
+                        &[id!(sample), id!(sample_as_bgra), id!(sample_video), id!(size)]
                     )
                 );
             }
@@ -1775,6 +1819,7 @@ impl ShaderFnCompiler {
             SHADER_IO_TEXTURE_CUBE_ARRAY => TextureType::TextureCubeArray,
             SHADER_IO_TEXTURE_DEPTH => TextureType::TextureDepth,
             SHADER_IO_TEXTURE_DEPTH_ARRAY => TextureType::TextureDepthArray,
+            SHADER_IO_TEXTURE_VIDEO => TextureType::TextureVideo,
             _ => return false,
         };
 

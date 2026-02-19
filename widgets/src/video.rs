@@ -7,6 +7,7 @@ use crate::{
 script_mod! {
     use mod.prelude.widgets_internal.*
 
+    mod.widgets.VideoDataSource = #(VideoDataSource::script_api(vm))
     mod.widgets.VideoBase = #(Video::register_widget(vm))
 
     mod.widgets.Video = set_type_default() do mod.widgets.VideoBase{
@@ -14,11 +15,9 @@ script_mod! {
         height: 100
 
         draw_bg +: {
-            shape: Solid
-            fill: Image
-            texture video_texture: textureOES
-            texture thumbnail_texture: texture2d
-            uniform show_thumbnail: 0.0
+            video_texture: texture_video()
+            thumbnail_texture: texture_2d(float)
+            show_thumbnail: uniform(0.0)
 
             opacity: instance(1.0)
             image_scale: instance(vec2(1.0, 1.0))
@@ -34,7 +33,7 @@ script_mod! {
                     if self.show_thumbnail > 0.0 {
                         return self.thumbnail_texture.sample_as_bgra(self.pos).xyzw
                     } else {
-                        return self.video_texture.sampleOES(self.pos)
+                        return self.video_texture.sample_video(self.pos)
                     }
                 }
 
@@ -67,7 +66,7 @@ script_mod! {
                 if self.show_thumbnail > 0.5 {
                     return self.thumbnail_texture.sample_as_bgra(adjusted_pos).xyzw
                 } else {
-                    return self.video_texture.sampleOES(adjusted_pos)
+                    return self.video_texture.sample_video(adjusted_pos)
                 }
             }
 

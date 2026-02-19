@@ -784,6 +784,27 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onClipboardPaste
     });
 }
 
+// IME stubs - Java side references these but full IME support is on a separate branch
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeTextStateChanged(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    _full_text: jni_sys::jstring,
+    _selection_start: jni_sys::jint,
+    _selection_end: jni_sys::jint,
+    _composing_start: jni_sys::jint,
+    _composing_end: jni_sys::jint,
+) {
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeEditorAction(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    _action_code: jni_sys::jint,
+) {
+}
+
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
     let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
     let rust_string = std::ffi::CStr::from_ptr(chars)

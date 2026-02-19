@@ -79,6 +79,7 @@ pub enum TextureType {
     TextureCubeArray,
     TextureDepth,
     TextureDepthArray,
+    TextureVideo,
 }
 
 #[derive(Debug, Clone)]
@@ -373,7 +374,8 @@ impl ShaderOutput {
                             SHADER_IO_TEXTURE_CUBE_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureCubeArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
                             SHADER_IO_TEXTURE_DEPTH => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepth), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
                             SHADER_IO_TEXTURE_DEPTH_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepthArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            
+                            SHADER_IO_TEXTURE_VIDEO => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureVideo), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+
                             // Other IO types are handled during compilation or elsewhere
                             _ => {}
                         }
