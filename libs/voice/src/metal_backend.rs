@@ -202,6 +202,142 @@ pub(crate) fn try_im2col_1d_f32(
     imp::try_im2col_1d_f32(input, ic, iw, kw, stride, pad)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_encoder_attn_block_f32(
+    x: &[f32],
+    seq_len: usize,
+    n_state: usize,
+    n_head: usize,
+    ln_w: &[f32],
+    ln_b: &[f32],
+    q_w_bytes: &[u8],
+    q_w_ggml_type: u32,
+    q_b: &[f32],
+    k_w_bytes: &[u8],
+    k_w_ggml_type: u32,
+    v_w_bytes: &[u8],
+    v_w_ggml_type: u32,
+    v_b: &[f32],
+    out_w_bytes: &[u8],
+    out_w_ggml_type: u32,
+    out_b: &[f32],
+) -> Option<Vec<f32>> {
+    if !metal_requested() {
+        return None;
+    }
+    imp::try_encoder_attn_block_f32(
+        x,
+        seq_len,
+        n_state,
+        n_head,
+        ln_w,
+        ln_b,
+        q_w_bytes,
+        q_w_ggml_type,
+        q_b,
+        k_w_bytes,
+        k_w_ggml_type,
+        v_w_bytes,
+        v_w_ggml_type,
+        v_b,
+        out_w_bytes,
+        out_w_ggml_type,
+        out_b,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_encoder_ffn_block_f32(
+    x: &[f32],
+    seq_len: usize,
+    n_state: usize,
+    ln_w: &[f32],
+    ln_b: &[f32],
+    w0_bytes: &[u8],
+    w0_ggml_type: u32,
+    b0: &[f32],
+    w1_bytes: &[u8],
+    w1_ggml_type: u32,
+    b1: &[f32],
+) -> Option<Vec<f32>> {
+    if !metal_requested() {
+        return None;
+    }
+    imp::try_encoder_ffn_block_f32(
+        x,
+        seq_len,
+        n_state,
+        ln_w,
+        ln_b,
+        w0_bytes,
+        w0_ggml_type,
+        b0,
+        w1_bytes,
+        w1_ggml_type,
+        b1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_encoder_layer_f32(
+    x: &[f32],
+    seq_len: usize,
+    n_state: usize,
+    n_head: usize,
+    attn_ln_w: &[f32],
+    attn_ln_b: &[f32],
+    q_w_bytes: &[u8],
+    q_w_ggml_type: u32,
+    q_b: &[f32],
+    k_w_bytes: &[u8],
+    k_w_ggml_type: u32,
+    v_w_bytes: &[u8],
+    v_w_ggml_type: u32,
+    v_b: &[f32],
+    out_w_bytes: &[u8],
+    out_w_ggml_type: u32,
+    out_b: &[f32],
+    mlp_ln_w: &[f32],
+    mlp_ln_b: &[f32],
+    w0_bytes: &[u8],
+    w0_ggml_type: u32,
+    b0: &[f32],
+    w1_bytes: &[u8],
+    w1_ggml_type: u32,
+    b1: &[f32],
+) -> Option<Vec<f32>> {
+    if !metal_requested() {
+        return None;
+    }
+    imp::try_encoder_layer_f32(
+        x,
+        seq_len,
+        n_state,
+        n_head,
+        attn_ln_w,
+        attn_ln_b,
+        q_w_bytes,
+        q_w_ggml_type,
+        q_b,
+        k_w_bytes,
+        k_w_ggml_type,
+        v_w_bytes,
+        v_w_ggml_type,
+        v_b,
+        out_w_bytes,
+        out_w_ggml_type,
+        out_b,
+        mlp_ln_w,
+        mlp_ln_b,
+        w0_bytes,
+        w0_ggml_type,
+        b0,
+        w1_bytes,
+        w1_ggml_type,
+        b1,
+    )
+}
+
 pub(crate) fn is_requested() -> bool {
     metal_requested()
 }
@@ -341,6 +477,77 @@ mod imp {
         _kw: usize,
         _stride: usize,
         _pad: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_encoder_attn_block_f32(
+        _x: &[f32],
+        _seq_len: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _ln_w: &[f32],
+        _ln_b: &[f32],
+        _q_w_bytes: &[u8],
+        _q_w_ggml_type: u32,
+        _q_b: &[f32],
+        _k_w_bytes: &[u8],
+        _k_w_ggml_type: u32,
+        _v_w_bytes: &[u8],
+        _v_w_ggml_type: u32,
+        _v_b: &[f32],
+        _out_w_bytes: &[u8],
+        _out_w_ggml_type: u32,
+        _out_b: &[f32],
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_encoder_ffn_block_f32(
+        _x: &[f32],
+        _seq_len: usize,
+        _n_state: usize,
+        _ln_w: &[f32],
+        _ln_b: &[f32],
+        _w0_bytes: &[u8],
+        _w0_ggml_type: u32,
+        _b0: &[f32],
+        _w1_bytes: &[u8],
+        _w1_ggml_type: u32,
+        _b1: &[f32],
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_encoder_layer_f32(
+        _x: &[f32],
+        _seq_len: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _attn_ln_w: &[f32],
+        _attn_ln_b: &[f32],
+        _q_w_bytes: &[u8],
+        _q_w_ggml_type: u32,
+        _q_b: &[f32],
+        _k_w_bytes: &[u8],
+        _k_w_ggml_type: u32,
+        _v_w_bytes: &[u8],
+        _v_w_ggml_type: u32,
+        _v_b: &[f32],
+        _out_w_bytes: &[u8],
+        _out_w_ggml_type: u32,
+        _out_b: &[f32],
+        _mlp_ln_w: &[f32],
+        _mlp_ln_b: &[f32],
+        _w0_bytes: &[u8],
+        _w0_ggml_type: u32,
+        _b0: &[f32],
+        _w1_bytes: &[u8],
+        _w1_ggml_type: u32,
+        _b1: &[f32],
     ) -> Option<Vec<f32>> {
         None
     }
@@ -860,6 +1067,15 @@ mod imp {
             .saturating_mul(s.ne[3] as usize)
     }
 
+    fn f32_slice_as_bytes(s: &[f32]) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                s.as_ptr() as *const u8,
+                s.len() * std::mem::size_of::<f32>(),
+            )
+        }
+    }
+
     fn flash_attn_supported_head_dim(d: usize) -> bool {
         matches!(
             d,
@@ -1075,6 +1291,8 @@ mod imp {
         }
 
         fn read_f32_buffer(&self, buffer: ObjcId, elems: usize) -> Result<Vec<f32>, String> {
+            self.wait_queue_idle()?;
+
             let out_ptr: *const c_void = unsafe { msg_send![buffer, contents] };
             if out_ptr.is_null() {
                 return Err("output buffer contents returned null".to_string());
@@ -1085,6 +1303,20 @@ mod imp {
                 std::ptr::copy_nonoverlapping(out_ptr as *const f32, out.as_mut_ptr(), elems);
             }
             Ok(out)
+        }
+
+        fn get_or_create_cached_f32_buffer(
+            &mut self,
+            data: &[f32],
+            tag: u8,
+        ) -> Result<ObjcId, String> {
+            let bytes = f32_slice_as_bytes(data);
+            let key = BufferKey {
+                ptr: data.as_ptr() as usize,
+                len: bytes.len(),
+                tag,
+            };
+            self.get_or_create_weight_buffer(key, bytes)
         }
 
         fn get_or_create_weight_buffer(
@@ -1232,12 +1464,13 @@ mod imp {
             Ok((command_buffer, encoder))
         }
 
-        fn end_command_encoder(
-            command_buffer: &StrongId,
-            encoder: &StrongId,
-        ) -> Result<(), String> {
+        fn wait_queue_idle(&self) -> Result<(), String> {
+            let command_buffer_obj: ObjcId =
+                unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
+            let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
+                .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+
             unsafe {
-                let _: () = msg_send![encoder.as_id(), endEncoding];
                 let _: () = msg_send![command_buffer.as_id(), commit];
                 let _: () = msg_send![command_buffer.as_id(), waitUntilCompleted];
             }
@@ -1246,9 +1479,21 @@ mod imp {
             if status == 5 {
                 let error: ObjcId = unsafe { msg_send![command_buffer.as_id(), error] };
                 return Err(format!(
-                    "Metal command buffer error: {}",
+                    "Metal command buffer error (queue idle wait): {}",
                     ns_error_to_string(error)
                 ));
+            }
+
+            Ok(())
+        }
+
+        fn end_command_encoder(
+            command_buffer: &StrongId,
+            encoder: &StrongId,
+        ) -> Result<(), String> {
+            unsafe {
+                let _: () = msg_send![encoder.as_id(), endEncoding];
+                let _: () = msg_send![command_buffer.as_id(), commit];
             }
 
             Ok(())
@@ -2242,6 +2487,13 @@ mod imp {
                 .ok_or_else(|| "overflow computing flash nb32".to_string())?;
             let nb33 = nb32;
 
+            let n_head_log2 = if n_head <= 1 {
+                1i32
+            } else {
+                let p = (usize::BITS - 1) - (n_head as u32).leading_zeros();
+                (1u32 << p) as i32
+            };
+
             if has_kvpad {
                 self.dispatch_flash_attn_ext_pad(
                     k_id, v_id, mask_id, pad_id, ne11, ne02, 1, nb11, nb12, nb13, nb21, nb22, nb23,
@@ -2328,7 +2580,7 @@ mod imp {
                 max_bias: 0.0,
                 m0: 1.0,
                 m1: 1.0,
-                n_head_log2: 1,
+                n_head_log2,
                 logit_softcap: 0.0,
             };
 
@@ -2515,6 +2767,563 @@ mod imp {
                 std::ptr::copy_nonoverlapping(out_ptr as *const f32, out.as_mut_ptr(), out_elems);
             }
             Ok(out)
+        }
+
+        fn flash_attn_f32_from_buffers(
+            &mut self,
+            q_id: ObjcId,
+            k_id: ObjcId,
+            v_id: ObjcId,
+            n_q: usize,
+            n_kv: usize,
+            n_head: usize,
+            d: usize,
+            scale: f32,
+        ) -> Result<StrongId, String> {
+            let out_elems = n_q
+                .checked_mul(n_head)
+                .and_then(|v| v.checked_mul(d))
+                .ok_or_else(|| "overflow computing flash output size".to_string())?;
+            let out_bytes = out_elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing flash output bytes".to_string())?;
+
+            let dst_buf = self.new_buffer_with_length(out_bytes)?;
+
+            let ncpsg = OP_FLASH_ATTN_EXT_NCPSG as usize;
+            let has_kvpad = n_kv % ncpsg != 0;
+            let n_state = n_head
+                .checked_mul(d)
+                .ok_or_else(|| "overflow computing flash n_state".to_string())?;
+
+            let pad_bytes = if has_kvpad {
+                let row = (n_state as u64)
+                    .checked_mul(4)
+                    .ok_or_else(|| "overflow computing flash pad row bytes".to_string())?;
+                let total = (ncpsg as u64)
+                    .checked_mul(n_head as u64)
+                    .and_then(|v| v.checked_mul(row))
+                    .and_then(|v| v.checked_mul(2))
+                    .ok_or_else(|| "overflow computing flash pad size".to_string())?;
+                total as usize
+            } else {
+                1usize
+            };
+            let pad_buf = self.new_buffer_with_length(pad_bytes.max(1))?;
+
+            let nblk0 =
+                (n_kv + OP_FLASH_ATTN_EXT_NCPSG as usize - 1) / OP_FLASH_ATTN_EXT_NCPSG as usize;
+            let nblk1 =
+                (n_q + OP_FLASH_ATTN_EXT_NQPSG as usize - 1) / OP_FLASH_ATTN_EXT_NQPSG as usize;
+            let blk_bytes = nblk0
+                .checked_mul(nblk1)
+                .ok_or_else(|| "overflow computing flash blk size".to_string())?
+                .max(1);
+            let blk_buf = self.new_buffer_with_length(blk_bytes)?;
+
+            self.dispatch_flash_attn_ext_f32(
+                q_id,
+                k_id,
+                v_id,
+                q_id, // unused when has_mask=false
+                q_id, // unused when has_sinks=false
+                pad_buf.as_id(),
+                blk_buf.as_id(),
+                dst_buf.as_id(),
+                n_q,
+                n_kv,
+                n_head,
+                d,
+                scale,
+            )?;
+
+            Ok(dst_buf)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn linear_from_src_buffer(
+            &mut self,
+            src_id: ObjcId,
+            m: usize,
+            k: usize,
+            w_bytes: &[u8],
+            w_ggml_type: u32,
+            n: usize,
+            bias: Option<&[f32]>,
+            weight_tag: u8,
+            bias_tag: u8,
+        ) -> Result<StrongId, String> {
+            let dst = self.matmul_nt_ggml_from_src1_buffer(
+                src_id,
+                w_bytes,
+                w_ggml_type,
+                m,
+                k,
+                n,
+                Some(weight_tag),
+            )?;
+
+            if let Some(bias) = bias {
+                if bias.len() != n {
+                    return Err(format!(
+                        "linear bias len mismatch: got {}, expected {}",
+                        bias.len(),
+                        n
+                    ));
+                }
+                let bias_id = self.get_or_create_cached_f32_buffer(bias, bias_tag)?;
+                let dst_shape = shape4_from_row_major(&[m, n], 4)?;
+                let bias_shape = shape4_from_row_major(&[n], 4)?;
+                self.dispatch_bin_f32(
+                    0,
+                    dst.as_id(),
+                    bias_id,
+                    dst.as_id(),
+                    &dst_shape,
+                    &bias_shape,
+                )?;
+            }
+
+            Ok(dst)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn encoder_attn_block_f32(
+            &mut self,
+            x: &[f32],
+            seq_len: usize,
+            n_state: usize,
+            n_head: usize,
+            ln_w: &[f32],
+            ln_b: &[f32],
+            q_w_bytes: &[u8],
+            q_w_ggml_type: u32,
+            q_b: &[f32],
+            k_w_bytes: &[u8],
+            k_w_ggml_type: u32,
+            v_w_bytes: &[u8],
+            v_w_ggml_type: u32,
+            v_b: &[f32],
+            out_w_bytes: &[u8],
+            out_w_ggml_type: u32,
+            out_b: &[f32],
+        ) -> Result<Vec<f32>, String> {
+            if n_state == 0 || seq_len == 0 || n_head == 0 || n_state % n_head != 0 {
+                return Err(format!(
+                    "invalid attn dimensions: seq_len={}, n_state={}, n_head={}",
+                    seq_len, n_state, n_head
+                ));
+            }
+            let x_need = seq_len
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing x size".to_string())?;
+            if x.len() != x_need {
+                return Err(format!(
+                    "x len mismatch: got {}, expected {}",
+                    x.len(),
+                    x_need
+                ));
+            }
+            if ln_w.len() != n_state || ln_b.len() != n_state {
+                return Err("layernorm affine size mismatch".to_string());
+            }
+            if q_b.len() != n_state || v_b.len() != n_state || out_b.len() != n_state {
+                return Err("attention bias size mismatch".to_string());
+            }
+
+            let x_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
+            let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
+            let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+            let ln_w_id = self.get_or_create_cached_f32_buffer(ln_w, 110)?;
+            let ln_b_id = self.get_or_create_cached_f32_buffer(ln_b, 111)?;
+
+            let norm_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
+            self.dispatch_norm_f32(
+                x_buf.as_id(),
+                ln_w_id,
+                ln_b_id,
+                norm_buf.as_id(),
+                &x_shape,
+                &ln_shape,
+                &ln_shape,
+                1e-5f32,
+                3,
+            )?;
+
+            let q_buf = self.linear_from_src_buffer(
+                norm_buf.as_id(),
+                seq_len,
+                n_state,
+                q_w_bytes,
+                q_w_ggml_type,
+                n_state,
+                Some(q_b),
+                112,
+                113,
+            )?;
+            let k_buf = self.linear_from_src_buffer(
+                norm_buf.as_id(),
+                seq_len,
+                n_state,
+                k_w_bytes,
+                k_w_ggml_type,
+                n_state,
+                None,
+                114,
+                0,
+            )?;
+            let v_buf = self.linear_from_src_buffer(
+                norm_buf.as_id(),
+                seq_len,
+                n_state,
+                v_w_bytes,
+                v_w_ggml_type,
+                n_state,
+                Some(v_b),
+                115,
+                116,
+            )?;
+
+            let d = n_state / n_head;
+            let scale = 1.0f32 / (d as f32).sqrt();
+            let attn_buf = self.flash_attn_f32_from_buffers(
+                q_buf.as_id(),
+                k_buf.as_id(),
+                v_buf.as_id(),
+                seq_len,
+                seq_len,
+                n_head,
+                d,
+                scale,
+            )?;
+
+            let proj_buf = self.linear_from_src_buffer(
+                attn_buf.as_id(),
+                seq_len,
+                n_state,
+                out_w_bytes,
+                out_w_ggml_type,
+                n_state,
+                Some(out_b),
+                117,
+                118,
+            )?;
+
+            self.dispatch_bin_f32(
+                0,
+                proj_buf.as_id(),
+                x_buf.as_id(),
+                proj_buf.as_id(),
+                &x_shape,
+                &x_shape,
+            )?;
+
+            self.read_f32_buffer(proj_buf.as_id(), x_need)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn encoder_ffn_block_f32(
+            &mut self,
+            x: &[f32],
+            seq_len: usize,
+            n_state: usize,
+            ln_w: &[f32],
+            ln_b: &[f32],
+            w0_bytes: &[u8],
+            w0_ggml_type: u32,
+            b0: &[f32],
+            w1_bytes: &[u8],
+            w1_ggml_type: u32,
+            b1: &[f32],
+        ) -> Result<Vec<f32>, String> {
+            if n_state == 0 || seq_len == 0 {
+                return Err(format!(
+                    "invalid ffn dimensions: seq_len={}, n_state={}",
+                    seq_len, n_state
+                ));
+            }
+            let x_need = seq_len
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing x size".to_string())?;
+            if x.len() != x_need {
+                return Err(format!(
+                    "x len mismatch: got {}, expected {}",
+                    x.len(),
+                    x_need
+                ));
+            }
+            if ln_w.len() != n_state || ln_b.len() != n_state {
+                return Err("layernorm affine size mismatch".to_string());
+            }
+            let n_ff = b0.len();
+            if n_ff == 0 || b1.len() != n_state {
+                return Err("ffn bias size mismatch".to_string());
+            }
+
+            let x_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
+            let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
+            let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+            let ln_w_id = self.get_or_create_cached_f32_buffer(ln_w, 120)?;
+            let ln_b_id = self.get_or_create_cached_f32_buffer(ln_b, 121)?;
+
+            let norm_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
+            self.dispatch_norm_f32(
+                x_buf.as_id(),
+                ln_w_id,
+                ln_b_id,
+                norm_buf.as_id(),
+                &x_shape,
+                &ln_shape,
+                &ln_shape,
+                1e-5f32,
+                3,
+            )?;
+
+            let ff0_buf = self.linear_from_src_buffer(
+                norm_buf.as_id(),
+                seq_len,
+                n_state,
+                w0_bytes,
+                w0_ggml_type,
+                n_ff,
+                Some(b0),
+                122,
+                123,
+            )?;
+
+            let ff0_shape = shape4_from_row_major(&[seq_len, n_ff], 4)?;
+            self.dispatch_unary_f32(
+                OP_UNARY_NUM_GELU,
+                ff0_buf.as_id(),
+                ff0_buf.as_id(),
+                &ff0_shape,
+            )?;
+
+            let ff1_buf = self.linear_from_src_buffer(
+                ff0_buf.as_id(),
+                seq_len,
+                n_ff,
+                w1_bytes,
+                w1_ggml_type,
+                n_state,
+                Some(b1),
+                124,
+                125,
+            )?;
+
+            self.dispatch_bin_f32(
+                0,
+                ff1_buf.as_id(),
+                x_buf.as_id(),
+                ff1_buf.as_id(),
+                &x_shape,
+                &x_shape,
+            )?;
+
+            self.read_f32_buffer(ff1_buf.as_id(), x_need)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn encoder_layer_f32(
+            &mut self,
+            x: &[f32],
+            seq_len: usize,
+            n_state: usize,
+            n_head: usize,
+            attn_ln_w: &[f32],
+            attn_ln_b: &[f32],
+            q_w_bytes: &[u8],
+            q_w_ggml_type: u32,
+            q_b: &[f32],
+            k_w_bytes: &[u8],
+            k_w_ggml_type: u32,
+            v_w_bytes: &[u8],
+            v_w_ggml_type: u32,
+            v_b: &[f32],
+            out_w_bytes: &[u8],
+            out_w_ggml_type: u32,
+            out_b: &[f32],
+            mlp_ln_w: &[f32],
+            mlp_ln_b: &[f32],
+            w0_bytes: &[u8],
+            w0_ggml_type: u32,
+            b0: &[f32],
+            w1_bytes: &[u8],
+            w1_ggml_type: u32,
+            b1: &[f32],
+        ) -> Result<Vec<f32>, String> {
+            if n_state == 0 || seq_len == 0 || n_head == 0 || n_state % n_head != 0 {
+                return Err(format!(
+                    "invalid encoder layer dimensions: seq_len={}, n_state={}, n_head={}",
+                    seq_len, n_state, n_head
+                ));
+            }
+            let x_need = seq_len
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing x size".to_string())?;
+            if x.len() != x_need {
+                return Err(format!(
+                    "x len mismatch: got {}, expected {}",
+                    x.len(),
+                    x_need
+                ));
+            }
+            if attn_ln_w.len() != n_state
+                || attn_ln_b.len() != n_state
+                || mlp_ln_w.len() != n_state
+                || mlp_ln_b.len() != n_state
+            {
+                return Err("layernorm affine size mismatch".to_string());
+            }
+            if q_b.len() != n_state || v_b.len() != n_state || out_b.len() != n_state {
+                return Err("attention bias size mismatch".to_string());
+            }
+            let n_ff = b0.len();
+            if n_ff == 0 || b1.len() != n_state {
+                return Err("ffn bias size mismatch".to_string());
+            }
+
+            let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
+            let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+            let x_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
+
+            // Attention sub-block
+            let attn_ln_w_id = self.get_or_create_cached_f32_buffer(attn_ln_w, 130)?;
+            let attn_ln_b_id = self.get_or_create_cached_f32_buffer(attn_ln_b, 131)?;
+            let norm0_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
+            self.dispatch_norm_f32(
+                x_buf.as_id(),
+                attn_ln_w_id,
+                attn_ln_b_id,
+                norm0_buf.as_id(),
+                &x_shape,
+                &ln_shape,
+                &ln_shape,
+                1e-5f32,
+                3,
+            )?;
+
+            let q_buf = self.linear_from_src_buffer(
+                norm0_buf.as_id(),
+                seq_len,
+                n_state,
+                q_w_bytes,
+                q_w_ggml_type,
+                n_state,
+                Some(q_b),
+                132,
+                133,
+            )?;
+            let k_buf = self.linear_from_src_buffer(
+                norm0_buf.as_id(),
+                seq_len,
+                n_state,
+                k_w_bytes,
+                k_w_ggml_type,
+                n_state,
+                None,
+                134,
+                0,
+            )?;
+            let v_buf = self.linear_from_src_buffer(
+                norm0_buf.as_id(),
+                seq_len,
+                n_state,
+                v_w_bytes,
+                v_w_ggml_type,
+                n_state,
+                Some(v_b),
+                135,
+                136,
+            )?;
+
+            let d = n_state / n_head;
+            let scale = 1.0f32 / (d as f32).sqrt();
+            let attn_buf = self.flash_attn_f32_from_buffers(
+                q_buf.as_id(),
+                k_buf.as_id(),
+                v_buf.as_id(),
+                seq_len,
+                seq_len,
+                n_head,
+                d,
+                scale,
+            )?;
+            let attn_res_buf = self.linear_from_src_buffer(
+                attn_buf.as_id(),
+                seq_len,
+                n_state,
+                out_w_bytes,
+                out_w_ggml_type,
+                n_state,
+                Some(out_b),
+                137,
+                138,
+            )?;
+            self.dispatch_bin_f32(
+                0,
+                attn_res_buf.as_id(),
+                x_buf.as_id(),
+                attn_res_buf.as_id(),
+                &x_shape,
+                &x_shape,
+            )?;
+
+            // FFN sub-block
+            let mlp_ln_w_id = self.get_or_create_cached_f32_buffer(mlp_ln_w, 139)?;
+            let mlp_ln_b_id = self.get_or_create_cached_f32_buffer(mlp_ln_b, 140)?;
+            let norm1_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
+            self.dispatch_norm_f32(
+                attn_res_buf.as_id(),
+                mlp_ln_w_id,
+                mlp_ln_b_id,
+                norm1_buf.as_id(),
+                &x_shape,
+                &ln_shape,
+                &ln_shape,
+                1e-5f32,
+                3,
+            )?;
+
+            let ff0_buf = self.linear_from_src_buffer(
+                norm1_buf.as_id(),
+                seq_len,
+                n_state,
+                w0_bytes,
+                w0_ggml_type,
+                n_ff,
+                Some(b0),
+                141,
+                142,
+            )?;
+            let ff0_shape = shape4_from_row_major(&[seq_len, n_ff], 4)?;
+            self.dispatch_unary_f32(
+                OP_UNARY_NUM_GELU,
+                ff0_buf.as_id(),
+                ff0_buf.as_id(),
+                &ff0_shape,
+            )?;
+            let ff1_buf = self.linear_from_src_buffer(
+                ff0_buf.as_id(),
+                seq_len,
+                n_ff,
+                w1_bytes,
+                w1_ggml_type,
+                n_state,
+                Some(b1),
+                143,
+                144,
+            )?;
+            self.dispatch_bin_f32(
+                0,
+                ff1_buf.as_id(),
+                attn_res_buf.as_id(),
+                ff1_buf.as_id(),
+                &x_shape,
+                &x_shape,
+            )?;
+
+            self.read_f32_buffer(ff1_buf.as_id(), x_need)
         }
 
         fn bin_f32(
@@ -2783,7 +3592,8 @@ mod imp {
             weight_cache_tag: Option<u8>,
         ) -> Result<StrongId, String> {
             if m == 0 || k == 0 || n == 0 {
-                return self.new_buffer_with_length(m.saturating_mul(n) * std::mem::size_of::<f32>());
+                return self
+                    .new_buffer_with_length(m.saturating_mul(n) * std::mem::size_of::<f32>());
             }
 
             let src0 = src0_type_from_ggml(bt_ggml_type).ok_or_else(|| {
@@ -2936,7 +3746,11 @@ mod imp {
                 .checked_mul(k)
                 .ok_or_else(|| "matmul overflow computing m*k".to_string())?;
             if a.len() != mk {
-                return Err(format!("lhs len mismatch: got {}, expected {}", a.len(), mk));
+                return Err(format!(
+                    "lhs len mismatch: got {}, expected {}",
+                    a.len(),
+                    mk
+                ));
             }
 
             let a_bytes = unsafe {
@@ -3310,5 +4124,138 @@ mod imp {
         pad: usize,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| ctx.im2col_1d_f32(input, ic, iw, kw, stride, pad))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_encoder_attn_block_f32(
+        x: &[f32],
+        seq_len: usize,
+        n_state: usize,
+        n_head: usize,
+        ln_w: &[f32],
+        ln_b: &[f32],
+        q_w_bytes: &[u8],
+        q_w_ggml_type: u32,
+        q_b: &[f32],
+        k_w_bytes: &[u8],
+        k_w_ggml_type: u32,
+        v_w_bytes: &[u8],
+        v_w_ggml_type: u32,
+        v_b: &[f32],
+        out_w_bytes: &[u8],
+        out_w_ggml_type: u32,
+        out_b: &[f32],
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.encoder_attn_block_f32(
+                x,
+                seq_len,
+                n_state,
+                n_head,
+                ln_w,
+                ln_b,
+                q_w_bytes,
+                q_w_ggml_type,
+                q_b,
+                k_w_bytes,
+                k_w_ggml_type,
+                v_w_bytes,
+                v_w_ggml_type,
+                v_b,
+                out_w_bytes,
+                out_w_ggml_type,
+                out_b,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_encoder_ffn_block_f32(
+        x: &[f32],
+        seq_len: usize,
+        n_state: usize,
+        ln_w: &[f32],
+        ln_b: &[f32],
+        w0_bytes: &[u8],
+        w0_ggml_type: u32,
+        b0: &[f32],
+        w1_bytes: &[u8],
+        w1_ggml_type: u32,
+        b1: &[f32],
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.encoder_ffn_block_f32(
+                x,
+                seq_len,
+                n_state,
+                ln_w,
+                ln_b,
+                w0_bytes,
+                w0_ggml_type,
+                b0,
+                w1_bytes,
+                w1_ggml_type,
+                b1,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_encoder_layer_f32(
+        x: &[f32],
+        seq_len: usize,
+        n_state: usize,
+        n_head: usize,
+        attn_ln_w: &[f32],
+        attn_ln_b: &[f32],
+        q_w_bytes: &[u8],
+        q_w_ggml_type: u32,
+        q_b: &[f32],
+        k_w_bytes: &[u8],
+        k_w_ggml_type: u32,
+        v_w_bytes: &[u8],
+        v_w_ggml_type: u32,
+        v_b: &[f32],
+        out_w_bytes: &[u8],
+        out_w_ggml_type: u32,
+        out_b: &[f32],
+        mlp_ln_w: &[f32],
+        mlp_ln_b: &[f32],
+        w0_bytes: &[u8],
+        w0_ggml_type: u32,
+        b0: &[f32],
+        w1_bytes: &[u8],
+        w1_ggml_type: u32,
+        b1: &[f32],
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.encoder_layer_f32(
+                x,
+                seq_len,
+                n_state,
+                n_head,
+                attn_ln_w,
+                attn_ln_b,
+                q_w_bytes,
+                q_w_ggml_type,
+                q_b,
+                k_w_bytes,
+                k_w_ggml_type,
+                v_w_bytes,
+                v_w_ggml_type,
+                v_b,
+                out_w_bytes,
+                out_w_ggml_type,
+                out_b,
+                mlp_ln_w,
+                mlp_ln_b,
+                w0_bytes,
+                w0_ggml_type,
+                b0,
+                w1_bytes,
+                w1_ggml_type,
+                b1,
+            )
+        })
     }
 }
