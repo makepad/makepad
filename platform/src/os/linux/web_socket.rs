@@ -168,9 +168,6 @@ impl OsWebSocket {
                     }
                 }
 
-                if !done {
-                    std::thread::sleep(Duration::from_millis(2));
-                }
             }
             stream.shutdown();
         });
