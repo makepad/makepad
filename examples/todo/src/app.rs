@@ -95,11 +95,7 @@ script_mod! {
     let todos = []
 
     // Seed sample todos
-    todos.push({text: "Build the todo app", tag: "dev", done: true})
-    todos.push({text: "Add delete buttons", tag: "dev", done: false})
-    todos.push({text: "Style everything nicely", tag: "design", done: false})
-    todos.push({text: "Buy groceries", tag: "personal", done: false})
-    todos.push({text: "Call the dentist", tag: "personal", done: false})
+    todos.push({text: "Get AI to control UI", tag: "dev", done: true})
 
     fn add_todo(text, tag){
         todos.push({text: text, tag: tag, done: false})

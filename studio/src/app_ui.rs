@@ -477,7 +477,13 @@ script_mod! {
                     axis: SplitterAxis.Vertical
                     align: SplitterAlign.FromB(200.0)
                     a: @edit_tabs
-                    b: @log_tabs                }
+                    b: @bottom_tabs_split                }
+
+                bottom_tabs_split := DockSplitter{
+                    axis: SplitterAxis.Horizontal
+                    align: SplitterAlign.Weighted(0.5)
+                    a: @log_tabs
+                    b: @terminal_tabs                }
 
                 file_tree_tabs := DockTabs{
                     tabs: [@file_tree_tab @run_list_tab @search]
@@ -490,8 +496,13 @@ script_mod! {
                 }
 
                 log_tabs := DockTabs{
-                    tabs: [@log_list_tab @terminal_tab]
-                    selected: 1
+                    tabs: [@log_list_tab]
+                    selected: 0
+                }
+
+                terminal_tabs := DockTabs{
+                    tabs: [@terminal_tab]
+                    selected: 0
                 }
 
                 file_tree_tab := DockTab{
