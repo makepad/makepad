@@ -44,7 +44,9 @@ pub mod adaptive_view;
 pub mod desktop_button;
 pub mod keyboard_view;
 pub mod nav_control;
+pub mod voice_wave;
 pub mod window;
+mod window_voice_input;
 pub mod window_menu;
 
 pub mod drop_down;
@@ -161,6 +163,7 @@ pub use crate::{
     link_label::*,
     modal::*,
     nav_control::*,
+    voice_wave::*,
     page_flip::*,
     popup_menu::*,
     popup_notification::*,
@@ -284,6 +287,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::adaptive_view::script_mod(vm);
     crate::desktop_button::script_mod(vm);
     crate::keyboard_view::script_mod(vm);
+    crate::voice_wave::script_mod(vm);
     crate::window_menu::script_mod(vm);
     crate::nav_control::script_mod(vm);
     crate::window::script_mod(vm);
