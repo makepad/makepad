@@ -2,6 +2,7 @@ mod decode_loop;
 mod decoder;
 mod encoder;
 mod mel;
+mod metal_backend;
 mod model;
 mod quant;
 mod tensor;
@@ -56,7 +57,19 @@ pub fn print_profiling() {
     eprintln!("    enc_attn:     {:.1}ms", to_ms(&PROF_ENC_ATTN));
     eprintln!("    enc_elem:     {:.1}ms", to_ms(&PROF_ENC_ELEM));
     eprintln!("  cross_kv:       {:.1}ms", to_ms(&PROF_CROSS_KV));
-    eprintln!("  decoder:        {:.1}ms ({} calls)", to_ms(&PROF_DECODER), PROF_DECODER_CALLS.load(Ordering::Relaxed));
-    eprintln!("  matmul_raw:     {:.1}ms ({} calls)", to_ms(&PROF_MATMUL_RAW), PROF_MATMUL_RAW_CALLS.load(Ordering::Relaxed));
-    eprintln!("  matmul_t:       {:.1}ms ({} calls)", to_ms(&PROF_MATMUL_T), PROF_MATMUL_T_CALLS.load(Ordering::Relaxed));
+    eprintln!(
+        "  decoder:        {:.1}ms ({} calls)",
+        to_ms(&PROF_DECODER),
+        PROF_DECODER_CALLS.load(Ordering::Relaxed)
+    );
+    eprintln!(
+        "  matmul_raw:     {:.1}ms ({} calls)",
+        to_ms(&PROF_MATMUL_RAW),
+        PROF_MATMUL_RAW_CALLS.load(Ordering::Relaxed)
+    );
+    eprintln!(
+        "  matmul_t:       {:.1}ms ({} calls)",
+        to_ms(&PROF_MATMUL_T),
+        PROF_MATMUL_T_CALLS.load(Ordering::Relaxed)
+    );
 }

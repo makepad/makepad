@@ -1,10 +1,23 @@
 use crate::quant::*;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 thread_local! {
     static Q8_ACT_SCRATCH: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+}
+
+fn quant_gpu_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MAKEPAD_VOICE_METAL_QUANT")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+            })
+            .unwrap_or(true)
+    })
 }
 
 /// Wrapper to pass raw *mut f32 across thread boundaries.
@@ -152,7 +165,11 @@ fn get_pool() -> &'static ThreadPool {
             .map(|n| n.get())
             .unwrap_or(1);
         let max_threads = hw.max(1);
-        let default_threads = if cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux")) {
+        let default_threads = if cfg!(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux"
+        )) {
             hw.saturating_sub(2).max(1)
         } else {
             hw.min(8).max(4).min(max_threads)
@@ -648,6 +665,13 @@ impl Tensor {
 
     /// out = a + b (broadcasting b if it's smaller)
     pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
+        if let Some(out) = crate::metal_backend::try_add_f32(&a.data, &a.shape, &b.data, &b.shape) {
+            return Tensor {
+                data: out,
+                shape: a.shape.clone(),
+            };
+        }
+
         if a.numel() == b.numel() {
             let data: Vec<f32> = a.data.iter().zip(&b.data).map(|(x, y)| x + y).collect();
             return Tensor {
@@ -679,6 +703,13 @@ impl Tensor {
 
     /// out = a * b element-wise (broadcasting b)
     pub fn mul(a: &Tensor, b: &Tensor) -> Tensor {
+        if let Some(out) = crate::metal_backend::try_mul_f32(&a.data, &a.shape, &b.data, &b.shape) {
+            return Tensor {
+                data: out,
+                shape: a.shape.clone(),
+            };
+        }
+
         if a.numel() == b.numel() {
             let data: Vec<f32> = a.data.iter().zip(&b.data).map(|(x, y)| x * y).collect();
             return Tensor {
@@ -716,6 +747,13 @@ impl Tensor {
 
     /// GELU activation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     pub fn gelu(a: &Tensor) -> Tensor {
+        if let Some(out) = crate::metal_backend::try_gelu_f32(&a.data, &a.shape) {
+            return Tensor {
+                data: out,
+                shape: a.shape.clone(),
+            };
+        }
+
         const SQRT_2_PI: f32 = 0.7978845608;
         let data: Vec<f32> = a
             .data
@@ -734,6 +772,13 @@ impl Tensor {
     /// Layer normalization along the last dimension.
     /// out[i] = (x[i] - mean) / sqrt(var + eps)
     pub fn layer_norm(x: &Tensor, eps: f32) -> Tensor {
+        if let Some(out) = crate::metal_backend::try_layer_norm_f32(&x.data, &x.shape, eps) {
+            return Tensor {
+                data: out,
+                shape: x.shape.clone(),
+            };
+        }
+
         let n = *x.shape.last().unwrap();
         let batches = x.numel() / n;
         let mut out = vec![0.0f32; x.numel()];
@@ -755,6 +800,22 @@ impl Tensor {
             data: out,
             shape: x.shape.clone(),
         }
+    }
+
+    /// Layer normalization followed by affine transform.
+    /// out = layer_norm(x, eps) * mul + add
+    pub fn layer_norm_mul_add(x: &Tensor, mul: &Tensor, add: &Tensor, eps: f32) -> Tensor {
+        if let Some(out) = crate::metal_backend::try_layer_norm_mul_add_f32(
+            &x.data, &x.shape, &mul.data, &mul.shape, &add.data, &add.shape, eps,
+        ) {
+            return Tensor {
+                data: out,
+                shape: x.shape.clone(),
+            };
+        }
+
+        let norm = Self::layer_norm(x, eps);
+        Self::add(&Self::mul(&norm, mul), add)
     }
 
     /// Softmax along last dimension, with optional additive mask and scale.
@@ -888,6 +949,13 @@ impl Tensor {
         assert_eq!(b.shape[0], k);
         let n = b.shape[1];
 
+        if let Some(out) = crate::metal_backend::try_matmul_nn_f32(&a.data, &b.data, m, k, n) {
+            return Tensor {
+                data: out,
+                shape: vec![m, n],
+            };
+        }
+
         // Transpose b to [N, K] so each output column is a contiguous row
         let mut bt = vec![0.0f32; n * k];
         for i in 0..k {
@@ -920,6 +988,24 @@ impl Tensor {
         let out_features = w.rows();
         let batch = x.numel() / in_features;
         assert_eq!(x.numel(), batch * in_features, "matmul_t: x size mismatch");
+
+        if let Some(out) = crate::metal_backend::try_matmul_nt_f32(
+            &x.data,
+            &w.data,
+            batch,
+            in_features,
+            out_features,
+        ) {
+            crate::PROF_MATMUL_T.fetch_add(
+                _t.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            crate::PROF_MATMUL_T_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Tensor {
+                data: out,
+                shape: vec![batch, out_features],
+            };
+        }
 
         let mut out = vec![0.0f32; batch * out_features];
         let out_ptr = SendPtr::new(out.as_mut_ptr());
@@ -993,6 +1079,74 @@ impl Tensor {
         Self::matmul_raw_with_prequant(x, weight, None)
     }
 
+    /// Fused linear layer: x @ weight^T + bias.
+    /// Uses fused Metal matmul+add when available.
+    pub fn linear_raw(x: &Tensor, weight: &RawTensor, bias: &Tensor) -> Tensor {
+        let in_features = weight.n_cols();
+        let out_features = weight.n_rows();
+        let batch = x.numel() / in_features;
+        assert_eq!(
+            x.numel(),
+            batch * in_features,
+            "linear_raw: x size mismatch"
+        );
+
+        if bias.numel() == out_features {
+            if let Some(out) = crate::metal_backend::try_matmul_nt_ggml_bytes_add_bias(
+                &x.data,
+                &weight.data,
+                weight.ggml_type,
+                batch,
+                in_features,
+                out_features,
+                &bias.data,
+            ) {
+                return Tensor {
+                    data: out,
+                    shape: vec![batch, out_features],
+                };
+            }
+        }
+
+        Tensor::add(&Self::matmul_raw(x, weight), bias)
+    }
+
+    /// Same as linear_raw but allows pre-quantized activation rows for CPU fallback path.
+    pub fn linear_raw_with_prequant(
+        x: &Tensor,
+        weight: &RawTensor,
+        xq_rows: Option<&[u8]>,
+        bias: &Tensor,
+    ) -> Tensor {
+        let in_features = weight.n_cols();
+        let out_features = weight.n_rows();
+        let batch = x.numel() / in_features;
+        assert_eq!(
+            x.numel(),
+            batch * in_features,
+            "linear_raw_with_prequant: x size mismatch"
+        );
+
+        if bias.numel() == out_features {
+            if let Some(out) = crate::metal_backend::try_matmul_nt_ggml_bytes_add_bias(
+                &x.data,
+                &weight.data,
+                weight.ggml_type,
+                batch,
+                in_features,
+                out_features,
+                &bias.data,
+            ) {
+                return Tensor {
+                    data: out,
+                    shape: vec![batch, out_features],
+                };
+            }
+        }
+
+        Tensor::add(&Self::matmul_raw_with_prequant(x, weight, xq_rows), bias)
+    }
+
     /// Same as matmul_raw but optionally accepts pre-quantized activation rows in Q8_0 layout.
     /// `xq_rows` is [batch, row_bytes] where row_bytes = (in_features/QK)*34.
     pub fn matmul_raw_with_prequant(
@@ -1001,6 +1155,19 @@ impl Tensor {
         xq_rows: Option<&[u8]>,
     ) -> Tensor {
         let _t = std::time::Instant::now();
+        if std::env::var("MAKEPAD_VOICE_BACKEND")
+            .ok()
+            .map(|v| v.trim().eq_ignore_ascii_case("metal"))
+            .unwrap_or(false)
+        {
+            static LOG_FIRST: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            if LOG_FIRST.set(()).is_ok() {
+                eprintln!(
+                    "[voice][debug] matmul_raw first-call weight.ggml_type={} shape={:?}",
+                    weight.ggml_type, weight.shape
+                );
+            }
+        }
         let in_features = weight.n_cols();
         let out_features = weight.n_rows();
         let batch = x.numel() / in_features;
@@ -1009,6 +1176,70 @@ impl Tensor {
             batch * in_features,
             "matmul_raw: x size mismatch"
         );
+
+        if weight.ggml_type == GGML_TYPE_F32 {
+            if let Some(out) = crate::metal_backend::try_matmul_nt_f32_bytes(
+                &x.data,
+                &weight.data,
+                batch,
+                in_features,
+                out_features,
+            ) {
+                crate::PROF_MATMUL_RAW.fetch_add(
+                    _t.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                crate::PROF_MATMUL_RAW_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Tensor {
+                    data: out,
+                    shape: vec![batch, out_features],
+                };
+            }
+        } else if weight.ggml_type == GGML_TYPE_F16 {
+            if let Some(out) = crate::metal_backend::try_matmul_nt_f16_bytes(
+                &x.data,
+                &weight.data,
+                batch,
+                in_features,
+                out_features,
+            ) {
+                crate::PROF_MATMUL_RAW.fetch_add(
+                    _t.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                crate::PROF_MATMUL_RAW_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Tensor {
+                    data: out,
+                    shape: vec![batch, out_features],
+                };
+            }
+        } else if quant_gpu_enabled() {
+            match weight.ggml_type {
+                GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1
+                | GGML_TYPE_Q8_0 => {
+                    if let Some(out) = crate::metal_backend::try_matmul_nt_ggml_bytes(
+                        &x.data,
+                        &weight.data,
+                        weight.ggml_type,
+                        batch,
+                        in_features,
+                        out_features,
+                    ) {
+                        crate::PROF_MATMUL_RAW.fetch_add(
+                            _t.elapsed().as_nanos() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        crate::PROF_MATMUL_RAW_CALLS
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Tensor {
+                            data: out,
+                            shape: vec![batch, out_features],
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
 
         let mut out = vec![0.0f32; batch * out_features];
 
@@ -1434,6 +1665,32 @@ impl Tensor {
         let in_len = input.shape[1];
         let pad = ksize / 2;
         let out_len = (in_len + 2 * pad - ksize) / stride + 1;
+
+        if let Some(im2col) =
+            crate::metal_backend::try_im2col_1d_f32(&input.data, ch_in, in_len, ksize, stride, pad)
+        {
+            let k = ch_in * ksize;
+            if let Some(mm_out) =
+                crate::metal_backend::try_matmul_nt_f32(&im2col, &weight.data, out_len, k, ch_out)
+            {
+                let mut out = vec![0.0f32; ch_out * out_len];
+                let out_ptr = SendPtr::new(out.as_mut_ptr());
+                let b_data = &bias.data;
+                parallel_for(ch_out, |co| {
+                    let b = b_data[co];
+                    for t in 0..out_len {
+                        unsafe {
+                            *out_ptr.ptr().add(co * out_len + t) = mm_out[t * ch_out + co] + b;
+                        }
+                    }
+                });
+
+                return Tensor {
+                    data: out,
+                    shape: vec![ch_out, out_len],
+                };
+            }
+        }
 
         let mut out = vec![0.0f32; ch_out * out_len];
         let out_ptr = SendPtr::new(out.as_mut_ptr());

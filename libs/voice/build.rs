@@ -7,24 +7,120 @@ const IOS_DEPLOYMENT_TARGET_DEFAULT: &str = "26.0";
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let host = env::var("HOST").unwrap_or_default();
+    let is_apple_host = host.contains("apple-darwin");
     let force_whisper = env::var("MAKEPAD")
         .ok()
         .is_some_and(|configs| configs.split(['+', ',']).any(|config| config == "whisper"));
 
     println!("cargo:rustc-check-cfg=cfg(force_whisper)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_VOICE_METAL_PRECOMPILE");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-env-changed=IPHONESIMULATOR_DEPLOYMENT_TARGET");
     if force_whisper {
         println!("cargo:rustc-cfg=force_whisper");
     }
 
-    if force_whisper || !host.contains("apple-darwin") {
+    if target_os == "macos" {
+        build_whisper_metallib();
+    }
+
+    if force_whisper || !is_apple_host {
         return;
     }
     if target_os == "macos" || target_os == "ios" {
         build_speech_bridge(&target_os);
     }
+}
+
+fn build_whisper_metallib() {
+    let precompile_enabled = env::var("MAKEPAD_VOICE_METAL_PRECOMPILE")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+        })
+        .unwrap_or(true);
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    let ggml_src_dir = format!("{}/../../local/whisper.cpp/ggml/src", manifest_dir);
+    let ggml_metal_dir = format!(
+        "{}/../../local/whisper.cpp/ggml/src/ggml-metal",
+        manifest_dir
+    );
+
+    let metal_src = format!("{}/ggml-metal.metal", ggml_metal_dir);
+    let common_h = format!("{}/ggml-common.h", ggml_src_dir);
+    let impl_h = format!("{}/ggml-metal-impl.h", ggml_metal_dir);
+
+    println!("cargo:rerun-if-changed={}", metal_src);
+    println!("cargo:rerun-if-changed={}", common_h);
+    println!("cargo:rerun-if-changed={}", impl_h);
+
+    let _ = fs::create_dir_all(&out_dir);
+    let air_path = format!("{}/ggml-metal.air", out_dir);
+    let metallib_path = format!("{}/ggml-default.metallib", out_dir);
+
+    if !precompile_enabled {
+        let _ = fs::write(&metallib_path, []);
+        println!(
+            "cargo:rustc-env=MAKEPAD_VOICE_GGML_METALLIB={}",
+            metallib_path
+        );
+        return;
+    }
+
+    let metal_status = Command::new("xcrun")
+        .args([
+            "--sdk",
+            "macosx",
+            "metal",
+            "-O3",
+            "-c",
+            &metal_src,
+            "-I",
+            &ggml_src_dir,
+            "-I",
+            &ggml_metal_dir,
+            "-o",
+            &air_path,
+        ])
+        .status();
+
+    let ok = metal_status.as_ref().is_ok_and(|s| s.success());
+    if !ok {
+        println!("cargo:warning=failed to compile ggml-metal.metal to AIR; runtime source compile will be used");
+        let _ = fs::write(&metallib_path, []);
+        println!(
+            "cargo:rustc-env=MAKEPAD_VOICE_GGML_METALLIB={}",
+            metallib_path
+        );
+        return;
+    }
+
+    let metallib_status = Command::new("xcrun")
+        .args([
+            "--sdk",
+            "macosx",
+            "metallib",
+            &air_path,
+            "-o",
+            &metallib_path,
+        ])
+        .status();
+
+    let ok = metallib_status.as_ref().is_ok_and(|s| s.success());
+    if !ok {
+        println!("cargo:warning=failed to build ggml default metallib; runtime source compile will be used");
+        let _ = fs::write(&metallib_path, []);
+    }
+
+    println!(
+        "cargo:rustc-env=MAKEPAD_VOICE_GGML_METALLIB={}",
+        metallib_path
+    );
 }
 
 fn build_speech_bridge(target_os: &str) {
@@ -127,8 +223,8 @@ fn ios_swift_target_and_sdk() -> Option<(String, String)> {
     } else {
         "IPHONEOS_DEPLOYMENT_TARGET"
     };
-    let deployment = env::var(deployment_key)
-        .unwrap_or_else(|_| IOS_DEPLOYMENT_TARGET_DEFAULT.to_string());
+    let deployment =
+        env::var(deployment_key).unwrap_or_else(|_| IOS_DEPLOYMENT_TARGET_DEFAULT.to_string());
     let swift_target = if is_simulator {
         format!("{swift_arch}-apple-ios{deployment}-simulator")
     } else {
@@ -215,9 +311,10 @@ fn strip_ld_previous_rpath(content: &str) -> String {
     while let Some(start) = result.find("'$ld$previous$@rpath/") {
         if let Some(end_quote_offset) = result[start + 1..].find('\'') {
             let end = start + 1 + end_quote_offset + 1; // past closing quote
-            // Skip trailing comma and whitespace/newlines
+                                                        // Skip trailing comma and whitespace/newlines
             let rest = &result[end..];
-            let trimmed = rest.trim_start_matches(|c: char| c == ',' || c == ' ' || c == '\n' || c == '\r');
+            let trimmed =
+                rest.trim_start_matches(|c: char| c == ',' || c == ' ' || c == '\n' || c == '\r');
             let skip = rest.len() - trimmed.len();
             result = format!("{}{}", &result[..start], &result[end + skip..]);
         } else {
