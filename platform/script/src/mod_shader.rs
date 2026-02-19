@@ -19,6 +19,7 @@ pub const SHADER_IO_VERTEX_BUFFER: ShaderIoType = ShaderIoType(4);
 pub const SHADER_IO_VARYING: ShaderIoType = ShaderIoType(5);
 pub const SHADER_IO_VERTEX_POSITION: ShaderIoType = ShaderIoType(6);
 pub const SHADER_IO_TEXTURE_1D: ShaderIoType = ShaderIoType(7);
+pub const SHADER_IO_TEXTURE_VIDEO: ShaderIoType = ShaderIoType(8);
 pub const SHADER_IO_TEXTURE_1D_ARRAY: ShaderIoType = ShaderIoType(9);
 pub const SHADER_IO_TEXTURE_2D: ShaderIoType = ShaderIoType(10);
 pub const SHADER_IO_TEXTURE_2D_ARRAY: ShaderIoType = ShaderIoType(11);
@@ -246,6 +247,19 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             let value = script_value!(vm, args.value);
             let obj = vm.bx.heap.new_with_proto(value);
             vm.bx.heap.set_shader_io(obj, SHADER_IO_TEXTURE_DEPTH_ARRAY);
+            obj.into()
+        },
+    );
+
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(texture_video),
+        script_args!(value = NIL),
+        |vm, args| {
+            let value = script_value!(vm, args.value);
+            let obj = vm.bx.heap.new_with_proto(value);
+            vm.bx.heap.set_shader_io(obj, SHADER_IO_TEXTURE_VIDEO);
             obj.into()
         },
     );

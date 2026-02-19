@@ -584,6 +584,7 @@ impl ShaderFnCompiler {
                                 SHADER_IO_TEXTURE_DEPTH_ARRAY => {
                                     Some(TextureType::TextureDepthArray)
                                 }
+                                SHADER_IO_TEXTURE_VIDEO => Some(TextureType::TextureVideo),
                                 _ => None,
                             };
                             if let Some(tex_type) = tex_type {
