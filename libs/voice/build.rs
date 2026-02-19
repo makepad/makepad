@@ -17,8 +17,27 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_VOICE_METAL_PRECOMPILE");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-env-changed=IPHONESIMULATOR_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_NO_VOICE");
+
     if force_whisper {
         println!("cargo:rustc-cfg=force_whisper");
+    }
+
+    // Always create the metallib env var (even if empty)
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let metallib_path = format!("{}/ggml-default.metallib", out_dir);
+    let _ = fs::create_dir_all(&out_dir);
+    let _ = fs::write(&metallib_path, []); // Create empty file
+    println!("cargo:rustc-env=MAKEPAD_VOICE_GGML_METALLIB={}", metallib_path);
+
+    // Check if we should skip the full build
+    let skip_voice = env::var("MAKEPAD_NO_VOICE").is_ok()
+        || (target_os == "macos" && !is_macos_26_or_later());
+
+    if skip_voice && (target_os == "macos" || target_os == "ios") {
+        println!("cargo:warning=makepad-voice: skipping speech bridge (requires macOS 26+)");
+        build_stub_speech_bridge(&out_dir);
+        return;
     }
 
     if target_os == "macos" {
@@ -31,6 +50,90 @@ fn main() {
     if target_os == "macos" || target_os == "ios" {
         build_speech_bridge(&target_os);
     }
+}
+
+fn build_stub_speech_bridge(out_dir: &str) {
+    // Create a C stub file matching the extern declarations in apple_speech.rs:
+    // fn apple_speech_transcribe(samples: *const f32, sample_count: i64, lang: *const c_char, out_count: *mut i32, out_segments: *mut *mut c_void) -> i32;
+    // fn apple_speech_free_segments(ptr: *mut c_void, count: i32);
+    // fn apple_speech_ensure_model(lang: *const c_char) -> i32;
+
+    let stub_c = format!("{}/speech_bridge_stub.c", out_dir);
+    let stub_code = r#"
+#include <stdint.h>
+#include <stddef.h>
+
+int32_t apple_speech_transcribe(
+    const float* samples,
+    int64_t sample_count,
+    const char* lang,
+    int32_t* out_count,
+    void** out_segments
+) {
+    if (out_count) *out_count = 0;
+    if (out_segments) *out_segments = NULL;
+    return -1; // Return error code - not supported
+}
+
+void apple_speech_free_segments(void* ptr, int32_t count) {
+    // No-op stub
+    (void)ptr;
+    (void)count;
+}
+
+int32_t apple_speech_ensure_model(const char* lang) {
+    (void)lang;
+    return -1; // Return error code - not supported
+}
+"#;
+
+    fs::write(&stub_c, stub_code).expect("Failed to write stub C file");
+
+    // Compile the stub
+    let stub_obj = format!("{}/speech_bridge_stub.o", out_dir);
+    let status = Command::new("cc")
+        .args(["-c", "-O2", &stub_c, "-o", &stub_obj])
+        .status()
+        .expect("Failed to compile stub");
+
+    if !status.success() {
+        panic!("Failed to compile speech bridge stub");
+    }
+
+    // Create static library
+    let stub_lib = format!("{}/libspeech_bridge.a", out_dir);
+    let status = Command::new("ar")
+        .args(["rcs", &stub_lib, &stub_obj])
+        .status()
+        .expect("Failed to create stub library");
+
+    if !status.success() {
+        panic!("Failed to create speech bridge stub library");
+    }
+
+    // Link the stub library
+    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-lib=static=speech_bridge");
+}
+
+fn is_macos_26_or_later() -> bool {
+    let output = Command::new("sw_vers")
+        .args(["-productVersion"])
+        .output()
+        .ok();
+
+    if let Some(output) = output {
+        if output.status.success() {
+            let version = String::from_utf8_lossy(&output.stdout);
+            let version = version.trim();
+            if let Some(major) = version.split('.').next() {
+                if let Ok(major_num) = major.parse::<u32>() {
+                    return major_num >= 26;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn build_whisper_metallib() {
@@ -132,7 +235,6 @@ fn build_speech_bridge(target_os: &str) {
     println!("cargo:rerun-if-changed=swift/speech_bridge.swift");
     let _ = fs::create_dir_all(&swift_module_cache);
 
-    // Compile Swift -> static library
     let output_lib = format!("{}/libspeech_bridge.a", out_dir);
     let mut swift_args = vec![
         "-emit-library".to_string(),
@@ -164,35 +266,18 @@ fn build_speech_bridge(target_os: &str) {
         panic!("swiftc compilation failed");
     }
 
-    // Fix the @rpath issue with libswift_Concurrency.dylib BEFORE emitting any
-    // link-search paths, so our override directory appears first in -L order.
-    //
-    // Background: The macOS SDK's libswift_Concurrency.tbd contains $ld$previous
-    // entries that tell the linker to record "@rpath/libswift_Concurrency.dylib"
-    // as the install name when MACOSX_DEPLOYMENT_TARGET < 15.0. Rust defaults to
-    // MACOSX_DEPLOYMENT_TARGET=11.0, which triggers this behavior. The resulting
-    // binary then fails at runtime with "dyld: Library not loaded: @rpath/...".
-    //
-    // The fix: create modified copies of the .tbd files with $ld$previous entries
-    // stripped, and add them to the linker search path before the SDK paths.
-    // Since cargo:rustc-link-search propagates from library crates to dependent
-    // binaries, the final binary's link step will find our clean .tbd first and
-    // use the absolute install name "/usr/lib/swift/libswift_Concurrency.dylib".
     if target_os == "macos" {
         fix_swift_rpath_tbds(&out_dir);
     }
 
-    // Link the static library
     println!("cargo:rustc-link-search=native={}", out_dir);
     println!("cargo:rustc-link-lib=static=speech_bridge");
 
-    // Link Apple frameworks
     println!("cargo:rustc-link-lib=framework=Speech");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=AVFoundation");
     println!("cargo:rustc-link-lib=framework=CoreMedia");
 
-    // Add Swift runtime library search paths so the linker can resolve symbols.
     let target_info = Command::new("swiftc")
         .args(&["-print-target-info"])
         .output()
@@ -244,14 +329,6 @@ fn ios_swift_target_and_sdk() -> Option<(String, String)> {
     Some((swift_target, sdk_path))
 }
 
-/// Create modified copies of Swift runtime .tbd files without $ld$previous entries.
-///
-/// The $ld$previous entries in the SDK's .tbd files cause the linker to use
-/// @rpath/ as the install name for deployment targets below certain thresholds.
-/// By stripping these entries and placing our modified .tbd in a search directory
-/// that comes before the SDK, the linker will use the actual absolute install
-/// names (e.g. "/usr/lib/swift/libswift_Concurrency.dylib") regardless of the
-/// deployment target.
 fn fix_swift_rpath_tbds(out_dir: &str) {
     let sdk_path = Command::new("xcrun")
         .args(&["--show-sdk-path"])
@@ -270,7 +347,6 @@ fn fix_swift_rpath_tbds(out_dir: &str) {
         return;
     }
 
-    // Only patch the specific Swift runtime .tbd files our static library depends on.
     let swift_tbd_dir = format!("{}/usr/lib/swift", sdk_path);
     let tbds_to_fix = [
         "libswift_Concurrency.tbd",
@@ -293,23 +369,15 @@ fn fix_swift_rpath_tbds(out_dir: &str) {
         let _ = fs::write(format!("{}/{}", override_dir, name), &fixed);
     }
 
-    // Emit this search path BEFORE any other Swift library search paths.
-    // cargo:rustc-link-search propagates from library crates to dependent binaries,
-    // so the final binary's linker will find our modified .tbd files first.
     println!("cargo:rustc-link-search=native={}", override_dir);
 }
 
-/// Strip $ld$previous entries that reference @rpath/ from a .tbd file's content.
 fn strip_ld_previous_rpath(content: &str) -> String {
     let mut result = content.to_string();
 
-    // $ld$previous entries appear as quoted strings in YAML:
-    // '$ld$previous$@rpath/libswift_Concurrency.dylib$$1$10.9$12.0$$'
-    // They may be followed by comma + whitespace in a YAML sequence.
     while let Some(start) = result.find("'$ld$previous$@rpath/") {
         if let Some(end_quote_offset) = result[start + 1..].find('\'') {
-            let end = start + 1 + end_quote_offset + 1; // past closing quote
-                                                        // Skip trailing comma and whitespace/newlines
+            let end = start + 1 + end_quote_offset + 1;
             let rest = &result[end..];
             let trimmed =
                 rest.trim_start_matches(|c: char| c == ',' || c == ' ' || c == '\n' || c == '\r');
