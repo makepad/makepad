@@ -59,22 +59,12 @@ script_mod! {
                 icon_sdf.box(0.02 * w, 0.28 * h, 0.50 * w, 0.30 * h, 1.0)
                 icon_sdf.union()
                 icon_sdf.fill(icon_color)
-            } else {
-                icon_sdf.box(0.20 * w, 0.20 * h, 0.54 * w, 0.62 * h, 0.8)
-                icon_sdf.stroke_keep(icon_color, 1.0)
-                icon_sdf.move_to(0.52 * w, 0.20 * h)
-                icon_sdf.line_to(0.74 * w, 0.20 * h)
-                icon_sdf.line_to(0.74 * w, 0.42 * h)
-                icon_sdf.stroke_keep(icon_color, 1.0)
-                icon_sdf.move_to(0.52 * w, 0.20 * h)
-                icon_sdf.line_to(0.52 * w, 0.42 * h)
-                icon_sdf.line_to(0.74 * w, 0.42 * h)
-                icon_sdf.stroke_keep(icon_color, 1.0)
-            }
+            } 
+            
             let icon = icon_sdf.result
 
             let dot_sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            dot_sdf.circle(0.82 * w, 0.78 * h, min(w, h) * 0.21)
+            dot_sdf.circle(0.82 * w, 0.5 * h, min(w, h) * 0.21)
             let dot_mask = dot_sdf.fill(vec4(1f, 1f, 1f, dot_blend)).w
             return icon * (1.0 - dot_mask) + dot_color * dot_mask
         }

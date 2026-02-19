@@ -158,12 +158,17 @@ fn handle_web_socket(
     headers: HttpServerHeaders,
     web_socket_id: u64,
 ) {
+    // Low-latency control traffic (e.g. studio Tick messages) benefits from
+    // disabling Nagle on loopback websocket links.
+    let _ = tcp_stream.set_nodelay(true);
+
     let upgrade_response =
         ServerWebSocket::create_upgrade_response(headers.sec_websocket_key.as_ref().unwrap());
 
     write_bytes_to_tcp_stream_no_error(&mut tcp_stream, upgrade_response.as_bytes());
 
     let mut write_tcp_stream = tcp_stream.try_clone().unwrap();
+    let _ = write_tcp_stream.set_nodelay(true);
     let (tx_socket, rx_socket) = mpsc::channel::<Vec<u8>>();
 
     let _write_thread = std::thread::spawn(move || {

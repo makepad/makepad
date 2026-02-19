@@ -132,7 +132,9 @@ impl Cx {
             let mut sockets = HashMap::new();
             let mut app_to_studio = AppToStudioVec(Vec::new());
             let mut first_message = None;
-            let collect_time = Duration::from_millis(16);
+            let default_collect_time = Duration::from_millis(16);
+            let urgent_collect_time = Duration::from_millis(1);
+            let mut collect_time = default_collect_time;
             let mut cycle_time = Duration::MAX;
             loop {
                 // the idea is that this loop collects AppToStudio messages for a minimum of collect_time
@@ -159,8 +161,13 @@ impl Cx {
                             if first_message.is_none() {
                                 first_message = Some(Instant::now())
                             }
+                            // Keep stdin-loop control traffic low-latency (Tick/RAF/draw-complete),
+                            // otherwise animation pacing becomes visibly jittery.
+                            if matches!(&message, AppToStudio::StdinToHost(_)) {
+                                collect_time = urgent_collect_time;
+                            }
                             app_to_studio.0.push(message);
-                            cycle_time = collect_time; // we should now block with a max of collect time since we received the first message
+                            cycle_time = collect_time;
                         }
                         WebSocketThreadMsg::Close { socket_id } => {
                             if let Some(socket) = sockets.get_mut(&socket_id) {
@@ -196,6 +203,7 @@ impl Cx {
                         }
                         app_to_studio.0.clear();
                         first_message = None;
+                        collect_time = default_collect_time;
                         cycle_time = Duration::MAX;
                     }
                 }
