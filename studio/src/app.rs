@@ -173,8 +173,11 @@ impl App {
                         // ok lets run the processes
 
                         for process in state.processes {
-                            if let Some(binary_id) =
-                                self.data.build_manager.binary_name_to_id(&process.binary)
+                            if let Some(binary_id) = self
+                                .data
+                                .build_manager
+                                .binary_root_name_to_id(&process.root, &process.binary)
+                                .or_else(|| self.data.build_manager.binary_name_to_id(&process.binary))
                             {
                                 self.data.build_manager.start_active_build(
                                     cx,
@@ -562,6 +565,8 @@ impl MatchEvent for App {
             }
             AppAction::ReloadFileTree => {
                 self.data.file_system.file_client.load_file_tree();
+                self.data.build_manager.update_run_list(cx);
+                run_list.redraw(cx);
             }
             AppAction::RedrawProfiler => {
                 profiler.redraw(cx);
@@ -761,6 +766,8 @@ impl MatchEvent for App {
 
         match action.cast() {
             FileSystemAction::TreeLoaded => {
+                self.data.build_manager.update_run_list(cx);
+                run_list.redraw(cx);
                 file_tree.redraw(cx);
                 self.load_state(cx, 0);
                 self.data.ai_chat_manager.init(&mut self.data.file_system);
