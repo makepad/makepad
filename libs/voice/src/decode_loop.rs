@@ -165,17 +165,20 @@ impl WhisperState {
                 params.max_tokens
             } else {
                 model.hparams.n_text_ctx as usize / 2
-            };
+            }
+            .min((model.hparams.n_text_ctx as usize).saturating_sub(n_prompt));
 
             let mut has_ts = false;
             let mut seek_delta: usize = n_ctx * 2; // default: advance full chunk
 
             for _i in 0..max_tokens {
+                if self.kv_cache.n_past >= model.hparams.n_text_ctx as usize {
+                    break;
+                }
                 // Get logits for last token
                 let prev_token = if result_tokens.is_empty() {
                     // Use last logits from prompt decode
-                    let token =
-                        sample_greedy(last_logits, vocab, params, &result_tokens, has_ts, 0);
+                    let token = sample_greedy(last_logits, vocab, params, &result_tokens, has_ts, 0);
                     result_tokens.push(token);
                     if token.id == vocab.token_eot {
                         break;

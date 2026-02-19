@@ -66,7 +66,7 @@ pub fn decode(
             let v = v.trim().to_ascii_lowercase();
             !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
         })
-        .unwrap_or(false);
+        .unwrap_or(true);
     let decoder_flash_self = std::env::var("MAKEPAD_VOICE_METAL_DECODER_FLASH_SELF")
         .ok()
         .map(|v| {
@@ -114,7 +114,37 @@ pub fn decode(
         let k_all = kv_cache.k_data(il);
         let v_all = kv_cache.v_data(il);
 
+        let (ref k_cross, ref v_cross) = cross_kv[il];
+        let n_audio_ctx = k_cross.shape[0];
+
         let scale = 1.0 / (n_state_head as f32).sqrt();
+        if decoder_flash_self
+            && decoder_flash_cross
+            && crate::metal_backend::is_requested()
+            && n_tokens == 1
+        {
+            if let Some(out) = crate::metal_backend::try_decoder_self_cross_ffn_step_f32(
+                il,
+                &residual.data,
+                &q.data,
+                k_all,
+                v_all,
+                n_kv,
+                n_state,
+                n_head,
+                &k_cross.data,
+                &v_cross.data,
+                n_audio_ctx,
+                layer,
+            ) {
+                cur = Tensor {
+                    data: out,
+                    shape: vec![n_tokens, n_state],
+                };
+                continue;
+            }
+        }
+
         let attn_out =
             if decoder_flash_self && crate::metal_backend::is_requested() && n_tokens == 1 {
                 crate::metal_backend::try_flash_attn_f32_self_kv_cache(
@@ -296,9 +326,6 @@ pub fn decode(
         };
         let projected = Tensor::linear_raw(&attn_result, &layer.attn_ln_1_w, &layer.attn_ln_1_b);
         cur = Tensor::add(&projected, &residual);
-
-        let (ref k_cross, ref v_cross) = cross_kv[il];
-        let n_audio_ctx = k_cross.shape[0];
 
         if decoder_flash_cross && crate::metal_backend::is_requested() && n_tokens == 1 {
             if let Some(out) = crate::metal_backend::try_decoder_cross_ffn_step_f32(
