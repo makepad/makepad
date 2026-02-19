@@ -543,7 +543,7 @@ fn discover_workspace_binary_packages(root_path: &PathBuf) -> Result<Vec<String>
         ));
     }
 
-    let metadata = CargoMetadata::deserialize_json(&stdout)
+    let metadata = CargoMetadata::deserialize_json_lenient(&stdout)
         .map_err(|err| format!("failed to parse cargo metadata json: {err:?}"))?;
 
     let mut binaries = Vec::new();
