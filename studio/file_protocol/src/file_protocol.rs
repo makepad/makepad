@@ -195,6 +195,14 @@ pub struct GitCommit {
     pub message: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin)]
+pub struct GitStatus {
+    pub modified: bool,
+    pub new_file: bool,
+    pub deleted: bool,
+    pub staged: bool,
+}
+
 /// A type for representing data about a node in a file tree.
 ///
 /// Each node is either a directory a file. Directories form the internal nodes of the file tree.
@@ -204,10 +212,12 @@ pub struct GitCommit {
 pub enum FileNodeData {
     Directory {
         git_log: Option<GitLog>,
+        git_status: Option<GitStatus>,
         entries: Vec<DirectoryEntry>,
     },
     File {
         data: Option<Vec<u8>>,
+        git_status: Option<GitStatus>,
     },
 }
 

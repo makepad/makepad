@@ -1366,7 +1366,6 @@ impl StudioTerminal {
         // This avoids showing a stale cursor on the previous line and then
         // jumping it once the new prompt position is committed.
         if terminal.modes.cursor_visible
-            && (self.cursor_blink_on || !has_focus)
             && !self.output_streaming
             && self.cursor_hold.is_none()
             && self.enter_coalesce.is_none()

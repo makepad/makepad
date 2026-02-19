@@ -39,6 +39,13 @@ pub struct Status {
     pub entries: Vec<StatusEntry>,
 }
 
+/// Options controlling status traversal behavior.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatusOptions {
+    pub skip_hidden: bool,
+    pub skip_target_dirs: bool,
+}
+
 /// Compute full working tree status by comparing HEAD tree, index, and worktree.
 ///
 /// - `head_files`: flat map of path -> OID from the HEAD commit's tree (recursively flattened).
@@ -49,6 +56,16 @@ pub fn compute_status(
     head_files: &HashMap<String, ObjectId>,
     index: &Index,
     workdir: &Path,
+) -> Result<Status, GitError> {
+    compute_status_with_options(head_files, index, workdir, StatusOptions::default())
+}
+
+/// Compute full working tree status with traversal options.
+pub fn compute_status_with_options(
+    head_files: &HashMap<String, ObjectId>,
+    index: &Index,
+    workdir: &Path,
+    options: StatusOptions,
 ) -> Result<Status, GitError> {
     let mut entries = Vec::new();
 
@@ -120,7 +137,7 @@ pub fn compute_status(
     }
 
     // 3. Untracked files
-    collect_untracked(workdir, workdir, &index_map, &mut entries)?;
+    collect_untracked(workdir, workdir, &index_map, &mut entries, options)?;
 
     // Sort by path for deterministic output
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -131,12 +148,75 @@ pub fn compute_status(
     Ok(Status { entries })
 }
 
+/// Compute working-tree-only status (without reading HEAD tree objects).
+///
+/// This reports:
+/// - `Modified` and `Deleted` by comparing worktree vs index
+/// - `Untracked` by scanning files not present in the index
+///
+/// It intentionally omits staged states because those require HEAD tree data.
+pub fn compute_status_worktree_only(index: &Index, workdir: &Path) -> Result<Status, GitError> {
+    compute_status_worktree_only_with_options(index, workdir, StatusOptions::default())
+}
+
+/// Compute working-tree-only status with traversal options.
+pub fn compute_status_worktree_only_with_options(
+    index: &Index,
+    workdir: &Path,
+    options: StatusOptions,
+) -> Result<Status, GitError> {
+    let mut entries = Vec::new();
+
+    // Build index map (only stage 0 entries)
+    let index_map: HashMap<&str, &IndexEntry> = index
+        .entries
+        .iter()
+        .filter(|e| e.stage() == 0)
+        .map(|e| (e.path.as_str(), e))
+        .collect();
+
+    // Compare worktree vs index (unstaged changes)
+    for (path, idx_entry) in &index_map {
+        let file_path = workdir.join(path);
+        if !file_path.exists() {
+            entries.push(StatusEntry {
+                path: path.to_string(),
+                status: FileStatus::Deleted,
+            });
+            continue;
+        }
+
+        // Quick stat check: if mtime/size match the index, skip content hashing
+        let metadata = fs::metadata(&file_path)?;
+        let stat_matches = metadata.mtime() as u32 == idx_entry.mtime_sec
+            && metadata.len() as u32 == idx_entry.file_size;
+
+        if !stat_matches {
+            let content = fs::read(&file_path)?;
+            let worktree_oid = hash_object("blob", &content);
+            if worktree_oid != idx_entry.oid {
+                entries.push(StatusEntry {
+                    path: path.to_string(),
+                    status: FileStatus::Modified,
+                });
+            }
+        }
+    }
+
+    // Untracked files
+    collect_untracked(workdir, workdir, &index_map, &mut entries, options)?;
+
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(Status { entries })
+}
+
 /// Recursively collect untracked files.
 fn collect_untracked(
     root: &Path,
     dir: &Path,
     index_map: &HashMap<&str, &IndexEntry>,
     entries: &mut Vec<StatusEntry>,
+    options: StatusOptions,
 ) -> Result<(), GitError> {
     let read_dir = match fs::read_dir(dir) {
         Ok(r) => r,
@@ -154,9 +234,15 @@ fn collect_untracked(
         if name_str == ".git" {
             continue;
         }
+        if options.skip_hidden && name_str.starts_with('.') {
+            continue;
+        }
+        if options.skip_target_dirs && path.is_dir() && name_str == "target" {
+            continue;
+        }
 
         if path.is_dir() {
-            collect_untracked(root, &path, index_map, entries)?;
+            collect_untracked(root, &path, index_map, entries, options)?;
         } else if path.is_file() {
             let rel_path = path.strip_prefix(root).map_err(|_| {
                 GitError::Io(std::io::Error::new(
@@ -439,5 +525,47 @@ mod tests {
         assert_eq!(status.entries.len(), 1);
         assert_eq!(status.entries[0].path, "new_file.txt");
         assert_eq!(status.entries[0].status, FileStatus::Untracked);
+    }
+
+    #[test]
+    fn test_compute_status_worktree_only_modified_and_untracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path();
+
+        fs::write(workdir.join("tracked.txt"), "new content\n").unwrap();
+        fs::write(workdir.join("untracked.txt"), "hello\n").unwrap();
+
+        let index = Index {
+            version: 2,
+            entries: vec![IndexEntry {
+                ctime_sec: 0,
+                ctime_nsec: 0,
+                mtime_sec: 0,
+                mtime_nsec: 0,
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                oid: hash_object("blob", b"old content\n"),
+                flags: "tracked.txt".len() as u16,
+                path: "tracked.txt".to_string(),
+            }],
+        };
+
+        let status = compute_status_worktree_only(&index, workdir).unwrap();
+        assert!(
+            status
+                .entries
+                .iter()
+                .any(|e| e.path == "tracked.txt" && e.status == FileStatus::Modified)
+        );
+        assert!(
+            status
+                .entries
+                .iter()
+                .any(|e| e.path == "untracked.txt" && e.status == FileStatus::Untracked)
+        );
     }
 }

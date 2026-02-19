@@ -11,8 +11,8 @@ use {
         },
         makepad_file_protocol::{
             FileClientMessage, FileError, FileNodeData, FileNotification, FileRequest,
-            FileResponse, FileTreeData, GitCommit, GitLog, SaveFileResponse, SaveKind, SearchItem,
-            SearchResult,
+            FileResponse, FileTreeData, GitCommit, GitLog, GitStatus, SaveFileResponse, SaveKind,
+            SearchItem, SearchResult,
         },
         makepad_file_server::FileSystemRoots,
         makepad_widgets::file_tree::*,
@@ -160,6 +160,7 @@ pub enum OpenDocument {
 pub struct FileNode {
     pub parent_edge: Option<FileEdge>,
     pub name: String,
+    pub git_status: Option<GitStatus>,
     pub child_edges: Option<Vec<FileEdge>>,
 }
 
@@ -718,6 +719,26 @@ impl FileSystem {
         };
     }
 
+    fn git_status_dot_kind(status: Option<GitStatus>) -> GitStatusDotKind {
+        let Some(status) = status else {
+            return GitStatusDotKind::None;
+        };
+        let active = status.new_file as u8 + status.modified as u8 + status.deleted as u8;
+        if active > 1 || (status.staged && active > 0) {
+            GitStatusDotKind::Mixed
+        } else if status.deleted {
+            GitStatusDotKind::Deleted
+        } else if status.modified {
+            GitStatusDotKind::Modified
+        } else if status.new_file {
+            GitStatusDotKind::New
+        } else if status.staged {
+            GitStatusDotKind::Mixed
+        } else {
+            GitStatusDotKind::None
+        }
+    }
+
     pub fn draw_file_node(
         &self,
         cx: &mut Cx2d,
@@ -728,13 +749,14 @@ impl FileSystem {
         if let Some(file_node) = self.file_nodes.get(&file_node_id) {
             match &file_node.child_edges {
                 Some(child_edges) => {
+                    let dot_kind = Self::git_status_dot_kind(file_node.git_status);
                     if level == 0 {
                         for child_edge in child_edges {
                             self.draw_file_node(cx, child_edge.file_node_id, level + 1, file_tree);
                         }
                     } else {
                         if file_tree
-                            .begin_folder(cx, file_node_id, &file_node.name)
+                            .begin_folder_with_status(cx, file_node_id, &file_node.name, dot_kind)
                             .is_ok()
                         {
                             for child_edge in child_edges {
@@ -750,7 +772,8 @@ impl FileSystem {
                     }
                 }
                 None => {
-                    file_tree.file(cx, file_node_id, &file_node.name);
+                    let dot_kind = Self::git_status_dot_kind(file_node.git_status);
+                    file_tree.file_with_status(cx, file_node_id, &file_node.name, dot_kind);
                 }
             }
         }
@@ -867,8 +890,14 @@ impl FileSystem {
             let node = FileNode {
                 parent_edge,
                 name,
+                git_status: match &node {
+                    FileNodeData::Directory { git_status, .. } => *git_status,
+                    FileNodeData::File { git_status, .. } => *git_status,
+                },
                 child_edges: match node {
-                    FileNodeData::Directory { entries, git_log } => Some({
+                    FileNodeData::Directory {
+                        entries, git_log, ..
+                    } => Some({
                         if let Some(git_log) = git_log {
                             git_logs.push(git_log);
                         }
