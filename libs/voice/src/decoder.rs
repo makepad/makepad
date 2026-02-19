@@ -77,16 +77,12 @@ pub fn decode(
         let residual = cur.clone();
 
         // Layer norm
-        let normed = Tensor::layer_norm(&cur, EPS);
-        let normed = Tensor::add(
-            &Tensor::mul(&normed, &layer.attn_ln_0_w),
-            &layer.attn_ln_0_b,
-        );
+        let normed = Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
 
         // Q, K, V projections
-        let q = Tensor::add(&Tensor::matmul_raw(&normed, &layer.attn_q_w), &layer.attn_q_b);
+        let q = Tensor::linear_raw(&normed, &layer.attn_q_w, &layer.attn_q_b);
         let k_new = Tensor::matmul_raw(&normed, &layer.attn_k_w);
-        let v_new = Tensor::add(&Tensor::matmul_raw(&normed, &layer.attn_v_w), &layer.attn_v_b);
+        let v_new = Tensor::linear_raw(&normed, &layer.attn_v_w, &layer.attn_v_b);
 
         // Append new K, V to cache
         kv_cache.append(il, &k_new.data, &v_new.data);
@@ -106,14 +102,17 @@ pub fn decode(
             let mut kh = vec![0.0f32; n_kv * n_state_head];
             let mut vh = vec![0.0f32; n_kv * n_state_head];
             for i in 0..n_tokens {
-                qh[i * n_state_head..(i + 1) * n_state_head]
-                    .copy_from_slice(&q_data[i * n_state + h_off..i * n_state + h_off + n_state_head]);
+                qh[i * n_state_head..(i + 1) * n_state_head].copy_from_slice(
+                    &q_data[i * n_state + h_off..i * n_state + h_off + n_state_head],
+                );
             }
             for j in 0..n_kv {
-                kh[j * n_state_head..(j + 1) * n_state_head]
-                    .copy_from_slice(&k_all[j * n_state + h_off..j * n_state + h_off + n_state_head]);
-                vh[j * n_state_head..(j + 1) * n_state_head]
-                    .copy_from_slice(&v_all[j * n_state + h_off..j * n_state + h_off + n_state_head]);
+                kh[j * n_state_head..(j + 1) * n_state_head].copy_from_slice(
+                    &k_all[j * n_state + h_off..j * n_state + h_off + n_state_head],
+                );
+                vh[j * n_state_head..(j + 1) * n_state_head].copy_from_slice(
+                    &v_all[j * n_state + h_off..j * n_state + h_off + n_state_head],
+                );
             }
 
             // Q @ K^T with causal mask
@@ -170,25 +169,20 @@ pub fn decode(
             data: attn_out,
             shape: vec![n_tokens, n_state],
         };
-        let projected = Tensor::add(
-            &Tensor::matmul_raw(&attn_result, &layer.attn_ln_1_w),
-            &layer.attn_ln_1_b,
-        );
+        let projected = Tensor::linear_raw(&attn_result, &layer.attn_ln_1_w, &layer.attn_ln_1_b);
         cur = Tensor::add(&projected, &residual);
 
         // === Cross-Attention ===
         let residual = cur.clone();
 
-        let normed = Tensor::layer_norm(&cur, EPS);
-        let normed = Tensor::add(
-            &Tensor::mul(&normed, &layer.cross_attn_ln_0_w),
+        let normed = Tensor::layer_norm_mul_add(
+            &cur,
+            &layer.cross_attn_ln_0_w,
             &layer.cross_attn_ln_0_b,
+            EPS,
         );
 
-        let q = Tensor::add(
-            &Tensor::matmul_raw(&normed, &layer.cross_attn_q_w),
-            &layer.cross_attn_q_b,
-        );
+        let q = Tensor::linear_raw(&normed, &layer.cross_attn_q_w, &layer.cross_attn_q_b);
 
         let (ref k_cross, ref v_cross) = cross_kv[il];
         let n_audio_ctx = k_cross.shape[0];
@@ -206,14 +200,17 @@ pub fn decode(
             let mut kh = vec![0.0f32; n_audio_ctx * n_state_head];
             let mut vh = vec![0.0f32; n_audio_ctx * n_state_head];
             for i in 0..n_tokens {
-                qh[i * n_state_head..(i + 1) * n_state_head]
-                    .copy_from_slice(&q_data[i * n_state + h_off..i * n_state + h_off + n_state_head]);
+                qh[i * n_state_head..(i + 1) * n_state_head].copy_from_slice(
+                    &q_data[i * n_state + h_off..i * n_state + h_off + n_state_head],
+                );
             }
             for j in 0..n_audio_ctx {
-                kh[j * n_state_head..(j + 1) * n_state_head]
-                    .copy_from_slice(&k_cross_data[j * n_state + h_off..j * n_state + h_off + n_state_head]);
-                vh[j * n_state_head..(j + 1) * n_state_head]
-                    .copy_from_slice(&v_cross_data[j * n_state + h_off..j * n_state + h_off + n_state_head]);
+                kh[j * n_state_head..(j + 1) * n_state_head].copy_from_slice(
+                    &k_cross_data[j * n_state + h_off..j * n_state + h_off + n_state_head],
+                );
+                vh[j * n_state_head..(j + 1) * n_state_head].copy_from_slice(
+                    &v_cross_data[j * n_state + h_off..j * n_state + h_off + n_state_head],
+                );
             }
 
             // Q @ K_cross^T
@@ -263,8 +260,9 @@ pub fn decode(
             data: attn_out,
             shape: vec![n_tokens, n_state],
         };
-        let projected = Tensor::add(
-            &Tensor::matmul_raw(&attn_result, &layer.cross_attn_ln_1_w),
+        let projected = Tensor::linear_raw(
+            &attn_result,
+            &layer.cross_attn_ln_1_w,
             &layer.cross_attn_ln_1_b,
         );
         cur = Tensor::add(&projected, &residual);
@@ -272,19 +270,17 @@ pub fn decode(
         // === Feed-Forward ===
         let residual = cur.clone();
 
-        let normed = Tensor::layer_norm(&cur, EPS);
-        let normed = Tensor::add(&Tensor::mul(&normed, &layer.mlp_ln_w), &layer.mlp_ln_b);
+        let normed = Tensor::layer_norm_mul_add(&cur, &layer.mlp_ln_w, &layer.mlp_ln_b, EPS);
 
-        let mut ff = Tensor::add(&Tensor::matmul_raw(&normed, &layer.mlp_0_w), &layer.mlp_0_b);
+        let mut ff = Tensor::linear_raw(&normed, &layer.mlp_0_w, &layer.mlp_0_b);
         ff = Tensor::gelu(&ff);
-        ff = Tensor::add(&Tensor::matmul_raw(&ff, &layer.mlp_1_w), &layer.mlp_1_b);
+        ff = Tensor::linear_raw(&ff, &layer.mlp_1_w, &layer.mlp_1_b);
 
         cur = Tensor::add(&ff, &residual);
     }
 
     // Final layer norm
-    let normed = Tensor::layer_norm(&cur, EPS);
-    let cur = Tensor::add(&Tensor::mul(&normed, &model.d_ln_w), &model.d_ln_b);
+    let cur = Tensor::layer_norm_mul_add(&cur, &model.d_ln_w, &model.d_ln_b, EPS);
 
     // Project to vocab logits: cur [n_tokens, n_state] @ d_te^T [n_state, n_vocab] -> [n_tokens, n_vocab]
     // d_te is [n_vocab, n_state], so we compute cur @ d_te^T

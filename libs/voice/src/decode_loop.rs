@@ -65,7 +65,10 @@ impl WhisperState {
         // 1. Compute mel spectrogram
         let _t = std::time::Instant::now();
         let (mel_data, _n_mel, n_mel_len) = mel::log_mel_spectrogram(samples, &model.filters, 1);
-        crate::PROF_MEL.fetch_add(_t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        crate::PROF_MEL.fetch_add(
+            _t.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         let mut segments = Vec::new();
         let mut seek = 0usize; // in mel frames
@@ -89,12 +92,18 @@ impl WhisperState {
             // 3. Encode
             let _t = std::time::Instant::now();
             let encoder_out = encoder::encode(model, &mel_chunk, n_ctx);
-            crate::PROF_ENCODER.fetch_add(_t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            crate::PROF_ENCODER.fetch_add(
+                _t.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
 
             // 4. Pre-compute cross-attention KV
             let _t = std::time::Instant::now();
             let cross_kv = encoder::compute_cross_kv(model, &encoder_out);
-            crate::PROF_CROSS_KV.fetch_add(_t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            crate::PROF_CROSS_KV.fetch_add(
+                _t.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
 
             // 5. Decode tokens
             self.kv_cache.clear();
@@ -132,7 +141,10 @@ impl WhisperState {
                 &mut self.kv_cache,
                 &cross_kv,
             );
-            crate::PROF_DECODER.fetch_add(_t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            crate::PROF_DECODER.fetch_add(
+                _t.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             crate::PROF_DECODER_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             decoder::advance_kv_cache(&mut self.kv_cache, n_prompt);
 
@@ -181,7 +193,10 @@ impl WhisperState {
                 let _t = std::time::Instant::now();
                 let logits =
                     decoder::decode(model, &[prev_token], &[pos], &mut self.kv_cache, &cross_kv);
-                crate::PROF_DECODER.fetch_add(_t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                crate::PROF_DECODER.fetch_add(
+                    _t.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 crate::PROF_DECODER_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 decoder::advance_kv_cache(&mut self.kv_cache, 1);
 

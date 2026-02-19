@@ -1,5 +1,5 @@
 use crate::model::WhisperModel;
-use crate::tensor::{RawTensor, Tensor, parallel_for};
+use crate::tensor::{parallel_for, RawTensor, Tensor};
 
 const EPS: f32 = 1e-5;
 
@@ -29,9 +29,37 @@ fn multi_head_attention(
     };
 
     // Q, K, V projections: [seq_len, n_state]
-    let q = Tensor::add(&Tensor::matmul_raw_with_prequant(x, q_w, xq.as_deref()), q_b);
+    let q = Tensor::linear_raw_with_prequant(x, q_w, xq.as_deref(), q_b);
     let k = Tensor::matmul_raw_with_prequant(x, k_w, xq.as_deref());
-    let v = Tensor::add(&Tensor::matmul_raw_with_prequant(x, v_w, xq.as_deref()), v_b);
+    let v = Tensor::linear_raw_with_prequant(x, v_w, xq.as_deref(), v_b);
+
+    let metal_attn_enabled = std::env::var("MAKEPAD_VOICE_METAL_ATTN")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+        })
+        .unwrap_or(true);
+
+    if crate::metal_backend::is_requested() && metal_attn_enabled {
+        if let Some(out) = crate::metal_backend::try_flash_attn_f32_packed(
+            &q.data,
+            &k.data,
+            &v.data,
+            seq_len,
+            seq_len,
+            n_head,
+            n_state_head,
+            scale,
+        ) {
+            let attn_out = Tensor {
+                data: out,
+                shape: vec![seq_len, n_state],
+            };
+
+            return Tensor::linear_raw(&attn_out, out_w, out_b);
+        }
+    }
 
     let mut out = vec![0.0f32; seq_len * n_state];
     let out_ptr = crate::tensor::SendPtr::new(out.as_mut_ptr());
@@ -102,7 +130,7 @@ fn multi_head_attention(
     };
 
     // Output projection
-    Tensor::add(&Tensor::matmul_raw(&attn_out, out_w), out_b)
+    Tensor::linear_raw(&attn_out, out_w, out_b)
 }
 
 /// Run the whisper encoder on a mel spectrogram chunk.
@@ -127,7 +155,10 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
     // Conv2 + GELU: [n_state, 2*n_ctx] -> [n_state, n_ctx] (stride 2)
     cur = Tensor::conv1d(&cur, &model.e_conv_2_w, &model.e_conv_2_b, 2);
     cur = Tensor::gelu(&cur);
-    crate::PROF_ENC_CONV.fetch_add(_tc.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    crate::PROF_ENC_CONV.fetch_add(
+        _tc.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     // cur is [n_state, n_ctx], transpose to [n_ctx, n_state]
     cur = Tensor::transpose_2d(&cur);
@@ -144,14 +175,11 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
     // Transformer encoder blocks
     for layer in &model.encoder_layers {
         // Self-attention block
+        let t_attn = std::time::Instant::now();
         let residual = cur.clone();
 
         // Layer norm
-        let normed = Tensor::layer_norm(&cur, EPS);
-        let normed = Tensor::add(
-            &Tensor::mul(&normed, &layer.attn_ln_0_w),
-            &layer.attn_ln_0_b,
-        );
+        let normed = Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
 
         // Multi-head self-attention
         let attn_out = multi_head_attention(
@@ -167,24 +195,31 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
         );
 
         cur = Tensor::add(&attn_out, &residual);
+        crate::PROF_ENC_ATTN.fetch_add(
+            t_attn.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         // Feed-forward block
+        let t_elem = std::time::Instant::now();
         let residual = cur.clone();
 
-        let normed = Tensor::layer_norm(&cur, EPS);
-        let normed = Tensor::add(&Tensor::mul(&normed, &layer.mlp_ln_w), &layer.mlp_ln_b);
+        let normed = Tensor::layer_norm_mul_add(&cur, &layer.mlp_ln_w, &layer.mlp_ln_b, EPS);
 
         // MLP: linear -> gelu -> linear
-        let mut ff = Tensor::add(&Tensor::matmul_raw(&normed, &layer.mlp_0_w), &layer.mlp_0_b);
+        let mut ff = Tensor::linear_raw(&normed, &layer.mlp_0_w, &layer.mlp_0_b);
         ff = Tensor::gelu(&ff);
-        ff = Tensor::add(&Tensor::matmul_raw(&ff, &layer.mlp_1_w), &layer.mlp_1_b);
+        ff = Tensor::linear_raw(&ff, &layer.mlp_1_w, &layer.mlp_1_b);
 
         cur = Tensor::add(&ff, &residual);
+        crate::PROF_ENC_ELEM.fetch_add(
+            t_elem.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     // Final layer norm
-    let normed = Tensor::layer_norm(&cur, EPS);
-    Tensor::add(&Tensor::mul(&normed, &model.e_ln_w), &model.e_ln_b)
+    Tensor::layer_norm_mul_add(&cur, &model.e_ln_w, &model.e_ln_b, EPS)
 }
 
 /// Pre-compute cross-attention K and V for all decoder layers.
@@ -202,8 +237,10 @@ pub fn compute_cross_kv(model: &WhisperModel, encoder_out: &Tensor) -> Vec<(Tens
     };
     for layer in &model.decoder_layers {
         let k = Tensor::matmul_raw_with_prequant(encoder_out, &layer.cross_attn_k_w, xq.as_deref());
-        let v = Tensor::add(
-            &Tensor::matmul_raw_with_prequant(encoder_out, &layer.cross_attn_v_w, xq.as_deref()),
+        let v = Tensor::linear_raw_with_prequant(
+            encoder_out,
+            &layer.cross_attn_v_w,
+            xq.as_deref(),
             &layer.cross_attn_v_b,
         );
         cross_kv.push((k, v));

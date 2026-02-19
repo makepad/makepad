@@ -10,7 +10,10 @@ fn main() {
     let samples = read_wav_pcm_f32(&wav_path);
 
     let params = makepad_voice::WhisperParams::default();
-    eprintln!("params: language='{}', translate={}", params.language, params.translate);
+    eprintln!(
+        "params: language='{}', translate={}",
+        params.language, params.translate
+    );
 
     // Try ensure_model first
     eprintln!("ensuring model for '{}'...", params.language);
@@ -19,11 +22,19 @@ fn main() {
         Err(()) => eprintln!("WARNING: ensure_model failed (may still work)"),
     }
 
-    eprintln!("transcribing {} samples ({:.2}s)...", samples.len(), samples.len() as f64 / 16000.0);
+    eprintln!(
+        "transcribing {} samples ({:.2}s)...",
+        samples.len(),
+        samples.len() as f64 / 16000.0
+    );
     let t0 = std::time::Instant::now();
     let segments = makepad_voice::apple_speech::transcribe(&samples, &params);
     let elapsed = t0.elapsed().as_secs_f64();
-    eprintln!("transcription done in {:.2}s, got {} segments", elapsed, segments.len());
+    eprintln!(
+        "transcription done in {:.2}s, got {} segments",
+        elapsed,
+        segments.len()
+    );
 
     if segments.is_empty() {
         eprintln!("WARNING: no segments returned!");
@@ -38,7 +49,8 @@ fn main() {
     fn read_wav_pcm_f32(path: &str) -> Vec<f32> {
         let mut f = std::fs::File::open(path).expect("failed to open wav");
         let mut riff_header = [0u8; 12];
-        f.read_exact(&mut riff_header).expect("failed to read RIFF header");
+        f.read_exact(&mut riff_header)
+            .expect("failed to read RIFF header");
         assert_eq!(&riff_header[0..4], b"RIFF");
         assert_eq!(&riff_header[8..12], b"WAVE");
 
@@ -49,10 +61,15 @@ fn main() {
 
         loop {
             let mut chunk_header = [0u8; 8];
-            if f.read_exact(&mut chunk_header).is_err() { break; }
+            if f.read_exact(&mut chunk_header).is_err() {
+                break;
+            }
             let chunk_id = &chunk_header[0..4];
             let chunk_size = u32::from_le_bytes([
-                chunk_header[4], chunk_header[5], chunk_header[6], chunk_header[7],
+                chunk_header[4],
+                chunk_header[5],
+                chunk_header[6],
+                chunk_header[7],
             ]) as usize;
 
             if chunk_id == b"fmt " {
@@ -70,7 +87,10 @@ fn main() {
             }
         }
 
-        eprintln!("wav: {} Hz, {} ch, {} bit", _sample_rate, channels, bits_per_sample);
+        eprintln!(
+            "wav: {} Hz, {} ch, {} bit",
+            _sample_rate, channels, bits_per_sample
+        );
 
         let n_samples = audio_data.len() / 2;
         let mut samples = Vec::with_capacity(n_samples);
@@ -81,7 +101,11 @@ fn main() {
         if channels == 2 {
             samples = samples.iter().step_by(2).copied().collect();
         }
-        eprintln!("wav: {} samples ({:.1}s)", samples.len(), samples.len() as f64 / 16000.0);
+        eprintln!(
+            "wav: {} samples ({:.1}s)",
+            samples.len(),
+            samples.len() as f64 / 16000.0
+        );
         samples
     }
 }

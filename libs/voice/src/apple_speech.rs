@@ -30,7 +30,8 @@ extern "C" {
 /// Transcribe PCM audio (f32, 16kHz, mono) using Apple SpeechAnalyzer.
 /// Returns segments with timestamps, matching the same `Segment` type as the CPU Whisper backend.
 pub fn transcribe(samples: &[f32], params: &WhisperParams) -> Vec<Segment> {
-    let lang = CString::new(params.language.as_str()).unwrap_or_else(|_| CString::new("en").unwrap());
+    let lang =
+        CString::new(params.language.as_str()).unwrap_or_else(|_| CString::new("en").unwrap());
     let mut count: i32 = 0;
     let mut raw_ptr: *mut c_void = std::ptr::null_mut();
 
@@ -81,5 +82,9 @@ pub fn transcribe(samples: &[f32], params: &WhisperParams) -> Vec<Segment> {
 pub fn ensure_model(language: &str) -> Result<(), ()> {
     let lang = CString::new(language).unwrap_or_else(|_| CString::new("en").unwrap());
     let ret = unsafe { apple_speech_ensure_model(lang.as_ptr()) };
-    if ret == 0 { Ok(()) } else { Err(()) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
