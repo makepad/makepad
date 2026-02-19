@@ -100,6 +100,7 @@ impl Cx {
         self.new_draw_event.will_redraw()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
         let mut request_ids = Vec::new();
         self.screenshot_requests.retain(|request| {
@@ -113,6 +114,7 @@ impl Cx {
         request_ids
     }
 
+    #[allow(dead_code)]
     pub(crate) fn send_studio_screenshot_response(
         request_ids: Vec<u64>,
         width: u32,
@@ -130,6 +132,7 @@ impl Cx {
         }));
     }
 
+    #[allow(dead_code)]
     pub(crate) fn send_studio_widget_tree_dump_response(&mut self, request_id: u64) {
         self.widget_tree_dump_requests.push(request_id);
         self.try_send_studio_widget_tree_dump_responses();

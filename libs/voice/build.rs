@@ -252,7 +252,6 @@ fn ios_swift_target_and_sdk() -> Option<(String, String)> {
 /// that comes before the SDK, the linker will use the actual absolute install
 /// names (e.g. "/usr/lib/swift/libswift_Concurrency.dylib") regardless of the
 /// deployment target.
-#[cfg(target_os = "macos")]
 fn fix_swift_rpath_tbds(out_dir: &str) {
     let sdk_path = Command::new("xcrun")
         .args(&["--show-sdk-path"])
@@ -301,7 +300,6 @@ fn fix_swift_rpath_tbds(out_dir: &str) {
 }
 
 /// Strip $ld$previous entries that reference @rpath/ from a .tbd file's content.
-#[cfg(target_os = "macos")]
 fn strip_ld_previous_rpath(content: &str) -> String {
     let mut result = content.to_string();
 
