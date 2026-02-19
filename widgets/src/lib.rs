@@ -377,9 +377,4 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_mod(vm);
     }
     //crate::theme_desktop_dark::script_mod(vm);
-    //makepad_fonts_emoji2::script_mod(vm);
-    //makepad_fonts_chinese_regular2::script_mod(vm);
-    //makepad_fonts_chinese_regular2_2::script_mod(vm);
-    //makepad_fonts_chinese_bold2::script_mod(vm);
-    //makepad_fonts_chinese_bold2_2::script_mod(vm);
 }

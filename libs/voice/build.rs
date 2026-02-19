@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::process::Command;
 
+const IOS_DEPLOYMENT_TARGET_DEFAULT: &str = "26.0";
+
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let host = env::var("HOST").unwrap_or_default();
@@ -11,6 +13,8 @@ fn main() {
 
     println!("cargo:rustc-check-cfg=cfg(force_whisper)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
+    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-env-changed=IPHONESIMULATOR_DEPLOYMENT_TARGET");
     if force_whisper {
         println!("cargo:rustc-cfg=force_whisper");
     }
@@ -123,7 +127,8 @@ fn ios_swift_target_and_sdk() -> Option<(String, String)> {
     } else {
         "IPHONEOS_DEPLOYMENT_TARGET"
     };
-    let deployment = env::var(deployment_key).unwrap_or_else(|_| "16.0".to_string());
+    let deployment = env::var(deployment_key)
+        .unwrap_or_else(|_| IOS_DEPLOYMENT_TARGET_DEFAULT.to_string());
     let swift_target = if is_simulator {
         format!("{swift_arch}-apple-ios{deployment}-simulator")
     } else {
