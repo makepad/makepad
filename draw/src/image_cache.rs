@@ -333,6 +333,7 @@ fn decode_timing_start() -> Option<Instant> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn headless_mode_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {

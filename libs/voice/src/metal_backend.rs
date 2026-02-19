@@ -576,12 +576,16 @@ mod imp {
 
     const FC_FLASH_ATTN_EXT_PAD: i32 = 100;
     const FC_FLASH_ATTN_EXT: i32 = 300;
+    const FC_FLASH_ATTN_EXT_VEC: i32 = 400;
+    const FC_FLASH_ATTN_EXT_VEC_REDUCE: i32 = 500;
     const FC_MUL_MV: i32 = 600;
     const FC_MUL_MM: i32 = 700;
     const FC_UNARY: i32 = 1200;
     const FC_BIN: i32 = 1300;
     const OP_FLASH_ATTN_EXT_NQPSG: i32 = 8;
     const OP_FLASH_ATTN_EXT_NCPSG: i32 = 64;
+    const OP_FLASH_ATTN_EXT_VEC_NQPSG: i32 = 1;
+    const OP_FLASH_ATTN_EXT_VEC_NCPSG: i32 = 32;
     const OP_UNARY_NUM_GELU: i16 = 103;
 
     const N_R0_Q4_0: i32 = 4;
@@ -775,6 +779,49 @@ mod imp {
         m1: f32,
         n_head_log2: i32,
         logit_softcap: f32,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct KArgsFlashAttnExtVec {
+        ne01: i32,
+        ne02: i32,
+        ne03: i32,
+        nb01: u64,
+        nb02: u64,
+        nb03: u64,
+        ne11: i32,
+        ne_12_2: i32,
+        ne_12_3: i32,
+        ns10: i32,
+        nb11: u64,
+        nb12: u64,
+        nb13: u64,
+        ns20: i32,
+        nb21: u64,
+        nb22: u64,
+        nb23: u64,
+        ne31: i32,
+        ne32: i32,
+        ne33: i32,
+        nb31: u64,
+        nb32: u64,
+        nb33: u64,
+        ne1: i32,
+        ne2: i32,
+        ne3: i32,
+        scale: f32,
+        max_bias: f32,
+        m0: f32,
+        m1: f32,
+        n_head_log2: i32,
+        logit_softcap: f32,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct KArgsFlashAttnExtVecReduce {
+        nrows: i32,
     }
 
     #[repr(C)]
@@ -1083,6 +1130,10 @@ mod imp {
         )
     }
 
+    fn flash_attn_use_vec(n_q: usize, d: usize) -> bool {
+        n_q < 20 && d % 32 == 0 && flash_attn_supported_head_dim(d)
+    }
+
     fn pad_to(v: usize, align: usize) -> usize {
         if align == 0 {
             return v;
@@ -1101,6 +1152,13 @@ mod imp {
 
         // Matches ggml-metal FATTN_SMEM() for non-quantized f32 K/V.
         let words = nqptg.saturating_mul(dk + 2 * pad_to(dv, 64) + 2 * (2 * ncpsg));
+        pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
+    }
+
+    fn flash_attn_vec_smem_bytes(dk: usize, dv: usize, nsg: i32) -> usize {
+        let ncpsg = OP_FLASH_ATTN_EXT_VEC_NCPSG as usize;
+        let words = (pad_to(dk, 128) + 4 * ncpsg + 2 * pad_to(dv, 128))
+            .saturating_mul(nsg.max(1) as usize);
         pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
     }
 
@@ -2317,6 +2375,7 @@ mod imp {
             v_id: ObjcId,
             mask_id: ObjcId,
             pad_id: ObjcId,
+            ncpsg: i32,
             ne11: i32,
             ne_12_2: i32,
             ne_12_3: i32,
@@ -2333,7 +2392,6 @@ mod imp {
             nb32: u64,
             nb33: u64,
         ) -> Result<(), String> {
-            let ncpsg = OP_FLASH_ATTN_EXT_NCPSG;
             let base = "kernel_flash_attn_ext_pad";
             let name = format!("{}_mask=0_ncpsg={}", base, ncpsg);
             let constants = [
@@ -2496,8 +2554,26 @@ mod imp {
 
             if has_kvpad {
                 self.dispatch_flash_attn_ext_pad(
-                    k_id, v_id, mask_id, pad_id, ne11, ne02, 1, nb11, nb12, nb13, nb21, nb22, nb23,
-                    ne31, ne32, ne33, nb31, nb32, nb33,
+                    k_id,
+                    v_id,
+                    mask_id,
+                    pad_id,
+                    ncpsg,
+                    ne11,
+                    ne02,
+                    1,
+                    nb11,
+                    nb12,
+                    nb13,
+                    nb21,
+                    nb22,
+                    nb23,
+                    ne31,
+                    ne32,
+                    ne33,
+                    nb31,
+                    nb32,
+                    nb33,
                 )?;
             }
 
