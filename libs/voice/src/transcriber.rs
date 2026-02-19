@@ -116,7 +116,9 @@ impl WhisperTranscriber {
             return Ok(());
         }
         if self.model_load_failed {
-            return Err(VoiceTranscribeError::ModelLoadFailed(self.model_path.clone()));
+            return Err(VoiceTranscribeError::ModelLoadFailed(
+                self.model_path.clone(),
+            ));
         }
         match WhisperModel::load_file(&self.model_path) {
             Ok(model) => {
@@ -126,7 +128,9 @@ impl WhisperTranscriber {
             }
             Err(_) => {
                 self.model_load_failed = true;
-                Err(VoiceTranscribeError::ModelLoadFailed(self.model_path.clone()))
+                Err(VoiceTranscribeError::ModelLoadFailed(
+                    self.model_path.clone(),
+                ))
             }
         }
     }
@@ -182,10 +186,7 @@ impl NativeAppleTranscriber {
         Self
     }
 
-    pub fn preload(
-        &mut self,
-        _params: &VoiceTranscribeParams,
-    ) -> Result<(), VoiceTranscribeError> {
+    pub fn preload(&mut self, _params: &VoiceTranscribeParams) -> Result<(), VoiceTranscribeError> {
         Err(VoiceTranscribeError::BackendUnavailable(
             "native apple backend unavailable",
         ))

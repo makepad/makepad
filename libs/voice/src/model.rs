@@ -5,6 +5,21 @@ use std::io::{self, Read, Seek};
 
 const GGML_FILE_MAGIC: u32 = 0x67676d6c;
 
+fn should_preserve_raw_weight_type() -> bool {
+    if let Ok(backend) = std::env::var("MAKEPAD_VOICE_BACKEND") {
+        if backend.trim().eq_ignore_ascii_case("metal") {
+            return true;
+        }
+    }
+    std::env::var("MAKEPAD_VOICE_PRESERVE_WTYPE")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone)]
 pub struct WhisperHparams {
     pub n_vocab: i32,
@@ -78,7 +93,7 @@ pub struct EncoderLayer {
 
 pub struct DecoderLayer {
     // self-attention
-    pub attn_ln_0_w: Tensor,    // layer norm (element-wise)
+    pub attn_ln_0_w: Tensor, // layer norm (element-wise)
     pub attn_ln_0_b: Tensor,
     pub attn_ln_1_w: RawTensor, // attn.out.weight (matmul)
     pub attn_ln_1_b: Tensor,
@@ -88,7 +103,7 @@ pub struct DecoderLayer {
     pub attn_v_w: RawTensor,
     pub attn_v_b: Tensor,
     // cross-attention
-    pub cross_attn_ln_0_w: Tensor,    // layer norm (element-wise)
+    pub cross_attn_ln_0_w: Tensor, // layer norm (element-wise)
     pub cross_attn_ln_0_b: Tensor,
     pub cross_attn_ln_1_w: RawTensor, // cross_attn.out.weight (matmul)
     pub cross_attn_ln_1_b: Tensor,
@@ -329,11 +344,20 @@ impl WhisperModel {
                 .unwrap_or_else(|| panic!("missing tensor: {}", name))
                 .to_f32()
         }
-        fn take_raw(tensors: &mut HashMap<String, RawTensor>, name: &str) -> RawTensor {
-            tensors
+        let preserve_wtype = should_preserve_raw_weight_type();
+        fn take_raw(
+            tensors: &mut HashMap<String, RawTensor>,
+            name: &str,
+            preserve_wtype: bool,
+        ) -> RawTensor {
+            let t = tensors
                 .remove(name)
-                .unwrap_or_else(|| panic!("missing tensor: {}", name))
-                .to_q8_0()
+                .unwrap_or_else(|| panic!("missing tensor: {}", name));
+            if preserve_wtype {
+                t
+            } else {
+                t.to_q8_0()
+            }
         }
 
         // Encoder global tensors
@@ -352,18 +376,34 @@ impl WhisperModel {
             encoder_layers.push(EncoderLayer {
                 attn_ln_0_w: take_f32(&mut tensors, &format!("{}.attn_ln.weight", p)),
                 attn_ln_0_b: take_f32(&mut tensors, &format!("{}.attn_ln.bias", p)),
-                attn_ln_1_w: take_raw(&mut tensors, &format!("{}.attn.out.weight", p)),
+                attn_ln_1_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.attn.out.weight", p),
+                    preserve_wtype,
+                ),
                 attn_ln_1_b: take_f32(&mut tensors, &format!("{}.attn.out.bias", p)),
-                attn_q_w: take_raw(&mut tensors, &format!("{}.attn.query.weight", p)),
+                attn_q_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.attn.query.weight", p),
+                    preserve_wtype,
+                ),
                 attn_q_b: take_f32(&mut tensors, &format!("{}.attn.query.bias", p)),
-                attn_k_w: take_raw(&mut tensors, &format!("{}.attn.key.weight", p)),
-                attn_v_w: take_raw(&mut tensors, &format!("{}.attn.value.weight", p)),
+                attn_k_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.attn.key.weight", p),
+                    preserve_wtype,
+                ),
+                attn_v_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.attn.value.weight", p),
+                    preserve_wtype,
+                ),
                 attn_v_b: take_f32(&mut tensors, &format!("{}.attn.value.bias", p)),
                 mlp_ln_w: take_f32(&mut tensors, &format!("{}.mlp_ln.weight", p)),
                 mlp_ln_b: take_f32(&mut tensors, &format!("{}.mlp_ln.bias", p)),
-                mlp_0_w: take_raw(&mut tensors, &format!("{}.mlp.0.weight", p)),
+                mlp_0_w: take_raw(&mut tensors, &format!("{}.mlp.0.weight", p), preserve_wtype),
                 mlp_0_b: take_f32(&mut tensors, &format!("{}.mlp.0.bias", p)),
-                mlp_1_w: take_raw(&mut tensors, &format!("{}.mlp.2.weight", p)),
+                mlp_1_w: take_raw(&mut tensors, &format!("{}.mlp.2.weight", p), preserve_wtype),
                 mlp_1_b: take_f32(&mut tensors, &format!("{}.mlp.2.bias", p)),
             });
         }
@@ -381,27 +421,59 @@ impl WhisperModel {
             decoder_layers.push(DecoderLayer {
                 attn_ln_0_w: take_f32(&mut tensors, &format!("{}.attn_ln.weight", p)),
                 attn_ln_0_b: take_f32(&mut tensors, &format!("{}.attn_ln.bias", p)),
-                attn_ln_1_w: take_raw(&mut tensors, &format!("{}.attn.out.weight", p)),
+                attn_ln_1_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.attn.out.weight", p),
+                    preserve_wtype,
+                ),
                 attn_ln_1_b: take_f32(&mut tensors, &format!("{}.attn.out.bias", p)),
-                attn_q_w: take_raw(&mut tensors, &format!("{}.attn.query.weight", p)),
+                attn_q_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.attn.query.weight", p),
+                    preserve_wtype,
+                ),
                 attn_q_b: take_f32(&mut tensors, &format!("{}.attn.query.bias", p)),
-                attn_k_w: take_raw(&mut tensors, &format!("{}.attn.key.weight", p)),
-                attn_v_w: take_raw(&mut tensors, &format!("{}.attn.value.weight", p)),
+                attn_k_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.attn.key.weight", p),
+                    preserve_wtype,
+                ),
+                attn_v_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.attn.value.weight", p),
+                    preserve_wtype,
+                ),
                 attn_v_b: take_f32(&mut tensors, &format!("{}.attn.value.bias", p)),
                 cross_attn_ln_0_w: take_f32(&mut tensors, &format!("{}.cross_attn_ln.weight", p)),
                 cross_attn_ln_0_b: take_f32(&mut tensors, &format!("{}.cross_attn_ln.bias", p)),
-                cross_attn_ln_1_w: take_raw(&mut tensors, &format!("{}.cross_attn.out.weight", p)),
+                cross_attn_ln_1_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.cross_attn.out.weight", p),
+                    preserve_wtype,
+                ),
                 cross_attn_ln_1_b: take_f32(&mut tensors, &format!("{}.cross_attn.out.bias", p)),
-                cross_attn_q_w: take_raw(&mut tensors, &format!("{}.cross_attn.query.weight", p)),
+                cross_attn_q_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.cross_attn.query.weight", p),
+                    preserve_wtype,
+                ),
                 cross_attn_q_b: take_f32(&mut tensors, &format!("{}.cross_attn.query.bias", p)),
-                cross_attn_k_w: take_raw(&mut tensors, &format!("{}.cross_attn.key.weight", p)),
-                cross_attn_v_w: take_raw(&mut tensors, &format!("{}.cross_attn.value.weight", p)),
+                cross_attn_k_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.cross_attn.key.weight", p),
+                    preserve_wtype,
+                ),
+                cross_attn_v_w: take_raw(
+                    &mut tensors,
+                    &format!("{}.cross_attn.value.weight", p),
+                    preserve_wtype,
+                ),
                 cross_attn_v_b: take_f32(&mut tensors, &format!("{}.cross_attn.value.bias", p)),
                 mlp_ln_w: take_f32(&mut tensors, &format!("{}.mlp_ln.weight", p)),
                 mlp_ln_b: take_f32(&mut tensors, &format!("{}.mlp_ln.bias", p)),
-                mlp_0_w: take_raw(&mut tensors, &format!("{}.mlp.0.weight", p)),
+                mlp_0_w: take_raw(&mut tensors, &format!("{}.mlp.0.weight", p), preserve_wtype),
                 mlp_0_b: take_f32(&mut tensors, &format!("{}.mlp.0.bias", p)),
-                mlp_1_w: take_raw(&mut tensors, &format!("{}.mlp.2.weight", p)),
+                mlp_1_w: take_raw(&mut tensors, &format!("{}.mlp.2.weight", p), preserve_wtype),
                 mlp_1_b: take_f32(&mut tensors, &format!("{}.mlp.2.bias", p)),
             });
         }

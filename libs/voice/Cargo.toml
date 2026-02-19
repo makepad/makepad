@@ -7,6 +7,9 @@ license = "MIT"
 
 [dependencies]
 
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
+
 [[bin]]
 name = "whisper-test"
 path = "src/bin/whisper_test.rs"
