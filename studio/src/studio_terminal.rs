@@ -146,17 +146,12 @@ struct EnterCoalesce {
 }
 
 /// While the terminal cursor hasn't settled to the prompt position after
-/// Enter, we keep drawing the cursor at the saved (pre-Enter) position
-/// to avoid a visible jump.
+/// Enter, we keep transition state so redraw/scroll clamping can defer
+/// until settle is complete.
 struct CursorHold {
-    /// Screen row (0..rows) where the cursor was at Enter.
-    /// We draw hold at this row within the current viewport to keep it stable.
-    screen_row: usize,
     /// Original virtual row at Enter; used for release checks even when
     /// viewport/scrollback state changes while coalescing.
     release_virtual_row: usize,
-    /// The column where the cursor was.
-    col: usize,
     /// We expect the cursor to reach at least this X on a row AFTER `virtual_row`.
     target_x: usize,
     /// Safety deadline — don't hold forever.
@@ -750,7 +745,6 @@ impl StudioTerminal {
 
         if let Some(terminal) = &self.terminal {
             let screen = terminal.screen();
-            let cursor_x = screen.cursor.x;
             // For coalescing we just need to see *some* content on the new
             // line (the prompt). Using 1 avoids the problem where a long
             // command like "ls -al" sets target_x too high for the short
@@ -768,9 +762,7 @@ impl StudioTerminal {
             if self.cursor_hold.is_none() {
                 let virtual_row = screen.scrollback_len() + screen.cursor.y;
                 self.cursor_hold = Some(CursorHold {
-                    screen_row: screen.cursor.y,
                     release_virtual_row: virtual_row,
-                    col: cursor_x,
                     target_x,
                     deadline: Instant::now() + Self::CURSOR_HOLD_TIMEOUT,
                 });
@@ -1370,32 +1362,25 @@ impl StudioTerminal {
         let has_focus = cx.has_key_focus(self.scroll_bars.area());
         self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
 
-        // Cursor — if we have a cursor hold active (post-Enter, waiting for
-        // prompt to settle), draw cursor at the saved position instead of the
-        // terminal's real cursor position.
+        // Cursor: hide it while Enter settle/coalesce is active.
+        // This avoids showing a stale cursor on the previous line and then
+        // jumping it once the new prompt position is committed.
         if terminal.modes.cursor_visible
-            && (!self.output_streaming
-                || self.cursor_hold.is_some()
-                || self.enter_coalesce.is_some())
+            && (self.cursor_blink_on || !has_focus)
+            && !self.output_streaming
+            && self.cursor_hold.is_none()
+            && self.enter_coalesce.is_none()
         {
-            let (draw_col, draw_virtual_row, cursor_shape) =
-                if let Some(ref hold) = self.cursor_hold {
-                    let hold_row = hold.screen_row.min(rows.saturating_sub(1));
-                    (hold.col, top_row + hold_row, CursorShape::Block)
-                } else {
-                    let cursor = &screen.cursor;
-                    (cursor.x, screen.scrollback_len() + cursor.y, cursor.shape)
-                };
-
-            let cursor_content_y = draw_virtual_row as f64 * cell_height;
+            let cursor = &screen.cursor;
+            let cursor_content_y = (screen.scrollback_len() + cursor.y) as f64 * cell_height;
             if !(cursor_content_y + cell_height < scroll_y
                 || cursor_content_y > scroll_y + self.viewport_rect.size.y)
             {
-                let cx_x = origin_x + draw_col as f64 * cell_width;
+                let cx_x = origin_x + cursor.x as f64 * cell_width;
                 let cx_y = origin_y + cursor_content_y + self.cursor_y_offset;
 
                 let cursor_rect = if has_focus {
-                    match cursor_shape {
+                    match cursor.shape {
                         CursorShape::Block => Rect {
                             pos: dvec2(cx_x, cx_y),
                             size: dvec2(cell_width, cell_height),
