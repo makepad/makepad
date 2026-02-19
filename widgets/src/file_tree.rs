@@ -26,17 +26,34 @@ script_mod! {
         ..mod.draw.DrawQuad
         color: instance(#fff)
         color_active: instance(#fff)
-        status_kind: instance(GitStatusDotKind.None)
-        color_new: #x58c26d
-        color_modified: #xd86464
-        color_deleted: #xd86464
-        color_mixed: #xd86464
         pixel: fn() {
             let icon_color = mix(
                 self.color * self.scale,
                 self.color_active,
                 self.active
             )
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+
+            if self.is_folder > 0.5 {
+                sdf.box(0.02 * w, 0.36 * h, 0.86 * w, 0.40 * h, 0.75)
+                sdf.box(0.02 * w, 0.28 * h, 0.50 * w, 0.30 * h, 1.0)
+                sdf.union()
+                sdf.fill(icon_color)
+            }
+            return sdf.result
+        }
+    }
+
+    set_type_default() do #(DrawStatusDotQuad::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        status_kind: instance(GitStatusDotKind.None)
+        color_new: #x58c26d
+        color_modified: #xd86464
+        color_deleted: #xd86464
+        color_mixed: #xd86464
+        pixel: fn() {
             let dot_color = match self.status_kind {
                 GitStatusDotKind.New => self.color_new
                 GitStatusDotKind.Modified => self.color_modified
@@ -50,23 +67,13 @@ script_mod! {
                 GitStatusDotKind.Mixed => 1f
                 _ => 0f
             }
-            let icon_sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            let w = self.rect_size.x
-            let h = self.rect_size.y
-
-            if self.is_folder > 0.5 {
-                icon_sdf.box(0.02 * w, 0.36 * h, 0.86 * w, 0.40 * h, 0.75)
-                icon_sdf.box(0.02 * w, 0.28 * h, 0.50 * w, 0.30 * h, 1.0)
-                icon_sdf.union()
-                icon_sdf.fill(icon_color)
-            } 
-            
-            let icon = icon_sdf.result
-
-            let dot_sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            dot_sdf.circle(0.82 * w, 0.5 * h, min(w, h) * 0.21)
-            let dot_mask = dot_sdf.fill(vec4(1f, 1f, 1f, dot_blend)).w
-            return icon * (1.0 - dot_mask) + dot_color * dot_mask
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.circle(
+                0.5 * self.rect_size.x,
+                0.5 * self.rect_size.y,
+                min(self.rect_size.x, self.rect_size.y) * 0.34
+            )
+            return dot_color * sdf.fill(vec4(1f, 1f, 1f, dot_blend)).w
         }
     }
 
@@ -135,6 +142,12 @@ script_mod! {
         icon_walk: Walk{
             width: (theme.data_icon_width - 2.0)
             height: theme.data_icon_height
+            margin: Inset{right: theme.space_1}
+        }
+
+        status_dot_walk: Walk{
+            width: 6.0
+            height: 6.0
             margin: Inset{right: theme.space_1}
         }
 
@@ -334,6 +347,13 @@ struct DrawIconQuad {
     hover: f32,
     #[live]
     opened: f32,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+struct DrawStatusDotQuad {
+    #[deref]
+    draw_super: DrawQuad,
     #[live]
     status_kind: GitStatusDotKind,
     #[live]
@@ -366,6 +386,8 @@ pub struct FileTreeNode {
     #[live]
     draw_icon: DrawIconQuad,
     #[live]
+    draw_status_dot: DrawStatusDotQuad,
+    #[live]
     draw_text: DrawNameText,
     #[layout]
     layout: Layout,
@@ -380,6 +402,8 @@ pub struct FileTreeNode {
 
     #[live]
     icon_walk: Walk,
+    #[live]
+    status_dot_walk: Walk,
 
     #[live]
     is_folder: bool,
@@ -512,9 +536,13 @@ impl FileTreeNode {
             self.layout,
         );
 
-        cx.walk_turtle(self.indent_walk(depth));
+        let show_dot = depth > 0;
+        cx.walk_turtle(self.indent_walk(depth, show_dot));
 
-        self.draw_icon.status_kind = status_kind;
+        if show_dot {
+            self.draw_status_dot.status_kind = status_kind;
+            self.draw_status_dot.draw_walk(cx, self.status_dot_walk);
+        }
         self.draw_icon.draw_walk(cx, self.icon_walk);
 
         self.draw_text
@@ -540,19 +568,36 @@ impl FileTreeNode {
             self.layout,
         );
 
-        cx.walk_turtle(self.indent_walk(depth));
-        self.draw_icon.status_kind = status_kind;
-        self.draw_icon.draw_walk(cx, self.icon_walk);
+        let show_dot = true;
+        cx.walk_turtle(self.indent_walk(depth, depth > 0));
+        self.draw_status_dot.status_kind = status_kind;
+        if show_dot {
+            self.draw_status_dot.draw_walk(cx, self.status_dot_walk);
+        }
 
         self.draw_text
             .draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
 
-    fn indent_walk(&self, depth: usize) -> Walk {
+    fn status_dot_slot_width(&self) -> f64 {
+        let width = match self.status_dot_walk.width {
+            Size::Fixed(width) => width,
+            _ => 0.0,
+        };
+        width + self.status_dot_walk.margin.left + self.status_dot_walk.margin.right
+    }
+
+    fn indent_walk(&self, depth: usize, dot_in_indent: bool) -> Walk {
+        let mut width = depth as f64 * self.indent_width + self.indent_shift;
+        if dot_in_indent {
+            let reclaimed = (self.status_dot_slot_width() - 2.0).max(0.0);
+            width = (width - reclaimed).max(0.0);
+        }
+
         Walk {
             abs_pos: None,
-            width: Size::Fixed(depth as f64 * self.indent_width + self.indent_shift),
+            width: Size::Fixed(width),
             height: Size::Fixed(0.0),
             margin: Inset {
                 left: depth as f64 * 1.0,
