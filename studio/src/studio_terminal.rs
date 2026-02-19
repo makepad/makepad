@@ -164,6 +164,22 @@ struct EnterPromptScan {
     saw_visible_after_newline: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub enum StudioTerminalAction {
+    SetTabTitle(String),
+    #[default]
+    None,
+}
+
+#[derive(Clone, Copy, Default)]
+enum TitleMarkerParseState {
+    #[default]
+    Ground,
+    OpenBrace,
+    InMarker,
+    MarkerCloseBrace,
+}
+
 #[derive(Clone, Copy)]
 enum EnterScanState {
     Ground,
@@ -288,6 +304,10 @@ pub struct StudioTerminal {
     select_scroll_next_frame: NextFrame,
     #[rust]
     last_finger_abs: Option<Vec2d>,
+    #[rust]
+    title_marker_parse_state: TitleMarkerParseState,
+    #[rust]
+    title_marker_parse_buf: Vec<u8>,
 }
 
 impl ScriptHook for StudioTerminal {
@@ -302,6 +322,8 @@ impl StudioTerminal {
     const OUTPUT_QUIET_DELAY: Duration = Duration::from_millis(120);
     const STREAMING_START_TICKS: u8 = 2;
     const STREAMING_START_BYTES: usize = 1024;
+    const TITLE_MARKER_MAX_BYTES: usize = 160;
+    const TITLE_MAX_CHARS: usize = 48;
     /// Maximum time to wait for prompt to settle after Enter before flushing redraw.
     const ENTER_COALESCE_TIMEOUT: Duration = Duration::from_millis(30);
     /// Maximum time to hold the cursor at the saved position after Enter.
@@ -416,6 +438,170 @@ impl StudioTerminal {
 
     pub fn insert_dropped_image_paths(&mut self, cx: &mut Cx, paths: &[String]) {
         self.send_dropped_image_paths(cx, paths);
+    }
+
+    fn parse_tab_title_marker(marker: &str) -> Option<String> {
+        let marker = marker.trim();
+        if marker.is_empty() {
+            return None;
+        }
+
+        let title = if marker.len() >= 5 {
+            let (prefix, rest) = marker.split_at(5);
+            if prefix.eq_ignore_ascii_case("title") {
+                let mut rest = rest.trim_start();
+                if let Some(stripped) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('='))
+                {
+                    rest = stripped.trim_start();
+                }
+                if rest.is_empty() {
+                    marker
+                } else {
+                    rest
+                }
+            } else {
+                marker
+            }
+        } else {
+            marker
+        };
+
+        let out = title
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(Self::TITLE_MAX_CHARS)
+            .collect::<String>();
+
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    fn emit_title_marker_literal(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(b"{{");
+        out.extend_from_slice(&self.title_marker_parse_buf);
+        if matches!(
+            self.title_marker_parse_state,
+            TitleMarkerParseState::MarkerCloseBrace
+        ) {
+            out.push(b'}');
+        }
+    }
+
+    fn take_incomplete_title_marker_literal(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self.title_marker_parse_state {
+            TitleMarkerParseState::Ground => {}
+            TitleMarkerParseState::OpenBrace => {
+                out.push(b'{');
+            }
+            TitleMarkerParseState::InMarker | TitleMarkerParseState::MarkerCloseBrace => {
+                self.emit_title_marker_literal(&mut out);
+            }
+        }
+        self.title_marker_parse_buf.clear();
+        self.title_marker_parse_state = TitleMarkerParseState::Ground;
+        out
+    }
+
+    fn flush_stale_incomplete_title_marker(&mut self, cx: &mut Cx) {
+        if matches!(self.title_marker_parse_state, TitleMarkerParseState::Ground) {
+            return;
+        }
+        let Some(last_output) = self.last_output_at else {
+            return;
+        };
+        if last_output.elapsed() < Self::OUTPUT_QUIET_DELAY {
+            return;
+        }
+        let literal = self.take_incomplete_title_marker_literal();
+        if literal.is_empty() {
+            return;
+        }
+        if let Some(terminal) = &mut self.terminal {
+            terminal.process_bytes(&literal);
+            let outbound = terminal.take_outbound();
+            if !outbound.is_empty() {
+                if let Some(pty) = &self.pty {
+                    let _ = pty.write(&outbound);
+                }
+            }
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn parse_title_markers(&mut self, cx: &mut Cx, input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(input.len());
+
+        for &byte in input {
+            match self.title_marker_parse_state {
+                TitleMarkerParseState::Ground => {
+                    if byte == b'{' {
+                        self.title_marker_parse_state = TitleMarkerParseState::OpenBrace;
+                    } else {
+                        out.push(byte);
+                    }
+                }
+                TitleMarkerParseState::OpenBrace => {
+                    if byte == b'{' {
+                        self.title_marker_parse_state = TitleMarkerParseState::InMarker;
+                        self.title_marker_parse_buf.clear();
+                    } else {
+                        out.push(b'{');
+                        out.push(byte);
+                        self.title_marker_parse_state = TitleMarkerParseState::Ground;
+                    }
+                }
+                TitleMarkerParseState::InMarker => {
+                    if byte == b'}' {
+                        self.title_marker_parse_state = TitleMarkerParseState::MarkerCloseBrace;
+                    } else if byte == b'\n' || byte == b'\r' {
+                        self.emit_title_marker_literal(&mut out);
+                        out.push(byte);
+                        self.title_marker_parse_buf.clear();
+                        self.title_marker_parse_state = TitleMarkerParseState::Ground;
+                    } else if self.title_marker_parse_buf.len() >= Self::TITLE_MARKER_MAX_BYTES {
+                        self.emit_title_marker_literal(&mut out);
+                        out.push(byte);
+                        self.title_marker_parse_buf.clear();
+                        self.title_marker_parse_state = TitleMarkerParseState::Ground;
+                    } else {
+                        self.title_marker_parse_buf.push(byte);
+                    }
+                }
+                TitleMarkerParseState::MarkerCloseBrace => {
+                    if byte == b'}' {
+                        let marker = String::from_utf8_lossy(&self.title_marker_parse_buf);
+                        if let Some(title) = Self::parse_tab_title_marker(marker.as_ref()) {
+                            cx.widget_action(self.widget_uid(), StudioTerminalAction::SetTabTitle(title));
+                        } else {
+                            self.emit_title_marker_literal(&mut out);
+                            out.push(b'}');
+                        }
+                        self.title_marker_parse_buf.clear();
+                        self.title_marker_parse_state = TitleMarkerParseState::Ground;
+                    } else if byte == b'\n' || byte == b'\r' {
+                        self.emit_title_marker_literal(&mut out);
+                        out.push(byte);
+                        self.title_marker_parse_buf.clear();
+                        self.title_marker_parse_state = TitleMarkerParseState::Ground;
+                    } else if self.title_marker_parse_buf.len() >= Self::TITLE_MARKER_MAX_BYTES {
+                        self.emit_title_marker_literal(&mut out);
+                        out.push(byte);
+                        self.title_marker_parse_buf.clear();
+                        self.title_marker_parse_state = TitleMarkerParseState::Ground;
+                    } else {
+                        self.title_marker_parse_buf.push(b'}');
+                        self.title_marker_parse_buf.push(byte);
+                        self.title_marker_parse_state = TitleMarkerParseState::InMarker;
+                    }
+                }
+            }
+        }
+
+        out
     }
 
     fn handle_image_file_drop(&mut self, cx: &mut Cx, event: &Event) -> bool {
@@ -880,13 +1066,17 @@ impl StudioTerminal {
             true
         };
 
-        let Some(pty) = &self.pty else { return };
+        if self.pty.is_none() {
+            return;
+        }
         const MAX_BYTES_PER_TICK: usize = 1 << 20;
 
         // Read all available PTY data into the backlog
         let mut fresh_bytes = 0usize;
         loop {
-            let Some(data) = pty.try_read() else { break };
+            let Some(data) = self.pty.as_ref().and_then(|pty| pty.try_read()) else {
+                break;
+            };
             fresh_bytes += data.len();
             self.pty_input_backlog.extend(data);
             if fresh_bytes >= MAX_BYTES_PER_TICK {
@@ -900,6 +1090,7 @@ impl StudioTerminal {
         if self.pty_input_backlog.is_empty() {
             self.pending_streaming_ticks = 0;
             self.update_cursor_hold_state(cx);
+            self.flush_stale_incomplete_title_marker(cx);
             return;
         }
 
@@ -927,31 +1118,47 @@ impl StudioTerminal {
         }
 
         // Process all backlog bytes through the terminal emulator.
-        let (total_bytes, old_scrollback, new_scrollback, synchronized_update) = {
+        let Some(old_sb) = self.terminal.as_ref().map(|terminal| terminal.screen().scrollback_len())
+        else {
+            return;
+        };
+
+        let mut total = 0usize;
+        let mut filtered_chunks = Vec::new();
+        while !self.pty_input_backlog.is_empty() {
+            let take = self.pty_input_backlog.len().min(4096);
+            let mut data = Vec::with_capacity(take);
+            for _ in 0..take {
+                if let Some(b) = self.pty_input_backlog.pop_front() {
+                    data.push(b);
+                }
+            }
+            let filtered = self.parse_title_markers(cx, &data);
+            total += filtered.len();
+            if !filtered.is_empty() {
+                filtered_chunks.push(filtered);
+            }
+        }
+
+        let (new_sb, synchronized_update) = {
             let Some(terminal) = &mut self.terminal else {
                 return;
             };
-            let old_sb = terminal.screen().scrollback_len();
-            let mut total = 0usize;
-            while !self.pty_input_backlog.is_empty() {
-                let take = self.pty_input_backlog.len().min(4096);
-                let mut data = Vec::with_capacity(take);
-                for _ in 0..take {
-                    if let Some(b) = self.pty_input_backlog.pop_front() {
-                        data.push(b);
-                    }
-                }
-                total += data.len();
-                terminal.process_bytes(&data);
+            for chunk in filtered_chunks {
+                terminal.process_bytes(&chunk);
                 let outbound = terminal.take_outbound();
                 if !outbound.is_empty() {
-                    let _ = pty.write(&outbound);
+                    if let Some(pty) = &self.pty {
+                        let _ = pty.write(&outbound);
+                    }
                 }
             }
-            let new_sb = terminal.screen().scrollback_len();
-            let sync = terminal.modes.synchronized_update;
-            (total, old_sb, new_sb, sync)
+            (terminal.screen().scrollback_len(), terminal.modes.synchronized_update)
         };
+
+        let total_bytes = total;
+        let old_scrollback = old_sb;
+        let new_scrollback = new_sb;
 
         if total_bytes == 0 {
             return;
