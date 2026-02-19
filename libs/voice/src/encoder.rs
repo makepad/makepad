@@ -172,6 +172,27 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
     };
     cur = Tensor::add(&cur, &pe);
 
+    if crate::metal_backend::is_requested() {
+        let t_stack = std::time::Instant::now();
+        if let Some(out) = crate::metal_backend::try_encoder_stack_f32(
+            &cur.data,
+            cur.shape[0],
+            cur.shape[1],
+            n_head,
+            &model.encoder_layers,
+            &model.e_ln_w.data,
+            &model.e_ln_b.data,
+        ) {
+            let dt = t_stack.elapsed().as_nanos() as u64;
+            crate::PROF_ENC_ATTN.fetch_add(dt / 2, std::sync::atomic::Ordering::Relaxed);
+            crate::PROF_ENC_ELEM.fetch_add(dt - dt / 2, std::sync::atomic::Ordering::Relaxed);
+            return Tensor {
+                data: out,
+                shape: cur.shape.clone(),
+            };
+        }
+    }
+
     // Transformer encoder blocks
     for layer in &model.encoder_layers {
         if crate::metal_backend::is_requested() {
