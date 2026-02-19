@@ -89,6 +89,18 @@ script_mod! {
                         sdf.fill(color)
                         return sdf.result
                     }
+                    DesktopButtonType.RecordOff => {
+                        let rr = 5.0
+                        sdf.circle(c.x, c.y, rr)
+                        sdf.stroke(#ff3b30, 1.0 + 0.5 * self.draw_pass.dpi_dilate)
+                        return sdf.result
+                    }
+                    DesktopButtonType.RecordOn => {
+                        let rr = 5.0
+                        sdf.circle(c.x, c.y, rr)
+                        sdf.fill(#ff3b30)
+                        return sdf.result
+                    }
                 }
                 return #f00
             }
@@ -141,6 +153,8 @@ pub enum DesktopButtonType {
     XRMode = 5,
     #[pick]
     Fullscreen = 6,
+    RecordOff = 7,
+    RecordOn = 8,
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
@@ -153,6 +167,9 @@ pub struct DesktopButton {
     animator: Animator,
     #[walk]
     walk: Walk,
+    #[visible]
+    #[live(true)]
+    visible: bool,
     #[redraw]
     #[live]
     draw_bg: DrawQuad,
@@ -160,6 +177,10 @@ pub struct DesktopButton {
 
 impl Widget for DesktopButton {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible {
+            return;
+        }
+
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -198,6 +219,10 @@ impl Widget for DesktopButton {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+
         let _ = self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()
     }

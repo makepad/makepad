@@ -30,7 +30,7 @@ workspace.members = [
     "libs/terminal_core",
     "libs/git",
     "libs/fast_inflate",
-#    "libs/voice",
+    "libs/voice",
 #    "libs/matrix",
 ]
 
@@ -130,6 +130,9 @@ lto = true        # Enable link-time optimization
 codegen-units = 1 # Reduce number of codegen units to increase optimizations
 panic = 'abort'   # Abort on panic
 strip = true
+
+[profile.release.package.makepad-voice]
+codegen-units = 1
 
 
 #[profile.dev.package.makepad-live-tokenizer]
