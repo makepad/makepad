@@ -1175,7 +1175,9 @@ mod imp {
     }
 
     fn flash_attn_use_vec(n_q: usize, d: usize) -> bool {
-        n_q < 20 && d % 32 == 0
+        // Keep decoder token-by-token path on the non-vec kernel for now.
+        // n_q == 1 is where we observe unstable outputs with vec on this port.
+        n_q > 1 && n_q < 20 && d % 32 == 0
     }
 
     #[derive(Clone, Copy, Default)]
