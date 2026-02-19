@@ -1,15 +1,19 @@
-use crate::makepad_draw::{
-    audio::{AudioBuffer, AudioDeviceId, AudioDevicesEvent},
-    permission::{Permission, PermissionResult, PermissionStatus},
-    thread::SignalToUI,
-    Cx, CxMediaApi,
+use crate::{
+    makepad_draw::{
+        audio::{AudioBuffer, AudioDeviceId, AudioDevicesEvent},
+        permission::{Permission, PermissionResult, PermissionStatus},
+        thread::SignalToUI,
+        Cx, CxMediaApi, Event, NextFrame,
+    },
+    voice_wave::VoiceWaveRef,
 };
 use makepad_voice::{Segment, VoiceTranscribeParams, VoiceTranscriber};
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const VOICE_TARGET_SAMPLE_RATE: f64 = 16_000.0;
 const VOICE_AUDIO_PACKET_SAMPLES: usize = 320; // 20ms @16k
@@ -28,6 +32,10 @@ const VOICE_NORM_MAX_GAIN: f32 = 10.0;
 const VOICE_NORM_MIN_GAIN: f32 = 0.35;
 const VOICE_NORM_PEAK_LIMIT: f32 = 0.98;
 const VOICE_NORM_MIN_RMS_FOR_BOOST: f32 = 0.004;
+const VOICE_WAVE_STEP_SAMPLES: usize = 320;
+const VOICE_WAVE_MAX_PENDING_SAMPLES: usize = VOICE_WAVE_STEP_SAMPLES * 64;
+const VOICE_WAVE_MAX_CHUNKS_PER_TICK: usize = 4;
+const VOICE_ENTER_DELAY_SECS: f64 = 0.075;
 
 enum VoiceControlMessage {
     Reset,
@@ -38,6 +46,12 @@ enum VoiceControlMessage {
 pub enum VoiceWaveEvent {
     Append(Vec<f32>),
     Submitted(Vec<f32>),
+}
+
+#[derive(Clone, Debug)]
+pub enum VoiceInjectEvent {
+    Text(String),
+    Enter,
 }
 
 pub struct WindowVoiceInput {
@@ -52,6 +66,13 @@ pub struct WindowVoiceInput {
     text_rx: Receiver<String>,
     wave_rx: Receiver<VoiceWaveEvent>,
     text_signal: SignalToUI,
+    voice_active_until: f64,
+    submit_flash_until: f64,
+    voice_visual_next_frame: NextFrame,
+    voice_wave_pending: VecDeque<f32>,
+    pending_inject: VecDeque<VoiceInjectEvent>,
+    next_enter_at: f64,
+    enter_after_next_text: bool,
 }
 
 impl Default for WindowVoiceInput {
@@ -90,11 +111,34 @@ impl Default for WindowVoiceInput {
             text_rx,
             wave_rx,
             text_signal,
+            voice_active_until: 0.0,
+            submit_flash_until: 0.0,
+            voice_visual_next_frame: NextFrame::default(),
+            voice_wave_pending: VecDeque::new(),
+            pending_inject: VecDeque::new(),
+            next_enter_at: 0.0,
+            enter_after_next_text: false,
         }
     }
 }
 
 impl WindowVoiceInput {
+    fn now_secs() -> f64 {
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_secs_f64()
+    }
+
+    fn chunk_rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let mut sum = 0.0f32;
+        for sample in samples {
+            sum += sample * sample;
+        }
+        (sum / samples.len() as f32).sqrt()
+    }
+
     pub fn ensure_audio_callback(&mut self, cx: &mut Cx, callback_index: usize) {
         if self.callback_installed {
             return;
@@ -119,6 +163,23 @@ impl WindowVoiceInput {
         } else {
             self.disable(cx);
         }
+    }
+
+    pub fn arm_enter_after_next_transcript(&mut self) {
+        self.enter_after_next_text = true;
+    }
+
+    pub fn sync_voice_wave_mic_state(&mut self, cx: &mut Cx, wave: &VoiceWaveRef) {
+        let enabled = self.desired_enabled;
+        wave.set_mic_on(cx, enabled);
+        if !enabled {
+            self.voice_wave_pending.clear();
+            self.voice_active_until = 0.0;
+            self.submit_flash_until = 0.0;
+            wave.set_voice_active(cx, false);
+            wave.set_submit_flash(cx, false);
+        }
+        self.refresh_voice_visual_state(cx, wave);
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -157,42 +218,78 @@ impl WindowVoiceInput {
             | PermissionStatus::DeniedPermanent
             | PermissionStatus::NotDetermined => {
                 self.desired_enabled = false;
-                self.stop_capture(cx);
+                self.stop_capture_and_reset(cx);
             }
         }
         old_enabled != self.desired_enabled
     }
 
-    pub fn take_pending_output(&mut self) -> (Vec<String>, Vec<VoiceWaveEvent>) {
+    pub fn process_signal(&mut self, cx: &mut Cx, wave: &VoiceWaveRef) -> Vec<VoiceInjectEvent> {
         if !self.text_signal.check_and_clear() {
-            return (Vec::new(), Vec::new());
+            return Vec::new();
         }
-        let mut texts = Vec::new();
+
+        let mut text_count = 0usize;
         while let Ok(text) = self.text_rx.try_recv() {
-            texts.push(text);
+            self.queue_transcript_parts(text);
+            text_count += 1;
         }
-        let mut waves = Vec::new();
+        if self.enter_after_next_text && text_count > 0 {
+            self.pending_inject.push_back(VoiceInjectEvent::Enter);
+            self.enter_after_next_text = false;
+        }
+
         while let Ok(event) = self.wave_rx.try_recv() {
-            waves.push(event);
+            match event {
+                VoiceWaveEvent::Append(samples) => {
+                    self.enqueue_voice_wave_samples(&samples);
+                }
+                VoiceWaveEvent::Submitted(_chunk) => {
+                    self.submit_flash_until = Self::now_secs() + 0.16;
+                    self.voice_active_until = 0.0;
+                }
+            }
         }
-        (texts, waves)
+
+        self.drain_voice_wave_pending(cx, wave);
+        self.refresh_voice_visual_state(cx, wave);
+        self.drain_ready_inject_events(cx)
+    }
+
+    pub fn handle_timers(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        wave: &VoiceWaveRef,
+    ) -> Vec<VoiceInjectEvent> {
+        if self.voice_visual_next_frame.is_event(event).is_none() {
+            return Vec::new();
+        }
+        self.drain_voice_wave_pending(cx, wave);
+        self.refresh_voice_visual_state(cx, wave);
+        self.drain_ready_inject_events(cx)
     }
 
     pub fn shutdown(&mut self, cx: &mut Cx) {
-        self.stop_capture(cx);
+        self.stop_capture_graceful(cx);
+        self.pending_inject.clear();
+        self.voice_wave_pending.clear();
+        self.next_enter_at = 0.0;
+        self.enter_after_next_text = false;
         let _ = self.control_tx.send(VoiceControlMessage::Shutdown);
     }
 
     fn request_enable(&mut self, cx: &mut Cx) {
         self.desired_enabled = true;
         self.pending_permission_request = Some(cx.request_permission(Permission::AudioInput));
+        self.enter_after_next_text = false;
         self.start_capture(cx);
     }
 
     fn disable(&mut self, cx: &mut Cx) {
         self.desired_enabled = false;
         self.pending_permission_request = None;
-        self.stop_capture(cx);
+        self.stop_capture_graceful(cx);
     }
 
     fn reset_pipeline(&mut self) {
@@ -214,10 +311,109 @@ impl WindowVoiceInput {
         }
     }
 
-    fn stop_capture(&mut self, cx: &mut Cx) {
+    fn stop_capture_graceful(&mut self, cx: &mut Cx) {
         self.capture_enabled.store(false, Ordering::Relaxed);
         cx.use_audio_inputs(&[]);
+        if let Ok(mut callback_state) = self.callback_state.lock() {
+            callback_state.flush_partial_packet();
+        }
+    }
+
+    fn stop_capture_and_reset(&mut self, cx: &mut Cx) {
+        self.stop_capture_graceful(cx);
         self.reset_pipeline();
+    }
+
+    fn queue_transcript_parts(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        for part in parse_voice_inject_parts(&text) {
+            self.pending_inject.push_back(part);
+        }
+    }
+
+    fn enqueue_voice_wave_samples(&mut self, samples: &[f32]) {
+        self.voice_wave_pending.extend(samples.iter().copied());
+        if self.voice_wave_pending.len() > VOICE_WAVE_MAX_PENDING_SAMPLES {
+            let drop_count = self.voice_wave_pending.len() - VOICE_WAVE_MAX_PENDING_SAMPLES;
+            for _ in 0..drop_count {
+                let _ = self.voice_wave_pending.pop_front();
+            }
+        }
+    }
+
+    fn drain_voice_wave_pending(&mut self, cx: &mut Cx, wave: &VoiceWaveRef) {
+        if !self.desired_enabled {
+            self.voice_wave_pending.clear();
+            return;
+        }
+
+        let mut processed_chunks = 0usize;
+        while self.voice_wave_pending.len() >= VOICE_WAVE_STEP_SAMPLES
+            && processed_chunks < VOICE_WAVE_MAX_CHUNKS_PER_TICK
+        {
+            let mut chunk = Vec::with_capacity(VOICE_WAVE_STEP_SAMPLES);
+            for _ in 0..VOICE_WAVE_STEP_SAMPLES {
+                if let Some(sample) = self.voice_wave_pending.pop_front() {
+                    chunk.push(sample);
+                }
+            }
+            if !chunk.is_empty() {
+                wave.append_samples(cx, &chunk);
+                if Self::chunk_rms(&chunk) > 0.008 {
+                    self.voice_active_until = Self::now_secs() + 0.22;
+                }
+            }
+            processed_chunks += 1;
+        }
+    }
+
+    fn refresh_voice_visual_state(&mut self, cx: &mut Cx, wave: &VoiceWaveRef) {
+        let now = Self::now_secs();
+        let submit_flash = now < self.submit_flash_until;
+        let voice_active = now < self.voice_active_until && !submit_flash;
+        let pending_wave_chunks = self.voice_wave_pending.len() >= VOICE_WAVE_STEP_SAMPLES;
+        let pending_inject = !self.pending_inject.is_empty();
+        wave.set_voice_active(cx, voice_active);
+        wave.set_submit_flash(cx, submit_flash);
+
+        let wave_animating = wave.is_animating();
+        if wave_animating || submit_flash || voice_active || pending_wave_chunks || pending_inject {
+            self.voice_visual_next_frame = cx.new_next_frame();
+        }
+    }
+
+    fn drain_ready_inject_events(&mut self, cx: &mut Cx) -> Vec<VoiceInjectEvent> {
+        let mut out = Vec::new();
+
+        loop {
+            let Some(next) = self.pending_inject.front() else {
+                break;
+            };
+            let now = Self::now_secs();
+            match next {
+                VoiceInjectEvent::Text(_) => {
+                    if let Some(VoiceInjectEvent::Text(text)) = self.pending_inject.pop_front() {
+                        out.push(VoiceInjectEvent::Text(text));
+                        self.next_enter_at = now + VOICE_ENTER_DELAY_SECS;
+                    }
+                }
+                VoiceInjectEvent::Enter => {
+                    if now + 1e-6 < self.next_enter_at {
+                        break;
+                    }
+                    let _ = self.pending_inject.pop_front();
+                    out.push(VoiceInjectEvent::Enter);
+                    self.next_enter_at = now + VOICE_ENTER_DELAY_SECS;
+                }
+            }
+        }
+
+        if !self.pending_inject.is_empty() {
+            self.voice_visual_next_frame = cx.new_next_frame();
+        }
+        out
     }
 }
 
@@ -225,6 +421,34 @@ impl Drop for WindowVoiceInput {
     fn drop(&mut self) {
         let _ = self.control_tx.send(VoiceControlMessage::Shutdown);
     }
+}
+
+fn parse_voice_inject_parts(text: &str) -> Vec<VoiceInjectEvent> {
+    let mut out = Vec::new();
+    let mut current_text = String::new();
+    for raw in text.split_whitespace() {
+        let token = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        if token.eq_ignore_ascii_case("enter") {
+            while current_text
+                .chars()
+                .last()
+                .is_some_and(|ch| ch.is_whitespace() || ch == ',')
+            {
+                current_text.pop();
+            }
+            if !current_text.is_empty() {
+                out.push(VoiceInjectEvent::Text(std::mem::take(&mut current_text)));
+            }
+            out.push(VoiceInjectEvent::Enter);
+        } else {
+            current_text.push_str(raw);
+            current_text.push(' ');
+        }
+    }
+    if !current_text.trim().is_empty() {
+        out.push(VoiceInjectEvent::Text(current_text));
+    }
+    out
 }
 
 struct CaptureCallbackState {
@@ -259,6 +483,19 @@ impl CaptureCallbackState {
         self.mono_scratch.clear();
         self.resampled_scratch.clear();
         self.pending_16k.clear();
+    }
+
+    fn flush_partial_packet(&mut self) {
+        if self.pending_16k.is_empty() {
+            return;
+        }
+        let mut chunk = Vec::with_capacity(self.pending_16k.len());
+        while let Some(sample) = self.pending_16k.pop_front() {
+            chunk.push(sample);
+        }
+        let _ = self.wave_tx.try_send(VoiceWaveEvent::Append(chunk.clone()));
+        self.text_signal.set();
+        let _ = self.audio_tx.try_send(chunk);
     }
 
     fn handle_input(&mut self, source_sample_rate: f64, input_buffer: &AudioBuffer) {
