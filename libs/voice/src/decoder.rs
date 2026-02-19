@@ -297,6 +297,28 @@ pub fn decode(
         let projected = Tensor::linear_raw(&attn_result, &layer.attn_ln_1_w, &layer.attn_ln_1_b);
         cur = Tensor::add(&projected, &residual);
 
+        let (ref k_cross, ref v_cross) = cross_kv[il];
+        let n_audio_ctx = k_cross.shape[0];
+
+        if decoder_flash_cross && crate::metal_backend::is_requested() && n_tokens == 1 {
+            if let Some(out) = crate::metal_backend::try_decoder_cross_ffn_step_f32(
+                il,
+                &cur.data,
+                n_state,
+                n_head,
+                &k_cross.data,
+                &v_cross.data,
+                n_audio_ctx,
+                layer,
+            ) {
+                cur = Tensor {
+                    data: out,
+                    shape: vec![n_tokens, n_state],
+                };
+                continue;
+            }
+        }
+
         // === Cross-Attention ===
         let residual = cur.clone();
 
@@ -308,9 +330,6 @@ pub fn decode(
         );
 
         let q = Tensor::linear_raw(&normed, &layer.cross_attn_q_w, &layer.cross_attn_q_b);
-
-        let (ref k_cross, ref v_cross) = cross_kv[il];
-        let n_audio_ctx = k_cross.shape[0];
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
 
