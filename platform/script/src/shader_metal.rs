@@ -33,6 +33,7 @@ impl ShaderOutput {
                         TextureType::TextureCubeArray => "texturecube_array<float>",
                         TextureType::TextureDepth => "depth2d<float>",
                         TextureType::TextureDepthArray => "depth2d_array<float>",
+                        TextureType::TextureVideo => "texture2d<float>", // Video textures are standard texture2d on Metal
                     };
                     writeln!(out, "    {} {};", metal_type, io.name).ok();
                 }
@@ -289,6 +290,7 @@ impl ShaderOutput {
                         TextureType::TextureCubeArray => "texturecube_array<float>",
                         TextureType::TextureDepth => "depth2d<float>",
                         TextureType::TextureDepthArray => "depth2d_array<float>",
+                        TextureType::TextureVideo => "texture2d<float>", // Video textures are standard texture2d on Metal
                     };
                     writeln!(
                         out,
@@ -417,6 +419,7 @@ impl ShaderOutput {
                         TextureType::TextureCubeArray => "texturecube_array<float>",
                         TextureType::TextureDepth => "depth2d<float>",
                         TextureType::TextureDepthArray => "depth2d_array<float>",
+                        TextureType::TextureVideo => "texture2d<float>", // Video textures are standard texture2d on Metal
                     };
                     writeln!(out, ",").ok();
                     write!(

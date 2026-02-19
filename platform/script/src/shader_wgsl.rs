@@ -52,6 +52,7 @@ fn wgsl_texture_type(tex_type: TextureType) -> &'static str {
         TextureType::TextureCubeArray => "texture_cube_array<f32>",
         TextureType::TextureDepth => "texture_depth_2d",
         TextureType::TextureDepthArray => "texture_depth_2d_array",
+        TextureType::TextureVideo => "texture_external",
     }
 }
 
