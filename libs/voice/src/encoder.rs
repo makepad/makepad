@@ -174,27 +174,98 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
 
     // Transformer encoder blocks
     for layer in &model.encoder_layers {
+        if crate::metal_backend::is_requested() {
+            let t_layer = std::time::Instant::now();
+            if let Some(out) = crate::metal_backend::try_encoder_layer_f32(
+                &cur.data,
+                cur.shape[0],
+                cur.shape[1],
+                n_head,
+                &layer.attn_ln_0_w.data,
+                &layer.attn_ln_0_b.data,
+                &layer.attn_q_w.data,
+                layer.attn_q_w.ggml_type,
+                &layer.attn_q_b.data,
+                &layer.attn_k_w.data,
+                layer.attn_k_w.ggml_type,
+                &layer.attn_v_w.data,
+                layer.attn_v_w.ggml_type,
+                &layer.attn_v_b.data,
+                &layer.attn_ln_1_w.data,
+                layer.attn_ln_1_w.ggml_type,
+                &layer.attn_ln_1_b.data,
+                &layer.mlp_ln_w.data,
+                &layer.mlp_ln_b.data,
+                &layer.mlp_0_w.data,
+                layer.mlp_0_w.ggml_type,
+                &layer.mlp_0_b.data,
+                &layer.mlp_1_w.data,
+                layer.mlp_1_w.ggml_type,
+                &layer.mlp_1_b.data,
+            ) {
+                cur = Tensor {
+                    data: out,
+                    shape: cur.shape.clone(),
+                };
+                let dt = t_layer.elapsed().as_nanos() as u64;
+                crate::PROF_ENC_ATTN.fetch_add(dt / 2, std::sync::atomic::Ordering::Relaxed);
+                crate::PROF_ENC_ELEM.fetch_add(dt - dt / 2, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+        }
+
         // Self-attention block
         let t_attn = std::time::Instant::now();
-        let residual = cur.clone();
+        let mut attn_done = false;
+        if crate::metal_backend::is_requested() {
+            if let Some(out) = crate::metal_backend::try_encoder_attn_block_f32(
+                &cur.data,
+                cur.shape[0],
+                cur.shape[1],
+                n_head,
+                &layer.attn_ln_0_w.data,
+                &layer.attn_ln_0_b.data,
+                &layer.attn_q_w.data,
+                layer.attn_q_w.ggml_type,
+                &layer.attn_q_b.data,
+                &layer.attn_k_w.data,
+                layer.attn_k_w.ggml_type,
+                &layer.attn_v_w.data,
+                layer.attn_v_w.ggml_type,
+                &layer.attn_v_b.data,
+                &layer.attn_ln_1_w.data,
+                layer.attn_ln_1_w.ggml_type,
+                &layer.attn_ln_1_b.data,
+            ) {
+                cur = Tensor {
+                    data: out,
+                    shape: cur.shape.clone(),
+                };
+                attn_done = true;
+            }
+        }
+        if !attn_done {
+            let residual = cur.clone();
 
-        // Layer norm
-        let normed = Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
+            // Layer norm
+            let normed =
+                Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
 
-        // Multi-head self-attention
-        let attn_out = multi_head_attention(
-            &normed,
-            &layer.attn_q_w,
-            &layer.attn_q_b,
-            &layer.attn_k_w,
-            &layer.attn_v_w,
-            &layer.attn_v_b,
-            &layer.attn_ln_1_w,
-            &layer.attn_ln_1_b,
-            n_head,
-        );
+            // Multi-head self-attention
+            let attn_out = multi_head_attention(
+                &normed,
+                &layer.attn_q_w,
+                &layer.attn_q_b,
+                &layer.attn_k_w,
+                &layer.attn_v_w,
+                &layer.attn_v_b,
+                &layer.attn_ln_1_w,
+                &layer.attn_ln_1_b,
+                n_head,
+            );
 
-        cur = Tensor::add(&attn_out, &residual);
+            cur = Tensor::add(&attn_out, &residual);
+        }
         crate::PROF_ENC_ATTN.fetch_add(
             t_attn.elapsed().as_nanos() as u64,
             std::sync::atomic::Ordering::Relaxed,
@@ -202,16 +273,40 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
 
         // Feed-forward block
         let t_elem = std::time::Instant::now();
-        let residual = cur.clone();
+        let mut ffn_done = false;
+        if crate::metal_backend::is_requested() {
+            if let Some(out) = crate::metal_backend::try_encoder_ffn_block_f32(
+                &cur.data,
+                cur.shape[0],
+                cur.shape[1],
+                &layer.mlp_ln_w.data,
+                &layer.mlp_ln_b.data,
+                &layer.mlp_0_w.data,
+                layer.mlp_0_w.ggml_type,
+                &layer.mlp_0_b.data,
+                &layer.mlp_1_w.data,
+                layer.mlp_1_w.ggml_type,
+                &layer.mlp_1_b.data,
+            ) {
+                cur = Tensor {
+                    data: out,
+                    shape: cur.shape.clone(),
+                };
+                ffn_done = true;
+            }
+        }
+        if !ffn_done {
+            let residual = cur.clone();
 
-        let normed = Tensor::layer_norm_mul_add(&cur, &layer.mlp_ln_w, &layer.mlp_ln_b, EPS);
+            let normed = Tensor::layer_norm_mul_add(&cur, &layer.mlp_ln_w, &layer.mlp_ln_b, EPS);
 
-        // MLP: linear -> gelu -> linear
-        let mut ff = Tensor::linear_raw(&normed, &layer.mlp_0_w, &layer.mlp_0_b);
-        ff = Tensor::gelu(&ff);
-        ff = Tensor::linear_raw(&ff, &layer.mlp_1_w, &layer.mlp_1_b);
+            // MLP: linear -> gelu -> linear
+            let mut ff = Tensor::linear_raw(&normed, &layer.mlp_0_w, &layer.mlp_0_b);
+            ff = Tensor::gelu(&ff);
+            ff = Tensor::linear_raw(&ff, &layer.mlp_1_w, &layer.mlp_1_b);
 
-        cur = Tensor::add(&ff, &residual);
+            cur = Tensor::add(&ff, &residual);
+        }
         crate::PROF_ENC_ELEM.fetch_add(
             t_elem.elapsed().as_nanos() as u64,
             std::sync::atomic::Ordering::Relaxed,
