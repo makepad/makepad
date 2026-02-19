@@ -7,10 +7,7 @@ use crate::{
     widget::*,
 };
 #[cfg(feature = "voice")]
-use crate::{
-    voice_wave::VoiceWaveWidgetExt,
-    window_voice_input::{VoiceInjectEvent, WindowVoiceInput},
-};
+use crate::voice_wave::VoiceWaveWidgetExt;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -203,17 +200,8 @@ pub struct Window {
     hide_caption_on_fullscreen: bool,
     #[live]
     show_performance_view: bool,
-    #[cfg(feature = "voice")]
-    #[rust]
-    voice_input: WindowVoiceInput,
     #[rust]
     has_focus: bool,
-    #[cfg(feature = "voice")]
-    #[rust]
-    ptt_f1_down: bool,
-    #[cfg(feature = "voice")]
-    #[rust]
-    ptt_owns_capture: bool,
     #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))]
     xr_view_matrix: Mat4f,
     #[deref]
@@ -236,71 +224,16 @@ pub enum WindowAction {
     EventForOtherWindow,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
-    #[cfg(feature = "voice")]
-    RecordVoice(bool),
     #[default]
     None,
 }
 
 impl Window {
-    #[cfg(feature = "voice")]
-    fn voice_callback_index(&self) -> usize {
-        self.window.window_id().id() % MAX_AUDIO_DEVICE_INDEX
-    }
-
-    #[cfg(feature = "voice")]
-    fn key_focus_in_this_window(&self, cx: &Cx) -> bool {
-        let Some(draw_list_id) = cx.key_focus().draw_list_id() else {
-            return false;
-        };
-        let Some(draw_list) = cx.draw_lists.checked_index(draw_list_id) else {
-            return false;
-        };
-        let Some(draw_pass_id) = draw_list.draw_pass_id else {
-            return false;
-        };
-        cx.get_pass_window_id(draw_pass_id) == Some(self.window.window_id())
-    }
-
-    #[cfg(feature = "voice")]
-    fn dispatch_voice_inject_events(
-        &mut self,
-        cx: &mut Cx,
-        scope: &mut Scope,
-        events: Vec<VoiceInjectEvent>,
-    ) {
-        for event in events {
-            match event {
-                VoiceInjectEvent::Text(chunk) => {
-                    let text_input = Event::TextInput(TextInputEvent {
-                        input: chunk,
-                        replace_last: false,
-                        was_paste: false,
-                    });
-                    self.view.handle_event(cx, &text_input, scope);
-                }
-                VoiceInjectEvent::Enter => {
-                    let key = KeyEvent {
-                        key_code: KeyCode::ReturnKey,
-                        is_repeat: false,
-                        modifiers: KeyModifiers::default(),
-                        time: 0.0,
-                    };
-                    self.view.handle_event(cx, &Event::KeyDown(key), scope);
-                    self.view.handle_event(cx, &Event::KeyUp(key), scope);
-                }
-            }
-        }
-    }
-
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized {
             return;
         }
         self.initialized = true;
-        #[cfg(feature = "voice")]
-        self.voice_input
-            .ensure_audio_callback(cx, self.voice_callback_index());
 
         self.window.handle.set_pass(cx, &self.pass.handle);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
@@ -351,11 +284,6 @@ impl Window {
                 // self.frame.get_view(ids!(caption_bar)).set_visible(false);
             }
             _ => (),
-        }
-        #[cfg(feature = "voice")]
-        {
-            let wave = self.voice_wave(cx, ids!(voice_wave));
-            self.voice_input.sync_voice_wave_mic_state(cx, &wave);
         }
     }
 
@@ -445,14 +373,6 @@ impl Window {
     pub fn set_fullscreen(&mut self, cx: &mut Cx) {
         self.window.handle.fullscreen(cx);
     }
-    #[cfg(feature = "voice")]
-    pub fn set_record_voice(&mut self, cx: &mut Cx, enabled: bool) {
-        self.voice_input
-            .ensure_audio_callback(cx, self.voice_callback_index());
-        self.voice_input.set_enabled(cx, enabled);
-        let wave = self.voice_wave(cx, ids!(voice_wave));
-        self.voice_input.sync_voice_wave_mic_state(cx, &wave);
-    }
     pub fn configure_window(
         &mut self,
         cx: &mut Cx,
@@ -506,21 +426,6 @@ impl WindowRef {
             inner.set_fullscreen(cx);
         }
     }
-    #[cfg(feature = "voice")]
-    pub fn set_record_voice(&self, cx: &mut Cx, enabled: bool) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.set_record_voice(cx, enabled);
-        }
-    }
-    #[cfg(feature = "voice")]
-    pub fn record_voice_toggled(&self, actions: &Actions) -> Option<bool> {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let WindowAction::RecordVoice(v) = item.cast() {
-                return Some(v);
-            }
-        }
-        None
-    }
     /// Configure the window's size and position, and whether it's fullscreen or not.
     ///
     /// If `fullscreen` is `true`, the window will be set to the monitor's size and the
@@ -558,73 +463,6 @@ impl Widget for Window {
 
         let uid = self.widget_uid();
 
-        #[cfg(feature = "voice")]
-        {
-            if let Event::AudioDevices(devices) = event {
-                self.voice_input.handle_audio_devices(cx, devices);
-                let wave = self.voice_wave(cx, ids!(voice_wave));
-                self.voice_input.sync_voice_wave_mic_state(cx, &wave);
-            }
-            if let Event::PermissionResult(result) = event {
-                if self.voice_input.handle_permission_result(cx, result) {
-                    let wave = self.voice_wave(cx, ids!(voice_wave));
-                    self.voice_input.sync_voice_wave_mic_state(cx, &wave);
-                    cx.widget_action(uid, WindowAction::RecordVoice(self.voice_input.is_enabled()));
-                }
-            }
-            if let Event::Signal = event {
-                let wave = self.voice_wave(cx, ids!(voice_wave));
-                let events = self.voice_input.process_signal(cx, &wave);
-                self.dispatch_voice_inject_events(cx, scope, events);
-            }
-            {
-                let wave = self.voice_wave(cx, ids!(voice_wave));
-                let events = self.voice_input.handle_timers(cx, event, &wave);
-                self.dispatch_voice_inject_events(cx, scope, events);
-            }
-            if let Event::Shutdown = event {
-                self.voice_input.shutdown(cx);
-            }
-        }
-        #[cfg(feature = "voice")]
-        {
-            if let Event::KeyDown(key_event) = event {
-                let has_focus = self.has_focus || self.key_focus_in_this_window(cx);
-                if key_event.key_code == KeyCode::F1 && !key_event.is_repeat && has_focus {
-                    if !self.ptt_f1_down {
-                        self.ptt_f1_down = true;
-                        self.ptt_owns_capture = !self.voice_input.is_enabled();
-                        if self.ptt_owns_capture {
-                            self.set_record_voice(cx, true);
-                            cx.widget_action(uid, WindowAction::RecordVoice(true));
-                        }
-                    }
-                    return;
-                }
-                let is_hotkey = !key_event.is_repeat
-                    && (key_event.modifiers.logo || key_event.modifiers.control)
-                    && key_event.key_code == KeyCode::Key1;
-                if is_hotkey && has_focus {
-                    let enabled = !self.voice_input.is_enabled();
-                    self.set_record_voice(cx, enabled);
-                    cx.widget_action(uid, WindowAction::RecordVoice(enabled));
-                    return;
-                }
-            }
-            if let Event::KeyUp(key_event) = event {
-                if key_event.key_code == KeyCode::F1 && self.ptt_f1_down {
-                    self.ptt_f1_down = false;
-                    if self.ptt_owns_capture {
-                        self.ptt_owns_capture = false;
-                        self.set_record_voice(cx, false);
-                        self.voice_input.arm_enter_after_next_transcript();
-                        cx.widget_action(uid, WindowAction::RecordVoice(false));
-                    }
-                    return;
-                }
-            }
-        }
-
         //self.debug_view.handle_event(cx, event);
         //if self.show_performance_view {
         //    self.performance_view.handle_widget(cx, event);
@@ -643,8 +481,6 @@ impl Widget for Window {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
                 if ev.window_id == self.window.window_id() {
-                    #[cfg(feature = "voice")]
-                    self.voice_input.shutdown(cx);
                     cx.widget_action(uid, WindowAction::WindowClosed)
                 }
                 true
@@ -738,10 +574,9 @@ impl Widget for Window {
 
         if let Event::Actions(actions) = event {
             #[cfg(feature = "voice")]
-            if self.voice_wave(cx, ids!(voice_wave)).clicked(&actions) {
-                let enabled = !self.voice_input.is_enabled();
-                self.set_record_voice(cx, enabled);
-                cx.widget_action(uid, WindowAction::RecordVoice(enabled));
+            {
+                let voice_wave = self.voice_wave(cx, ids!(voice_wave));
+                voice_wave.handle_actions(cx, actions, &mut self.view, scope);
             }
             if self
                 .desktop_button(cx, ids!(windows_buttons.min))
