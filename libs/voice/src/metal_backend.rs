@@ -418,6 +418,29 @@ pub(crate) fn try_decoder_cross_ffn_step_f32(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_decoder_self_cross_ffn_step_f32(
+    layer_idx: usize,
+    x: &[f32],
+    q_self: &[f32],
+    k_all: &[f32],
+    v_all: &[f32],
+    n_kv: usize,
+    n_state: usize,
+    n_head: usize,
+    k_cross: &[f32],
+    v_cross: &[f32],
+    n_audio_ctx: usize,
+    layer: &crate::model::DecoderLayer,
+) -> Option<Vec<f32>> {
+    if !metal_requested() {
+        return None;
+    }
+    imp::try_decoder_self_cross_ffn_step_f32(
+        layer_idx, x, q_self, k_all, v_all, n_kv, n_state, n_head, k_cross, v_cross, n_audio_ctx, layer,
+    )
+}
+
 pub(crate) fn is_requested() -> bool {
     metal_requested()
 }
@@ -688,6 +711,24 @@ mod imp {
     ) -> Option<Vec<f32>> {
         None
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_decoder_self_cross_ffn_step_f32(
+        _layer_idx: usize,
+        _x: &[f32],
+        _q_self: &[f32],
+        _k_all: &[f32],
+        _v_all: &[f32],
+        _n_kv: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _k_cross: &[f32],
+        _v_cross: &[f32],
+        _n_audio_ctx: usize,
+        _layer: &crate::model::DecoderLayer,
+    ) -> Option<Vec<f32>> {
+        None
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -707,6 +748,9 @@ mod imp {
 
     const UTF8_ENCODING: u64 = 4;
     const MTL_RESOURCE_STORAGE_MODE_SHARED: u64 = 0;
+    const MTL_GPU_FAMILY_APPLE6: u64 = 1006;
+    const MTL_GPU_FAMILY_METAL3: u64 = 5001;
+    const MTL_GPU_FAMILY_METAL4: u64 = 5002;
 
     const MTL_DATA_TYPE_INT: u64 = 29;
     const MTL_DATA_TYPE_SHORT: u64 = 37;
@@ -729,6 +773,7 @@ mod imp {
     const SCRATCH_FLASH_PAD: u8 = 1;
     const SCRATCH_FLASH_BLK: u8 = 2;
     const SCRATCH_FLASH_TMP: u8 = 3;
+    const SCRATCH_FLASH_OUT: u8 = 4;
 
     const N_R0_Q4_0: i32 = 4;
     const N_SG_Q4_0: i32 = 2;
@@ -1166,6 +1211,37 @@ mod imp {
         }
     }
 
+    fn device_supports_family(device: ObjcId, family: u64) -> bool {
+        unsafe { msg_send![device, supportsFamily: family] }
+    }
+
+    fn metal_compile_feature_macros(device: ObjcId) -> (bool, bool) {
+        let mut has_bfloat = device_supports_family(device, MTL_GPU_FAMILY_METAL3)
+            || device_supports_family(device, MTL_GPU_FAMILY_APPLE6);
+        if std::env::var("GGML_METAL_BF16_DISABLE").is_ok() {
+            has_bfloat = false;
+        }
+
+        let mut has_tensor = device_supports_family(device, MTL_GPU_FAMILY_METAL4);
+        if std::env::var("GGML_METAL_TENSOR_DISABLE").is_ok() {
+            has_tensor = false;
+        }
+
+        if std::env::var("GGML_METAL_TENSOR_ENABLE").is_err() && has_tensor {
+            let dev_name_obj: ObjcId = unsafe { msg_send![device, name] };
+            let dev_name = nsstring_to_string(dev_name_obj);
+            let tensor_whitelisted = dev_name.contains("M5")
+                || dev_name.contains("M6")
+                || dev_name.contains("A19")
+                || dev_name.contains("A20");
+            if !tensor_whitelisted {
+                has_tensor = false;
+            }
+        }
+
+        (has_bfloat, has_tensor)
+    }
+
     fn build_ggml_source() -> String {
         let mut src = _GGML_METAL_SOURCE_RAW.to_string();
         src = src.replace("__embed_ggml-common.h__", _GGML_COMMON_H);
@@ -1480,6 +1556,7 @@ mod imp {
         pipeline_cache: HashMap<String, PipelineState>,
         cached_weight_buffers: HashMap<BufferKey, StrongId>,
         scratch_buffers: HashMap<u8, ScratchBuffer>,
+        matmul_out_buffers: HashMap<u8, ScratchBuffer>,
         decoder_kv_layers: HashMap<usize, DecoderKvLayer>,
         cross_kv_layers: HashMap<usize, CrossKvLayer>,
         batch_depth: usize,
@@ -1550,6 +1627,7 @@ mod imp {
                 pipeline_cache: HashMap::new(),
                 cached_weight_buffers: HashMap::new(),
                 scratch_buffers: HashMap::new(),
+                matmul_out_buffers: HashMap::new(),
                 decoder_kv_layers: HashMap::new(),
                 cross_kv_layers: HashMap::new(),
                 batch_depth: 0,
@@ -1600,6 +1678,40 @@ mod imp {
                 .ok_or_else(|| "MTLCompileOptions::new returned nil".to_string())?;
             unsafe {
                 let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
+            }
+
+            let (has_bfloat, has_tensor) = metal_compile_feature_macros(device);
+            if has_bfloat || has_tensor {
+                let prep_obj: ObjcId = unsafe { msg_send![class!(NSMutableDictionary), dictionary] };
+                if !prep_obj.is_null() {
+                    if has_bfloat {
+                        let key_obj = str_to_nsstring_owned("GGML_METAL_HAS_BF16");
+                        let val_obj = str_to_nsstring_owned("1");
+                        let key = unsafe { StrongId::from_owned(key_obj) }
+                            .ok_or_else(|| "failed to build metal macro key".to_string())?;
+                        let val = unsafe { StrongId::from_owned(val_obj) }
+                            .ok_or_else(|| "failed to build metal macro value".to_string())?;
+                        unsafe {
+                            let _: () =
+                                msg_send![prep_obj, setObject: val.as_id() forKey: key.as_id()];
+                        }
+                    }
+                    if has_tensor {
+                        let key_obj = str_to_nsstring_owned("GGML_METAL_HAS_TENSOR");
+                        let val_obj = str_to_nsstring_owned("1");
+                        let key = unsafe { StrongId::from_owned(key_obj) }
+                            .ok_or_else(|| "failed to build metal macro key".to_string())?;
+                        let val = unsafe { StrongId::from_owned(val_obj) }
+                            .ok_or_else(|| "failed to build metal macro value".to_string())?;
+                        unsafe {
+                            let _: () =
+                                msg_send![prep_obj, setObject: val.as_id() forKey: key.as_id()];
+                        }
+                    }
+                    unsafe {
+                        let _: () = msg_send![options.as_id(), setPreprocessorMacros: prep_obj];
+                    }
+                }
             }
 
             let source_obj = str_to_nsstring_owned(source);
@@ -1664,6 +1776,30 @@ mod imp {
             );
 
             Ok(self.scratch_buffers.get(&kind).unwrap().buf.as_id())
+        }
+
+        fn get_or_create_matmul_out_buffer(
+            &mut self,
+            tag: u8,
+            need_bytes: usize,
+        ) -> Result<ObjcId, String> {
+            let need_bytes = need_bytes.max(1);
+            if let Some(entry) = self.matmul_out_buffers.get(&tag) {
+                if entry.cap_bytes >= need_bytes {
+                    return Ok(entry.buf.as_id());
+                }
+            }
+
+            let buf = self.new_buffer_with_length(need_bytes)?;
+            self.matmul_out_buffers.insert(
+                tag,
+                ScratchBuffer {
+                    buf,
+                    cap_bytes: need_bytes,
+                },
+            );
+
+            Ok(self.matmul_out_buffers.get(&tag).unwrap().buf.as_id())
         }
 
         fn read_f32_buffer(&self, buffer: ObjcId, elems: usize) -> Result<Vec<f32>, String> {
@@ -3834,7 +3970,7 @@ mod imp {
             let q_buf = self.new_buffer_with_bytes(q_bytes)?;
             let k_buf = self.new_buffer_with_bytes(k_bytes)?;
             let v_buf = self.new_buffer_with_bytes(v_bytes)?;
-            let dst_buf = self.new_buffer_with_length(out_bytes)?;
+            let dst_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_OUT, out_bytes)?;
 
             let params = FlashAttnExtParams::default();
             let use_vec = flash_attn_use_vec(n_q, d);
@@ -3854,7 +3990,7 @@ mod imp {
                     q_buf.as_id(), // unused when has_sinks=false
                     pad_id,
                     Some(tmp_id),
-                    dst_buf.as_id(),
+                    dst_id,
                     n_q,
                     n_kv,
                     n_head,
@@ -3877,7 +4013,7 @@ mod imp {
                     q_buf.as_id(), // unused when has_sinks=false
                     pad_id,
                     blk_id,
-                    dst_buf.as_id(),
+                    dst_id,
                     n_q,
                     n_kv,
                     n_head,
@@ -3890,7 +4026,7 @@ mod imp {
                 )?;
             }
 
-            self.read_f32_buffer(dst_buf.as_id(), out_elems)
+            self.read_f32_buffer(dst_id, out_elems)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -4021,7 +4157,7 @@ mod imp {
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| "overflow computing flash output bytes".to_string())?;
 
-            let dst_buf = self.new_buffer_with_length(out_bytes)?;
+            let dst_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_OUT, out_bytes)?;
 
             let params = FlashAttnExtParams::default();
             let use_vec = flash_attn_use_vec(n_q, d);
@@ -4041,7 +4177,7 @@ mod imp {
                     q_id, // unused when has_sinks=false
                     pad_id,
                     Some(tmp_id),
-                    dst_buf.as_id(),
+                    dst_id,
                     n_q,
                     n_kv,
                     n_head,
@@ -4064,7 +4200,7 @@ mod imp {
                     q_id, // unused when has_sinks=false
                     pad_id,
                     blk_id,
-                    dst_buf.as_id(),
+                    dst_id,
                     n_q,
                     n_kv,
                     n_head,
@@ -4077,7 +4213,8 @@ mod imp {
                 )?;
             }
 
-            Ok(dst_buf)
+            unsafe { StrongId::from_unowned(dst_id) }
+                .ok_or_else(|| "flash-attn output buffer returned nil".to_string())
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -4717,6 +4854,263 @@ mod imp {
         }
 
         #[allow(clippy::too_many_arguments)]
+        fn decoder_self_cross_ffn_step_f32(
+            &mut self,
+            layer_idx: usize,
+            x: &[f32],
+            q_self: &[f32],
+            k_all: &[f32],
+            v_all: &[f32],
+            n_kv: usize,
+            n_state: usize,
+            n_head: usize,
+            k_cross: &[f32],
+            v_cross: &[f32],
+            n_audio_ctx: usize,
+            layer: &DecoderLayer,
+        ) -> Result<Vec<f32>, String> {
+            if n_state == 0 || n_head == 0 || n_state % n_head != 0 {
+                return Err(format!(
+                    "invalid decoder dimensions: n_state={}, n_head={}",
+                    n_state, n_head
+                ));
+            }
+            if x.len() != n_state || q_self.len() != n_state {
+                return Err(format!(
+                    "decoder self-cross x/q len mismatch: x={}, q={}, expected={}",
+                    x.len(),
+                    q_self.len(),
+                    n_state
+                ));
+            }
+            let kv_need = n_kv
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing decoder self kv size".to_string())?;
+            if k_all.len() != kv_need || v_all.len() != kv_need {
+                return Err(format!(
+                    "decoder self kv len mismatch: k_all={}, v_all={}, expected={}",
+                    k_all.len(),
+                    v_all.len(),
+                    kv_need
+                ));
+            }
+            if layer.attn_ln_1_b.data.len() != n_state
+                || layer.cross_attn_ln_0_w.data.len() != n_state
+                || layer.cross_attn_ln_0_b.data.len() != n_state
+                || layer.cross_attn_q_b.data.len() != n_state
+                || layer.cross_attn_ln_1_b.data.len() != n_state
+                || layer.mlp_ln_w.data.len() != n_state
+                || layer.mlp_ln_b.data.len() != n_state
+                || layer.mlp_1_b.data.len() != n_state
+            {
+                return Err("decoder self/cross/ffn affine size mismatch".to_string());
+            }
+
+            let n_ff = layer.mlp_0_b.data.len();
+            if n_ff == 0 {
+                return Err("decoder ffn hidden size is zero".to_string());
+            }
+
+            let d = n_state / n_head;
+            let scale = 1.0f32 / (d as f32).sqrt();
+
+            let out_buf = self.with_batch(|ctx| {
+                let x_shape = shape4_from_row_major(&[1, n_state], 4)?;
+                let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+
+                let x_buf = ctx.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
+
+                let (k_self_id, v_self_id) = ctx.ensure_decoder_kv_layer(layer_idx, n_state, n_kv)?;
+                let row_bytes = n_state
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| "overflow computing decoder kv row bytes".to_string())?;
+                let start_row = ctx
+                    .decoder_kv_layers
+                    .get(&layer_idx)
+                    .map(|e| e.len_rows.min(n_kv))
+                    .unwrap_or(0);
+                if start_row < n_kv {
+                    let copy_rows = n_kv - start_row;
+                    let copy_bytes = copy_rows
+                        .checked_mul(row_bytes)
+                        .ok_or_else(|| "overflow computing decoder kv copy bytes".to_string())?;
+                    let offset = start_row
+                        .checked_mul(row_bytes)
+                        .ok_or_else(|| "overflow computing decoder kv copy offset".to_string())?;
+                    let src_k = f32_slice_as_bytes(&k_all[start_row * n_state..n_kv * n_state]);
+                    let src_v = f32_slice_as_bytes(&v_all[start_row * n_state..n_kv * n_state]);
+                    let dst_k: *mut u8 = unsafe { msg_send![k_self_id, contents] };
+                    let dst_v: *mut u8 = unsafe { msg_send![v_self_id, contents] };
+                    if dst_k.is_null() || dst_v.is_null() {
+                        return Err("decoder kv buffer contents returned null".to_string());
+                    }
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src_k.as_ptr(), dst_k.add(offset), copy_bytes);
+                        std::ptr::copy_nonoverlapping(src_v.as_ptr(), dst_v.add(offset), copy_bytes);
+                    }
+                    if let Some(entry) = ctx.decoder_kv_layers.get_mut(&layer_idx) {
+                        entry.len_rows = n_kv;
+                    }
+                }
+
+                let q_self_buf = ctx.new_buffer_with_bytes(f32_slice_as_bytes(q_self))?;
+                let self_attn_buf = ctx.flash_attn_f32_from_buffers(
+                    q_self_buf.as_id(),
+                    k_self_id,
+                    v_self_id,
+                    1,
+                    n_kv,
+                    n_head,
+                    d,
+                    scale,
+                )?;
+
+                let self_proj_buf = ctx.linear_from_src_buffer(
+                    self_attn_buf.as_id(),
+                    1,
+                    n_state,
+                    &layer.attn_ln_1_w.data,
+                    layer.attn_ln_1_w.ggml_type,
+                    n_state,
+                    Some(&layer.attn_ln_1_b.data),
+                    212,
+                    213,
+                )?;
+
+                ctx.dispatch_bin_f32(
+                    0,
+                    self_proj_buf.as_id(),
+                    x_buf.as_id(),
+                    self_proj_buf.as_id(),
+                    &x_shape,
+                    &x_shape,
+                )?;
+
+                let (k_cross_id, v_cross_id) =
+                    ctx.ensure_cross_kv_layer(layer_idx, n_state, n_audio_ctx, k_cross, v_cross)?;
+
+                let cross_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 214)?;
+                let cross_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 215)?;
+                let norm0_buf = ctx.new_buffer_with_length(n_state * std::mem::size_of::<f32>())?;
+                ctx.dispatch_norm_f32(
+                    self_proj_buf.as_id(),
+                    cross_ln_w_id,
+                    cross_ln_b_id,
+                    norm0_buf.as_id(),
+                    &x_shape,
+                    &ln_shape,
+                    &ln_shape,
+                    1e-5f32,
+                    3,
+                )?;
+
+                let q_cross_buf = ctx.linear_from_src_buffer(
+                    norm0_buf.as_id(),
+                    1,
+                    n_state,
+                    &layer.cross_attn_q_w.data,
+                    layer.cross_attn_q_w.ggml_type,
+                    n_state,
+                    Some(&layer.cross_attn_q_b.data),
+                    216,
+                    217,
+                )?;
+
+                let cross_attn_buf = ctx.flash_attn_f32_from_buffers(
+                    q_cross_buf.as_id(),
+                    k_cross_id,
+                    v_cross_id,
+                    1,
+                    n_audio_ctx,
+                    n_head,
+                    d,
+                    scale,
+                )?;
+
+                let cross_proj_buf = ctx.linear_from_src_buffer(
+                    cross_attn_buf.as_id(),
+                    1,
+                    n_state,
+                    &layer.cross_attn_ln_1_w.data,
+                    layer.cross_attn_ln_1_w.ggml_type,
+                    n_state,
+                    Some(&layer.cross_attn_ln_1_b.data),
+                    218,
+                    219,
+                )?;
+
+                ctx.dispatch_bin_f32(
+                    0,
+                    cross_proj_buf.as_id(),
+                    self_proj_buf.as_id(),
+                    cross_proj_buf.as_id(),
+                    &x_shape,
+                    &x_shape,
+                )?;
+
+                let mlp_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_w.data, 220)?;
+                let mlp_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_b.data, 221)?;
+                let norm1_buf = ctx.new_buffer_with_length(n_state * std::mem::size_of::<f32>())?;
+                ctx.dispatch_norm_f32(
+                    cross_proj_buf.as_id(),
+                    mlp_ln_w_id,
+                    mlp_ln_b_id,
+                    norm1_buf.as_id(),
+                    &x_shape,
+                    &ln_shape,
+                    &ln_shape,
+                    1e-5f32,
+                    3,
+                )?;
+
+                let ff0_buf = ctx.linear_from_src_buffer(
+                    norm1_buf.as_id(),
+                    1,
+                    n_state,
+                    &layer.mlp_0_w.data,
+                    layer.mlp_0_w.ggml_type,
+                    n_ff,
+                    Some(&layer.mlp_0_b.data),
+                    222,
+                    223,
+                )?;
+
+                let ff0_shape = shape4_from_row_major(&[1, n_ff], 4)?;
+                ctx.dispatch_unary_f32(
+                    OP_UNARY_NUM_GELU,
+                    ff0_buf.as_id(),
+                    ff0_buf.as_id(),
+                    &ff0_shape,
+                )?;
+
+                let ff1_buf = ctx.linear_from_src_buffer(
+                    ff0_buf.as_id(),
+                    1,
+                    n_ff,
+                    &layer.mlp_1_w.data,
+                    layer.mlp_1_w.ggml_type,
+                    n_state,
+                    Some(&layer.mlp_1_b.data),
+                    224,
+                    225,
+                )?;
+
+                ctx.dispatch_bin_f32(
+                    0,
+                    ff1_buf.as_id(),
+                    cross_proj_buf.as_id(),
+                    ff1_buf.as_id(),
+                    &x_shape,
+                    &x_shape,
+                )?;
+
+                Ok(ff1_buf)
+            })?;
+
+            self.read_f32_buffer(out_buf.as_id(), n_state)
+        }
+
+        #[allow(clippy::too_many_arguments)]
         fn decoder_cross_ffn_step_f32(
             &mut self,
             layer_idx: usize,
@@ -5214,7 +5608,18 @@ mod imp {
                 id
             };
 
-            let dst_buffer = self.new_buffer_with_length(mn * std::mem::size_of::<f32>())?;
+            let dst_bytes = mn
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "matmul overflow computing dst bytes".to_string())?;
+            let mut dst_temp = None;
+            let dst_id = if let Some(tag) = weight_cache_tag {
+                self.get_or_create_matmul_out_buffer(tag, dst_bytes)?
+            } else {
+                let b = self.new_buffer_with_length(dst_bytes)?;
+                let id = b.as_id();
+                dst_temp = Some(b);
+                id
+            };
             let used_mul_mv_ext = can_use_mul_mv_ext(src0, ne00, ne11);
             let used_mul_mm = ne00 >= 64 && ne11 > 8;
 
@@ -5223,7 +5628,7 @@ mod imp {
                     src0,
                     src0_id,
                     src1_id,
-                    dst_buffer.as_id(),
+                    dst_id,
                     ne00,
                     ne01,
                     ne10,
@@ -5240,7 +5645,7 @@ mod imp {
                     src0,
                     src0_id,
                     src1_id,
-                    dst_buffer.as_id(),
+                    dst_id,
                     ne00,
                     ne01,
                     nb01,
@@ -5260,7 +5665,7 @@ mod imp {
                             src0,
                             src0_id,
                             src1_id,
-                            dst_buffer.as_id(),
+                            dst_id,
                             ne00,
                             ne01,
                             ne10,
@@ -5279,7 +5684,7 @@ mod imp {
                     src0,
                     src0_id,
                     src1_id,
-                    dst_buffer.as_id(),
+                    dst_id,
                     ne00,
                     ne01,
                     ne10,
@@ -5294,7 +5699,12 @@ mod imp {
             };
             compute_res?;
             drop(src0_temp);
-            Ok(dst_buffer)
+            if let Some(dst_buffer) = dst_temp {
+                Ok(dst_buffer)
+            } else {
+                unsafe { StrongId::from_unowned(dst_id) }
+                    .ok_or_else(|| "matmul scratch output buffer returned nil".to_string())
+            }
         }
 
         fn matmul_nt_ggml_bytes_impl(
@@ -5895,6 +6305,39 @@ mod imp {
             ctx.decoder_cross_ffn_step_f32(
                 layer_idx,
                 x,
+                n_state,
+                n_head,
+                k_cross,
+                v_cross,
+                n_audio_ctx,
+                layer,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_decoder_self_cross_ffn_step_f32(
+        layer_idx: usize,
+        x: &[f32],
+        q_self: &[f32],
+        k_all: &[f32],
+        v_all: &[f32],
+        n_kv: usize,
+        n_state: usize,
+        n_head: usize,
+        k_cross: &[f32],
+        v_cross: &[f32],
+        n_audio_ctx: usize,
+        layer: &DecoderLayer,
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.decoder_self_cross_ffn_step_f32(
+                layer_idx,
+                x,
+                q_self,
+                k_all,
+                v_all,
+                n_kv,
                 n_state,
                 n_head,
                 k_cross,
