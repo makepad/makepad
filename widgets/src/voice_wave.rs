@@ -1,5 +1,6 @@
 use crate::{
-    button::ButtonAction, makepad_derive_widget::*, makepad_draw::*, widget::*,
+    makepad_derive_widget::*, makepad_draw::*, view::View, widget::*,
+    window_voice_input::{VoiceInjectEvent, WindowVoiceInput},
 };
 
 const VOICE_TARGET_SAMPLE_RATE: usize = 16_000;
@@ -19,6 +20,16 @@ const DISPLAY_GAIN_DOWN: f32 = 0.22;
 const DISPLAY_MU: f32 = 14.0;
 const DISPLAY_SILENCE_CARRIER_BASE: f32 = 0.006;
 const DISPLAY_SILENCE_CARRIER_SWING: f32 = 0.004;
+
+#[derive(Clone, Debug, Default)]
+pub enum VoiceWaveAction {
+    #[default]
+    None,
+    Clicked(KeyModifiers),
+    RecordVoice(bool),
+    InjectText(String),
+    InjectEnter,
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -162,6 +173,14 @@ pub struct VoiceWave {
     animating: bool,
     #[rust]
     reset_on_next_append: bool,
+    #[rust]
+    voice_input: WindowVoiceInput,
+    #[rust]
+    voice_initialized: bool,
+    #[rust]
+    ptt_f1_down: bool,
+    #[rust]
+    ptt_owns_capture: bool,
 }
 
 impl VoiceWave {
@@ -394,6 +413,125 @@ impl VoiceWave {
     pub fn is_animating(&self) -> bool {
         self.animating
     }
+
+    fn ensure_voice_initialized(&mut self, cx: &mut Cx) {
+        if self.voice_initialized {
+            return;
+        }
+        self.voice_initialized = true;
+        self.voice_input.ensure_audio_callback(cx, 0);
+    }
+
+    fn sync_mic_state(&mut self, cx: &mut Cx) {
+        let enabled = self.voice_input.is_enabled();
+        self.set_mic_on(cx, enabled);
+        if !enabled {
+            self.voice_input.clear_pending();
+            self.set_voice_active(cx, false);
+            self.set_submit_flash(cx, false);
+        }
+        self.drain_and_refresh_voice(cx);
+    }
+
+    fn emit_inject_events(&self, cx: &mut Cx, events: Vec<VoiceInjectEvent>) {
+        let uid = self.widget_uid();
+        for event in events {
+            match event {
+                VoiceInjectEvent::Text(text) => {
+                    cx.widget_action(uid, VoiceWaveAction::InjectText(text));
+                }
+                VoiceInjectEvent::Enter => {
+                    cx.widget_action(uid, VoiceWaveAction::InjectEnter);
+                }
+            }
+        }
+    }
+
+    /// Drain pending wave samples from voice_input into our own waveform display,
+    /// then refresh visual state (voice_active, submit_flash, next_frame scheduling).
+    fn drain_and_refresh_voice(&mut self, cx: &mut Cx) {
+        // Drain pending wave samples
+        while let Some(chunk) = self.voice_input.take_wave_chunk() {
+            self.append_samples(cx, &chunk);
+        }
+        // Refresh visual state
+        let state = self.voice_input.visual_state();
+        self.set_voice_active(cx, state.voice_active);
+        self.set_submit_flash(cx, state.submit_flash);
+        if self.animating || state.voice_active || state.submit_flash
+            || state.pending_wave || state.pending_inject
+        {
+            self.voice_input.request_next_frame(cx);
+        }
+    }
+
+    fn set_enabled(&mut self, cx: &mut Cx, enabled: bool) {
+        self.ensure_voice_initialized(cx);
+        self.voice_input.set_enabled(cx, enabled);
+        self.sync_mic_state(cx);
+    }
+
+    fn handle_voice_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.ensure_voice_initialized(cx);
+        let uid = self.widget_uid();
+
+        if let Event::AudioDevices(devices) = event {
+            self.voice_input.handle_audio_devices(cx, devices);
+            self.sync_mic_state(cx);
+        }
+        if let Event::PermissionResult(result) = event {
+            if self.voice_input.handle_permission_result(cx, result) {
+                self.sync_mic_state(cx);
+                cx.widget_action(uid, VoiceWaveAction::RecordVoice(self.voice_input.is_enabled()));
+            }
+        }
+        if let Event::Signal = event {
+            let events = self.voice_input.process_signal_no_wave(cx);
+            self.drain_and_refresh_voice(cx);
+            self.emit_inject_events(cx, events);
+        }
+        if self.voice_input.is_timer_event(event) {
+            self.drain_and_refresh_voice(cx);
+            let events = self.voice_input.drain_ready_inject_events(cx);
+            self.emit_inject_events(cx, events);
+        }
+        if let Event::Shutdown = event {
+            self.voice_input.shutdown(cx);
+        }
+
+        // F1 push-to-talk and Cmd/Ctrl+1 toggle
+        if let Event::KeyDown(key_event) = event {
+            if key_event.key_code == KeyCode::F1 && !key_event.is_repeat {
+                if !self.ptt_f1_down {
+                    self.ptt_f1_down = true;
+                    self.ptt_owns_capture = !self.voice_input.is_enabled();
+                    if self.ptt_owns_capture {
+                        self.set_enabled(cx, true);
+                        cx.widget_action(uid, VoiceWaveAction::RecordVoice(true));
+                    }
+                }
+            }
+            let is_hotkey = !key_event.is_repeat
+                && (key_event.modifiers.logo || key_event.modifiers.control)
+                && key_event.key_code == KeyCode::Key1;
+            if is_hotkey {
+                let enabled = !self.voice_input.is_enabled();
+                self.set_enabled(cx, enabled);
+                cx.widget_action(uid, VoiceWaveAction::RecordVoice(enabled));
+            }
+        }
+        if let Event::KeyUp(key_event) = event {
+            if key_event.key_code == KeyCode::F1 && self.ptt_f1_down {
+                self.ptt_f1_down = false;
+                if self.ptt_owns_capture {
+                    self.ptt_owns_capture = false;
+                    self.set_enabled(cx, false);
+                    self.voice_input.arm_enter_after_next_transcript();
+                    cx.widget_action(uid, VoiceWaveAction::RecordVoice(false));
+                }
+            }
+        }
+    }
 }
 
 impl Widget for VoiceWave {
@@ -402,19 +540,19 @@ impl Widget for VoiceWave {
             return;
         }
 
+        self.handle_voice_event(cx, event);
+
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
             }
-            Hit::FingerDown(fe) => {
-                cx.widget_action(uid, ButtonAction::Pressed(fe.modifiers));
-            }
             Hit::FingerUp(fe) => {
                 if fe.is_over {
-                    cx.widget_action(uid, ButtonAction::Clicked(fe.modifiers));
-                } else {
-                    cx.widget_action(uid, ButtonAction::Released(fe.modifiers));
+                    let enabled = !self.voice_input.is_enabled();
+                    self.set_enabled(cx, enabled);
+                    cx.widget_action(uid, VoiceWaveAction::RecordVoice(enabled));
+                    cx.widget_action(uid, VoiceWaveAction::Clicked(fe.modifiers));
                 }
             }
             _ => (),
@@ -435,7 +573,54 @@ impl Widget for VoiceWave {
 impl VoiceWaveRef {
     pub fn clicked(&self, actions: &Actions) -> bool {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            matches!(item.cast(), ButtonAction::Clicked(_))
+            matches!(item.cast(), VoiceWaveAction::Clicked(_))
+        } else {
+            false
+        }
+    }
+
+    /// Handle voice actions from the actions queue, injecting text/enter events
+    /// into the given view. Returns `Some(enabled)` when voice recording state changed.
+    pub fn handle_actions(&self, cx: &mut Cx, actions: &Actions, view: &mut View, scope: &mut Scope) -> Option<bool> {
+        let mut result = None;
+        for action in actions.filter_widget_actions_cast::<VoiceWaveAction>(self.widget_uid()) {
+            match action {
+                VoiceWaveAction::RecordVoice(enabled) => {
+                    result = Some(enabled);
+                }
+                VoiceWaveAction::InjectText(text) => {
+                    let text_event = Event::TextInput(TextInputEvent {
+                        input: text,
+                        replace_last: false,
+                        was_paste: false,
+                    });
+                    view.handle_event(cx, &text_event, scope);
+                }
+                VoiceWaveAction::InjectEnter => {
+                    let key = KeyEvent {
+                        key_code: KeyCode::ReturnKey,
+                        is_repeat: false,
+                        modifiers: KeyModifiers::default(),
+                        time: 0.0,
+                    };
+                    view.handle_event(cx, &Event::KeyDown(key), scope);
+                    view.handle_event(cx, &Event::KeyUp(key), scope);
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_enabled(cx, enabled);
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.voice_input.is_enabled()
         } else {
             false
         }

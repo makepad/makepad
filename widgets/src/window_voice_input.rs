@@ -1,11 +1,8 @@
-use crate::{
-    makepad_draw::{
-        audio::{AudioBuffer, AudioDeviceId, AudioDevicesEvent},
-        permission::{Permission, PermissionResult, PermissionStatus},
-        thread::SignalToUI,
-        Cx, CxMediaApi, Event, NextFrame,
-    },
-    voice_wave::VoiceWaveRef,
+use crate::makepad_draw::{
+    audio::{AudioBuffer, AudioDeviceId, AudioDevicesEvent},
+    permission::{Permission, PermissionResult, PermissionStatus},
+    thread::SignalToUI,
+    Cx, CxMediaApi, Event, NextFrame,
 };
 use makepad_voice::{Segment, VoiceTranscribeParams, VoiceTranscriber};
 use std::collections::VecDeque;
@@ -34,7 +31,6 @@ const VOICE_NORM_PEAK_LIMIT: f32 = 0.98;
 const VOICE_NORM_MIN_RMS_FOR_BOOST: f32 = 0.004;
 const VOICE_WAVE_STEP_SAMPLES: usize = 320;
 const VOICE_WAVE_MAX_PENDING_SAMPLES: usize = VOICE_WAVE_STEP_SAMPLES * 64;
-const VOICE_WAVE_MAX_CHUNKS_PER_TICK: usize = 4;
 const VOICE_ENTER_DELAY_SECS: f64 = 0.075;
 
 enum VoiceControlMessage {
@@ -169,19 +165,6 @@ impl WindowVoiceInput {
         self.enter_after_next_text = true;
     }
 
-    pub fn sync_voice_wave_mic_state(&mut self, cx: &mut Cx, wave: &VoiceWaveRef) {
-        let enabled = self.desired_enabled;
-        wave.set_mic_on(cx, enabled);
-        if !enabled {
-            self.voice_wave_pending.clear();
-            self.voice_active_until = 0.0;
-            self.submit_flash_until = 0.0;
-            wave.set_voice_active(cx, false);
-            wave.set_submit_flash(cx, false);
-        }
-        self.refresh_voice_visual_state(cx, wave);
-    }
-
     pub fn is_enabled(&self) -> bool {
         self.desired_enabled
     }
@@ -222,52 +205,6 @@ impl WindowVoiceInput {
             }
         }
         old_enabled != self.desired_enabled
-    }
-
-    pub fn process_signal(&mut self, cx: &mut Cx, wave: &VoiceWaveRef) -> Vec<VoiceInjectEvent> {
-        if !self.text_signal.check_and_clear() {
-            return Vec::new();
-        }
-
-        let mut text_count = 0usize;
-        while let Ok(text) = self.text_rx.try_recv() {
-            self.queue_transcript_parts(text);
-            text_count += 1;
-        }
-        if self.enter_after_next_text && text_count > 0 {
-            self.pending_inject.push_back(VoiceInjectEvent::Enter);
-            self.enter_after_next_text = false;
-        }
-
-        while let Ok(event) = self.wave_rx.try_recv() {
-            match event {
-                VoiceWaveEvent::Append(samples) => {
-                    self.enqueue_voice_wave_samples(&samples);
-                }
-                VoiceWaveEvent::Submitted(_chunk) => {
-                    self.submit_flash_until = Self::now_secs() + 0.16;
-                    self.voice_active_until = 0.0;
-                }
-            }
-        }
-
-        self.drain_voice_wave_pending(cx, wave);
-        self.refresh_voice_visual_state(cx, wave);
-        self.drain_ready_inject_events(cx)
-    }
-
-    pub fn handle_timers(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        wave: &VoiceWaveRef,
-    ) -> Vec<VoiceInjectEvent> {
-        if self.voice_visual_next_frame.is_event(event).is_none() {
-            return Vec::new();
-        }
-        self.drain_voice_wave_pending(cx, wave);
-        self.refresh_voice_visual_state(cx, wave);
-        self.drain_ready_inject_events(cx)
     }
 
     pub fn shutdown(&mut self, cx: &mut Cx) {
@@ -343,48 +280,7 @@ impl WindowVoiceInput {
         }
     }
 
-    fn drain_voice_wave_pending(&mut self, cx: &mut Cx, wave: &VoiceWaveRef) {
-        if !self.desired_enabled {
-            self.voice_wave_pending.clear();
-            return;
-        }
-
-        let mut processed_chunks = 0usize;
-        while self.voice_wave_pending.len() >= VOICE_WAVE_STEP_SAMPLES
-            && processed_chunks < VOICE_WAVE_MAX_CHUNKS_PER_TICK
-        {
-            let mut chunk = Vec::with_capacity(VOICE_WAVE_STEP_SAMPLES);
-            for _ in 0..VOICE_WAVE_STEP_SAMPLES {
-                if let Some(sample) = self.voice_wave_pending.pop_front() {
-                    chunk.push(sample);
-                }
-            }
-            if !chunk.is_empty() {
-                wave.append_samples(cx, &chunk);
-                if Self::chunk_rms(&chunk) > 0.008 {
-                    self.voice_active_until = Self::now_secs() + 0.22;
-                }
-            }
-            processed_chunks += 1;
-        }
-    }
-
-    fn refresh_voice_visual_state(&mut self, cx: &mut Cx, wave: &VoiceWaveRef) {
-        let now = Self::now_secs();
-        let submit_flash = now < self.submit_flash_until;
-        let voice_active = now < self.voice_active_until && !submit_flash;
-        let pending_wave_chunks = self.voice_wave_pending.len() >= VOICE_WAVE_STEP_SAMPLES;
-        let pending_inject = !self.pending_inject.is_empty();
-        wave.set_voice_active(cx, voice_active);
-        wave.set_submit_flash(cx, submit_flash);
-
-        let wave_animating = wave.is_animating();
-        if wave_animating || submit_flash || voice_active || pending_wave_chunks || pending_inject {
-            self.voice_visual_next_frame = cx.new_next_frame();
-        }
-    }
-
-    fn drain_ready_inject_events(&mut self, cx: &mut Cx) -> Vec<VoiceInjectEvent> {
+    pub fn drain_ready_inject_events(&mut self, cx: &mut Cx) -> Vec<VoiceInjectEvent> {
         let mut out = Vec::new();
 
         loop {
@@ -415,6 +311,97 @@ impl WindowVoiceInput {
         }
         out
     }
+
+    /// Clear pending wave samples and visual timers (used when mic is disabled).
+    pub fn clear_pending(&mut self) {
+        self.voice_wave_pending.clear();
+        self.voice_active_until = 0.0;
+        self.submit_flash_until = 0.0;
+    }
+
+    /// Take one chunk of pending wave samples for the waveform display.
+    /// Returns `None` when no complete chunk is available.
+    pub fn take_wave_chunk(&mut self) -> Option<Vec<f32>> {
+        if !self.desired_enabled || self.voice_wave_pending.len() < VOICE_WAVE_STEP_SAMPLES {
+            return None;
+        }
+        let mut chunk = Vec::with_capacity(VOICE_WAVE_STEP_SAMPLES);
+        for _ in 0..VOICE_WAVE_STEP_SAMPLES {
+            if let Some(sample) = self.voice_wave_pending.pop_front() {
+                chunk.push(sample);
+            }
+        }
+        if !chunk.is_empty() {
+            if WindowVoiceInput::chunk_rms(&chunk) > 0.008 {
+                self.voice_active_until = Self::now_secs() + 0.22;
+            }
+            Some(chunk)
+        } else {
+            None
+        }
+    }
+
+    /// Get current visual state without touching the wave widget.
+    pub fn visual_state(&self) -> VoiceVisualState {
+        let now = Self::now_secs();
+        let submit_flash = now < self.submit_flash_until;
+        let voice_active = now < self.voice_active_until && !submit_flash;
+        VoiceVisualState {
+            voice_active,
+            submit_flash,
+            pending_wave: self.voice_wave_pending.len() >= VOICE_WAVE_STEP_SAMPLES,
+            pending_inject: !self.pending_inject.is_empty(),
+        }
+    }
+
+    /// Schedule a next-frame callback for animation.
+    pub fn request_next_frame(&mut self, cx: &mut Cx) {
+        self.voice_visual_next_frame = cx.new_next_frame();
+    }
+
+    /// Process signal events without touching the wave widget.
+    /// Caller should call `take_wave_chunk` / `visual_state` separately.
+    pub fn process_signal_no_wave(&mut self, _cx: &mut Cx) -> Vec<VoiceInjectEvent> {
+        if !self.text_signal.check_and_clear() {
+            return Vec::new();
+        }
+
+        let mut text_count = 0usize;
+        while let Ok(text) = self.text_rx.try_recv() {
+            self.queue_transcript_parts(text);
+            text_count += 1;
+        }
+        if self.enter_after_next_text && text_count > 0 {
+            self.pending_inject.push_back(VoiceInjectEvent::Enter);
+            self.enter_after_next_text = false;
+        }
+
+        while let Ok(event) = self.wave_rx.try_recv() {
+            match event {
+                VoiceWaveEvent::Append(samples) => {
+                    self.enqueue_voice_wave_samples(&samples);
+                }
+                VoiceWaveEvent::Submitted(_chunk) => {
+                    self.submit_flash_until = Self::now_secs() + 0.16;
+                    self.voice_active_until = 0.0;
+                }
+            }
+        }
+
+        self.drain_ready_inject_events(_cx)
+    }
+
+    /// Check if the given event is the timer event we're waiting for.
+    pub fn is_timer_event(&self, event: &Event) -> bool {
+        self.voice_visual_next_frame.is_event(event).is_some()
+    }
+}
+
+pub struct VoiceVisualState {
+    pub voice_active: bool,
+    pub submit_flash: bool,
+    pub pending_wave: bool,
+    pub pending_inject: bool,
 }
 
 impl Drop for WindowVoiceInput {
