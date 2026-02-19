@@ -30,6 +30,7 @@ impl KvCache {
             v.clear();
         }
         self.n_past = 0;
+        crate::metal_backend::clear_decoder_kv_cache();
     }
 
     /// Append K, V rows for a layer
@@ -79,7 +80,7 @@ pub fn decode(
             let v = v.trim().to_ascii_lowercase();
             !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
         })
-        .unwrap_or(decoder_flash);
+        .unwrap_or(true);
 
     let n_tokens = tokens.len();
     let n_state = model.hparams.n_text_state as usize;
@@ -116,16 +117,28 @@ pub fn decode(
         let scale = 1.0 / (n_state_head as f32).sqrt();
         let attn_out =
             if decoder_flash_self && crate::metal_backend::is_requested() && n_tokens == 1 {
-                crate::metal_backend::try_flash_attn_f32_packed(
+                crate::metal_backend::try_flash_attn_f32_self_kv_cache(
+                    il,
                     &q.data,
                     k_all,
                     v_all,
-                    n_tokens,
                     n_kv,
                     n_head,
                     n_state_head,
                     scale,
                 )
+                .or_else(|| {
+                    crate::metal_backend::try_flash_attn_f32_packed(
+                        &q.data,
+                        k_all,
+                        v_all,
+                        n_tokens,
+                        n_kv,
+                        n_head,
+                        n_state_head,
+                        scale,
+                    )
+                })
                 .unwrap_or_else(|| {
                     let mut attn_out = vec![0.0f32; n_tokens * n_state];
                     let out_ptr = SendPtr::new(attn_out.as_mut_ptr());
@@ -305,7 +318,8 @@ pub fn decode(
             && crate::metal_backend::is_requested()
             && n_tokens == 1
         {
-            crate::metal_backend::try_flash_attn_f32_packed(
+            crate::metal_backend::try_flash_attn_f32_cross_kv_cache(
+                il,
                 &q.data,
                 &k_cross.data,
                 &v_cross.data,
@@ -315,6 +329,18 @@ pub fn decode(
                 n_state_head,
                 scale,
             )
+            .or_else(|| {
+                crate::metal_backend::try_flash_attn_f32_packed(
+                    &q.data,
+                    &k_cross.data,
+                    &v_cross.data,
+                    n_tokens,
+                    n_audio_ctx,
+                    n_head,
+                    n_state_head,
+                    scale,
+                )
+            })
             .unwrap_or_else(|| {
                 let mut attn_out = vec![0.0f32; n_tokens * n_state];
                 let out_ptr = SendPtr::new(attn_out.as_mut_ptr());

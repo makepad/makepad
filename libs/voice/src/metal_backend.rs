@@ -135,6 +135,50 @@ pub(crate) fn try_flash_attn_f32_packed(
     imp::try_flash_attn_f32_packed(q, k, v, n_q, n_kv, n_head, d, scale)
 }
 
+pub(crate) fn clear_decoder_kv_cache() {
+    if !metal_requested() {
+        return;
+    }
+    imp::clear_decoder_kv_cache();
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_flash_attn_f32_self_kv_cache(
+    layer: usize,
+    q: &[f32],
+    k_all: &[f32],
+    v_all: &[f32],
+    n_kv: usize,
+    n_head: usize,
+    d: usize,
+    scale: f32,
+) -> Option<Vec<f32>> {
+    if !metal_requested() {
+        return None;
+    }
+    imp::try_flash_attn_f32_self_kv_cache(layer, q, k_all, v_all, n_kv, n_head, d, scale)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_flash_attn_f32_cross_kv_cache(
+    layer: usize,
+    q: &[f32],
+    k_cross: &[f32],
+    v_cross: &[f32],
+    n_q: usize,
+    n_kv: usize,
+    n_head: usize,
+    d: usize,
+    scale: f32,
+) -> Option<Vec<f32>> {
+    if !metal_requested() {
+        return None;
+    }
+    imp::try_flash_attn_f32_cross_kv_cache(
+        layer, q, k_cross, v_cross, n_q, n_kv, n_head, d, scale,
+    )
+}
+
 pub(crate) fn try_add_f32(
     a: &[f32],
     a_shape: &[usize],
@@ -440,6 +484,37 @@ mod imp {
         _q: &[f32],
         _k: &[f32],
         _v: &[f32],
+        _n_q: usize,
+        _n_kv: usize,
+        _n_head: usize,
+        _d: usize,
+        _scale: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn clear_decoder_kv_cache() {}
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_flash_attn_f32_self_kv_cache(
+        _layer: usize,
+        _q: &[f32],
+        _k_all: &[f32],
+        _v_all: &[f32],
+        _n_kv: usize,
+        _n_head: usize,
+        _d: usize,
+        _scale: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_flash_attn_f32_cross_kv_cache(
+        _layer: usize,
+        _q: &[f32],
+        _k_cross: &[f32],
+        _v_cross: &[f32],
         _n_q: usize,
         _n_kv: usize,
         _n_head: usize,
@@ -1175,9 +1250,7 @@ mod imp {
     }
 
     fn flash_attn_use_vec(n_q: usize, d: usize) -> bool {
-        // Keep decoder token-by-token path on the non-vec kernel for now.
-        // n_q == 1 is where we observe unstable outputs with vec on this port.
-        n_q > 1 && n_q < 20 && d % 32 == 0
+        n_q < 20 && d % 32 == 0
     }
 
     #[derive(Clone, Copy, Default)]
@@ -1340,12 +1413,37 @@ mod imp {
         nr1: i32,
     }
 
+    struct DecoderKvLayer {
+        k: StrongId,
+        v: StrongId,
+        n_state: usize,
+        cap_rows: usize,
+        len_rows: usize,
+    }
+
+    struct CrossKvLayer {
+        k: StrongId,
+        v: StrongId,
+        n_state: usize,
+        n_rows: usize,
+        src_k_ptr: usize,
+        src_v_ptr: usize,
+        src_k_len: usize,
+        src_v_len: usize,
+    }
+
     struct MetalContext {
         device: StrongId,
         command_queue: StrongId,
         library: StrongId,
         pipeline_cache: HashMap<String, PipelineState>,
         cached_weight_buffers: HashMap<BufferKey, StrongId>,
+        decoder_kv_layers: HashMap<usize, DecoderKvLayer>,
+        cross_kv_layers: HashMap<usize, CrossKvLayer>,
+        batch_depth: usize,
+        batch_command_buffer: Option<StrongId>,
+        batch_encoder: Option<StrongId>,
+        last_command_buffer: Option<StrongId>,
     }
 
     impl MetalContext {
@@ -1409,6 +1507,12 @@ mod imp {
                 library,
                 pipeline_cache: HashMap::new(),
                 cached_weight_buffers: HashMap::new(),
+                decoder_kv_layers: HashMap::new(),
+                cross_kv_layers: HashMap::new(),
+                batch_depth: 0,
+                batch_command_buffer: None,
+                batch_encoder: None,
+                last_command_buffer: None,
             })
         }
 
@@ -1540,6 +1644,149 @@ mod imp {
             Ok(self.cached_weight_buffers.get(&key).unwrap().as_id())
         }
 
+        fn clear_decoder_kv_cache(&mut self) {
+            self.decoder_kv_layers.clear();
+            self.cross_kv_layers.clear();
+        }
+
+        fn ensure_decoder_kv_layer(
+            &mut self,
+            layer: usize,
+            n_state: usize,
+            need_rows: usize,
+        ) -> Result<(ObjcId, ObjcId), String> {
+            let need_rows = need_rows.max(1);
+
+            if let Some(entry) = self.decoder_kv_layers.get(&layer) {
+                if entry.n_state == n_state && entry.cap_rows >= need_rows {
+                    return Ok((entry.k.as_id(), entry.v.as_id()));
+                }
+            }
+
+            let row_bytes = n_state
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing decoder kv row bytes".to_string())?;
+
+            let old = self.decoder_kv_layers.remove(&layer);
+            let cap_rows = if let Some(ref old) = old {
+                if old.n_state == n_state {
+                    old.cap_rows.saturating_mul(2).max(need_rows).max(32)
+                } else {
+                    need_rows.max(32)
+                }
+            } else {
+                need_rows.max(32)
+            };
+            let total_bytes = cap_rows
+                .checked_mul(row_bytes)
+                .ok_or_else(|| "overflow computing decoder kv bytes".to_string())?;
+
+            let new_k = self.new_buffer_with_length(total_bytes)?;
+            let new_v = self.new_buffer_with_length(total_bytes)?;
+
+            let mut len_rows = 0usize;
+            if let Some(old) = old {
+                if old.n_state == n_state && old.len_rows > 0 {
+                    let copy_rows = old.len_rows.min(cap_rows);
+                    let copy_bytes = copy_rows
+                        .checked_mul(row_bytes)
+                        .ok_or_else(|| "overflow computing decoder kv copy bytes".to_string())?;
+                    let old_k_ptr: *const u8 = unsafe { msg_send![old.k.as_id(), contents] };
+                    let old_v_ptr: *const u8 = unsafe { msg_send![old.v.as_id(), contents] };
+                    let new_k_ptr: *mut u8 = unsafe { msg_send![new_k.as_id(), contents] };
+                    let new_v_ptr: *mut u8 = unsafe { msg_send![new_v.as_id(), contents] };
+                    if old_k_ptr.is_null()
+                        || old_v_ptr.is_null()
+                        || new_k_ptr.is_null()
+                        || new_v_ptr.is_null()
+                    {
+                        return Err("decoder kv buffer contents returned null".to_string());
+                    }
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(old_k_ptr, new_k_ptr, copy_bytes);
+                        std::ptr::copy_nonoverlapping(old_v_ptr, new_v_ptr, copy_bytes);
+                    }
+                    len_rows = copy_rows;
+                }
+            }
+
+            self.decoder_kv_layers.insert(
+                layer,
+                DecoderKvLayer {
+                    k: new_k,
+                    v: new_v,
+                    n_state,
+                    cap_rows,
+                    len_rows,
+                },
+            );
+            let entry = self
+                .decoder_kv_layers
+                .get(&layer)
+                .ok_or_else(|| "decoder kv layer insertion failed".to_string())?;
+            Ok((entry.k.as_id(), entry.v.as_id()))
+        }
+
+        fn ensure_cross_kv_layer(
+            &mut self,
+            layer: usize,
+            n_state: usize,
+            n_rows: usize,
+            k_cross: &[f32],
+            v_cross: &[f32],
+        ) -> Result<(ObjcId, ObjcId), String> {
+            let need = n_rows
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing cross kv size".to_string())?;
+            if k_cross.len() != need || v_cross.len() != need {
+                return Err(format!(
+                    "cross kv len mismatch: k={}, v={}, expected={}",
+                    k_cross.len(),
+                    v_cross.len(),
+                    need
+                ));
+            }
+
+            let src_k_ptr = k_cross.as_ptr() as usize;
+            let src_v_ptr = v_cross.as_ptr() as usize;
+            let src_k_len = k_cross.len();
+            let src_v_len = v_cross.len();
+
+            if let Some(entry) = self.cross_kv_layers.get(&layer) {
+                if entry.n_state == n_state
+                    && entry.n_rows == n_rows
+                    && entry.src_k_ptr == src_k_ptr
+                    && entry.src_v_ptr == src_v_ptr
+                    && entry.src_k_len == src_k_len
+                    && entry.src_v_len == src_v_len
+                {
+                    return Ok((entry.k.as_id(), entry.v.as_id()));
+                }
+            }
+
+            let k_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(k_cross))?;
+            let v_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(v_cross))?;
+            self.cross_kv_layers.insert(
+                layer,
+                CrossKvLayer {
+                    k: k_buf,
+                    v: v_buf,
+                    n_state,
+                    n_rows,
+                    src_k_ptr,
+                    src_v_ptr,
+                    src_k_len,
+                    src_v_len,
+                },
+            );
+
+            let entry = self
+                .cross_kv_layers
+                .get(&layer)
+                .ok_or_else(|| "cross kv layer insertion failed".to_string())?;
+            Ok((entry.k.as_id(), entry.v.as_id()))
+        }
+
         fn compile_pipeline(
             &self,
             base_name: &str,
@@ -1659,7 +1906,82 @@ mod imp {
             unsafe { msg_send![pipeline, maxTotalThreadsPerThreadgroup] }
         }
 
-        fn begin_command_encoder(&self) -> Result<(StrongId, StrongId), String> {
+        fn begin_batch(&mut self) -> Result<(), String> {
+            if self.batch_depth == 0 {
+                let command_buffer_obj: ObjcId =
+                    unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
+                let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
+                    .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+
+                let encoder_obj: ObjcId =
+                    unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
+                let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
+                    .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
+
+                self.batch_command_buffer = Some(command_buffer);
+                self.batch_encoder = Some(encoder);
+            }
+            self.batch_depth += 1;
+            Ok(())
+        }
+
+        fn end_batch(&mut self) -> Result<(), String> {
+            if self.batch_depth == 0 {
+                return Err("end_batch called with no active batch".to_string());
+            }
+
+            self.batch_depth -= 1;
+            if self.batch_depth == 0 {
+                let command_buffer = self
+                    .batch_command_buffer
+                    .take()
+                    .ok_or_else(|| "batch command buffer missing".to_string())?;
+                let encoder = self
+                    .batch_encoder
+                    .take()
+                    .ok_or_else(|| "batch encoder missing".to_string())?;
+
+                unsafe {
+                    let _: () = msg_send![encoder.as_id(), endEncoding];
+                    let _: () = msg_send![command_buffer.as_id(), commit];
+                }
+
+                self.last_command_buffer = Some(command_buffer);
+            }
+
+            Ok(())
+        }
+
+        fn with_batch<T, F>(&mut self, f: F) -> Result<T, String>
+        where
+            F: FnOnce(&mut Self) -> Result<T, String>,
+        {
+            self.begin_batch()?;
+            let out = f(self);
+            let end_res = self.end_batch();
+            match (out, end_res) {
+                (Ok(v), Ok(())) => Ok(v),
+                (Err(e), Ok(())) => Err(e),
+                (Ok(_), Err(e)) => Err(e),
+                (Err(e), Err(_)) => Err(e),
+            }
+        }
+
+        fn begin_command_encoder(
+            &self,
+        ) -> Result<(ObjcId, ObjcId, Option<(StrongId, StrongId)>), String> {
+            if self.batch_depth > 0 {
+                let command_buffer = self
+                    .batch_command_buffer
+                    .as_ref()
+                    .ok_or_else(|| "batch command buffer missing".to_string())?;
+                let encoder = self
+                    .batch_encoder
+                    .as_ref()
+                    .ok_or_else(|| "batch encoder missing".to_string())?;
+                return Ok((command_buffer.as_id(), encoder.as_id(), None));
+            }
+
             let command_buffer_obj: ObjcId =
                 unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
             let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
@@ -1670,20 +1992,42 @@ mod imp {
             let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
                 .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
 
-            Ok((command_buffer, encoder))
+            Ok((
+                command_buffer.as_id(),
+                encoder.as_id(),
+                Some((command_buffer, encoder)),
+            ))
         }
 
         fn wait_queue_idle(&self) -> Result<(), String> {
+            if self.batch_depth > 0 {
+                return Err("wait_queue_idle called while command batch is active".to_string());
+            }
+
+            if let Some(command_buffer) = self.last_command_buffer.as_ref() {
+                let command_buffer_id = command_buffer.as_id();
+                unsafe {
+                    let _: () = msg_send![command_buffer_id, waitUntilCompleted];
+                }
+                let status: u64 = unsafe { msg_send![command_buffer_id, status] };
+                if status == 5 {
+                    let error: ObjcId = unsafe { msg_send![command_buffer_id, error] };
+                    return Err(format!(
+                        "Metal command buffer error (queue idle wait): {}",
+                        ns_error_to_string(error)
+                    ));
+                }
+                return Ok(());
+            }
+
             let command_buffer_obj: ObjcId =
                 unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
             let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
                 .ok_or_else(|| "commandBuffer returned nil".to_string())?;
-
             unsafe {
                 let _: () = msg_send![command_buffer.as_id(), commit];
                 let _: () = msg_send![command_buffer.as_id(), waitUntilCompleted];
             }
-
             let status: u64 = unsafe { msg_send![command_buffer.as_id(), status] };
             if status == 5 {
                 let error: ObjcId = unsafe { msg_send![command_buffer.as_id(), error] };
@@ -1692,18 +2036,20 @@ mod imp {
                     ns_error_to_string(error)
                 ));
             }
-
             Ok(())
         }
 
-        fn end_command_encoder(
-            command_buffer: &StrongId,
-            encoder: &StrongId,
-        ) -> Result<(), String> {
+        fn end_command_encoder(&mut self, handles: Option<(StrongId, StrongId)>) -> Result<(), String> {
+            let Some((command_buffer, encoder)) = handles else {
+                return Ok(());
+            };
+
             unsafe {
                 let _: () = msg_send![encoder.as_id(), endEncoding];
                 let _: () = msg_send![command_buffer.as_id(), commit];
             }
+
+            self.last_command_buffer = Some(command_buffer);
 
             Ok(())
         }
@@ -1791,21 +2137,21 @@ mod imp {
                 r3: 1,
             };
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsMulMvExt as *const c_void
                     length: std::mem::size_of::<KArgsMulMvExt>() as u64
                     atIndex: 0u64
                 ];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                    msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
 
                 let tgs = MTLSize {
                     width: ((ne01 + r0ptg - 1) / r0ptg) as u64,
@@ -1818,13 +2164,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         fn dispatch_mul_mm(
@@ -1889,23 +2235,23 @@ mod imp {
                 r3: 1,
             };
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsMulMm as *const c_void
                     length: std::mem::size_of::<KArgsMulMm>() as u64
                     atIndex: 0u64
                 ];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                    msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setThreadgroupMemoryLength: pipeline_smem as u64
                     atIndex: 0u64
                 ];
@@ -1921,13 +2267,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         fn dispatch_mul_mv(
@@ -2009,25 +2355,25 @@ mod imp {
                 r3: 1,
             };
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsMulMv as *const c_void
                     length: std::mem::size_of::<KArgsMulMv>() as u64
                     atIndex: 0u64
                 ];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                    msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
 
                 if smem > 0 {
                     let _: () = msg_send![
-                        encoder.as_id(),
+                        encoder,
                         setThreadgroupMemoryLength: smem as u64
                         atIndex: 0u64
                     ];
@@ -2051,13 +2397,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         fn dispatch_unary_f32(
@@ -2121,19 +2467,19 @@ mod imp {
                 args.ne0 /= 4;
             }
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsUnary as *const c_void
                     length: std::mem::size_of::<KArgsUnary>() as u64
                     atIndex: 0u64
                 ];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 2u64];
+                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
 
                 if is_cnt {
                     let n = if is_c4 { shape.numel / 4 } else { shape.numel };
@@ -2148,7 +2494,7 @@ mod imp {
                         depth: 1,
                     };
                     let _: () = msg_send![
-                        encoder.as_id(),
+                        encoder,
                         dispatchThreadgroups: tgs
                         threadsPerThreadgroup: tpg
                     ];
@@ -2169,14 +2515,14 @@ mod imp {
                         depth: 1,
                     };
                     let _: () = msg_send![
-                        encoder.as_id(),
+                        encoder,
                         dispatchThreadgroups: tgs
                         threadsPerThreadgroup: tpg
                     ];
                 }
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         fn dispatch_bin_f32(
@@ -2262,21 +2608,21 @@ mod imp {
                 args.ne0 /= 4;
             }
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsBin as *const c_void
                     length: std::mem::size_of::<KArgsBin>() as u64
                     atIndex: 0u64
                 ];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                    msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
 
                 if is_rb {
                     let n = if is_c4 {
@@ -2295,7 +2641,7 @@ mod imp {
                         depth: 1,
                     };
                     let _: () = msg_send![
-                        encoder.as_id(),
+                        encoder,
                         dispatchThreadgroups: tgs
                         threadsPerThreadgroup: tpg
                     ];
@@ -2317,14 +2663,14 @@ mod imp {
                         depth: 1,
                     };
                     let _: () = msg_send![
-                        encoder.as_id(),
+                        encoder,
                         dispatchThreadgroups: tgs
                         threadsPerThreadgroup: tpg
                     ];
                 }
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2384,25 +2730,25 @@ mod imp {
             nth = std::cmp::min(nth, nth_max);
             nth = std::cmp::min(nth, args.ne00_t.max(1) as u64);
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsNorm as *const c_void
                     length: std::mem::size_of::<KArgsNorm>() as u64
                     atIndex: 0u64
                 ];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src1_0_id offset: 0u64 atIndex: 2u64];
+                    msg_send![encoder, setBuffer: src1_0_id offset: 0u64 atIndex: 2u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src1_1_id offset: 0u64 atIndex: 3u64];
+                    msg_send![encoder, setBuffer: src1_1_id offset: 0u64 atIndex: 3u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 4u64];
+                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 4u64];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setThreadgroupMemoryLength: pipeline_smem as u64
                     atIndex: 0u64
                 ];
@@ -2418,13 +2764,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         fn dispatch_im2col_1d_f32(
@@ -2485,19 +2831,19 @@ mod imp {
             }
             let ntptg0 = (max_threads / khkw).min(1).max(1);
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsIm2Col as *const c_void
                     length: std::mem::size_of::<KArgsIm2Col>() as u64
                     atIndex: 0u64
                 ];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: src_id offset: 0u64 atIndex: 1u64];
+                    msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 1u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 2u64];
+                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
 
                 let tgs = MTLSize {
                     width: ic_i32 as u64,
@@ -2510,13 +2856,13 @@ mod imp {
                     depth: kw_i32 as u64,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2577,21 +2923,21 @@ mod imp {
                 nb33,
             };
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsFlashAttnExtPad as *const c_void
                     length: std::mem::size_of::<KArgsFlashAttnExtPad>() as u64
                     atIndex: 0u64
                 ];
-                let _: () = msg_send![encoder.as_id(), setBuffer: k_id offset: 0u64 atIndex: 1u64];
-                let _: () = msg_send![encoder.as_id(), setBuffer: v_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: k_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: v_id offset: 0u64 atIndex: 2u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: mask_id offset: 0u64 atIndex: 3u64];
+                    msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 3u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: pad_id offset: 0u64 atIndex: 4u64];
+                    msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 4u64];
 
                 let tgs = MTLSize {
                     width: ncpsg as u64,
@@ -2604,13 +2950,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2657,19 +3003,19 @@ mod imp {
                 nb33,
             };
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsFlashAttnExtBlk as *const c_void
                     length: std::mem::size_of::<KArgsFlashAttnExtBlk>() as u64
                     atIndex: 0u64
                 ];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: mask_id offset: 0u64 atIndex: 1u64];
+                    msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 1u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: blk_id offset: 0u64 atIndex: 2u64];
+                    msg_send![encoder, setBuffer: blk_id offset: 0u64 atIndex: 2u64];
 
                 let nblk1 = ((ne01 + nqptg - 1) / nqptg) as u64;
                 let nblk0 = ((ne30 + ncpsg - 1) / ncpsg) as u64;
@@ -2684,13 +3030,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         fn dispatch_flash_attn_ext_f32(
@@ -2919,30 +3265,30 @@ mod imp {
                 logit_softcap,
             };
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsFlashAttnExt as *const c_void
                     length: std::mem::size_of::<KArgsFlashAttnExt>() as u64
                     atIndex: 0u64
                 ];
-                let _: () = msg_send![encoder.as_id(), setBuffer: q_id offset: 0u64 atIndex: 1u64];
-                let _: () = msg_send![encoder.as_id(), setBuffer: k_id offset: 0u64 atIndex: 2u64];
-                let _: () = msg_send![encoder.as_id(), setBuffer: v_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: q_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: k_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: v_id offset: 0u64 atIndex: 3u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: mask_id offset: 0u64 atIndex: 4u64];
+                    msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 4u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
+                    msg_send![encoder, setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: pad_id offset: 0u64 atIndex: 6u64];
+                    msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 6u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: blk_id offset: 0u64 atIndex: 7u64];
+                    msg_send![encoder, setBuffer: blk_id offset: 0u64 atIndex: 7u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 8u64];
+                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 8u64];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setThreadgroupMemoryLength: pipeline_smem as u64
                     atIndex: 0u64
                 ];
@@ -2958,13 +3304,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         fn dispatch_flash_attn_ext_vec_reduce_f32(
@@ -3006,17 +3352,17 @@ mod imp {
                 ));
             }
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsFlashAttnExtVecReduce as *const c_void
                     length: std::mem::size_of::<KArgsFlashAttnExtVecReduce>() as u64
                     atIndex: 0u64
                 ];
-                let _: () = msg_send![encoder.as_id(), setBuffer: tmp_id offset: 0u64 atIndex: 1u64];
-                let _: () = msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: tmp_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
 
                 let tgs = MTLSize {
                     width: nrows as u64,
@@ -3029,13 +3375,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)
+            self.end_command_encoder(encoder_handles)
         }
 
         fn dispatch_flash_attn_ext_vec_f32(
@@ -3286,36 +3632,36 @@ mod imp {
                 .checked_mul(n_head)
                 .ok_or_else(|| "overflow computing flash vec nrows".to_string())?;
 
-            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
-                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setBytes: &args as *const KArgsFlashAttnExtVec as *const c_void
                     length: std::mem::size_of::<KArgsFlashAttnExtVec>() as u64
                     atIndex: 0u64
                 ];
-                let _: () = msg_send![encoder.as_id(), setBuffer: q_id offset: 0u64 atIndex: 1u64];
-                let _: () = msg_send![encoder.as_id(), setBuffer: k_id offset: 0u64 atIndex: 2u64];
-                let _: () = msg_send![encoder.as_id(), setBuffer: v_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: q_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: k_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: v_id offset: 0u64 atIndex: 3u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: mask_id offset: 0u64 atIndex: 4u64];
+                    msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 4u64];
                 let _: () =
-                    msg_send![encoder.as_id(), setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
-                let _: () = msg_send![encoder.as_id(), setBuffer: pad_id offset: 0u64 atIndex: 6u64];
+                    msg_send![encoder, setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
+                let _: () = msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 6u64];
                 if nwg == 1 {
                     let _: () =
-                        msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 7u64];
+                        msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 7u64];
                 } else {
                     let tmp_id = tmp_id.ok_or_else(|| {
                         "flash-attn vec requires tmp buffer when nwg > 1".to_string()
                     })?;
                     let _: () =
-                        msg_send![encoder.as_id(), setBuffer: tmp_id offset: 0u64 atIndex: 7u64];
+                        msg_send![encoder, setBuffer: tmp_id offset: 0u64 atIndex: 7u64];
                 }
 
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     setThreadgroupMemoryLength: pipeline_smem as u64
                     atIndex: 0u64
                 ];
@@ -3331,13 +3677,13 @@ mod imp {
                     depth: 1,
                 };
                 let _: () = msg_send![
-                    encoder.as_id(),
+                    encoder,
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
             }
 
-            Self::end_command_encoder(&command_buffer, &encoder)?;
+            self.end_command_encoder(encoder_handles)?;
 
             if nwg > 1 {
                 let tmp_id = tmp_id.ok_or_else(|| {
@@ -3482,6 +3828,115 @@ mod imp {
             }
 
             self.read_f32_buffer(dst_buf.as_id(), out_elems)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn flash_attn_f32_self_kv_cache(
+            &mut self,
+            layer: usize,
+            q: &[f32],
+            k_all: &[f32],
+            v_all: &[f32],
+            n_kv: usize,
+            n_head: usize,
+            d: usize,
+            scale: f32,
+        ) -> Result<Vec<f32>, String> {
+            if n_kv == 0 || n_head == 0 || d == 0 {
+                return Ok(Vec::new());
+            }
+            let n_state = n_head
+                .checked_mul(d)
+                .ok_or_else(|| "overflow computing n_state".to_string())?;
+            let kv_need = n_kv
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing decoder self kv size".to_string())?;
+            if q.len() != n_state || k_all.len() != kv_need || v_all.len() != kv_need {
+                return Err(format!(
+                    "decoder self kv len mismatch: q={}, k_all={}, v_all={}, expected q={}, kv={}",
+                    q.len(),
+                    k_all.len(),
+                    v_all.len(),
+                    n_state,
+                    kv_need
+                ));
+            }
+
+            let (k_id, v_id) = self.ensure_decoder_kv_layer(layer, n_state, n_kv)?;
+            let row_bytes = n_state
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing decoder kv row bytes".to_string())?;
+            let start_row = self
+                .decoder_kv_layers
+                .get(&layer)
+                .map(|e| e.len_rows.min(n_kv))
+                .unwrap_or(0);
+            if start_row < n_kv {
+                let copy_rows = n_kv - start_row;
+                let copy_bytes = copy_rows
+                    .checked_mul(row_bytes)
+                    .ok_or_else(|| "overflow computing decoder kv copy bytes".to_string())?;
+                let offset = start_row
+                    .checked_mul(row_bytes)
+                    .ok_or_else(|| "overflow computing decoder kv copy offset".to_string())?;
+                let src_k = f32_slice_as_bytes(&k_all[start_row * n_state..n_kv * n_state]);
+                let src_v = f32_slice_as_bytes(&v_all[start_row * n_state..n_kv * n_state]);
+                let dst_k: *mut u8 = unsafe { msg_send![k_id, contents] };
+                let dst_v: *mut u8 = unsafe { msg_send![v_id, contents] };
+                if dst_k.is_null() || dst_v.is_null() {
+                    return Err("decoder kv buffer contents returned null".to_string());
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src_k.as_ptr(), dst_k.add(offset), copy_bytes);
+                    std::ptr::copy_nonoverlapping(src_v.as_ptr(), dst_v.add(offset), copy_bytes);
+                }
+                if let Some(entry) = self.decoder_kv_layers.get_mut(&layer) {
+                    entry.len_rows = n_kv;
+                }
+            }
+
+            let q_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(q))?;
+            let out_buf =
+                self.flash_attn_f32_from_buffers(q_buf.as_id(), k_id, v_id, 1, n_kv, n_head, d, scale)?;
+            self.read_f32_buffer(out_buf.as_id(), n_state)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn flash_attn_f32_cross_kv_cache(
+            &mut self,
+            layer: usize,
+            q: &[f32],
+            k_cross: &[f32],
+            v_cross: &[f32],
+            n_q: usize,
+            n_kv: usize,
+            n_head: usize,
+            d: usize,
+            scale: f32,
+        ) -> Result<Vec<f32>, String> {
+            if n_q == 0 || n_kv == 0 || n_head == 0 || d == 0 {
+                return Ok(Vec::new());
+            }
+            let n_state = n_head
+                .checked_mul(d)
+                .ok_or_else(|| "overflow computing n_state".to_string())?;
+            let q_need = n_q
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing cross q size".to_string())?;
+            if q.len() != q_need {
+                return Err(format!(
+                    "cross q len mismatch: got {}, expected {}",
+                    q.len(),
+                    q_need
+                ));
+            }
+
+            let (k_id, v_id) =
+                self.ensure_cross_kv_layer(layer, n_state, n_kv, k_cross, v_cross)?;
+            let q_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(q))?;
+            let out_buf =
+                self.flash_attn_f32_from_buffers(q_buf.as_id(), k_id, v_id, n_q, n_kv, n_head, d, scale)?;
+            self.read_f32_buffer(out_buf.as_id(), q_need)
         }
 
         fn flash_attn_f32_from_buffers(
@@ -4147,34 +4602,37 @@ mod imp {
 
             for (il, layer) in layers.iter().enumerate() {
                 let tag_base = (il as u8).wrapping_mul(16).wrapping_add(160);
-                cur_buf = self.encoder_layer_from_buffer_f32(
-                    cur_buf.as_id(),
-                    seq_len,
-                    n_state,
-                    n_head,
-                    &layer.attn_ln_0_w.data,
-                    &layer.attn_ln_0_b.data,
-                    &layer.attn_q_w.data,
-                    layer.attn_q_w.ggml_type,
-                    &layer.attn_q_b.data,
-                    &layer.attn_k_w.data,
-                    layer.attn_k_w.ggml_type,
-                    &layer.attn_v_w.data,
-                    layer.attn_v_w.ggml_type,
-                    &layer.attn_v_b.data,
-                    &layer.attn_ln_1_w.data,
-                    layer.attn_ln_1_w.ggml_type,
-                    &layer.attn_ln_1_b.data,
-                    &layer.mlp_ln_w.data,
-                    &layer.mlp_ln_b.data,
-                    &layer.mlp_0_w.data,
-                    layer.mlp_0_w.ggml_type,
-                    &layer.mlp_0_b.data,
-                    &layer.mlp_1_w.data,
-                    layer.mlp_1_w.ggml_type,
-                    &layer.mlp_1_b.data,
-                    tag_base,
-                )?;
+                let cur_id = cur_buf.as_id();
+                cur_buf = self.with_batch(|ctx| {
+                    ctx.encoder_layer_from_buffer_f32(
+                        cur_id,
+                        seq_len,
+                        n_state,
+                        n_head,
+                        &layer.attn_ln_0_w.data,
+                        &layer.attn_ln_0_b.data,
+                        &layer.attn_q_w.data,
+                        layer.attn_q_w.ggml_type,
+                        &layer.attn_q_b.data,
+                        &layer.attn_k_w.data,
+                        layer.attn_k_w.ggml_type,
+                        &layer.attn_v_w.data,
+                        layer.attn_v_w.ggml_type,
+                        &layer.attn_v_b.data,
+                        &layer.attn_ln_1_w.data,
+                        layer.attn_ln_1_w.ggml_type,
+                        &layer.attn_ln_1_b.data,
+                        &layer.mlp_ln_w.data,
+                        &layer.mlp_ln_b.data,
+                        &layer.mlp_0_w.data,
+                        layer.mlp_0_w.ggml_type,
+                        &layer.mlp_0_b.data,
+                        &layer.mlp_1_w.data,
+                        layer.mlp_1_w.ggml_type,
+                        &layer.mlp_1_b.data,
+                        tag_base,
+                    )
+                })?;
             }
 
             let ln_w_id = self.get_or_create_cached_f32_buffer(final_ln_w, 120)?;
@@ -4944,6 +5402,48 @@ mod imp {
         scale: f32,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| ctx.flash_attn_f32_packed(q, k, v, n_q, n_kv, n_head, d, scale))
+    }
+
+    pub(super) fn clear_decoder_kv_cache() {
+        let _ = with_context(|ctx| {
+            ctx.clear_decoder_kv_cache();
+            Ok(())
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_flash_attn_f32_self_kv_cache(
+        layer: usize,
+        q: &[f32],
+        k_all: &[f32],
+        v_all: &[f32],
+        n_kv: usize,
+        n_head: usize,
+        d: usize,
+        scale: f32,
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.flash_attn_f32_self_kv_cache(layer, q, k_all, v_all, n_kv, n_head, d, scale)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_flash_attn_f32_cross_kv_cache(
+        layer: usize,
+        q: &[f32],
+        k_cross: &[f32],
+        v_cross: &[f32],
+        n_q: usize,
+        n_kv: usize,
+        n_head: usize,
+        d: usize,
+        scale: f32,
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.flash_attn_f32_cross_kv_cache(
+                layer, q, k_cross, v_cross, n_q, n_kv, n_head, d, scale,
+            )
+        })
     }
 
     pub(super) fn try_add_f32(
