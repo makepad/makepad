@@ -14,11 +14,9 @@ use std::time::Duration;
 const VOICE_TARGET_SAMPLE_RATE: f64 = 16_000.0;
 const VOICE_AUDIO_PACKET_SAMPLES: usize = 320; // 20ms @16k
 const VOICE_TRANSCRIBE_MIN_SAMPLES: usize = 16_000 / 2; // ~0.50s
-const VOICE_TRANSCRIBE_MAX_SAMPLES: usize = 16_000 * 2; // 2.0s
 const VOICE_TRANSCRIBE_PREROLL_SAMPLES: usize = 16_000 / 2; // 500ms
-const VOICE_TRANSCRIBE_OVERLAP_SAMPLES: usize = 16_000 / 4; // 250ms carry between chunks
 const VOICE_TRIM_TAIL_PAD_SAMPLES: usize = 16_000 / 8; // 125ms safety pad
-const VOICE_MAX_PENDING_SAMPLES: usize = 16_000 * 4; // 4.0s backlog cap
+const VOICE_MAX_PENDING_SAMPLES: usize = 16_000 * 12; // 12.0s backlog cap
 const VOICE_SILENCE_RMS_THRESHOLD: f32 = 0.0026;
 const VOICE_PAUSE_RMS_THRESHOLD: f32 = 0.0024;
 const VOICE_SPEECH_RMS_THRESHOLD: f32 = 0.0030;
@@ -370,7 +368,7 @@ fn spawn_voice_worker(
         crate::log!("voice: backend {:?}", transcriber.kind());
 
         let mut pending_samples = VecDeque::<f32>::new();
-        let mut chunk = Vec::with_capacity(VOICE_TRANSCRIBE_MAX_SAMPLES);
+        let mut chunk = Vec::with_capacity(VOICE_MAX_PENDING_SAMPLES);
         let mut silence_packet_run = 0usize;
         let mut saw_speech_since_flush = false;
         let mut voiced_samples_since_flush = 0usize;
@@ -437,48 +435,31 @@ fn spawn_voice_worker(
             }
 
             loop {
-                let flush_on_hard_limit = saw_speech_since_flush
-                    && pending_samples.len() >= VOICE_TRANSCRIBE_MAX_SAMPLES;
-                let flush_on_pause = !flush_on_hard_limit
-                    && saw_speech_since_flush
+                let flush_on_pause = saw_speech_since_flush
                     && silence_packet_run >= VOICE_PAUSE_PACKETS_TO_FLUSH
                     && voiced_samples_since_flush >= VOICE_MIN_VOICED_SAMPLES_FOR_EARLY_FLUSH
                     && pending_samples.len() >= VOICE_TRANSCRIBE_MIN_SAMPLES;
-                let flush_on_idle = !flush_on_hard_limit
-                    && !flush_on_pause
+                let flush_on_idle = !flush_on_pause
                     && saw_speech_since_flush
                     && voiced_samples_since_flush >= VOICE_MIN_VOICED_SAMPLES_FOR_EARLY_FLUSH
                     && idle_timeout_ticks >= VOICE_IDLE_TIMEOUT_TICKS_TO_FLUSH
                     && pending_samples.len() >= VOICE_TRANSCRIBE_MIN_SAMPLES;
-                if !flush_on_hard_limit && !flush_on_pause && !flush_on_idle {
+                if !flush_on_pause && !flush_on_idle {
                     break;
                 }
-                let flush_reason = if flush_on_hard_limit {
-                    "hard_limit"
-                } else if flush_on_pause {
+                let flush_reason = if flush_on_pause {
                     "pause"
                 } else {
                     "idle"
                 };
 
-                let flush_len = if flush_on_hard_limit {
-                    VOICE_TRANSCRIBE_MAX_SAMPLES
-                } else {
-                    pending_samples.len()
-                };
+                let flush_len = pending_samples.len();
 
                 chunk.clear();
                 for _ in 0..flush_len {
                     if let Some(sample) = pending_samples.pop_front() {
                         chunk.push(sample);
                     }
-                }
-                if flush_on_hard_limit {
-                    prepend_overlap_tail(
-                        &mut pending_samples,
-                        &chunk,
-                        VOICE_TRANSCRIBE_OVERLAP_SAMPLES,
-                    );
                 }
 
                 if flush_on_pause || flush_on_idle {
@@ -519,14 +500,10 @@ fn spawn_voice_worker(
                     text_signal.set();
                 }
 
-                // After any submission, require fresh voiced audio before next early flush.
+                // After any submission, wait for fresh voiced audio before next flush.
                 silence_packet_run = 0;
-                saw_speech_since_flush = flush_on_hard_limit;
-                voiced_samples_since_flush = if flush_on_hard_limit {
-                    VOICE_TRANSCRIBE_OVERLAP_SAMPLES
-                } else {
-                    0
-                };
+                saw_speech_since_flush = false;
+                voiced_samples_since_flush = 0;
                 idle_timeout_ticks = 0;
             }
         }
@@ -540,17 +517,6 @@ fn trim_pending_to_recent(samples: &mut VecDeque<f32>, keep: usize) {
     let drop_count = samples.len() - keep;
     for _ in 0..drop_count {
         let _ = samples.pop_front();
-    }
-}
-
-fn prepend_overlap_tail(pending: &mut VecDeque<f32>, chunk: &[f32], overlap: usize) {
-    let keep = overlap.min(chunk.len());
-    if keep == 0 {
-        return;
-    }
-    let start = chunk.len() - keep;
-    for &sample in chunk[start..].iter().rev() {
-        pending.push_front(sample);
     }
 }
 
@@ -574,6 +540,7 @@ fn normalize_transcript(segments: &[Segment]) -> String {
         merged.push_str(&segment.text);
     }
     merged = strip_blank_audio_markers(merged);
+    merged = strip_noise_markers(merged);
     let mut normalized = String::new();
     let mut last_was_space = true;
     for ch in merged.chars() {
@@ -605,6 +572,49 @@ fn strip_blank_audio_markers(mut text: String) -> String {
         text = replace_case_insensitive_all(text, marker, " ");
     }
     text
+}
+
+fn strip_noise_markers(mut text: String) -> String {
+    for marker in [
+        "(static)",
+        "[static]",
+        "<static>",
+        "(noise)",
+        "[noise]",
+        "<noise>",
+        "(background noise)",
+        "[background noise]",
+        "<background noise>",
+        "(white noise)",
+        "[white noise]",
+        "(hiss)",
+        "[hiss]",
+        "(music)",
+        "[music]",
+        "<music>",
+        "(laughter)",
+        "[laughter]",
+        "(applause)",
+        "[applause]",
+        "(inaudible)",
+        "[inaudible]",
+        "(silence)",
+        "[silence]",
+        "(crosstalk)",
+        "[crosstalk]",
+    ] {
+        text = replace_case_insensitive_all(text, marker, " ");
+    }
+
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '♪' | '♫' | '♬' | '♩') {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn replace_case_insensitive_all(mut text: String, pattern: &str, replacement: &str) -> String {
