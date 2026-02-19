@@ -865,6 +865,18 @@ impl MatchEvent for App {
             }
 
             match action.cast() {
+                StudioTerminalAction::SetTabTitle(title) => {
+                    let path = cx.widget_tree().path_to(action.widget_uid);
+                    let tab_id = path
+                        .get(path.len().wrapping_sub(2))
+                        .copied()
+                        .unwrap_or(id!(terminal_tab));
+                    dock.set_tab_title(cx, tab_id, title);
+                }
+                StudioTerminalAction::None => {}
+            }
+
+            match action.cast() {
                 DockAction::TabCloseWasPressed(tab_id) => {
                     dock.close_tab(cx, tab_id);
                     if let Some(run_view_id) = self.data.build_manager.handle_tab_close(tab_id) {
