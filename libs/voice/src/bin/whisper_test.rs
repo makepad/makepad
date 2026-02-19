@@ -96,6 +96,14 @@ fn main() {
         .nth(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
+    let max_tokens: Option<usize> = std::env::args()
+        .nth(4)
+        .and_then(|s| s.parse().ok())
+        .or_else(|| {
+            std::env::var("MAKEPAD_VOICE_MAX_TOKENS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        });
 
     eprintln!("loading audio: {}", wav_path);
     let mut samples = read_wav_pcm_f32(&wav_path);
@@ -106,7 +114,11 @@ fn main() {
     }
 
     let mut state = WhisperState::new(&model);
-    let params = WhisperParams::default();
+    let mut params = WhisperParams::default();
+    if let Some(max_tokens) = max_tokens {
+        params.max_tokens = max_tokens;
+        eprintln!("using max_tokens={}", max_tokens);
+    }
 
     eprintln!("transcribing...");
     makepad_voice::reset_profiling();
