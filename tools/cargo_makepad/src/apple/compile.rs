@@ -3,6 +3,8 @@ use crate::makepad_shell::*;
 use crate::utils::*;
 use std::path::{Path, PathBuf};
 
+const IOS_DEPLOYMENT_TARGET: &str = "26.0";
+
 pub struct PlistValues {
     identifier: String,
     display_name: String,
@@ -231,11 +233,11 @@ impl PlistValues {
                 <key>DTPlatformName</key>
                 <string>iphoneos</string>
                 <key>DTPlatformVersion</key>
-                <string>17.5</string>
+                <string>26.0</string>
                 <key>DTSDKBuild</key>
                 <string>22A3362</string>
                 <key>DTSDKName</key>
-                <string>iphoneos17.5</string>
+                <string>iphoneos26.0</string>
                 <key>DTXcode</key>
                 <string>1600</string>
                 <key>DTXcodeBuild</key>
@@ -248,7 +250,7 @@ impl PlistValues {
                 <key>LSRequiresIPhoneOS</key>
                 <true/>
                 <key>MinimumOSVersion</key>
-                <string>17.5</string>
+                <string>26.0</string>
                 <key>UIApplicationSupportsIndirectInputEvents</key>
                 <true/>
                 <key>UIDeviceFamily</key>
@@ -436,15 +438,18 @@ pub fn build(
         args_out.push("build-std=std");
     }
 
-    shell_env(
-        &[
-            ("RUST_BACKTRACE", "1"),
-            ("MAKEPAD", if stable { "" } else { "lines" }),
-        ],
-        &cwd,
-        "rustup",
-        &args_out,
-    )?;
+    let mut rust_env = vec![
+        ("RUST_BACKTRACE", "1"),
+        ("MAKEPAD", if stable { "" } else { "lines" }),
+    ];
+    if matches!(apple_target.os(), AppleOs::Ios) {
+        rust_env.push(("IPHONEOS_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
+        rust_env.push((
+            "IPHONESIMULATOR_DEPLOYMENT_TARGET",
+            IOS_DEPLOYMENT_TARGET,
+        ));
+    }
+    shell_env(&rust_env, &cwd, "rustup", &args_out)?;
 
     // alright lets make the .app file with manifest
     let plist = PlistValues {
@@ -501,6 +506,14 @@ pub fn run_on_sim(
         args,
         apple_target,
     )?;
+    let build_crate = get_build_crate_from_args(args)?;
+    copy_resources(
+        &result.app_dir,
+        build_crate,
+        &result.build_dir,
+        apple_target,
+    )?;
+    let app_dir = result.app_dir.into_os_string().into_string().unwrap();
 
     let cwd = std::env::current_dir().unwrap();
     shell_env(
@@ -511,7 +524,7 @@ pub fn run_on_sim(
             "simctl",
             "install",
             "booted",
-            &result.app_dir.into_os_string().into_string().unwrap(),
+            &app_dir,
         ],
     )?;
 
@@ -721,27 +734,45 @@ fn copy_resources(
     apple_target: AppleTarget,
 ) -> Result<(), String> {
     /*let mut assets_to_add: Vec<String> = Vec::new();*/
+    let add_assets_dir =
+        |crate_name: &str, source_dir: &Path, asset_subdir: &str| -> Result<(), String> {
+            if !source_dir.is_dir() {
+                return Ok(());
+            }
+            let crate_name = crate_name.replace('-', "_");
+            let dst_dir = app_dir.join(format!("makepad/{crate_name}/{asset_subdir}"));
+            mkdir(&dst_dir)?;
+            cp_all(source_dir, &dst_dir, false)?;
+            Ok(())
+        };
+    let add_font_assets_dir = |crate_name: &str, source_dir: &Path| -> Result<(), String> {
+        if !source_dir.is_dir() {
+            return Ok(());
+        }
+        let crate_name = crate_name.replace('-', "_");
+        let dst_dir = app_dir.join(format!("makepad/{crate_name}/fonts"));
+        let assets = ls(source_dir)?;
+        for path in &assets {
+            let ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase());
+            if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc" | "woff" | "woff2")) {
+                continue;
+            }
+            cp(&source_dir.join(path), &dst_dir.join(path), false)?;
+        }
+        Ok(())
+    };
 
     let build_crate_dir = get_crate_dir(build_crate)?;
-
-    let local_resources_path = build_crate_dir.join("resources");
-
-    if local_resources_path.is_dir() {
-        let underscore_build_crate = build_crate.replace('-', "_");
-        let dst_dir = app_dir.join(format!("makepad/{underscore_build_crate}/resources"));
-        mkdir(&dst_dir)?;
-        cp_all(&local_resources_path, &dst_dir, false)?;
-    }
+    add_assets_dir(build_crate, &build_crate_dir.join("resources"), "resources")?;
+    add_font_assets_dir(build_crate, &build_crate_dir.join("fonts"))?;
 
     let deps = get_crate_dep_dirs(build_crate, &build_dir, apple_target.toolchain());
     for (name, dep_dir) in deps.iter() {
-        let resources_path = dep_dir.join("resources");
-        if resources_path.is_dir() {
-            let name = name.replace("-", "_");
-            let dst_dir = app_dir.join(format!("makepad/{name}/resources"));
-            mkdir(&dst_dir)?;
-            cp_all(&resources_path, &dst_dir, false)?;
-        }
+        add_assets_dir(name, &dep_dir.join("resources"), "resources")?;
+        add_font_assets_dir(name, &dep_dir.join("fonts"))?;
     }
 
     Ok(())
