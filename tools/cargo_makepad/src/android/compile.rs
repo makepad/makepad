@@ -593,43 +593,35 @@ fn add_resources(
     let mut assets_to_add: Vec<String> = Vec::new();
 
     let build_crate_dir = get_crate_dir(build_crate)?;
-    let local_resources_path = build_crate_dir.join("resources");
-    if local_resources_path.is_dir() {
-        let underscore_build_crate = build_crate.replace('-', "_");
-        let dst_dir = build_paths
-            .out_dir
-            .join(format!("assets/makepad/{underscore_build_crate}/resources"));
-        mkdir(&dst_dir)?;
-
-        cp_all(&local_resources_path, &dst_dir, false)?;
-
-        let assets = ls(&dst_dir)?;
-        for path in &assets {
-            let path = path.display().to_string().replace("\\", "/");
-            assets_to_add.push(format!(
-                "assets/makepad/{underscore_build_crate}/resources/{path}"
-            ));
-        }
-    }
+    add_assets_dir_to_apk(
+        &build_paths.out_dir,
+        &mut assets_to_add,
+        build_crate,
+        &build_crate_dir.join("resources"),
+        "resources",
+    )?;
+    add_font_assets_dir_to_apk(
+        &build_paths.out_dir,
+        &mut assets_to_add,
+        build_crate,
+        &build_crate_dir.join("fonts"),
+    )?;
 
     let deps = get_crate_dep_dirs(build_crate, &build_dir, &android_targets[0].toolchain());
     for (name, dep_dir) in deps.iter() {
-        let resources_path = dep_dir.join("resources");
-        if resources_path.is_dir() {
-            let name = name.replace('-', "_");
-
-            let dst_dir = build_paths
-                .out_dir
-                .join(format!("assets/makepad/{name}/resources"));
-            mkdir(&dst_dir)?;
-            cp_all(&resources_path, &dst_dir, false)?;
-
-            let assets = ls(&dst_dir)?;
-            for path in &assets {
-                let path = path.display().to_string();
-                assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
-            }
-        }
+        add_assets_dir_to_apk(
+            &build_paths.out_dir,
+            &mut assets_to_add,
+            name,
+            &dep_dir.join("resources"),
+            "resources",
+        )?;
+        add_font_assets_dir_to_apk(
+            &build_paths.out_dir,
+            &mut assets_to_add,
+            name,
+            &dep_dir.join("fonts"),
+        )?;
     }
     // FIX THIS PROPER
     // On quest remove most of the widget resourcse
@@ -664,6 +656,58 @@ fn add_resources(
         &aapt_args,
     )?;
 
+    Ok(())
+}
+
+fn add_assets_dir_to_apk(
+    out_dir: &Path,
+    assets_to_add: &mut Vec<String>,
+    crate_name: &str,
+    source_dir: &Path,
+    asset_subdir: &str,
+) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Ok(());
+    }
+
+    let crate_name = crate_name.replace('-', "_");
+    let dst_dir = out_dir.join(format!("assets/makepad/{crate_name}/{asset_subdir}"));
+    mkdir(&dst_dir)?;
+    cp_all(source_dir, &dst_dir, false)?;
+
+    let assets = ls(&dst_dir)?;
+    for path in &assets {
+        let path = path.display().to_string().replace("\\", "/");
+        assets_to_add.push(format!("assets/makepad/{crate_name}/{asset_subdir}/{path}"));
+    }
+    Ok(())
+}
+
+fn add_font_assets_dir_to_apk(
+    out_dir: &Path,
+    assets_to_add: &mut Vec<String>,
+    crate_name: &str,
+    source_dir: &Path,
+) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Ok(());
+    }
+
+    let crate_name = crate_name.replace('-', "_");
+    let dst_dir = out_dir.join(format!("assets/makepad/{crate_name}/fonts"));
+    let assets = ls(source_dir)?;
+    for path in &assets {
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase());
+        if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc" | "woff" | "woff2")) {
+            continue;
+        }
+        cp(&source_dir.join(path), &dst_dir.join(path), false)?;
+        let path = path.display().to_string().replace("\\", "/");
+        assets_to_add.push(format!("assets/makepad/{crate_name}/fonts/{path}"));
+    }
     Ok(())
 }
 
