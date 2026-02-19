@@ -249,6 +249,10 @@ script_mod! {
             is_folder: false
             draw_bg +: {is_folder: 0.0}
             draw_text +: {is_folder: 0.0}
+            draw_icon +: {
+                color: theme.color_label_inner_inactive
+                color_active: theme.color_label_inner_inactive
+            }
         }
 
         folder_node: mod.widgets.FileTreeNode{
