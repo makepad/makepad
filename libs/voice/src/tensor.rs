@@ -1728,6 +1728,74 @@ impl Tensor {
 
     /// Same as conv1d but with RawTensor weight (dequantize first)
     pub fn conv1d_raw(input: &Tensor, weight: &RawTensor, bias: &Tensor, stride: usize) -> Tensor {
+        if weight.shape.len() == 3 {
+            let ksize = weight.shape[0];
+            let ch_in = weight.shape[1];
+            let ch_out = weight.shape[2];
+            let in_len = input.shape[1];
+            let pad = ksize / 2;
+            let out_len = (in_len + 2 * pad - ksize) / stride + 1;
+
+            if let Some(im2col) = crate::metal_backend::try_im2col_1d_f32(
+                &input.data,
+                ch_in,
+                in_len,
+                ksize,
+                stride,
+                pad,
+            ) {
+                let k = ch_in * ksize;
+                let mm_out = match weight.ggml_type {
+                    GGML_TYPE_F32 => crate::metal_backend::try_matmul_nt_f32_bytes(
+                        &im2col,
+                        &weight.data,
+                        out_len,
+                        k,
+                        ch_out,
+                    ),
+                    GGML_TYPE_F16 => crate::metal_backend::try_matmul_nt_f16_bytes(
+                        &im2col,
+                        &weight.data,
+                        out_len,
+                        k,
+                        ch_out,
+                    ),
+                    GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1
+                    | GGML_TYPE_Q8_0
+                        if quant_gpu_enabled() =>
+                    {
+                        crate::metal_backend::try_matmul_nt_ggml_bytes(
+                            &im2col,
+                            &weight.data,
+                            weight.ggml_type,
+                            out_len,
+                            k,
+                            ch_out,
+                        )
+                    }
+                    _ => None,
+                };
+
+                if let Some(mm_out) = mm_out {
+                    let mut out = vec![0.0f32; ch_out * out_len];
+                    let out_ptr = SendPtr::new(out.as_mut_ptr());
+                    let b_data = &bias.data;
+                    parallel_for(ch_out, |co| {
+                        let b = b_data[co];
+                        for t in 0..out_len {
+                            unsafe {
+                                *out_ptr.ptr().add(co * out_len + t) = mm_out[t * ch_out + co] + b;
+                            }
+                        }
+                    });
+                    return Tensor {
+                        data: out,
+                        shape: vec![ch_out, out_len],
+                    };
+                }
+            }
+        }
+
         let w = weight.to_f32();
         Self::conv1d(input, &w, bias, stride)
     }

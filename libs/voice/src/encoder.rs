@@ -149,11 +149,11 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
 
     // Conv1 + GELU: [n_mels, 2*n_ctx] -> [n_state, 2*n_ctx]
     let _tc = std::time::Instant::now();
-    let mut cur = Tensor::conv1d(&mel, &model.e_conv_1_w, &model.e_conv_1_b, 1);
+    let mut cur = Tensor::conv1d_raw(&mel, &model.e_conv_1_w, &model.e_conv_1_b, 1);
     cur = Tensor::gelu(&cur);
 
     // Conv2 + GELU: [n_state, 2*n_ctx] -> [n_state, n_ctx] (stride 2)
-    cur = Tensor::conv1d(&cur, &model.e_conv_2_w, &model.e_conv_2_b, 2);
+    cur = Tensor::conv1d_raw(&cur, &model.e_conv_2_w, &model.e_conv_2_b, 2);
     cur = Tensor::gelu(&cur);
     crate::PROF_ENC_CONV.fetch_add(
         _tc.elapsed().as_nanos() as u64,

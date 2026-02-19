@@ -139,13 +139,13 @@ pub struct WhisperModel {
     pub wtype: u32,
 
     // encoder
-    pub e_pe: Tensor,       // positional embedding [n_audio_ctx, n_audio_state]
-    pub e_conv_1_w: Tensor, // conv1.weight [n_audio_state, n_mels, 3]
-    pub e_conv_1_b: Tensor, // conv1.bias [n_audio_state]
-    pub e_conv_2_w: Tensor, // conv2.weight [n_audio_state, n_audio_state, 3]
-    pub e_conv_2_b: Tensor, // conv2.bias [n_audio_state]
-    pub e_ln_w: Tensor,     // ln_post.weight [n_audio_state]
-    pub e_ln_b: Tensor,     // ln_post.bias [n_audio_state]
+    pub e_pe: Tensor,          // positional embedding [n_audio_ctx, n_audio_state]
+    pub e_conv_1_w: RawTensor, // conv1.weight [n_audio_state, n_mels, 3]
+    pub e_conv_1_b: Tensor,    // conv1.bias [n_audio_state]
+    pub e_conv_2_w: RawTensor, // conv2.weight [n_audio_state, n_audio_state, 3]
+    pub e_conv_2_b: Tensor,    // conv2.bias [n_audio_state]
+    pub e_ln_w: Tensor,        // ln_post.weight [n_audio_state]
+    pub e_ln_b: Tensor,        // ln_post.bias [n_audio_state]
     pub encoder_layers: Vec<EncoderLayer>,
 
     // decoder
@@ -373,9 +373,9 @@ impl WhisperModel {
 
         // Encoder global tensors
         let e_pe = take_f32(&mut tensors, "encoder.positional_embedding");
-        let e_conv_1_w = take_f32(&mut tensors, "encoder.conv1.weight");
+        let e_conv_1_w = take_raw(&mut tensors, "encoder.conv1.weight", preserve_wtype);
         let e_conv_1_b = take_f32(&mut tensors, "encoder.conv1.bias");
-        let e_conv_2_w = take_f32(&mut tensors, "encoder.conv2.weight");
+        let e_conv_2_w = take_raw(&mut tensors, "encoder.conv2.weight", preserve_wtype);
         let e_conv_2_b = take_f32(&mut tensors, "encoder.conv2.bias");
         let e_ln_w = take_f32(&mut tensors, "encoder.ln_post.weight");
         let e_ln_b = take_f32(&mut tensors, "encoder.ln_post.bias");
