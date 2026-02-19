@@ -1,3 +1,5 @@
+Let's test audio with Whisper. (static) 
+Testing Whisper. Yeah, I mean it works West you 
 This is the repository for Makepad, a new way to build UIs in Rust for both native and the web.
 
 ## Contact

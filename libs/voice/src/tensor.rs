@@ -151,8 +151,12 @@ fn get_pool() -> &'static ThreadPool {
         let hw = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        let max_threads = hw.min(16).max(1);
-        let default_threads = hw.min(8).max(4).min(max_threads);
+        let max_threads = hw.max(1);
+        let default_threads = if cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux")) {
+            hw.saturating_sub(2).max(1)
+        } else {
+            hw.min(8).max(4).min(max_threads)
+        };
         let n = std::env::var("MAKEPAD_VOICE_THREADS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
