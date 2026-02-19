@@ -46,6 +46,7 @@ pub mod keyboard_view;
 pub mod nav_control;
 pub mod voice_wave;
 pub mod window;
+#[cfg(feature = "voice")]
 mod window_voice_input;
 pub mod window_menu;
 
