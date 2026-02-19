@@ -107,9 +107,9 @@ impl ActiveBuilds {
         self.builds.get(&item_id).is_some()
     }
 
-    pub fn any_binary_active(&self, binary: &str) -> bool {
+    pub fn any_binary_active(&self, root: &str, binary: &str) -> bool {
         for (_k, v) in &self.builds {
-            if v.process.binary == binary {
+            if v.process.root == root && v.process.binary == binary {
                 return true;
             }
         }
@@ -509,6 +509,56 @@ fn parse_terminal_package_name(cargo_args: &[String]) -> Option<String> {
         i += 1;
     }
     None
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct CargoMetadata {
+    packages: Vec<CargoMetadataPackage>,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct CargoMetadataPackage {
+    name: String,
+    targets: Vec<CargoMetadataTarget>,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct CargoMetadataTarget {
+    kind: Vec<String>,
+}
+
+fn discover_workspace_binary_packages(root_path: &PathBuf) -> Result<Vec<String>, String> {
+    let (stdout, stderr, ok) = shell_env_cap_split(
+        &[],
+        root_path,
+        "cargo",
+        &["metadata", "--no-deps", "--format-version=1"],
+    );
+    if !ok {
+        return Err(format!(
+            "cargo metadata failed in {:?}\n{}\n{}",
+            root_path,
+            stderr.trim(),
+            stdout.trim()
+        ));
+    }
+
+    let metadata = CargoMetadata::deserialize_json(&stdout)
+        .map_err(|err| format!("failed to parse cargo metadata json: {err:?}"))?;
+
+    let mut binaries = Vec::new();
+    let mut seen = HashSet::new();
+    for package in metadata.packages {
+        let has_bin_target = package
+            .targets
+            .iter()
+            .any(|target| target.kind.iter().any(|kind| kind == "bin"));
+        if has_bin_target && seen.insert(package.name.clone()) {
+            binaries.push(package.name);
+        }
+    }
+    binaries.sort();
+    Ok(binaries)
 }
 
 fn log_level_name(level: LogLevel) -> &'static str {
@@ -1580,35 +1630,31 @@ impl BuildManager {
     pub fn update_run_list(&mut self, _cx: &mut Cx) {
         self.binaries.clear();
         for (root_name, root_path) in &self.roots.roots {
-            match shell_env_cap(&[], root_path, "cargo", &["run", "--bin"]) {
-                Ok(_) => {}
-                // we expect it on stderr
-                Err(e) => {
-                    let mut after_av = false;
-                    for line in e.split("\n") {
-                        if after_av {
-                            let binary = line.trim().to_string();
-                            if binary.len() > 0 {
-                                self.binaries.push(BuildBinary {
-                                    open: 0.0,
-                                    root: root_name.clone(),
-                                    name: binary,
-                                });
-                            }
-                        }
-                        if line.contains("Available binaries:") {
-                            after_av = true;
-                        }
+            match discover_workspace_binary_packages(root_path) {
+                Ok(packages) => {
+                    for package in packages {
+                        self.binaries.push(BuildBinary {
+                            open: 0.0,
+                            root: root_name.clone(),
+                            name: package,
+                        });
                     }
+                }
+                Err(err) => {
+                    crate::warning!(
+                        "run list discovery failed for root {}: {}",
+                        root_name,
+                        err
+                    );
                 }
             }
         }
     }
 
-    pub fn any_binary_active(&self, binary: &str) -> bool {
-        self.running_processes
-            .values()
-            .any(|process| process.binary == binary)
+    pub fn any_binary_active(&self, root: &str, binary: &str) -> bool {
+        self.running_processes.values().any(|process| {
+            process.root == root && process.binary == binary
+        })
     }
 
     pub fn item_id_active(&self, item_id: LiveId) -> bool {
@@ -1727,6 +1773,12 @@ impl BuildManager {
 
     pub fn start_recompile(&mut self, _cx: &mut Cx) {
         let studio_addr = self.studio_addr();
+        let known_roots: HashSet<String> = self
+            .roots
+            .roots
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
         let build_ids: Vec<LiveId> = self.active.builds.keys().copied().collect();
         for build_id in build_ids {
             self.terminal_build_origins.remove(&build_id);
@@ -1738,6 +1790,9 @@ impl BuildManager {
             self.clear_terminal_widget_tree_dumps_for_build(build_id);
         }
         for (build_id, active_build) in &mut self.active.builds {
+            if !known_roots.contains(&active_build.process.root) {
+                continue;
+            }
             self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Stop);
             self.clients[0].send_cmd_with_id(
                 *build_id,
@@ -2404,7 +2459,12 @@ impl BuildManager {
                         if let Some(kind) = socket_kinds.remove(&web_socket_id) {
                             match kind {
                                 SocketKind::App(build_id) => {
-                                    let _ = studio_disconnect_sender.send(build_id);
+                                    let still_connected = socket_kinds.values().any(|kind| {
+                                        matches!(kind, SocketKind::App(id) if *id == build_id)
+                                    });
+                                    if !still_connected {
+                                        let _ = studio_disconnect_sender.send(build_id);
+                                    }
                                 }
                                 SocketKind::Terminal => {
                                     let _ = terminal_sender.send(
@@ -2607,6 +2667,12 @@ impl BuildManager {
         self.binaries.iter().position(|v| v.name == name)
     }
 
+    pub fn binary_root_name_to_id(&self, root: &str, name: &str) -> Option<usize> {
+        self.binaries
+            .iter()
+            .position(|v| v.root == root && v.name == name)
+    }
+
     pub fn run_app(&mut self, cx: &mut Cx, binary_name: &str) {
         let binary_id = self.binary_name_to_id(binary_name).unwrap();
         self.start_active_build(cx, binary_id, BuildTarget::Release);
@@ -2624,7 +2690,11 @@ impl BuildManager {
             || self
                 .running_processes
                 .values()
-                .any(|running| running.binary == process.binary && running.target == process.target)
+                .any(|running| {
+                    running.root == process.root
+                        && running.binary == process.binary
+                        && running.target == process.target
+                })
         {
             return;
         }
@@ -2699,8 +2769,10 @@ impl BuildManager {
             .running_processes
             .iter()
             .filter_map(|(build_id, running)| {
-                (running.binary == process.binary && running.target == process.target)
-                    .then_some(*build_id)
+                (running.root == process.root
+                    && running.binary == process.binary
+                    && running.target == process.target)
+                .then_some(*build_id)
             })
             .collect();
 

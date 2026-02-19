@@ -187,7 +187,7 @@ impl RunList {
         for (binary_id, binary) in build_manager.binaries.iter().enumerate() {
             let is_even = counter & 1 == 0;
 
-            let item_id = LiveId::from_str(&binary.name);
+            let item_id = BuildProcess::binary_item_id(&binary.root, &binary.name);
             let mut item = list.item(cx, item_id, id!(Binary)).unwrap().as_view();
             let name = &binary.name;
             let is_even_f = if is_even { 1.0 } else { 0.0 };
@@ -201,7 +201,7 @@ impl RunList {
 
             let cb = item.check_box(cx, ids!(check));
             cb.set_text(name);
-            cb.set_active(cx, build_manager.any_binary_active(&binary.name));
+            cb.set_active(cx, build_manager.any_binary_active(&binary.root, &binary.name));
             cb.set_action_data(ActionData::RunMain { binary_id });
 
             item.draw_all(cx, &mut Scope::empty());
