@@ -727,13 +727,13 @@ impl FileSystem {
         if active > 1 || (status.staged && active > 0) {
             GitStatusDotKind::Mixed
         } else if status.deleted {
-            GitStatusDotKind::Deleted
+            GitStatusDotKind::None
         } else if status.modified {
             GitStatusDotKind::Modified
         } else if status.new_file {
             GitStatusDotKind::New
         } else if status.staged {
-            GitStatusDotKind::Mixed
+            GitStatusDotKind::Modified
         } else {
             GitStatusDotKind::None
         }

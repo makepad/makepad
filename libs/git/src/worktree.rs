@@ -46,6 +46,22 @@ pub struct StatusOptions {
     pub skip_target_dirs: bool,
 }
 
+#[derive(Debug, Clone)]
+struct IgnoreRule {
+    base_rel: String,
+    pattern: String,
+    negated: bool,
+    dir_only: bool,
+    anchored: bool,
+    has_slash: bool,
+}
+
+#[derive(Debug, Default)]
+struct IgnoreStack {
+    rules: Vec<IgnoreRule>,
+    repo_exclude_loaded: bool,
+}
+
 /// Compute full working tree status by comparing HEAD tree, index, and worktree.
 ///
 /// - `head_files`: flat map of path -> OID from the HEAD commit's tree (recursively flattened).
@@ -137,7 +153,15 @@ pub fn compute_status_with_options(
     }
 
     // 3. Untracked files
-    collect_untracked(workdir, workdir, &index_map, &mut entries, options)?;
+    let mut ignore_stack = IgnoreStack::default();
+    collect_untracked(
+        workdir,
+        workdir,
+        &index_map,
+        &mut entries,
+        options,
+        &mut ignore_stack,
+    )?;
 
     // Sort by path for deterministic output
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -204,10 +228,295 @@ pub fn compute_status_worktree_only_with_options(
     }
 
     // Untracked files
-    collect_untracked(workdir, workdir, &index_map, &mut entries, options)?;
+    let mut ignore_stack = IgnoreStack::default();
+    collect_untracked(
+        workdir,
+        workdir,
+        &index_map,
+        &mut entries,
+        options,
+        &mut ignore_stack,
+    )?;
 
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(Status { entries })
+}
+
+fn path_to_rel_slash(root: &Path, path: &Path) -> Result<String, GitError> {
+    let rel = path.strip_prefix(root).map_err(|_| {
+        GitError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "cannot compute relative path",
+        ))
+    })?;
+    let mut out = String::new();
+    for (idx, comp) in rel.components().enumerate() {
+        if idx > 0 {
+            out.push('/');
+        }
+        out.push_str(&comp.as_os_str().to_string_lossy());
+    }
+    Ok(out)
+}
+
+fn parse_ignore_line(line: &str) -> Option<(String, bool, bool, bool, bool)> {
+    let mut raw = line.trim_end_matches('\r');
+    if raw.is_empty() {
+        return None;
+    }
+
+    if raw.starts_with('#') {
+        return None;
+    }
+
+    let mut negated = false;
+    if raw.starts_with("\\#") || raw.starts_with("\\!") {
+        raw = &raw[1..];
+    } else if raw.starts_with('!') {
+        negated = true;
+        raw = &raw[1..];
+    }
+
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut anchored = false;
+    if raw.starts_with('/') {
+        anchored = true;
+        raw = raw.trim_start_matches('/');
+    }
+
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut dir_only = false;
+    if raw.ends_with('/') {
+        dir_only = true;
+        raw = raw.trim_end_matches('/');
+    }
+
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut pattern = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                pattern.push(next);
+            } else {
+                pattern.push('\\');
+            }
+        } else {
+            pattern.push(ch);
+        }
+    }
+
+    if pattern.is_empty() {
+        return None;
+    }
+
+    let has_slash = pattern.contains('/');
+    Some((pattern, negated, dir_only, anchored, has_slash))
+}
+
+fn strip_rule_base<'a>(base_rel: &str, rel_path: &'a str) -> Option<&'a str> {
+    if base_rel.is_empty() {
+        return Some(rel_path);
+    }
+    if rel_path == base_rel {
+        return Some("");
+    }
+    rel_path
+        .strip_prefix(base_rel)
+        .and_then(|rest| rest.strip_prefix('/'))
+}
+
+fn glob_match(pattern: &str, text: &str, slash_sensitive: bool) -> bool {
+    fn rec(
+        p: &[u8],
+        t: &[u8],
+        slash_sensitive: bool,
+        pi: usize,
+        ti: usize,
+        memo: &mut [Option<bool>],
+    ) -> bool {
+        let width = t.len() + 1;
+        let key = pi * width + ti;
+        if let Some(cached) = memo[key] {
+            return cached;
+        }
+
+        let result = if pi == p.len() {
+            ti == t.len()
+        } else {
+            match p[pi] {
+                b'*' => {
+                    let mut next_pi = pi + 1;
+                    let is_double = next_pi < p.len() && p[next_pi] == b'*';
+                    if is_double {
+                        while next_pi < p.len() && p[next_pi] == b'*' {
+                            next_pi += 1;
+                        }
+                        let mut matched = false;
+                        let mut k = ti;
+                        while k <= t.len() {
+                            if rec(p, t, slash_sensitive, next_pi, k, memo) {
+                                matched = true;
+                                break;
+                            }
+                            k += 1;
+                        }
+                        matched
+                    } else {
+                        let mut matched = false;
+                        let mut k = ti;
+                        loop {
+                            if rec(p, t, slash_sensitive, next_pi, k, memo) {
+                                matched = true;
+                                break;
+                            }
+                            if k == t.len() {
+                                break;
+                            }
+                            if slash_sensitive && t[k] == b'/' {
+                                break;
+                            }
+                            k += 1;
+                        }
+                        matched
+                    }
+                }
+                b'?' => {
+                    if ti < t.len() && (!slash_sensitive || t[ti] != b'/') {
+                        rec(p, t, slash_sensitive, pi + 1, ti + 1, memo)
+                    } else {
+                        false
+                    }
+                }
+                ch => {
+                    if ti < t.len() && ch == t[ti] {
+                        rec(p, t, slash_sensitive, pi + 1, ti + 1, memo)
+                    } else {
+                        false
+                    }
+                }
+            }
+        };
+
+        memo[key] = Some(result);
+        result
+    }
+
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+    let mut memo = vec![None; (p.len() + 1) * (t.len() + 1)];
+    rec(p, t, slash_sensitive, 0, 0, &mut memo)
+}
+
+fn path_matches_rule_pattern(rule: &IgnoreRule, rel_in_base: &str) -> bool {
+    if rule.anchored {
+        return glob_match(&rule.pattern, rel_in_base, true);
+    }
+
+    if rule.has_slash {
+        if glob_match(&rule.pattern, rel_in_base, true) {
+            return true;
+        }
+        let mut tail = rel_in_base;
+        while let Some(pos) = tail.find('/') {
+            tail = &tail[pos + 1..];
+            if glob_match(&rule.pattern, tail, true) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    rel_in_base
+        .split('/')
+        .any(|seg| glob_match(&rule.pattern, seg, false))
+}
+
+fn rule_matches(rule: &IgnoreRule, rel_path: &str, is_dir: bool) -> bool {
+    let Some(rel_in_base) = strip_rule_base(&rule.base_rel, rel_path) else {
+        return false;
+    };
+    if rel_in_base.is_empty() {
+        return false;
+    }
+
+    if rule.dir_only {
+        if is_dir && path_matches_rule_pattern(rule, rel_in_base) {
+            return true;
+        }
+        let mut idx = 0usize;
+        while let Some(pos) = rel_in_base[idx..].find('/') {
+            let end = idx + pos;
+            let candidate = &rel_in_base[..end];
+            if path_matches_rule_pattern(rule, candidate) {
+                return true;
+            }
+            idx = end + 1;
+        }
+        return false;
+    }
+
+    path_matches_rule_pattern(rule, rel_in_base)
+}
+
+impl IgnoreStack {
+    fn push_ignore_file(
+        &mut self,
+        root: &Path,
+        base_dir: &Path,
+        file_path: &Path,
+    ) -> Result<(), GitError> {
+        let content = match fs::read_to_string(file_path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(GitError::Io(err)),
+        };
+
+        let base_rel = path_to_rel_slash(root, base_dir)?;
+        for line in content.lines() {
+            let Some((pattern, negated, dir_only, anchored, has_slash)) = parse_ignore_line(line)
+            else {
+                continue;
+            };
+            self.rules.push(IgnoreRule {
+                base_rel: base_rel.clone(),
+                pattern,
+                negated,
+                dir_only,
+                anchored,
+                has_slash,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_repo_exclude_loaded(&mut self, root: &Path) -> Result<(), GitError> {
+        if self.repo_exclude_loaded {
+            return Ok(());
+        }
+        self.repo_exclude_loaded = true;
+        let exclude_path = root.join(".git").join("info").join("exclude");
+        self.push_ignore_file(root, root, &exclude_path)
+    }
+
+    fn is_ignored(&self, rel_path: &str, is_dir: bool) -> bool {
+        let mut ignored = false;
+        for rule in &self.rules {
+            if rule_matches(rule, rel_path, is_dir) {
+                ignored = !rule.negated;
+            }
+        }
+        ignored
+    }
 }
 
 /// Recursively collect untracked files.
@@ -217,7 +526,14 @@ fn collect_untracked(
     index_map: &HashMap<&str, &IndexEntry>,
     entries: &mut Vec<StatusEntry>,
     options: StatusOptions,
+    ignore_stack: &mut IgnoreStack,
 ) -> Result<(), GitError> {
+    let saved_rules_len = ignore_stack.rules.len();
+    if dir == root {
+        ignore_stack.ensure_repo_exclude_loaded(root)?;
+    }
+    ignore_stack.push_ignore_file(root, dir, &dir.join(".gitignore"))?;
+
     let read_dir = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -241,16 +557,20 @@ fn collect_untracked(
             continue;
         }
 
-        if path.is_dir() {
-            collect_untracked(root, &path, index_map, entries, options)?;
-        } else if path.is_file() {
-            let rel_path = path.strip_prefix(root).map_err(|_| {
-                GitError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "cannot compute relative path",
-                ))
-            })?;
-            let rel_str = rel_path.to_string_lossy().to_string();
+        let is_dir = path.is_dir();
+        let is_file = path.is_file();
+        if !is_dir && !is_file {
+            continue;
+        }
+
+        let rel_str = path_to_rel_slash(root, &path)?;
+        if ignore_stack.is_ignored(&rel_str, is_dir) {
+            continue;
+        }
+
+        if is_dir {
+            collect_untracked(root, &path, index_map, entries, options, ignore_stack)?;
+        } else if is_file {
             if !index_map.contains_key(rel_str.as_str()) {
                 entries.push(StatusEntry {
                     path: rel_str,
@@ -259,6 +579,7 @@ fn collect_untracked(
             }
         }
     }
+    ignore_stack.rules.truncate(saved_rules_len);
     Ok(())
 }
 
@@ -555,17 +876,97 @@ mod tests {
         };
 
         let status = compute_status_worktree_only(&index, workdir).unwrap();
-        assert!(
-            status
-                .entries
-                .iter()
-                .any(|e| e.path == "tracked.txt" && e.status == FileStatus::Modified)
-        );
-        assert!(
-            status
-                .entries
-                .iter()
-                .any(|e| e.path == "untracked.txt" && e.status == FileStatus::Untracked)
-        );
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "tracked.txt" && e.status == FileStatus::Modified));
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "untracked.txt" && e.status == FileStatus::Untracked));
+    }
+
+    #[test]
+    fn test_compute_status_respects_gitignore_untracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path();
+
+        fs::write(workdir.join(".gitignore"), "*.log\nbuild/\n").unwrap();
+        fs::write(workdir.join("keep.txt"), "keep\n").unwrap();
+        fs::write(workdir.join("ignored.log"), "ignored\n").unwrap();
+        fs::create_dir_all(workdir.join("build")).unwrap();
+        fs::write(workdir.join("build").join("out.txt"), "ignored\n").unwrap();
+
+        let head_files = HashMap::new();
+        let index = Index {
+            version: 2,
+            entries: vec![],
+        };
+
+        let status = compute_status(&head_files, &index, workdir).unwrap();
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "keep.txt" && e.status == FileStatus::Untracked));
+        assert!(!status
+            .entries
+            .iter()
+            .any(|e| e.path == "ignored.log" && e.status == FileStatus::Untracked));
+        assert!(!status
+            .entries
+            .iter()
+            .any(|e| e.path == "build/out.txt" && e.status == FileStatus::Untracked));
+    }
+
+    #[test]
+    fn test_compute_status_gitignore_negation() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path();
+
+        fs::write(workdir.join(".gitignore"), "*.log\n!important.log\n").unwrap();
+        fs::write(workdir.join("ignored.log"), "ignored\n").unwrap();
+        fs::write(workdir.join("important.log"), "keep\n").unwrap();
+
+        let head_files = HashMap::new();
+        let index = Index {
+            version: 2,
+            entries: vec![],
+        };
+
+        let status = compute_status(&head_files, &index, workdir).unwrap();
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "important.log" && e.status == FileStatus::Untracked));
+        assert!(!status
+            .entries
+            .iter()
+            .any(|e| e.path == "ignored.log" && e.status == FileStatus::Untracked));
+    }
+
+    #[test]
+    fn test_compute_status_respects_git_info_exclude() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path();
+        fs::create_dir_all(workdir.join(".git").join("info")).unwrap();
+        fs::write(workdir.join(".git").join("info").join("exclude"), "*.tmp\n").unwrap();
+        fs::write(workdir.join("ignored.tmp"), "ignored\n").unwrap();
+        fs::write(workdir.join("keep.txt"), "keep\n").unwrap();
+
+        let head_files = HashMap::new();
+        let index = Index {
+            version: 2,
+            entries: vec![],
+        };
+
+        let status = compute_status(&head_files, &index, workdir).unwrap();
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "keep.txt" && e.status == FileStatus::Untracked));
+        assert!(!status
+            .entries
+            .iter()
+            .any(|e| e.path == "ignored.tmp" && e.status == FileStatus::Untracked));
     }
 }
