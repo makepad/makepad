@@ -575,6 +575,7 @@ mod imp {
     const MTL_DATA_TYPE_BOOL: u64 = 53;
 
     const FC_FLASH_ATTN_EXT_PAD: i32 = 100;
+    const FC_FLASH_ATTN_EXT_BLK: i32 = 200;
     const FC_FLASH_ATTN_EXT: i32 = 300;
     const FC_FLASH_ATTN_EXT_VEC: i32 = 400;
     const FC_FLASH_ATTN_EXT_VEC_REDUCE: i32 = 500;
@@ -736,6 +737,19 @@ mod imp {
         nb21: u64,
         nb22: u64,
         nb23: u64,
+        ne31: i32,
+        ne32: i32,
+        ne33: i32,
+        nb31: u64,
+        nb32: u64,
+        nb33: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct KArgsFlashAttnExtBlk {
+        ne01: i32,
+        ne30: i32,
         ne31: i32,
         ne32: i32,
         ne33: i32,
@@ -1131,7 +1145,15 @@ mod imp {
     }
 
     fn flash_attn_use_vec(n_q: usize, d: usize) -> bool {
-        n_q < 20 && d % 32 == 0 && flash_attn_supported_head_dim(d)
+        n_q < 20 && d % 32 == 0
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct FlashAttnExtParams {
+        has_mask: bool,
+        has_sinks: bool,
+        max_bias: f32,
+        logit_softcap: f32,
     }
 
     fn pad_to(v: usize, align: usize) -> usize {
@@ -1160,6 +1182,103 @@ mod imp {
         let words = (pad_to(dk, 128) + 4 * ncpsg + 2 * pad_to(dv, 128))
             .saturating_mul(nsg.max(1) as usize);
         pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
+    }
+
+    fn flash_attn_ext_extra_pad_bytes(
+        n_q: usize,
+        n_kv: usize,
+        n_head: usize,
+        d: usize,
+        has_mask: bool,
+        use_vec: bool,
+    ) -> Result<usize, String> {
+        // Match ggml-metal: reserve non-vec sized padding space, but gate by the active kernel kvpad.
+        let reserve_ncpsg = OP_FLASH_ATTN_EXT_NCPSG as usize;
+        let active_ncpsg = if use_vec {
+            OP_FLASH_ATTN_EXT_VEC_NCPSG as usize
+        } else {
+            OP_FLASH_ATTN_EXT_NCPSG as usize
+        };
+        let has_kvpad = n_kv % active_ncpsg != 0;
+        if !has_kvpad {
+            return Ok(0);
+        }
+
+        let n_state = n_head
+            .checked_mul(d)
+            .ok_or_else(|| "overflow computing flash n_state".to_string())?;
+        let nb11 = n_state
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "overflow computing flash nb11".to_string())?;
+        let nb21 = nb11;
+
+        let k_term = nb11
+            .checked_mul(n_head)
+            .ok_or_else(|| "overflow computing flash extra pad K bytes".to_string())?;
+        let v_term = nb21
+            .checked_mul(n_head)
+            .ok_or_else(|| "overflow computing flash extra pad V bytes".to_string())?;
+        let mask_term = if has_mask {
+            std::mem::size_of::<u16>()
+                .checked_mul(n_q)
+                .ok_or_else(|| "overflow computing flash extra pad mask bytes".to_string())?
+        } else {
+            0
+        };
+
+        reserve_ncpsg
+            .checked_mul(
+                k_term
+                    .checked_add(v_term)
+                    .and_then(|v| v.checked_add(mask_term))
+                    .ok_or_else(|| "overflow computing flash extra pad size".to_string())?,
+            )
+            .ok_or_else(|| "overflow computing flash extra pad size".to_string())
+    }
+
+    fn flash_attn_ext_extra_blk_bytes(
+        n_q: usize,
+        n_kv: usize,
+        has_mask: bool,
+        use_vec: bool,
+    ) -> Result<usize, String> {
+        if !has_mask {
+            return Ok(0);
+        }
+
+        let nqptg = if use_vec {
+            OP_FLASH_ATTN_EXT_VEC_NQPSG as usize
+        } else {
+            OP_FLASH_ATTN_EXT_NQPSG as usize
+        };
+        let ncpsg = if use_vec {
+            OP_FLASH_ATTN_EXT_VEC_NCPSG as usize
+        } else {
+            OP_FLASH_ATTN_EXT_NCPSG as usize
+        };
+
+        let ne1 = (n_q + nqptg - 1) / nqptg;
+        let ne0 = (n_kv + ncpsg - 1) / ncpsg;
+        let raw = ne0
+            .checked_mul(ne1)
+            .ok_or_else(|| "overflow computing flash extra blk size".to_string())?;
+
+        Ok(pad_to(raw, 32))
+    }
+
+    fn flash_attn_ext_extra_tmp_bytes(
+        n_q: usize,
+        n_head: usize,
+        d: usize,
+        nwg: usize,
+    ) -> Result<usize, String> {
+        let ne01_max = n_q.min(32);
+        std::mem::size_of::<f32>()
+            .checked_mul(ne01_max)
+            .and_then(|v| v.checked_mul(n_head))
+            .and_then(|v| v.checked_mul(nwg))
+            .and_then(|v| v.checked_mul(d + 2))
+            .ok_or_else(|| "overflow computing flash extra tmp size".to_string())
     }
 
     fn can_use_mul_mv_ext(src0: Src0Type, ne00: i32, ne11: i32) -> bool {
@@ -2375,6 +2494,7 @@ mod imp {
             v_id: ObjcId,
             mask_id: ObjcId,
             pad_id: ObjcId,
+            has_mask: bool,
             ncpsg: i32,
             ne11: i32,
             ne_12_2: i32,
@@ -2393,11 +2513,11 @@ mod imp {
             nb33: u64,
         ) -> Result<(), String> {
             let base = "kernel_flash_attn_ext_pad";
-            let name = format!("{}_mask=0_ncpsg={}", base, ncpsg);
+            let name = format!("{}_mask={}_ncpsg={}", base, has_mask as i32, ncpsg);
             let constants = [
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT_PAD + 0,
-                    value: FunctionConstantValue::Bool(false),
+                    value: FunctionConstantValue::Bool(has_mask),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT_PAD + 25,
@@ -2461,6 +2581,86 @@ mod imp {
             Self::end_command_encoder(&command_buffer, &encoder)
         }
 
+        #[allow(clippy::too_many_arguments)]
+        fn dispatch_flash_attn_ext_blk(
+            &mut self,
+            mask_id: ObjcId,
+            blk_id: ObjcId,
+            n_q: usize,
+            n_kv: usize,
+            ne31: i32,
+            ne32: i32,
+            ne33: i32,
+            nb31: u64,
+            nb32: u64,
+            nb33: u64,
+            nqptg: i32,
+            ncpsg: i32,
+        ) -> Result<(), String> {
+            let base = "kernel_flash_attn_ext_blk";
+            let name = format!("{}_nqptg={}_ncpsg={}", base, nqptg, ncpsg);
+            let constants = [
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_BLK + 24,
+                    value: FunctionConstantValue::Int32(nqptg),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_BLK + 25,
+                    value: FunctionConstantValue::Int32(ncpsg),
+                },
+            ];
+            let (pipeline, _smem, _nr0, _nr1, _nsg) =
+                self.get_or_compile_cached_pipeline(name, base, &constants, 0, 0, 0, 0)?;
+
+            let ne01 = i32::try_from(n_q).map_err(|_| format!("n_q too large: {}", n_q))?;
+            let ne30 = i32::try_from(n_kv).map_err(|_| format!("n_kv too large: {}", n_kv))?;
+            let args = KArgsFlashAttnExtBlk {
+                ne01,
+                ne30,
+                ne31,
+                ne32,
+                ne33,
+                nb31,
+                nb32,
+                nb33,
+            };
+
+            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    setBytes: &args as *const KArgsFlashAttnExtBlk as *const c_void
+                    length: std::mem::size_of::<KArgsFlashAttnExtBlk>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () =
+                    msg_send![encoder.as_id(), setBuffer: mask_id offset: 0u64 atIndex: 1u64];
+                let _: () =
+                    msg_send![encoder.as_id(), setBuffer: blk_id offset: 0u64 atIndex: 2u64];
+
+                let nblk1 = ((ne01 + nqptg - 1) / nqptg) as u64;
+                let nblk0 = ((ne30 + ncpsg - 1) / ncpsg) as u64;
+                let tgs = MTLSize {
+                    width: nblk0,
+                    height: nblk1,
+                    depth: (ne32 * ne33) as u64,
+                };
+                let tpg = MTLSize {
+                    width: 32,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
+
+            Self::end_command_encoder(&command_buffer, &encoder)
+        }
+
         fn dispatch_flash_attn_ext_f32(
             &mut self,
             q_id: ObjcId,
@@ -2476,6 +2676,10 @@ mod imp {
             n_head: usize,
             d: usize,
             scale: f32,
+            has_mask: bool,
+            has_sinks: bool,
+            max_bias: f32,
+            logit_softcap: f32,
         ) -> Result<(), String> {
             static LOG_ONCE: OnceLock<()> = OnceLock::new();
             if LOG_ONCE.set(()).is_ok() {
@@ -2499,6 +2703,8 @@ mod imp {
             let nqptg = OP_FLASH_ATTN_EXT_NQPSG;
             let ncpsg = OP_FLASH_ATTN_EXT_NCPSG;
             let has_kvpad = n_kv % (ncpsg as usize) != 0;
+            let has_bias = max_bias != 0.0;
+            let has_scap = logit_softcap != 0.0;
 
             let ne01 = i32::try_from(n_q).map_err(|_| format!("n_q too large: {}", n_q))?;
             let ne11 = i32::try_from(n_kv).map_err(|_| format!("n_kv too large: {}", n_kv))?;
@@ -2551,6 +2757,13 @@ mod imp {
                 let p = (usize::BITS - 1) - (n_head as u32).leading_zeros();
                 (1u32 << p) as i32
             };
+            let m0 = (2.0f32).powf(-(max_bias) / (n_head_log2 as f32));
+            let m1 = (2.0f32).powf(-(max_bias / 2.0) / (n_head_log2 as f32));
+            let scale_k = if has_scap {
+                scale / logit_softcap
+            } else {
+                scale
+            };
 
             if has_kvpad {
                 self.dispatch_flash_attn_ext_pad(
@@ -2558,6 +2771,7 @@ mod imp {
                     v_id,
                     mask_id,
                     pad_id,
+                    has_mask,
                     ncpsg,
                     ne11,
                     ne02,
@@ -2576,28 +2790,41 @@ mod imp {
                     nb33,
                 )?;
             }
+            if has_mask {
+                self.dispatch_flash_attn_ext_blk(
+                    mask_id, blk_id, n_q, n_kv, ne31, ne32, ne33, nb31, nb32, nb33, nqptg, ncpsg,
+                )?;
+            }
 
             let base = format!("kernel_flash_attn_ext_f32_dk{}_dv{}", d, d);
             let name = format!(
-                "{}_mask=0_sinks=0_bias=0_scap=0_kvpad={}_bcm=0_ns10={}_ns20={}_nsg={}",
-                base, has_kvpad as i32, n_state_i32, n_state_i32, nsg
+                "{}_mask={}_sinks={}_bias={}_scap={}_kvpad={}_bcm=0_ns10={}_ns20={}_nsg={}",
+                base,
+                has_mask as i32,
+                has_sinks as i32,
+                has_bias as i32,
+                has_scap as i32,
+                has_kvpad as i32,
+                n_state_i32,
+                n_state_i32,
+                nsg
             );
             let constants = [
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 0,
-                    value: FunctionConstantValue::Bool(false),
+                    value: FunctionConstantValue::Bool(has_mask),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 1,
-                    value: FunctionConstantValue::Bool(false),
+                    value: FunctionConstantValue::Bool(has_sinks),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 2,
-                    value: FunctionConstantValue::Bool(false),
+                    value: FunctionConstantValue::Bool(has_bias),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 3,
-                    value: FunctionConstantValue::Bool(false),
+                    value: FunctionConstantValue::Bool(has_scap),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 4,
@@ -2652,12 +2879,12 @@ mod imp {
                 ne1: ne02,
                 ne2: ne01,
                 ne3: 1,
-                scale,
-                max_bias: 0.0,
-                m0: 1.0,
-                m1: 1.0,
+                scale: scale_k,
+                max_bias,
+                m0,
+                m1,
                 n_head_log2,
-                logit_softcap: 0.0,
+                logit_softcap,
             };
 
             let (command_buffer, encoder) = self.begin_command_encoder()?;
@@ -2706,6 +2933,388 @@ mod imp {
             }
 
             Self::end_command_encoder(&command_buffer, &encoder)
+        }
+
+        fn dispatch_flash_attn_ext_vec_reduce_f32(
+            &mut self,
+            tmp_id: ObjcId,
+            dst_id: ObjcId,
+            nrows: usize,
+            d: usize,
+            nwg: i32,
+        ) -> Result<(), String> {
+            let base = "kernel_flash_attn_ext_vec_reduce";
+            let name = format!("{}_dv={}_nwg={}", base, d, nwg);
+            let d_i32 = i32::try_from(d).map_err(|_| format!("d too large for vec reduce: {}", d))?;
+            let constants = [
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC_REDUCE + 0,
+                    value: FunctionConstantValue::Int32(d_i32),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC_REDUCE + 1,
+                    value: FunctionConstantValue::Int32(nwg),
+                },
+            ];
+            let (pipeline, _smem, _nr0, _nr1, _pnsg) =
+                self.get_or_compile_cached_pipeline(name, base, &constants, 0, 0, 0, 0)?;
+
+            let nrows_i32 = i32::try_from(nrows)
+                .map_err(|_| format!("nrows too large for vec reduce: {}", nrows))?;
+            let args = KArgsFlashAttnExtVecReduce { nrows: nrows_i32 };
+
+            let tpg_width = (32i32)
+                .checked_mul(nwg)
+                .ok_or_else(|| "overflow computing vec reduce tpg width".to_string())?;
+            let max_threads = Self::pipeline_max_threads(pipeline);
+            if tpg_width as u64 > max_threads {
+                return Err(format!(
+                    "vec reduce threadsPerThreadgroup={} exceeds max={}",
+                    tpg_width, max_threads
+                ));
+            }
+
+            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    setBytes: &args as *const KArgsFlashAttnExtVecReduce as *const c_void
+                    length: std::mem::size_of::<KArgsFlashAttnExtVecReduce>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder.as_id(), setBuffer: tmp_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 2u64];
+
+                let tgs = MTLSize {
+                    width: nrows as u64,
+                    height: 1,
+                    depth: 1,
+                };
+                let tpg = MTLSize {
+                    width: tpg_width as u64,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
+
+            Self::end_command_encoder(&command_buffer, &encoder)
+        }
+
+        fn dispatch_flash_attn_ext_vec_f32(
+            &mut self,
+            q_id: ObjcId,
+            k_id: ObjcId,
+            v_id: ObjcId,
+            mask_id: ObjcId,
+            sinks_id: ObjcId,
+            pad_id: ObjcId,
+            tmp_id: Option<ObjcId>,
+            dst_id: ObjcId,
+            n_q: usize,
+            n_kv: usize,
+            n_head: usize,
+            d: usize,
+            scale: f32,
+            has_mask: bool,
+            has_sinks: bool,
+            max_bias: f32,
+            logit_softcap: f32,
+        ) -> Result<(), String> {
+            static LOG_ONCE: OnceLock<()> = OnceLock::new();
+            if LOG_ONCE.set(()).is_ok() {
+                eprintln!("[voice][metal] flash_attn dispatch: flash_attn_ext_vec_f32");
+            }
+
+            if d % 32 != 0 {
+                return Err(format!(
+                    "flash-attn vec requires head dim divisible by 32, got {}",
+                    d
+                ));
+            }
+            if !flash_attn_supported_head_dim(d) {
+                return Err(format!(
+                    "unsupported flash-attn vec head dim for f32 kernel: {}",
+                    d
+                ));
+            }
+
+            let nqptg = OP_FLASH_ATTN_EXT_VEC_NQPSG;
+            let ncpsg = OP_FLASH_ATTN_EXT_VEC_NCPSG;
+            let nhptg = 1i32;
+            let has_kvpad = n_kv % (ncpsg as usize) != 0;
+            let has_bias = max_bias != 0.0;
+            let has_scap = logit_softcap != 0.0;
+
+            let nwg = 32i32;
+            let mut nsg = 1i32;
+            while (2i64)
+                .saturating_mul(nwg as i64)
+                .saturating_mul(nsg as i64)
+                .saturating_mul(ncpsg as i64)
+                < n_kv as i64
+                && nsg < 4
+            {
+                nsg *= 2;
+            }
+
+            let ne01 = i32::try_from(n_q).map_err(|_| format!("n_q too large: {}", n_q))?;
+            let ne11 = i32::try_from(n_kv).map_err(|_| format!("n_kv too large: {}", n_kv))?;
+            let ne02 =
+                i32::try_from(n_head).map_err(|_| format!("n_head too large: {}", n_head))?;
+            let n_state = n_head
+                .checked_mul(d)
+                .ok_or_else(|| "overflow computing flash n_state".to_string())?;
+            let n_state_i32 =
+                i32::try_from(n_state).map_err(|_| format!("n_state too large: {}", n_state))?;
+
+            let nb01 = (n_state as u64)
+                .checked_mul(4)
+                .ok_or_else(|| "overflow computing flash nb01".to_string())?;
+            let nb02 = (d as u64)
+                .checked_mul(4)
+                .ok_or_else(|| "overflow computing flash nb02".to_string())?;
+            let nb03 = nb01
+                .checked_mul(n_q as u64)
+                .ok_or_else(|| "overflow computing flash nb03".to_string())?;
+
+            let nb11 = (n_state as u64)
+                .checked_mul(4)
+                .ok_or_else(|| "overflow computing flash nb11".to_string())?;
+            let nb12 = (d as u64)
+                .checked_mul(4)
+                .ok_or_else(|| "overflow computing flash nb12".to_string())?;
+            let nb13 = nb11
+                .checked_mul(n_kv as u64)
+                .ok_or_else(|| "overflow computing flash nb13".to_string())?;
+
+            let nb21 = nb11;
+            let nb22 = nb12;
+            let nb23 = nb13;
+
+            let ne31 = ne01;
+            let ne32 = 1i32;
+            let ne33 = 1i32;
+            let nb31 = (n_kv as u64)
+                .checked_mul(2)
+                .ok_or_else(|| "overflow computing flash nb31".to_string())?;
+            let nb32 = nb31
+                .checked_mul(n_q as u64)
+                .ok_or_else(|| "overflow computing flash nb32".to_string())?;
+            let nb33 = nb32;
+
+            let n_head_log2 = if n_head <= 1 {
+                1i32
+            } else {
+                let p = (usize::BITS - 1) - (n_head as u32).leading_zeros();
+                (1u32 << p) as i32
+            };
+            let m0 = (2.0f32).powf(-(max_bias) / (n_head_log2 as f32));
+            let m1 = (2.0f32).powf(-(max_bias / 2.0) / (n_head_log2 as f32));
+            let scale_k = if has_scap {
+                scale / logit_softcap
+            } else {
+                scale
+            };
+
+            if has_kvpad {
+                self.dispatch_flash_attn_ext_pad(
+                    k_id,
+                    v_id,
+                    mask_id,
+                    pad_id,
+                    has_mask,
+                    ncpsg,
+                    ne11,
+                    ne02,
+                    1,
+                    nb11,
+                    nb12,
+                    nb13,
+                    nb21,
+                    nb22,
+                    nb23,
+                    ne31,
+                    ne32,
+                    ne33,
+                    nb31,
+                    nb32,
+                    nb33,
+                )?;
+            }
+
+            let base = format!("kernel_flash_attn_ext_vec_f32_dk{}_dv{}", d, d);
+            let name = format!(
+                "{}_mask={}_sink={}_bias={}_scap={}_kvpad={}_ns10={}_ns20={}_nsg={}_nwg={}",
+                base,
+                has_mask as i32,
+                has_sinks as i32,
+                has_bias as i32,
+                has_scap as i32,
+                has_kvpad as i32,
+                n_state_i32,
+                n_state_i32,
+                nsg,
+                nwg
+            );
+            let constants = [
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 0,
+                    value: FunctionConstantValue::Bool(has_mask),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 1,
+                    value: FunctionConstantValue::Bool(has_sinks),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 2,
+                    value: FunctionConstantValue::Bool(has_bias),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 3,
+                    value: FunctionConstantValue::Bool(has_scap),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 4,
+                    value: FunctionConstantValue::Bool(has_kvpad),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 20,
+                    value: FunctionConstantValue::Int32(n_state_i32),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 21,
+                    value: FunctionConstantValue::Int32(n_state_i32),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 22,
+                    value: FunctionConstantValue::Int32(nsg),
+                },
+                FunctionConstant {
+                    idx: FC_FLASH_ATTN_EXT_VEC + 23,
+                    value: FunctionConstantValue::Int32(nwg),
+                },
+            ];
+
+            let smem = flash_attn_vec_smem_bytes(d, d, nsg);
+            let (pipeline, pipeline_smem, _nr0, _nr1, _pnsg) =
+                self.get_or_compile_cached_pipeline(name, &base, &constants, smem, 0, 0, nsg)?;
+            let max_threads = Self::pipeline_max_threads(pipeline);
+            let thread_width = (32i32)
+                .checked_mul(nsg)
+                .ok_or_else(|| "overflow computing vec thread width".to_string())?;
+            if thread_width as u64 > max_threads {
+                return Err(format!(
+                    "flash-attn vec threadsPerThreadgroup={} exceeds max={}",
+                    thread_width, max_threads
+                ));
+            }
+
+            let args = KArgsFlashAttnExtVec {
+                ne01,
+                ne02,
+                ne03: 1,
+                nb01,
+                nb02,
+                nb03,
+                ne11,
+                ne_12_2: ne02,
+                ne_12_3: 1,
+                ns10: n_state_i32,
+                nb11,
+                nb12,
+                nb13,
+                ns20: n_state_i32,
+                nb21,
+                nb22,
+                nb23,
+                ne31,
+                ne32,
+                ne33,
+                nb31,
+                nb32,
+                nb33,
+                ne1: ne02,
+                ne2: ne01,
+                ne3: 1,
+                scale: scale_k,
+                max_bias,
+                m0,
+                m1,
+                n_head_log2,
+                logit_softcap,
+            };
+
+            let nrows = n_q
+                .checked_mul(n_head)
+                .ok_or_else(|| "overflow computing flash vec nrows".to_string())?;
+
+            let (command_buffer, encoder) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    setBytes: &args as *const KArgsFlashAttnExtVec as *const c_void
+                    length: std::mem::size_of::<KArgsFlashAttnExtVec>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder.as_id(), setBuffer: q_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder.as_id(), setBuffer: k_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder.as_id(), setBuffer: v_id offset: 0u64 atIndex: 3u64];
+                let _: () =
+                    msg_send![encoder.as_id(), setBuffer: mask_id offset: 0u64 atIndex: 4u64];
+                let _: () =
+                    msg_send![encoder.as_id(), setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
+                let _: () = msg_send![encoder.as_id(), setBuffer: pad_id offset: 0u64 atIndex: 6u64];
+                if nwg == 1 {
+                    let _: () =
+                        msg_send![encoder.as_id(), setBuffer: dst_id offset: 0u64 atIndex: 7u64];
+                } else {
+                    let tmp_id = tmp_id.ok_or_else(|| {
+                        "flash-attn vec requires tmp buffer when nwg > 1".to_string()
+                    })?;
+                    let _: () =
+                        msg_send![encoder.as_id(), setBuffer: tmp_id offset: 0u64 atIndex: 7u64];
+                }
+
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    setThreadgroupMemoryLength: pipeline_smem as u64
+                    atIndex: 0u64
+                ];
+
+                let tgs = MTLSize {
+                    width: ((n_q as i32 + nqptg - 1) / nqptg) as u64,
+                    height: ((n_head as i32 + nhptg - 1) / nhptg) as u64,
+                    depth: nwg as u64,
+                };
+                let tpg = MTLSize {
+                    width: 32,
+                    height: nsg as u64,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
+
+            Self::end_command_encoder(&command_buffer, &encoder)?;
+
+            if nwg > 1 {
+                let tmp_id = tmp_id.ok_or_else(|| {
+                    "flash-attn vec requires tmp buffer when nwg > 1".to_string()
+                })?;
+                self.dispatch_flash_attn_ext_vec_reduce_f32(tmp_id, dst_id, nrows, d, nwg)?;
+            }
+
+            Ok(())
         }
 
         fn flash_attn_f32_packed(
@@ -2786,63 +3395,61 @@ mod imp {
             let v_buf = self.new_buffer_with_bytes(v_bytes)?;
             let dst_buf = self.new_buffer_with_length(out_bytes)?;
 
-            let ncpsg = OP_FLASH_ATTN_EXT_NCPSG as usize;
-            let has_kvpad = n_kv % ncpsg != 0;
-            let n_state = n_head
-                .checked_mul(d)
-                .ok_or_else(|| "overflow computing flash n_state".to_string())?;
-
-            let pad_bytes = if has_kvpad {
-                let row = (n_state as u64)
-                    .checked_mul(4)
-                    .ok_or_else(|| "overflow computing flash pad row bytes".to_string())?;
-                let total = (ncpsg as u64)
-                    .checked_mul(n_head as u64)
-                    .and_then(|v| v.checked_mul(row))
-                    .and_then(|v| v.checked_mul(2))
-                    .ok_or_else(|| "overflow computing flash pad size".to_string())?;
-                total as usize
-            } else {
-                1usize
-            };
+            let params = FlashAttnExtParams::default();
+            let use_vec = flash_attn_use_vec(n_q, d);
+            let pad_bytes =
+                flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, params.has_mask, use_vec)?;
             let pad_buf = self.new_buffer_with_length(pad_bytes.max(1))?;
 
-            let nblk0 =
-                (n_kv + OP_FLASH_ATTN_EXT_NCPSG as usize - 1) / OP_FLASH_ATTN_EXT_NCPSG as usize;
-            let nblk1 =
-                (n_q + OP_FLASH_ATTN_EXT_NQPSG as usize - 1) / OP_FLASH_ATTN_EXT_NQPSG as usize;
-            let blk_bytes = nblk0
-                .checked_mul(nblk1)
-                .ok_or_else(|| "overflow computing flash blk size".to_string())?
-                .max(1);
-            let blk_buf = self.new_buffer_with_length(blk_bytes)?;
+            if use_vec {
+                let tmp_bytes = flash_attn_ext_extra_tmp_bytes(n_q, n_head, d, 32)?;
+                let tmp_buf = self.new_buffer_with_length(tmp_bytes)?;
 
-            self.dispatch_flash_attn_ext_f32(
-                q_buf.as_id(),
-                k_buf.as_id(),
-                v_buf.as_id(),
-                q_buf.as_id(), // unused when has_mask=false
-                q_buf.as_id(), // unused when has_sinks=false
-                pad_buf.as_id(),
-                blk_buf.as_id(),
-                dst_buf.as_id(),
-                n_q,
-                n_kv,
-                n_head,
-                d,
-                scale,
-            )?;
+                self.dispatch_flash_attn_ext_vec_f32(
+                    q_buf.as_id(),
+                    k_buf.as_id(),
+                    v_buf.as_id(),
+                    q_buf.as_id(), // unused when has_mask=false
+                    q_buf.as_id(), // unused when has_sinks=false
+                    pad_buf.as_id(),
+                    Some(tmp_buf.as_id()),
+                    dst_buf.as_id(),
+                    n_q,
+                    n_kv,
+                    n_head,
+                    d,
+                    scale,
+                    params.has_mask,
+                    params.has_sinks,
+                    params.max_bias,
+                    params.logit_softcap,
+                )?;
+            } else {
+                let blk_bytes = flash_attn_ext_extra_blk_bytes(n_q, n_kv, params.has_mask, false)?;
+                let blk_buf = self.new_buffer_with_length(blk_bytes.max(1))?;
 
-            let out_ptr: *const c_void = unsafe { msg_send![dst_buf.as_id(), contents] };
-            if out_ptr.is_null() {
-                return Err("flash output buffer contents returned null".to_string());
+                self.dispatch_flash_attn_ext_f32(
+                    q_buf.as_id(),
+                    k_buf.as_id(),
+                    v_buf.as_id(),
+                    q_buf.as_id(), // unused when has_mask=false
+                    q_buf.as_id(), // unused when has_sinks=false
+                    pad_buf.as_id(),
+                    blk_buf.as_id(),
+                    dst_buf.as_id(),
+                    n_q,
+                    n_kv,
+                    n_head,
+                    d,
+                    scale,
+                    params.has_mask,
+                    params.has_sinks,
+                    params.max_bias,
+                    params.logit_softcap,
+                )?;
             }
 
-            let mut out = vec![0.0f32; out_elems];
-            unsafe {
-                std::ptr::copy_nonoverlapping(out_ptr as *const f32, out.as_mut_ptr(), out_elems);
-            }
-            Ok(out)
+            self.read_f32_buffer(dst_buf.as_id(), out_elems)
         }
 
         fn flash_attn_f32_from_buffers(
@@ -2866,52 +3473,59 @@ mod imp {
 
             let dst_buf = self.new_buffer_with_length(out_bytes)?;
 
-            let ncpsg = OP_FLASH_ATTN_EXT_NCPSG as usize;
-            let has_kvpad = n_kv % ncpsg != 0;
-            let n_state = n_head
-                .checked_mul(d)
-                .ok_or_else(|| "overflow computing flash n_state".to_string())?;
-
-            let pad_bytes = if has_kvpad {
-                let row = (n_state as u64)
-                    .checked_mul(4)
-                    .ok_or_else(|| "overflow computing flash pad row bytes".to_string())?;
-                let total = (ncpsg as u64)
-                    .checked_mul(n_head as u64)
-                    .and_then(|v| v.checked_mul(row))
-                    .and_then(|v| v.checked_mul(2))
-                    .ok_or_else(|| "overflow computing flash pad size".to_string())?;
-                total as usize
-            } else {
-                1usize
-            };
+            let params = FlashAttnExtParams::default();
+            let use_vec = flash_attn_use_vec(n_q, d);
+            let pad_bytes =
+                flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, params.has_mask, use_vec)?;
             let pad_buf = self.new_buffer_with_length(pad_bytes.max(1))?;
 
-            let nblk0 =
-                (n_kv + OP_FLASH_ATTN_EXT_NCPSG as usize - 1) / OP_FLASH_ATTN_EXT_NCPSG as usize;
-            let nblk1 =
-                (n_q + OP_FLASH_ATTN_EXT_NQPSG as usize - 1) / OP_FLASH_ATTN_EXT_NQPSG as usize;
-            let blk_bytes = nblk0
-                .checked_mul(nblk1)
-                .ok_or_else(|| "overflow computing flash blk size".to_string())?
-                .max(1);
-            let blk_buf = self.new_buffer_with_length(blk_bytes)?;
+            if use_vec {
+                let tmp_bytes = flash_attn_ext_extra_tmp_bytes(n_q, n_head, d, 32)?;
+                let tmp_buf = self.new_buffer_with_length(tmp_bytes)?;
 
-            self.dispatch_flash_attn_ext_f32(
-                q_id,
-                k_id,
-                v_id,
-                q_id, // unused when has_mask=false
-                q_id, // unused when has_sinks=false
-                pad_buf.as_id(),
-                blk_buf.as_id(),
-                dst_buf.as_id(),
-                n_q,
-                n_kv,
-                n_head,
-                d,
-                scale,
-            )?;
+                self.dispatch_flash_attn_ext_vec_f32(
+                    q_id,
+                    k_id,
+                    v_id,
+                    q_id, // unused when has_mask=false
+                    q_id, // unused when has_sinks=false
+                    pad_buf.as_id(),
+                    Some(tmp_buf.as_id()),
+                    dst_buf.as_id(),
+                    n_q,
+                    n_kv,
+                    n_head,
+                    d,
+                    scale,
+                    params.has_mask,
+                    params.has_sinks,
+                    params.max_bias,
+                    params.logit_softcap,
+                )?;
+            } else {
+                let blk_bytes = flash_attn_ext_extra_blk_bytes(n_q, n_kv, params.has_mask, false)?;
+                let blk_buf = self.new_buffer_with_length(blk_bytes.max(1))?;
+
+                self.dispatch_flash_attn_ext_f32(
+                    q_id,
+                    k_id,
+                    v_id,
+                    q_id, // unused when has_mask=false
+                    q_id, // unused when has_sinks=false
+                    pad_buf.as_id(),
+                    blk_buf.as_id(),
+                    dst_buf.as_id(),
+                    n_q,
+                    n_kv,
+                    n_head,
+                    d,
+                    scale,
+                    params.has_mask,
+                    params.has_sinks,
+                    params.max_bias,
+                    params.logit_softcap,
+                )?;
+            }
 
             Ok(dst_buf)
         }
