@@ -4,8 +4,11 @@ use crate::{
     makepad_draw::*,
     nav_control::NavControl,
     view::*,
-    voice_wave::VoiceWaveWidgetExt,
     widget::*,
+};
+#[cfg(feature = "voice")]
+use crate::{
+    voice_wave::VoiceWaveWidgetExt,
     window_voice_input::{VoiceInjectEvent, WindowVoiceInput},
 };
 
@@ -200,12 +203,15 @@ pub struct Window {
     hide_caption_on_fullscreen: bool,
     #[live]
     show_performance_view: bool,
+    #[cfg(feature = "voice")]
     #[rust]
     voice_input: WindowVoiceInput,
     #[rust]
     has_focus: bool,
+    #[cfg(feature = "voice")]
     #[rust]
     ptt_f1_down: bool,
+    #[cfg(feature = "voice")]
     #[rust]
     ptt_owns_capture: bool,
     #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))]
@@ -230,16 +236,19 @@ pub enum WindowAction {
     EventForOtherWindow,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
+    #[cfg(feature = "voice")]
     RecordVoice(bool),
     #[default]
     None,
 }
 
 impl Window {
+    #[cfg(feature = "voice")]
     fn voice_callback_index(&self) -> usize {
         self.window.window_id().id() % MAX_AUDIO_DEVICE_INDEX
     }
 
+    #[cfg(feature = "voice")]
     fn key_focus_in_this_window(&self, cx: &Cx) -> bool {
         let Some(draw_list_id) = cx.key_focus().draw_list_id() else {
             return false;
@@ -253,6 +262,7 @@ impl Window {
         cx.get_pass_window_id(draw_pass_id) == Some(self.window.window_id())
     }
 
+    #[cfg(feature = "voice")]
     fn dispatch_voice_inject_events(
         &mut self,
         cx: &mut Cx,
@@ -288,6 +298,7 @@ impl Window {
             return;
         }
         self.initialized = true;
+        #[cfg(feature = "voice")]
         self.voice_input
             .ensure_audio_callback(cx, self.voice_callback_index());
 
@@ -341,8 +352,11 @@ impl Window {
             }
             _ => (),
         }
-        let wave = self.voice_wave(cx, ids!(voice_wave));
-        self.voice_input.sync_voice_wave_mic_state(cx, &wave);
+        #[cfg(feature = "voice")]
+        {
+            let wave = self.voice_wave(cx, ids!(voice_wave));
+            self.voice_input.sync_voice_wave_mic_state(cx, &wave);
+        }
     }
 
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
@@ -431,6 +445,7 @@ impl Window {
     pub fn set_fullscreen(&mut self, cx: &mut Cx) {
         self.window.handle.fullscreen(cx);
     }
+    #[cfg(feature = "voice")]
     pub fn set_record_voice(&mut self, cx: &mut Cx, enabled: bool) {
         self.voice_input
             .ensure_audio_callback(cx, self.voice_callback_index());
@@ -491,11 +506,13 @@ impl WindowRef {
             inner.set_fullscreen(cx);
         }
     }
+    #[cfg(feature = "voice")]
     pub fn set_record_voice(&self, cx: &mut Cx, enabled: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_record_voice(cx, enabled);
         }
     }
+    #[cfg(feature = "voice")]
     pub fn record_voice_toggled(&self, actions: &Actions) -> Option<bool> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let WindowAction::RecordVoice(v) = item.cast() {
@@ -541,64 +558,70 @@ impl Widget for Window {
 
         let uid = self.widget_uid();
 
-        if let Event::AudioDevices(devices) = event {
-            self.voice_input.handle_audio_devices(cx, devices);
-            let wave = self.voice_wave(cx, ids!(voice_wave));
-            self.voice_input.sync_voice_wave_mic_state(cx, &wave);
-        }
-        if let Event::PermissionResult(result) = event {
-            if self.voice_input.handle_permission_result(cx, result) {
+        #[cfg(feature = "voice")]
+        {
+            if let Event::AudioDevices(devices) = event {
+                self.voice_input.handle_audio_devices(cx, devices);
                 let wave = self.voice_wave(cx, ids!(voice_wave));
                 self.voice_input.sync_voice_wave_mic_state(cx, &wave);
-                cx.widget_action(uid, WindowAction::RecordVoice(self.voice_input.is_enabled()));
+            }
+            if let Event::PermissionResult(result) = event {
+                if self.voice_input.handle_permission_result(cx, result) {
+                    let wave = self.voice_wave(cx, ids!(voice_wave));
+                    self.voice_input.sync_voice_wave_mic_state(cx, &wave);
+                    cx.widget_action(uid, WindowAction::RecordVoice(self.voice_input.is_enabled()));
+                }
+            }
+            if let Event::Signal = event {
+                let wave = self.voice_wave(cx, ids!(voice_wave));
+                let events = self.voice_input.process_signal(cx, &wave);
+                self.dispatch_voice_inject_events(cx, scope, events);
+            }
+            {
+                let wave = self.voice_wave(cx, ids!(voice_wave));
+                let events = self.voice_input.handle_timers(cx, event, &wave);
+                self.dispatch_voice_inject_events(cx, scope, events);
+            }
+            if let Event::Shutdown = event {
+                self.voice_input.shutdown(cx);
             }
         }
-        if let Event::Signal = event {
-            let wave = self.voice_wave(cx, ids!(voice_wave));
-            let events = self.voice_input.process_signal(cx, &wave);
-            self.dispatch_voice_inject_events(cx, scope, events);
-        }
+        #[cfg(feature = "voice")]
         {
-            let wave = self.voice_wave(cx, ids!(voice_wave));
-            let events = self.voice_input.handle_timers(cx, event, &wave);
-            self.dispatch_voice_inject_events(cx, scope, events);
-        }
-        if let Event::Shutdown = event {
-            self.voice_input.shutdown(cx);
-        }
-        if let Event::KeyDown(key_event) = event {
-            let has_focus = self.has_focus || self.key_focus_in_this_window(cx);
-            if key_event.key_code == KeyCode::F1 && !key_event.is_repeat && has_focus {
-                if !self.ptt_f1_down {
-                    self.ptt_f1_down = true;
-                    self.ptt_owns_capture = !self.voice_input.is_enabled();
-                    if self.ptt_owns_capture {
-                        self.set_record_voice(cx, true);
-                        cx.widget_action(uid, WindowAction::RecordVoice(true));
+            if let Event::KeyDown(key_event) = event {
+                let has_focus = self.has_focus || self.key_focus_in_this_window(cx);
+                if key_event.key_code == KeyCode::F1 && !key_event.is_repeat && has_focus {
+                    if !self.ptt_f1_down {
+                        self.ptt_f1_down = true;
+                        self.ptt_owns_capture = !self.voice_input.is_enabled();
+                        if self.ptt_owns_capture {
+                            self.set_record_voice(cx, true);
+                            cx.widget_action(uid, WindowAction::RecordVoice(true));
+                        }
                     }
+                    return;
                 }
-                return;
-            }
-            let is_hotkey = !key_event.is_repeat
-                && (key_event.modifiers.logo || key_event.modifiers.control)
-                && key_event.key_code == KeyCode::Key1;
-            if is_hotkey && has_focus {
-                let enabled = !self.voice_input.is_enabled();
-                self.set_record_voice(cx, enabled);
-                cx.widget_action(uid, WindowAction::RecordVoice(enabled));
-                return;
-            }
-        }
-        if let Event::KeyUp(key_event) = event {
-            if key_event.key_code == KeyCode::F1 && self.ptt_f1_down {
-                self.ptt_f1_down = false;
-                if self.ptt_owns_capture {
-                    self.ptt_owns_capture = false;
-                    self.set_record_voice(cx, false);
-                    self.voice_input.arm_enter_after_next_transcript();
-                    cx.widget_action(uid, WindowAction::RecordVoice(false));
+                let is_hotkey = !key_event.is_repeat
+                    && (key_event.modifiers.logo || key_event.modifiers.control)
+                    && key_event.key_code == KeyCode::Key1;
+                if is_hotkey && has_focus {
+                    let enabled = !self.voice_input.is_enabled();
+                    self.set_record_voice(cx, enabled);
+                    cx.widget_action(uid, WindowAction::RecordVoice(enabled));
+                    return;
                 }
-                return;
+            }
+            if let Event::KeyUp(key_event) = event {
+                if key_event.key_code == KeyCode::F1 && self.ptt_f1_down {
+                    self.ptt_f1_down = false;
+                    if self.ptt_owns_capture {
+                        self.ptt_owns_capture = false;
+                        self.set_record_voice(cx, false);
+                        self.voice_input.arm_enter_after_next_transcript();
+                        cx.widget_action(uid, WindowAction::RecordVoice(false));
+                    }
+                    return;
+                }
             }
         }
 
@@ -620,6 +643,7 @@ impl Widget for Window {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
                 if ev.window_id == self.window.window_id() {
+                    #[cfg(feature = "voice")]
                     self.voice_input.shutdown(cx);
                     cx.widget_action(uid, WindowAction::WindowClosed)
                 }
@@ -713,6 +737,7 @@ impl Widget for Window {
         }
 
         if let Event::Actions(actions) = event {
+            #[cfg(feature = "voice")]
             if self.voice_wave(cx, ids!(voice_wave)).clicked(&actions) {
                 let enabled = !self.voice_input.is_enabled();
                 self.set_record_voice(cx, enabled);
