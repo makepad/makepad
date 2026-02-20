@@ -107,7 +107,6 @@ pub mod page_flip;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
-#[cfg(target_os = "android")]
 pub mod video;
 
 pub mod command_text_input;
@@ -238,7 +237,6 @@ pub use crate::widgets_3d::*;
 
 pub use crate::chart::*;
 
-#[cfg(target_os = "android")]
 pub use crate::video::*;
 
 
@@ -347,7 +345,6 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::modal::script_mod(vm);
     crate::tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
-    #[cfg(target_os = "android")]
     crate::video::script_mod(vm);
     crate::page_flip::script_mod(vm);
     crate::file_tree::script_mod(vm);

@@ -2,7 +2,7 @@ use crate::{
     image_cache::ImageCacheImpl, makepad_derive_widget::*, makepad_draw::*,
     makepad_platform::event::video_playback::*, widget::*,
 };
-//use std::sync::Arc;
+
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -29,7 +29,7 @@ script_mod! {
             get_color_scale_pan: fn() {
                 // Early return for default scaling and panning,
                 // used when walk size is not specified or non-fixed.
-                if self.target_size.x <= 0.0 && self.target_size.y <= 0.0 {
+                if self.target_size.x <= 0.0 || self.target_size.y <= 0.0 {
                     if self.show_thumbnail > 0.0 {
                         return self.thumbnail_texture.sample_as_bgra(self.pos).xyzw
                     } else {
@@ -77,8 +77,6 @@ script_mod! {
         }
     }
 }
-
-/// Currently only supported on Android
 
 /// DSL Usage
 ///
@@ -187,6 +185,10 @@ impl ScriptHook for Video {
     ) {
         vm.with_cx_mut(|cx| {
             self.apply_thumbnail_settings(cx);
+            // On macOS/iOS there's no TextureHandleReady event (Metal doesn't use GL external textures),
+            // so trigger playback preparation here after all DSL properties have been applied.
+            self.should_prepare_playback = self.autoplay;
+            self.maybe_prepare_playback(cx);
         });
     }
 }
@@ -444,29 +446,23 @@ impl Video {
     fn init_video_texture(&mut self, cx: &mut Cx) {
         self.id = LiveId::unique();
 
-        #[cfg(target_os = "android")]
-        {
-            if self.video_texture.is_none() {
-                let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
-                self.video_texture = Some(new_texture);
-            }
-            let texture = self.video_texture.as_mut().unwrap();
-            self.draw_bg.draw_vars.set_texture(0, &texture);
+        if self.video_texture.is_none() {
+            let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
+            self.video_texture = Some(new_texture);
         }
+        let texture = self.video_texture.as_mut().unwrap();
+        self.draw_bg.draw_vars.set_texture(0, &texture);
 
-        #[cfg(not(target_os = "android"))]
-        error!("Video Widget is currently only supported on Android.");
-
+        #[cfg(target_os = "android")]
         match cx.os_type() {
-            OsType::Android(params) => {
-                if params.is_emulator {
-                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
-                }
+            OsType::Android(params) if params.is_emulator => {
+                panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
             }
             _ => {}
         }
 
         self.should_prepare_playback = self.autoplay;
+        self.maybe_prepare_playback(cx);
     }
 
     fn apply_thumbnail_settings(&mut self, cx: &mut Cx) {
@@ -486,6 +482,8 @@ impl Video {
 
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
+            // On Android, wait for GL texture handle before preparing
+            #[cfg(target_os = "android")]
             if self.video_texture_handle.is_none() {
                 // texture is not yet ready, this method will be called again on TextureHandleReady
                 return;
@@ -511,10 +509,14 @@ impl Video {
                 VideoDataSource::Filesystem { path } => VideoSource::Filesystem(path.to_string()),
             };
 
+            let Some(texture) = self.video_texture.as_ref() else {
+                return;
+            };
             cx.prepare_video_playback(
                 self.id,
                 source,
-                self.video_texture_handle.unwrap(),
+                self.video_texture_handle.unwrap_or(0),
+                texture.texture_id(),
                 self.autoplay,
                 self.is_looping,
             );

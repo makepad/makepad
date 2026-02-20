@@ -18,7 +18,7 @@ use {
         makepad_live_id::*,
         makepad_math::{Rect, Vec2d},
         makepad_script::value::ScriptHandle,
-        texture::Texture,
+        texture::{Texture, TextureId},
         window::WindowId,
     },
     std::{
@@ -127,7 +127,7 @@ pub enum CxOsOp {
         request_id: LiveId,
     },
 
-    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
+    PrepareVideoPlayback(LiveId, VideoSource, u32, TextureId, bool, bool),
     BeginVideoPlayback(LiveId),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
@@ -869,6 +869,7 @@ impl Cx {
         video_id: LiveId,
         source: VideoSource,
         external_texture_id: u32,
+        texture_id: TextureId,
         autoplay: bool,
         should_loop: bool,
     ) {
@@ -876,6 +877,7 @@ impl Cx {
             video_id,
             source,
             external_texture_id,
+            texture_id,
             autoplay,
             should_loop,
         ));

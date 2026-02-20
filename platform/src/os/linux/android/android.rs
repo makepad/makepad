@@ -1344,6 +1344,7 @@ impl Cx {
                     video_id,
                     source,
                     external_texture_id,
+                    _texture_id,
                     autoplay,
                     should_loop,
                 ) => unsafe {
