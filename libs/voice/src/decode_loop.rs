@@ -64,7 +64,8 @@ impl WhisperState {
 
         // 1. Compute mel spectrogram
         let _t = std::time::Instant::now();
-        let (mel_data, _n_mel, n_mel_len) = mel::log_mel_spectrogram(samples, &model.filters, 1);
+        let (mel_data, _n_mel, n_mel_len, n_mel_len_org) =
+            mel::log_mel_spectrogram(samples, &model.filters, 1);
         crate::PROF_MEL.fetch_add(
             _t.elapsed().as_nanos() as u64,
             std::sync::atomic::Ordering::Relaxed,
@@ -73,11 +74,13 @@ impl WhisperState {
         let mut segments = Vec::new();
         let mut seek = 0usize; // in mel frames
 
-        let mel_end = n_mel_len;
+        // Use the original (non-30s-padded) mel length as the decode endpoint.
+        let mel_end = n_mel_len_org.min(n_mel_len);
 
         while seek < mel_end {
             // 2. Extract mel chunk: [n_mels, 2*n_ctx] starting at seek
             let chunk_len = 2 * n_ctx;
+            let is_final_chunk = seek + chunk_len >= mel_end;
             let mut mel_chunk = vec![0.0f32; n_mels * chunk_len];
             for j in 0..n_mels {
                 for i in 0..chunk_len {
@@ -231,6 +234,18 @@ impl WhisperState {
                 result_tokens.push(token);
             }
 
+            // Mirror whisper.cpp behavior: if decoding ends with a single trailing timestamp,
+            // advance by the whole chunk to avoid re-decoding the same tail window.
+            let single_timestamp_ending = result_tokens.len() > 1
+                && result_tokens[result_tokens.len() - 2].id < vocab.token_beg
+                && result_tokens[result_tokens.len() - 1].id > vocab.token_beg;
+            if single_timestamp_ending {
+                seek_delta = std::cmp::min(mel_end - seek, n_ctx * 2);
+            }
+            if is_final_chunk {
+                seek_delta = mel_end - seek;
+            }
+
             // 7. Convert tokens to segments
             let chunk_start_ms = (seek as f64 * 10.0) as i64; // mel frames to ms (each frame = 10ms)
 
@@ -286,7 +301,11 @@ impl WhisperState {
             }
 
             // Advance seek
-            seek += seek_delta;
+            let seek_step = std::cmp::min(seek_delta, mel_end.saturating_sub(seek));
+            if seek_step == 0 {
+                break;
+            }
+            seek += seek_step;
         }
 
         segments
