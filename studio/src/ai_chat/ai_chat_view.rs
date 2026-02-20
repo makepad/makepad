@@ -44,6 +44,7 @@ script_mod! {
                 width: Fill
                 height: Fit
                 empty_text: "Enter prompt"
+                is_multiline: true
             }
         }
     }

@@ -148,6 +148,8 @@ pub struct IosApp {
     edit_menu_interaction: Option<ObjcId>,
     /// Keyboard notification observer delegate - stored for cleanup
     keyboard_observer_delegate: Option<ObjcId>,
+    /// Cached keyboard config to avoid redundant reloadInputViews calls
+    last_keyboard_config: Option<crate::ime::TextInputConfig>,
 }
 
 impl IosApp {
@@ -178,6 +180,7 @@ impl IosApp {
                 edit_menu_delegate_instance,
                 edit_menu_interaction: None,
                 keyboard_observer_delegate: None,
+                last_keyboard_config: None,
             }
         }
     }
@@ -446,6 +449,71 @@ impl IosApp {
 
             UIApplicationMain(argc, &mut argv, nil, class_string);
         }
+    }
+
+    /// Configure keyboard settings (UITextInputTraits)
+    /// Uses caching to avoid calling reloadInputViews every frame
+    pub fn configure_keyboard(config: &crate::ime::TextInputConfig) {
+        use crate::ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType};
+
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    if app.last_keyboard_config.as_ref() == Some(config) {
+                        return;
+                    }
+
+                    if let Some(text_input_view) = app.text_input_view {
+                        unsafe {
+                            let kb_type: i64 = match config.soft_keyboard.input_mode {
+                                InputMode::Text => UI_KEYBOARD_TYPE_DEFAULT,
+                                InputMode::Ascii => UI_KEYBOARD_TYPE_ASCII_CAPABLE,
+                                InputMode::Url => UI_KEYBOARD_TYPE_URL,
+                                InputMode::Numeric => UI_KEYBOARD_TYPE_NUMBER_PAD,
+                                InputMode::Tel => UI_KEYBOARD_TYPE_PHONE_PAD,
+                                InputMode::Email => UI_KEYBOARD_TYPE_EMAIL_ADDRESS,
+                                InputMode::Decimal => UI_KEYBOARD_TYPE_DECIMAL_PAD,
+                                InputMode::Search => UI_KEYBOARD_TYPE_WEB_SEARCH,
+                            };
+
+                            let autocap_type: i64 = match config.soft_keyboard.autocapitalize {
+                                AutoCapitalize::None => UI_TEXT_AUTOCAPITALIZATION_NONE,
+                                AutoCapitalize::Words => UI_TEXT_AUTOCAPITALIZATION_WORDS,
+                                AutoCapitalize::Sentences => UI_TEXT_AUTOCAPITALIZATION_SENTENCES,
+                                AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
+                            };
+
+                            let autocorrect_type: i64 = match config.soft_keyboard.autocorrect {
+                                AutoCorrect::Default => -1,
+                                AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
+                                AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
+                            };
+
+                            let return_type: i64 = match config.soft_keyboard.return_key_type {
+                                ReturnKeyType::Default => UI_RETURN_KEY_DEFAULT,
+                                ReturnKeyType::Go => UI_RETURN_KEY_GO,
+                                ReturnKeyType::Search => UI_RETURN_KEY_SEARCH,
+                                ReturnKeyType::Send => UI_RETURN_KEY_SEND,
+                                ReturnKeyType::Done => UI_RETURN_KEY_DONE,
+                            };
+
+                            (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
+                            (*text_input_view)
+                                .set_ivar::<i64>("_autocapitalization_type", autocap_type);
+                            (*text_input_view)
+                                .set_ivar::<i64>("_autocorrection_type", autocorrect_type);
+                            (*text_input_view).set_ivar::<i64>("_return_key_type", return_type);
+                            (*text_input_view)
+                                .set_ivar::<bool>("_secure_text_entry", config.is_secure);
+
+                            let () = msg_send![text_input_view, reloadInputViews];
+                        }
+                    }
+
+                    app.last_keyboard_config = Some(*config);
+                }
+            }
+        });
     }
 
     pub fn show_keyboard() {
@@ -835,6 +903,7 @@ impl IosApp {
                 input: content,
                 replace_last: false,
                 was_paste: true,
+                ..Default::default()
             }));
         }
     }

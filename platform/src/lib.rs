@@ -26,6 +26,7 @@ mod draw_vars;
 
 mod area;
 pub mod component;
+pub mod ime;
 mod component_list;
 mod component_map;
 mod cursor;
@@ -90,6 +91,7 @@ pub use {
         },
         draw_vars::DrawVars,
         event::{
+            CharOffset,
             DesignerPickEvent,
             DigitDevice,
             DragEvent,
@@ -107,6 +109,7 @@ pub use {
             FingerMoveEvent,
             FingerScrollEvent,
             FingerUpEvent,
+            FullTextState,
             GameInputState,
             Hit,
             HitDesigner,
@@ -117,6 +120,8 @@ pub use {
             HttpProgress,
             HttpRequest,
             HttpResponse,
+            ImeAction,
+            ImeActionEvent,
             Inset,
             KeyCode,
             KeyEvent,
@@ -132,6 +137,7 @@ pub use {
             NextFrameEvent,
             TextClipboardEvent,
             TextInputEvent,
+            TextRangeReplaceEvent,
             //MidiInputListEvent,
             Timer,
             TimerEvent,
@@ -149,6 +155,10 @@ pub use {
             XrLocalEvent,
             XrState,
             XrUpdateEvent,
+        },
+        ime::{
+            AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
+            TextInputConfig,
         },
         game_input::*,
         geometry::{Geometry, GeometryId},

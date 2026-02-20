@@ -190,6 +190,7 @@ pub enum Event {
     TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
+    ImeAction(ImeActionEvent),
 
     Drag(DragEvent),
     Drop(DropEvent),
@@ -305,6 +306,7 @@ impl Event {
 
             56 => "DesignerPick",
             57 => "XrLocal",
+            58 => "ImeAction",
             _ => panic!(),
         }
     }
@@ -355,6 +357,7 @@ impl Event {
             Self::TextRangeReplace(_) => 35,
             Self::TextCopy(_) => 36,
             Self::TextCut(_) => 37,
+            Self::ImeAction(_) => 58,
 
             Self::Drag(_) => 38,
             Self::Drop(_) => 39,
@@ -410,6 +413,7 @@ pub enum Hit {
     TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
+    ImeAction(ImeActionEvent),
 
     FingerScroll(FingerScrollEvent),
     FingerDown(FingerDownEvent),

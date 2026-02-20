@@ -958,6 +958,7 @@ impl RawInput {
                                     input: format!("{}", inp),
                                     was_paste: false,
                                     replace_last: false,
+                                    ..Default::default()
                                 }));
                             }
                         }

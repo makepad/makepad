@@ -241,6 +241,7 @@ pub use crate::video::*;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);
+    makepad_platform::ime::script_mod(vm);
 
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));
@@ -262,6 +263,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 ..mod.turtle,
                 ..mod.turtle.Size,
                 ..mod.turtle.Flow,
+                ..mod.ime,
+                ..mod.ime.InputMode,
+                ..mod.ime.AutoCapitalize,
+                ..mod.ime.AutoCorrect,
+                ..mod.ime.ReturnKeyType,
                 ..mod.std
                 theme:mod.theme,
                 draw:mod.draw,
@@ -376,6 +382,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 ..mod.turtle,
                 ..mod.turtle.Size,
                 ..mod.turtle.Flow,
+                ..mod.ime,
+                ..mod.ime.InputMode,
+                ..mod.ime.AutoCapitalize,
+                ..mod.ime.AutoCorrect,
+                ..mod.ime.ReturnKeyType,
                 ..mod.draw.MouseCursor
             }
         }

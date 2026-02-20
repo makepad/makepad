@@ -184,6 +184,24 @@ fn build_speech_bridge(target_os: &str) {
     println!("cargo:rustc-link-search=native={}", out_dir);
     println!("cargo:rustc-link-lib=static=speech_bridge");
 
+    // On iOS, ensure the linker uses the same deployment target as the Swift objects.
+    // Without this, Rust's default target triple (arm64-apple-ios10.0.0) causes a
+    // mismatch and missing symbols like ___chkstk_darwin from the Swift async runtime.
+    if target_os == "ios" {
+        let deployment_key = {
+            let abi = env::var("CARGO_CFG_TARGET_ABI").unwrap_or_default();
+            let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+            if abi == "sim" || arch == "x86_64" {
+                "IPHONESIMULATOR_DEPLOYMENT_TARGET"
+            } else {
+                "IPHONEOS_DEPLOYMENT_TARGET"
+            }
+        };
+        let deployment = env::var(deployment_key)
+            .unwrap_or_else(|_| IOS_DEPLOYMENT_TARGET_DEFAULT.to_string());
+        println!("cargo:rustc-link-arg=-miphoneos-version-min={}", deployment);
+    }
+
     // Link Apple frameworks
     println!("cargo:rustc-link-lib=framework=Speech");
     println!("cargo:rustc-link-lib=framework=Foundation");

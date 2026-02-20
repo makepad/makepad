@@ -474,6 +474,7 @@ impl Into<TextInputEvent> for ToWasmTextInput {
             was_paste: self.was_paste,
             replace_last: self.replace_last,
             input: self.input,
+            ..Default::default()
         }
     }
 }

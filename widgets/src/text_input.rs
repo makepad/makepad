@@ -4,6 +4,11 @@ use {
         makepad_derive_widget::*,
         makepad_draw::{
             event::finger::TouchState,
+            event::keyboard::CharOffset,
+            ime::{
+                AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
+                TextInputConfig,
+            },
             text::{
                 geom::Point,
                 layouter::{LaidoutText, SelectionRect},
@@ -290,6 +295,14 @@ script_mod! {
             }
         }
 
+        draw_composition_underline +: {
+            color: uniform(#8)
+
+            pixel: fn() {
+                return self.color
+            }
+        }
+
         animator: Animator{
             empty: {
                 default: @off
@@ -479,6 +492,8 @@ pub struct TextInput {
     draw_selection: DrawQuad,
     #[live]
     draw_cursor: DrawQuad,
+    #[live]
+    draw_composition_underline: DrawQuad,
 
     #[layout]
     layout: Layout,
@@ -493,6 +508,16 @@ pub struct TextInput {
     is_read_only: bool,
     #[live]
     is_numeric_only: bool,
+    #[live]
+    input_mode: InputMode,
+    #[live]
+    autocapitalize: AutoCapitalize,
+    #[live]
+    autocorrect: AutoCorrect,
+    #[live]
+    return_key_type: ReturnKeyType,
+    #[live(false)]
+    is_multiline: bool,
     #[live]
     scroll_y: f64,
     #[live]
@@ -522,9 +547,21 @@ pub struct TextInput {
     /// IME composition tracking - byte index where composition starts
     #[rust]
     composition_start: usize,
-    /// IME composition tracking - byte length of current composition
+    /// IME composition tracking - byte index where composition ends
     #[rust]
-    composition_length: usize,
+    composition_end: usize,
+    /// Frame ID when IME input was last received (echo prevention)
+    #[rust]
+    ime_update_frame: u64,
+    /// Cached text last sent to platform IME (echo prevention)
+    #[rust]
+    last_sent_ime_text: String,
+    /// Cached selection start (byte index) last sent to platform IME
+    #[rust]
+    last_sent_ime_sel_start: usize,
+    /// Cached selection end (byte index) last sent to platform IME
+    #[rust]
+    last_sent_ime_sel_end: usize,
 
     #[live]
     on_change: Option<ScriptFnRef>,
@@ -1070,6 +1107,8 @@ impl TextInput {
         self.animator_play(cx, ids!(blink.on));
         cx.stop_timer(self.blink_timer);
         cx.hide_text_ime();
+        self.composition_start = 0;
+        self.composition_end = 0;
         // Only hide clipboard actions on mobile platforms where they're supported
         match cx.os_type() {
             OsType::Android(_) | OsType::Ios(_) => {
@@ -1078,6 +1117,93 @@ impl TextInput {
             _ => {}
         }
         cx.widget_action(uid, TextInputAction::KeyFocusLost);
+    }
+
+    fn has_composition(&self) -> bool {
+        self.composition_end > self.composition_start
+    }
+
+    fn get_ime_config(&self) -> TextInputConfig {
+        TextInputConfig {
+            soft_keyboard: SoftKeyboardConfig {
+                input_mode: if self.is_numeric_only && self.input_mode == InputMode::Text {
+                    InputMode::Decimal
+                } else {
+                    self.input_mode
+                },
+                autocapitalize: self.autocapitalize,
+                autocorrect: self.autocorrect,
+                return_key_type: self.return_key_type,
+            },
+            is_multiline: self.is_multiline,
+            is_secure: self.is_password,
+        }
+    }
+
+    fn update_ime_context(&mut self, cx: &mut Cx) {
+        if self.has_composition() {
+            return;
+        }
+
+        let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+        let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+
+        if self.text != self.last_sent_ime_text
+            || self.selection.start().index != self.last_sent_ime_sel_start
+            || self.selection.end().index != self.last_sent_ime_sel_end
+        {
+            self.last_sent_ime_text = self.text.clone();
+            self.last_sent_ime_sel_start = self.selection.start().index;
+            self.last_sent_ime_sel_end = self.selection.end().index;
+
+            cx.sync_ime_state(
+                self.text.clone(),
+                CharOffset(sel_start_chars)..CharOffset(sel_end_chars),
+                None,
+            );
+        }
+    }
+
+    fn draw_composition_underline(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+        if !self.has_composition() {
+            return;
+        }
+
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should never be `None` here");
+
+        let composition_selection = Selection {
+            anchor: Cursor {
+                index: self.composition_start.min(self.text.len()),
+                prefer_next_row: false,
+            },
+            cursor: Cursor {
+                index: self.composition_end.min(self.text.len()),
+                prefer_next_row: false,
+            },
+        };
+
+        let selection = self.selection_to_password_selection(composition_selection);
+        let underline_height = 1.5 * self.draw_text.font_scale;
+
+        self.draw_composition_underline.begin_many_instances(cx);
+        for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(selection) {
+            let scaled_x =
+                text_rect.pos.x + (rect_in_lpxs.origin.x * self.draw_text.font_scale) as f64;
+            let scaled_y = text_rect.pos.y
+                + ((rect_in_lpxs.origin.y + rect_in_lpxs.size.height) * self.draw_text.font_scale)
+                    as f64
+                - underline_height as f64;
+            let scaled_w = (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64;
+
+            self.draw_composition_underline.draw_abs(
+                cx,
+                rect(scaled_x, scaled_y, scaled_w, underline_height as f64),
+            );
+        }
+        self.draw_composition_underline.end_many_instances(cx);
     }
 
     fn ceil_word_boundary(&self, index: usize) -> usize {
@@ -1107,26 +1233,51 @@ impl TextInput {
         if input.len() == 1 && input.chars().next().unwrap() <= '\u{1d}' {
             return String::new();
         }
-        if self.is_numeric_only {
-            let mut contains_dot = if is_set_text {
-                false
-            } else {
-                let before_selection = self.text[..self.selection.start().index].to_string();
-                let after_selection = self.text[self.selection.end().index..].to_string();
-                before_selection.contains('.') || after_selection.contains('.')
-            };
-            input
-                .chars()
-                .filter(|char| match char {
-                    '.' | ',' if !contains_dot => {
-                        contains_dot = true;
-                        true
-                    }
-                    char => char.is_ascii_digit(),
-                })
-                .collect()
+        // Use input_mode for filtering; fall back to is_numeric_only for backwards compat
+        let effective_mode = if self.is_numeric_only && self.input_mode == InputMode::Text {
+            InputMode::Decimal
         } else {
-            input.to_string()
+            self.input_mode
+        };
+        match effective_mode {
+            InputMode::Ascii => {
+                input.chars().filter(|c| c.is_ascii()).collect()
+            }
+            InputMode::Numeric => {
+                input.chars().filter(|c| c.is_ascii_digit()).collect()
+            }
+            InputMode::Decimal => {
+                let mut contains_dot = if is_set_text {
+                    false
+                } else {
+                    let before_selection = self.text[..self.selection.start().index].to_string();
+                    let after_selection = self.text[self.selection.end().index..].to_string();
+                    before_selection.contains('.') || after_selection.contains('.')
+                };
+                input
+                    .chars()
+                    .filter(|c| match c {
+                        '.' if !contains_dot => {
+                            contains_dot = true;
+                            true
+                        }
+                        '-' | '+' => true,
+                        c => c.is_ascii_digit(),
+                    })
+                    .collect()
+            }
+            InputMode::Tel => {
+                input
+                    .chars()
+                    .filter(|c| {
+                        c.is_ascii_digit()
+                            || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
+                    })
+                    .collect()
+            }
+            InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Search => {
+                input.to_string()
+            }
         }
     }
 
@@ -1232,17 +1383,23 @@ impl Widget for TextInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_selection.append_to_draw_call(cx);
+        self.draw_composition_underline.append_to_draw_call(cx);
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
         let cursor_rect = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
+        self.draw_composition_underline(cx, text_rect);
         self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
+            if self.ime_update_frame != cx.redraw_id() {
+                self.update_ime_context(cx);
+            }
             let cursor_bottom_pos = cursor_rect.pos + cursor_rect.size;
-            cx.show_text_ime(
+            cx.show_text_ime_with_config(
                 self.draw_bg.area(),
                 dvec2(cursor_bottom_pos.x, cursor_bottom_pos.y - self.scroll_y),
+                self.get_ime_config(),
             );
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
@@ -1319,6 +1476,17 @@ impl Widget for TextInput {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
+                // Sync text state to platform IME before keyboard shows
+                let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+                let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+                cx.sync_ime_state(
+                    self.text.clone(),
+                    CharOffset(sel_start_chars)..CharOffset(sel_end_chars),
+                    None,
+                );
+                self.last_sent_ime_text = self.text.clone();
+                self.last_sent_ime_sel_start = self.selection.start().index;
+                self.last_sent_ime_sel_end = self.selection.end().index;
                 cx.widget_action(uid, TextInputAction::KeyFocus);
             }
             Hit::KeyFocusLost(_) => {
@@ -1568,8 +1736,26 @@ impl Widget for TextInput {
                 modifiers: mods @ KeyModifiers { shift: false, .. },
                 ..
             }) => {
-                cx.hide_text_ime();
-                self.emit_return(cx, uid, mods);
+                // For multiline text input, plain Return inserts a newline
+                // For single-line, Return hides the keyboard and emits Returned action
+                if self.is_multiline && !self.is_read_only {
+                    self.reset_blink_timer(cx);
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: "\n".to_string(),
+                        },
+                    );
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                } else {
+                    cx.hide_text_ime();
+                    cx.set_key_focus(Area::Empty);
+                    self.emit_return(cx, uid, mods);
+                }
             }
 
             Hit::KeyDown(KeyEvent {
@@ -1662,51 +1848,130 @@ impl Widget for TextInput {
                 self.draw_bg.redraw(cx);
                 self.emit_change(cx, uid);
             }
-            Hit::TextInput(TextInputEvent {
-                input,
-                replace_last,
-                was_paste,
-                ..
-            }) if !self.is_read_only => {
-                let input = self.filter_input(&input, false);
-                if input.is_empty() {
-                    // Empty input with replace_last means composition was cancelled
-                    if replace_last && self.composition_length > 0 {
-                        // Remove the composition text
-                        self.create_or_extend_edit_group(EditKind::Other);
-                        self.apply_edit(
-                            cx,
-                            Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
-                                replace_with: String::new(),
-                            },
-                        );
-                        self.composition_length = 0;
-                        self.draw_bg.redraw(cx);
-                        self.emit_change(cx, uid);
+            Hit::TextInput(event) if !self.is_read_only => {
+                // Text changes invalidate any preserved cursor from a pending tap gesture
+                self.preserved_selection_cursor = None;
+
+                // Handle Android full state sync (authoritative from Java InputConnection)
+                if let Some(full_state) = &event.full_state_sync {
+                    let text_changed = self.text != full_state.text;
+                    if text_changed {
+                        self.history
+                            .create_or_extend_edit_group(EditKind::Other, self.selection);
+                        self.text = full_state.text.clone();
+                        self.laidout_text = None;
+                    }
+
+                    let sel_start_byte = full_state.selection.start.to_byte_index(&self.text);
+                    let sel_end_byte = full_state.selection.end.to_byte_index(&self.text);
+                    self.selection = Selection {
+                        anchor: Cursor {
+                            index: sel_start_byte,
+                            prefer_next_row: false,
+                        },
+                        cursor: Cursor {
+                            index: sel_end_byte,
+                            prefer_next_row: false,
+                        },
+                    };
+
+                    if let Some(composition_range) = &full_state.composition {
+                        self.composition_start =
+                            composition_range.start.to_byte_index(&self.text);
+                        self.composition_end = composition_range.end.to_byte_index(&self.text);
+                    } else {
+                        self.composition_start = 0;
+                        self.composition_end = 0;
+                    }
+
+                    self.last_sent_ime_text = self.text.clone();
+                    self.last_sent_ime_sel_start = sel_start_byte;
+                    self.last_sent_ime_sel_end = sel_end_byte;
+                    self.ime_update_frame = cx.redraw_id();
+
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                    if text_changed {
+                        cx.hide_clipboard_actions();
                     }
                     return;
                 }
 
-                if replace_last {
-                    // IME composition update
-                    if self.composition_length > 0 {
-                        // Replace previous composition text
+                // Handle iOS range replacement (autocorrect/paste)
+                if let Some((start, end)) = event.replace_range {
+                    let filtered_text = self.filter_input(&event.input, false);
+                    if filtered_text.is_empty() && !event.input.is_empty() {
+                        self.update_ime_context(cx);
+                        return;
+                    }
+
+                    let byte_start = start.to_byte_index(&self.text);
+                    let byte_end = end.to_byte_index(&self.text);
+
+                    if self.has_composition() && byte_start < self.composition_start {
+                        let edit_delta =
+                            filtered_text.len() as isize - (byte_end - byte_start) as isize;
+                        self.composition_start =
+                            (self.composition_start as isize + edit_delta).max(0) as usize;
+                    }
+                    self.composition_end = self.composition_start;
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: byte_start,
+                            end: byte_end,
+                            replace_with: filtered_text,
+                        },
+                    );
+                    self.ime_update_frame = cx.redraw_id();
+
+                    self.animator_play(cx, ids!(empty.off));
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                    cx.hide_clipboard_actions();
+                    return;
+                }
+
+                // Handle regular text input and composition (all platforms)
+                let input = self.filter_input(&event.input, false);
+                if input.is_empty() {
+                    // Composition cancelled, remove preview text
+                    if event.replace_last && self.has_composition() {
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
                             Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
+                                start: self.composition_start.min(self.text.len()),
+                                end: self.composition_end.min(self.text.len()),
+                                replace_with: String::new(),
+                            },
+                        );
+                        self.draw_bg.redraw(cx);
+                        self.emit_change(cx, uid);
+                    }
+                    self.composition_end = self.composition_start;
+                    return;
+                }
+
+                if event.replace_last {
+                    // IME composition preview
+                    if self.has_composition() {
+                        let start = self.composition_start.min(self.text.len());
+                        let end = self.composition_end.min(self.text.len());
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start,
+                                end,
                                 replace_with: input.clone(),
                             },
                         );
-                        self.composition_length = input.len();
+                        self.composition_end = self.composition_start + input.len();
                     } else {
-                        // First composition character - record start position
                         self.composition_start = self.selection.start().index;
-                        self.composition_length = input.len();
+                        self.composition_end = self.composition_start + input.len();
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
@@ -1717,23 +1982,24 @@ impl Widget for TextInput {
                             },
                         );
                     }
+                    self.ime_update_frame = cx.redraw_id();
                 } else {
                     // Final commit or regular text input
-                    if self.composition_length > 0 {
-                        // Replace composition with final committed text
+                    if self.has_composition() {
+                        let start = self.composition_start.min(self.text.len());
+                        let end = self.composition_end.min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
                             Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
+                                start,
+                                end,
                                 replace_with: input,
                             },
                         );
-                        self.composition_length = 0;
+                        self.composition_end = self.composition_start;
                     } else {
-                        // Normal text input (no active composition)
-                        self.create_or_extend_edit_group(if was_paste {
+                        self.create_or_extend_edit_group(if event.was_paste {
                             EditKind::Other
                         } else {
                             EditKind::Insert
@@ -1751,6 +2017,7 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 self.emit_change(cx, uid);
+                cx.hide_clipboard_actions();
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
                 // iOS autocorrect sends range replacement events
@@ -1768,8 +2035,11 @@ impl Widget for TextInput {
                     .map(|(i, _)| i)
                     .unwrap_or(self.text.len());
 
+                // Ensure valid range (guard against backwards indices)
+                let (byte_start, byte_end) = (byte_start.min(byte_end), byte_start.max(byte_end));
+
                 // Clear any active composition
-                self.composition_length = 0;
+                self.composition_end = self.composition_start;
 
                 // Perform the replacement
                 self.create_or_extend_edit_group(EditKind::Other);
@@ -1804,6 +2074,27 @@ impl Widget for TextInput {
                     );
                     self.draw_bg.redraw(cx);
                     self.emit_change(cx, uid);
+                }
+            }
+            Hit::ImeAction(event) => {
+                use crate::makepad_platform::event::ImeAction;
+                let mods = KeyModifiers::default();
+                match event.action {
+                    ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
+                        cx.hide_text_ime();
+                        cx.set_key_focus(Area::Empty);
+                        cx.widget_action(
+                            uid,
+                            TextInputAction::Returned(self.text.clone(), mods),
+                        );
+                    }
+                    ImeAction::Next | ImeAction::Previous => {
+                        cx.widget_action(
+                            uid,
+                            TextInputAction::Returned(self.text.clone(), mods),
+                        );
+                    }
+                    ImeAction::Unspecified | ImeAction::None => {}
                 }
             }
             Hit::KeyDown(event) => {

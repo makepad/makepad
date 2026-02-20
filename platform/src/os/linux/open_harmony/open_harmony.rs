@@ -549,7 +549,7 @@ impl Cx {
                 CxOsOp::Quit => {
                     self.os.quit = true;
                 }
-                CxOsOp::ShowTextIME(_area, _pos) => {
+                CxOsOp::ShowTextIME(_area, _pos, _config) => {
                     let _ = self.os.arkts_obj.as_mut().unwrap().call_js_function(
                         "showKeyBoard",
                         0,

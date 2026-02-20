@@ -57,6 +57,7 @@ script_mod! {
                 margin: Inset{left: 10.0 right: 10.0 bottom: 10.0}
                 empty_text: "Output Log"
                 is_read_only: true
+                is_multiline: true
             }
         }
     }

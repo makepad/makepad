@@ -8,9 +8,11 @@ use {
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
+        event::keyboard::CharOffset,
         event::xr::XrAnchor,
         event::{DragItem, HttpRequest, NextFrame, Timer, Trigger, VideoSource},
         gpu_info::GpuInfo,
+        ime::TextInputConfig,
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
@@ -21,6 +23,7 @@ use {
     },
     std::{
         any::{Any, TypeId},
+        ops::Range,
         rc::Rc,
     },
 };
@@ -81,8 +84,13 @@ pub enum CxOsOp {
     SetTopmost(WindowId, bool),
     ShowInDock(bool),
 
-    ShowTextIME(Area, Vec2d),
+    ShowTextIME(Area, Vec2d, TextInputConfig),
     HideTextIME,
+    SyncImeState {
+        text: String,
+        selection: Range<CharOffset>,
+        composition: Option<Range<CharOffset>>,
+    },
     SetCursor(MouseCursor),
     StartTimer {
         timer_id: u64,
@@ -170,6 +178,7 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
             Self::HideTextIME => write!(f, "HideTextIME"),
+            Self::SyncImeState { .. } => write!(f, "SyncImeState"),
             Self::SetCursor(..) => write!(f, "SetCursor"),
             Self::StartTimer { .. } => write!(f, "StartTimer"),
             Self::StopTimer(..) => write!(f, "StopTimer"),
@@ -387,10 +396,28 @@ impl Cx {
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
+        self.show_text_ime_with_config(area, pos, TextInputConfig::default());
+    }
+
+    pub fn show_text_ime_with_config(&mut self, area: Area, pos: Vec2d, config: TextInputConfig) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
-            self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
+            self.platform_ops
+                .push(CxOsOp::ShowTextIME(area, pos, config));
         }
+    }
+
+    pub fn sync_ime_state(
+        &mut self,
+        text: String,
+        selection: Range<CharOffset>,
+        composition: Option<Range<CharOffset>>,
+    ) {
+        self.platform_ops.push(CxOsOp::SyncImeState {
+            text,
+            selection,
+            composition,
+        });
     }
 
     pub fn hide_text_ime(&mut self) {

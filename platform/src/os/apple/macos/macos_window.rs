@@ -423,6 +423,7 @@ impl MacosWindow {
             input: input,
             was_paste: false,
             replace_last: replace_last,
+            ..Default::default()
         }))
     }
 

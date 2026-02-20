@@ -549,6 +549,7 @@ impl XlibWindow {
             input,
             was_paste: false,
             replace_last,
+            ..Default::default()
         }))
     }
 }
