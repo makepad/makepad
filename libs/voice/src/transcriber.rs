@@ -11,17 +11,26 @@ pub enum VoiceBackendKind {
 
 impl VoiceBackendKind {
     pub fn default_for_platform() -> Self {
-        #[cfg(all(any(target_os = "macos", target_os = "ios"), not(force_whisper)))]
+        #[cfg(target_os = "ios")]
         {
             Self::NativeApple
         }
-        #[cfg(not(all(any(target_os = "macos", target_os = "ios"), not(force_whisper))))]
+        #[cfg(all(target_os = "macos", not(force_whisper)))]
+        {
+            Self::NativeApple
+        }
+        #[cfg(not(any(target_os = "ios", all(target_os = "macos", not(force_whisper)))))]
         {
             Self::Whisper
         }
     }
 
     pub fn from_makepad_env() -> Self {
+        #[cfg(target_os = "ios")]
+        {
+            return Self::NativeApple;
+        }
+
         if std::env::var("MAKEPAD").ok().is_some_and(|configs| {
             configs
                 .split(['+', ','])
@@ -161,7 +170,7 @@ impl WhisperTranscriber {
 
 pub struct NativeAppleTranscriber;
 
-#[cfg(all(any(target_os = "macos", target_os = "ios"), not(force_whisper)))]
+#[cfg(any(target_os = "ios", all(target_os = "macos", not(force_whisper))))]
 impl NativeAppleTranscriber {
     pub fn new() -> Self {
         Self
@@ -184,7 +193,7 @@ impl NativeAppleTranscriber {
     }
 }
 
-#[cfg(not(all(any(target_os = "macos", target_os = "ios"), not(force_whisper))))]
+#[cfg(not(any(target_os = "ios", all(target_os = "macos", not(force_whisper)))))]
 impl NativeAppleTranscriber {
     pub fn new() -> Self {
         Self
@@ -221,17 +230,32 @@ impl VoiceTranscriber {
     }
 
     pub fn from_makepad_env() -> Self {
+        #[cfg(target_os = "ios")]
+        {
+            return Self::NativeApple(NativeAppleTranscriber::new());
+        }
+
         let kind = VoiceBackendKind::from_makepad_env();
 
-        #[cfg(all(any(target_os = "macos", target_os = "ios"), not(force_whisper)))]
-        if kind == VoiceBackendKind::Whisper {
+        #[cfg(all(target_os = "macos", not(force_whisper)))]
+        {
             let model_path = WhisperTranscriber::model_path_from_env();
-            if !Path::new(&model_path).exists() {
-                eprintln!(
-                    "[voice] whisper model not found at '{}', using native apple backend",
-                    model_path
-                );
-                return Self::NativeApple(NativeAppleTranscriber::new());
+            let model_exists = Path::new(&model_path).exists();
+
+            if kind == VoiceBackendKind::Whisper {
+                if !model_exists {
+                    eprintln!(
+                        "[voice] whisper model not found at '{}', using native apple backend",
+                        model_path
+                    );
+                    return Self::NativeApple(NativeAppleTranscriber::new());
+                }
+                return Self::Whisper(WhisperTranscriber::new_from_env());
+            }
+
+            // On Apple platforms, auto-prefer Whisper when the model is available.
+            if model_exists {
+                return Self::Whisper(WhisperTranscriber::new_from_env());
             }
         }
 
