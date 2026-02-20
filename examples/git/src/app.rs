@@ -283,7 +283,6 @@ impl Widget for GitLogList {
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                list.set_tail_range(true);
                 list.set_item_range(cx, 0, range_end);
                 while let Some(item_id) = list.next_visible_item(cx) {
                     if line_count == 0 {
@@ -327,9 +326,19 @@ impl App {
     fn log_event(&mut self, cx: &mut Cx, text: impl Into<String>) {
         self.log_counter += 1;
         let line = format!("#{:04} {}", self.log_counter, text.into());
-        println!("{}", line);
         push_event_log(line);
         self.ui.widget(cx, ids!(log_list)).redraw(cx);
+    }
+
+    fn debug_portal_list_state(&mut self, cx: &mut Cx, reason: &str) {
+        let state = self
+            .ui
+            .portal_list(cx, ids!(log_list.list))
+            .debug_scroll_state_line();
+        if state != self.last_portal_scroll_state {
+            self.last_portal_scroll_state = state.clone();
+            log!("PortalList[{}] {}", reason, state);
+        }
     }
 
     fn destination_display_path() -> String {
@@ -672,6 +681,8 @@ pub struct App {
     force_full_checkout: bool,
     #[rust]
     log_counter: u64,
+    #[rust]
+    last_portal_scroll_state: String,
 }
 
 impl MatchEvent for App {
@@ -753,5 +764,14 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+
+        let reason = match event {
+            Event::Scroll(_) => Some("scroll"),
+            Event::NextFrame(_) => Some("next_frame"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            self.debug_portal_list_state(cx, reason);
+        }
     }
 }

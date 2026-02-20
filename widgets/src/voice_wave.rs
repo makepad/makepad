@@ -593,6 +593,7 @@ impl VoiceWaveRef {
                         input: text,
                         replace_last: false,
                         was_paste: false,
+                        ..Default::default()
                     });
                     view.handle_event(cx, &text_event, scope);
                 }
