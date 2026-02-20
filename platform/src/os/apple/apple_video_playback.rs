@@ -90,7 +90,7 @@ impl AppleVideoPlayer {
 
             // If source was InMemory, we created a temp file - the URL retains it
 
-            let mut this = Self {
+            Self {
                 player: RcObjcId::from_unowned(NonNull::new(player).unwrap()),
                 player_item: RcObjcId::from_unowned(NonNull::new(player_item).unwrap()),
                 video_output: RcObjcId::from_unowned(NonNull::new(video_output).unwrap()),
@@ -103,9 +103,7 @@ impl AppleVideoPlayer {
                 autoplay,
                 is_looping,
                 temp_file_path,
-            };
-
-            this
+            }
         }
     }
 

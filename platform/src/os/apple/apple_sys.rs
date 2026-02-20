@@ -1423,7 +1423,7 @@ extern "C" {
     pub fn IOSurfaceDecrementUseCount(surface: IOSurfaceRef);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     pub fn CFRelease(cf: *const c_void);
