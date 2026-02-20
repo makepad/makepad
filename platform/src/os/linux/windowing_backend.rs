@@ -179,7 +179,7 @@ pub struct CxOs {
     pub(crate) network_response: NetworkResponseChannel,
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
-    pub(super) opengl_cx: Option<OpenglCx>,
+    pub opengl_cx: Option<OpenglCx>,
 }
 
 impl CxOs {
