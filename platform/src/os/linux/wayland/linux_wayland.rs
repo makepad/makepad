@@ -101,6 +101,7 @@ impl WaylandCx {
                 input,
                 replace_last: false,
                 was_paste: true,
+                ..Default::default()
             }));
         }
         if let EventFlow::Exit = self.handle_platform_ops(state) {
@@ -426,7 +427,7 @@ impl WaylandCx {
                     use crate::os::linux::http::LinuxHttpSocket;
                     LinuxHttpSocket::cancel(request_id);
                 }
-                CxOsOp::ShowTextIME(area, pos) => {
+                CxOsOp::ShowTextIME(area, pos, _config) => {
                     if let Some(window) = state.current_window {
                         if let Some(text_input) = state.text_input.as_ref() {
                             text_input.enable();
@@ -448,6 +449,9 @@ impl WaylandCx {
                         text_input.commit();
                     }
                 }
+                // Mobile-only ops (soft keyboard, clipboard UI); no-op on desktop
+                CxOsOp::SyncImeState { .. } => {}
+                CxOsOp::HideClipboardActions => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }

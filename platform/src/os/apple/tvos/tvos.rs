@@ -241,9 +241,10 @@ impl Cx {
                 CxOsOp::CancelHttpRequest { request_id } => {
                     self.os.http_requests.cancel_http_request(request_id);
                 }
-                CxOsOp::ShowClipboardActions { .. } => {
-                    crate::log!("Show clipboard actions not supported yet");
-                }
+                // Mobile-only ops; no-op on tvOS
+                CxOsOp::SyncImeState { .. } => {}
+                CxOsOp::ShowClipboardActions { .. } => {}
+                CxOsOp::HideClipboardActions => {}
                 CxOsOp::CopyToClipboard(_request) => {
                     crate::error!("Clipboard actions not yet implemented for tvOS");
                 }

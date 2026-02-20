@@ -392,6 +392,7 @@ impl MacosApp {
                                         input: string,
                                         was_paste: true,
                                         replace_last: false,
+                                        ..Default::default()
                                     }));
                                 }
                             }

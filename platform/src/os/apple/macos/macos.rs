@@ -609,7 +609,7 @@ impl Cx {
                         metal_window.cocoa_window.hide();
                     }
                 }
-                CxOsOp::ShowTextIME(area, pos) => {
+                CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     metal_windows.iter_mut().for_each(|w| {
                         w.cocoa_window.set_ime_spot(pos);
@@ -654,9 +654,10 @@ impl Cx {
                 CxOsOp::CancelHttpRequest { request_id } => {
                     self.os.http_requests.cancel_http_request(request_id);
                 }
-                CxOsOp::ShowClipboardActions { .. } => {
-                    crate::log!("Show clipboard actions not supported yet");
-                }
+                // These ops are mobile-only (soft keyboard, clipboard UI); no-op on macOS
+                CxOsOp::SyncImeState { .. } => {}
+                CxOsOp::ShowClipboardActions { .. } => {}
+                CxOsOp::HideClipboardActions => {}
                 CxOsOp::CopyToClipboard(content) => {
                     with_macos_app(|app| app.copy_to_clipboard(&content));
                 }

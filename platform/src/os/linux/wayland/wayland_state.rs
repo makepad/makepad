@@ -553,6 +553,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandState {
                         input: text_str,
                         replace_last: false,
                         was_paste: false,
+                        ..Default::default()
                     }));
                 }
             }
@@ -664,6 +665,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                     input: text_str,
                                     replace_last: false,
                                     was_paste: false,
+                                    ..Default::default()
                                 }));
                             }
                         }
@@ -1045,6 +1047,7 @@ impl WaylandState {
                 input: self.clipboard_text.clone(),
                 replace_last: false,
                 was_paste: true,
+                ..Default::default()
             }));
         }
     }

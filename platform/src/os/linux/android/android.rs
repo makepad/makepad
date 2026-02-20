@@ -28,6 +28,7 @@ use {
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
+            keyboard::{CharOffset, FullTextState, ImeAction, ImeActionEvent},
             Event,
             HttpError,
             HttpResponse,
@@ -117,6 +118,9 @@ impl Cx {
                 }
                 Ok(message) => {
                     self.handle_message(message);
+                    // Dispatch platform ops immediately after non-RenderLoop messages.
+                    // This ensures SyncImeState reaches Java before the IME's next buffer query.
+                    self.handle_platform_ops();
                 }
                 Err(e) => {
                     crate::error!("Error receiving message: {:?}", e);
@@ -335,6 +339,7 @@ impl Cx {
                         input: character.to_string(),
                         replace_last: false,
                         was_paste: false,
+                        ..Default::default()
                     });
                     self.call_event_handler(&e);
                 }
@@ -374,6 +379,7 @@ impl Cx {
                                     input: content,
                                     replace_last: false,
                                     was_paste: true,
+                                    ..Default::default()
                                 });
                                 self.call_event_handler(&e);
                             }
@@ -682,7 +688,43 @@ impl Cx {
                     input: content,
                     replace_last: false,
                     was_paste: true,
+                    ..Default::default()
                 });
+                self.call_event_handler(&e);
+            }
+            FromJavaMessage::ImeTextStateChanged {
+                full_text,
+                selection_start,
+                selection_end,
+                composing_start,
+                composing_end,
+            } => {
+                let sel_start = CharOffset::from_utf16_index(&full_text, selection_start as usize);
+                let sel_end = CharOffset::from_utf16_index(&full_text, selection_end as usize);
+
+                let composition = if composing_start >= 0 && composing_end >= 0 {
+                    let comp_start =
+                        CharOffset::from_utf16_index(&full_text, composing_start as usize);
+                    let comp_end =
+                        CharOffset::from_utf16_index(&full_text, composing_end as usize);
+                    Some(comp_start..comp_end)
+                } else {
+                    None
+                };
+
+                let e = Event::TextInput(TextInputEvent {
+                    full_state_sync: Some(FullTextState {
+                        text: full_text,
+                        selection: sel_start..sel_end,
+                        composition,
+                    }),
+                    ..Default::default()
+                });
+                self.call_event_handler(&e);
+            }
+            FromJavaMessage::ImeEditorAction { action_code } => {
+                let action = ImeAction::from_android_action_code(action_code);
+                let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
             FromJavaMessage::Init(_) => {}
@@ -1069,6 +1111,7 @@ impl Cx {
                      input: text,
                      replace_last: false,
                      was_paste: true,
+                     ..Default::default()
                  }
              );
              self.call_event_handler(&e);
@@ -1223,16 +1266,30 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
                 }
-                CxOsOp::ShowTextIME(_area, _pos) => {
-                    //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
+                CxOsOp::ShowTextIME(_area, _pos, config) => {
                     unsafe {
+                        android_jni::to_java_configure_keyboard(&config);
                         android_jni::to_java_show_keyboard(true);
                     }
                 }
                 CxOsOp::HideTextIME => {
-                    //self.os.keyboard_visible = false;
                     unsafe {
                         android_jni::to_java_show_keyboard(false);
+                    }
+                }
+                CxOsOp::SyncImeState {
+                    text,
+                    selection,
+                    composition: _,
+                } => {
+                    let sel_start_utf16 = selection.start.to_utf16_index(&text) as i32;
+                    let sel_end_utf16 = selection.end.to_utf16_index(&text) as i32;
+                    unsafe {
+                        android_jni::to_java_update_ime_text_state(
+                            &text,
+                            sel_start_utf16,
+                            sel_end_utf16,
+                        );
                     }
                 }
                 CxOsOp::CopyToClipboard(content) => unsafe {
