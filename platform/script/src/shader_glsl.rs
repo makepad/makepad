@@ -232,12 +232,10 @@ impl ShaderOutput {
     ) {
         writeln!(out, "void main() {{").ok();
         for field in geometry_fields {
-            let value_expr = self.glsl_unpack_expr_for_field(vm, field, "packed_geometry_");
-            writeln!(out, "    {} = {};", field.name, value_expr).ok();
+            self.glsl_unpack_field_to_statements(vm, field, "packed_geometry_", out);
         }
         for field in instance_fields {
-            let value_expr = self.glsl_unpack_expr_for_field(vm, field, "packed_instance_");
-            writeln!(out, "    {} = {};", field.name, value_expr).ok();
+            self.glsl_unpack_field_to_statements(vm, field, "packed_instance_", out);
         }
         writeln!(out, "    vtx_pos = vec4(0.0, 0.0, 0.0, 1.0);").ok();
 
@@ -279,8 +277,7 @@ impl ShaderOutput {
     ) {
         writeln!(out, "void main() {{").ok();
         for field in varying_fields {
-            let value_expr = self.glsl_unpack_expr_for_field(vm, field, "packed_varying_");
-            writeln!(out, "    {} = {};", field.name, value_expr).ok();
+            self.glsl_unpack_field_to_statements(vm, field, "packed_varying_", out);
         }
         let fragment_fn_name = self.backend.map_function_name("io_fragment");
         writeln!(out, "    {}();", fragment_fn_name).ok();
@@ -460,6 +457,44 @@ impl ShaderOutput {
             &scalars,
             &mut scalar_index,
         )
+    }
+
+    /// Emit assignment statements to unpack a packed field into a variable.
+    ///
+    /// For struct-typed fields, this generates per-sub-field assignments instead
+    /// of using GLSL struct constructor syntax, which some GLES drivers (notably
+    /// the Android emulator's ANGLE/SwiftShader) reject.
+    ///
+    /// For example, instead of `vb_geom = QuadVertex(vec2(x, y));` this emits:
+    ///   `vb_geom.pos = vec2(x, y);`
+    fn glsl_unpack_field_to_statements(
+        &self,
+        vm: &ScriptVm,
+        field: &GlslPackedField,
+        prefix: &str,
+        out: &mut String,
+    ) {
+        let pod_ty = vm.bx.heap.pod_type_ref(field.ty);
+        if let ScriptPodTy::Struct { fields: sub_fields, .. } = &pod_ty.ty {
+            let scalars = (0..field.slots)
+                .map(|slot| Self::glsl_packed_component(prefix, field.offset + slot))
+                .collect::<Vec<_>>();
+            let mut scalar_index = 0usize;
+            for sub_field in sub_fields {
+                let sub_field_name = self.backend.map_field_name(sub_field.name);
+                let value_expr = self.glsl_reconstruct_inline(
+                    vm,
+                    &sub_field.ty,
+                    field.attr_format,
+                    &scalars,
+                    &mut scalar_index,
+                );
+                writeln!(out, "    {}.{} = {};", field.name, sub_field_name, value_expr).ok();
+            }
+        } else {
+            let value_expr = self.glsl_unpack_expr_for_field(vm, field, prefix);
+            writeln!(out, "    {} = {};", field.name, value_expr).ok();
+        }
     }
 
     fn glsl_reconstruct_from_scalars(
