@@ -865,6 +865,7 @@ pub fn expand_sdk(
                     "-o", // overwrite existing files
                     src_dir.join(url_file_name).to_str().unwrap(),
                     &format!("{NDK_IN}/*"),
+                    &format!("{NDK_IN}/**/*"), // `*` alone doesn't match `/` on some Linux unzip builds
                     "-d",
                     src_dir.to_str().unwrap(),
                 ],
