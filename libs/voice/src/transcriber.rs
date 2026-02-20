@@ -1,6 +1,7 @@
 use crate::{Segment, WhisperModel, WhisperParams, WhisperState};
+use std::path::Path;
 
-const DEFAULT_MODEL_PATH: &str = "local/ggml-small.en-q8_0.bin";
+const DEFAULT_MODEL_PATH: &str = "ggml-large-v3-turbo.bin";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VoiceBackendKind {
@@ -101,10 +102,13 @@ pub struct WhisperTranscriber {
 }
 
 impl WhisperTranscriber {
+    fn model_path_from_env() -> String {
+        std::env::var("MAKEPAD_VOICE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string())
+    }
+
     pub fn new_from_env() -> Self {
         Self {
-            model_path: std::env::var("MAKEPAD_VOICE_MODEL")
-                .unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string()),
+            model_path: Self::model_path_from_env(),
             model: None,
             state: None,
             model_load_failed: false,
@@ -217,7 +221,21 @@ impl VoiceTranscriber {
     }
 
     pub fn from_makepad_env() -> Self {
-        Self::new(VoiceBackendKind::from_makepad_env())
+        let kind = VoiceBackendKind::from_makepad_env();
+
+        #[cfg(all(any(target_os = "macos", target_os = "ios"), not(force_whisper)))]
+        if kind == VoiceBackendKind::Whisper {
+            let model_path = WhisperTranscriber::model_path_from_env();
+            if !Path::new(&model_path).exists() {
+                eprintln!(
+                    "[voice] whisper model not found at '{}', using native apple backend",
+                    model_path
+                );
+                return Self::NativeApple(NativeAppleTranscriber::new());
+            }
+        }
+
+        Self::new(kind)
     }
 
     pub fn kind(&self) -> VoiceBackendKind {
