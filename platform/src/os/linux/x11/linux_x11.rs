@@ -464,7 +464,7 @@ impl X11Cx {
                     use crate::os::linux::http::LinuxHttpSocket;
                     LinuxHttpSocket::cancel(request_id);
                 }
-                CxOsOp::ShowTextIME(area, pos) => {
+                CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(&cx).pos + pos;
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_spot(pos);
@@ -503,6 +503,9 @@ impl X11Cx {
                         },
                     ));
                 }
+                // Mobile-only ops (soft keyboard, clipboard UI); no-op on desktop
+                CxOsOp::SyncImeState { .. } => {}
+                CxOsOp::HideClipboardActions => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }

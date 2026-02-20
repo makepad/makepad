@@ -229,6 +229,56 @@ pub enum WindowAction {
 }
 
 impl Window {
+    fn voice_callback_index(&self) -> usize {
+        self.window.window_id().id() % MAX_AUDIO_DEVICE_INDEX
+    }
+
+    fn key_focus_in_this_window(&self, cx: &Cx) -> bool {
+        let Some(draw_list_id) = cx.key_focus().draw_list_id() else {
+            return false;
+        };
+        let Some(draw_list) = cx.draw_lists.checked_index(draw_list_id) else {
+            return false;
+        };
+        let Some(draw_pass_id) = draw_list.draw_pass_id else {
+            return false;
+        };
+        cx.get_pass_window_id(draw_pass_id) == Some(self.window.window_id())
+    }
+
+    fn dispatch_voice_inject_events(
+        &mut self,
+        cx: &mut Cx,
+        scope: &mut Scope,
+        events: Vec<VoiceInjectEvent>,
+    ) {
+        for event in events {
+            match event {
+                VoiceInjectEvent::Text(chunk) => {
+                    let text_input = Event::TextInput(TextInputEvent {
+                        input: chunk,
+                        replace_last: false,
+                        was_paste: false,
+                        composition: None,
+                        full_state_sync: None,
+                        replace_range: None,
+                    });
+                    self.view.handle_event(cx, &text_input, scope);
+                }
+                VoiceInjectEvent::Enter => {
+                    let key = KeyEvent {
+                        key_code: KeyCode::ReturnKey,
+                        is_repeat: false,
+                        modifiers: KeyModifiers::default(),
+                        time: 0.0,
+                    };
+                    self.view.handle_event(cx, &Event::KeyDown(key), scope);
+                    self.view.handle_event(cx, &Event::KeyUp(key), scope);
+                }
+            }
+        }
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized {
             return;

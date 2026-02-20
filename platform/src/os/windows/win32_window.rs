@@ -414,6 +414,7 @@ impl Win32Window {
                                             input: utf8,
                                             was_paste: true,
                                             replace_last: false,
+                                            ..Default::default()
                                         }));
                                     }
                                 } else {
@@ -471,6 +472,7 @@ impl Win32Window {
                             input: utf8,
                             was_paste: false,
                             replace_last: false,
+                            ..Default::default()
                         }));
                     }
                 }
@@ -1021,6 +1023,7 @@ impl Win32Window {
             input: input,
             was_paste: false,
             replace_last: replace_last,
+            ..Default::default()
         }))
     }
 

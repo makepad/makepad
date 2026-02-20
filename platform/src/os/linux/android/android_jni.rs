@@ -7,11 +7,13 @@ use {
         area::Area,
         cx::AndroidParams,
         event::{HttpRequest, TouchPoint, TouchState, VideoSource},
+        ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputConfig},
         makepad_live_id::*,
         makepad_math::*,
         WebSocketMessage,
     },
     makepad_android_state::{get_activity, get_java_vm},
+    std::ffi::c_uint,
     std::sync::Mutex,
     std::{
         cell::Cell,
@@ -127,6 +129,16 @@ pub enum FromJavaMessage {
     },
     ClipboardPaste {
         content: String,
+    },
+    ImeTextStateChanged {
+        full_text: String,
+        selection_start: i32,
+        selection_end: i32,
+        composing_start: i32,
+        composing_end: i32,
+    },
+    ImeEditorAction {
+        action_code: i32,
     },
 }
 unsafe impl Send for FromJavaMessage {}
@@ -784,25 +796,35 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onClipboardPaste
     });
 }
 
-// IME stubs - Java side references these but full IME support is on a separate branch
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeTextStateChanged(
-    _env: *mut jni_sys::JNIEnv,
+    env: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
-    _full_text: jni_sys::jstring,
-    _selection_start: jni_sys::jint,
-    _selection_end: jni_sys::jint,
-    _composing_start: jni_sys::jint,
-    _composing_end: jni_sys::jint,
+    full_text: jni_sys::jstring,
+    selection_start: jni_sys::jint,
+    selection_end: jni_sys::jint,
+    composing_start: jni_sys::jint,
+    composing_end: jni_sys::jint,
 ) {
+    let text = jstring_to_string(env, full_text);
+    send_from_java_message(FromJavaMessage::ImeTextStateChanged {
+        full_text: text,
+        selection_start: selection_start as i32,
+        selection_end: selection_end as i32,
+        composing_start: composing_start as i32,
+        composing_end: composing_end as i32,
+    });
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeEditorAction(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
-    _action_code: jni_sys::jint,
+    action_code: jni_sys::jint,
 ) {
+    send_from_java_message(FromJavaMessage::ImeEditorAction {
+        action_code: action_code as i32,
+    });
 }
 
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
@@ -1206,4 +1228,77 @@ pub unsafe fn to_java_request_permission(permission: &str, request_id: i32) {
     );
 
     (**env).DeleteLocalRef.unwrap()(env, permission_jstr);
+}
+
+/// Configure keyboard/IME settings before showing the keyboard
+pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
+    let env = attach_jni_env();
+
+    let input_mode = match config.soft_keyboard.input_mode {
+        InputMode::Text => 0,
+        InputMode::Ascii => 1,
+        InputMode::Url => 2,
+        InputMode::Numeric => 3,
+        InputMode::Tel => 4,
+        InputMode::Email => 5,
+        InputMode::Decimal => 6,
+        InputMode::Search => 7,
+    };
+
+    let autocapitalize = match config.soft_keyboard.autocapitalize {
+        AutoCapitalize::None => 0,
+        AutoCapitalize::Words => 1,
+        AutoCapitalize::Sentences => 2,
+        AutoCapitalize::AllCharacters => 3,
+    };
+
+    let autocorrect = match config.soft_keyboard.autocorrect {
+        AutoCorrect::Default => 0,
+        AutoCorrect::Enabled => 1,
+        AutoCorrect::Disabled => 2,
+    };
+
+    let return_key_type = match config.soft_keyboard.return_key_type {
+        ReturnKeyType::Default => 0,
+        ReturnKeyType::Go => 1,
+        ReturnKeyType::Search => 2,
+        ReturnKeyType::Send => 3,
+        ReturnKeyType::Done => 5,
+    };
+
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "configureKeyboard",
+        "(IIIIZZ)V",
+        input_mode as jni_sys::jint,
+        autocapitalize as jni_sys::jint,
+        autocorrect as jni_sys::jint,
+        return_key_type as jni_sys::jint,
+        config.is_multiline as jni_sys::jboolean as c_uint,
+        config.is_secure as jni_sys::jboolean as c_uint
+    );
+}
+
+/// Update IME text state for programmatic changes (Rust→Java)
+pub unsafe fn to_java_update_ime_text_state(
+    full_text: &str,
+    selection_start: i32,
+    selection_end: i32,
+) {
+    let env = attach_jni_env();
+    let text_cstr = CString::new(full_text).unwrap();
+    let text_jstr = ((**env).NewStringUTF.unwrap())(env, text_cstr.as_ptr());
+
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "updateImeTextState",
+        "(Ljava/lang/String;II)V",
+        text_jstr,
+        selection_start as jni_sys::jint,
+        selection_end as jni_sys::jint
+    );
+
+    (**env).DeleteLocalRef.unwrap()(env, text_jstr);
 }
