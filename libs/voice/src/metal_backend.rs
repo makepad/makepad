@@ -7,6 +7,11 @@ fn env_truthy(key: &str) -> Option<bool> {
     })
 }
 
+fn log_mul_mat_requested() -> bool {
+    static LOG_MUL_MAT: OnceLock<bool> = OnceLock::new();
+    *LOG_MUL_MAT.get_or_init(|| env_truthy("MAKEPAD_VOICE_METAL_LOG_MUL_MAT").unwrap_or(false))
+}
+
 fn metal_requested() -> bool {
     static USE_METAL: OnceLock<bool> = OnceLock::new();
     *USE_METAL.get_or_init(|| {
@@ -800,6 +805,8 @@ mod imp {
 
     const UTF8_ENCODING: u64 = 4;
     const MTL_RESOURCE_STORAGE_MODE_SHARED: u64 = 0;
+    const MTL_RESOURCE_OPTIONS_STORAGE_MODE_PRIVATE: u64 = 32;
+    const MTL_STORAGE_MODE_PRIVATE: u64 = 2;
     const MTL_GPU_FAMILY_APPLE6: u64 = 1006;
     const MTL_GPU_FAMILY_METAL3: u64 = 5001;
     const MTL_GPU_FAMILY_METAL4: u64 = 5002;
@@ -831,6 +838,8 @@ mod imp {
     const SCRATCH_ENC_NORM1: u8 = 11;
     const SCRATCH_DEC_NORM0: u8 = 12;
     const SCRATCH_DEC_NORM1: u8 = 13;
+    const SCRATCH_ENC_FLASH_K_F16: u8 = 14;
+    const SCRATCH_ENC_FLASH_V_F16: u8 = 15;
 
     const N_R0_Q4_0: i32 = 4;
     const N_SG_Q4_0: i32 = 2;
@@ -966,6 +975,28 @@ mod imp {
         ne1: i32,
         r2: i16,
         r3: i16,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct KArgsCpy {
+        nk0: i64,
+        ne00: i64,
+        ne01: i64,
+        ne02: i64,
+        ne03: i64,
+        nb00: u64,
+        nb01: u64,
+        nb02: u64,
+        nb03: u64,
+        ne0: i64,
+        ne1: i64,
+        ne2: i64,
+        ne3: i64,
+        nb0: u64,
+        nb1: u64,
+        nb2: u64,
+        nb3: u64,
     }
 
     #[repr(C)]
@@ -1422,6 +1453,17 @@ mod imp {
         n_q < 20 && d % 32 == 0
     }
 
+    fn flash_attn_kv_elem_bytes(src_type: Src0Type) -> Result<usize, String> {
+        match src_type {
+            Src0Type::F32 => Ok(std::mem::size_of::<f32>()),
+            Src0Type::F16 => Ok(std::mem::size_of::<u16>()),
+            _ => Err(format!(
+                "unsupported flash-attn kv type for Metal path: {:?}",
+                src_type
+            )),
+        }
+    }
+
     #[derive(Clone, Copy, Default)]
     struct FlashAttnExtParams {
         has_mask: bool,
@@ -1463,6 +1505,7 @@ mod imp {
         n_kv: usize,
         n_head: usize,
         d: usize,
+        kv_elem_bytes: usize,
         has_mask: bool,
         use_vec: bool,
     ) -> Result<usize, String> {
@@ -1482,7 +1525,7 @@ mod imp {
             .checked_mul(d)
             .ok_or_else(|| "overflow computing flash n_state".to_string())?;
         let nb11 = n_state
-            .checked_mul(std::mem::size_of::<f32>())
+            .checked_mul(kv_elem_bytes)
             .ok_or_else(|| "overflow computing flash nb11".to_string())?;
         let nb21 = nb11;
 
@@ -1604,6 +1647,7 @@ mod imp {
     struct ScratchBuffer {
         buf: StrongId,
         cap_bytes: usize,
+        is_private: bool,
     }
 
     struct MetalContext {
@@ -1815,20 +1859,48 @@ mod imp {
                 .ok_or_else(|| format!("newBufferWithLength failed for {} bytes", byte_len))
         }
 
+        fn new_buffer_with_length_private(&self, byte_len: usize) -> Result<StrongId, String> {
+            let obj: ObjcId = unsafe {
+                msg_send![
+                    self.device.as_id(),
+                    newBufferWithLength: byte_len as u64
+                    options: MTL_RESOURCE_OPTIONS_STORAGE_MODE_PRIVATE
+                ]
+            };
+            unsafe { StrongId::from_owned(obj) }
+                .ok_or_else(|| format!("newBufferWithLength(private) failed for {} bytes", byte_len))
+        }
+
         fn get_or_create_scratch_buffer(&mut self, kind: u8, need_bytes: usize) -> Result<ObjcId, String> {
             let need_bytes = need_bytes.max(1);
+            let is_private = matches!(
+                kind,
+                SCRATCH_FLASH_PAD
+                    | SCRATCH_FLASH_BLK
+                    | SCRATCH_FLASH_TMP
+                    | SCRATCH_FLASH_OUT
+                    | SCRATCH_ENC_NORM0
+                    | SCRATCH_ENC_NORM1
+                    | SCRATCH_DEC_NORM0
+                    | SCRATCH_DEC_NORM1
+            );
             if let Some(entry) = self.scratch_buffers.get(&kind) {
-                if entry.cap_bytes >= need_bytes {
+                if entry.cap_bytes >= need_bytes && entry.is_private == is_private {
                     return Ok(entry.buf.as_id());
                 }
             }
 
-            let buf = self.new_buffer_with_length(need_bytes)?;
+            let buf = if is_private {
+                self.new_buffer_with_length_private(need_bytes)?
+            } else {
+                self.new_buffer_with_length(need_bytes)?
+            };
             self.scratch_buffers.insert(
                 kind,
                 ScratchBuffer {
                     buf,
                     cap_bytes: need_bytes,
+                    is_private,
                 },
             );
 
@@ -1847,12 +1919,15 @@ mod imp {
                 }
             }
 
-            let buf = self.new_buffer_with_length(need_bytes)?;
+            // Mirror ggml-metal backend allocation for compute intermediates:
+            // matrix outputs are GPU-only private buffers.
+            let buf = self.new_buffer_with_length_private(need_bytes)?;
             self.matmul_out_buffers.insert(
                 tag,
                 ScratchBuffer {
                     buf,
                     cap_bytes: need_bytes,
+                    is_private: true,
                 },
             );
 
@@ -1926,9 +2001,70 @@ mod imp {
             Ok(out)
         }
 
+        fn copy_buffer_to_shared_staging(
+            &self,
+            src_buffer: ObjcId,
+            len_bytes: usize,
+        ) -> Result<StrongId, String> {
+            let len_bytes = len_bytes.max(1);
+            let dst_buffer = self.new_buffer_with_length(len_bytes)?;
+
+            let command_buffer_obj: ObjcId =
+                unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
+            let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
+                .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+
+            let blit_encoder_obj: ObjcId =
+                unsafe { msg_send![command_buffer.as_id(), blitCommandEncoder] };
+            let blit_encoder = unsafe { StrongId::from_unowned(blit_encoder_obj) }
+                .ok_or_else(|| "blitCommandEncoder returned nil".to_string())?;
+
+            unsafe {
+                let _: () = msg_send![
+                    blit_encoder.as_id(),
+                    copyFromBuffer: src_buffer
+                    sourceOffset: 0u64
+                    toBuffer: dst_buffer.as_id()
+                    destinationOffset: 0u64
+                    size: len_bytes as u64
+                ];
+                let _: () = msg_send![blit_encoder.as_id(), endEncoding];
+                let _: () = msg_send![command_buffer.as_id(), commit];
+                let _: () = msg_send![command_buffer.as_id(), waitUntilCompleted];
+            }
+
+            let status: u64 = unsafe { msg_send![command_buffer.as_id(), status] };
+            if status == 5 {
+                let error: ObjcId = unsafe { msg_send![command_buffer.as_id(), error] };
+                return Err(format!(
+                    "Metal command buffer error (buffer staging copy): {}",
+                    ns_error_to_string(error)
+                ));
+            }
+
+            Ok(dst_buffer)
+        }
+
+        fn copy_f32_buffer_contents_readable(
+            &self,
+            buffer: ObjcId,
+            elems: usize,
+        ) -> Result<Vec<f32>, String> {
+            let byte_len = elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing readback byte length".to_string())?;
+            let storage_mode: u64 = unsafe { msg_send![buffer, storageMode] };
+            if storage_mode == MTL_STORAGE_MODE_PRIVATE {
+                let staging = self.copy_buffer_to_shared_staging(buffer, byte_len)?;
+                self.copy_f32_buffer_contents(staging.as_id(), elems)
+            } else {
+                self.copy_f32_buffer_contents(buffer, elems)
+            }
+        }
+
         fn read_f32_buffer(&self, buffer: ObjcId, elems: usize) -> Result<Vec<f32>, String> {
             self.wait_queue_idle()?;
-            self.copy_f32_buffer_contents(buffer, elems)
+            self.copy_f32_buffer_contents_readable(buffer, elems)
         }
 
         fn read_f32_buffers3(
@@ -1939,9 +2075,9 @@ mod imp {
             elems: usize,
         ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
             self.wait_queue_idle()?;
-            let o0 = self.copy_f32_buffer_contents(b0, elems)?;
-            let o1 = self.copy_f32_buffer_contents(b1, elems)?;
-            let o2 = self.copy_f32_buffer_contents(b2, elems)?;
+            let o0 = self.copy_f32_buffer_contents_readable(b0, elems)?;
+            let o1 = self.copy_f32_buffer_contents_readable(b1, elems)?;
+            let o2 = self.copy_f32_buffer_contents_readable(b2, elems)?;
             Ok((o0, o1, o2))
         }
 
@@ -2292,6 +2428,13 @@ mod imp {
             unsafe { msg_send![pipeline, maxTotalThreadsPerThreadgroup] }
         }
 
+        fn create_compute_encoder(&self, command_buffer: ObjcId) -> Result<StrongId, String> {
+            let encoder_obj: ObjcId = unsafe { msg_send![command_buffer, computeCommandEncoder] };
+
+            unsafe { StrongId::from_unowned(encoder_obj) }
+                .ok_or_else(|| "computeCommandEncoder returned nil".to_string())
+        }
+
         fn begin_batch(&mut self) -> Result<(), String> {
             if self.batch_depth == 0 {
                 let command_buffer_obj: ObjcId =
@@ -2299,10 +2442,7 @@ mod imp {
                 let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
                     .ok_or_else(|| "commandBuffer returned nil".to_string())?;
 
-                let encoder_obj: ObjcId =
-                    unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
-                let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
-                    .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
+                let encoder = self.create_compute_encoder(command_buffer.as_id())?;
 
                 self.batch_command_buffer = Some(command_buffer);
                 self.batch_encoder = Some(encoder);
@@ -2373,10 +2513,7 @@ mod imp {
             let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
                 .ok_or_else(|| "commandBuffer returned nil".to_string())?;
 
-            let encoder_obj: ObjcId =
-                unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
-            let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
-                .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
+            let encoder = self.create_compute_encoder(command_buffer.as_id())?;
 
             Ok((
                 command_buffer.as_id(),
@@ -2425,7 +2562,10 @@ mod imp {
             Ok(())
         }
 
-        fn end_command_encoder(&mut self, handles: Option<(StrongId, StrongId)>) -> Result<(), String> {
+        fn end_command_encoder(
+            &mut self,
+            handles: Option<(StrongId, StrongId)>,
+        ) -> Result<(), String> {
             let Some((command_buffer, encoder)) = handles else {
                 return Ok(());
             };
@@ -2906,6 +3046,87 @@ mod imp {
                         threadsPerThreadgroup: tpg
                     ];
                 }
+            }
+
+            self.end_command_encoder(encoder_handles)
+        }
+
+        fn dispatch_cpy_f32_to_f16(
+            &mut self,
+            src_id: ObjcId,
+            dst_id: ObjcId,
+            ne00: usize,
+            ne01: usize,
+            nb00: u64,
+            nb01: u64,
+            nb0: u64,
+            nb1: u64,
+        ) -> Result<(), String> {
+            let base = "kernel_cpy_f32_f16";
+            let (pipeline, _smem, _nr0, _nr1, _nsg) =
+                self.get_or_compile_cached_pipeline(base.to_string(), base, &[], 0, 0, 0, 0)?;
+
+            let ne00_i64 = i64::try_from(ne00).map_err(|_| format!("ne00 too large: {}", ne00))?;
+            let ne01_i64 = i64::try_from(ne01).map_err(|_| format!("ne01 too large: {}", ne01))?;
+            let nb02 = nb01
+                .checked_mul(ne01 as u64)
+                .ok_or_else(|| "overflow computing cpy nb02".to_string())?;
+            let nb2 = nb1
+                .checked_mul(ne01 as u64)
+                .ok_or_else(|| "overflow computing cpy nb2".to_string())?;
+            let args = KArgsCpy {
+                nk0: ne00_i64,
+                ne00: ne00_i64,
+                ne01: ne01_i64,
+                ne02: 1,
+                ne03: 1,
+                nb00,
+                nb01,
+                nb02,
+                nb03: nb02,
+                ne0: ne00_i64,
+                ne1: ne01_i64,
+                ne2: 1,
+                ne3: 1,
+                nb0,
+                nb1,
+                nb2,
+                nb3: nb2,
+            };
+
+            let max_threads = Self::pipeline_max_threads(pipeline).max(1);
+            let nth = std::cmp::min(ne00.max(1) as u64, max_threads).max(1);
+            let nw0 = ((ne00.max(1) as u64) + nth - 1) / nth;
+
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder,
+                    setBytes: &args as *const KArgsCpy as *const c_void
+                    length: std::mem::size_of::<KArgsCpy>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
+
+                let tgs = MTLSize {
+                    width: nw0
+                        .checked_mul(ne01 as u64)
+                        .ok_or_else(|| "overflow computing cpy threadgroups width".to_string())?,
+                    height: 1,
+                    depth: 1,
+                };
+                let tpg = MTLSize {
+                    width: nth,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder,
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
             }
 
             self.end_command_encoder(encoder_handles)
@@ -3439,20 +3660,16 @@ mod imp {
             n_kv: usize,
             n_head: usize,
             d: usize,
+            kv_type: Src0Type,
             scale: f32,
             has_mask: bool,
             has_sinks: bool,
             max_bias: f32,
             logit_softcap: f32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if LOG_ONCE.set(()).is_ok() {
-                eprintln!("[voice][metal] flash_attn dispatch: flash_attn_ext_f32");
-            }
-
             if !flash_attn_supported_head_dim(d) {
                 return Err(format!(
-                    "unsupported flash-attn head dim for f32 kernel: {}",
+                    "unsupported flash-attn head dim for kv kernel: {}",
                     d
                 ));
             }
@@ -3477,8 +3694,7 @@ mod imp {
             let n_state = n_head
                 .checked_mul(d)
                 .ok_or_else(|| "overflow computing flash n_state".to_string())?;
-            let n_state_i32 =
-                i32::try_from(n_state).map_err(|_| format!("n_state too large: {}", n_state))?;
+            let kv_elem_bytes = flash_attn_kv_elem_bytes(kv_type)? as u64;
 
             let nb01 = (n_state as u64)
                 .checked_mul(4)
@@ -3491,10 +3707,10 @@ mod imp {
                 .ok_or_else(|| "overflow computing flash nb03".to_string())?;
 
             let nb11 = (n_state as u64)
-                .checked_mul(4)
+                .checked_mul(kv_elem_bytes)
                 .ok_or_else(|| "overflow computing flash nb11".to_string())?;
             let nb12 = (d as u64)
-                .checked_mul(4)
+                .checked_mul(kv_elem_bytes)
                 .ok_or_else(|| "overflow computing flash nb12".to_string())?;
             let nb13 = nb11
                 .checked_mul(n_kv as u64)
@@ -3528,6 +3744,11 @@ mod imp {
             } else {
                 scale
             };
+            let bc_mask = has_mask && (ne31 % 8 != 0);
+            let ns10 = i32::try_from(nb11 / kv_elem_bytes)
+                .map_err(|_| "overflow computing flash ns10".to_string())?;
+            let ns20 = i32::try_from(nb21 / kv_elem_bytes)
+                .map_err(|_| "overflow computing flash ns20".to_string())?;
 
             if has_kvpad {
                 self.dispatch_flash_attn_ext_pad(
@@ -3560,17 +3781,23 @@ mod imp {
                 )?;
             }
 
-            let base = format!("kernel_flash_attn_ext_f32_dk{}_dv{}", d, d);
+            let base = format!(
+                "kernel_flash_attn_ext_{}_dk{}_dv{}",
+                src0_type_name(kv_type),
+                d,
+                d
+            );
             let name = format!(
-                "{}_mask={}_sinks={}_bias={}_scap={}_kvpad={}_bcm=0_ns10={}_ns20={}_nsg={}",
+                "{}_mask={}_sinks={}_bias={}_scap={}_kvpad={}_bcm={}_ns10={}_ns20={}_nsg={}",
                 base,
                 has_mask as i32,
                 has_sinks as i32,
                 has_bias as i32,
                 has_scap as i32,
                 has_kvpad as i32,
-                n_state_i32,
-                n_state_i32,
+                bc_mask as i32,
+                ns10,
+                ns20,
                 nsg
             );
             let constants = [
@@ -3596,15 +3823,15 @@ mod imp {
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 10,
-                    value: FunctionConstantValue::Bool(false),
+                    value: FunctionConstantValue::Bool(bc_mask),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 20,
-                    value: FunctionConstantValue::Int32(n_state_i32),
+                    value: FunctionConstantValue::Int32(ns10),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 21,
-                    value: FunctionConstantValue::Int32(n_state_i32),
+                    value: FunctionConstantValue::Int32(ns20),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT + 22,
@@ -3626,11 +3853,11 @@ mod imp {
                 ne11,
                 ne_12_2: ne02,
                 ne_12_3: 1,
-                ns10: n_state_i32,
+                ns10,
                 nb11,
                 nb12,
                 nb13,
-                ns20: n_state_i32,
+                ns20,
                 nb21,
                 nb22,
                 nb23,
@@ -3784,17 +4011,13 @@ mod imp {
             n_kv: usize,
             n_head: usize,
             d: usize,
+            kv_type: Src0Type,
             scale: f32,
             has_mask: bool,
             has_sinks: bool,
             max_bias: f32,
             logit_softcap: f32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if LOG_ONCE.set(()).is_ok() {
-                eprintln!("[voice][metal] flash_attn dispatch: flash_attn_ext_vec_f32");
-            }
-
             if d % 32 != 0 {
                 return Err(format!(
                     "flash-attn vec requires head dim divisible by 32, got {}",
@@ -3803,7 +4026,7 @@ mod imp {
             }
             if !flash_attn_supported_head_dim(d) {
                 return Err(format!(
-                    "unsupported flash-attn vec head dim for f32 kernel: {}",
+                    "unsupported flash-attn vec head dim for kv kernel: {}",
                     d
                 ));
             }
@@ -3834,8 +4057,7 @@ mod imp {
             let n_state = n_head
                 .checked_mul(d)
                 .ok_or_else(|| "overflow computing flash n_state".to_string())?;
-            let n_state_i32 =
-                i32::try_from(n_state).map_err(|_| format!("n_state too large: {}", n_state))?;
+            let kv_elem_bytes = flash_attn_kv_elem_bytes(kv_type)? as u64;
 
             let nb01 = (n_state as u64)
                 .checked_mul(4)
@@ -3848,10 +4070,10 @@ mod imp {
                 .ok_or_else(|| "overflow computing flash nb03".to_string())?;
 
             let nb11 = (n_state as u64)
-                .checked_mul(4)
+                .checked_mul(kv_elem_bytes)
                 .ok_or_else(|| "overflow computing flash nb11".to_string())?;
             let nb12 = (d as u64)
-                .checked_mul(4)
+                .checked_mul(kv_elem_bytes)
                 .ok_or_else(|| "overflow computing flash nb12".to_string())?;
             let nb13 = nb11
                 .checked_mul(n_kv as u64)
@@ -3885,6 +4107,10 @@ mod imp {
             } else {
                 scale
             };
+            let ns10 = i32::try_from(nb11 / kv_elem_bytes)
+                .map_err(|_| "overflow computing flash vec ns10".to_string())?;
+            let ns20 = i32::try_from(nb21 / kv_elem_bytes)
+                .map_err(|_| "overflow computing flash vec ns20".to_string())?;
 
             if has_kvpad {
                 self.dispatch_flash_attn_ext_pad(
@@ -3912,7 +4138,12 @@ mod imp {
                 )?;
             }
 
-            let base = format!("kernel_flash_attn_ext_vec_f32_dk{}_dv{}", d, d);
+            let base = format!(
+                "kernel_flash_attn_ext_vec_{}_dk{}_dv{}",
+                src0_type_name(kv_type),
+                d,
+                d
+            );
             let name = format!(
                 "{}_mask={}_sink={}_bias={}_scap={}_kvpad={}_ns10={}_ns20={}_nsg={}_nwg={}",
                 base,
@@ -3921,8 +4152,8 @@ mod imp {
                 has_bias as i32,
                 has_scap as i32,
                 has_kvpad as i32,
-                n_state_i32,
-                n_state_i32,
+                ns10,
+                ns20,
                 nsg,
                 nwg
             );
@@ -3949,11 +4180,11 @@ mod imp {
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT_VEC + 20,
-                    value: FunctionConstantValue::Int32(n_state_i32),
+                    value: FunctionConstantValue::Int32(ns10),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT_VEC + 21,
-                    value: FunctionConstantValue::Int32(n_state_i32),
+                    value: FunctionConstantValue::Int32(ns20),
                 },
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT_VEC + 22,
@@ -3989,11 +4220,11 @@ mod imp {
                 ne11,
                 ne_12_2: ne02,
                 ne_12_3: 1,
-                ns10: n_state_i32,
+                ns10,
                 nb11,
                 nb12,
                 nb13,
-                ns20: n_state_i32,
+                ns20,
                 nb21,
                 nb22,
                 nb23,
@@ -4018,6 +4249,12 @@ mod imp {
                 .checked_mul(n_head)
                 .ok_or_else(|| "overflow computing flash vec nrows".to_string())?;
 
+            let out_id = if nwg == 1 {
+                dst_id
+            } else {
+                tmp_id.ok_or_else(|| "flash-attn vec requires tmp buffer when nwg > 1".to_string())?
+            };
+
             let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
                 let _: () = msg_send![encoder, setComputePipelineState: pipeline];
@@ -4035,16 +4272,8 @@ mod imp {
                 let _: () =
                     msg_send![encoder, setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
                 let _: () = msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 6u64];
-                if nwg == 1 {
-                    let _: () =
-                        msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 7u64];
-                } else {
-                    let tmp_id = tmp_id.ok_or_else(|| {
-                        "flash-attn vec requires tmp buffer when nwg > 1".to_string()
-                    })?;
-                    let _: () =
-                        msg_send![encoder, setBuffer: tmp_id offset: 0u64 atIndex: 7u64];
-                }
+                let _: () =
+                    msg_send![encoder, setBuffer: out_id offset: 0u64 atIndex: 7u64];
 
                 let _: () = msg_send![
                     encoder,
@@ -4160,9 +4389,11 @@ mod imp {
             let dst_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_OUT, out_bytes)?;
 
             let params = FlashAttnExtParams::default();
+            let kv_type = Src0Type::F32;
+            let kv_elem_bytes = flash_attn_kv_elem_bytes(kv_type)?;
             let use_vec = flash_attn_use_vec(n_q, d);
             let pad_bytes =
-                flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, params.has_mask, use_vec)?;
+                flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, kv_elem_bytes, params.has_mask, use_vec)?;
             let pad_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_PAD, pad_bytes)?;
 
             if use_vec {
@@ -4182,6 +4413,7 @@ mod imp {
                     n_kv,
                     n_head,
                     d,
+                    kv_type,
                     scale,
                     params.has_mask,
                     params.has_sinks,
@@ -4205,6 +4437,7 @@ mod imp {
                     n_kv,
                     n_head,
                     d,
+                    kv_type,
                     scale,
                     params.has_mask,
                     params.has_sinks,
@@ -4391,6 +4624,26 @@ mod imp {
             params: FlashAttnExtParams,
             mask_id: Option<ObjcId>,
         ) -> Result<StrongId, String> {
+            self.flash_attn_f32_from_buffers_with_params_typed(
+                q_id, k_id, v_id, n_q, n_kv, n_head, d, scale, params, mask_id, Src0Type::F32,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn flash_attn_f32_from_buffers_with_params_typed(
+            &mut self,
+            q_id: ObjcId,
+            k_id: ObjcId,
+            v_id: ObjcId,
+            n_q: usize,
+            n_kv: usize,
+            n_head: usize,
+            d: usize,
+            scale: f32,
+            params: FlashAttnExtParams,
+            mask_id: Option<ObjcId>,
+            kv_type: Src0Type,
+        ) -> Result<StrongId, String> {
             let out_elems = n_q
                 .checked_mul(n_head)
                 .and_then(|v| v.checked_mul(d))
@@ -4398,12 +4651,13 @@ mod imp {
             let out_bytes = out_elems
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| "overflow computing flash output bytes".to_string())?;
+            let kv_elem_bytes = flash_attn_kv_elem_bytes(kv_type)?;
 
             let dst_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_OUT, out_bytes)?;
 
             let use_vec = flash_attn_use_vec(n_q, d);
             let pad_bytes =
-                flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, params.has_mask, use_vec)?;
+                flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, kv_elem_bytes, params.has_mask, use_vec)?;
             let pad_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_PAD, pad_bytes)?;
             let mask_buf_id = if params.has_mask {
                 mask_id.ok_or_else(|| "flash-attn requested mask but no mask buffer was provided".to_string())?
@@ -4428,6 +4682,7 @@ mod imp {
                     n_kv,
                     n_head,
                     d,
+                    kv_type,
                     scale,
                     params.has_mask,
                     params.has_sinks,
@@ -4451,6 +4706,7 @@ mod imp {
                     n_kv,
                     n_head,
                     d,
+                    kv_type,
                     scale,
                     params.has_mask,
                     params.has_sinks,
@@ -4461,6 +4717,49 @@ mod imp {
 
             unsafe { StrongId::from_unowned(dst_id) }
                 .ok_or_else(|| "flash-attn output buffer returned nil".to_string())
+        }
+
+        fn encoder_flash_kv_f16_buffer(
+            &mut self,
+            src_f32_id: ObjcId,
+            seq_len: usize,
+            n_kv_flash: usize,
+            n_state: usize,
+            scratch_kind: u8,
+        ) -> Result<ObjcId, String> {
+            let row_bytes_f32 = n_state
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing encoder f32 row bytes".to_string())?;
+            let row_bytes_f16 = n_state
+                .checked_mul(std::mem::size_of::<u16>())
+                .ok_or_else(|| "overflow computing encoder f16 row bytes".to_string())?;
+            let total_bytes = n_kv_flash
+                .checked_mul(row_bytes_f16)
+                .ok_or_else(|| "overflow computing encoder f16 kv bytes".to_string())?;
+            let dst_id = self.get_or_create_scratch_buffer(scratch_kind, total_bytes)?;
+
+            self.dispatch_cpy_f32_to_f16(
+                src_f32_id,
+                dst_id,
+                n_state,
+                seq_len,
+                std::mem::size_of::<f32>() as u64,
+                row_bytes_f32 as u64,
+                std::mem::size_of::<u16>() as u64,
+                row_bytes_f16 as u64,
+            )?;
+
+            if seq_len < n_kv_flash {
+                let tail_off = seq_len
+                    .checked_mul(row_bytes_f16)
+                    .ok_or_else(|| "overflow computing encoder kv tail offset".to_string())?;
+                let tail_bytes = (n_kv_flash - seq_len)
+                    .checked_mul(row_bytes_f16)
+                    .ok_or_else(|| "overflow computing encoder kv tail bytes".to_string())?;
+                self.zero_buffer_range(dst_id, tail_off, tail_bytes)?;
+            }
+
+            Ok(dst_id)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -4834,20 +5133,8 @@ mod imp {
 
             // Match whisper.cpp encoder flash-attn usage: keep KV rows padded.
             let n_kv_flash = pad_to(seq_len, 256);
-            let kv_flash_bytes = n_kv_flash
-                .checked_mul(n_state)
-                .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
-                .ok_or_else(|| "overflow computing encoder kv padded bytes".to_string())?;
-            let _ = self.get_or_create_matmul_out_buffer(
-                tag_base.wrapping_add(4),
-                kv_flash_bytes,
-            )?;
-            let _ = self.get_or_create_matmul_out_buffer(
-                tag_base.wrapping_add(5),
-                kv_flash_bytes,
-            )?;
 
-            let k_buf = self.linear_from_src_buffer(
+            let k_buf_f32 = self.linear_from_src_buffer(
                 norm0_id,
                 seq_len,
                 n_state,
@@ -4858,7 +5145,7 @@ mod imp {
                 tag_base.wrapping_add(4),
                 0,
             )?;
-            let v_buf = self.linear_from_src_buffer(
+            let v_buf_f32 = self.linear_from_src_buffer(
                 norm0_id,
                 seq_len,
                 n_state,
@@ -4869,18 +5156,35 @@ mod imp {
                 tag_base.wrapping_add(5),
                 tag_base.wrapping_add(6),
             )?;
+            let k_buf_f16 = self.encoder_flash_kv_f16_buffer(
+                k_buf_f32.as_id(),
+                seq_len,
+                n_kv_flash,
+                n_state,
+                SCRATCH_ENC_FLASH_K_F16,
+            )?;
+            let v_buf_f16 = self.encoder_flash_kv_f16_buffer(
+                v_buf_f32.as_id(),
+                seq_len,
+                n_kv_flash,
+                n_state,
+                SCRATCH_ENC_FLASH_V_F16,
+            )?;
 
             let d = n_state / n_head;
             let scale = 1.0f32 / (d as f32).sqrt();
-            let attn_buf = self.flash_attn_f32_from_buffers(
+            let attn_buf = self.flash_attn_f32_from_buffers_with_params_typed(
                 q_buf.as_id(),
-                k_buf.as_id(),
-                v_buf.as_id(),
+                k_buf_f16,
+                v_buf_f16,
                 seq_len,
                 n_kv_flash,
                 n_head,
                 d,
                 scale,
+                FlashAttnExtParams::default(),
+                None,
+                Src0Type::F16,
             )?;
             let attn_res_buf = self.linear_from_src_buffer(
                 attn_buf.as_id(),
@@ -5067,8 +5371,11 @@ mod imp {
             let out_buf = self.with_batch(|ctx| {
                 let mut cur_buf = ctx.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
 
-                for (il, layer) in layers.iter().enumerate() {
-                    let tag_base = (il as u8).wrapping_mul(16).wrapping_add(160);
+                // Reuse the same intermediate-output tag set across encoder layers.
+                // Layers execute sequentially, so per-layer unique output tags only inflate
+                // persistent Metal intermediate buffers without improving correctness.
+                for layer in layers.iter() {
+                    let tag_base = 160u8;
                     let cur_id = cur_buf.as_id();
                     cur_buf = ctx.encoder_layer_from_buffer_f32(
                         cur_id,
@@ -6005,22 +6312,25 @@ mod imp {
             let used_mul_mv_ext = can_use_mul_mv_ext(src0, ne00, ne11);
             let used_mul_mm = ne00 >= 64 && ne11 > 8;
 
-            let compute_res = if used_mul_mv_ext {
-                self.dispatch_mul_mv_ext(
-                    src0,
-                    src0_id,
-                    src1_id,
-                    dst_id,
-                    ne00,
-                    ne01,
-                    ne10,
-                    ne11,
-                    nb00,
-                    nb01,
-                    nb10,
-                    nb11,
-                    ne0,
-                    ne1,
+            let (kernel, compute_res) = if used_mul_mv_ext {
+                (
+                    "mul_mv_ext",
+                    self.dispatch_mul_mv_ext(
+                        src0,
+                        src0_id,
+                        src1_id,
+                        dst_id,
+                        ne00,
+                        ne01,
+                        ne10,
+                        ne11,
+                        nb00,
+                        nb01,
+                        nb10,
+                        nb11,
+                        ne0,
+                        ne1,
+                    ),
                 )
             } else if used_mul_mm {
                 match self.dispatch_mul_mm(
@@ -6037,49 +6347,67 @@ mod imp {
                     ne0,
                     ne1,
                 ) {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        eprintln!(
-                            "[voice][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
-                            src0, e
-                        );
-                        self.dispatch_mul_mv(
-                            src0,
-                            src0_id,
-                            src1_id,
-                            dst_id,
-                            ne00,
-                            ne01,
-                            ne10,
-                            ne11,
-                            nb00,
-                            nb01,
-                            nb10,
-                            nb11,
-                            ne0,
-                            ne1,
-                        )
-                    }
+                    Ok(()) => ("mul_mm", Ok(())),
+                    Err(e) => (
+                        "mul_mv",
+                        {
+                            eprintln!(
+                                "[voice][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
+                                src0, e
+                            );
+                            self.dispatch_mul_mv(
+                                src0,
+                                src0_id,
+                                src1_id,
+                                dst_id,
+                                ne00,
+                                ne01,
+                                ne10,
+                                ne11,
+                                nb00,
+                                nb01,
+                                nb10,
+                                nb11,
+                                ne0,
+                                ne1,
+                            )
+                        },
+                    ),
                 }
             } else {
-                self.dispatch_mul_mv(
-                    src0,
-                    src0_id,
-                    src1_id,
-                    dst_id,
-                    ne00,
-                    ne01,
-                    ne10,
-                    ne11,
-                    nb00,
-                    nb01,
-                    nb10,
-                    nb11,
-                    ne0,
-                    ne1,
+                (
+                    "mul_mv",
+                    self.dispatch_mul_mv(
+                        src0,
+                        src0_id,
+                        src1_id,
+                        dst_id,
+                        ne00,
+                        ne01,
+                        ne10,
+                        ne11,
+                        nb00,
+                        nb01,
+                        nb10,
+                        nb11,
+                        ne0,
+                        ne1,
+                    ),
                 )
             };
             compute_res?;
+            if super::log_mul_mat_requested() {
+                eprintln!(
+                    "[voice][metal] mul_mat kernel={} src0={} src1=f32 ne00={} ne01={} ne11={} ne12=1 nb01={} nb11={}",
+                    kernel,
+                    src0_type_name(src0),
+                    ne00,
+                    ne01,
+                    ne11,
+                    nb01,
+                    nb11
+                );
+            }
             drop(src0_temp);
             if let Some(dst_buffer) = dst_temp {
                 Ok(dst_buffer)
