@@ -1,15 +1,24 @@
+#[path = "cpu/decode_loop.rs"]
 mod decode_loop;
+#[path = "cpu/decoder.rs"]
 mod decoder;
+#[path = "cpu/encoder.rs"]
 mod encoder;
+#[path = "cpu/mel.rs"]
 mod mel;
+#[path = "metal/backend.rs"]
 mod metal_backend;
+#[path = "cpu/model.rs"]
 mod model;
+#[path = "cpu/quant.rs"]
 mod quant;
 mod settings;
+#[path = "cpu/tensor.rs"]
 mod tensor;
 mod transcriber;
 
 #[cfg(all(any(target_os = "macos", target_os = "ios"), not(force_whisper)))]
+#[path = "apple/speech.rs"]
 pub mod apple_speech;
 
 pub use decode_loop::{Segment, WhisperParams, WhisperState};
