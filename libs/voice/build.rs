@@ -34,13 +34,14 @@ fn main() {
 }
 
 fn build_whisper_metallib() {
+    let precompile_default = env::var_os("CARGO_FEATURE_METAL_PRECOMPILE").is_some();
     let precompile_enabled = env::var("MAKEPAD_VOICE_METAL_PRECOMPILE")
         .ok()
         .map(|v| {
             let v = v.trim().to_ascii_lowercase();
             !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
         })
-        .unwrap_or(true);
+        .unwrap_or(precompile_default);
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();

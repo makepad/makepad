@@ -5,6 +5,10 @@ edition = "2021"
 description = "Pure Rust CPU-only SIMD+threaded Whisper inference"
 license = "MIT"
 
+[features]
+default = []
+metal-precompile = []
+
 [dependencies]
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
