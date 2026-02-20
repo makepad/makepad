@@ -536,7 +536,7 @@ impl Cx {
                          CxOsOp::SetTopmost(_window_id, _is_topmost) => {}
                          CxOsOp::XrStartPresenting(_) => {},
                          CxOsOp::XrStopPresenting(_) => {},
-                         CxOsOp::ShowTextIME(_area, _pos) => {},
+                         CxOsOp::ShowTextIME(_area, _pos, _config) => {},
                          CxOsOp::HideTextIME => {},
                          CxOsOp::SetCursor(_cursor) => {},
                          CxOsOp::StartTimer {timer_id, interval, repeats} => {},

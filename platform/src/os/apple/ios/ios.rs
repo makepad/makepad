@@ -152,6 +152,7 @@ impl Cx {
                                     input,
                                     replace_last,
                                     was_paste: false,
+                                    ..Default::default()
                                 }));
                             }
                             ios_app::IosTextInputEvent::RangeReplace(start, end, text) => {
@@ -312,12 +313,20 @@ impl Cx {
                     window.window_geom = with_ios_app(|app| app.last_window_geom.clone());
                     window.is_created = true;
                 }
-                CxOsOp::ShowTextIME(_area, pos) => {
+                CxOsOp::ShowTextIME(_area, pos, config) => {
                     IosApp::set_ime_position(pos);
+                    IosApp::configure_keyboard(&config);
                     IosApp::show_keyboard();
                 }
                 CxOsOp::HideTextIME => {
                     IosApp::hide_keyboard();
+                }
+                CxOsOp::SyncImeState {
+                    text,
+                    selection,
+                    composition: _,
+                } => {
+                    IosApp::set_ime_text(text, selection.end.0);
                 }
                 CxOsOp::StartTimer {
                     timer_id,

@@ -162,26 +162,44 @@ impl Cx {
                     }
                 }
 
-                match File::open(&res.abs_path) {
-                    Ok(mut file) => {
-                        let mut data = Vec::new();
-                        match file.read_to_end(&mut data) {
-                            Ok(_) => {
-                                res.data = CxScriptResourceData::Loaded(Rc::new(data));
-                            }
-                            Err(e) => {
-                                res.data = CxScriptResourceData::Error(format!(
-                                    "Failed to read file: {}",
-                                    e
-                                ));
-                            }
+                // Try loading from the filesystem (works on desktop/simulator)
+                if let Ok(mut file) = File::open(&res.abs_path) {
+                    let mut data = Vec::new();
+                    match file.read_to_end(&mut data) {
+                        Ok(_) => {
+                            res.data = CxScriptResourceData::Loaded(Rc::new(data));
+                        }
+                        Err(e) => {
+                            res.data = CxScriptResourceData::Error(format!(
+                                "Failed to read file: {}",
+                                e
+                            ));
                         }
                     }
-                    Err(e) => {
-                        res.data =
-                            CxScriptResourceData::Error(format!("Failed to open file: {}", e));
+                    continue;
+                }
+
+                // On iOS/tvOS device, fall back to loading from the app bundle.
+                // The bundle has resources at {bundle}/makepad/{crate_name}/{file_path}.
+                #[cfg(any(target_os = "ios", target_os = "tvos"))]
+                {
+                    if let Some(dep_path) = res.dependency_path.as_deref() {
+                        let bundle_path = if let Some(root) = self.package_root.as_deref() {
+                            format!("{}/{}", root, dep_path)
+                        } else {
+                            dep_path.to_string()
+                        };
+                        if let Ok(data) = self.apple_bundle_load_file(&bundle_path) {
+                            res.data = CxScriptResourceData::Loaded(data);
+                            continue;
+                        }
                     }
                 }
+
+                res.data = CxScriptResourceData::Error(format!(
+                    "Failed to open resource: {}",
+                    res.abs_path
+                ));
             }
         }
 
