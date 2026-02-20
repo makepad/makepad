@@ -172,7 +172,8 @@ script_mod! {
                             align: Align{y: 0.5}
 
                             todo_input := TextInput{
-                                width: Fill height: Fit
+                                width: Fill height: 56
+                                draw_text.text_style.font_size: 20
                                 empty_text: "What needs to be done?"
                                 on_return: || ui.add_button.on_click()
                             }
