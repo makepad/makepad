@@ -774,6 +774,10 @@ mod imp {
     const SCRATCH_FLASH_BLK: u8 = 2;
     const SCRATCH_FLASH_TMP: u8 = 3;
     const SCRATCH_FLASH_OUT: u8 = 4;
+    const SCRATCH_ENC_NORM0: u8 = 10;
+    const SCRATCH_ENC_NORM1: u8 = 11;
+    const SCRATCH_DEC_NORM0: u8 = 12;
+    const SCRATCH_DEC_NORM1: u8 = 13;
 
     const N_R0_Q4_0: i32 = 4;
     const N_SG_Q4_0: i32 = 2;
@@ -4557,12 +4561,16 @@ mod imp {
             // Attention sub-block
             let attn_ln_w_id = self.get_or_create_cached_f32_buffer(attn_ln_w, tag_base.wrapping_add(0))?;
             let attn_ln_b_id = self.get_or_create_cached_f32_buffer(attn_ln_b, tag_base.wrapping_add(1))?;
-            let norm0_buf = self.new_buffer_with_length(x_shape.numel * std::mem::size_of::<f32>())?;
+            let norm_bytes = x_shape
+                .numel
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing encoder norm buffer bytes".to_string())?;
+            let norm0_id = self.get_or_create_scratch_buffer(SCRATCH_ENC_NORM0, norm_bytes)?;
             self.dispatch_norm_f32(
                 x_id,
                 attn_ln_w_id,
                 attn_ln_b_id,
-                norm0_buf.as_id(),
+                norm0_id,
                 &x_shape,
                 &ln_shape,
                 &ln_shape,
@@ -4571,7 +4579,7 @@ mod imp {
             )?;
 
             let q_buf = self.linear_from_src_buffer(
-                norm0_buf.as_id(),
+                norm0_id,
                 seq_len,
                 n_state,
                 q_w_bytes,
@@ -4582,7 +4590,7 @@ mod imp {
                 tag_base.wrapping_add(3),
             )?;
             let k_buf = self.linear_from_src_buffer(
-                norm0_buf.as_id(),
+                norm0_id,
                 seq_len,
                 n_state,
                 k_w_bytes,
@@ -4593,7 +4601,7 @@ mod imp {
                 0,
             )?;
             let v_buf = self.linear_from_src_buffer(
-                norm0_buf.as_id(),
+                norm0_id,
                 seq_len,
                 n_state,
                 v_w_bytes,
@@ -4639,12 +4647,12 @@ mod imp {
             // FFN sub-block
             let mlp_ln_w_id = self.get_or_create_cached_f32_buffer(mlp_ln_w, tag_base.wrapping_add(9))?;
             let mlp_ln_b_id = self.get_or_create_cached_f32_buffer(mlp_ln_b, tag_base.wrapping_add(10))?;
-            let norm1_buf = self.new_buffer_with_length(x_shape.numel * std::mem::size_of::<f32>())?;
+            let norm1_id = self.get_or_create_scratch_buffer(SCRATCH_ENC_NORM1, norm_bytes)?;
             self.dispatch_norm_f32(
                 attn_res_buf.as_id(),
                 mlp_ln_w_id,
                 mlp_ln_b_id,
-                norm1_buf.as_id(),
+                norm1_id,
                 &x_shape,
                 &ln_shape,
                 &ln_shape,
@@ -4653,7 +4661,7 @@ mod imp {
             )?;
 
             let ff0_buf = self.linear_from_src_buffer(
-                norm1_buf.as_id(),
+                norm1_id,
                 seq_len,
                 n_state,
                 w0_bytes,
@@ -4991,12 +4999,15 @@ mod imp {
 
                 let cross_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 214)?;
                 let cross_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 215)?;
-                let norm0_buf = ctx.new_buffer_with_length(n_state * std::mem::size_of::<f32>())?;
+                let norm_bytes = n_state
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| "overflow computing decoder norm bytes".to_string())?;
+                let norm0_id = ctx.get_or_create_scratch_buffer(SCRATCH_DEC_NORM0, norm_bytes)?;
                 ctx.dispatch_norm_f32(
                     self_proj_buf.as_id(),
                     cross_ln_w_id,
                     cross_ln_b_id,
-                    norm0_buf.as_id(),
+                    norm0_id,
                     &x_shape,
                     &ln_shape,
                     &ln_shape,
@@ -5005,7 +5016,7 @@ mod imp {
                 )?;
 
                 let q_cross_buf = ctx.linear_from_src_buffer(
-                    norm0_buf.as_id(),
+                    norm0_id,
                     1,
                     n_state,
                     &layer.cross_attn_q_w.data,
@@ -5050,12 +5061,12 @@ mod imp {
 
                 let mlp_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_w.data, 220)?;
                 let mlp_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_b.data, 221)?;
-                let norm1_buf = ctx.new_buffer_with_length(n_state * std::mem::size_of::<f32>())?;
+                let norm1_id = ctx.get_or_create_scratch_buffer(SCRATCH_DEC_NORM1, norm_bytes)?;
                 ctx.dispatch_norm_f32(
                     cross_proj_buf.as_id(),
                     mlp_ln_w_id,
                     mlp_ln_b_id,
-                    norm1_buf.as_id(),
+                    norm1_id,
                     &x_shape,
                     &ln_shape,
                     &ln_shape,
@@ -5064,7 +5075,7 @@ mod imp {
                 )?;
 
                 let ff0_buf = ctx.linear_from_src_buffer(
-                    norm1_buf.as_id(),
+                    norm1_id,
                     1,
                     n_state,
                     &layer.mlp_0_w.data,
@@ -5165,12 +5176,15 @@ mod imp {
                 // Cross-attention block
                 let cross_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 200)?;
                 let cross_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 201)?;
-                let norm0_buf = ctx.new_buffer_with_length(n_state * std::mem::size_of::<f32>())?;
+                let norm_bytes = n_state
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| "overflow computing decoder norm bytes".to_string())?;
+                let norm0_id = ctx.get_or_create_scratch_buffer(SCRATCH_DEC_NORM0, norm_bytes)?;
                 ctx.dispatch_norm_f32(
                     x_buf.as_id(),
                     cross_ln_w_id,
                     cross_ln_b_id,
-                    norm0_buf.as_id(),
+                    norm0_id,
                     &x_shape,
                     &ln_shape,
                     &ln_shape,
@@ -5179,7 +5193,7 @@ mod imp {
                 )?;
 
                 let q_buf = ctx.linear_from_src_buffer(
-                    norm0_buf.as_id(),
+                    norm0_id,
                     1,
                     n_state,
                     &layer.cross_attn_q_w.data,
@@ -5225,12 +5239,12 @@ mod imp {
                 // FFN block
                 let mlp_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_w.data, 206)?;
                 let mlp_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_b.data, 207)?;
-                let norm1_buf = ctx.new_buffer_with_length(n_state * std::mem::size_of::<f32>())?;
+                let norm1_id = ctx.get_or_create_scratch_buffer(SCRATCH_DEC_NORM1, norm_bytes)?;
                 ctx.dispatch_norm_f32(
                     cross_proj_buf.as_id(),
                     mlp_ln_w_id,
                     mlp_ln_b_id,
-                    norm1_buf.as_id(),
+                    norm1_id,
                     &x_shape,
                     &ln_shape,
                     &ln_shape,
@@ -5239,7 +5253,7 @@ mod imp {
                 )?;
 
                 let ff0_buf = ctx.linear_from_src_buffer(
-                    norm1_buf.as_id(),
+                    norm1_id,
                     1,
                     n_state,
                     &layer.mlp_0_w.data,
